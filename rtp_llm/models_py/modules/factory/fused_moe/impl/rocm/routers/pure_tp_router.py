@@ -167,13 +167,8 @@ class PureTpRouterFusedQuant(PureTpRouterBase):
     def _do_quant(
         self, a1: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Quantization is fused to executor, just pass through"""
-        M, model_dim = a1.shape
-        a8_type = self.quant_config.quant_dtype
-        a8 = torch.empty((M, model_dim), dtype=a8_type, device=a1.device)
-        a8_scale = torch.empty((M, 1), dtype=torch.float32, device=a1.device)
-        aiter.dynamic_per_token_scaled_quant(a8, a1, a8_scale)
-        return a8, a8_scale
+        """Pass through BF16 without quantization; fused_moe handles quantization internally."""
+        return a1, None
 
     def finalize(
         self,

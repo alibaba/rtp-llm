@@ -52,7 +52,11 @@ inline std::vector<int64_t> bufferShapeToTorchShape(const Buffer& buffer) {
 }
 
 #if USING_ROCM
+#ifdef ROCM_GFX950
+#define TORCH_FP8_E4M3_TYPE torch::kFloat8_e4m3fn
+#else
 #define TORCH_FP8_E4M3_TYPE torch::kFloat8_e4m3fnuz
+#endif
 #else
 #define TORCH_FP8_E4M3_TYPE torch::kFloat8_e4m3fn
 #endif

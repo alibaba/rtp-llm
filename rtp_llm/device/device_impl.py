@@ -340,10 +340,8 @@ class CudaImpl(GpuImpl):
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         if self.py_env_configs.moe_config.fp4_moe_op == "auto":
             self.py_env_configs.moe_config.fp4_moe_op = "trtllm"
-            if (
-                self.py_env_configs.moe_config.use_deepep_moe
-                and self.py_env_configs.moe_config.use_deepep_low_latency
-            ):
+            if self.py_env_configs.moe_config.use_deepep_moe and \
+                    self.py_env_configs.moe_config.use_deepep_low_latency:
                 self.py_env_configs.moe_config.fp4_moe_op = "cutedsl"
 
     def _get_mem_info(self) -> MemInfo:
@@ -487,7 +485,7 @@ class CudaImpl(GpuImpl):
             if scale_ndim == 2
             else swizzled_scale.reshape(B, M_padded, K_padded)
         )
-
+    
     @staticmethod
     def convert_fp4_gemm_weight_params(
         weight: torch.Tensor, weight_scale: torch.Tensor
@@ -495,11 +493,8 @@ class CudaImpl(GpuImpl):
         backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cutlass")
         if backend == "trtllm":
             from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
-
             epilogue_tile_m = 128
-            processed_weight = shuffle_matrix_a(
-                weight.view(torch.uint8), epilogue_tile_m
-            )
+            processed_weight = shuffle_matrix_a(weight.view(torch.uint8), epilogue_tile_m)
             processed_weight_scale = (
                 shuffle_matrix_sf_a(weight_scale.view(torch.uint8), epilogue_tile_m)
                 .reshape(weight_scale.shape)
@@ -521,9 +516,7 @@ class CudaImpl(GpuImpl):
             batches, rows, cols = padded_scales.shape
             assert rows % 128 == 0
             assert cols % 4 == 0
-            padded_scales = padded_scales.reshape(
-                batches, rows // 128, 4, 32, cols // 4, 4
-            )
+            padded_scales = padded_scales.reshape(batches, rows // 128, 4, 32, cols // 4, 4)
             padded_scales = padded_scales.permute((0, 1, 4, 3, 2, 5))
             padded_scales = padded_scales.contiguous().cuda()
             padded_scales = (
@@ -573,34 +566,22 @@ class CudaImpl(GpuImpl):
         cache,
     ):
         from flashinfer import nvfp4_block_scale_interleave
-
         epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
 
-        weight_fp4 = weight.view(torch.float8_e4m3fn).reshape(
-            *shape[:-1], shape[-1] // 2
-        )  # packed fp4
-        scale_linear_fp4 = scale.view(torch.float8_e4m3fn).reshape(
-            *shape[:-1], shape[-1] // 16
-        )  # fp8 scaling factors
+        weight_fp4 = weight.view(torch.float8_e4m3fn).reshape(*shape[:-1], shape[-1] // 2)  # packed fp4
+        scale_linear_fp4 = scale.view(torch.float8_e4m3fn).reshape(*shape[:-1], shape[-1] // 16)  # fp8 scaling factors
 
         weight_fp4_shuffled = []
         scale_fp4_shuffled = []
         for i in range(shape[0]):
-            permute_indices = findices(
-                cache, weight_fp4[i].view(torch.uint8), epilogue_tile_m
-            )
+            permute_indices = findices(cache, weight_fp4[i].view(torch.uint8), epilogue_tile_m)
             weight_fp4_shuffled.append(
                 weight_fp4[i]
                 .view(torch.uint8)[permute_indices.to(weight_fp4.device)]
                 .contiguous()
             )
 
-            permute_sf_indices = findices(
-                cache,
-                scale_linear_fp4[i].view(torch.uint8),
-                epilogue_tile_m,
-                num_elts_per_sf=16,
-            )
+            permute_sf_indices = findices(cache, scale_linear_fp4[i].view(torch.uint8), epilogue_tile_m, num_elts_per_sf=16)
             scale_fp4_shuffled.append(
                 nvfp4_block_scale_interleave(
                     scale_linear_fp4[i]
@@ -630,20 +611,10 @@ class CudaImpl(GpuImpl):
         if self.py_env_configs.moe_config.fp4_moe_op == "cutedsl":
             # cutedsl moe needs gate+up format for w13
             if kernel_name == W.moe_w1:
-                kernel = torch.cat(
-                    [
-                        kernel[:, kernel.shape[1] // 2 :, :],
-                        kernel[:, : kernel.shape[1] // 2, :],
-                    ],
-                    dim=1,
-                )
-                scale = torch.cat(
-                    [
-                        scale[:, scale.shape[1] // 2 :, :],
-                        scale[:, : scale.shape[1] // 2, :],
-                    ],
-                    dim=1,
-                )
+                kernel = torch.cat([kernel[:, kernel.shape[1] // 2:, :],
+                                    kernel[:, :kernel.shape[1] // 2, :]], dim=1)
+                scale = torch.cat([scale[:, scale.shape[1] // 2:, :],
+                                   scale[:, :scale.shape[1] // 2, :]], dim=1)
             swizzled_scale = self.swizzle_blockscale(scale)
             return kernel, swizzled_scale
 
@@ -654,16 +625,11 @@ class CudaImpl(GpuImpl):
             _maybe_get_cached_w3_w1_permute_indices,
             get_w2_permute_indices_with_cache,
         )
-
         return CudaImpl.prepare_static_weights_for_trtllm_fp4_moe(
             kernel,
             scale,
             [*kernel.shape[:-1], kernel.shape[-1] * 2],
-            (
-                _maybe_get_cached_w3_w1_permute_indices
-                if kernel_name == W.moe_w1
-                else get_w2_permute_indices_with_cache
-            ),
+            _maybe_get_cached_w3_w1_permute_indices if kernel_name == W.moe_w1 else get_w2_permute_indices_with_cache,
             self._cache_permute_indices,
         )
 
@@ -767,7 +733,9 @@ class RocmImpl(GpuImpl):
             except Exception as e:
                 logging.warn(f"Cannot get ROCm device gfx version: {e}")
         # 如果无法获取，则使用环境变量或默认值
-        specify_gpu_arch = self.py_env_configs.runtime_config.specify_gpu_arch
+        specify_gpu_arch = (
+            self.py_env_configs.runtime_config.specify_gpu_arch
+        )
         return "900" if specify_gpu_arch == "" else specify_gpu_arch
 
     def preprocess_groupwise_weight_params(
@@ -856,7 +824,9 @@ class RocmImpl(GpuImpl):
             except Exception as e:
                 logging.warn(f"Cannot get ROCm device gfx version: {e}")
         # 如果无法获取，则使用环境变量或默认值
-        specify_gpu_arch = self.py_env_configs.runtime_config.specify_gpu_arch
+        specify_gpu_arch = (
+            self.py_env_configs.runtime_config.specify_gpu_arch
+        )
         return "900" if specify_gpu_arch == "" else specify_gpu_arch
 
     def shuffle_moe_weight(
@@ -882,12 +852,15 @@ class RocmImpl(GpuImpl):
     ) -> torch.Tensor:
         if key == "weight":
             assert weight.dtype == torch.float8_e4m3fn
-            weight_as_int8 = weight.view(torch.int8)
-            ROCM_FP8_NAN_AS_INT = -128
-            weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
-            weight = weight_as_int8.view(torch.float8_e4m3fnuz)
+            prop = torch.cuda.get_device_properties(torch.cuda.current_device())
+            if "gfx950" not in prop.gcnArchName:
+                weight_as_int8 = weight.view(torch.int8)
+                ROCM_FP8_NAN_AS_INT = -128
+                weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
+                weight = weight_as_int8.view(torch.float8_e4m3fnuz)
         elif key == "scale":
-            weight = weight * 2.0
+            if "gfx950" not in torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName:
+                weight = weight * 2.0
 
         if key in [
             W.attn_qkv_w,
@@ -902,10 +875,7 @@ class RocmImpl(GpuImpl):
             W.linear_attn_out_w,
         ]:
             if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
-                if (
-                    self.py_env_configs.model_specific_config.load_python_model
-                    and weight.dtype != torch.float8_e4m3fn
-                ):
+                if self.py_env_configs.model_specific_config.load_python_model and weight.dtype != torch.float8_e4m3fn:
                     weight = swizzle_tensor(weight.t(), False).t()
                 else:
                     weight = swizzle_tensor(weight, weight.dtype != torch.float8_e4m3fn)
@@ -951,6 +921,9 @@ class RocmImpl(GpuImpl):
         self, weight: torch.Tensor, weight_scale: torch.Tensor
     ):
         assert weight.dtype == torch.float8_e4m3fn
+        prop = torch.cuda.get_device_properties(torch.cuda.current_device())
+        if "gfx950" in prop.gcnArchName:
+            return weight, weight_scale
         # The bits pattern 10000000(-128) represents zero in e4m3fn
         # but NaN in e4m3fnuz. So here we set it to 0.
         # https://onnx.ai/onnx/technical/float8.html

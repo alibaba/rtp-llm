@@ -2,6 +2,7 @@ from typing import Any, Dict, Optional
 
 import aiter
 import torch
+from aiter.fused_moe import fused_moe
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -21,7 +22,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 
 from rtp_llm.utils.model_weight import W
 
-BLOCK_SIZE_M = 32
+
+def _moe_activation_type(activation: str) -> aiter.ActivationType:
+    if activation in ("silu", "SiGLU"):
+        return aiter.ActivationType.Silu
+    return aiter.ActivationType.Gelu
 
 
 class RocmExpertsBf16(FusedMoeExpertExecutor):
@@ -81,9 +86,10 @@ class RocmExpertsBf16(FusedMoeExpertExecutor):
         topk_ids = payload.expert_topk_ids
         topk_weights = payload.expert_topk_weights
         assert topk_ids is not None
+        assert topk_weights is not None
 
-        assert self.w1.size(0) == self.num_experts
-        assert self.w2.size(0) == self.num_experts
+        assert self.w1.size(0) == self.local_num_experts
+        assert self.w2.size(0) == self.local_num_experts
 
         hidden_states = payload.expert_x
 
@@ -98,20 +104,13 @@ class RocmExpertsBf16(FusedMoeExpertExecutor):
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
-        activation_type = (
-            aiter.ActivationType.Silu
-            if activation == "silu" or activation == "SiGLU"
-            else aiter.ActivationType.Gelu
-        )
-
-        from aiter.fused_moe import fused_moe
         output = fused_moe(
             hidden_states,
             self.w1,
             self.w2,
             topk_weights,
             topk_ids,
-            activation=activation_type,
+            activation=_moe_activation_type(activation),
             expert_mask=expert_map,
         )
 
@@ -149,7 +148,11 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         super().__init__(config, quant_config, weights)
 
         # Update quant_config with FP8-specific settings
-        self.quant_config.quant_dtype = torch.float8_e4m3fnuz
+        prop = torch.cuda.get_device_properties(torch.cuda.current_device())
+        if "gfx950" in prop.gcnArchName:
+            self.quant_config.quant_dtype = torch.float8_e4m3fn
+        else:
+            self.quant_config.quant_dtype = torch.float8_e4m3fnuz
         self.quant_config.per_act_token_quant = True
         self.quant_config.per_out_ch_quant = True
         self.quant_config.block_shape = None
@@ -162,8 +165,26 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         self.w2 = weights[W.moe_w2]
         self.w1_scale = weights[W.moe_s1]
         self.w2_scale = weights[W.moe_s2]
-        self.a1q_scale = weights.get(W.moe_w1_input_sr, None)
-        self.a2_scale = weights.get(W.moe_w2_input_sr, None)
+
+        if self.ep_size > 1:
+            local_e = self.w1.size(0)
+            start = self.ep_rank * local_e
+            end = start + local_e
+            self.expert_mask = torch.zeros(
+                self.num_experts, dtype=torch.int32, device=self.w1.device
+            )
+            self.expert_mask[start:end] = 1
+        else:
+            self.expert_mask = None
+
+        if self.ep_size > 1:
+            local_E = self.w1.size(0)
+            start = self.ep_rank * local_E
+            end = start + local_E
+            self.expert_mask = torch.zeros(self.num_experts, dtype=torch.int32, device=self.w1.device)
+            self.expert_mask[start:end] = 1
+        else:
+            self.expert_mask = None
 
     @property
     def local_num_experts(self) -> int:
@@ -189,101 +210,45 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         assert payload.expert_tokens_meta is not None
 
         global_E = self.num_experts
-        E = global_E
+        E = self.local_num_experts
         N = self.w1.size(1)
         assert payload.expert_topk_ids is not None
 
-        assert self.w1.size(0) == E
-        assert self.w2.size(0) == E
+        assert self.w1.size(0) == E, f"w1 expert dim mismatch: {self.w1.size(0)} != {E}"
+        assert self.w2.size(0) == E, f"w2 expert dim mismatch: {self.w2.size(0)} != {E}"
 
         topk_ids = payload.expert_topk_ids
         topk_weights = payload.expert_topk_weights
+        assert topk_ids is not None
+        assert topk_weights is not None
+        assert self.w1.size(0) == self.local_num_experts
+        assert self.w2.size(0) == self.local_num_experts
 
-        device = topk_ids.device
-        M, topk = topk_ids.shape
-        model_dim = self.w1.size(2)
-        num_token = payload.expert_x.size(0)
-        inter_dim = self.w2.size(2)
+        hidden_states = payload.expert_x
+        if apply_router_weight_on_input:
+            assert (
+                topk_weights.dim() == 2
+            ), "`topk_weights` should be in shape (num_tokens, topk)"
+            _, topk = topk_weights.shape
+            assert (
+                topk == 1
+            ), "Only support topk=1 when `apply_router_weight_on_input` is True"
+            hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
+            topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
-        max_num_tokens_padded = M * topk + global_E * BLOCK_SIZE_M - topk
+        effective_mask = expert_map if expert_map is not None else self.expert_mask
 
-        max_num_m_blocks = int(
-            (max_num_tokens_padded + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
-        )
-        sorted_ids = torch.empty(
-            (max_num_tokens_padded,), dtype=torch.int32, device=device
-        )
-        sorted_weights = torch.empty(
-            (max_num_tokens_padded,), dtype=torch.float32, device=device
-        )
-        sorted_expert_ids = torch.empty(
-            (max_num_m_blocks,), dtype=torch.int32, device=device
-        )
-        num_valid_ids = torch.empty((2,), dtype=torch.int32, device=device)
-        moe_out = torch.empty(
-            (num_token, model_dim), dtype=torch.bfloat16, device=device
-        )
-
-        aiter.moe_sorting_fwd(
-            topk_ids,
+        output = fused_moe(
+            hidden_states,
+            self.w1,
+            self.w2,
             topk_weights,
-            sorted_ids,
-            sorted_weights,
-            sorted_expert_ids,
-            num_valid_ids,
-            moe_out,
-            global_E,
-            BLOCK_SIZE_M,
-            local_expert_mask=None,
-            num_local_tokens=None,
-            dispatch_policy=0,
-        )
-
-        tmp_out = torch.zeros(
-            (num_token, topk, inter_dim), dtype=torch.bfloat16, device=device
-        )
-
-        aiter.moe_stage1_g1u1(
-            payload.expert_x,
-            self.w1,
-            self.w2,
-            sorted_ids,
-            sorted_expert_ids,
-            num_valid_ids,
-            tmp_out,
-            inter_dim,
-            "",
-            BLOCK_SIZE_M,
-            ksplit=0,
-            activation=aiter.ActivationType.Silu,
+            topk_ids,
             quant_type=aiter.QuantType.per_Token,
-            a1_scale=payload.expert_x_scale,
             w1_scale=self.w1_scale,
-            sorted_weights=None,
-        )
-        a2_scale = torch.empty((num_token, topk, 1), dtype=torch.float32, device=device)
-        a2 = torch.empty(
-            (num_token, topk, inter_dim),
-            dtype=self.quant_config.quant_dtype,
-            device=device,
-        )
-        aiter.dynamic_per_token_scaled_quant(a2, tmp_out, a2_scale)
-        aiter.ck_moe_stage2(
-            a2,
-            self.w1,
-            self.w2,
-            sorted_ids,
-            sorted_expert_ids,
-            num_valid_ids,
-            moe_out,
-            topk,
-            "",
-            self.w2_scale,
-            a2_scale,
-            BLOCK_SIZE_M,
-            sorted_weights,
-            aiter.QuantType.per_Token,
-            aiter.ActivationType.Silu,
+            w2_scale=self.w2_scale,
+            activation=_moe_activation_type(activation),
+            expert_mask=effective_mask,
         )
 
-        return CombineForwardPayload(fused_expert_output=moe_out)
+        return CombineForwardPayload(fused_expert_output=output)

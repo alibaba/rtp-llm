@@ -1,6 +1,7 @@
 import copy
 import functools
 import logging
+import re
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -51,6 +52,22 @@ QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale"
 
 
+def _ckpt_base_matches_quant_exclude(
+    base_name_template: str, exclude_modules: set
+) -> bool:
+    """True if ckpt module path (``{i}`` = layer) matches any entry in quant ``exclude``."""
+    if not exclude_modules:
+        return False
+    if base_name_template in exclude_modules:
+        return True
+    if "{i}" not in base_name_template:
+        return False
+    parts = base_name_template.split("{i}")
+    pattern = "^" + r"\d+".join(re.escape(p) for p in parts) + "$"
+    rx = re.compile(pattern)
+    return any(rx.match(ex) for ex in exclude_modules)
+
+
 def _identity_ensure_2d(
     ts: List[torch.Tensor], allow_empty: bool = False
 ) -> torch.Tensor:
@@ -79,7 +96,12 @@ def _wrap_merge_fun_ensure_2d(original_merge_fun):
 
     @functools.wraps(original_merge_fun)
     def wrapped(ts, *args, **kwargs):
-        result = original_merge_fun(ts, *args, **kwargs)
+        # Quark per-channel scale may be saved as 1D [N].
+        ts_2d = [
+            t.unsqueeze(-1) if isinstance(t, torch.Tensor) and t.dim() == 1 else t
+            for t in ts
+        ]
+        result = original_merge_fun(ts_2d, *args, **kwargs)
         if result is not None and result.dim() == 1:
             return result.unsqueeze(-1)
         return result
@@ -213,7 +235,16 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         ):
             return False
         name = src_weight_info.name
-        return name in cls.w8a8_weight_list
+        if name not in cls.w8a8_weight_list:
+            return False
+        if quant_config._exclude_modules and hasattr(src_weight_info, 'weights'):
+            for ckpt_w in src_weight_info.weights:
+                base_name = ckpt_w.name.rsplit('.', 1)[0]
+                if _ckpt_base_matches_quant_exclude(
+                    base_name, quant_config._exclude_modules
+                ):
+                    return False
+        return True
 
     def __init__(
         self,
@@ -236,15 +267,24 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         elif src_weight_info.name == W.moe_w2:
             kernel, scale = self._get_moe_w2_quant_weight(src_weight_info)
         elif src_weight_info.name in [W.linear_attn_qkvz_w, W.linear_attn_out_w]:
-            pairs = {
-                W.linear_attn_qkvz_w: (W.linear_attn_qkvz_w, W.linear_attn_qkvz_s),
-                W.linear_attn_out_w: (W.linear_attn_out_w, W.linear_attn_out_s),
-            }
-            kernel, scale = self._get_quant_weight_linear(
-                src_weight_info,
-                pairs[src_weight_info.name][0],
-                pairs[src_weight_info.name][1],
-            )
+            if (
+                src_weight_info.name == W.linear_attn_qkvz_w
+                and len(src_weight_info.weights) == 2
+            ):
+                # Qwen3.5 split format: in_proj_qkv + in_proj_z
+                kernel, scale = self._get_quant_weight_linear_qkvz_qwen35(
+                    src_weight_info
+                )
+            else:
+                pairs = {
+                    W.linear_attn_qkvz_w: (W.linear_attn_qkvz_w, W.linear_attn_qkvz_s),
+                    W.linear_attn_out_w: (W.linear_attn_out_w, W.linear_attn_out_s),
+                }
+                kernel, scale = self._get_quant_weight_linear(
+                    src_weight_info,
+                    pairs[src_weight_info.name][0],
+                    pairs[src_weight_info.name][1],
+                )
         elif src_weight_info.name == W.attn_gate_w:
             kernel, scale = self._get_attn_gate_quant_weight(src_weight_info)
 
@@ -469,6 +509,9 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         weight_key: str,
         scale_key: str,
     ):
+        assert (
+            len(src_weight_info.weights) == 1
+        ), f"Expected single source weight for {weight_key}, got {len(src_weight_info.weights)}"
         w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
 
         kernel = W8A8Fp8PerChannelLinearAttnAtomicWeight(
@@ -488,6 +531,41 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                 )
             ],
             identity,
+            src_weight_info.config,
+            torch.float32,
+        )
+        return [kernel, scale]
+
+    def _get_quant_weight_linear_qkvz_qwen35(
+        self,
+        src_weight_info: LinearAttnAtomicWeight,
+    ):
+        def merge_qkv_z(ts: List[torch.Tensor]) -> torch.Tensor:
+            qkv = ts[0]
+            z = ts[1]
+            return torch.cat([qkv, z], dim=0)
+
+        qkv_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
+        z_name = src_weight_info.weights[1].name[: -len(W_SUFFIX)]
+
+        kernel = W8A8Fp8PerChannelLinearAttnAtomicWeight(
+            W.linear_attn_qkvz_w,
+            [
+                CkptWeightInfo(qkv_name + QW_SUFFIX, identity),
+                CkptWeightInfo(z_name + QW_SUFFIX, identity),
+            ],
+            merge_qkv_z,
+            src_weight_info.config,
+            torch.float8_e4m3fn,
+        )
+
+        scale = W8A8Fp8PerChannelLinearAttnAtomicWeight(
+            W.linear_attn_qkvz_s,
+            [
+                CkptWeightInfo(qkv_name + QS_SUFFIX, _identity_ensure_2d),
+                CkptWeightInfo(z_name + QS_SUFFIX, _identity_ensure_2d),
+            ],
+            merge_qkv_z,
             src_weight_info.config,
             torch.float32,
         )
@@ -547,11 +625,10 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                 if scale_weight.dim() == 2
                 else scale_weight
             )
-            kernel_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
-                "weight", kernel_weight
-            )
-            scale_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
-                "scale", scale_weight
+            kernel_weight, scale_weight = (
+                load_config.exported_device.convert_fp8_weight_params(
+                    kernel_weight, scale_weight
+                )
             )
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight

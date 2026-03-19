@@ -537,6 +537,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             weights, W.linear_attn_out_w, W.linear_attn_out_s, None, quant_config
         )
 
+    # mixed_qkvz, mixed_ba -> q, k, v, z, b, a
     def fix_query_key_value_ordering(
         self, mixed_qkvz: torch.Tensor, mixed_ba: torch.Tensor
     ) -> tuple[
@@ -545,38 +546,19 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         torch.Tensor,
         torch.Tensor,
     ]:
-        num_k_heads = self.linear_attn_config.linear_num_key_heads
-        num_v_heads = self.linear_attn_config.linear_num_value_heads
-        num_v_per_k = num_v_heads // num_k_heads
-
-        new_tensor_shape_qkvz = mixed_qkvz.size()[:-1] + (
-            self.local_num_k_heads,
-            self.head_k_dim + self.head_k_dim + num_v_per_k * self.head_v_dim * 2,
-        )
-
-        mixed_qkvz = mixed_qkvz.view(*new_tensor_shape_qkvz)
-
         split_arg_list_qkvz = [
-            self.head_k_dim,  # Q
-            self.head_k_dim,  # K
-            num_v_per_k * self.head_v_dim,  # V
-            num_v_per_k * self.head_v_dim,  # Z
+            self.head_k_dim * self.local_num_k_heads
+            + self.head_k_dim * self.local_num_k_heads
+            + self.head_v_dim * self.local_num_v_heads,
+            self.head_v_dim * self.local_num_v_heads,
         ]
-        query, key, value, z = torch.split(mixed_qkvz, split_arg_list_qkvz, dim=2)
 
+        mixed_qkv, z = torch.split(mixed_qkvz, split_arg_list_qkvz, dim=1)
         b, a = torch.split(
             mixed_ba, [self.local_num_v_heads, self.local_num_v_heads], dim=1
         )
-
-        query = query.reshape(query.size(0), -1)
-        key = key.reshape(key.size(0), -1)
-        value = value.reshape(value.size(0), -1)
-        mixed_qkv = torch.cat([query, key, value], dim=-1)
-
-        z = z.reshape(z.size(0), -1, self.head_v_dim)
-        b = b.reshape(b.size(0), self.local_num_v_heads)
-        a = a.reshape(a.size(0), self.local_num_v_heads)
-
+        # reshape to [token, v_head_num, v_head_dim]
+        # b,a should be contiguous for fused_gdn_gating
         return mixed_qkv, z, b, a
 
     def forward(

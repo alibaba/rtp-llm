@@ -23,8 +23,10 @@ class RocmFp8PerChannelPureTPStrategy(MoeStrategy):
             PureTpRouterFusedQuant,
         )
 
+        prop = torch.cuda.get_device_properties(torch.cuda.current_device())
+        fp8_dtype = torch.float8_e4m3fn if "gfx950" in prop.gcnArchName else torch.float8_e4m3fnuz
         quant_config = FusedMoEQuantConfig(
-            quant_dtype=torch.float8_e4m3fnuz,
+            quant_dtype=fp8_dtype,
             per_act_token_quant=True,
             per_out_ch_quant=True,
         )

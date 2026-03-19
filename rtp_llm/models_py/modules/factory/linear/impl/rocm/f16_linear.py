@@ -6,7 +6,6 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.modules.factory.linear import LinearBase
-from aiter import hipb_mm, hipb_create_extension
 from functools import lru_cache
 from rtp_llm.ops import HWKernelConfig
 
@@ -42,6 +41,7 @@ class RocmF16LinearBase(LinearBase):
     @staticmethod    
     @lru_cache(maxsize=1)
     def init_hipblas():
+        from aiter import hipb_create_extension
         hipb_create_extension()
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -64,6 +64,7 @@ class RocmF16LinearWithSwizzle(RocmF16LinearBase):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         self.init_hipblas()
+        from aiter import hipb_mm
         return hipb_mm(
             input,
             self.weight,
@@ -75,6 +76,7 @@ class RocmF16LinearWithSwizzle(RocmF16LinearBase):
             scaleOut=None,
             bpreshuffle=True,
         )
+
         
 class RocmF16LinearNoSwizzle(RocmF16LinearBase):
 
@@ -99,6 +101,7 @@ class RocmF16LinearNoSwizzle(RocmF16LinearBase):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         self.init_hipblas()
+        from aiter import hipb_mm
         return hipb_mm(
             input,
             self.weight,
