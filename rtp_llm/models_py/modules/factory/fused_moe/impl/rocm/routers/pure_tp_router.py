@@ -182,3 +182,28 @@ class PureTpRouterFusedQuant(PureTpRouterBase):
         if self.tp_size > 1:
             fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
         return fused_expert_output
+
+
+class PureTpRouterFp8PerBlockPassthrough(PureTpRouterBase):
+    """Pure TP router for FP8 PerBlock: accepts FP8_PER_BLOCK quant but passes through BF16 without quantization (executor handles quantization internally)."""
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(config, quant_config, do_recompute_topk=False)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        super().check_conditions(checker, config)
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(
+            quant_method in ("FP8_PER_BLOCK", "FP8_PER_BLOCK_QUARK")
+        )
+
+    def _do_quant(
+        self, a1: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return a1, None
