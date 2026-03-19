@@ -256,6 +256,7 @@ class LinearFactory:
             "FP8_PER_CHANNEL_COMPRESSED",
             "FP8_PER_CHANNEL_QUARK",
             "FP8_PER_TENSOR_COMPRESSED",
+            "FP8_PER_CHANNEL_QUARK",
         ]
         if quant_method not in fp8_methods:
             return False
