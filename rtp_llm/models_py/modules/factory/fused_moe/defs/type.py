@@ -12,6 +12,8 @@ class RouterType(Enum):
     DEEPEP_NORMAL = 2  # DeepEP normal mode
     DEEPEP_LOW_LATENCY = 4  # DeepEP low latency mode (best communication)
     PURE_TP = 5  # optimize when EP=TP, use all_reduce as gather
+    MORI_EP_INTRANODE = 6  # MORI intra-node EP router
+    MORI_EP_INTERNODE = 7  # MORI inter-node EP router
 
 
 class ExecutorType(Enum):
