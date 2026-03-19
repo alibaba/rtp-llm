@@ -9,7 +9,11 @@
 
 #define __nv_bfloat16 amd_bfloat16
 #define __nv_bfloat162 amd_bfloat162
+#ifdef ROCM_GFX950
+#define __nv_fp8_e4m3 __hip_fp8_e4m3
+#else
 #define __nv_fp8_e4m3 __hip_fp8_e4m3_fnuz
+#endif
 
 static inline __device__ __host__ __nv_bfloat162 __float2bfloat162_rn(float x) {
     return {__nv_bfloat16(x), __nv_bfloat16(x)};
