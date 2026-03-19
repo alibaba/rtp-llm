@@ -19,11 +19,23 @@ struct MHAKVCacheSpec: public KVCacheSpec {
     MHAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
         type              = KVCacheSpecType::MultiHeadAttention;
         layer_num         = 1;  // Will be set by caller
+
+        // TODO(xinfei.sxf): 这里的head_num_kv分配逻辑需要和ModelConfig::getAttentionConfigs里保持一致，目前这里还是单独计算的
+        /* 
+        KV head partitioning logic for tensor parallelism:
+        Case 1: If kv_head_num % tp_size == 0,
+            then each rank gets kv_head_num / tp_size KV heads.
+
+        Case 2: If kv_head_num % tp_size != 0,
+            then we take the greatest common divisor:
+                gcd = GCD(kv_head_num, tp_size),
+            and each rank gets kv_head_num / gcd KV heads.
+        */
         local_head_num_kv = static_cast<uint32_t>(
-            std::max(1,
-                     (attn_config.kv_head_num > 1) ?
-                         static_cast<int>(attn_config.kv_head_num / parallelism_config.get_attn_tp_size()) :
-                         static_cast<int>(attn_config.kv_head_num)));
+            (attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
+                attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
+                attn_config.kv_head_num / std::gcd(attn_config.kv_head_num, parallelism_config.get_attn_tp_size())
+        );
         seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
         size_per_head      = static_cast<uint32_t>(attn_config.size_per_head);
     }
