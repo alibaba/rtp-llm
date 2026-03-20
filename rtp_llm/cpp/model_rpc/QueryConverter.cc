@@ -123,6 +123,16 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
 
+    if (input->extra_input_ids_size() > 0) {
+        auto device = rtp_llm::DeviceFactory::getDefaultDevice();
+        generate_input->extra_input_ids = device->allocateBuffer(
+            {rtp_llm::DataType::TYPE_INT32, {(size_t)input->extra_input_ids_size()}, rtp_llm::AllocationType::HOST}, {});
+        memcpy(generate_input->extra_input_ids.value()->data(),
+               input->extra_input_ids().data(),
+               generate_input->extra_input_ids.value()->sizeBytes());
+        generate_input->extra_input_ids_loc = input->extra_input_ids_loc();
+    }
+
     return generate_input;
 }
 

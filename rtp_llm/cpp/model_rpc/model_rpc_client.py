@@ -159,6 +159,10 @@ def trans_input(input_py: GenerateInput):
 
         generate_config_pb.role_addrs.append(role_addr_pb)
 
+    if input_py.extra_input_ids is not None:
+        input_pb.extra_input_ids.extend(input_py.extra_input_ids)
+        input_pb.extra_input_ids_loc = input_py.extra_input_ids_loc
+
     return input_pb
 
 

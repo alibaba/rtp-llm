@@ -134,6 +134,8 @@ message GenerateInputPB {
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;
+    repeated int32 extra_input_ids = 7;
+    int32 extra_input_ids_loc = 8;  // -1 means not present
 }
 
 message AuxInfoPB {

@@ -52,10 +52,12 @@ class Pipeline(object):
         ] = None,  # mm_related_params from ModelConfig (optional)
         grpc_config: Optional[Any] = None,  # grpc_config from PyEnvConfigs (optional)
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
+        extra_input_processor: Optional[Any] = None,  # callable(input_ids) -> (processed_ids, extra_ids, loc)
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
         self._special_tokens: SpecialTokens = special_tokens
+        self._extra_input_processor = extra_input_processor
         self._mm_token: str = ""
         if mm_related_params:
             self._mm_token = mm_related_params.special_tokens.get(
@@ -186,6 +188,14 @@ class Pipeline(object):
             )
         token_ids = self.tokenizer.encode(prompt)
 
+        extra_input_ids = None
+        extra_input_ids_loc = -1
+        if self._extra_input_processor is not None:
+            try:
+                token_ids, extra_input_ids, extra_input_ids_loc = self._extra_input_processor(token_ids)
+            except Exception as e:
+                logging.warning(f"Failed to process extra input: {e}")
+
         if generate_config.sp_advice_prompt != "":
             generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
                 generate_config.sp_advice_prompt
@@ -197,7 +207,10 @@ class Pipeline(object):
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.max_num_beams())
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
         return self.generate_stream(
-            request_id, token_ids, mm_inputs, generate_config, **kwargs
+            request_id, token_ids, mm_inputs, generate_config,
+            extra_input_ids=extra_input_ids,
+            extra_input_ids_loc=extra_input_ids_loc,
+            **kwargs
         )
 
     @staticmethod
@@ -440,6 +453,8 @@ class Pipeline(object):
         token_ids: List[int],
         mm_inputs: List[MultimodalInput],
         generate_config: GenerateConfig,
+        extra_input_ids: Optional[List[int]] = None,
+        extra_input_ids_loc: int = -1,
         **kwargs: Any
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
@@ -453,6 +468,8 @@ class Pipeline(object):
             generate_config=generate_config,
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
+            extra_input_ids=extra_input_ids,
+            extra_input_ids_loc=extra_input_ids_loc,
         )
 
         stop_word_strs = generate_config.stop_words_str
