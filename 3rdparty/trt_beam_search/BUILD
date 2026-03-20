@@ -1,4 +1,5 @@
-load("//:def.bzl", "rpm_library", "copts", "cuda_copts",)
+load("//:def.bzl", "rpm_library", "copts", "cuda_copts", "rocm_copts", "any_cuda_copts")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
@@ -10,19 +11,28 @@ cc_library(
         "*.h",
     ]),
     deps = [
-        ":trt_beam_search_header",
-        "//rtp_llm/models_py/bindings/cuda:trt_utils",
-        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
         "//rtp_llm/cpp/utils:math_utils",
-        "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart",
-    ],
-    copts = cuda_copts(),
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + select({
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/rocm:rocm_types_hdr",
+            "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:hip",
+        ],
+        "//conditions:default": [
+            ":trt_beam_search_header",
+            "//rtp_llm/models_py/bindings/cuda:trt_utils",
+            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+            "@local_config_cuda//cuda:cuda",
+            "@local_config_cuda//cuda:cudart",
+        ],
+    }),
+    copts = any_cuda_copts(),
     visibility = ["//:__subpackages__"],
     alwayslink = True,
 )
-
 
 cc_library(
     name = "trt_beam_search_header",
@@ -31,10 +41,16 @@ cc_library(
         "**/*.h",
         "**/*.cuh",
     ]),
-    deps = [
-        "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart",
-    ],
-    copts = cuda_copts(),
+    deps = select({
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:hip",
+        ],
+        "//conditions:default": [
+            "@local_config_cuda//cuda:cuda",
+            "@local_config_cuda//cuda:cudart",
+        ],
+    }),
+    copts = any_cuda_copts(),
     visibility = ["//visibility:public"],
 )

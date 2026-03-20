@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "rtp_llm/models_py/bindings/cuda/ops/BeamSearchOp.h"
+#include "rtp_llm/models_py/bindings/core/ops/BeamSearchOp.h"
 
 namespace rtp_llm {
 

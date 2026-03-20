@@ -265,6 +265,7 @@ cc_library(
             "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/rocm:speculative_sampling",
             "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
+            "//3rdparty/trt_beam_search:trt_beam_search_impl",
             "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:rocm",
         ],

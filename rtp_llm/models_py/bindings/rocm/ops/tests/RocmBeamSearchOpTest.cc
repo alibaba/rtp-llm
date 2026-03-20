@@ -4,7 +4,12 @@
 using namespace std;
 using namespace rtp_llm;
 
-class CudaBeamSearchOpTest: public BeamSearchOpTest {
+// int main(int argc, char** argv) {
+//     ::testing::InitGoogleTest(&argc, argv);
+//     return RUN_ALL_TESTS();
+// }
+
+class RocmBeamSearchOpTest: public BeamSearchOpTest {
     virtual TestBeamSearchOutput opRun(TestBeamSearchInput& input) override {
         auto logits = input.logits.to(torch::kCUDA);
         auto cuda_input = BeamSearchParams({logits,
@@ -12,7 +17,7 @@ class CudaBeamSearchOpTest: public BeamSearchOpTest {
                                             input.input_lengths.to(torch::kCUDA),
                                             input.sequence_lengths.to(torch::kCUDA),
                                             input.cum_log_probs.to(torch::kCUDA),
-                                            input.beam_width_out});
+                                            static_cast<size_t>(input.beam_width_out)});
 
         auto result = execSampleBeamSearch(cuda_input);
 
@@ -24,7 +29,7 @@ class CudaBeamSearchOpTest: public BeamSearchOpTest {
     }
 };
 
-TEST_F(CudaBeamSearchOpTest, simpleTest) {
+TEST_F(RocmBeamSearchOpTest, simpleTest) {
     std::vector<int> batch_sizes = {1, 2, 15, 32};
     std::vector<int> beam_widths = {1, 2, 4, 5, 64, 70, 128, 500, 1024, 2500};
     std::vector<int> max_seq_len = {10, 100, 1000};
@@ -41,7 +46,7 @@ TEST_F(CudaBeamSearchOpTest, simpleTest) {
     }
 }
 
-TEST_F(CudaBeamSearchOpTest, variableBeamWidthTest) {
+TEST_F(RocmBeamSearchOpTest, variableBeamWidthTest) {
     std::vector<int> batch_sizes = {1, 2, 31};
     std::vector<int> beam_widths = {1, 5, 70, 500, 2500};
     std::vector<int> max_seq_len = {10, 500};

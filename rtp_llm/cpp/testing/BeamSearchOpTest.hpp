@@ -1,6 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/testing/TestBase.h"
-#include "rtp_llm/models_py/bindings/cuda/ops/BeamSearchOp.h"
+#include "rtp_llm/models_py/bindings/core/ops/BeamSearchOp.h"
 #include <torch/torch.h>
 
 using namespace rtp_llm;
@@ -69,7 +69,7 @@ public:
         return TestBeamSearchInput({logits, token_ids, input_lengths, sequence_lengths, cum_log_probs, beam_width_out});
     };
 
-    TestBeamSearchOutput opRun(TestBeamSearchInput& input) {
+    virtual TestBeamSearchOutput opRun(TestBeamSearchInput& input) {
         torch_impl::BeamSearchOp beam_search;
         beam_search.ptr()->to(torch::Device(torch::kCUDA));
 

@@ -20,11 +20,17 @@
  * introduced in https://dl.acm.org/doi/pdf/10.1145/3581784.3607062 .
  * Another variant can be found in TopP sampling: cpp/tensorrt_llm/kernels/samplingAirTopPKernels.cu .
  */
+#if USING_ROCM
+#include <hip/hip_runtime.h>
+#include <hipcub/hipcub.hpp>
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
+#else
 #include <cuda_runtime_api.h>
-
-#include "topkLastDim.h"
 #include <cub/cub.cuh>
 #include <cuda/atomic>
+#endif
+
+#include "topkLastDim.h"
 
 namespace tensorrt_llm
 {
@@ -42,7 +48,11 @@ namespace air_topk_stable
 {
 using WideT = float4;
 constexpr int VECTORIZED_READ_SIZE = 16;
+#if USING_ROCM
+constexpr int WARP_SIZE = 64;
+#else
 constexpr int WARP_SIZE = 32;
+#endif
 
 // constexpr unsigned FULL_WARP_MASK = 0xffffffff;
 
@@ -1044,7 +1054,7 @@ __device__ void filter_and_histogram_for_one_block(T const* in_buf, IdxT const* 
             auto const previous_bits = (twiddle_in(value, select_min) >> previous_start_bit) << previous_start_bit;
             if (previous_bits == kth_value_bits)
             {
-#if CUDART_VERSION < 12000
+#if !USING_ROCM && defined(CUDART_VERSION) && CUDART_VERSION < 12000
                 // Avoiding potential compiler bug in CUDA 11
                 volatile
 #endif
@@ -1239,7 +1249,7 @@ void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, Idx
                 out_idx, k * batch_size, batch_size, transform_iter, transform_iter + 1, stream);
         }
     }
-    temp_storage_bytes = max(temp_storage_bytes, temp_storage_bytes_sort);
+    temp_storage_bytes = std::max(temp_storage_bytes, temp_storage_bytes_sort);
 
     {
         IdxT len_candidates = air_topk_stable::calc_buf_len<T>(len);
@@ -1375,7 +1385,7 @@ void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T cons
         }
     }
 
-    temp_storage_bytes = max(temp_storage_bytes, temp_storage_bytes_sort);
+    temp_storage_bytes = std::max(temp_storage_bytes, temp_storage_bytes_sort);
     {
         size_t total_size = 0;
         size_t sort_buffer_size = 0;
@@ -1489,7 +1499,7 @@ size_t invokeComputeTopkLastDimWorkspaceSize(
 INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(int);
 INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(float);
 INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(half);
-#ifdef ENABLE_BF16
+#if defined(ENABLE_BF16) && !USING_ROCM
 INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(__nv_bfloat16);
 #endif
 #undef INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE
@@ -1519,7 +1529,7 @@ void invokeTopkLastDim(SizeType32 batchSize, SizeType32 inputLength, SizeType32 
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(int);
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(float);
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(half);
-#ifdef ENABLE_BF16
+#if defined(ENABLE_BF16) && !USING_ROCM
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(__nv_bfloat16);
 #endif
 #undef INSTANTIATE_TOPK_LastDim_DATA_TYPE
