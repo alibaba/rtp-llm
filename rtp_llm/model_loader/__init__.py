@@ -18,3 +18,4 @@ from .static_fp8_quant_weight import Fp8PerTensorCompressedWeight
 from .weight_only_quant_weight import WeightOnlyPerColWeight
 from .w4a8_int4_per_channel_quant_weight import LoadW4a8Int4PerChannelQuantWeight
 from .per_group_fp4_quant_weight import PerGroupFp4Weight
+from .mixed_fp4_quant_weight import MixedFp4Weight

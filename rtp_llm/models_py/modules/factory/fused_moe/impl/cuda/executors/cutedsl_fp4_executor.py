@@ -1,6 +1,9 @@
+import logging
 from typing import Any, Dict, Optional
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
     flashinfer_cutedsl_moe_masked,
@@ -82,9 +85,47 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         self._w2_alpha = a2_global_scale * _w2_alpha
         self.input_global_scale = 1 / input_global_scale
         self.a2_global_scale = 1 / a2_global_scale
+        self.input_global_scale = self.clamp_inf(self.input_global_scale, "input_global_scale")
+        self.a2_global_scale = self.clamp_inf(self.a2_global_scale, "a2_global_scale")
 
         # Check FP4 quantization
         assert self.quant_config.is_quantized
+
+    def clamp_inf(self, tensor: torch.Tensor, name: str = "tensor") -> torch.Tensor:
+        """Replace inf/-inf values in tensor with finite values.
+
+        Args:
+            tensor: Input tensor
+            name: Tensor name for logging output
+
+        Returns:
+            Processed tensor with inf/-inf replaced by finite max/min values
+        """
+        finite_mask = torch.isfinite(tensor)
+        if finite_mask.all():
+            return tensor
+
+        num_inf = (~finite_mask).sum().item()
+        num_posinf = torch.isposinf(tensor).sum().item()
+        num_neginf = torch.isneginf(tensor).sum().item()
+
+        if not finite_mask.any():
+            # All values are inf/nan, cannot determine valid range, raise error
+            raise ValueError(
+                f"[{name}] All values are inf/nan ({num_posinf} posinf, {num_neginf} neginf). "
+                f"Cannot determine valid scale range. Shape: {tensor.shape}"
+            )
+
+        max_val = tensor[finite_mask].max()
+        min_val = tensor[finite_mask].min()
+
+        logger.warning(
+            f"[{name}] Found {num_inf} inf values ({num_posinf} posinf, {num_neginf} neginf). "
+            f"Replacing posinf with {max_val.item():.6e}, neginf with {min_val.item():.6e}. "
+            f"Shape: {tensor.shape}"
+        )
+
+        return tensor.clamp(min=min_val, max=max_val)
 
     @property
     def local_num_experts(self) -> int:
