@@ -47,12 +47,13 @@ bool FlashInferAttnParams::check_recycle() {
     return true;
 }
 
-FlashInferAttnParams* FlashInferAttnParams::get(int batch_size, int input_token_num) {
+FlashInferAttnParams* FlashInferAttnParams::get(int batch_size, int input_token_num, int page_num) {
     auto cache = isDecode(input_token_num) ? &ParamsCache::DECODE_PARAMS_CACHE : &ParamsCache::PREFILL_PARAMS_CACHE;
     if (!cache->empty()) {
         auto params = cache->back();
         cache->pop_back();
-        if (batch_size <= params->batch_size && input_token_num <= params->input_token_num) {
+        if (batch_size <= params->batch_size && input_token_num <= params->input_token_num
+            && page_num <= params->page_num) {
             return params;
         }
         delete params;
@@ -88,7 +89,7 @@ tuple<BufferPtr, vector<torch::Tensor>> FlashInferAttnParams::allocateManyBuffer
 
 FlashInferAttnParams*
 FlashInferAttnParams::create(CudaDevice* device, int batch_size, int input_token_num, int page_num) {
-    if (auto params = get(batch_size, input_token_num)) {
+    if (auto params = get(batch_size, input_token_num, page_num)) {
         return params;
     }
     RTP_LLM_LOG_DEBUG("new FlashInferAttnParams batch_size(%d) input_token_num(%d)", batch_size, input_token_num);

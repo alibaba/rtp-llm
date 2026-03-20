@@ -118,7 +118,7 @@ public:
                                                 const int        batch_size,
                                                 const int        tokens_per_block);
     void                         refreshFlashInferBuf(CudaDevice* device, int batch_size, int token_num);
-    static FlashInferAttnParams* get(int batch_size, int input_token_num);
+    static FlashInferAttnParams* get(int batch_size, int input_token_num, int page_num);
 };
 
 using FlashInferAttnParamsPtr = std::shared_ptr<FlashInferAttnParams>;
