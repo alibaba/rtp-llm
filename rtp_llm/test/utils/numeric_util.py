@@ -53,18 +53,24 @@ def per_token_cast_back(
 
         x_scales = x_scales.view(dtype=torch.float)
 
-    if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2" or pertoken_quant:
-        x_fp32_padded = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, x_fp8.size(1))
+    # L2 / pertoken: dequant from unpadded x_fp8 (element count m*n). When n % 128 != 0,
+    # aligned_n > n; reshaping to x_fp8_padded.shape would require m*aligned_n elements
+    # and raises RuntimeError — must fold back to x_fp8.shape (or reshape to x_fp8.shape).
+    use_unpadded_dequant = (
+        os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2" or pertoken_quant
+    )
+    if use_unpadded_dequant:
+        x_fp32_groups = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, x_fp8.size(1))
     else:
-        x_fp32_padded = x_fp8_padded.to(torch.float32).view(x_fp8.size(0), -1, 128)
+        x_fp32_groups = x_fp8_padded.to(torch.float32).view(x_fp8.size(0), -1, 128)
 
     x_scales = x_scales.view(x_fp8.size(0), -1, 1)
-    return (
-        (x_fp32_padded * x_scales)
-        .view(x_fp8_padded.shape)
-        .to(torch.bfloat16)[:, :n]
-        .contiguous()
-    )
+    dequant = x_fp32_groups * x_scales
+    if use_unpadded_dequant:
+        out_bf16 = dequant.reshape(x_fp8.shape).to(torch.bfloat16)
+    else:
+        out_bf16 = dequant.view(x_fp8_padded.shape).to(torch.bfloat16)[:, :n]
+    return out_bf16.contiguous()
 
 
 def per_channel_cast_to_fp8(
