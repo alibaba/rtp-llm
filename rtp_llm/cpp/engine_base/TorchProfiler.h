@@ -1,8 +1,12 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <functional>
 #include <mutex>
+#include <queue>
 #include <string>
+#include <thread>
 #include "torch/csrc/autograd/profiler_kineto.h"
 
 namespace rtp_llm {
@@ -16,6 +20,12 @@ public:
     TorchProfile(const std::string& prefix, std::string output_dir = "");
     ~TorchProfile();
     void start();
+
+    // Stops profiling and returns the result + filename for async saving.
+    // Returns {nullptr, ""} if already stopped.
+    std::pair<std::unique_ptr<torch::autograd::profiler::ProfilerResult>, std::string> stopAndCollect();
+
+    // Legacy synchronous stop (calls stopAndCollect + save inline).
     void stop();
 
     TorchProfile(const TorchProfile&)            = delete;
@@ -30,9 +40,37 @@ private:
     bool                        stopped_ = true;
 };
 
+// Background thread that serializes profiler results to disk without blocking the engine loop.
+class ProfilerSaveWorker {
+public:
+    ProfilerSaveWorker();
+    ~ProfilerSaveWorker();
+
+    // Enqueue a save task. Non-blocking, returns immediately.
+    void enqueue(std::unique_ptr<torch::autograd::profiler::ProfilerResult> result, std::string file_name);
+
+    ProfilerSaveWorker(const ProfilerSaveWorker&)            = delete;
+    ProfilerSaveWorker& operator=(const ProfilerSaveWorker&) = delete;
+
+private:
+    void run();
+
+    struct SaveTask {
+        std::unique_ptr<torch::autograd::profiler::ProfilerResult> result;
+        std::string                                                file_name;
+    };
+
+    std::mutex              mu_;
+    std::condition_variable cv_;
+    std::queue<SaveTask>    tasks_;
+    bool                    stop_ = false;
+    std::thread             thread_;
+};
+
 // Step-window profiler controlled via API (sglang-style).
 // Thread-safe: configure() is called from gRPC thread, tick() from engine loop thread.
 // The actual TorchProfile start/stop happens only inside tick(), satisfying Kineto thread-affinity.
+// Trace export is done asynchronously on a background thread to avoid blocking inference.
 class StepWindowProfiler {
 public:
     explicit StepWindowProfiler(const std::string& default_output_dir = "", int world_rank = 0);
@@ -68,6 +106,7 @@ private:
     int64_t                       waited_steps_   = 0;
     int64_t                       profiled_steps_ = 0;
     int                           world_rank_     = 0;
+    ProfilerSaveWorker            save_worker_;
 };
 
 }  // namespace rtp_llm

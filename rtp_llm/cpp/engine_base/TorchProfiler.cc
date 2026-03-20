@@ -26,14 +26,64 @@ void TorchProfile::start() {
     tap::enableProfiler(config_, activities_);
 }
 
-void TorchProfile::stop() {
+std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopAndCollect() {
     if (stopped_) {
-        return;
+        return {nullptr, ""};
     }
     auto        res       = tap::disableProfiler();
     std::string file_name = output_dir_ + "/" + prefix_ + std::to_string(count_) + ".json";
-    res->save(file_name);
-    stopped_ = true;
+    stopped_              = true;
+    return {std::move(res), std::move(file_name)};
+}
+
+void TorchProfile::stop() {
+    auto [res, file_name] = stopAndCollect();
+    if (res) {
+        res->save(file_name);
+    }
+}
+
+// ---- ProfilerSaveWorker ----
+
+ProfilerSaveWorker::ProfilerSaveWorker(): thread_([this] { run(); }) {}
+
+ProfilerSaveWorker::~ProfilerSaveWorker() {
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        stop_ = true;
+    }
+    cv_.notify_one();
+    thread_.join();
+}
+
+void ProfilerSaveWorker::enqueue(std::unique_ptr<tap::ProfilerResult> result, std::string file_name) {
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        tasks_.push({std::move(result), std::move(file_name)});
+    }
+    cv_.notify_one();
+}
+
+void ProfilerSaveWorker::run() {
+    while (true) {
+        SaveTask task;
+        {
+            std::unique_lock<std::mutex> lock(mu_);
+            cv_.wait(lock, [this] { return stop_ || !tasks_.empty(); });
+            if (stop_ && tasks_.empty()) {
+                return;
+            }
+            task = std::move(tasks_.front());
+            tasks_.pop();
+        }
+        RTP_LLM_LOG_INFO("saving profiler trace to %s (async)", task.file_name.c_str());
+        try {
+            task.result->save(task.file_name);
+            RTP_LLM_LOG_INFO("profiler trace saved: %s", task.file_name.c_str());
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("failed to save profiler trace %s: %s", task.file_name.c_str(), e.what());
+        }
+    }
 }
 
 // ---- StepWindowProfiler ----
@@ -52,14 +102,15 @@ void StepWindowProfiler::configure(bool enable, const std::string& trace_name, i
         std::lock_guard<std::mutex> lock(mu_);
         trace_name_ = trace_name;
     }
+    static constexpr int kDefaultNumSteps = 3;
     start_step_.store(std::max(0, start_step));
-    num_steps_.store(std::max(0, num_steps));
+    num_steps_.store(num_steps > 0 ? num_steps : kDefaultNumSteps);
     enabled_.store(enable);
     reconfigure_.store(true);
     RTP_LLM_LOG_INFO("timeline profiling configured: enable=%d start_step=%d num_steps=%d trace=%s",
                      int(enable),
-                     std::max(0, start_step),
-                     std::max(0, num_steps),
+                     start_step_.load(),
+                     num_steps_.load(),
                      trace_name.c_str());
 }
 
@@ -78,7 +129,10 @@ void StepWindowProfiler::tick() {
     if (reconfigure_.exchange(false)) {
         std::lock_guard<std::mutex> lock(mu_);
         if (profiler_) {
-            profiler_->stop();
+            auto [res, file_name] = profiler_->stopAndCollect();
+            if (res) {
+                save_worker_.enqueue(std::move(res), std::move(file_name));
+            }
             profiler_.reset();
             has_profiler_.store(false, std::memory_order_relaxed);
             RTP_LLM_LOG_INFO("timeline profiler stopped for reconfigure");
@@ -120,7 +174,10 @@ void StepWindowProfiler::tick() {
     const int target = num_steps_.load();
     if (target > 0 && profiled_steps_ >= target) {
         enabled_.store(false);
-        profiler_->stop();
+        auto [res, file_name] = profiler_->stopAndCollect();
+        if (res) {
+            save_worker_.enqueue(std::move(res), std::move(file_name));
+        }
         profiler_.reset();
         has_profiler_.store(false, std::memory_order_relaxed);
         RTP_LLM_LOG_INFO("timeline profiler stopped: reached %ld/%d steps", profiled_steps_, target);
@@ -134,7 +191,10 @@ StepWindowProfiler::~StepWindowProfiler() {
 void StepWindowProfiler::stopProfiler(const char* reason) {
     std::lock_guard<std::mutex> lock(mu_);
     if (profiler_) {
-        profiler_->stop();
+        auto [res, file_name] = profiler_->stopAndCollect();
+        if (res) {
+            save_worker_.enqueue(std::move(res), std::move(file_name));
+        }
         profiler_.reset();
         has_profiler_.store(false, std::memory_order_relaxed);
         RTP_LLM_LOG_INFO("timeline profiler stopped: reason=%s", reason);
