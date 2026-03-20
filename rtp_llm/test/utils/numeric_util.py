@@ -33,23 +33,38 @@ def per_token_cast_to_fp8(
     return (x_view * (1.0 / sf.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, n), sf
 
 
-def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
-    x_scales = x_scales.contiguous()
+def per_token_cast_back(
+    x_fp8: torch.Tensor, x_scales: torch.Tensor, pertoken_quant: bool = False
+):
+    if x_fp8.numel() == 0:
+        return x_fp8.to(torch.bfloat16)
+
+    assert x_fp8.dim() == 2
+    m, n = x_fp8.shape
+    aligned_n = align(n, 128)
+    x_fp8_padded = torch.nn.functional.pad(
+        x_fp8, (0, aligned_n - n), mode="constant", value=0
+    )
     if x_scales.dtype == torch.int:
-        if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
+        if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2" or pertoken_quant:
             x_scales = x_scales << 23
         else:
-            x_scales = x_scales.view(dtype=torch.int8).to(torch.int) << 23
+            x_scales = x_scales.view(dtype=torch.uint8).to(torch.int) << 23
 
         x_scales = x_scales.view(dtype=torch.float)
 
-    if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
-        x_fp32 = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, x_fp8.size(1))
+    if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2" or pertoken_quant:
+        x_fp32_padded = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, x_fp8.size(1))
     else:
-        x_fp32 = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, 128)
+        x_fp32_padded = x_fp8_padded.to(torch.float32).view(x_fp8.size(0), -1, 128)
 
     x_scales = x_scales.view(x_fp8.size(0), -1, 1)
-    return (x_fp32 * x_scales).view(x_fp8.shape).to(torch.bfloat16)
+    return (
+        (x_fp32_padded * x_scales)
+        .view(x_fp8_padded.shape)
+        .to(torch.bfloat16)[:, :n]
+        .contiguous()
+    )
 
 
 def per_channel_cast_to_fp8(

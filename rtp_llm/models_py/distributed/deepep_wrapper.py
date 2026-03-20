@@ -278,44 +278,83 @@ class DeepEPWrapper:
     def get_instance(
         cls,
         config: DeepepWrapperConfig,
-        group: Optional[ProcessGroup] = None,
     ) -> "DeepEPWrapper":
-        """Ensure DeepEP is initialized with given config (thread-safe).
+        """Return the initialized DeepEP wrapper instance (thread-safe).
 
-        If already initialized with a different config, raises an error.
+        Does not perform initialization. Call init_deepep_wrapper before calling this.
 
         Args:
-            config: DeepepWrapperConfig to initialize with
-            group: ProcessGroup (if not provided, uses torch.distributed.group.WORLD)
+            config: DeepepWrapperConfig to verify against current instance
+
+        Returns:
+            The initialized DeepEPWrapper instance
 
         Raises:
-            RuntimeError: If DeepEP is not supported or config mismatch
+            RuntimeError: If DeepEP is not initialized, or config mismatch
         """
         with cls._lock:
-            if cls._initialized:
-                if cls._instance is None:
-                    raise RuntimeError("DeepEP state is inconsistent")
-                if not cls._instance._config.equal(config):
-                    raise RuntimeError(
-                        "DeepEP already initialized with different config, origin: {}, new: {}".format(
-                            cls._instance._config, config
-                        )
+            if not cls._initialized:
+                raise RuntimeError(
+                    "DeepEPWrapper is not initialized. Call init_deepep_wrapper first."
+                )
+            if cls._instance is None:
+                raise RuntimeError(
+                    "DeepEP state is inconsistent, _initialized is True but _instance is None"
+                )
+            if not cls._instance._config.equal(config):
+                raise RuntimeError(
+                    "DeepEP already initialized with different config, origin: {}, new: {}".format(
+                        cls._instance._config, config
                     )
+                )
+            return cls._instance
 
-                return cls._instance
+    @staticmethod
+    def create(config: DeepepWrapperConfig) -> None:
+        """Create a new DeepEPWrapper instance.
 
-            if not cls.supported():
-                raise RuntimeError("DeepEP is not supported on this device")
+        Args:
+            config: DeepepWrapperConfig
 
+        Returns:
+            None
+
+        Raises:
+            RuntimeError: If DeepEP is not initialized, or config mismatch
+        """
+        try:
             if not torch.distributed.is_initialized():
                 raise RuntimeError("Distributed environment is not initialized")
-
-            if group is None:
-                group = torch.distributed.group.WORLD
-
-            cls._instance = cls(group, config)  # type: ignore
-            cls._initialized = True
-            return cls._instance
+            with DeepEPWrapper._lock:
+                if DeepEPWrapper._initialized:
+                    if DeepEPWrapper._instance is None:
+                        raise RuntimeError(
+                            "DeepEP state is inconsistent, _initialized is True but _instance is None"
+                        )
+                    if not DeepEPWrapper._instance._config.equal(config):
+                        raise RuntimeError(
+                            "DeepEP already initialized with different config, origin: {}, new: {}".format(
+                                DeepEPWrapper._instance._config, config
+                            )
+                        )
+                    else:
+                        logging.warning(
+                            "DeepEP already initialized with the same config"
+                        )
+                else:
+                    if DeepEPWrapper._instance is not None:
+                        raise RuntimeError(
+                            "DeepEP state is inconsistent, _initialized is False but _instance is not None"
+                        )
+                    logging.info("Start initialize DeepEP wrapper")
+                    DeepEPWrapper._instance = DeepEPWrapper(
+                        torch.distributed.group.WORLD, config
+                    )
+                    DeepEPWrapper._initialized = True
+                    logging.info("Finish initialize DeepEP wrapper")
+        except Exception as e:
+            logging.error(f"Failed to initialize DeepEP wrapper: {e}")
+            raise e
 
     @classmethod
     def reset(cls) -> None:
@@ -565,23 +604,35 @@ class DeepEPWrapper:
         gc.collect()
 
 
-def init_deepep_wrapper(engine_config: EngineConfig, model_config: ModelConfig) -> None:
+def init_deepep_wrapper(
+    engine_config: EngineConfig,
+    model_config: ModelConfig,
+) -> None:
     """Initialize DeepEP wrapper if MOE model and DeepEP is enabled.
 
+    Performs full initialization internally. Call this before any
+    DeepEPWrapper.get_instance(). Thread-safe. Requires torch.distributed
+    to be initialized; group is taken from torch.distributed.group.WORLD.
+
     Args:
-        engine_config: Engine configuration containing MOE and model-specific configs
-        model_config: Model configuration
+        engine_config: EngineConfig
+        model_config: ModelConfig
+
+    Returns:
+        None
     """
+
+    if not DeepEPWrapper.supported():
+        logging.warning(
+            "DeepEP is not supported on this device, skipping initialization"
+        )
+        return
 
     enable_cuda_graph = (
         engine_config.hw_kernel_config.enable_cuda_graph
         if engine_config.hw_kernel_config is not None
         else False
     )
-    ll_num_max_token = engine_config.runtime_config.max_generate_batch_size
-    sp_type = engine_config.sp_config.type  # Get SpeculativeType enum value
-    if engine_config.sp_config.type != SpeculativeType.NONE:
-        ll_num_max_token *= engine_config.sp_config.gen_num_per_cycle + 1
 
     deepep_config_adapter = MoEConfigAdapter(
         model_config=model_config,
@@ -591,30 +642,21 @@ def init_deepep_wrapper(engine_config: EngineConfig, model_config: ModelConfig) 
         enable_cuda_graph=enable_cuda_graph,
     )
 
-    # Only initialize if DeepEP is supported
-    if DeepEPWrapper.supported():
-        # Calculate ll_num_max_token_per_rank for low latency mode
-        ll_num_max_token_per_rank = 0
-        if engine_config.moe_config.use_deepep_low_latency:
-            ll_num_max_token_per_rank = (
-                DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
-                    ll_num_max_token,
-                    engine_config.parallelism_config.tp_size,
-                    model_config.quant_config,
-                )
+    ll_num_max_token_per_rank = 0
+    if engine_config.moe_config.use_deepep_low_latency:
+        ll_num_max_token = engine_config.runtime_config.max_generate_batch_size
+        if engine_config.sp_config.type != SpeculativeType.NONE:
+            ll_num_max_token *= engine_config.sp_config.gen_num_per_cycle + 1
+        ll_num_max_token_per_rank = (
+            DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+                ll_num_max_token,
+                engine_config.parallelism_config.tp_size,
+                model_config.quant_config,
             )
-
-        deepep_config = DeepepWrapperConfig.from_config_adapter(
-            deepep_config_adapter, ll_num_max_token_per_rank
         )
 
-        try:
-            logging.info("Start initialize DeepEP wrapper")
-            DeepEPWrapper.get_instance(deepep_config)
-            logging.info("Finish initialize DeepEP wrapper")
-        except Exception as e:
-            logging.error(f"Failed to initialize DeepEP wrapper: {e}")
-    else:
-        logging.warning(
-            "DeepEP is not supported on this device, skipping initialization"
-        )
+    deepep_config = DeepepWrapperConfig.from_config_adapter(
+        deepep_config_adapter, ll_num_max_token_per_rank
+    )
+
+    DeepEPWrapper.create(deepep_config)
