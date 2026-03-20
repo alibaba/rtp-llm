@@ -209,6 +209,22 @@ class QuantizationConfig(ABC):
                 and group_size == 16
             ):
                 quant_method = ModelOptFp4Config.get_method()
+                mixed_attention = False
+                text_config = config_json.get("text_config", None)
+                if text_config is not None:
+                    full_attention_interval = text_config.get("full_attention_interval", 0)
+                    if full_attention_interval != 0:
+                        mixed_attention = True
+                return ModelOptFp4Config.from_config(
+                    {
+                        "bits": bits,
+                        "method": quant_method,
+                        "group_size": group_size,
+                        "is_quanted": True,
+                        "mixed_attention": mixed_attention,
+                    }
+                )
+            
 
         return cls.from_config(
             {
@@ -598,6 +614,7 @@ class ModelOptFp4Config(QuantizationConfig):
 
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        self.mixed_attention = kwargs.get('mixed_attention', False)
 
     @classmethod
     def get_method(cls) -> str:
