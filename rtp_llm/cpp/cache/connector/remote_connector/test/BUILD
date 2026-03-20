@@ -5,18 +5,15 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+# Only need gpu_register for DeviceFactory::initDevices(), not full cuda_impl.
 test_deps = [
-    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    "//rtp_llm/cpp/devices/cuda_impl:gpu_register",
     "//rtp_llm/cpp/config:config_modules",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps()
-
-test_copts = [
-    "-fno-access-control",
-] + copts()
 
 cc_test(
     name = "group_policy_test",
@@ -25,7 +22,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "A10"},
-    # tags = ["H20"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -38,7 +34,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "A10"},
-    # tags = ["H20"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -51,7 +46,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "A10"},
-    # tags = ["H20"],
     deps = [
         ":remote_connector_mock_base",
     ],
@@ -64,7 +58,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "A10"},
-    # tags = ["H20"],
     deps = [
         ":remote_connector_mock_base",
     ],
@@ -77,7 +70,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "A10"},
-    # tags = ["H20"],
     deps = test_deps + [
         ":mock",
     ],

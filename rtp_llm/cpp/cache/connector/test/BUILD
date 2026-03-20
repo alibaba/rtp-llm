@@ -7,8 +7,9 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+# Only need gpu_register for DeviceFactory::initDevices(), not full cuda_impl.
 test_deps = [
-    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    "//rtp_llm/cpp/devices/cuda_impl:gpu_register",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/utils:core_utils",
