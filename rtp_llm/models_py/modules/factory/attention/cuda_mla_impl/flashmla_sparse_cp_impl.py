@@ -87,7 +87,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.cp_slot_mapper = CPSlotMapper(
             cp_rank=self.prefill_cp_rank,
             cp_size=self.prefill_cp_size,
-            block_size=64,  # default page_size; overridden by plan() via self.token_per_block
+            block_size=page_size,
         )
 
         self.kv_restore_unpad_indices = None

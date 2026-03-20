@@ -39,7 +39,10 @@ static CompleteTokenIdsPtr makeTokenIds(rtp_llm::DeviceBase* device, int batch_s
 
 static BatchKVCacheResourcePtr makeResource(int batch_size, int layer_num) {
     auto res = std::make_shared<BatchKVCacheResource>();
-    res->init(batch_size, layer_num, /*group_num=*/1);
+    res->resetBatchSize(batch_size);
+    std::vector<int> layer_to_group_id(layer_num, 0);
+    res->initGroups(/*group_nums=*/1, layer_num, layer_to_group_id);
+
     return res;
 }
 
@@ -203,8 +206,9 @@ TEST_F(KVCacheManagerCPSlotMapperTest, InsertAutoInjectsMapper) {
 
     auto mgr = std::make_shared<KVCacheManager>(config, device_, false, nullptr, kv_cfg, par);
     ASSERT_TRUE(mgr->init());
-
-    const int seq_len   = 8;
+    // virtual_block_size = 4 * 2 = 8
+    // effectiveSeqLenForAlloc(16) = ceil(16/8) * 4 = 8 tokens worth => ceil(8/4) = 2 blocks
+    const int seq_len   = 16;
     auto      resource  = makeResource(1, config.layer_num);
     auto      token_ids = makeTokenIds(device_, 1, seq_len, seq_size_per_block);
 
