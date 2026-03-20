@@ -47,18 +47,18 @@ def align_up_math(n: int, alignment: int = 128) -> int:
     return int(math.ceil(n / alignment)) * alignment
 
 
-class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
+class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
     BLOCK_SIZE = 128
     EXPERT_ALIGNMENT = 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
 
     @classmethod
-    def executor_type(cls):
+    def executor_type(cls) -> ExecutorType:
         return ExecutorType.DEEPGEMM_CONTINUOUS
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        """Check if DeepGemmContinousExecutor can handle the configuration"""
+        """Check if DeepGemmHybridExecutor can handle the configuration"""
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
@@ -212,8 +212,6 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
                 scale_ue8m0=is_deep_gemm_e8m0_used(),
             )
             dispose_tensor(hidden_states_fp8)
-            if not is_deep_gemm_e8m0_used():
-                input_tensor[1] = tma_align_input_scale(input_tensor[1])
 
             upgate_output = torch.empty(
                 (self.num_experts_per_partition, alignment, self.N),

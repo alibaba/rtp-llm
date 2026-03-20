@@ -30,8 +30,8 @@ class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
         checker.check(config.moe_strategy == "fp8_per_block_no_dp" or config.moe_strategy == "auto")
 
     def get_attributes(self) -> StrategyAttributes:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_continous_executor import (
-            DeepGemmContinousExecutor,
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor import (
+            DeepGemmHybridExecutor,
         )
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
             PureTpRouterFp8PerBlock,
@@ -43,7 +43,7 @@ class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
         )
         return StrategyAttributes(
             router_class=PureTpRouterFp8PerBlock,
-            executor_class=DeepGemmContinousExecutor,
+            executor_class=DeepGemmHybridExecutor,
             quant_config=quant_config,
         )
 
@@ -117,8 +117,8 @@ class CudaFp8PerBlockEpNormalStrategy(MoeStrategy):
         checker.check(config.moe_strategy == "fp8_per_block_ep_normal" or config.moe_strategy == "auto")
 
     def get_attributes(self) -> StrategyAttributes:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_continous_executor import (
-            DeepGemmContinousExecutor,
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor import (
+            DeepGemmHybridExecutor,
         )
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
             DeepepNormalRouterFp8PerBlock,
@@ -130,6 +130,6 @@ class CudaFp8PerBlockEpNormalStrategy(MoeStrategy):
         )
         return StrategyAttributes(
             router_class=DeepepNormalRouterFp8PerBlock,
-            executor_class=DeepGemmContinousExecutor,
+            executor_class=DeepGemmHybridExecutor,
             quant_config=quant_config,
         )
