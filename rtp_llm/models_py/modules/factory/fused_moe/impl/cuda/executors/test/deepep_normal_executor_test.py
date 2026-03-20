@@ -18,8 +18,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_continous_executor import (
-    DeepGemmContinousExecutor,
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor import (
+    DeepGemmHybridExecutor,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.fused_moe_executor_test_util import (
     generate_payload_and_weights,
@@ -30,7 +30,7 @@ from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.utils.model_weight import W
 
 
-class DeepGemmContinousExecutorTestBase:
+class DeepGemmHybridExecutorTestBase:
     DP_SIZE = 4
     TP_SIZE = 1
     EP_SIZE = 4
@@ -152,7 +152,7 @@ class DeepGemmContinousExecutorTestBase:
             weights[W.moe_w1] = new_w1
             weights[W.moe_w2] = new_w2
 
-        executor = DeepGemmContinousExecutor(
+        executor = DeepGemmHybridExecutor(
             config,
             FusedMoEQuantConfig(
                 quant_dtype=torch.float8_e4m3fn if use_fp8 else None,
@@ -197,7 +197,7 @@ class DeepGemmContinousExecutorTestBase:
         token_idx = 0
         for i, num_token in enumerate(expert_num_tokens):
             diff = calc_diff(
-                combine_payload.fused_expert_output[token_idx : token_idx + num_token],
+                combine_payload.fused_expert_output[token_idx: token_idx + num_token],
                 ref_output[i, :num_token],
             )
             # print('diff:', diff, combine_payload.fused_expert_output[token_idx : token_idx + num_token], ref_output[i, :num_token])
@@ -205,8 +205,8 @@ class DeepGemmContinousExecutorTestBase:
             assert diff < 0.003
 
 
-class DeepGemmContinousExecutorTestBase(
-    DeepGemmContinousExecutorTestBase, unittest.TestCase
+class DeepGemmHybridExecutorTestBase(
+    DeepGemmHybridExecutorTestBase, unittest.TestCase
 ):
     pass
 
