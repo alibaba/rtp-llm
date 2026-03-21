@@ -4,7 +4,6 @@ from typing import Any, Dict, Optional
 from rtp_llm.access_logger.json_util import dump_json
 from rtp_llm.access_logger.log_utils import get_handler
 from rtp_llm.access_logger.py_access_log import PyAccessLog, RequestLog, ResponseLog
-from rtp_llm.config.py_config_modules import PyMiscellaneousConfig
 from rtp_llm.structure.request_extractor import request_id_field_name
 
 ACCESS_LOGGER_NAME = "access_logger"
@@ -57,6 +56,7 @@ class AccessLogger:
         rank_id: Optional[int] = None,
         server_id: Optional[int] = None,
         async_mode: bool = True,
+        misc_config=None,
     ) -> None:
         init_access_logger(log_path, backup_count, rank_id, server_id, async_mode)
         init_query_access_logger(log_path, backup_count, rank_id, server_id, async_mode)
@@ -65,14 +65,19 @@ class AccessLogger:
         self.async_mode = async_mode
         self.rank_id = rank_id
         self.server_id = server_id
+        self._misc_config = misc_config
         logging.info(
             f"AccessLogger created: async_mode={async_mode}, rank_id={rank_id}, server_id={server_id}"
         )
 
-    @staticmethod
-    def is_private_request(request: Dict[str, Any]):
+    def _get_disable_access_log(self) -> bool:
+        if self._misc_config is not None:
+            return self._misc_config.misc_config.disable_access_log
+        return False
+
+    def is_private_request(self, request: Dict[str, Any]):
         return request.get(
-            "private_request", PyMiscellaneousConfig.misc_config.disable_access_log
+            "private_request", self._get_disable_access_log()
         )
 
     def log_access(self, request: Dict[str, Any], response: ResponseLog) -> None:
