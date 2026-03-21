@@ -403,7 +403,7 @@ absl::Status NormalEngine::step() {
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         {
-            RTP_LLM_PROFILE_SCOPE("engine.normal.schedule_work");
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step_));
         }
         if (parallelism_config.dp_size > 1) {
@@ -418,7 +418,7 @@ absl::Status NormalEngine::step() {
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
     {
-        RTP_LLM_PROFILE_SCOPE("engine.normal.execute_work");
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams);
     }
 
