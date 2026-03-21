@@ -685,6 +685,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         if (engine_->isMTPEagle()) {
             if (propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
                 && !propose_maga_init_params_->mtp_model_params_->empty()) {
+                const size_t mtp_base_model_id = propose_maga_init_params_->mtp_model_params_->at(0)->model_id;
                 for (size_t mtp_model_id = 0; mtp_model_id < propose_maga_init_params_->mtp_model_params_->size();
                      mtp_model_id++) {
                     EngineInitParams* mtp_engine_init_params =
@@ -725,7 +726,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             load_context.block_ids_by_group[gid] != nullptr, "null mtp group_block: gid=%zu", gid);
                         const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
                         auto        block_num = block_ids.size();
-                        size_t      model_id  = mtp_engine_init_params->model_id;
+                        size_t      model_id  = mtp_base_model_id;
 
                         // Use per-module global_layer_ids for address lookup.
                         const int global_layer_id = mtp_cache_cfg.global_layer_ids[0][layer_id];
