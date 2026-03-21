@@ -7,11 +7,8 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-# All cache tests need DeviceFactory::initDevices() for device registration,
-# but NOT the full cuda_impl with all kernel/cutlass/flash-attention ops.
-# gpu_register provides just the device registration path, cutting link time dramatically.
 test_deps = [
-    "//rtp_llm/cpp/devices/cuda_impl:gpu_register",
+    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/cache",
@@ -25,7 +22,7 @@ test_deps = [
 
 block_cache_test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
-    "//rtp_llm/cpp/devices/cuda_impl:gpu_register",
+    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/cache",
