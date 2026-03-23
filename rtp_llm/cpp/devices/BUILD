@@ -22,7 +22,7 @@ cc_library(
     ], exclude = []),
     srcs = glob([
         "*.cc",
-    ], exclude = []),
+    ], exclude = ["DeviceFactory.cc"]),
     deps = [
         "//rtp_llm/cpp/core:allocator",
         "//rtp_llm/cpp/core:memory_tracker",
@@ -42,6 +42,17 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
         "@havenask//aios/autil:scope",
         "//rtp_llm/cpp/utils:signal_utils",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+    alwayslink = 1,
+)
+
+cc_library(
+    name = "device_factory",
+    srcs = ["DeviceFactory.cc"],
+    deps = [
+        ":devices_base",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),
@@ -75,6 +86,7 @@ cc_library(
     ]),
     deps = [
         ":devices_base",
+        ":device_factory",
         "//rtp_llm/cpp/core:buffer_torch",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:model_config",

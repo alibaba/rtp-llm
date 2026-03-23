@@ -679,11 +679,8 @@ void NormalBatchStreamProcessor::checkNanFlagAndSetFailed(const StreamGroups& st
             }
 
             if (batch_has_nan) {
-                static const std::string error_msg = "NaN detected in decode forward pass";
-                RTP_LLM_LOG_ERROR("decode stream [%ld] has nan, set stoped and return error %s",
-                                  stream->streamId(),
-                                  error_msg.c_str());
-                stream->setStop(ErrorCode::NAN_DETECTED, error_msg.c_str());
+                RTP_LLM_LOG_ERROR("decode stream [%ld] has nan, set stopped and return error", stream->streamId());
+                stream->setStop(ErrorCode::NAN_DETECTED, "NaN detected in decode forward pass");
             }
             batch_idx += 1;
         }
@@ -700,11 +697,8 @@ void NormalBatchStreamProcessor::checkNanFlagAndSetFailed(const StreamGroups& st
             }
 
             if (batch_has_nan) {
-                static const std::string error_msg = "NaN detected in context forward pass";
-                RTP_LLM_LOG_ERROR("context stream [%ld] has nan, set stoped and return error %s",
-                                  stream->streamId(),
-                                  error_msg.c_str());
-                stream->setStop(ErrorCode::NAN_DETECTED, error_msg.c_str());
+                RTP_LLM_LOG_ERROR("context stream [%ld] has nan, set stopped and return error", stream->streamId());
+                stream->setStop(ErrorCode::NAN_DETECTED, "NaN detected in context forward pass");
             }
             batch_idx += 1;
         }

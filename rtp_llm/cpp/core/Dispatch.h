@@ -150,10 +150,6 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
     ENABLE_FP8_CASE_NUMERIC(MACRO, __VA_ARGS__)                                                                        \
     DISPATCH_FOR_EACH_COMPUTE_TYPE(MACRO, __VA_ARGS__)
 
-#define DISPATCH_FOR_KV_CACHE_TYPE(MACRO, ...)                                                                         \
-    ENABLE_FP8_CASE_NUMERIC(MACRO, __VA_ARGS__)                                                                        \
-    DISPATCH_FOR_EACH_COMPUTE_TYPE(MACRO, __VA_ARGS__)
-
 #define DISPATCH_FOR_EACH_QUANT_TYPE(MACRO, T1, ...)                                                                   \
     MACRO(DataType::TYPE_INT8, T1, int8_t, __VA_ARGS__)                                                                \
     ENABLE_FP8_CASE_QUANT(MACRO, T1, __VA_ARGS__)                                                                      \
@@ -181,11 +177,6 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
 #define DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, function, ...)                                                     \
     do {                                                                                                               \
         switch (data_type) { DISPATCH_FOR_EACH_COMPUTE_TYPE(DP_FUNCTION_CALL_CASE, function, __VA_ARGS__) }            \
-    } while (0)
-
-#define DISPATCH_CUDA_FUNCTION_KV_CACHE_TYPE(data_type, function, ...)                                                 \
-    do {                                                                                                               \
-        switch (data_type) { DISPATCH_FOR_KV_CACHE_TYPE(DP_FUNCTION_CALL_CASE_DIRECT, function, __VA_ARGS__) }         \
     } while (0)
 
 #define DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, function, ...)                                                  \

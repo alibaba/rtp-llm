@@ -44,13 +44,19 @@ __global__ void checkNANKernel(T* input, size_t nums, size_t circle) {
     size_t             max_index = min(index + vec_size * circle, nums - vec_size);
     for (size_t i = index; i < max_index; i += vec_size) {
         inputs.load(input + i);
-        for (size_t j = 0; j < vec_size; ++j)
-            if (isnan(float(inputs[j]))) {
-                // Fail fast on NaN detection (device-side).
-                // This is intended for debugging / validation only.
-                __trap();
-                break;
+        for (size_t j = 0; j < vec_size; ++j) {
+            if (!isnan(float(inputs[j]))) {
+                continue;
             }
+            // Fail fast on NaN detection (device-side).
+            // This is intended for debugging / validation only.
+#if USING_CUDA
+            __trap();
+#elif USING_ROCM
+            __builtin_trap();
+#endif
+            break;
+        }
     }
 }
 
@@ -72,10 +78,13 @@ template void invokeCheckNAN(half* input, size_t nums, cudaStream_t stream);
 #ifdef ENABLE_BF16
 template void invokeCheckNAN(nv_bfloat16* input, size_t nums, cudaStream_t stream);
 #endif
-#ifdef ENABLE_FP8
+#if defined(ENABLE_FP8) || defined(USING_ROCM)
 template void invokeCheckNAN(__nv_fp8_e4m3* input, size_t nums, cudaStream_t stream);
 #endif
 
+// NanInfChecker: detect NaN/Inf in KV cache and reset to zero in-place.
+// Reset to zero prevents NaN propagation to other streams sharing the same batch.
+// The affected stream is already marked as failed via nan_flag and will be terminated.
 template<typename T>
 struct NanInfChecker;
 
@@ -128,7 +137,11 @@ struct NanInfChecker<__half> {
     // Check and reset a single scalar in-place.
     __device__ __forceinline__ static bool check_and_reset(__half* val_ptr) {
         __half val = *val_ptr;
+#if USING_CUDA
         if (__hisnan(val) || __hisinf(val)) {
+#else
+        if (isnan(__half2float(val)) || isinf(__half2float(val))) {
+#endif
             *val_ptr = __half(0.0f);
             return true;
         }
@@ -166,7 +179,7 @@ struct NanInfChecker<__nv_bfloat16> {
 };
 #endif
 
-#ifdef ENABLE_FP8
+#if defined(ENABLE_FP8) || defined(USING_ROCM)
 // FP8 E4M3: 1 sign bit, 4 exponent bits (bits 6:3), 3 mantissa bits (bits 2:0).
 // Per NVIDIA: "NaNs are limited to 0x7F and 0xFF" — i.e. (raw & 0x7F) == 0x7F.
 template<>
@@ -288,7 +301,11 @@ __global__ void check_and_reset_kv_cache_prefill_kernel(const void* const* __res
             physical_block_id         = batch_blocks[logical_block_idx];
             shared_block_ids[warp_id] = physical_block_id;
         }
+#if USING_CUDA
         __syncwarp();
+#elif USING_ROCM
+        __syncthreads();
+#endif
         physical_block_id = shared_block_ids[warp_id];
 
         if (physical_block_id < 0)
@@ -318,6 +335,17 @@ __global__ void check_and_reset_kv_cache_prefill_kernel(const void* const* __res
                         thread_has_nan = true;
                     }
                 }
+
+                const size_t k_remainder = k_token_bytes & 15;
+                if (k_remainder) {
+                    T*           remainder_ptr   = reinterpret_cast<T*>(k_data + (k_vec_count << 4));
+                    const size_t remainder_elems = k_remainder / sizeof(T);
+                    for (size_t i = 0; i < remainder_elems; i++) {
+                        if (NanInfChecker<T>::check_and_reset(&remainder_ptr[i])) {
+                            thread_has_nan = true;
+                        }
+                    }
+                }
             }
 
             char* v_base = block_base + k_block_size_bytes;
@@ -333,11 +361,26 @@ __global__ void check_and_reset_kv_cache_prefill_kernel(const void* const* __res
                         thread_has_nan = true;
                     }
                 }
+
+                const size_t v_remainder = v_token_bytes & 15;
+                if (v_remainder) {
+                    T*           remainder_ptr   = reinterpret_cast<T*>(v_data + (v_vec_count << 4));
+                    const size_t remainder_elems = v_remainder / sizeof(T);
+                    for (size_t i = 0; i < remainder_elems; i++) {
+                        if (NanInfChecker<T>::check_and_reset(&remainder_ptr[i])) {
+                            thread_has_nan = true;
+                        }
+                    }
+                }
             }
         }
 
         // Use warp-level reduction instead of atomic operations
+#if USING_CUDA
         bool warp_has_nan = __any_sync(0xFFFFFFFF, thread_has_nan);
+#elif USING_ROCM
+        bool warp_has_nan = (__ballot(thread_has_nan) != 0);
+#endif
         if (lane_id == 0 && warp_has_nan) {
             shared_nan_flags[warp_id] = 1;
         }
@@ -498,9 +541,13 @@ __global__ void check_and_reset_kv_cache_decode_kernel(const void* const* __rest
     }
 
     // Each warp independently writes nan_flag — benign race (all write same value 1.0f, 4-byte aligned).
+#if USING_CUDA
     bool warp_has_nan = __any_sync(0xFFFFFFFF, thread_has_nan);
-    if (threadIdx.x == 0 && warp_has_nan) {
-        nan_flag[batch_id] = 1;
+#elif USING_ROCM
+    bool warp_has_nan = (__ballot(thread_has_nan) != 0);
+#endif
+    if (lane_id == 0 && warp_has_nan) {
+        nan_flag[batch_id] = 1.0f;
     }
 }
 
@@ -682,13 +729,23 @@ void invokeCheckAndResetNANKvCacheDecode(const void* const* layer_base_addr,
 
 INVOKE_CHECK_AND_RESET_NAN_KV_CACHE_PREFILL(float)
 INVOKE_CHECK_AND_RESET_NAN_KV_CACHE_DECODE(float)
+#if USING_ROCM
+// ROCm: use __half/__nv_bfloat16 to match NanInfChecker specializations (half/nv_bfloat16 may differ).
+INVOKE_CHECK_AND_RESET_NAN_KV_CACHE_PREFILL(__half)
+INVOKE_CHECK_AND_RESET_NAN_KV_CACHE_DECODE(__half)
+#ifdef ENABLE_BF16
+INVOKE_CHECK_AND_RESET_NAN_KV_CACHE_PREFILL(__nv_bfloat16)
+INVOKE_CHECK_AND_RESET_NAN_KV_CACHE_DECODE(__nv_bfloat16)
+#endif
+#else
 INVOKE_CHECK_AND_RESET_NAN_KV_CACHE_PREFILL(half)
 INVOKE_CHECK_AND_RESET_NAN_KV_CACHE_DECODE(half)
 #ifdef ENABLE_BF16
 INVOKE_CHECK_AND_RESET_NAN_KV_CACHE_PREFILL(nv_bfloat16)
 INVOKE_CHECK_AND_RESET_NAN_KV_CACHE_DECODE(nv_bfloat16)
 #endif
-#ifdef ENABLE_FP8
+#endif
+#if defined(ENABLE_FP8) || defined(USING_ROCM)
 INVOKE_CHECK_AND_RESET_NAN_KV_CACHE_PREFILL(__nv_fp8_e4m3)
 INVOKE_CHECK_AND_RESET_NAN_KV_CACHE_DECODE(__nv_fp8_e4m3)
 #endif

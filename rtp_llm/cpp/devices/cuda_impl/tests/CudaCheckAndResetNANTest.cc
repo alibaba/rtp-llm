@@ -1278,8 +1278,8 @@ TEST_F(CudaCheckAndResetNANTest, TestFP8_KVCachePrefill_RemainderTailDetection) 
     ASSERT_EQ(cudaMalloc(&d_prefix_lengths, batch_size * sizeof(float)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_input_lengths, batch_size * sizeof(float)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_nan_flag, batch_size * sizeof(float)), cudaSuccess);
-    cudaMemcpy(d_prefix_lengths, prefix_lengths.data(), batch_size * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_input_lengths, input_lengths.data(), batch_size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_prefix_lengths, prefix_lengths.data(), batch_size * sizeof(int32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_input_lengths, input_lengths.data(), batch_size * sizeof(int32_t), cudaMemcpyHostToDevice);
     cudaMemset(d_nan_flag, 0, batch_size * sizeof(float));
 
     // Inject NaN at K token tail byte (remainder region): token 0, last byte of 127-byte token.
@@ -1313,7 +1313,7 @@ TEST_F(CudaCheckAndResetNANTest, TestFP8_KVCachePrefill_RemainderTailDetection) 
     cudaStreamSynchronize(stream_);
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
 
-    float h_nan_flag = 0.0f;
+    float h_nan_flag = 0;
     cudaMemcpy(&h_nan_flag, d_nan_flag, sizeof(int32_t), cudaMemcpyDeviceToHost);
     EXPECT_EQ(h_nan_flag, 1) << "NaN in FP8 remainder byte should be detected in prefill";
 
@@ -1923,7 +1923,7 @@ TEST_F(CudaCheckAndResetNANTest, TestFloat_KVCacheDecode_MultiWarpNanDetection) 
     // Sequence lengths
     int32_t* d_seq_lens = nullptr;
     ASSERT_EQ(cudaMalloc(&d_seq_lens, batch_size * sizeof(float)), cudaSuccess);
-    cudaMemcpy(d_seq_lens, sequence_lengths.data(), batch_size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_seq_lens, sequence_lengths.data(), batch_size * sizeof(int32_t), cudaMemcpyHostToDevice);
 
     // nan_flag
     float* d_nan_flag = nullptr;
@@ -1999,8 +1999,8 @@ TEST_F(CudaCheckAndResetNANTest, TestFloat_KVCacheDecode_MultiWarpNanDetection) 
     ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "Kernel launch failed";
 
     // Read back nan_flag
-    std::vector<float> h_nan_flag(batch_size);
-    cudaMemcpy(h_nan_flag.data(), d_nan_flag, batch_size * sizeof(float), cudaMemcpyDeviceToHost);
+    std::vector<int32_t> h_nan_flag(batch_size);
+    cudaMemcpy(h_nan_flag.data(), d_nan_flag, batch_size * sizeof(int32_t), cudaMemcpyDeviceToHost);
 
     // Both batches should have NaN detected — NaN was placed in warp 1's heads only.
     // If the bug exists (threadIdx.x == 0), these will be 0 (FAIL).

@@ -271,8 +271,6 @@ protected:
 
     void holdInputsHostBuffers(const GptModelInputs& inputs);
 
-    void checkAndResetKVCacheNAN(const rtp_llm::GptModelInputs& inputs, rtp_llm::BufferPtr& nan_flag);
-
 protected:
     rtp_llm::DeviceBase*                     device_;
     const rtp_llm::DeviceProperties          device_props_;

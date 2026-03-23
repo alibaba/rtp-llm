@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
+#include "rtp_llm/cpp/models/NanCheckRunner.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
@@ -221,7 +222,22 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(BufferPtr             hidd
     // Unified check for all KV cache types (MHA, MLA, Linear Attention)
     // Only checks newly allocated/written blocks
     if (inputs.kv_cache_block_id) {
-        checkAndResetKVCacheNAN(inputs, nan_flag);
+        NanCheckStaging nan_check_staging;
+        bool            did_run_nan_check = KvCacheNanCheckRunner::run(device_,
+                                                            description_.attention_conf,
+                                                            cache_dtype_,
+                                                            cache_element_size_,
+                                                            layer_num_,
+                                                            layer_base_addr_buffer_,
+                                                            inputs,
+                                                            nan_flag,
+                                                            nan_check_staging);
+        for (const auto& buffer : nan_check_staging.buffers) {
+            buffer_holder_.hold(buffer);
+        }
+        if (did_run_nan_check && device_props_.tp_size > 1) {
+            nan_flag = device_->allReduce({nan_flag, ReduceOp::Sum, false, ParallelMode::TP}).buffer;
+        }
     }
 
     size_t num_input_tokens = num_valid_tokens != -1 ? num_valid_tokens : inputs.combo_tokens->shape()[0];
