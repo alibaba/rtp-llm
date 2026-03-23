@@ -95,6 +95,7 @@ message GenerateConfigPB {
     bool enable_memory_cache = 51;
     bool enable_device_cache = 52;
     bool enable_remote_cache = 53;
+    string unique_key = 54;
 }
 
 message MMPreprocessConfigPB {
@@ -204,6 +205,22 @@ enum ErrorCodePB {
     CACHE_STORE_LOAD_RDMA_CONNECT_FAILED = 7;
     CACHE_STORE_LOAD_RDMA_WRITE_FAILED = 8;
     CACHE_STORE_LOAD_BUFFER_TIMEOUT = 9;
+    P2P_CONNECTOR_CALL_PREFILL_FAILED = 10;
+    P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED = 11;
+    P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED = 12;
+    P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED = 13;
+    P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED = 14;
+    P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED = 15;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT = 16;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED = 17;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED = 18;
+    P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED = 19;
+    P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH = 20;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT = 21;
+    P2P_CONNECTOR_WORKER_READ_FAILED = 22;
+    P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
+    P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
+    P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
 }
 
 // transfer between prefill and decode
@@ -425,11 +442,68 @@ message MemoryOperationResponsePB {
     bool success = 1;
 }
 
-message FunctionRequestPB {
-    oneof request {
-        MemoryOperationRequestPB mem_request = 1;
-        RemoteOperationRequestPB remote_request = 2;
-    }
+message TPWorkerInfoPB {
+    string ip = 1;
+    int32 cache_store_port = 2;
+}
+
+message LayerCacheBlockPB {
+    uint32 layer_id = 1;
+    repeated int64 cache_keys = 2;
+    repeated uint32 block_ids = 3;
+}
+
+enum P2PConnectorBroadcastType {
+    READ = 0;
+    HANDLE_READ = 1;
+    CANCEL_READ = 2;
+    CANCEL_HANDLE_READ = 3;
+}
+
+message P2PConnectorBroadcastTpRequestPB {
+    repeated LayerCacheBlockPB layer_blocks = 1;
+    repeated TPWorkerInfoPB peer_workers = 2;
+    string unique_key = 3;
+    int64 request_id = 4;
+    int64 deadline_ms = 5;
+    P2PConnectorBroadcastType type = 6;
+    // TP size of the remote side (prefill_tp_size for decode, decode_tp_size for prefill)
+    int32 remote_tp_size = 8;
+}
+
+// GetPeerInfo: Decode calls this on Prefill to exchange TP size before recv registration
+message GetPeerInfoRequestPB {
+    string requester_ip = 1;
+    int32  requester_tp_size = 2;
+}
+
+message GetPeerInfoResponsePB {
+    int32  tp_size = 1;
+}
+
+message P2PConnectorBroadcastTpResponsePB {
+    ErrorCodePB error_code = 1;
+    string error_message = 2;
+}
+
+message P2PConnectorStartLoadRequestPB {
+    string unique_key = 1;
+    repeated TPWorkerInfoPB workers = 2;
+    int64 deadline_ms = 3;
+}
+
+message P2PConnectorStartLoadResponsePB {
+    int64 first_generate_token_id = 1;
+    int32 total_reuse_len = 2;
+    int32 local_reuse_len = 3;
+    int32 remote_reuse_len = 4;
+    repeated int32 propose_token_ids = 5;
+    TensorPB propose_probs = 6;
+    TensorPB propose_hidden = 7;
+    repeated int32 position_ids = 8;
+    ErrorCodePB error_code = 9;
+    string error_message = 10;
+    int32 memory_reuse_len = 11;
 }
 
 enum RemoteOpType {
@@ -443,6 +517,14 @@ message RemoteBlockMaskPB {
     oneof info {
         int32 offset = 1;
         RemoteBoolMasksTypePB bool_masks = 2;
+    }
+}
+
+message FunctionRequestPB {
+    oneof request {
+        MemoryOperationRequestPB mem_request = 1;
+        RemoteOperationRequestPB remote_request = 2;
+        P2PConnectorBroadcastTpRequestPB p2p_request = 3;
     }
 }
 
@@ -463,6 +545,7 @@ message FunctionResponsePB {
     oneof response {
         MemoryOperationResponsePB mem_response = 1;
         RemoteOperationResponsePB remote_response = 2;
+        P2PConnectorBroadcastTpResponsePB p2p_response = 3;
     }
 }
 
@@ -488,6 +571,8 @@ service RpcService {
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
+    rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
+    rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
 }
 
 service MultimodalRpcService {

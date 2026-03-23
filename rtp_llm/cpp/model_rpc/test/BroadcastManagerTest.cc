@@ -431,6 +431,78 @@ TEST_F(BroadcastManagerTest, Broadcast_WaitsAllRequests_WhenAnyRpcStatusFailed) 
     ASSERT_NE(ctx1, nullptr);
     EXPECT_EQ(ctx0->status.error_code(), grpc::StatusCode::INTERNAL);
     EXPECT_EQ(ctx1->status.error_code(), grpc::StatusCode::OK);
+}
+
+TEST_F(BroadcastManagerTest, Broadcast_WaitDone_WithOverallTimeout_CanBeResumed) {
+    std::vector<std::unique_ptr<TestRpcServer>> servers;
+    std::vector<std::string>                    server_addrs;
+    for (int i = 0; i < 2; ++i) {
+        auto service = std::make_unique<TestRpcService>();
+        service->setSleepMillis(200);
+        auto server = std::make_unique<TestRpcServer>(std::move(service));
+        ASSERT_TRUE(server->start());
+        server_addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
+        servers.push_back(std::move(server));
+    }
+
+    auto manager = std::make_unique<BroadcastManager>(server_addrs);
+    ASSERT_TRUE(manager->init());
+
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
+    auto result = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/2000, rpc_call);
+    ASSERT_NE(result, nullptr);
+
+    EXPECT_FALSE(result->waitDone(/*timeout_ms=*/10));
+    EXPECT_FALSE(result->done());
+
+    EXPECT_TRUE(result->waitDone(/*timeout_ms=*/0));
+    EXPECT_TRUE(result->done());
+    EXPECT_TRUE(result->success());
+}
+
+TEST_F(BroadcastManagerTest, Broadcast_WaitDone_FailureStatePersistsAcrossTimeoutResume) {
+    std::vector<std::string> server_addrs;
+
+    // server0: fails immediately
+    auto service0 = std::make_unique<TestRpcService>();
+    service0->setRpcResponseStatus(::grpc::Status(grpc::StatusCode::INTERNAL, "internal error"));
+    auto server0 = std::make_unique<TestRpcServer>(std::move(service0));
+    ASSERT_TRUE(server0->start());
+    server_addrs.push_back("127.0.0.1:" + std::to_string(server0->listenPort()));
+
+    // server1: slow success, so the first short waitDone should timeout
+    auto service1 = std::make_unique<TestRpcService>();
+    service1->setSleepMillis(300);
+    auto server1 = std::make_unique<TestRpcServer>(std::move(service1));
+    ASSERT_TRUE(server1->start());
+    server_addrs.push_back("127.0.0.1:" + std::to_string(server1->listenPort()));
+
+    auto manager = std::make_unique<BroadcastManager>(server_addrs);
+    ASSERT_TRUE(manager->init());
+
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
+    auto result = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/2000, rpc_call);
+    ASSERT_NE(result, nullptr);
+
+    EXPECT_FALSE(result->waitDone(/*timeout_ms=*/10));
+    EXPECT_FALSE(result->done());
+    EXPECT_FALSE(result->success());
+
+    EXPECT_TRUE(result->waitDone(/*timeout_ms=*/0));
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+
+    const auto& ctx0 = result->worker_contexts_.at(0);
+    ASSERT_NE(ctx0, nullptr);
+    EXPECT_EQ(ctx0->status.error_code(), grpc::StatusCode::INTERNAL);
 
     server1->shutdown();
     server0->shutdown();
