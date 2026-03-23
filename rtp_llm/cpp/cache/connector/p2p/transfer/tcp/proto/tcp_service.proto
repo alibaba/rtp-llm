@@ -1,0 +1,50 @@
+syntax = "proto2";
+
+import "arpc/proto/rpc_extensions.proto";
+option cc_generic_services = true;
+
+package tcp_transfer;
+
+enum TcpTransferErrorCodePB {
+    TCP_TRANSFER_NONE_ERROR       = 0;
+    TCP_TRANSFER_UNKNOWN_ERROR    = 1;
+    TCP_TRANSFER_BUFFER_MISMATCH  = 2;
+    // Context waited too long for a matching recv task (deadline exceeded on receiver side)
+    TCP_TRANSFER_CONTEXT_TIMEOUT  = 3;
+    // Matching recv task was already cancelled before the transfer RPC arrived
+    TCP_TRANSFER_TASK_CANCELLED   = 4;
+}
+
+// TCP mode: block content embedded inline
+message TcpBlockBufferInfo {
+    optional uint32 len     = 1;
+    optional bytes  content = 2;
+}
+
+message TcpCacheKeyBlockBufferInfo {
+    optional int64 key = 1;
+    repeated TcpBlockBufferInfo blocks = 2;
+}
+
+// One transfer per layer per partition
+// unique_key = base_key + "_" + layer_id + "_" + remote_partition_id
+message TcpLayerBlockTransferRequest {
+    repeated TcpCacheKeyBlockBufferInfo blocks     = 1;
+    optional string                     unique_key = 2;
+    optional int64                      deadline_ms = 3;
+}
+
+message TcpLayerBlockTransferResponse {
+    optional TcpTransferErrorCodePB error_code    = 1;
+    optional string                 error_message = 2;
+}
+
+// Routing IDs must be unique per arpc server. An older shared transfer proto used 10009/10010;
+// RDMA barex uses 10011/10012 (rdma_service.proto). TCP uses 10013/10014.
+service TcpTransferService {
+    option (arpc.global_service_id) = 10013;
+
+    rpc transfer(TcpLayerBlockTransferRequest) returns (TcpLayerBlockTransferResponse) {
+        option (arpc.local_method_id) = 10014;
+    }
+}
