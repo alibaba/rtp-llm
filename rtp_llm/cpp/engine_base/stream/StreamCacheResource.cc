@@ -182,10 +182,6 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         return absl::InternalError("fake inited not allow to incr block");
     }
 
-    if (batch_kv_cache_resource_->curBlocksNum() > 0) {
-        return absl::OkStatus();
-    }
-
     MallocInfo malloc_info;
     malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
@@ -361,12 +357,14 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
     const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * seqSizePerBlock();
     const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * seqSizePerBlock();
     const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * seqSizePerBlock();
-    stream_->setInitialReuseLength(total_reuse_len);
-    stream_->setReuseLength(total_reuse_len);
-    stream_->setLocalReuseLength(device_reuse_len + memory_reuse_len);
-    stream_->setMtpTokenIndex(total_reuse_len);
-    stream_->setMemoryReuseLength(memory_reuse_len);
-    stream_->setRemoteReuseLength(remote_reuse_len);
+    if (total_reuse_len > 0) {
+        stream_->setInitialReuseLength(total_reuse_len);
+        stream_->setReuseLength(total_reuse_len);
+        stream_->setLocalReuseLength(device_reuse_len + memory_reuse_len);
+        stream_->setMtpTokenIndex(total_reuse_len);
+        stream_->setMemoryReuseLength(memory_reuse_len);
+        stream_->setRemoteReuseLength(remote_reuse_len);
+    }
 }
 
 std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(

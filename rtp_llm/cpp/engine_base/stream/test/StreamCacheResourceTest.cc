@@ -479,4 +479,108 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TieredMemoryCache_EvictsDe
     EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
 }
 
+TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseLength) {
+    // Simulates PD separation: initKVBlock called twice on the same stream.
+    // First call sets reuse length via loadCacheSync; second call should NOT overwrite it with 0.
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_,
+                                                                             device_);
+    cache_manager_->coordinator_ = mock_coord;
+
+    // First call: loadCacheSync returns reuse blocks (memory=1, device=2)
+    auto match_child1 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*match_child1, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_child1, success()).WillByDefault(testing::Return(true));
+    auto fused_match1 = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child1});
+
+    auto kv_resource1 = std::make_shared<KVCacheResource>();
+    kv_resource1->setDeviceReuseBlockNum(2);
+    kv_resource1->setMemoryReuseBlockNum(1);
+
+    std::shared_ptr<Meta> meta1;
+    auto                  load_ctx1 = std::make_shared<FusedAsyncReadContext>(fused_match1, kv_resource1, meta1);
+    load_ctx1->setFusedReadContext(nullptr);
+
+    // Second call: loadCacheSync returns 0 reuse blocks (cache already consumed)
+    auto match_child2 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*match_child2, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_child2, success()).WillByDefault(testing::Return(true));
+    auto fused_match2 = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child2});
+
+    auto kv_resource2 = std::make_shared<KVCacheResource>();
+    // All reuse block nums default to 0
+
+    std::shared_ptr<Meta> meta2;
+    auto                  load_ctx2 = std::make_shared<FusedAsyncReadContext>(fused_match2, kv_resource2, meta2);
+    load_ctx2->setFusedReadContext(nullptr);
+
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(load_ctx1)))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(load_ctx2)));
+
+    // First initKVBlock: allocates blocks and loads cache with reuse
+    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_GT(resource.curBlocksNum(), 0);
+
+    const int expected_total_reuse_len  = (2 + 1) * resource.seqSizePerBlock();
+    const int expected_memory_reuse_len = 1 * resource.seqSizePerBlock();
+    EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
+    EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
+
+    // Second initKVBlock: curBlocksNum() > 0, goes through incrMalloc path.
+    // loadCacheSync returns 0 reuse — must NOT overwrite the values from the first call.
+    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+
+    EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
+    EXPECT_EQ(stream_->initialReuseLength(), expected_total_reuse_len);
+    EXPECT_EQ(stream_->localReuseLength(), expected_total_reuse_len);
+    EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
+}
+
+TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwriteExisting) {
+    // Directly tests that waitLoadCacheDone with total_reuse_len == 0 preserves existing values.
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    // Pre-set reuse lengths on the stream (simulating a prior successful loadCacheSync)
+    stream_->setReuseLength(100);
+    stream_->setInitialReuseLength(100);
+    stream_->setLocalReuseLength(80);
+    stream_->setMemoryReuseLength(40);
+    stream_->setRemoteReuseLength(20);
+    stream_->setMtpTokenIndex(100);
+
+    // Build a FusedAsyncReadContext with 0 reuse blocks
+    auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*match_child, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_child, success()).WillByDefault(testing::Return(true));
+    auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
+
+    auto                  kv_resource = std::make_shared<KVCacheResource>();
+    std::shared_ptr<Meta> meta;
+    auto                  load_ctx = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
+    load_ctx->setFusedReadContext(nullptr);
+
+    // Call waitLoadCacheDone directly
+    resource.waitLoadCacheDone(load_ctx);
+
+    // All values should be preserved — not overwritten with 0
+    EXPECT_EQ(stream_->reuseLength(), 100);
+    EXPECT_EQ(stream_->initialReuseLength(), 100);
+    EXPECT_EQ(stream_->localReuseLength(), 80);
+    EXPECT_EQ(stream_->memoryReuseLength(), 40);
+    EXPECT_EQ(stream_->remoteReuseLength(), 20);
+    EXPECT_EQ(stream_->getMtpTokenIndex(), 100);
+}
+
 }  // namespace rtp_llm
