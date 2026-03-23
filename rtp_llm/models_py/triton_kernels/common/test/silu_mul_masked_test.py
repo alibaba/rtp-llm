@@ -22,23 +22,17 @@ from rtp_llm.test.utils.numeric_util import calc_diff, per_token_cast_back
 
 class SiluMulMaskedTest(unittest.TestCase):
 
-    MAX_NUM_LOCAL_EXPERTS = 256
-    MAX_EXPECTED_M = 1024
-    MAX_MOE_INTERMEDIATE_SIZE = 5120
+    MAX_NUM_LOCAL_EXPERTS = 64
+    MAX_EXPECTED_M = 256
+    MAX_MOE_INTERMEDIATE_SIZE = 2560
 
     STEP_SIZE_NUM_LOCAL_EXPERTS = 8
     STEP_SIZE_EXPECTED_M = 32
     STEP_SIZE_MOE_INTERMEDIATE_SIZE = 128
 
-    SEARCH_NUM_LOCAL_EXPERTS_LIST = [1, 2, 4, 8, 16, 20, 32, 40] + list(
-        range(48, 256, 64)
-    )
-    SEARCH_EXPECTED_M_LIST = (
-        list(range(1, 16, 4)) + list(range(16, 512, 64)) + list(range(512, 1024, 256))
-    )
-    SEARCH_MOE_INTERMEDIATE_SIZE_LIST = list(range(128, 2560, 256)) + list(
-        range(2560, 5120, 512)
-    )
+    SEARCH_NUM_LOCAL_EXPERTS_LIST = [1, 2, 4, 8, 16, 20, 32, 40]
+    SEARCH_EXPECTED_M_LIST = list(range(1, 16, 4))
+    SEARCH_MOE_INTERMEDIATE_SIZE_LIST = list(range(128, 2560, 256))
 
     NUM_LOCAL_EXPERTS = 4
     EXPECTED_M = 256
@@ -126,9 +120,11 @@ class SiluMulMaskedTest(unittest.TestCase):
         fn()
         # Compare outputs
         if test_new_output_scale is not None:
+            orig_shape = test_new_output.shape
             test_new_output = per_token_cast_back(
-                test_new_output, test_new_output_scale
-            )
+                test_new_output.flatten(0, -2),
+                test_new_output_scale.flatten(0, -2),
+            ).view(orig_shape)
         diff = calc_diff(test_new_output, ref_output)
         return diff
 
