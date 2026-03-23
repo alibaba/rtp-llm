@@ -6,9 +6,7 @@ from unittest import SkipTest, TestCase, main
 
 import torch
 import torch.nn.functional as F
-
-import rtp_llm.ops  # isort:skip
-from rtp_llm.ops.compute_ops import cutlass_moe_mm  # isort:skip
+from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
 
 
 def to_fp8(tensor: torch.Tensor):
@@ -191,7 +189,8 @@ class Fp8GroupedGemmOpTest(TestCase):
             device=self.device,
             dtype=torch.int64,
         )
-        cutlass_moe_mm(
+        swap_ab = expert_offsets[num_expert].item() <= 64 * num_expert
+        fp8_grouped_gemm_ptpc(
             out_tensors_stacked,
             a_tensors_stacked,
             b_tensors_stacked,
@@ -204,6 +203,8 @@ class Fp8GroupedGemmOpTest(TestCase):
             c_strides,
             per_act_token,
             per_out_ch,
+            swap_ab=swap_ab,
+            profile=True,
         )
 
         # Validate each group's result against the baseline

@@ -14,8 +14,9 @@ from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.models_py.utils.math import align
 
 if is_cuda():
+    from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
+
     from rtp_llm.ops.compute_ops import (
-        cutlass_moe_mm,
         per_tensor_quant_fp8,
         per_token_group_quant_fp8,
         per_token_group_quant_fp8_v2,
@@ -210,7 +211,7 @@ def cutlass_moe_mm_fp8_scaled(
     per_out_ch,
     elements_m,
     swap_ab,
-):
+) -> None:
 
     assert per_act_token == True
     assert per_out_ch == False
@@ -232,7 +233,7 @@ def cutlass_moe_mm_fp8_scaled(
             logging.warning(
                 "Using mismatched gemm config swap_ab, potentially causing cutlass groupgemm performance loss."
             )
-        return cutlass_moe_mm(
+        fp8_grouped_gemm_ptpc(
             output,
             aq,
             w,
@@ -245,17 +246,20 @@ def cutlass_moe_mm_fp8_scaled(
             c_strides,
             per_act_token,
             per_out_ch,
-            True,  # profile
             tile_m,
             tile_n,
             tile_k,
             cluster_m,
             cluster_n,
             cluster_k,
-            swap_ab,
+            stage_count=0,
+            mainloop_sched=0,
+            epilogue_sched=0,
+            swap_ab=swap_ab,
+            profile=True,
         )
     else:
-        return cutlass_moe_mm(
+        fp8_grouped_gemm_ptpc(
             output,
             aq,
             w,
@@ -268,14 +272,17 @@ def cutlass_moe_mm_fp8_scaled(
             c_strides,
             per_act_token,
             per_out_ch,
-            False,
-            128,
-            128,
-            128,
-            1,
-            1,
-            1,
-            swap_ab,
+            tile_m=128,
+            tile_n=128,
+            tile_k=128,
+            cluster_m=1,
+            cluster_n=1,
+            cluster_k=1,
+            stage_count=0,
+            mainloop_sched=0,
+            epilogue_sched=0,
+            swap_ab=swap_ab,
+            profile=True,
         )
 
 
