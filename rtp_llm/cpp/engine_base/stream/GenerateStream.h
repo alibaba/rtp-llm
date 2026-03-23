@@ -1,7 +1,6 @@
 #pragma once
 
 #include "absl/status/statusor.h"
-#include "autil/AtomicCounter.h"
 #include "autil/TimeUtility.h"
 #include "autil/SynchronizedQueue.h"
 #include "kmonitor/client/MetricsReporter.h"
