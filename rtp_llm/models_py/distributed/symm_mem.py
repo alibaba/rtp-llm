@@ -113,6 +113,14 @@ class TorchSymmMemCommunicator:
             self.buffer = None
             self.disabled = True
             return
+        if not hasattr(torch.ops.symm_mem, "multimem_all_gather_out"):
+            logging.warning(
+                "TorchSymmMemCommunicator: torch.ops.symm_mem.multimem_all_gather_out "
+                "is not available in this PyTorch build, disabling symm_mem communicator."
+            )
+            self.buffer = None
+            self.disabled = True
+            return
         self.disabled = False
 
     def should_torch_symm_mem_allreduce(self, inp: torch.Tensor):
