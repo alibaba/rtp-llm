@@ -22,12 +22,15 @@ class FlashInferPrefillImpl(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = FlashInferPrefillOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(
+            attn_configs, max_seq_len
+        )
         self.attn_configs = attn_configs
 
         # Store input info
@@ -77,13 +80,14 @@ class FlashInferDecodeImpl(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         self.seq_size_per_block = attn_configs.tokens_per_block
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         # Create implementations
         self.fmha_impl = FlashInferDecodeOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs, max_seq_len)
         self.attn_configs = attn_configs
 
         # Store input info

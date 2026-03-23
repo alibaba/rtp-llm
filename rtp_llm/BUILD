@@ -196,7 +196,15 @@ py_library(
     deps = [
         ":torch",
         ":utils",
-    ],
+    ] + select({
+        "@//:using_cuda12_9_x86": rtp_kernel,
+        "@//:using_cuda12_arm": rtp_kernel,
+        "//conditions:default": []
+    }) + select({
+        "@//:using_cuda12_9_x86": flashattn,
+        "@//:using_cuda12_arm": flashattn,
+        "//conditions:default": []
+    }),
 )
 
 py_library(

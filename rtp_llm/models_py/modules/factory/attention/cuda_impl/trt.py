@@ -4,8 +4,8 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.utils.arch import get_sm
 from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
-
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQKVOut,
     FusedRopeKVCachePrefillOpQOut,
@@ -24,12 +24,15 @@ class TRTMHAImpl(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = TRTAttnOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(
+            attn_configs, max_seq_len
+        )
 
         # Store input info
         self.attn_inputs = attn_inputs
@@ -126,12 +129,15 @@ class TRTPagedMHAImpl(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = TRTPagedAttnOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(
+            attn_configs, max_seq_len
+        )
 
         # Store input info
         self.attn_inputs = attn_inputs
@@ -141,6 +147,8 @@ class TRTPagedMHAImpl(FMHAImplBase):
         # Create params
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        if get_sm() == (9, 0) and self.rope_params.kv_cache_offset is not None:
+            self.rope_params.kv_cache_offset_h = self.rope_params.kv_cache_offset.cpu()
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     @classmethod
