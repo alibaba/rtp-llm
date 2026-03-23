@@ -170,6 +170,17 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs.defined()) {
         RTP_LLM_CHECK(update_info.softmax_probs.dim() == 2);
         RTP_LLM_CHECK(update_info.softmax_probs.size(1) == update_info.num_new_tokens);
+        if (update_info.src_batch_indices.defined() && softmax_probs_.defined()) {
+            const int history_len = seqLength() - update_info.num_new_tokens - inputLength();
+            if (history_len > 0) {
+                const int   new_batch_size = update_info.src_batch_indices.size(0);
+                auto        tmp            = softmax_probs_.clone();
+                const auto* src_indices    = update_info.src_batch_indices.data_ptr<int32_t>();
+                for (int i = 0; i < new_batch_size; ++i) {
+                    softmax_probs_[i].copy_(tmp[src_indices[i]]);
+                }
+            }
+        }
         setSoftmaxProbs(update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
     }
 

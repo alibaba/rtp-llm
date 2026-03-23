@@ -113,12 +113,28 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     // construct update info
     torch::Tensor batch_hidden_states;
     if (stream->generateConfig()->return_hidden_states) {
-        batch_hidden_states = model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size);
+        auto raw_hidden_states = model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size);
+        if (has_beam_search && src_batch_indices.defined()) {
+            batch_hidden_states = torch::empty_like(raw_hidden_states.narrow(0, 0, next_batch_size));
+            for (int i = 0; i < next_batch_size; ++i) {
+                batch_hidden_states[i].copy_(raw_hidden_states[get_src_idx(i)]);
+            }
+        } else {
+            batch_hidden_states = raw_hidden_states;
+        }
     }
 
     torch::Tensor batch_logits;
     if (stream->returnLogits() || stream->calculateSoftmaxProbs() || has_beam_search) {
-        batch_logits = model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
+        auto raw_logits = model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
+        if (has_beam_search && src_batch_indices.defined()) {
+            batch_logits = torch::empty_like(raw_logits.narrow(0, 0, next_batch_size));
+            for (int i = 0; i < next_batch_size; ++i) {
+                batch_logits[i].copy_(raw_logits[get_src_idx(i)]);
+            }
+        } else {
+            batch_logits = raw_logits;
+        }
     }
 
     torch::Tensor all_probs;
@@ -165,7 +181,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         auto batch_softmax_tensor = batch_softmax_input.cpu();
         current_softmax_result    = torch::empty({(int64_t)next_batch_size, 1}, torch::kFloat32);
         for (int i = 0; i < next_batch_size; ++i) {
-            current_softmax_result[i][0] = batch_softmax_tensor[get_src_idx(i)][new_tokens.data_ptr<int32_t>()[i]];
+            current_softmax_result[i][0] = batch_softmax_tensor[i][new_tokens.data_ptr<int32_t>()[i]];
         }
     }
 
