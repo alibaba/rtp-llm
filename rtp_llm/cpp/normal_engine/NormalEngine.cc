@@ -327,9 +327,11 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 }
 
 absl::Status NormalEngine::startLoop() {
-    RTP_LLM_LOG_INFO("start init system prompt");
-    THROW_IF_STATUS_ERROR(initSystemPrompt());
-    RTP_LLM_LOG_INFO("init system prompt done");
+    if (device_->getDeviceProperties().tp_rank == 0) {
+        RTP_LLM_LOG_INFO("start init system prompt");
+        THROW_IF_STATUS_ERROR(initSystemPrompt());
+        RTP_LLM_LOG_INFO("init system prompt done");
+    }
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_     = true;
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
