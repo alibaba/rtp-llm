@@ -1,11 +1,12 @@
 from typing import Any, Dict, Optional
 
 import torch
-
-import rtp_llm.ops.compute_ops as compute_ops
-from rtp_kernel.w4a8_group_gemm import (
-    w4a8_group_gemm_ptpc,
+from rtp_kernel.fp8_group_gemm import (
+    get_cutlass_batched_moe_mm_data,
+    get_cutlass_moe_mm_without_permute_info,
 )
+from rtp_kernel.w4a8_group_gemm import w4a8_group_gemm_ptpc
+
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -45,9 +46,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
 
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(
-            quant_method in ["W4A8_INT4_PER_CHANNEL"]
-        )
+        checker.check(quant_method in ["W4A8_INT4_PER_CHANNEL"])
 
     def __init__(
         self,
@@ -81,17 +80,31 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
         self.K = self.w2.shape[1]
         self.N = self.w2.shape[2] * 2
         scale_k = self.w1_scale.shape[1]
-        assert (self.K % scale_k == 0), f"invalid params {self.K} or {scale_k}"
+        assert self.K % scale_k == 0, f"invalid params {self.K} or {scale_k}"
         self.group_size = self.K // scale_k
         device = self.w2.device
-        self.ab_strides1 = torch.full((self.E,), self.K, device=device, dtype=torch.int64)
-        self.b_scales_strides1 = torch.tensor(
-            [2 * self.N, 0], dtype=torch.int64, device=device).unsqueeze(0).repeat(self.E, 1, 1)
-        self.c_strides1 = torch.full((self.E,), 2 * self.N, device=device, dtype=torch.int64)
-        self.ab_strides2 = torch.full((self.E,), self.N, device=device, dtype=torch.int64)
-        self.b_scales_strides2 = torch.tensor(
-            [self.K, 0], dtype=torch.int64, device=device).unsqueeze(0).repeat(self.E, 1, 1)
-        self.c_strides2 = torch.full((self.E,), self.K, device=device, dtype=torch.int64)
+        self.ab_strides1 = torch.full(
+            (self.E,), self.K, device=device, dtype=torch.int64
+        )
+        self.b_scales_strides1 = (
+            torch.tensor([2 * self.N, 0], dtype=torch.int64, device=device)
+            .unsqueeze(0)
+            .repeat(self.E, 1, 1)
+        )
+        self.c_strides1 = torch.full(
+            (self.E,), 2 * self.N, device=device, dtype=torch.int64
+        )
+        self.ab_strides2 = torch.full(
+            (self.E,), self.N, device=device, dtype=torch.int64
+        )
+        self.b_scales_strides2 = (
+            torch.tensor([self.K, 0], dtype=torch.int64, device=device)
+            .unsqueeze(0)
+            .repeat(self.E, 1, 1)
+        )
+        self.c_strides2 = torch.full(
+            (self.E,), self.K, device=device, dtype=torch.int64
+        )
 
     def execute(
         self,
@@ -209,7 +222,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             num_tokens=M,
             hidden_size=self.K,
         )
-        compute_ops.get_cutlass_moe_mm_without_permute_info(
+        get_cutlass_moe_mm_without_permute_info(
             topk_ids,
             expert_offsets,
             problem_sizes1,
@@ -235,7 +248,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             self.ab_strides1,
             self.b_scales_strides1,
             self.c_strides1,
-            self.group_size
+            self.group_size,
         )
 
         silu_and_mul(c2, c1)
@@ -258,7 +271,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             self.ab_strides2,
             self.b_scales_strides2,
             self.c_strides2,
-            self.group_size
+            self.group_size,
         )
         del a2q
 
@@ -289,9 +302,7 @@ class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
 
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(
-            quant_method in ["W4A8_INT4_PER_CHANNEL"]
-        )
+        checker.check(quant_method in ["W4A8_INT4_PER_CHANNEL"])
 
     def __init__(
         self,
@@ -325,17 +336,31 @@ class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
         self.K = self.w2.shape[1]
         self.N = self.w2.shape[2] * 2
         scale_k = self.w1_scale.shape[1]
-        assert (self.K % scale_k == 0), f"invalid params {self.K} or {scale_k}"
+        assert self.K % scale_k == 0, f"invalid params {self.K} or {scale_k}"
         self.group_size = self.K // scale_k
         device = self.w2.device
-        self.ab_strides1 = torch.full((self.E,), self.K, device=device, dtype=torch.int64)
-        self.b_scales_strides1 = torch.tensor(
-            [2 * self.N, 0], dtype=torch.int64, device=device).unsqueeze(0).repeat(self.E, 1, 1)
-        self.c_strides1 = torch.full((self.E,), 2 * self.N, device=device, dtype=torch.int64)
-        self.ab_strides2 = torch.full((self.E,), self.N, device=device, dtype=torch.int64)
-        self.b_scales_strides2 = torch.tensor(
-            [self.K, 0], dtype=torch.int64, device=device).unsqueeze(0).repeat(self.E, 1, 1)
-        self.c_strides2 = torch.full((self.E,), self.K, device=device, dtype=torch.int64)
+        self.ab_strides1 = torch.full(
+            (self.E,), self.K, device=device, dtype=torch.int64
+        )
+        self.b_scales_strides1 = (
+            torch.tensor([2 * self.N, 0], dtype=torch.int64, device=device)
+            .unsqueeze(0)
+            .repeat(self.E, 1, 1)
+        )
+        self.c_strides1 = torch.full(
+            (self.E,), 2 * self.N, device=device, dtype=torch.int64
+        )
+        self.ab_strides2 = torch.full(
+            (self.E,), self.N, device=device, dtype=torch.int64
+        )
+        self.b_scales_strides2 = (
+            torch.tensor([self.K, 0], dtype=torch.int64, device=device)
+            .unsqueeze(0)
+            .repeat(self.E, 1, 1)
+        )
+        self.c_strides2 = torch.full(
+            (self.E,), self.K, device=device, dtype=torch.int64
+        )
 
     def execute(
         self,
@@ -384,7 +409,7 @@ class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             (self.E, 3), dtype=torch.int32, device=expert_x.device
         )
 
-        compute_ops.get_cutlass_batched_moe_mm_data(
+        get_cutlass_batched_moe_mm_data(
             expert_offsets,
             problem_sizes1,
             problem_sizes2,
@@ -394,7 +419,7 @@ class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             self.N,
             self.K,
             self.swap_ab_gemm1,
-            self.swap_ab_gemm2
+            self.swap_ab_gemm2,
         )
 
         expert_x = expert_x.reshape(-1, expert_x.size(2))
@@ -412,7 +437,7 @@ class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             self.ab_strides1,
             self.b_scales_strides1,
             self.c_strides1,
-            self.group_size
+            self.group_size,
         )
 
         a2q, a2q_scale = silu_mul_fp8_per_token_quant_batched(c1, expert_num_tokens)
@@ -432,6 +457,6 @@ class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             self.ab_strides2,
             self.b_scales_strides2,
             self.c_strides2,
-            self.group_size
+            self.group_size,
         )
         return CombineForwardPayload(fused_expert_output=output)
