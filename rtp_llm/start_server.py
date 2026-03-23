@@ -272,6 +272,12 @@ def start_server(py_env_configs: PyEnvConfigs):
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
     )
+
+    enable_mps = os.environ.get("ENABLE_MPS", "") == "true"
+    if enable_mps:
+        from internal_source.rtp_llm.prompt_generator.service.start_mps import start_mps
+        start_mps()
+
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
 
