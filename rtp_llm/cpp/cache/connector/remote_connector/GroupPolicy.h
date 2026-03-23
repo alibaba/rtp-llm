@@ -10,13 +10,6 @@
 
 namespace rtp_llm {
 
-enum class RemoteConnectorGroupMode {
-    RCGM_LAYER_DEFAULT,
-    RCGM_ONLY_FULL_LAYER,
-    RCGM_FULL_LINEAR_LAYER,
-    RCGM_FULL_SW_LAYER
-};
-
 class KVCacheAllocator;
 
 namespace remote_connector {
@@ -184,31 +177,6 @@ private:
     std::string GetOtherGroupPrefixName() const override {
         return "L";
     }
-};
-
-class FullSWLayerGroupPolicy: public FullOtherGroupPolicy {
-public:
-    FullSWLayerGroupPolicy(std::shared_ptr<KVCacheAllocator> allocator,
-                           const std::vector<int32_t>&       full_group_ids,
-                           const std::vector<int32_t>&       other_group_ids,
-                           size_t                            sink_size,
-                           size_t                            sw_size):
-        FullOtherGroupPolicy(allocator, full_group_ids, other_group_ids, 1), sink_size_(sink_size), sw_size_(sw_size) {}
-
-    bool filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
-                                 LocationsView&                     locations_view,
-                                 kv_cache_manager::BlockMaskOffset  block_mask = 0) const override;
-
-    std::string debugString() const override;
-
-private:
-    std::string GetOtherGroupPrefixName() const override {
-        return "S";
-    }
-
-private:
-    size_t sink_size_ = 0;
-    size_t sw_size_   = 0;
 };
 
 }  // namespace remote_connector

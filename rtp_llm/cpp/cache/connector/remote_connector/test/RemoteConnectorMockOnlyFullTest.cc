@@ -78,17 +78,14 @@ private:
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
             auto allocator = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_);
             ASSERT_TRUE(allocator->init());
-            remote_connectors_.push_back(
-                std::make_shared<RemoteConnector>(cache_config_,
-                                                  kv_cache_config_,
-                                                  runtime_config_,
-                                                  parallelism_config_,
-                                                  sp_config_,
-                                                  nullptr,
-                                                  0,
-                                                  allocator,
-                                                  RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER,
-                                                  full_group_ids_));
+            remote_connectors_.push_back(std::make_shared<RemoteConnector>(cache_config_,
+                                                                           kv_cache_config_,
+                                                                           runtime_config_,
+                                                                           parallelism_config_,
+                                                                           sp_config_,
+                                                                           nullptr,
+                                                                           0,
+                                                                           allocator));
             ASSERT_TRUE(remote_connectors_[i]->init());
             servers_[i]->set_remote_connector(remote_connectors_[i]);
         }

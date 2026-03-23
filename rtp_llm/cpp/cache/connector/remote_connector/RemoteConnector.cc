@@ -161,21 +161,16 @@ bool RemoteAsyncMatchContext::success() const {
     return state_.successImpl();
 }
 
-RemoteConnector::RemoteConnector(const CacheConfig&                 cache_config,
-                                 const KVCacheConfig&               kv_cache_config,
-                                 const RuntimeConfig&               runtime_config,
-                                 const ParallelismConfig&           parallelism_config,
-                                 const SpeculativeExecutionConfig&  sp_config,
-                                 void*                              register_buffer_addr,
-                                 size_t                             register_buffer_size,
-                                 std::shared_ptr<KVCacheAllocator>  allocator,
-                                 RemoteConnectorGroupMode           group_mode,
-                                 const std::vector<int32_t>&        full_group_ids,
-                                 const std::vector<int32_t>&        other_group_ids,
-                                 const kmonitor::MetricsReporterPtr metrics_reporter,
-                                 uint32_t                           linear_attention_write_interval,
-                                 size_t                             sink_size,
-                                 size_t                             sw_size):
+RemoteConnector::RemoteConnector(const CacheConfig&                        cache_config,
+                                 const KVCacheConfig&                      kv_cache_config,
+                                 const RuntimeConfig&                      runtime_config,
+                                 const ParallelismConfig&                  parallelism_config,
+                                 const SpeculativeExecutionConfig&         sp_config,
+                                 void*                                     register_buffer_addr,
+                                 size_t                                    register_buffer_size,
+                                 std::shared_ptr<KVCacheAllocator>         allocator,
+                                 const kmonitor::MetricsReporterPtr        metrics_reporter,
+                                 const std::map<std::string, std::string>& lora_info_map):
     metrics_reporter_(metrics_reporter) {
     RemoteConnector::InitParams init_params{cache_config,
                                             kv_cache_config,
@@ -185,27 +180,21 @@ RemoteConnector::RemoteConnector(const CacheConfig&                 cache_config
                                             register_buffer_addr,
                                             register_buffer_size};
     init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
-    switch (group_mode) {
-        case RemoteConnectorGroupMode::RCGM_LAYER_DEFAULT: {
-            group_policy_ =
-                std::make_unique<remote_connector::DefaultLayerGroupPolicy>(allocator, full_group_ids, other_group_ids);
-            break;
+    std::vector<int32_t> full_group_ids, linear_group_ids;
+    if (cache_config.linear_group_num == 0) {
+        full_group_ids.push_back(0);
+        group_policy_ =
+            std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_ids, linear_group_ids);
+    } else {
+        for (int32_t group_id = 0; static_cast<size_t>(group_id) < cache_config.group_types.size(); group_id++) {
+            if (cache_config.group_types[group_id] == CacheGroupType::FULL) {
+                full_group_ids.push_back(group_id);
+            } else {
+                linear_group_ids.push_back(group_id);
+            }
         }
-        case RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER: {
-            group_policy_ =
-                std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_ids, other_group_ids);
-            break;
-        }
-        case RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER: {
-            group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
-                allocator, full_group_ids, other_group_ids, linear_attention_write_interval);
-            break;
-        }
-        case RemoteConnectorGroupMode::RCGM_FULL_SW_LAYER: {
-            group_policy_ = std::make_unique<remote_connector::FullSWLayerGroupPolicy>(
-                allocator, full_group_ids, other_group_ids, sink_size, sw_size);
-            break;
-        }
+        group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
+            allocator, full_group_ids, linear_group_ids, std::max(1, cache_config.linear_step));
     }
 }
 
