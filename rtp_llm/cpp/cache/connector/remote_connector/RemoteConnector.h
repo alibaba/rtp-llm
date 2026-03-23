@@ -27,22 +27,16 @@ class RemoteConnectorAsyncContext;
 
 class RemoteConnector: public KVCacheConnector {
 public:
-    RemoteConnector(const CacheConfig&                 cache_config,
-                    const KVCacheConfig&               kv_cache_config,
-                    const RuntimeConfig&               runtime_config,
-                    const ParallelismConfig&           parallelism_config,
-                    const SpeculativeExecutionConfig&  sp_config,
-                    void*                              register_buffer_addr,
-                    size_t                             register_buffer_size,
-                    std::shared_ptr<KVCacheAllocator>  allocator,
-                    RemoteConnectorGroupMode           group_mode,
-                    const std::vector<int32_t>&        full_group_ids,
-                    const std::vector<int32_t>&        other_group_ids                 = {},
-                    const kmonitor::MetricsReporterPtr metrics_reporter                = nullptr,
-                    uint32_t                           linear_attention_write_interval = 1,  // for linear attention
-                    size_t                             sink_size = 0,  // for slide window attention
-                    size_t                             sw_size   = 0   // for slide window attention
-    );
+    RemoteConnector(const CacheConfig&                        cache_config,
+                    const KVCacheConfig&                      kv_cache_config,
+                    const RuntimeConfig&                      runtime_config,
+                    const ParallelismConfig&                  parallelism_config,
+                    const SpeculativeExecutionConfig&         sp_config,
+                    void*                                     register_buffer_addr,
+                    size_t                                    register_buffer_size,
+                    std::shared_ptr<KVCacheAllocator>         allocator,
+                    const kmonitor::MetricsReporterPtr        metrics_reporter = nullptr,
+                    const std::map<std::string, std::string>& lora_info_map    = {});
     ~RemoteConnector() override;
 
     bool init();

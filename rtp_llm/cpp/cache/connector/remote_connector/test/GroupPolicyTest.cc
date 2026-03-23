@@ -163,6 +163,12 @@ MATCHER_P(LocationsEqLocationsView, locations_view, "") {
 
 class GroupPolicyTest: public ::testing::Test {
 public:
+    enum class RemoteConnectorGroupMode {
+        RCGM_LAYER_DEFAULT,
+        RCGM_ONLY_FULL_LAYER,
+        RCGM_FULL_LINEAR_LAYER
+    };
+
     void SetUp() override {
         rtp_llm::initLogger();
     }
@@ -193,11 +199,6 @@ public:
             case RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER: {
                 group_policy_ = std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(
                     allocator_, full_group_ids, other_group_ids, linear_attention_write_interval);
-                break;
-            }
-            case RemoteConnectorGroupMode::RCGM_FULL_SW_LAYER: {
-                group_policy_ = std::make_shared<remote_connector::FullSWLayerGroupPolicy>(
-                    allocator_, full_group_ids, other_group_ids, sink_size, sw_size);
                 break;
             }
         }
@@ -347,8 +348,21 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
             resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0L1L2", "F0", "F0L1L2"};
+            ASSERT_EQ(expected, real);
+        }
+        {
+            auto resource        = std::make_shared<KVCacheResource>();
+            resource->cache_keys = {0, 1, 2, 3};
+            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
+            resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
+            resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
+            std::vector<std::string> real;
+            resource->setLastBlockAligned(false);
+            ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
+            std::vector<std::string> expected = {"F0L1L2", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
         }
         {
@@ -358,6 +372,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7, 21}));
             resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11, 22}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0L1L2", "F0", "F0L1L2", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
@@ -369,6 +384,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({-1, -1, -1, 7}));
             resource->groupBlocks().push_back(makeGroupBlockIds({-1, -1, -1, 11}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
@@ -380,6 +396,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({4, -1, 6, 7}));
             resource->groupBlocks().push_back(makeGroupBlockIds({8, -1, 10, 11}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0L1L2", "F0", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
@@ -391,6 +408,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, -1}));
             resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, -1}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0L1L2", "F0", "F0L1L2", "F0"};
             ASSERT_EQ(expected, real);
@@ -402,6 +420,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, -1, 7, 21}));
             resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, -1, 11, 22}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0L1L2", "F0", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
@@ -413,6 +432,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({4, -1, -1, 7, 21}));
             resource->groupBlocks().push_back(makeGroupBlockIds({8, -1, -1, 11, 22}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0L1L2", "F0", "F0", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
@@ -424,6 +444,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({-1, 5, -1, 7}));
             resource->groupBlocks().push_back(makeGroupBlockIds({-1, 9, -1, 11}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0L1L2", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
@@ -435,6 +456,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({1}));
             resource->groupBlocks().push_back(makeGroupBlockIds({2}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {};  // all full linear
             ASSERT_EQ(expected, real);
@@ -446,6 +468,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({-1}));
             resource->groupBlocks().push_back(makeGroupBlockIds({-1}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0"};
             ASSERT_EQ(expected, real);
@@ -460,6 +483,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
             resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {};
             ASSERT_EQ(expected, real);
@@ -471,6 +495,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, -1, 21}));
             resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, -1, 22}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0L1L2", "F0L1L2", "F0L1L2", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
@@ -482,6 +507,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({4}));
             resource->groupBlocks().push_back(makeGroupBlockIds({8}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {};
             ASSERT_EQ(expected, real);
@@ -496,6 +522,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
             resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
@@ -507,6 +534,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7, 21}));
             resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11, 22}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0", "F0", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
@@ -518,6 +546,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, -1}));
             resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, -1}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0", "F0L1L2", "F0"};
             ASSERT_EQ(expected, real);
@@ -529,6 +558,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({4}));
             resource->groupBlocks().push_back(makeGroupBlockIds({8}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {};
             ASSERT_EQ(expected, real);
@@ -540,6 +570,7 @@ private:
             resource->groupBlocks().push_back(makeGroupBlockIds({-1}));
             resource->groupBlocks().push_back(makeGroupBlockIds({-1}));
             std::vector<std::string> real;
+            resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0"};
             ASSERT_EQ(expected, real);
@@ -927,6 +958,7 @@ TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_fa
         resource->groupBlocks().push_back(makeGroupBlockIds({4, -1, 6, 7, -1}));
         resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11, -1}));
         std::vector<std::string> real;
+        resource->setLastBlockAligned(true);
         ASSERT_FALSE(group_policy_->getNeedWriteGroups(resource, real));
     }
     {  // invalid group size
@@ -935,6 +967,7 @@ TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_fa
         resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
         resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7, 21}));
         std::vector<std::string> real;
+        resource->setLastBlockAligned(true);
         ASSERT_FALSE(group_policy_->getNeedWriteGroups(resource, real));
     }
     {  // invalid group size
@@ -945,6 +978,7 @@ TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_fa
         resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11, 22}));
         resource->groupBlocks().push_back(makeGroupBlockIds({12, 13, 14, 15, 23}));
         std::vector<std::string> real;
+        resource->setLastBlockAligned(true);
         ASSERT_FALSE(group_policy_->getNeedWriteGroups(resource, real));
     }
 }
@@ -987,6 +1021,7 @@ TEST_F(GroupPolicyTest, test_FullLayerGroupPolicy_filterNeedWriteGroups_success)
         resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
         resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
         std::vector<std::string> real;
+        resource->setLastBlockAligned(true);
         ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
         std::vector<std::string> expected = {};
         ASSERT_EQ(expected, real);
@@ -1011,8 +1046,21 @@ TEST_F(GroupPolicyTest, test_DefaultLayerGroupPolicy_filterNeedWriteGroups_succe
         resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
         resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
         std::vector<std::string> real;
+        resource->setLastBlockAligned(true);
         ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
         std::vector<std::string> expected = {"F0G1G2", "F0G1G2", "F0G1G2", "F0G1G2"};
+        ASSERT_EQ(expected, real);
+    }
+    {
+        auto resource        = std::make_shared<KVCacheResource>();
+        resource->cache_keys = {0, 1, 2, 3};
+        resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
+        resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
+        resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
+        std::vector<std::string> real;
+        resource->setLastBlockAligned(false);
+        ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
+        std::vector<std::string> expected = {"F0G1G2", "F0G1G2", "F0G1G2"};
         ASSERT_EQ(expected, real);
     }
     {
@@ -1022,6 +1070,7 @@ TEST_F(GroupPolicyTest, test_DefaultLayerGroupPolicy_filterNeedWriteGroups_succe
         resource->groupBlocks().push_back(makeGroupBlockIds({4, -1, 6, 7, -1, 21}));
         resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, -1, 11, -1, 22}));
         std::vector<std::string> real;
+        resource->setLastBlockAligned(true);
         ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
         std::vector<std::string> expected = {"F0G1G2", "F0G2", "F0G1", "F0G1G2", "F0", "G1G2"};
         ASSERT_EQ(expected, real);

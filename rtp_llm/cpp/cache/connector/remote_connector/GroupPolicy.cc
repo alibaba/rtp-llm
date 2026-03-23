@@ -117,8 +117,13 @@ bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheRe
                                                  std::vector<std::string>& location_spec_group_names) const {
     const auto& group_block_ids = resource->groupBlocks();
     const auto& cache_keys      = resource->cacheKeys();
-    location_spec_group_names.reserve(cache_keys.size());
-    for (size_t key_idx = 0; key_idx < cache_keys.size(); key_idx++) {
+    RTP_LLM_CHECK(!cache_keys.empty());
+    size_t valid_keys_size = cache_keys.size();
+    if (!resource->lastBlockAligned()) {
+        valid_keys_size--;
+    }
+    location_spec_group_names.reserve(valid_keys_size);
+    for (size_t key_idx = 0; key_idx < valid_keys_size; key_idx++) {
         uint64_t groups_name_bithash = 0;
         for (const auto& [group_idx, group] : groups_) {
             const auto gpu_block_idx = group_block_ids.at(group_idx)->blocks().at(key_idx);
@@ -249,11 +254,16 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResou
         return false;
     }
     const auto& cache_keys = resource->cacheKeys();
-    location_spec_group_names.resize(cache_keys.size(), {});
+    RTP_LLM_CHECK(!cache_keys.empty());
+    size_t valid_keys_size = cache_keys.size();
+    if (!resource->lastBlockAligned()) {
+        valid_keys_size--;
+    }
+    location_spec_group_names.resize(valid_keys_size, {});
     bool   exist_full_other  = false;
     size_t count             = write_interval_;
     bool   is_all_full_other = true;
-    for (size_t key_idx = cache_keys.size(); key_idx-- > 0;) {
+    for (size_t key_idx = valid_keys_size; key_idx-- > 0;) {
         uint64_t groups_name_bithash = 0;
         for (const auto& [group_idx, group] : groups_) {
             const auto gpu_block_idx = group_block_ids.at(group_idx)->blocks().at(key_idx);
@@ -438,39 +448,6 @@ bool FullLinearLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager:
         }
     }
     return true;
-}
-
-bool FullSWLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
-                                                     LocationsView&                     locations_view,
-                                                     kv_cache_manager::BlockMaskOffset  block_mask) const {
-    locations_view.reserve(locations.size());
-    size_t need_load_sink_size = 0;
-    if (block_mask < sink_size_) {
-        // load sink
-        // TODO : 这里的min要加个ut
-        need_load_sink_size = std::min(sink_size_ - block_mask, locations.size());
-        locations_view.resize(need_load_sink_size);
-        for (size_t i = 0; i < need_load_sink_size; i++) {
-            if (!CheckInvalidFullLocationAndSetView(locations[i], locations_view[i])) {
-                return false;
-            }
-        }
-    }
-    size_t load_sw_size = 0;
-    for (size_t i = locations.size(); i-- > need_load_sink_size;) {
-        // TODO : 现在信息不够, 还需要已经匹配的窗口长度
-        if (load_sw_size < sw_size_) {}
-    }
-    RTP_LLM_LOG_WARNING("Not Implement");
-    return false;
-}
-
-std::string FullSWLayerGroupPolicy::debugString() const {
-    std::stringstream debug_ss;
-    debug_ss << FullOtherGroupPolicy::debugString();
-    debug_ss << "\tsink_size_ : " << sink_size_ << '\n';
-    debug_ss << "\tsw_size_ : " << sw_size_ << '\n';
-    return debug_ss.str();
 }
 
 }  // namespace remote_connector

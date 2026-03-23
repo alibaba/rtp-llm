@@ -173,7 +173,7 @@ std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryC
 
 std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnector() {
 #ifdef USE_REMOTE_KV_CACHE
-    // TODO : support different group mode
+    // TODO : get lora info map
     auto remote_connector_ = std::make_shared<RemoteConnector>(cache_config_,
                                                                kv_cache_config_,
                                                                runtime_config_,
@@ -182,9 +182,6 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
                                                                allocator_->getBlockPool()->getBaseAddress(),
                                                                allocator_->getBlockPool()->getTotalSizeBytes(),
                                                                allocator_,
-                                                               RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER,
-                                                               std::vector<int32_t>({0}),
-                                                               std::vector<int32_t>({}),
                                                                metrics_reporter_);
 
     RTP_LLM_CHECK_WITH_INFO(remote_connector_->init(), "remote connector init failed");

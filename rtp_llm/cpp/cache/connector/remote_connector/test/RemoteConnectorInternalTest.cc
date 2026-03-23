@@ -139,14 +139,21 @@ public:
         byte_size_per_block_           = static_cast<size_t>(mha_spec->block_size_bytes() * mha_spec->layer_num);
         cache_config_.block_size_bytes = byte_size_per_block_;
         cache_config_.dtype            = rtp_llm::DataType::TYPE_FP16;
+        cache_config_.group_types.push_back(CacheGroupType::FULL);
+        cache_config_.group_types.push_back(CacheGroupType::LINEAR);
+        cache_config_.group_types.push_back(CacheGroupType::LINEAR);
+        cache_config_.full_group_num   = 1;
+        cache_config_.linear_group_num = 2;
     }
 
     void TearDown() override {}
 
 private:
     std::shared_ptr<RemoteConnector> getFullLinearPolicyConnector() const {
-        auto allocator =
-            std::make_shared<FakeKVCacheAllocator>(cache_config_, full_group_ids_, linear_group_ids_, layer_num_);
+        std::vector<int32_t> full_group_ids({0});
+        std::vector<int32_t> linear_group_ids({1, 2});
+        auto                 allocator =
+            std::make_shared<FakeKVCacheAllocator>(cache_config_, full_group_ids, linear_group_ids, layer_num_);
         return std::shared_ptr<RemoteConnector>(new RemoteConnector(cache_config_,
                                                                     kv_cache_config_,
                                                                     runtime_config_,
@@ -154,23 +161,16 @@ private:
                                                                     sp_config_,
                                                                     nullptr,
                                                                     0,
-                                                                    allocator,
-                                                                    RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
-                                                                    full_group_ids_,
-                                                                    linear_group_ids_,
-                                                                    nullptr,
-                                                                    1));
+                                                                    allocator));
     }
 
-    CacheConfig                              cache_config_;
-    KVCacheConfig                            kv_cache_config_;
-    RuntimeConfig                            runtime_config_;
-    ParallelismConfig                        parallelism_config_;
-    SpeculativeExecutionConfig               sp_config_;
-    size_t                                   byte_size_per_block_ = 0;
-    constexpr static int                     layer_num_           = 10;
-    inline static const std::vector<int32_t> full_group_ids_      = {0};
-    inline static const std::vector<int32_t> linear_group_ids_    = {1, 2};
+    CacheConfig                cache_config_;
+    KVCacheConfig              kv_cache_config_;
+    RuntimeConfig              runtime_config_;
+    ParallelismConfig          parallelism_config_;
+    SpeculativeExecutionConfig sp_config_;
+    size_t                     byte_size_per_block_ = 0;
+    constexpr static int       layer_num_           = 10;
 };
 
 TEST_F(RemoteConnectorInternalTest, test_genClientConfig) {

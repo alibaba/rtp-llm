@@ -16,8 +16,7 @@ namespace rtp_llm {
 namespace test {
 
 namespace {
-constexpr static int    kFakeLayerNum = 4;
-constexpr static size_t kFakeIovSize  = 1024;
+constexpr static int kFakeLayerNum = 4;
 
 }  // namespace
 
