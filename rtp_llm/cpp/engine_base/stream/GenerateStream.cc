@@ -69,8 +69,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
             {rtp_llm::DataType::TYPE_FP32, {(size_t)inputLength() - 1}, rtp_llm::AllocationType::HOST}, {});
     }
     if (generate_input_->generate_config->return_softmax_probs) {
-        softmax_probs_ = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {init_batch_size, (size_t)max_seq_len_}, rtp_llm::AllocationType::HOST}, {});
+        softmax_probs_ = device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
+                                                  {(size_t)maxBatchSize(), (size_t)max_seq_len_},
+                                                  rtp_llm::AllocationType::HOST},
+                                                 {});
         memset(softmax_probs_->data(), 0, softmax_probs_->sizeBytes());
     }
     if (generate_input_->generate_config->return_all_hidden_states) {

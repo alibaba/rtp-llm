@@ -603,12 +603,32 @@ void NormalBatchStreamProcessor::dispatchSingleStream(GenerateStreamPtr   stream
     // construct update info
     BufferPtr batch_hidden_states = nullptr;
     if (stream->generateConfig()->return_hidden_states) {
-        batch_hidden_states = model_output.hidden_states->slice(batch_idx_in, cur_batch_size);
+        auto raw_hidden_states = model_output.hidden_states->slice(batch_idx_in, cur_batch_size);
+        if (has_beam_search && src_batch_indices) {
+            const auto hidden_dim = raw_hidden_states->shape()[1];
+            batch_hidden_states   = device_->allocateBuffer(
+                {raw_hidden_states->type(), {(size_t)next_batch_size, hidden_dim}, rtp_llm::AllocationType::DEVICE},
+                {});
+            for (int i = 0; i < next_batch_size; ++i) {
+                device_->copy({batch_hidden_states->view(i, 1), raw_hidden_states->view(get_src_idx(i), 1)});
+            }
+        } else {
+            batch_hidden_states = raw_hidden_states;
+        }
     }
 
     BufferPtr batch_logits = nullptr;
     if (stream->returnLogits() || stream->calculateSoftmaxProbs() || has_beam_search) {
-        batch_logits = model_output.logits->slice(batch_idx_in, cur_batch_size);
+        auto raw_logits = model_output.logits->slice(batch_idx_in, cur_batch_size);
+        if (has_beam_search && src_batch_indices) {
+            batch_logits = device_->allocateBuffer(
+                {raw_logits->type(), {(size_t)next_batch_size, vocab_size_}, rtp_llm::AllocationType::DEVICE}, {});
+            for (int i = 0; i < next_batch_size; ++i) {
+                device_->copy({batch_logits->view(i, 1), raw_logits->view(get_src_idx(i), 1)});
+            }
+        } else {
+            batch_logits = raw_logits;
+        }
     }
 
     BufferPtr all_probs = nullptr;
@@ -651,8 +671,8 @@ void NormalBatchStreamProcessor::dispatchSingleStream(GenerateStreamPtr   stream
         batch_softmax_result =
             device_->softmax({batch_logits, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_FP32, std::nullopt});
         for (int i = 0; i < next_batch_size; ++i) {
-            device_->copy({(*current_softmax_result)[i],
-                           (*batch_softmax_result)[get_src_idx(i)].view(new_tokens->data<int32_t>()[i], 1)});
+            device_->copy(
+                {(*current_softmax_result)[i], (*batch_softmax_result)[i].view(new_tokens->data<int32_t>()[i], 1)});
         }
     }
 

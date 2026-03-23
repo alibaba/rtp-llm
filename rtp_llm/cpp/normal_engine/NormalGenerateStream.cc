@@ -180,6 +180,18 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs) {
         RTP_LLM_CHECK(update_info.softmax_probs->dim() == 2);
         RTP_LLM_CHECK(update_info.softmax_probs->shape()[1] == update_info.num_new_tokens);
+        if (update_info.src_batch_indices && softmax_probs_) {
+            const int   history_len    = seqLength() - update_info.num_new_tokens - inputLength();
+            const int   new_batch_size = static_cast<int>(update_info.src_batch_indices->shape()[0]);
+            const auto* src_indices    = update_info.src_batch_indices->data<int32_t>();
+            if (history_len > 0) {
+                auto tmp = device_->clone({*softmax_probs_, rtp_llm::AllocationType::HOST});
+                for (int i = 0; i < new_batch_size; ++i) {
+                    int src = src_indices[i];
+                    device_->copy({softmax_probs_->view(i, 1), tmp->view(src, 1)});
+                }
+            }
+        }
         setSoftmaxProbs(*update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
     }
 
