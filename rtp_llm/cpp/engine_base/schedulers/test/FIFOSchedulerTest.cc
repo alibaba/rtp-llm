@@ -3,6 +3,7 @@
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
 #include "gtest/gtest.h"
+#include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/core/Types.h"
@@ -417,6 +418,215 @@ TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
     ASSERT_EQ(streams_status.value().size(), 2);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
 
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 2);
+}
+
+TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    int64_t group_id   = 100;
+    int     group_size = 3;
+
+    // Enqueue only 2 of 3 — group incomplete, should not be scheduled
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config               = make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = 10;
+        query->batch_group_id                = group_id;
+        query->batch_group_size              = group_size;
+        query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config               = make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = 10;
+        query->batch_group_id                = group_id;
+        query->batch_group_size              = group_size;
+        query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+
+    auto result1 = scheduler.schedule();
+    ASSERT_TRUE(result1.ok());
+    ASSERT_EQ(result1.value().size(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
+
+    // Enqueue the 3rd — group complete, all 3 should be scheduled together
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config               = make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = 10;
+        query->batch_group_id                = group_id;
+        query->batch_group_size              = group_size;
+        query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+
+    auto result2 = scheduler.schedule();
+    ASSERT_TRUE(result2.ok());
+    ASSERT_EQ(result2.value().size(), 3);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 3);
+}
+
+TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    int64_t group_id   = 200;
+    int     group_size = 3;
+    int     timeout_ms = 10;
+    int64_t past_time  = autil::TimeUtility::currentTimeInMicroSeconds() - (timeout_ms + 100) * 1000;
+
+    // Enqueue only 2 of 3 with begin_time far in the past so timeout has expired
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config               = make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = timeout_ms;
+        query->batch_group_id                = group_id;
+        query->batch_group_size              = group_size;
+        query->begin_time_us                 = past_time;
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config               = make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = timeout_ms;
+        query->batch_group_id                = group_id;
+        query->batch_group_size              = group_size;
+        query->begin_time_us                 = past_time;
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+
+    // Group incomplete but timeout expired — streams should be scheduled as normal
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.value().size(), 2);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    int64_t group_id   = 300;
+    int     group_size = 2;
+
+    // Enqueue: normal stream first, then a complete force batch group
+    shared_ptr<GenerateStream> normal_stream;
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config               = make_shared<GenerateConfig>();
+        query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+        normal_stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(normal_stream).ok());
+    }
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config               = make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = 10;
+        query->batch_group_id                = group_id;
+        query->batch_group_size              = group_size;
+        query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config               = make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = 10;
+        query->batch_group_id                = group_id;
+        query->batch_group_size              = group_size;
+        query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+
+    // Round 1: normal stream is first in FIFO, force batch streams should be skipped
+    auto result1 = scheduler.schedule();
+    ASSERT_TRUE(result1.ok());
+    ASSERT_EQ(result1.value().size(), 1);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+
+    // Finish the normal stream
+    normal_stream->setFinishedWithoutLock();
+    // Round 2: force batch group should now be scheduled
+    auto result2 = scheduler.schedule();
+    ASSERT_TRUE(result2.ok());
+    ASSERT_EQ(result2.value().size(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
 }

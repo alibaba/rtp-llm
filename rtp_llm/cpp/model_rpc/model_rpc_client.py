@@ -52,7 +52,7 @@ def trans_input(input_py: GenerateInput):
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.batch_group_size = input_py.batch_group_size
     if hasattr(input_py, 'batch_group_id') and input_py.batch_group_id != -1:
-        input_pb.batch_group_id = input_py.batch_group_id
+        input_pb.batch_group_id.value = input_py.batch_group_id
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
     # check generate config is valid before enter into engine

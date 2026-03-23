@@ -178,11 +178,16 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     int64_t                 force_batch_group_id = -1;
     int64_t                 now                  = autil::TimeUtility::currentTimeInMilliSeconds();
 
+    struct GroupInfo {
+        int64_t first_arrival_time = 0;
+        int     count              = 0;
+    };
+    std::unordered_map<int64_t, GroupInfo> request_group_info;
+
     // Re-scan: Build map from scratch using batch_group_id
-    request_group_info_.clear();
     for (const auto& stream : waiting_streams_) {
         if (stream->forceBatch() && stream->batchGroupId() != -1) {
-            auto& info = request_group_info_[stream->batchGroupId()];
+            auto& info = request_group_info[stream->batchGroupId()];
             if (info.count == 0) {
                 info.first_arrival_time = stream->enqueueTime() / 1000;
             }
@@ -195,7 +200,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
         bool  force_batch = stream->generateConfig()->force_batch;
 
         if (force_batch && stream->batchGroupId() != -1) {
-            auto& info = request_group_info_[stream->batchGroupId()];
+            auto& info = request_group_info[stream->batchGroupId()];
             if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
                 force_batch = false;
             } else if (info.count < stream->batchGroupSize()) {
@@ -204,6 +209,8 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             }
         }
 
+        // Batch isolation: force_batch streams and normal streams cannot mix in the same round.
+        // The first stream in FIFO determines the batch type for this round.
         if (!new_streams.empty()) {
             if (force_batch_group_id != -1) {
                 if (!force_batch || stream->batchGroupId() != force_batch_group_id) {

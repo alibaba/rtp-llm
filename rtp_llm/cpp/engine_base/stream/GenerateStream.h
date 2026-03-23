@@ -412,7 +412,7 @@ public:
     }
 
     int batchGroupTimeout() const {
-        return generate_input_->generate_config->batch_group_timeout.value_or(10);
+        return generate_input_->generate_config->batch_group_timeout.value_or(100);
     }
 
     bool forceBatch() const {

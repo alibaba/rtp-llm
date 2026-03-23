@@ -121,8 +121,9 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
     generate_input->batch_group_size = input->batch_group_size() > 0 ? input->batch_group_size() : 1;
-    // batch_group_id defaults to -1 if not set (proto default for int64 is 0, so we check for 0)
-    generate_input->batch_group_id = input->batch_group_id() != 0 ? input->batch_group_id() : -1;
+    if (input->has_batch_group_id()) {
+        generate_input->batch_group_id = input->batch_group_id().value();
+    }
 
     return generate_input;
 }

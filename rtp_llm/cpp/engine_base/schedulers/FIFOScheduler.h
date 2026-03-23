@@ -72,19 +72,13 @@ protected:
     size_t                          max_generate_batch_size_ = 1;
     const bool                      need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
-    std::atomic<bool>               schedule_trigger_        = false;
+    bool                            schedule_trigger_        = false;
     std::mutex                      lock_;
     std::condition_variable         cond_;
     kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
-
-    struct GroupInfo {
-        int64_t first_arrival_time = 0;
-        int     count              = 0;
-    };
-    std::unordered_map<int64_t, GroupInfo> request_group_info_;
 
     // TODO @wangyin support different beams run togather
 };

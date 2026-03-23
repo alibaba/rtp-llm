@@ -138,7 +138,7 @@ message GenerateInputPB {
     string client_id = 5;
     int64 start_time = 6;
     int32 batch_group_size = 7;
-    int64 batch_group_id = 8;
+    google.protobuf.Int64Value batch_group_id = 8;
 }
 
 message AuxInfoPB {
