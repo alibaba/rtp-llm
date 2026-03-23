@@ -9,9 +9,6 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     m_grouped_fp8_gemm_nt_contiguous,
     m_grouped_fp8_gemm_nt_masked,
 )
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-    sgl_per_token_group_quant_fp8,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -20,26 +17,26 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
 )
-from rtp_llm.models_py.triton_kernels.common.activation import (
-    create_packed_scale_tensor,
-    silu_and_mul_masked_post_quant_packed_fwd,
-    silu_mul_masked_fp8_post_quant_fwd,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
-from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
+from rtp_llm.models_py.triton_kernels.common.activation import (
+    create_packed_scale_tensor,
+    silu_and_mul,
+    silu_and_mul_contiguous_fp8_post_quant,
+    silu_and_mul_masked_post_quant_packed_fwd,
+    silu_mul_masked_fp8_post_quant_fwd,
+)
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     ep_gather,
     ep_scatter,
     ep_scatter_v2,
     tma_align_input_scale,
 )
-from rtp_llm.models_py.utils.math import ceil_div, align
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
+from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.models_py.utils.memory import dispose_tensor
-from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 from rtp_llm.utils.model_weight import W
 
 
@@ -134,9 +131,23 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         assert payload.expert_x is not None, "hidden_states_fp8 is not initialized"
         token_num = payload.expert_x.shape[0]
         if token_num <= self.masked_max_token_num:
-            return self.execute_masked(payload, activation, expert_map, a2_scale, apply_router_weight_on_input, extra_expert_args)
+            return self.execute_masked(
+                payload,
+                activation,
+                expert_map,
+                a2_scale,
+                apply_router_weight_on_input,
+                extra_expert_args,
+            )
         else:
-            return self.execute_contiguous(payload, activation, expert_map, a2_scale, apply_router_weight_on_input, extra_expert_args)
+            return self.execute_contiguous(
+                payload,
+                activation,
+                expert_map,
+                a2_scale,
+                apply_router_weight_on_input,
+                extra_expert_args,
+            )
 
     def execute_masked(
         self,
@@ -186,13 +197,21 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
                 ),
                 (
                     torch.zeros(
-                        [self.num_experts_per_partition, ceil_div(self.K // self.BLOCK_SIZE, 4), alignment],
+                        [
+                            self.num_experts_per_partition,
+                            ceil_div(self.K // self.BLOCK_SIZE, 4),
+                            alignment,
+                        ],
                         device=hidden_states_fp8_device,
                         dtype=torch.int,
                     ).transpose(1, 2)
                     if is_deep_gemm_e8m0_used()
                     else torch.empty(
-                        (self.num_experts_per_partition, alignment, self.K // self.BLOCK_SIZE),
+                        (
+                            self.num_experts_per_partition,
+                            alignment,
+                            self.K // self.BLOCK_SIZE,
+                        ),
                         device=hidden_states_fp8_device,
                         dtype=torch.float32,
                     )
@@ -206,7 +225,9 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
                 topk_idx,
                 alignment,
                 expert_start_loc,
-                input_tensor[0].view(self.num_experts_per_partition * alignment, self.K),
+                input_tensor[0].view(
+                    self.num_experts_per_partition * alignment, self.K
+                ),
                 input_tensor[1],
                 output_index,
                 scale_ue8m0=is_deep_gemm_e8m0_used(),
@@ -315,8 +336,13 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
                 device=hidden_states_fp8_device,
                 dtype=torch.bfloat16,
             )
-            ep_gather(down_output.view(self.num_experts_per_partition * alignment,
-                      self.K), topk_idx, topk_weights, output_index, gather_out)
+            ep_gather(
+                down_output.view(self.num_experts_per_partition * alignment, self.K),
+                topk_idx,
+                topk_weights,
+                output_index,
+                gather_out,
+            )
             return CombineForwardPayload(fused_expert_output=gather_out)
 
     def execute_contiguous(
@@ -432,33 +458,30 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
         )
         del input_tensor
-        down_input = torch.empty(
-            (
-                all_tokens,
-                N // 2,
-            ),
-            device=gateup_output.device,
-            dtype=torch.bfloat16,
-        )
         gateup_output = gateup_output.view(-1, N)
-        silu_and_mul(down_input, gateup_output)
+        if is_deep_gemm_e8m0_used():
+            # UE8M0 path: sgl kernel handles packed int32 scale format directly.
+            # Still fuse silu+quant to eliminate intermediate bf16 buffer.
+            down_input_fp8, down_input_scale = silu_and_mul_contiguous_fp8_post_quant(
+                gateup_output,
+                group_size=self.BLOCK_SIZE,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                use_ue8m0=True,
+            )
+        else:
+            # Fused SiLU(gate)*up + FP8 per-group quantization — eliminates
+            # intermediate bf16 buffer between activation and quantization.
+            down_input_fp8, down_input_scale = silu_and_mul_contiguous_fp8_post_quant(
+                gateup_output,
+                group_size=self.BLOCK_SIZE,
+            )
         del gateup_output
         down_output = torch.empty(
             (all_tokens, K),
             device=hidden_states_fp8_device,
             dtype=torch.bfloat16,
         )
-        if is_deep_gemm_e8m0_used():
-            down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
-                down_input,
-                group_size=self.BLOCK_SIZE,
-                column_major_scales=True,
-                scale_tma_aligned=True,
-                scale_ue8m0=is_deep_gemm_e8m0_used(),
-            )
-        else:
-            down_input_fp8, down_input_scale = trt_fp8_quantize_128(down_input, False)
-        del down_input
         if not is_deep_gemm_e8m0_used():
             down_input_scale = tma_align_input_scale(down_input_scale)
         m_grouped_fp8_gemm_nt_contiguous(

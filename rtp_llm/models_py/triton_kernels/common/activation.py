@@ -883,6 +883,142 @@ def silu_and_mul_masked_post_quant_packed_fwd(
     return
 
 
+@triton.jit
+def _silu_and_mul_contiguous_fp8_post_quant_kernel(
+    # Pointers
+    input_ptr,  # bf16 gateup activations, shape (all_tokens, 2*H)
+    y_q_ptr,  # fp8 output, shape (all_tokens, H)
+    y_s_ptr,  # float32 scales
+    # Sizes
+    H: tl.constexpr,  # hidden dim (half of last dim)
+    GROUP_SIZE: tl.constexpr,  # quant group size (128)
+    # Strides (elements)
+    stride_input_row,
+    stride_yq_row,
+    stride_ys_row,
+    stride_ys_g,
+    # Numeric params
+    eps: tl.constexpr,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
+    use_ue8m0: tl.constexpr,
+    # Meta
+    BLOCK: tl.constexpr,
+):
+    # Grid: (num_groups_per_row, num_tokens)
+    g = tl.program_id(0).to(tl.int64)  # group index within row
+    t = tl.program_id(1).to(tl.int64)  # token index
+
+    cols = tl.arange(0, BLOCK).to(tl.int64)
+    mask = cols < GROUP_SIZE
+
+    # Offsets into the input row for this group
+    base_offset = t * stride_input_row + g * GROUP_SIZE
+    up_offset = base_offset + cols
+    gate_offset = base_offset + H + cols
+
+    # Load gate and up
+    gate = tl.load(input_ptr + gate_offset, mask=mask, other=0.0).to(tl.float32)
+    up = tl.load(input_ptr + up_offset, mask=mask, other=0.0)
+
+    # SiLU(gate) * up
+    y = (gate * (1.0 / (1.0 + tl.exp(-gate)))) * up
+
+    # Per-group absmax scale
+    y_s = tl.maximum(tl.max(tl.abs(y)), eps) / fp8_max
+    if use_ue8m0:
+        y_s = tl.exp2(tl.ceil(tl.log2(y_s)))
+
+    # Quantize
+    y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+
+    # Store fp8 output
+    yq_offset = t * stride_yq_row + g * GROUP_SIZE + cols
+    tl.store(y_q_ptr + yq_offset, y_q, mask=mask)
+
+    # Store scale
+    ys_offset = t * stride_ys_row + g * stride_ys_g
+    tl.store(y_s_ptr + ys_offset, y_s)
+
+
+def silu_and_mul_contiguous_fp8_post_quant(
+    gateup_output: torch.Tensor,  # (all_tokens, 2*H), bf16
+    group_size: int = 128,
+    column_major_scales: bool = False,
+    scale_tma_aligned: bool = False,
+    use_ue8m0: bool = False,
+    eps: float = 1e-10,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused SiLU(gate)*up + per-group FP8 quantization for contiguous 2D layout.
+
+    Reads gateup_output (bf16, [all_tokens, 2*H]), computes SiLU activation and
+    FP8 per-group quantization in one kernel, eliminating intermediate bf16 buffer.
+
+    Returns (y_q, y_s):
+      - y_q: FP8 tensor, shape (all_tokens, H)
+      - y_s: float32 scales tensor
+    """
+    assert gateup_output.ndim == 2
+    all_tokens, H2 = gateup_output.shape
+    assert H2 % 2 == 0
+    H = H2 // 2
+    G = H // group_size
+    assert H % group_size == 0
+
+    fp8_dtype = torch.float8_e4m3fn
+    y_q = torch.empty((all_tokens, H), dtype=fp8_dtype, device=gateup_output.device)
+
+    # Create scale tensor — float32, with column-major layout if requested.
+    # UE8M0 packing (int32) is handled externally by the caller if needed.
+    if column_major_scales:
+        num_tokens_for_scale = all_tokens
+        if scale_tma_aligned:
+            num_tokens_for_scale = (all_tokens + 3) // 4 * 4
+        storage = torch.empty(
+            (G, num_tokens_for_scale),
+            dtype=torch.float32,
+            device=gateup_output.device,
+        )
+        y_s = storage.transpose(0, 1)[:all_tokens, :]
+    else:
+        y_s = torch.empty(
+            (all_tokens, G),
+            dtype=torch.float32,
+            device=gateup_output.device,
+        )
+
+    stride_input_row = gateup_output.stride(0)
+    stride_yq_row = y_q.stride(0)
+    stride_ys_row = y_s.stride(0)
+    stride_ys_g = y_s.stride(1)
+
+    f_info = torch.finfo(fp8_dtype)
+    fp8_max = f_info.max
+    fp8_min = f_info.min
+
+    grid = (G, all_tokens)
+
+    _silu_and_mul_contiguous_fp8_post_quant_kernel[grid](
+        gateup_output,
+        y_q,
+        y_s,
+        H,
+        group_size,
+        stride_input_row,
+        stride_yq_row,
+        stride_ys_row,
+        stride_ys_g,
+        eps,
+        fp8_min,
+        fp8_max,
+        use_ue8m0,
+        BLOCK=group_size,
+        num_warps=1,
+    )
+
+    return y_q, y_s
+
+
 def _heuristic_params(expert_num: int, expected_m: int) -> Tuple[int, int, int]:
     """
     Heuristic parameter selection based on actual test data.
