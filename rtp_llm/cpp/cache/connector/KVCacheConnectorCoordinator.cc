@@ -3,6 +3,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #ifdef USE_REMOTE_KV_CACHE
@@ -17,7 +18,9 @@ KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&     
                                                          const SpeculativeExecutionConfig&        sp_config,
                                                          const std::shared_ptr<KVCacheAllocator>& allocator,
                                                          rtp_llm::DeviceBase*                     device,
-                                                         const kmonitor::MetricsReporterPtr&      metrics_reporter):
+                                                         const kmonitor::MetricsReporterPtr&      metrics_reporter,
+                                                         const PDSepConfig&                       pd_sep_config,
+                                                         const CacheStoreConfig&                  cache_store_config):
     cache_config_(cache_config),
     kv_cache_config_(kv_cache_config),
     runtime_config_(runtime_config),
@@ -25,7 +28,9 @@ KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&     
     sp_config_(sp_config),
     allocator_(allocator),
     device_(device),
-    metrics_reporter_(metrics_reporter) {}
+    metrics_reporter_(metrics_reporter),
+    pd_sep_config_(pd_sep_config),
+    cache_store_config_(cache_store_config) {}
 
 KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
     stop_.store(true);
@@ -289,6 +294,22 @@ std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeys() const {
         return {};
     }
     return memory_connector_->cacheKeys();
+}
+
+void KVCacheConnectorCoordinator::handleRead(const P2PConnectorStartLoadRequestPB& request,
+                                             P2PConnectorStartLoadResponsePB&      response,
+                                             std::function<bool()>                 is_cancelled) {
+    // TODO: for p2p connector next pull request
+    (void)request;
+    (void)is_cancelled;
+    RTP_LLM_LOG_WARNING("handleRead: P2P path not configured on coordinator");
+    response.set_error_code(ErrorCodePB::UNKNOWN_ERROR);
+    response.set_error_message("P2P StartLoad not wired in KVCacheConnectorCoordinator");
+}
+
+bool KVCacheConnectorCoordinator::hasActiveConnectors() const {
+    // TODO: for p2p connector next pull request
+    return false;
 }
 
 }  // namespace rtp_llm

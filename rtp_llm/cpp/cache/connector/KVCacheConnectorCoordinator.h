@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
 namespace rtp_llm {
 
@@ -30,7 +32,9 @@ public:
                                 const SpeculativeExecutionConfig&        sp_config,
                                 const std::shared_ptr<KVCacheAllocator>& allocator,
                                 rtp_llm::DeviceBase*                     device,
-                                const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
+                                const kmonitor::MetricsReporterPtr&      metrics_reporter   = nullptr,
+                                const PDSepConfig&                       pd_sep_config      = PDSepConfig{},
+                                const CacheStoreConfig&                  cache_store_config = CacheStoreConfig{});
     virtual ~KVCacheConnectorCoordinator();
 
 public:
@@ -46,6 +50,13 @@ public:
 
     virtual bool              executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
     std::vector<CacheKeyType> memoryCacheKeys() const;
+
+    /// Prefill-side StartLoad path; P2P connector wiring fills this in when enabled.
+    virtual void handleRead(const P2PConnectorStartLoadRequestPB& request,
+                            P2PConnectorStartLoadResponsePB&      response,
+                            std::function<bool()>                 is_cancelled = nullptr);
+
+    bool hasActiveConnectors() const;
 
 private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();
@@ -65,6 +76,8 @@ private:
     std::shared_ptr<KVCacheAllocator> allocator_;
     rtp_llm::DeviceBase*              device_{nullptr};
     kmonitor::MetricsReporterPtr      metrics_reporter_;
+    PDSepConfig                       pd_sep_config_;
+    CacheStoreConfig                  cache_store_config_;
 
     std::vector<std::shared_ptr<KVCacheConnector>>    connectors_;
     std::shared_ptr<KVCacheMemoryConnector>           memory_connector_;
