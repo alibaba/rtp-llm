@@ -309,6 +309,10 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
         self.w1_scale = weights[W.moe_s1]
         self.w2_scale = weights[W.moe_s2]
 
+        self.expert_mask = build_ep_expert_mask(
+            self.num_experts, self.ep_rank, self.ep_size, self.w1
+        )
+
     @property
     def local_num_experts(self) -> int:
         return self.w1.size(0)
@@ -361,7 +365,7 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),
-            expert_mask=expert_map,
+            expert_mask=expert_map if expert_map is not None else self.expert_mask,
         )
 
         return CombineForwardPayload(fused_expert_output=output)
