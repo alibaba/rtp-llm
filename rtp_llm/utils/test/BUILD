@@ -122,6 +122,7 @@ py_test(
         "//:th_transformer",
         "//:th_transformer_config",
         "//:rtp_compute_ops",
+        "//rtp_llm:fastapi",
     ],
     exec_properties = {'gpu':'A10'}
 )
