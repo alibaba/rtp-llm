@@ -11,11 +11,19 @@ void KVCacheResource::initGroups(int group_num, int layer_num, const std::vector
         group_block_ids.push_back(std::make_shared<BlockIds>());
     }
 
-    int gid = 0;
     if (!group_block_ids.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(layer_to_group_id.empty() || layer_to_group_id.size() >= static_cast<size_t>(layer_num),
+                                "KVCacheResource::initGroups: layer_to_group_id size %zu < layer_num %d",
+                                layer_to_group_id.size(),
+                                layer_num);
         layer_block_ids.resize(layer_num);
         for (int i = 0; i < layer_num; ++i) {
-            gid                = layer_to_group_id[i];
+            int gid = layer_to_group_id.empty() ? 0 : layer_to_group_id[i];
+            RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < group_num,
+                                    "KVCacheResource::initGroups: invalid group id %d for layer %d (group_num=%d)",
+                                    gid,
+                                    i,
+                                    group_num);
             layer_block_ids[i] = group_block_ids[gid];
         }
     }

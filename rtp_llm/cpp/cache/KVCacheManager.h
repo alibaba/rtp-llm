@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <functional>
 #include <thread>
 #include <vector>
 
@@ -29,7 +30,9 @@ public:
                    const KVCacheConfig&               kv_cache_config    = KVCacheConfig{},
                    const ParallelismConfig&           parallelism_config = ParallelismConfig{},
                    const RuntimeConfig&               runtime_config     = RuntimeConfig{},
-                   const SpeculativeExecutionConfig&  sp_config          = SpeculativeExecutionConfig{});
+                   const SpeculativeExecutionConfig&  sp_config          = SpeculativeExecutionConfig{},
+                   const PDSepConfig&                 pd_sep_config      = PDSepConfig{},
+                   const CacheStoreConfig&            cache_store_config = CacheStoreConfig{});
     ~KVCacheManager();
 
     // 初始化和配置相关
@@ -100,6 +103,17 @@ public:
     // for every single rank
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 
+    // handle read request from decode side (StartLoad RPC), delegate to coordinator
+    void handleRead(const P2PConnectorStartLoadRequestPB& request,
+                    P2PConnectorStartLoadResponsePB&      response,
+                    std::function<bool()>                 is_cancelled = nullptr);
+
+    bool hasActiveConnectors() const;
+
+    std::shared_ptr<KVCacheConnectorCoordinator> connectorCoordinator() const {
+        return coordinator_;
+    }
+
 private:
     void initConnectorCoordinator();
     void allocateAndSync();
@@ -115,6 +129,8 @@ private:
     const ParallelismConfig            parallelism_config_;
     const RuntimeConfig                runtime_config_;
     const SpeculativeExecutionConfig   sp_config_;
+    const PDSepConfig                  pd_sep_config_;
+    const CacheStoreConfig             cache_store_config_;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;

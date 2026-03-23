@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <unordered_set>
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
@@ -81,6 +84,39 @@ MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
     } else {
         return incrMalloc(malloc_info);
     }
+}
+
+uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {
+    if (model_id == 0) {
+        // main model: local_layer_id is the global layer id
+        if (local_layer_id >= 0 && static_cast<size_t>(local_layer_id) < config_.layer_num) {
+            return static_cast<uint32_t>(local_layer_id);
+        }
+        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: local_layer_id=%d is invalid", local_layer_id);
+        return std::numeric_limits<uint32_t>::max();
+    }
+
+    if (model_id > config_.mtp_sub_configs.size()) {
+        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: model_id=%zu out of range (mtp_sub_configs=%zu)",
+                          model_id,
+                          config_.mtp_sub_configs.size());
+        return std::numeric_limits<uint32_t>::max();
+    }
+
+    const auto& sub = config_.mtp_sub_configs[model_id - 1];
+    if (!sub) {
+        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: mtp_sub_configs[%zu] is null", model_id - 1);
+        return std::numeric_limits<uint32_t>::max();
+    }
+    if (sub->global_layer_ids.empty()) {
+        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: mtp_sub_configs[%zu] global_layer_ids is empty", model_id - 1);
+        return std::numeric_limits<uint32_t>::max();
+    }
+    if (local_layer_id >= 0 && static_cast<size_t>(local_layer_id) < sub->global_layer_ids[0].size()) {
+        return sub->global_layer_ids[0][static_cast<size_t>(local_layer_id)];
+    }
+    RTP_LLM_LOG_ERROR("convertToGlobalLayerId: local_layer_id=%d is invalid", local_layer_id);
+    return std::numeric_limits<uint32_t>::max();
 }
 
 void KVCacheAllocator::blockCopy(int src_block_index, int dest_block_index) {

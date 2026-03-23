@@ -1,12 +1,16 @@
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -70,6 +74,57 @@ static CacheConfig makeTinyHybridConfig() {
         }
     }
     return config;
+}
+
+static ModelConfig makeTinyModelConfig(uint32_t num_layers) {
+    ModelConfig cfg;
+    cfg.num_layers                   = static_cast<int64_t>(num_layers);
+    cfg.max_seq_len                  = 128;
+    cfg.hidden_size                  = 64;
+    cfg.vocab_size                   = 1024;
+    cfg.data_type                    = rtp_llm::DataType::TYPE_FP16;
+    cfg.attn_config.head_num         = 2;
+    cfg.attn_config.kv_head_num      = 2;
+    cfg.attn_config.size_per_head    = 16;
+    cfg.attn_config.tokens_per_block = 4;
+    cfg.attn_config.use_mla          = false;
+    cfg.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+    return cfg;
+}
+
+static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig() {
+    auto score_model_cfg   = makeTinyModelConfig(/*num_layers=*/4);
+    auto propose_model_cfg = makeTinyModelConfig(/*num_layers=*/1);
+
+    score_model_cfg.hybrid_attention_config.enable_hybrid_attention = true;
+    score_model_cfg.hybrid_attention_config.hybrid_attention_types  = {
+        HybridAttentionType::LINEAR, HybridAttentionType::LINEAR, HybridAttentionType::NONE, HybridAttentionType::NONE};
+    score_model_cfg.linear_attention_config.linear_conv_kernel_dim = 2;
+    score_model_cfg.linear_attention_config.linear_key_head_dim    = 8;
+    score_model_cfg.linear_attention_config.linear_value_head_dim  = 8;
+    score_model_cfg.linear_attention_config.linear_num_key_heads   = 2;
+    score_model_cfg.linear_attention_config.linear_num_value_heads = 2;
+
+    ParallelismConfig parallelism_cfg;
+    parallelism_cfg.tp_size = 1;
+
+    RuntimeConfig runtime_cfg;
+    KVCacheConfig kv_cache_cfg;
+    kv_cache_cfg.test_block_num = 8;
+
+    SpeculativeExecutionConfig sp_cfg;
+    sp_cfg.type              = SP_TYPE_MTP;
+    sp_cfg.gen_num_per_cycle = 2;
+
+    return CacheConfigCreator::createSpConfig(score_model_cfg,
+                                              propose_model_cfg,
+                                              parallelism_cfg,
+                                              runtime_cfg,
+                                              kv_cache_cfg,
+                                              sp_cfg,
+                                              /*warm_up_result=*/std::nullopt,
+                                              /*is_mtp=*/true,
+                                              /*is_eagle=*/false);
 }
 
 static CompleteTokenIdsPtr
@@ -180,6 +235,33 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
     auto addr3 = allocator->convertIndexToAddr(/*layer_id=*/3, /*block_id=*/1);
     EXPECT_NE(addr0.kv_addr, nullptr);
     EXPECT_NE(addr3.kv_addr, nullptr);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridNoMtp) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+
+    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/0), 0u);
+    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/3), 3u);
+    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/4),
+              std::numeric_limits<uint32_t>::max());
+
+    // no mtp sub-model
+    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0),
+              std::numeric_limits<uint32_t>::max());
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridWithMtpSubConfigs) {
+    auto config    = makeTinyHybridMtpConfigByCreateSpConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+
+    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/2), 2u);
+    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0), 4u);
+    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/0), 5u);
+    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/1),
+              std::numeric_limits<uint32_t>::max());
+    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/3, /*local_layer_id=*/0),
+              std::numeric_limits<uint32_t>::max());
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReuseFlag) {

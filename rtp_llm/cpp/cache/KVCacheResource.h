@@ -93,4 +93,6 @@ private:
     bool   last_block_aligned_{false};
 };
 
+using KVCacheResourcePtr = std::shared_ptr<KVCacheResource>;
+
 }  // namespace rtp_llm

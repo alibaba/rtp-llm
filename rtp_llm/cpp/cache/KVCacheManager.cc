@@ -26,14 +26,18 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const KVCacheConfig&               kv_cache_config,
                                const ParallelismConfig&           parallelism_config,
                                const RuntimeConfig&               runtime_config,
-                               const SpeculativeExecutionConfig&  sp_config):
+                               const SpeculativeExecutionConfig&  sp_config,
+                               const PDSepConfig&                 pd_sep_config,
+                               const CacheStoreConfig&            cache_store_config):
     config_(config),
     device_(device),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
     parallelism_config_(parallelism_config),
     runtime_config_(runtime_config),
-    sp_config_(sp_config) {
+    sp_config_(sp_config),
+    pd_sep_config_(pd_sep_config),
+    cache_store_config_(cache_store_config) {
     if (warmup) {
         config_.block_num = 1;
     } else {
@@ -411,6 +415,10 @@ void KVCacheManager::regUserMr(size_t model_id) {
     allocator_->regUserMr(model_id);
 }
 
+bool KVCacheManager::hasActiveConnectors() const {
+    return coordinator_ && coordinator_->hasActiveConnectors();
+}
+
 // 异步连接器操作
 
 std::shared_ptr<AsyncContext>
@@ -444,7 +452,9 @@ void KVCacheManager::initConnectorCoordinator() {
                                                                  sp_config_,
                                                                  allocator_,
                                                                  device_,
-                                                                 metrics_reporter_);
+                                                                 metrics_reporter_,
+                                                                 pd_sep_config_,
+                                                                 cache_store_config_);
     RTP_LLM_CHECK_WITH_INFO(coordinator_->init(), "connector coordinator init failed");
 }
 
@@ -503,6 +513,14 @@ void KVCacheManager::reportMetricsLoop() {
 
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &collector);
         std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s
+    }
+}
+
+void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
+                                P2PConnectorStartLoadResponsePB&      response,
+                                std::function<bool()>                 is_cancelled) {
+    if (coordinator_) {
+        coordinator_->handleRead(request, response, is_cancelled);
     }
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -82,6 +83,8 @@ public:
     size_t                  availableTokensNum() const;
     size_t                  totalBlocksNum() const;
     size_t                  maxAvailableTokensNum() const;
+    /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
+    uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
 protected:
     virtual bool         doInit() = 0;

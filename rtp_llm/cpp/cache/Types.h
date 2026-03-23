@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 
+#include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -23,25 +24,6 @@ inline bool isNullBlockIdx(BlockIdxType block_idx) {
 struct BlockAddrInfo {
     void* kv_addr       = nullptr;
     void* kv_scale_addr = nullptr;
-};
-
-// Lightweight block descriptor for cache-store / RPC use cases.
-// Upper layers may convert (device, scalar_type) to rtp_llm::MemoryType/DataType and build Buffer views as needed.
-struct BlockInfo {
-    // Torch device of the backing storage (CPU/CUDA), taken from the underlying tensor.
-    // Kept as raw values to avoid torch->rtp conversions inside cache.
-    bool    is_cuda      = false;
-    int32_t device_index = 0;
-
-    int32_t scalar_type = 0;  // c10::ScalarType
-
-    void*  addr       = nullptr;
-    size_t size_bytes = 0;
-};
-
-struct BlockInfoPair {
-    BlockInfo kv;
-    BlockInfo kv_scale;
 };
 
 struct KVCacheInfo {

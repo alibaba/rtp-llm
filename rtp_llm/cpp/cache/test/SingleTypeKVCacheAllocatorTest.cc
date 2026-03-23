@@ -2,6 +2,7 @@
 #include <memory>
 #include <vector>
 #include <set>
+#include <optional>
 #include <torch/torch.h>
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
@@ -23,6 +24,52 @@ CacheConfig createSingleTypeTestConfig(int layer_num = 4, int block_num = 10, in
                                     rtp_llm::DataType::TYPE_FP16,
                                     /*local_head_num_kv=*/8,
                                     /*size_per_head=*/128);
+}
+
+static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
+    rtp_llm::ModelConfig m;
+    m.num_layers                   = static_cast<int>(num_layers);
+    m.max_seq_len                  = 128;
+    m.hidden_size                  = 1;
+    m.vocab_size                   = 1;
+    m.data_type                    = rtp_llm::DataType::TYPE_FP16;
+    m.attn_config.use_mla          = false;
+    m.attn_config.tokens_per_block = 4;
+    m.attn_config.kv_head_num      = 2;
+    m.attn_config.size_per_head    = 1;
+    m.attn_config.kv_cache_dtype   = KvCacheDataType::INT8;
+    m.attn_config.kv_lora_rank     = 0;
+    m.attn_config.rope_head_dim    = 0;
+    m.attn_config.head_num         = 2;
+    return m;
+}
+
+static rtp_llm::CacheConfig
+makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uint32_t block_num) {
+    auto score_model_config   = makeTestModelConfig(main_layers);
+    auto propose_model_config = makeTestModelConfig(/*num_layers=*/1);
+
+    rtp_llm::ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+
+    rtp_llm::RuntimeConfig runtime_config;
+
+    rtp_llm::KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = static_cast<int>(block_num);
+
+    rtp_llm::SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = mtp_module_num;
+
+    return rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
+                                                       propose_model_config,
+                                                       parallelism_config,
+                                                       runtime_config,
+                                                       kv_cache_config,
+                                                       sp_config,
+                                                       /*warm_up_result=*/std::nullopt,
+                                                       /*is_mtp=*/true,
+                                                       /*is_eagle=*/false);
 }
 
 CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block = 8) {
@@ -377,6 +424,41 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToAddr) {
             EXPECT_NE(addr_info.kv_addr, nullptr);
         }
     }
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdSingleNoMtp) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
+
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/0), 0u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/3), 3u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/-1),
+              std::numeric_limits<uint32_t>::max());
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/4),
+              std::numeric_limits<uint32_t>::max());
+
+    // no mtp sub-model
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0),
+              std::numeric_limits<uint32_t>::max());
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdSingleWithMtp) {
+    auto config = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/8);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
+
+    // main model: global == local
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/0), 0u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/1), 1u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/2),
+              std::numeric_limits<uint32_t>::max());
+
+    // mtp sub-models map via sub_cfg->global_layer_ids[0]
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0), 2u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/0), 3u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/1),
+              std::numeric_limits<uint32_t>::max());
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/3, /*local_layer_id=*/0),
+              std::numeric_limits<uint32_t>::max());
 }
 
 // Test convert index to buffer

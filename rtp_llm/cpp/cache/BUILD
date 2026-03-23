@@ -11,6 +11,15 @@ cc_library(
 )
 
 cc_library(
+    name = "block_info",
+    hdrs = [
+        "BlockInfo.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cache_types",
     hdrs = [
         "BufferTypes.h",
@@ -27,6 +36,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":block_info",
         ":batch_kv_cache_resource",
         ":cache_group_type",
         "//:rtp_compute_ops",
