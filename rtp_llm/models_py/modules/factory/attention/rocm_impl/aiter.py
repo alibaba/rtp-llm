@@ -679,6 +679,7 @@ class AiterPrefillImplAsm(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create implementations
@@ -727,6 +728,7 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create implementations
@@ -855,6 +857,7 @@ class AiterDecodeImplAsm(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create implementations
@@ -901,6 +904,7 @@ class AiterDecodeImplNonAsm(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create implementations

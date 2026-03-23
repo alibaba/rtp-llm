@@ -184,7 +184,7 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
 
             engine_config = EngineConfig.create(py_env_configs)
             model_config = ModelConfig()
-            model_config.max_seq_len = 2048
+            self.max_seq_len = model_config.max_seq_len = 2048
 
             init_device(
                 parallelism_config=engine_config.parallelism_config,
@@ -237,7 +237,7 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
 
         # Create shared cos_sin_cache
         cos_sin_cache = create_cos_sin_cache(
-            head_dim=head_dim, max_seq_len=2048, device="cuda"
+            head_dim=head_dim, max_seq_len=self.max_seq_len, device="cuda"
         )
 
         # Create input QKV
@@ -330,7 +330,7 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         print("\n[2] Testing FusedRopeKVCachePrefillOpQOut (C++)")
 
         # Create FusedRopeKVCachePrefillOpQOut
-        fused_rope_op = FusedRopeKVCachePrefillOpQOut(attn_config)
+        fused_rope_op = FusedRopeKVCachePrefillOpQOut(attn_config, self.max_seq_len)
 
         # Create PyAttentionInputs for C++ implementation
         attn_inputs = PyAttentionInputs()

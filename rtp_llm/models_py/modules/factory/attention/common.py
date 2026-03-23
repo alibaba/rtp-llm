@@ -83,7 +83,9 @@ def apply_write_cache_store(
         write_cache_store_impl(kv_cache)
 
 
-def copy_kv_cache_offset(old_offset: torch.Tensor, new_offset: torch.Tensor) -> None:
+def copy_kv_cache_offset(
+    old_offset: Optional[torch.Tensor], new_offset: Optional[torch.Tensor]
+) -> None:
     """Copy KV Cache offset data.
 
     Used for CUDA graph parameter update scenarios.
@@ -94,6 +96,8 @@ def copy_kv_cache_offset(old_offset: torch.Tensor, new_offset: torch.Tensor) -> 
         old_offset: Target offset tensor, data will be updated
         new_offset: Source offset tensor, provides new data
     """
+    if old_offset is None or new_offset is None:
+        return
     if new_offset.shape == old_offset.shape:
         old_offset.copy_(new_offset, non_blocking=True)
     else:

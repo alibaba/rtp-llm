@@ -146,7 +146,7 @@ def get_fmha_impl(
             continue
 
         try:
-            instance = impl(attn_configs, attn_inputs, parallelism_config)
+            instance = impl(attn_configs, attn_inputs, max_seq_len, parallelism_config)
             if not is_cuda_graph or instance.support_cuda_graph():
                 return instance
 

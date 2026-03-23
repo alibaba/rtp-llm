@@ -130,6 +130,7 @@ class CPFlashInferImpl(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        max_seq_len: int,
         parallelism_config: Optional[ParallelismConfig] = None,
     ):
         # Create implementations
@@ -137,7 +138,9 @@ class CPFlashInferImpl(FMHAImplBase):
 
         method = parallelism_config.prefill_cp_config.method
         self.fmha_impl = impl_map[method](attn_configs, attn_inputs, parallelism_config)
-        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(
+            attn_configs, max_seq_len
+        )
 
         # Store input info
         self.attn_inputs = attn_inputs

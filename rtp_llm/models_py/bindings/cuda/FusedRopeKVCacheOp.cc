@@ -125,10 +125,10 @@ TRTAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs a
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     attn_params->padding_offset            = attn_inputs.padding_offset;
-    
+
     if (attn_inputs.context_parallel_info.has_value()
-    && attn_inputs.context_parallel_info->prefill_shuffle_indices.defined()) {
-    attn_params->cp_position_ids = attn_inputs.context_parallel_info->prefill_shuffle_indices;
+        && attn_inputs.context_parallel_info->prefill_shuffle_indices.defined()) {
+        attn_params->cp_position_ids = attn_inputs.context_parallel_info->prefill_shuffle_indices;
     }
     return attn_params;
 }
@@ -287,13 +287,6 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
         .def(
             "__cpp_ptr__",
             [](KVBlockArray& self) { return reinterpret_cast<uintptr_t>(&self); },
-            "Get C++ object pointer address");
-    pybind11::class_<TRTAttn, std::shared_ptr<TRTAttn>, rtp_llm::ParamsBase>(m, "TRTAttn")
-        .def(pybind11::init<>())
-        .def_readwrite("kv_cache_offset", &TRTAttn::kv_cache_offset)
-        .def(
-            "__cpp_ptr__",
-            [](TRTAttn& self) { return reinterpret_cast<uintptr_t>(&self); },
             "Get C++ object pointer address");
     pybind11::class_<FusedRopeKVCachePrefillOpQKVOut>(m, "FusedRopeKVCachePrefillOpQKVOut")
         .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
