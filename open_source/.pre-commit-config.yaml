@@ -13,6 +13,7 @@ repos:
     rev: 24.8.0
     hooks:
       - id: black
+        types_or: [python]
 
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
