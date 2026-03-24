@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <iostream>
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
@@ -54,6 +55,7 @@ PyWrappedModel::~PyWrappedModel() {
 
 // Helper function to build PyAttentionInputs from GptModelInputs
 torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs) {
+    RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
     DevicePerfWrapper            wrapper(device_, "py model buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
     py_attn_inputs.prefix_lengths   = Buffer2torchTensor(inputs.prefix_lengths, false);
@@ -126,6 +128,7 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
                                                     const GptModelInputs&         inputs,
                                                     BufferPtr&                    kv_cache_block_id_device,
                                                     std::vector<BufferPtr>*       kv_cache_block_id_device_by_group) {
+    RTP_LLM_PROFILE_SCOPE("py_model.setupKVCacheForAttentionInputs");
     DevicePerfWrapper wrapper(device_, "py model setupKVCacheForAttentionInputs");
     if (!inputs.kv_cache_block_id) {
         return;
@@ -165,6 +168,7 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
 
 // Helper function to build BertEmbeddingInputs from GptModelInputs
 torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const GptModelInputs& inputs) {
+    RTP_LLM_PROFILE_SCOPE("py_model.buildBertEmbeddingInputs");
     DevicePerfWrapper              wrapper(device_, "py model buildBertEmbeddingInputs");
     torch_ext::BertEmbeddingInputs bert_embedding_inputs;
 
@@ -204,6 +208,7 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(BufferPtr             hidd
                                                       const GptModelInputs& inputs,
                                                       bool                  skip_final_layernorm,
                                                       size_t                num_valid_tokens) {
+    RTP_LLM_PROFILE_SCOPE("py_model.callForwardPostLayers");
     size_t num_input_tokens = num_valid_tokens != -1 ? num_valid_tokens : inputs.combo_tokens->shape()[0];
     return forwardPostLayers(hidden_states,
                              inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
@@ -217,6 +222,7 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(BufferPtr             hidd
 }
 
 std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
+    RTP_LLM_PROFILE_SCOPE("py_model.prepareWriteCacheParams");
     std::optional<PyCacheStoreInputs> params;
     if (!inputs.warmup && inputs.pd_separation) {
         const auto           decoder_batch_size = inputs.sequence_lengths->shape()[0];
@@ -252,6 +258,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
 }
 
 GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs) {
+    RTP_LLM_PROFILE_SCOPE("py_model.forwardMicroBatched");
     py::object py_forward_method = py_model_.attr("forward_micro_batch");
     if (device_props_.ffn_as_service) {
         py::object py_outputs_obj = py_forward_method(std::vector<PyModelInputs>{});
@@ -326,6 +333,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
+    RTP_LLM_PROFILE_SCOPE("py_model.forward");
     DevicePerfWrapper wrapper(device_, "py model forward");
     holdInputsHostBuffers(inputs);
     py::gil_scoped_acquire gil;
@@ -371,11 +379,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // Cast the Python object to PyModelOutputs and extract hidden states
         CudaGraphState graph_state;
         if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state)) {
+            RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state);
             hidden_states = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         } else {
+            RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(device_, "normal forward");
             held_attn_pyobj_      = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto py_model_forward = py_model_.attr("forward");
