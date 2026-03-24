@@ -114,9 +114,13 @@ def _is_fmha_impl_disabled(
     # Aiter ASM / Paged prefill
     elif (
         "AiterPrefillImplAsm" in impl_class_name
-        or "AiterDecodeImplAsm" in impl_class_name
         or "AiterPrefillImplPaged" in impl_class_name
     ):
+        return not fmha_config.use_asm_pa
+    # Aiter ASM decode — disabled when triton PA is enabled (triton PA takes priority)
+    elif "AiterDecodeImplAsm" in impl_class_name:
+        if fmha_config.use_triton_pa:
+            return True
         return not fmha_config.use_asm_pa
     # Aiter Non-ASM implementations
     elif (
