@@ -1,9 +1,8 @@
 from unittest import TestCase, main
 
 from rtp_llm.config.py_config_modules import DeepEPConfig
-from rtp_llm.distribute.worker_info import g_parallel_info
-from rtp_llm.ops import RoleType, MoeConfig
 from rtp_llm.config.server_config_setup import auto_configure_deepep
+from rtp_llm.ops import MoeConfig, ParallelismConfig, RoleType
 
 
 class AutoConfigureDeepepTest(TestCase):
@@ -14,21 +13,20 @@ class AutoConfigureDeepepTest(TestCase):
         # Create fresh config objects for each test
         self.moe_config = MoeConfig()
         self.deep_ep_config = DeepEPConfig()
+        self.parallel_config = ParallelismConfig()
 
     def _setup_parallel_info(
-        self, world_size: int, tp_size: int, ep_size: int, local_world_size: int = 8
+        self,
+        world_size: int,
+        tp_size: int,
+        ep_size: int,
+        local_world_size: int,
     ):
-        """Helper to set up parallel info
-
-        Ensures world_size % tp_size == 0 to match real-world constraints.
-        """
-        assert (
-            world_size % tp_size == 0
-        ), f"world_size ({world_size}) must be divisible by tp_size ({tp_size})"
-        g_parallel_info.world_size = world_size
-        g_parallel_info.tp_size = tp_size
-        g_parallel_info.ep_size = ep_size
-        g_parallel_info.local_world_size = local_world_size
+        """Set self.parallel_config for auto_configure_deepep."""
+        self.parallel_config.world_size = world_size
+        self.parallel_config.tp_size = tp_size
+        self.parallel_config.ep_size = ep_size
+        self.parallel_config.local_world_size = local_world_size
 
     def _assert_deepep_config(self, moe: bool, low_latency: bool, internode: bool):
         """Helper to assert DeepEP configuration values in moe_config"""
@@ -39,16 +37,18 @@ class AutoConfigureDeepepTest(TestCase):
     def test_use_all_gather_disables_all_deepep(self):
         """Test: USE_ALL_GATHER enabled should disable all DeepEP settings"""
         # Setup: ep_size == tp_size and USE_ALL_GATHER is True
+
         self._setup_parallel_info(
             world_size=8, tp_size=8, ep_size=8, local_world_size=8
         )
+
         self.moe_config.use_all_gather = True
         role_type = RoleType.PDFUSION
 
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -63,7 +63,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -81,7 +81,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -99,7 +99,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -113,7 +113,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -130,7 +130,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -144,7 +144,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
         self._assert_deepep_config(moe=False, low_latency=False, internode=False)
@@ -160,7 +160,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -177,7 +177,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -194,7 +194,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -212,7 +212,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -230,7 +230,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -248,7 +248,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -268,7 +268,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -288,7 +288,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -307,7 +307,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -329,7 +329,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -351,7 +351,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -370,7 +370,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -389,7 +389,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -409,7 +409,7 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
@@ -429,12 +429,223 @@ class AutoConfigureDeepepTest(TestCase):
         auto_configure_deepep(
             moe_config=self.moe_config,
             deep_ep_config=self.deep_ep_config,
-            g_parallel_info=g_parallel_info,
+            parallelism_config=self.parallel_config,
             role_type=role_type,
         )
 
         # Single-node multi-GPU with DECODE should enable moe and low_latency
         self._assert_deepep_config(moe=True, low_latency=True, internode=False)
+
+    def test_tp1_ep4_world4_single_node(self):
+        """Test: Decode TP=1, EP=4, world_size=4 on single node with 4 local GPUs"""
+        # world_size=4, tp_size=1, ep_size=4, local_world_size=4
+        # num_nodes = (4 + 4 - 1) // 4 = 1
+        self._setup_parallel_info(
+            world_size=4, tp_size=1, ep_size=4, local_world_size=4
+        )
+        self.moe_config.use_all_gather = False
+        role_type = RoleType.DECODE
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=role_type,
+        )
+
+        # Single-node multi-GPU with DECODE should enable moe and low_latency
+        self._assert_deepep_config(moe=True, low_latency=True, internode=False)
+
+    def test_user_specified_all_config_values(self):
+        """Test: User explicitly sets all DeepEP configuration values"""
+        self._setup_parallel_info(
+            world_size=8, tp_size=4, ep_size=8, local_world_size=8
+        )
+        self.moe_config.use_all_gather = False
+        # User explicitly sets all values
+        self.deep_ep_config.use_deepep_moe = True
+        self.deep_ep_config.use_deepep_low_latency = True
+        self.deep_ep_config.use_deepep_internode = True
+        role_type = RoleType.PDFUSION
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=role_type,
+        )
+
+        # Should use user-specified values, not auto-config
+        self._assert_deepep_config(moe=True, low_latency=True, internode=True)
+
+    def test_user_specified_partial_config_values(self):
+        """Test: User explicitly sets only some DeepEP configuration values"""
+        self._setup_parallel_info(
+            world_size=8, tp_size=4, ep_size=8, local_world_size=8
+        )
+        self.moe_config.use_all_gather = False
+        # User only sets use_deepep_moe
+        self.deep_ep_config.use_deepep_moe = False
+        self.deep_ep_config.use_deepep_low_latency = None
+        self.deep_ep_config.use_deepep_internode = None
+        role_type = RoleType.DECODE
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=role_type,
+        )
+
+        # Should use user-specified value for moe, and auto-config for others
+        # But since user set at least one value, it should copy only the set values
+        # Actually, looking at the code, if any value is set, it copies only the set ones
+        # and leaves others as they were (or None)
+        self.assertEqual(self.moe_config.use_deepep_moe, False)
+        # The other values should remain as auto-configured or default
+
+    def test_user_specified_moe_only(self):
+        """Test: User explicitly sets only use_deepep_moe"""
+        self._setup_parallel_info(
+            world_size=8, tp_size=4, ep_size=8, local_world_size=8
+        )
+        self.moe_config.use_all_gather = False
+        self.deep_ep_config.use_deepep_moe = False
+        self.deep_ep_config.use_deepep_low_latency = None
+        self.deep_ep_config.use_deepep_internode = None
+        role_type = RoleType.DECODE
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=role_type,
+        )
+
+        # Should use user-specified value
+        self.assertEqual(self.moe_config.use_deepep_moe, False)
+
+    def test_user_specified_low_latency_only(self):
+        """Test: User explicitly sets only use_deepep_low_latency"""
+        self._setup_parallel_info(
+            world_size=8, tp_size=4, ep_size=8, local_world_size=8
+        )
+        self.moe_config.use_all_gather = False
+        self.deep_ep_config.use_deepep_moe = None
+        self.deep_ep_config.use_deepep_low_latency = True
+        self.deep_ep_config.use_deepep_internode = None
+        role_type = RoleType.PDFUSION
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=role_type,
+        )
+
+        # Should use user-specified value
+        self.assertEqual(self.moe_config.use_deepep_low_latency, True)
+
+    def test_user_specified_internode_only(self):
+        """Test: User explicitly sets only use_deepep_internode"""
+        self._setup_parallel_info(
+            world_size=8, tp_size=4, ep_size=8, local_world_size=8
+        )
+        self.moe_config.use_all_gather = False
+        self.deep_ep_config.use_deepep_moe = None
+        self.deep_ep_config.use_deepep_low_latency = None
+        self.deep_ep_config.use_deepep_internode = True
+        role_type = RoleType.PDFUSION
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=role_type,
+        )
+
+        # Should use user-specified value
+        self.assertEqual(self.moe_config.use_deepep_internode, True)
+
+    def test_use_all_gather_disabled_by_low_latency(self):
+        """Test: use_deepep_low_latency=True should disable use_all_gather"""
+        self._setup_parallel_info(
+            world_size=8, tp_size=8, ep_size=8, local_world_size=8
+        )
+        self.moe_config.use_all_gather = True
+        # User sets low_latency, which should disable use_all_gather
+        self.deep_ep_config.use_deepep_low_latency = True
+        self.deep_ep_config.use_deepep_moe = None
+        self.deep_ep_config.use_deepep_internode = None
+        role_type = RoleType.PDFUSION
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=role_type,
+        )
+
+        # use_all_gather should be disabled because use_deepep_low_latency is True
+        self.assertEqual(self.moe_config.use_all_gather, False)
+        # And DeepEP settings should be applied
+        self.assertEqual(self.moe_config.use_deepep_low_latency, True)
+
+    def test_use_all_gather_with_ep_not_equal_tp(self):
+        """Test: use_all_gather=True but ep_size != tp_size should not disable DeepEP"""
+        self._setup_parallel_info(
+            world_size=8, tp_size=4, ep_size=8, local_world_size=8
+        )
+        self.moe_config.use_all_gather = True
+        self.deep_ep_config.use_deepep_moe = None
+        self.deep_ep_config.use_deepep_low_latency = None
+        self.deep_ep_config.use_deepep_internode = None
+        role_type = RoleType.DECODE
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=role_type,
+        )
+
+        # Since ep_size != tp_size, use_all_gather should be disabled
+        # and normal auto-config should apply
+        self.assertEqual(self.moe_config.use_all_gather, False)
+        # Should apply auto-config for DECODE + single-node multi-GPU
+        self._assert_deepep_config(moe=True, low_latency=True, internode=False)
+
+    def test_inference_single_node_multi_gpu(self):
+        """Test: Non-PD separation + Inference node + Single-node multi-GPU (>1TP): 1, 0, 0"""
+        self._setup_parallel_info(
+            world_size=8, tp_size=4, ep_size=8, local_world_size=8
+        )
+        self.moe_config.use_all_gather = False
+        role_type = RoleType.PDFUSION
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=role_type,
+        )
+
+        self._assert_deepep_config(moe=True, low_latency=False, internode=False)
+
+    def test_deepep_ll_init(self):
+        """Test: deepep ll max token init"""
+        self._setup_parallel_info(
+            world_size=8, tp_size=4, ep_size=8, local_world_size=8
+        )
+        role_type = RoleType.PDFUSION
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=role_type,
+            ll_num_max_token=256,
+        )
+        self.assertEqual(self.moe_config.ll_num_max_token, 256)
 
 
 if __name__ == "__main__":

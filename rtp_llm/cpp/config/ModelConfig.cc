@@ -70,6 +70,10 @@ static std::string quantMethodToString(QuantMethod quant_method) {
             return "FP8Quant";
         case QuantMethod::FP8PTPC:
             return "FP8PTPC";
+        case QuantMethod::W4A8INT4PTPC:
+            return "W4A8INT4PTPC";
+        case QuantMethod::ModelOptFP4:
+            return "ModelOptFP4";
         default:
             return "UNKNOWN(" + std::to_string(static_cast<int>(quant_method)) + ")";
     }
@@ -159,6 +163,9 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
 
     // Set dtype from model data type
     config.dtype = dataTypeToTorchType(data_type);
+
+    // Set max_seq_len for RoPE cache generation
+    config.max_seq_len = max_seq_len;
 
     return config;
 }

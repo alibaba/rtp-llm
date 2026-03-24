@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import random
 import shlex
 import socket
 import subprocess
@@ -11,7 +12,7 @@ from typing import Any, Dict, List, Optional
 import psutil
 import requests
 
-from rtp_llm.distribute.worker_info import WorkerInfo
+from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
 from rtp_llm.test.utils.port_util import PortManager
 
 CHECKPOINT_PATH = "CHECKPOINT_PATH"
@@ -68,12 +69,12 @@ class MagaServerManager(object):
 
         from rtp_llm.utils.util import wait_sever_done
 
-        port = (
-            WorkerInfo.rpc_server_port_offset(0, int(self._port))
-            if (int(self._env_args.get("VIT_SEPARATION", "0")) == 1)
-            else self._port
-        )
-        return wait_sever_done(self._server_process, port, timeout)
+        # Health check uses START_PORT (self._port); when VIT_SEPARATION==1 we return True above
+        result = wait_sever_done(self._server_process, int(self._port), timeout)
+        if not result:
+            # Print process log when server startup fails
+            self.print_process_log()
+        return result
 
     def start_server(
         self,
@@ -124,10 +125,6 @@ class MagaServerManager(object):
             current_env["DG_JIT_CACHE_DIR"] = os.path.join(home_dir, ".deep_gemm")
 
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
-        if "MULTI_TASK_PROMPT" in current_env:
-            current_env["MULTI_TASK_PROMPT"] = os.path.join(
-                os.getcwd(), current_env["MULTI_TASK_PROMPT"]
-            )
         cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)
         # 创建一个文件来存储子进程的日志
         self._log_file = (
@@ -141,7 +138,20 @@ class MagaServerManager(object):
             )
             self._file_stream = open(self._log_file, "w")
         logging.info(f"smoke_args_str: {self._smoke_args_str}")
+        # Parse smoke_args_str (single string with all arguments) into list
         parsed_args = shlex.split(self._smoke_args_str)
+
+        # Handle --multi_task_prompt argument: convert relative path to absolute path
+        for i in range(len(parsed_args)):
+            if parsed_args[i] == "--multi_task_prompt" and i + 1 < len(parsed_args):
+                path = parsed_args[i + 1]
+                if not os.path.isabs(path):
+                    parsed_args[i + 1] = os.path.join(os.getcwd(), path)
+                    logging.info(
+                        f"Converted --multi_task_prompt path from '{path}' to '{parsed_args[i + 1]}'"
+                    )
+                break
+
         p = subprocess.Popen(
             ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
             env=current_env,
@@ -191,6 +201,14 @@ class MagaServerManager(object):
     def visit(self, query: Dict[str, Any], retry_times: int, endpoint: str = "/"):
         logging.info(f"retry times: {retry_times}")
         port_offset = 5 if int(self._env_args.get("HTTP_API_TEST", 0)) else 0
+        # for dp test, random select dp for visit
+        if int(self._env_args.get("DP_SIZE", 1)) > 1:
+            port_offset = (
+                random.randint(0, int(self._env_args.get("DP_SIZE", 1)) - 1)
+                * MIN_WORKER_INFO_PORT_NUM
+                + port_offset
+            )
+
         url = f"http://0.0.0.0:{int(self._port) + port_offset}{endpoint}"
 
         for _ in range(retry_times):
@@ -225,6 +243,25 @@ class MagaServerManager(object):
     def print_process_log(self):
         if self._log_file is None:
             return
-        with open(self._log_file) as f:
-            content = f.read()
-        logging.warning(f"{content}")
+        # Flush file stream before reading to ensure all logs are written
+        if self._file_stream is not None:
+            try:
+                self._file_stream.flush()
+            except Exception:
+                pass
+        try:
+            if os.path.exists(self._log_file):
+                with open(self._log_file, "r") as f:
+                    content = f.read()
+                if content:
+                    logging.warning("=" * 80)
+                    logging.warning(f"Server process log ({self._log_file}):")
+                    logging.warning("=" * 80)
+                    logging.warning(f"{content}")
+                    logging.warning("=" * 80)
+                else:
+                    logging.warning(f"Log file {self._log_file} is empty")
+            else:
+                logging.warning(f"Log file {self._log_file} does not exist")
+        except Exception as e:
+            logging.warning(f"Failed to read log file {self._log_file}: {e}")

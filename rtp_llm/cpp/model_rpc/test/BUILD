@@ -1,7 +1,9 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("//rtp_llm/cpp/devices:device_defs.bzl",
     "device_impl_target", "device_test_envs")
+
+cc_test = cc_test_wrapper
 
 test_copts = [
     "-fno-access-control",
@@ -62,3 +64,17 @@ cc_test(
     exec_properties = {'gpu':'A10'},
 )
 
+cc_test(
+    name = "broadcast_manager_test",
+    srcs = [
+        "BroadcastManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
+        "@havenask//aios/autil:net",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)

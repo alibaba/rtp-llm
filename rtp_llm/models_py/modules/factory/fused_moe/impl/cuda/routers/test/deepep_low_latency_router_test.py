@@ -6,12 +6,17 @@ import torch
 import torch.distributed
 import torch.multiprocessing as mp
 
+from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
-from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPWrapper
+from rtp_llm.models_py.distributed.deepep_wrapper import (
+    DeepEPWrapper,
+    init_deepep_wrapper,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -24,7 +29,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router import (
     DeepEpLowLatencyRouter,
 )
-from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
+from rtp_llm.ops import MoeConfig, NcclCommConfig, ParallelismConfig, RuntimeConfig
 from rtp_llm.test.utils.numeric_util import per_token_cast_back
 from rtp_llm.test.utils.port_util import PortManager, PortsContext
 
@@ -56,9 +61,13 @@ def _init_router(
     model_config.expert_num = NUM_EXPERTS
     model_config.hidden_size = HIDDEN_SIZE
 
-    # Use the provided parallelism_config directly
-    parallelism_config.nccl_ip = "127.0.0.1"
-    parallelism_config.th_nccl_port = nccl_port
+    base_port = nccl_port + 11
+    nccl_comm_config = NcclCommConfig(
+        nccl_ip="127.0.0.1",
+        tp_nccl_port=base_port - 2,
+        dp_tp_nccl_port=base_port - 10,
+        ffn_tp_nccl_port=base_port - 5,
+    )
 
     moe_config = MoeConfig()
     moe_config.use_deepep_low_latency = True
@@ -66,20 +75,50 @@ def _init_router(
 
     runtime_config = RuntimeConfig()
     runtime_config.max_generate_batch_size = NUM_TOKEN_PER_RANK
-
+    moe_config.ll_num_max_token = NUM_TOKEN_PER_RANK
     config = MoEConfigAdapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
-        max_generate_batch_size=NUM_TOKEN_PER_RANK,
     )
 
     torch.cuda.set_device(parallelism_config.local_rank)
     torch.set_default_device(f"cuda:{parallelism_config.local_rank}")
     init_distributed_environment(
-        parallelism_config=parallelism_config, backend="nccl", timeout=60
+        parallelism_config=parallelism_config,
+        nccl_comm_config=nccl_comm_config,
+        nccl_init_port=base_port - 11,
+        backend="nccl",
+        timeout=60,
     )
-    # DeepEPWrapper will be initialized by router with correct ll_num_max_token_per_rank
+
+    py_env = PyEnvConfigs()
+    py_env.parallelism_config = parallelism_config
+    py_env.moe_config = moe_config
+    py_env.runtime_config = runtime_config
+    py_env.concurrency_config.concurrency_limit = NUM_TOKEN_PER_RANK
+    engine_config = EngineConfig(
+        parallelism_config=py_env.parallelism_config,
+        runtime_config=py_env.runtime_config,
+        nccl_comm_config=nccl_comm_config,
+        server_config=py_env.server_config,
+        pd_sep_config=py_env.pd_separation_config,
+        concurrency_config=py_env.concurrency_config,
+        fmha_config=py_env.fmha_config,
+        kv_cache_config=py_env.kv_cache_config,
+        profiling_debug_logging_config=py_env.profiling_debug_logging_config,
+        hw_kernel_config=py_env.py_hw_kernel_config,
+        device_resource_config=py_env.device_resource_config,
+        moe_config=py_env.moe_config,
+        model_specific_config=py_env.model_specific_config,
+        sp_config=py_env.sp_config,
+        cache_store_config=py_env.cache_store_config,
+        misc_config=py_env.misc_config.misc_config,
+        arpc_config=py_env.arpc_config,
+        grpc_config=py_env.grpc_config,
+        load_config=py_env.load_config,
+    )
+    init_deepep_wrapper(engine_config, model_config)
 
     router = DeepEpLowLatencyRouter(
         config,
@@ -117,7 +156,7 @@ def _run_deepep_low_latency_router_test(
     num_max_tokens = router._ll_num_max_token_per_rank * ep_size
 
     # for per dp rank
-    num_token_per_rank = config.max_generate_batch_size
+    num_token_per_rank = config.ll_num_max_token
     int_mask = (2**32) - 1
     hidden_states = torch.randn((dp_size, num_token_per_rank, hidden_size)).to(
         torch.bfloat16

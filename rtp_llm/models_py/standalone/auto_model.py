@@ -25,7 +25,6 @@ from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
 from rtp_llm.utils.model_weight import W
 
 
-
 class AutoModel:
     def __init__(
         self,
@@ -48,7 +47,7 @@ class AutoModel:
             self.py_env_configs.model_args.tokenizer_path = model_path
 
         # Create EngineConfig from py_env_configs
-        engine_config = EngineConfig.create(self.py_env_configs)
+        engine_config = EngineConfig.create(self.py_env_configs, nccl_comm_config=None)
 
         # Create model configs
         model_config = ModelFactory.create_model_config(
@@ -97,8 +96,9 @@ class AutoModel:
             concurrency_config=engine_config.concurrency_config,
             ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
             runtime_config=engine_config.runtime_config,
+            model_specific_config=engine_config.model_specific_config,
         )
-        self.device = "cuda:0"
+        self.device = "cuda"
 
         # init kv cache and bind it to py model
         self.tokens_per_block = self.model_config.attn_config.tokens_per_block
@@ -152,13 +152,12 @@ class AutoModel:
         kv_shape = [
             self.layer_num,
             self.block_nums,
-            2,
-            self.kv_head_num,
-            self.tokens_per_block,
-            self.size_per_head,
+            2 * self.kv_head_num * self.tokens_per_block * self.size_per_head,
         ]
 
-        kv_cache_total = torch.zeros(kv_shape, dtype=self.compute_dtype, device=self.device)
+        kv_cache_total = torch.zeros(
+            kv_shape, dtype=self.compute_dtype, device=self.device
+        )
         kv_cache_base = kv_cache_total
         self.kv_cache.kv_cache_base = kv_cache_base
 
@@ -201,6 +200,8 @@ class AutoModel:
             [0], dtype=torch.int32, device=self.device
         )
         attention_inputs.input_lengths = torch.tensor([1], dtype=torch.int32)
+        attention_inputs.prefix_lengths = torch.tensor([], dtype=torch.int32)
+
         # sequence_lengths is index, so minus 1
         attention_inputs.sequence_lengths = torch.tensor(
             [sequence_length - 1], dtype=torch.int32
@@ -213,6 +214,7 @@ class AutoModel:
         attention_inputs.kv_cache_block_id_host = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
         )
+        attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base)
         return attention_inputs
 
     def generate(

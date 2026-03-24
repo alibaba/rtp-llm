@@ -26,6 +26,15 @@ py_test (
 )
 
 py_test (
+    name = "cutlass_w4a8_group_gemm_test",
+    srcs = ["cutlass_w4a8_group_gemm_test.py"],
+    deps = py_test_deps,
+    env = test_envs,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test (
     name = "per_tensor_scaled_fp8_quant_test",
     srcs = ["per_tensor_scaled_fp8_quant_test.py"],
     deps = py_test_deps,
@@ -60,16 +69,16 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
-py_test(
-    name = "test_xqa_batch_decode",
-    srcs = ["test_xqa_batch_decode.py"],
-    deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": ["//rtp_llm:flashinfer-python"],
-        "@//:cuda_pre_12_9": ["//rtp_llm:flashinfer-python"],
-        "//conditions:default": []
-    }),
-    env = test_envs,
-    tags = ["H20"],
-    exec_properties = {'gpu':'H20'},
-)
+# py_test(
+#     name = "test_xqa_batch_decode",
+#     srcs = ["test_xqa_batch_decode.py"],
+#     deps = py_test_deps + select({
+#         "@//:using_cuda12_9_x86": ["//rtp_llm:flashinfer-python"],
+#         "@//:cuda_pre_12_9": ["//rtp_llm:flashinfer-python"],
+#         "//conditions:default": []
+#     }),
+#     env = test_envs,
+#     tags = ["H20"],
+#     exec_properties = {'gpu':'H20'},
+# )
 

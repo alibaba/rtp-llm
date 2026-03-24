@@ -19,7 +19,14 @@ class DeviceBase:
     def __init__(self, exported_device: DeviceExporter):
         self.exported_device = exported_device
         from rtp_llm.server.server_args.server_args import setup_args
+        from rtp_llm.config.server_config_setup import auto_configure_deepep
         self.py_env_configs = setup_args()
+        auto_configure_deepep(
+            moe_config=self.py_env_configs.moe_config,
+            deep_ep_config=self.py_env_configs.deep_ep_config,
+            parallelism_config=self.py_env_configs.parallelism_config,
+            role_type=self.py_env_configs.role_config.role_type,
+        )
 
     def get_device_type(self) -> DeviceType:
         return self.exported_device.get_device_type()
@@ -79,3 +86,13 @@ class DeviceBase:
         self, key: str, weight: torch.Tensor
     ) -> torch.Tensor:
         return weight
+
+    def maybe_prepare_static_weights_for_fp4_moe(
+        self,
+        kernel_name: str,
+        scale_name: str,
+        kernel: torch.Tensor,
+        scale: torch.Tensor,
+        **kwargs
+    ):
+        return kernel, scale

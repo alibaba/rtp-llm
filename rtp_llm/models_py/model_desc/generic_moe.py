@@ -2,11 +2,11 @@ import logging
 from typing import Any, Dict, Optional
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
     SelectTopk,
+    SigmoidGateScaleAdd,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -57,13 +58,16 @@ class GenericMoeLayer(nn.Module):
             weights, W.moe_gate, None, None, quant_config, hw_kernel_config
         )
         self.select_topk = SelectTopk(
-            config, moe_config.fake_balance_expert, parallelism_config.dp_rank
+            config=config,
+            fake_balance_expert=moe_config.fake_balance_expert,
+            dp_rank=parallelism_config.dp_rank,
+            dp_size=parallelism_config.dp_size,
+            ep_size=parallelism_config.ep_size,
         )
         config_adapter = MoEConfigAdapter(
             model_config=config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
-            max_generate_batch_size=max_generate_batch_size,
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
         )
@@ -86,8 +90,10 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = LinearFactory.create_linear_from_weights(
                 weights, W.shared_expert_gate, None, None, config
             )
+            self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
         else:
             self.shared_expert_gate = None
+            self.sigmoid_gate_scale_add = None
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
@@ -142,11 +148,13 @@ class GenericMoeLayer(nn.Module):
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(hidden_states)
             if self.shared_expert_gate is not None:
-                shared_expert_output = (
-                    F.sigmoid(self.shared_expert_gate(hidden_states))
-                    * shared_expert_output
+                gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+                # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
+                self.sigmoid_gate_scale_add(
+                    gate_output, shared_expert_output, experts_output
                 )
-            experts_output = experts_output + shared_expert_output
+            else:
+                experts_output = experts_output + shared_expert_output
         return experts_output
 
 
@@ -164,6 +172,7 @@ class GenericMoeDecoderLayer(nn.Module):
         config: ModelConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        global_weights: Dict[str, torch.Tensor],
         layer_idx: int,
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
@@ -184,9 +193,12 @@ class GenericMoeDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 quant_config,
                 hw_kernel_config,
+                global_weights=global_weights,
             )
         else:
-            attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+            attn_configs = config.getAttentionConfigs(
+                parallelism_config.get_attn_tp_size()
+            )
             self.self_attn = CausalAttention(
                 attn_configs,
                 parallelism_config,
@@ -284,6 +296,7 @@ class GenericMoeModel(GptModelBase):
                     model_config,
                     parallelism_config,
                     weights.weights[idx],
+                    weights.global_weights,
                     idx,
                     moe_config,
                     max_generate_batch_size,
@@ -299,14 +312,14 @@ class GenericMoeModel(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = inputs_embeds
+        hidden_states = self.embed_tokens(input_ids)
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)  # pyright: ignore[reportUnreachable]
-            fmha_impl.prepare(inputs.attention_inputs)
-
+            fmha_impl = self.prepare_fmha_impl(
+                inputs
+            )  # pyright: ignore[reportUnreachable]
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+            select_block_map_for_layer(inputs.attention_inputs, i)
             output = decoder_layer(
                 hidden_states,
                 residual,

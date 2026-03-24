@@ -247,6 +247,7 @@ public:
     int64_t wait_stream_size           = 0;
     int64_t running_stream_size        = 0;
     int64_t remote_running_stream_size = 0;
+    int64_t loading_cache_stream_size  = 0;
 };
 
 class RtpLLMSchedulerMetrics: public kmonitor::MetricsGroup {
@@ -258,6 +259,7 @@ public:
     kmonitor::MutableMetric* wait_stream_size_metric           = nullptr;
     kmonitor::MutableMetric* running_stream_size_metric        = nullptr;
     kmonitor::MutableMetric* remote_running_stream_size_metric = nullptr;
+    kmonitor::MutableMetric* loading_cache_stream_size_metric  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -407,12 +409,14 @@ private:
 
 class RtpLLMCacheMetricsCollector final {
 public:
-    int64_t kv_cache_item_num         = 0;
-    int64_t kv_cache_free_blocks      = 0;
-    int64_t kv_cache_available_blocks = 0;
-    int64_t kv_cache_left_seq         = 0;
-    float   kv_cache_used_ratio       = 0;
-    int64_t mr_cost_time_ms           = 0;
+    int64_t kv_cache_item_num             = 0;
+    int64_t kv_cache_free_blocks          = 0;
+    int64_t kv_cache_available_blocks     = 0;
+    int64_t kv_cache_request_ref_blocks   = 0;
+    int64_t kv_cache_connector_ref_blocks = 0;
+    int64_t kv_cache_left_seq             = 0;
+    float   kv_cache_used_ratio           = 0;
+    int64_t mr_cost_time_ms               = 0;
 };
 
 class RtpLLMCacheMetrics: public kmonitor::MetricsGroup {
@@ -421,12 +425,14 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* kv_cache_item_num_metric         = nullptr;
-    kmonitor::MutableMetric* kv_cache_free_blocks_metric      = nullptr;
-    kmonitor::MutableMetric* kv_cache_available_blocks_metric = nullptr;
-    kmonitor::MutableMetric* kv_cache_left_seq_metric         = nullptr;
-    kmonitor::MutableMetric* kv_cache_used_ratio_metric       = nullptr;
-    kmonitor::MutableMetric* mr_cost_time_ms_metric           = nullptr;
+    kmonitor::MutableMetric* kv_cache_item_num_metric             = nullptr;
+    kmonitor::MutableMetric* kv_cache_free_blocks_metric          = nullptr;
+    kmonitor::MutableMetric* kv_cache_available_blocks_metric     = nullptr;
+    kmonitor::MutableMetric* kv_cache_request_ref_blocks_metric   = nullptr;
+    kmonitor::MutableMetric* kv_cache_connector_ref_blocks_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_left_seq_metric             = nullptr;
+    kmonitor::MutableMetric* kv_cache_used_ratio_metric           = nullptr;
+    kmonitor::MutableMetric* mr_cost_time_ms_metric               = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -434,11 +440,114 @@ private:
 
 class RtpLLMCacheReuseMetricsCollector final {
 public:
-    int64_t match_cost_time_us    = 0;
     int64_t kv_cache_reuse_length = 0;
-    int64_t gpu_input_length      = 0;
-    int64_t gpu_reuse_length      = 0;
-    float   gpu_cache_hit_rate    = 0;
+    float   kv_cache_hit_rate     = 0;
+};
+
+class RtpLLMDeviceCacheReuseMetricsCollector final {
+public:
+    int64_t match_cost_time_us    = 0;
+    int64_t device_input_length   = 0;
+    int64_t device_reuse_length   = 0;
+    float   device_cache_hit_rate = 0;
+};
+
+class RtpLLMRemoteCacheMatchMetricsCollector final {
+public:
+    bool    remote_match_qps             = true;
+    bool    remote_match_fail_qps        = true;
+    double  remote_valid_hit_ratio       = 0; /* 0~1 */
+    int64_t remote_match_reuse_block_num = 0;
+    int64_t remote_match_time_us         = 0;
+};
+
+class RtpLLMRemoteCacheReadMetricsCollector final {
+public:
+    bool    remote_read_qps               = true;
+    bool    remote_read_fail_qps          = true;
+    int64_t remote_read_task_cost_time_us = 0;
+    int64_t remote_read_token_num         = 0;
+};
+
+class RtpLLMRemoteCacheWriteMetricsCollector final {
+public:
+    bool    remote_write_qps                  = true;
+    bool    remote_write_fail_qps             = true;
+    int64_t remote_write_cache_block_num      = 0;
+    int64_t remote_write_task_cost_time_us    = 0;
+    int64_t remote_get_write_location_time_us = 0;
+    int64_t remote_write_broadcast_time_us    = 0;
+    int64_t remote_finish_write_time_us       = 0;
+};
+
+class RtpLLMRemoteCacheSDKMetricsCollector final {
+public:
+    bool    remote_sdk_fail_qps     = true;
+    int64_t remote_sdk_block_num    = 0;
+    int64_t remote_sdk_cost_time_us = 0;
+};
+
+class RtpLLMRemoteCacheMatchMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheMatchMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* remote_match_qps_metric             = nullptr;
+    kmonitor::MutableMetric* remote_match_fail_qps_metric        = nullptr;
+    kmonitor::MutableMetric* remote_valid_hit_ratio_metric       = nullptr;
+    kmonitor::MutableMetric* remote_match_reuse_block_num_metric = nullptr;
+    kmonitor::MutableMetric* remote_match_time_us_metric         = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMRemoteCacheReadMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheReadMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* remote_read_qps_metric               = nullptr;
+    kmonitor::MutableMetric* remote_read_fail_qps_metric          = nullptr;
+    kmonitor::MutableMetric* remote_read_task_cost_time_us_metric = nullptr;
+    kmonitor::MutableMetric* remote_read_token_num_metric         = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMRemoteCacheWriteMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheWriteMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* remote_write_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* remote_write_fail_qps_metric             = nullptr;
+    kmonitor::MutableMetric* remote_write_cache_block_num_metric      = nullptr;
+    kmonitor::MutableMetric* remote_write_task_cost_time_us_metric    = nullptr;
+    kmonitor::MutableMetric* remote_get_write_location_time_us_metric = nullptr;
+    kmonitor::MutableMetric* remote_write_broadcast_time_us_metric    = nullptr;
+    kmonitor::MutableMetric* remote_finish_write_time_us_metric       = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMRemoteCacheSDKMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheSDKMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* remote_sdk_fail_qps_metric     = nullptr;
+    kmonitor::MutableMetric* remote_sdk_block_num_metric    = nullptr;
+    kmonitor::MutableMetric* remote_sdk_cost_time_us_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
 };
 
 class RtpLLMCacheReuseMetrics: public kmonitor::MetricsGroup {
@@ -447,11 +556,23 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* match_cost_time_us    = nullptr;
     kmonitor::MutableMetric* kv_cache_reuse_length = nullptr;
-    kmonitor::MutableMetric* gpu_input_length      = nullptr;
-    kmonitor::MutableMetric* gpu_reuse_length      = nullptr;
-    kmonitor::MutableMetric* gpu_cache_hit_rate    = nullptr;
+    kmonitor::MutableMetric* kv_cache_hit_rate     = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMDeviceCacheReuseMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMDeviceCacheReuseMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* match_cost_time_us    = nullptr;
+    kmonitor::MutableMetric* device_input_length   = nullptr;
+    kmonitor::MutableMetric* device_reuse_length   = nullptr;
+    kmonitor::MutableMetric* device_cache_hit_rate = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -664,7 +785,7 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
-class RtpLLMMemoryBlockCacheMatchMetricsCollector final {
+class RtpLLMMemoryCacheMatchMetricsCollector final {
 public:
     bool    failed        = false;
     int64_t latency_us    = 0;
@@ -672,50 +793,67 @@ public:
     int64_t matched_token = 0;
 };
 
-class RtpLLMMemoryBlockCachePutMetricsCollector final {
+class RtpLLMMemoryCacheReadMetricsCollector final {
+public:
+    bool    failed        = false;
+    int64_t latency_us    = 0;
+    int64_t input_token   = 0;
+    int64_t matched_token = 0;
+    int64_t read_token    = 0;
+};
+
+class RtpLLMMemoryCacheWriteMetricsCollector final {
 public:
     bool    failed      = false;
     int64_t latency_us  = 0;
     int64_t input_token = 0;
-    int64_t put_token   = 0;
+    int64_t write_token = 0;
 };
 
-class RtpLLMMemoryBlockCacheCopyMetricsCollector final {
+class RtpLLMMemoryCacheCopyMetricsCollector final {
 public:
     bool    failed     = false;
     int64_t latency_us = 0;
     bool    from_gpu   = false;
 };
 
-class RtpLLMMemoryBlockCacheStatusMetricsCollector final {
+class RtpLLMMemoryCacheStatusMetricsCollector final {
 public:
     int64_t total_block_num     = 0;
     int64_t allocated_block_num = 0;  // 在cache中的block数量
     int64_t available_block_num = 0;  // 可用的block数量
 };
 
-class RtpLLMMemoryBlockCacheMetrics: public kmonitor::MetricsGroup {
+class RtpLLMMemoryCacheMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryBlockCacheMatchMetricsCollector* collector);
-    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryBlockCachePutMetricsCollector* collector);
-    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryBlockCacheCopyMetricsCollector* collector);
-    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryBlockCacheStatusMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheMatchMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheReadMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheWriteMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheStatusMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* kv_cache_memory_cache_match_qps_metric           = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_match_none_qps_metric      = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_match_failed_qps_metric    = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_match_latency_metric       = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_match_input_token_metric   = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_match_matched_token_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_match_qps_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_match_failed_qps_metric  = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_match_none_qps_metric    = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_match_latency_metric     = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_match_input_token_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_matched_token_metric     = nullptr;
 
-    kmonitor::MutableMetric* kv_cache_memory_cache_put_qps_metric         = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_put_none_qps_metric    = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_put_failed_qps_metric  = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_put_latency_metric     = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_put_input_token_metric = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_put_put_token_metric   = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_read_qps_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_read_none_qps_metric    = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_read_failed_qps_metric  = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_read_latency_metric     = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_read_input_token_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_read_token_metric       = nullptr;
+
+    kmonitor::MutableMetric* kv_cache_memory_cache_write_qps_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_write_none_qps_metric    = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_write_failed_qps_metric  = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_write_latency_metric     = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_write_input_token_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_write_token_metric       = nullptr;
 
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_qps_metric        = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;

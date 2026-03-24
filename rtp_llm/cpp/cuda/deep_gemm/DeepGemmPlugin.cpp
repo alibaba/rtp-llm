@@ -4,6 +4,7 @@
 #include <torch/torch.h>
 #include "rtp_llm/cpp/cuda/deep_gemm/utils.h"
 #include "rtp_llm/cpp/cuda/deep_gemm/ConfigUtils.h"
+#include "rtp_llm/cpp/cuda/deep_gemm/JITRuntime.h"
 #include "rtp_llm/cpp/core/QBuffer.h"
 #include "rtp_llm/cpp/cuda/deep_gemm/DeepGemmPlugin.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
@@ -14,26 +15,32 @@ using namespace std;
 namespace rtp_llm {
 
 #ifdef ENABLE_FP8
-void runDeepGemm(__nv_bfloat16* output,
-                 __nv_fp8_e4m3* lhs,
-                 float*         lhs_scale,
-                 __nv_fp8_e4m3* rhs,
-                 float*         rhs_scale,
-                 int*           grouped_layout,
-                 uint32_t       m,
-                 uint32_t       n,
-                 uint32_t       k,
-                 uint32_t       bm,
-                 uint32_t       bn,
-                 uint32_t       bk,
-                 uint32_t       num_groups,
-                 uint32_t       num_stages,
-                 uint32_t       num_tma_multicast,
-                 DeepGemmType   gemm_type,
-                 cudaStream_t   stream,
-                 uint32_t       num_sms,
-                 uint32_t       smem_size,
-                 bool           swap_ab);
+static void runDeepGemm(__nv_bfloat16* output,
+                        __nv_fp8_e4m3* lhs,
+                        float*         lhs_scale,
+                        __nv_fp8_e4m3* rhs,
+                        float*         rhs_scale,
+                        int*           grouped_layout,
+                        uint32_t       m,
+                        uint32_t       n,
+                        uint32_t       k,
+                        uint32_t       bm,
+                        uint32_t       bn,
+                        uint32_t       bk,
+                        uint32_t       num_groups,
+                        uint32_t       num_stages,
+                        uint32_t       num_tma_multicast,
+                        DeepGemmType   gemm_type,
+                        cudaStream_t   stream,
+                        uint32_t       num_sms,
+                        uint32_t       smem_size,
+                        bool           swap_ab) {
+    RTP_LLM_LOG_DEBUG("m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_stages:%u, num_tma_multicast:%u, swap_ab:%u\n",
+                      m, n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, swap_ab);
+    runKernel(output, lhs, lhs_scale, rhs, rhs_scale, grouped_layout,
+              m, n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast,
+              gemm_type, stream, num_sms, smem_size, swap_ab);
+}
 #endif
 
 size_t DeepGemmPlugin::getPaddingSize(size_t m, DeepGemmType gemm_type) {

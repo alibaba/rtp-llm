@@ -94,13 +94,16 @@ public:
             if (!result.ok()) {
                 (*it)->setStop(ErrorCode::MALLOC_FAILED,
                                "BatchDecodeScheduler::initRunningStreams: initKVBlock failed");
+                continue;
             }
-        }
-        // incr kvcache block to decode
-        if (scheduler_type_ == SchedulerType::kBatchDecode) {
-            for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
-                auto stream = *it;
-                stream->setIsContextStream(false);
+            if (scheduler_type_ == SchedulerType::kBatchDecode) {
+                (*it)->setIsContextStream(false);
+                // for linear attn, incrKVBlock to clear unused linear block
+                result = (*it)->incrKVBlock(reserve_step);
+                if (!result.ok()) {
+                    (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "decode incrKVBlock failed");
+                    RTP_LLM_LOG_WARNING("stream [%ld] decode incr block failed", (*it)->streamId());
+                }
             }
         }
     }

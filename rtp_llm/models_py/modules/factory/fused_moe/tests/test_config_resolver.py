@@ -5,7 +5,9 @@ from unittest.mock import patch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
@@ -27,7 +29,7 @@ def create_config_adapter(
     model_config.moe_k = 2
     model_config.data_type = data_type
     model_config.quant_config = quant_config
-    
+
     parallelism_config = ParallelismConfig()
     parallelism_config.ep_size = ep_size
     parallelism_config.tp_size = tp_size
@@ -39,15 +41,14 @@ def create_config_adapter(
     parallelism_config.world_rank = 0
     parallelism_config.local_rank = 0
     parallelism_config.local_world_size = 1
-    
+
     moe_config = MoeConfig()
     moe_config.use_deepep_low_latency = use_deepep_low_latency
-    
+    moe_config.ll_num_max_token = 128
     return MoEConfigAdapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
-        max_generate_batch_size=128,
     )
 
 

@@ -38,7 +38,7 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
 
     if (k_block_stride_bytes == v_block_stride_bytes) {
         auto spec                = std::make_shared<MHAKVCacheSpec>();
-        spec->type               = KVCacheType::MultiHeadAttention;
+        spec->type               = KVCacheSpecType::MultiHeadAttention;
         spec->dtype              = dtype;
         spec->layer_num          = layer_num;
         spec->local_head_num_kv  = local_head_num_kv;
@@ -48,7 +48,7 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
     } else {
         // Use MLA spec to allow different K/V sizes.
         auto spec                = std::make_shared<MLAKVCacheSpec>();
-        spec->type               = KVCacheType::MultiHeadLatentAttention;
+        spec->type               = KVCacheSpecType::MultiHeadLatentAttention;
         spec->dtype              = dtype;
         spec->layer_num          = layer_num;
         spec->local_head_num_kv  = local_head_num_kv;
@@ -59,19 +59,30 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
     }
 }
 
-inline BlockPoolConfig createTestConfig(MemoryLayout      layout               = LAYER_FIRST,
-                                        size_t            k_block_stride_bytes = 512,
+inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes = 512,
                                         size_t            v_block_stride_bytes = 512,
+                                        size_t            k_scale_stride_bytes = 0,
+                                        size_t            v_scale_stride_bytes = 0,
                                         rtp_llm::DataType dtype                = rtp_llm::DataType::TYPE_FP16,
                                         uint32_t          local_head_num_kv    = 1,
                                         uint32_t          seq_size_per_block   = 1) {
-    RTP_LLM_CHECK_WITH_INFO(layout == LAYER_FIRST, "only LAYER_FIRST is supported in tests");
     constexpr uint32_t kLayerNum = 4;
     constexpr uint32_t kBlockNum = 10;
 
     auto spec = createTestKvCacheSpec(
         kLayerNum, dtype, local_head_num_kv, seq_size_per_block, k_block_stride_bytes, v_block_stride_bytes);
-    return BlockPoolConfigHelper::createLayerFirstConfig(kLayerNum, kBlockNum, spec);
+
+    // Create CacheConfig with the spec
+    rtp_llm::CacheConfig cache_config;
+    cache_config.cache_specs           = {spec};
+    cache_config.layer_num             = kLayerNum;
+    cache_config.block_num             = kBlockNum;
+    cache_config.dtype                 = dtype;
+    cache_config.seq_size_per_block    = seq_size_per_block;
+    cache_config.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
+    cache_config.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
+
+    return BlockPoolConfigHelper::createConfig(cache_config);
 }
 
 DeviceBase* createDevice() {
@@ -89,9 +100,13 @@ DeviceBase* createDevice() {
     rtp_llm::ConcurrencyConfig           concurrency_config;
     rtp_llm::FfnDisAggregateConfig       ffn_disaggregate_config;
     rtp_llm::RuntimeConfig               runtime_config;
+    rtp_llm::ModelSpecificConfig         model_specific_config;
 
-    device_resource_config.device_reserve_memory_bytes = 1024L * 1024 * 1024;  // 1GB
-    device_resource_config.host_reserve_memory_bytes   = 1024L * 1024 * 1024;  // 1GB
+    // Keep tests stable on shared GPUs with low free memory:
+    // - device_reserve_memory_bytes=1 => avoid DeviceFactory default (-512MB), i.e. avoid reserving (free - 512MB)
+    // - host_reserve_memory_bytes=0   => don't reserve pinned host memory
+    device_resource_config.device_reserve_memory_bytes = 2048000000;
+    device_resource_config.host_reserve_memory_bytes   = 0;
 
     rtp_llm::DeviceFactory::initDevices(parallelism_config,
                                         model_config,
@@ -105,7 +120,9 @@ DeviceBase* createDevice() {
                                         hw_kernel_config,
                                         concurrency_config,
                                         ffn_disaggregate_config,
-                                        runtime_config);
+                                        runtime_config,
+                                        model_specific_config,
+                                        rtp_llm::NcclCommConfig{});
     return rtp_llm::DeviceFactory::getDefaultDevice();
 }
 

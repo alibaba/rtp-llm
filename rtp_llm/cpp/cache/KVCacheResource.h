@@ -30,6 +30,10 @@ public:
         block_indices.resize(reserver_blocks, value);
     }
 
+    void swap(size_t rhs, size_t lhs) {
+        std::swap(block_indices[rhs], block_indices[lhs]);
+    }
+
 private:
     BlockIndicesType block_indices;
 };
@@ -39,7 +43,7 @@ using LayerBlockIds = std::vector<std::shared_ptr<BlockIds>>;
 
 class KVCacheResource {
 public:
-    void initGroups(int group_nums);
+    void initGroups(int group_num, int layer_num, const std::vector<int>& layer_to_group_id = {});
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int               blocksNum(int group_id = 0) const;
@@ -50,8 +54,29 @@ public:
     GroupBlockIds&       groupBlocks();
     const GroupBlockIds& groupBlocks() const;
 
+    const LayerBlockIds& layerBlocks() const;
+
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
+
+    size_t reuseBlockNum() const;
+
+    size_t deviceReuseBlockNum() const;
+    void   setDeviceReuseBlockNum(size_t device_reuse_blocks_num);
+
+    size_t memoryReuseBlockNum() const;
+    void   setMemoryReuseBlockNum(size_t memory_reuse_blocks_num);
+
+    size_t remoteReuseBlockNum() const;
+    void   setRemoteReuseBlockNum(size_t remote_reuse_blocks_num);
+
+    bool lastBlockAligned() const;
+    void setLastBlockAligned(bool last_block_aligned);
+
+    size_t remoteReuseBlocksNum() const;
+    void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
+
+    void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
 
     std::string debugString() const;
 
@@ -61,6 +86,11 @@ private:
     // group_id -> block_indices
     GroupBlockIds group_block_ids;
     CacheKeysType cache_keys;
+
+    size_t device_reuse_block_num_{0};
+    size_t memory_reuse_block_num_{0};
+    size_t remote_reuse_block_num_{0};
+    bool   last_block_aligned_{false};
 };
 
 }  // namespace rtp_llm

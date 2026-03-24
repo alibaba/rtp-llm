@@ -16,7 +16,7 @@ from flashinfer.utils import is_sm90a_supported
 
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 from rtp_llm.models_py.utils.arch import is_cuda
-from rtp_llm.ops import AttentionConfigs
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
@@ -160,19 +160,24 @@ def concat_and_cast_mha_k_triton(
 
 
 class MlaFlashInferPrefillOp(object):
+    _triton_compat_warned = False  # Class variable to track warning status
+
     def __init__(
         self,
         num_heads: int,
         kv_lora_rank: int,
         qk_rope_head_dim: int,
         qk_nope_head_dim: int,
+        v_head_dim: int,
         page_size: int,
         softmax_extra_scale: float,
         use_mla: bool,
         weights: List[Dict[str, torch.Tensor]] | None,
         quant_config: Optional[object] = None,
+        kv_cache_dtype: KvCacheDataType = KvCacheDataType.BASE,
     ):
         super().__init__()
+
         if weights is None:
             raise Exception(f"MlaAbsorbAttention need weights but got none")
         self.quant_config = quant_config
@@ -180,17 +185,19 @@ class MlaFlashInferPrefillOp(object):
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_nope_head_dim = qk_nope_head_dim
+        self.v_head_dim = v_head_dim
         self.scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** -0.5
         self.weights = weights
         self.token_per_block = page_size
         self.softmax_extra_scale = softmax_extra_scale
         self.use_mla = use_mla
+        self.kv_cache_type = kv_cache_dtype
         global g_workspace_buffer
         if g_workspace_buffer is None:
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
-                device=self.weights[0].get(W.mla_k_nope_w).device,
+                device=self.weights[0].get(W.mla_kv_b_w).device,
             )
 
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
@@ -200,17 +207,14 @@ class MlaFlashInferPrefillOp(object):
             use_cuda_graph=False,
         )
 
-    def support(self, attention_inputs: PyAttentionInputs):
-        return self.use_mla and attention_inputs.is_prefill
-
     def plan(self, mla_params: Any):
         self.prefill_wrapper.plan(
             mla_params.qo_indptr_d,
-            mla_params.prefill_page_indptr_d,
+            mla_params.prefill_ragged_kv_len_indptr_d,
             self.num_heads,
             self.num_heads,
             self.qk_rope_head_dim + self.qk_nope_head_dim,
-            self.qk_nope_head_dim,
+            self.v_head_dim,
             sm_scale=(1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5)
             * self.softmax_extra_scale,
             causal=True,
@@ -220,6 +224,12 @@ class MlaFlashInferPrefillOp(object):
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.qo_indptr = mla_params.qo_indptr_d
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
+        self.total_kv_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1].item()
+        self.block_table = mla_params.page_indice_d.unsqueeze(0)
+        self.workspace_starts = torch.zeros(
+            1, dtype=torch.int32, device=self.block_table.device
+        )
+        self.seq_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1:]
 
     def _reuse_kv_cache_indexed_batched(
         self,
@@ -236,6 +246,28 @@ class MlaFlashInferPrefillOp(object):
 
         if num_blocks == 0:
             return compressed_kv, k_pe
+
+        if self.kv_cache_type == KvCacheDataType.FP8:
+            final_compressed_kv = torch.empty(
+                [self.total_kv_lens, self.kv_lora_rank],
+                dtype=torch.bfloat16,
+                device=compressed_kv.device,
+            )
+            final_k_pe = torch.empty(
+                [self.total_kv_lens, self.qk_rope_head_dim],
+                dtype=torch.bfloat16,
+                device=compressed_kv.device,
+            )
+            rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache(
+                kv_cache.kv_cache_base.view(torch.uint8),
+                final_compressed_kv,
+                final_k_pe,
+                self.block_table,
+                self.seq_lens,
+                self.workspace_starts,
+                batch_size=1,  # ragged
+            )
+            return final_compressed_kv, final_k_pe
 
         compressed_kv_dim = compressed_kv.size(1)
         qo_indptr = self.qo_indptr
@@ -290,15 +322,30 @@ class MlaFlashInferPrefillOp(object):
         ):
             k = k_nope.new_empty(*k_shape)
             rtp_llm_ops.mla_k_merge(k, k_nope, k_pe)
-        elif is_cuda():
+        elif is_cuda() and self._is_triton_compatible():
+            # Triton kernel requires dimensions to be power of 2
             attn_dtype = k_nope.dtype
             k = k_nope.new_empty(*k_shape, dtype=attn_dtype)
             concat_and_cast_mha_k_triton(k, k_nope, k_pe)
         else:
+            # Fallback to PyTorch native operations for non-power-of-2 dimensions
             k = k_nope.new_empty(*k_shape)
             k[..., : self.qk_nope_head_dim] = k_nope
             k[..., self.qk_nope_head_dim :] = k_pe
         return k
+
+    def _is_triton_compatible(self):
+        """Check if dimensions are compatible with Triton kernel (must be power of 2)."""
+
+        def is_power_of_2(n):
+            return n > 0 and (n & (n - 1)) == 0
+
+        compatible = (
+            is_power_of_2(self.qk_nope_head_dim)
+            and is_power_of_2(self.qk_rope_head_dim)
+            and is_power_of_2(self.num_heads)
+        )
+        return compatible
 
     def forward(
         self,
@@ -314,28 +361,23 @@ class MlaFlashInferPrefillOp(object):
         )
 
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
-        self.k_nope_proj = LinearFactory.create_linear_from_weights(
+        self.kv_b_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id],
-            W.mla_k_nope_w,
-            W.mla_k_nope_s,
+            W.mla_kv_b_w,
+            W.mla_kv_b_s,
             None,
             self.quant_config,
         )
 
-        self.v_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None, self.quant_config
-        )
-
-        k_nope = self.k_nope_proj(compressed_kv)
-        value_states = self.v_proj(compressed_kv)
-
-        k_nope = k_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
-        value_states = value_states.view(-1, self.num_heads, self.qk_nope_head_dim)
+        kv = self.kv_b_proj(compressed_kv)
+        kv = kv.view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope = kv[:, :, : self.qk_nope_head_dim]
+        value_states = kv[:, :, self.qk_nope_head_dim :]
         k = self._concat_and_cast_mha_k(k_nope, k_pe)
 
         # TODO: add TRT prefill support
         attn_output = self.prefill_wrapper.run(q, k, value_states)
-        attn_output = attn_output.view(-1, self.num_heads, self.qk_nope_head_dim)
+        attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
         return attn_output
 
 
@@ -349,6 +391,7 @@ class MlaFlashInferDecodeOp(object):
         token_per_block: int,
         softmax_extra_scale: float,
         use_mla: bool,
+        is_sparse: bool,
         weights: List[Dict[str, torch.Tensor]] | None = None,
         max_bs: int = 0,
         max_context_len: int = 0,
@@ -356,6 +399,7 @@ class MlaFlashInferDecodeOp(object):
         is_cuda_graph: bool = False,
     ):
         super().__init__()
+
         if weights is None:
             raise Exception(f"MlaAbsorbAttention need weights but got none")
         self.num_heads = num_heads
@@ -367,6 +411,7 @@ class MlaFlashInferDecodeOp(object):
         self.softmax_extra_scale = softmax_extra_scale
         self.weights = weights
         self.use_mla = use_mla
+        self.is_sparse = is_sparse
         self.use_cuda_graph = is_cuda_graph
         global g_workspace_buffer
         self.kv_indices_d = torch.empty(
@@ -396,9 +441,6 @@ class MlaFlashInferDecodeOp(object):
             kv_len_arr=self.kv_len_arr_h,
         )
 
-    def support(self, attention_inputs: PyAttentionInputs):
-        return self.use_mla
-
     def plan(self, fmha_params: Any):
         if self.use_cuda_graph and self.kv_indices_d.size(
             0
@@ -409,6 +451,7 @@ class MlaFlashInferDecodeOp(object):
             raise ValueError(
                 f"kv_indices_d.size(0) < fmha_params.page_indice_d.size(0)"
             )
+
         self.mla_wrapper.plan(
             fmha_params.qo_indptr_h,
             fmha_params.decode_page_indptr_h,
@@ -418,8 +461,8 @@ class MlaFlashInferDecodeOp(object):
             self.kv_lora_rank,
             self.qk_rope_head_dim,
             self.token_per_block,
-            False,  # causal
-            self.scale,
+            True,  # causal
+            self.scale * self.softmax_extra_scale,
             torch.bfloat16,
             torch.bfloat16,
         )
@@ -435,7 +478,9 @@ class MlaFlashInferDecodeOp(object):
         k_weight = self.weights[layer_id].get(W.mla_kc, None)
         v_weight = self.weights[layer_id].get(W.mla_vc, None)
 
-        compressed_kv = kv_cache.kv_cache_base
+        compressed_kv = kv_cache.kv_cache_base.view(
+            -1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim
+        )
 
         q_nope = q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
         q_pe = q_pe.view(-1, self.num_heads, self.qk_rope_head_dim)
@@ -447,31 +492,11 @@ class MlaFlashInferDecodeOp(object):
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        profiler_args = ()
-
-        num_heads = q_nope.shape[1]
-        page_size = self.mla_wrapper._page_size
-        sm_scale = self.mla_wrapper._sm_scale * self.softmax_extra_scale
-
         attn_output = torch.empty_like(q_nope)
-        self.mla_wrapper._cached_module.run.default(
-            self.mla_wrapper._float_workspace_buffer,
-            self.mla_wrapper._int_workspace_buffer,
-            self.mla_wrapper._plan_info,
-            q_nope,
-            q_pe,
-            compressed_kv,
-            k_pe,
-            self.mla_wrapper._kv_indices_buf,
-            attn_output,
-            None,
-            1,
-            num_heads,
-            page_size,
-            sm_scale,
-            *profiler_args,
-        )
+        self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe, attn_output)
+
         attn_output = attn_output.view(-1, self.num_heads, self.kv_lora_rank)
         attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), v_weight)
         attn_bmm_output = attn_bmm_output.transpose(0, 1)
+
         return attn_bmm_output

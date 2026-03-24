@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <cstring>
 
 namespace rtp_llm {
@@ -21,6 +22,7 @@ grpc::Status DecodeRpcServerNew::init(const EngineInitParams&                   
 grpc::Status DecodeRpcServerNew::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                     const GenerateInputPB*                 request,
                                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
+    RTP_LLM_PROFILE_FUNCTION();
     DecodeGenerateContextNew decode_context(server_context, request, response_writer, metrics_reporter_, meta_);
 
     RTP_LLM_LOG_DEBUG("request [%s] start generate", decode_context.request_key.c_str());
@@ -48,6 +50,7 @@ grpc::Status DecodeRpcServerNew::GenerateStreamCall(grpc::ServerContext*        
 }
 
 ErrorInfo DecodeRpcServerNew::loadCacheFromPrefill(DecodeGenerateContextNew& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to load cache from prefill", decode_context.request_key.c_str());
 
     makeRemoteGenerateRequest(decode_context);
@@ -71,6 +74,7 @@ ErrorInfo DecodeRpcServerNew::loadCacheFromPrefill(DecodeGenerateContextNew& dec
 }
 
 void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto& request = decode_context.remote_generate_request;
 
     GenerateInputPB* new_request = new GenerateInputPB(*decode_context.request);
@@ -97,6 +101,7 @@ void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& dec
 }
 
 ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to call prefill", decode_context.request_key.c_str());
 
     auto                        role_addrs = QueryConverter::getRoleAddrs(&decode_context.request->generate_config());
@@ -111,11 +116,10 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
     }
 
     // If no host specified in request, check if there's a master role
-    char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
+    char* decode_cm2_config_env    = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
     char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
-    bool  has_master_role =
-        (decode_cm2_config_env != nullptr
-            || (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0));
+    bool  has_master_role          = (decode_cm2_config_env != nullptr
+                            || (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0));
 
     // For PD inversion where request directly reaches decode, we need to select prefill machines
     if (!host && has_master_role) {
@@ -210,6 +214,7 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
 }
 
 grpc::Status DecodeRpcServerNew::localGenerate(DecodeGenerateContextNew& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto generate_stream = decode_context.getStream();
     auto error_info      = writeAppendFirstToken(decode_context);
     if (!error_info.ok()) {
@@ -231,6 +236,7 @@ grpc::Status DecodeRpcServerNew::localGenerate(DecodeGenerateContextNew& decode_
 }
 
 ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     if (decode_context.server_context->IsCancelled()) {
         RTP_LLM_LOG_WARNING("request [%s] is cancelled", decode_context.request_key.c_str());
         return ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");
@@ -240,6 +246,7 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
     auto  decode_total_reuse_len  = decode_context.getStream()->initialReuseLength();
     auto  decode_local_reuse_len  = decode_context.getStream()->localReuseLength();
     auto  decode_remote_reuse_len = decode_context.getStream()->remoteReuseLength();
+    auto  decode_memory_reuse_len = decode_context.getStream()->memoryReuseLength();
 
     auto    first_token_rt_us = response.first_token_rt_us();
     int64_t cost_time_us      = currentTimeUs() - decode_context.request_begin_time_us;
@@ -255,6 +262,8 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
             response_output->flatten_output().aux_info(i).local_reuse_len());
         response_output->mutable_flatten_output()->mutable_aux_info(i)->set_prefill_remote_reuse_len(
             response_output->flatten_output().aux_info(i).remote_reuse_len());
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_prefill_memory_reuse_len(
+            response_output->flatten_output().aux_info(i).memory_reuse_len());
 
         response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_total_reuse_len(
             decode_total_reuse_len);
@@ -262,6 +271,8 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
             decode_local_reuse_len);
         response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_remote_reuse_len(
             decode_remote_reuse_len);
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_memory_reuse_len(
+            decode_memory_reuse_len);
     }
 
     if (!decode_context.response_writer->Write(*response_output)) {

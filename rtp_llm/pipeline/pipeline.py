@@ -301,7 +301,7 @@ class Pipeline(object):
                     )
                 else:
                     tokens = tokens.reshape(-1)
-                tokens_lists_for_decode_input.append(tokens)
+                tokens_lists_for_decode_input.append(tokens.tolist())
         for i, generate_output in enumerate(generate_outputs.generate_outputs):
             tokens_list = tokens_lists_for_decode_input[i]
             output_lens.append(len(tokens_list))

@@ -177,7 +177,7 @@ class CkptFileInfo:
 
                     return tensor
 
-    def load_tensors(self, device: str = "cuda:0", direct_io=True):
+    def load_tensors(self, device: str = "cuda", direct_io=True):
         file_path = os.path.abspath(self.file_name)
         if file_path.startswith(("/dev/shm", "/run/shm", "/sys/fs/cgroup")):
             logging.info(f"abs path : {file_path} cannot use direct_io")

@@ -1,15 +1,15 @@
-from typing import Dict, Any
-import os
 import logging
 import logging.config
+import os
+from typing import Any, Dict
 
 
 def get_logging_config(log_path: str, world_rank: int) -> Dict[str, Any]:
     """Generate logging configuration with specified world_rank.
-    
+
     Args:
         world_rank: The world rank for the log file name.
-        
+
     Returns:
         Dictionary containing logging configuration.
     """
@@ -52,9 +52,10 @@ def get_logging_config(log_path: str, world_rank: int) -> Dict[str, Any]:
         },
     }
 
+
 def get_log_path() -> str:
     """Get log path from environment variable.
-    
+
     Returns:
         Log path string, default is "logs".
     """
@@ -65,7 +66,7 @@ def get_log_path() -> str:
 
 def get_log_level() -> str:
     """Get log level from environment variable.
-    
+
     Returns:
         Log level string, default is "INFO". "TRACE" is converted to "DEBUG".
     """
@@ -89,16 +90,16 @@ def setup_logging():
     # nccl log file path
     if os.environ.get("NCCL_DEBUG_FILE") is None:
         os.environ["NCCL_DEBUG_FILE"] = os.path.join(LOG_PATH, "nccl.log")
-        logging.info(f"successfully set NCCL_DEBUG_FILE path to {os.environ['NCCL_DEBUG_FILE']}")
+        logging.info(
+            f"successfully set NCCL_DEBUG_FILE path to {os.environ['NCCL_DEBUG_FILE']}"
+        )
 
     # FT_SERVER_TEST is used for test, we don't need to setup logging for test
-    if os.environ.get("FT_SERVER_TEST") == '1':
+    if os.environ.get("FT_SERVER_TEST") == "1":
         return
 
-    WORLD_RANK = int(os.environ.get('WORLD_RANK', '0'))
+    WORLD_RANK = int(os.environ.get("WORLD_RANK", "0"))
 
     LOGGING_CONFIG = get_logging_config(LOG_PATH, WORLD_RANK)
     LOGGING_CONFIG["loggers"][""]["level"] = LOGLEVEL
     logging.config.dictConfig(LOGGING_CONFIG)
-
-

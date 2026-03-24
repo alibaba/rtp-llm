@@ -1,11 +1,13 @@
-import logging
-import os
 from typing import Any, Dict, List, Optional
 
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
+    MlaKVCacheWriteOp,
+)
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
 from .flashinfer_mla import (
@@ -14,59 +16,49 @@ from .flashinfer_mla import (
     check_attention_inputs,
     warmup_flashinfer_python,
 )
-from .rotary_emb import MlaRotaryEmbeddingOp
+from .rope_emb_new import NewMlaRotaryEmbeddingOp
 
 
-class MlaFlashInferImplBase(object):
+class MlaFlashInferImplBase(MlaImplBase):
 
     def __init__(
         self,
         fmha_impl: Any,
-        rope_kvcache_impl: Any,
+        rope_impl: Any,
+        kv_cache_write_op: MlaKVCacheWriteOp,
         attn_inputs: PyAttentionInputs,
         seq_size_per_block: int,
         is_cuda_graph: bool = False,
     ) -> None:
         warmup_flashinfer_python()
         self.seq_size_per_block = seq_size_per_block
-        self.fmha_impl = fmha_impl
+        self.fmha_impl: Any = fmha_impl
         self.fmha_params = None
         self.rope_params = None
         self.write_cache_store_impl = None
-        self.support_: bool = self.fmha_impl.support(attn_inputs)
-        if self.support_:
-            self.rope_kvcache_impl = rope_kvcache_impl
-            self.attn_inputs = attn_inputs
-            if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
-                self.write_cache_store_impl = WriteCacheStoreOp(
-                    self.attn_inputs.input_lengths,
-                    self.attn_inputs.prefix_lengths,
-                    self.attn_inputs.kv_cache_block_id_host,
-                    self.attn_inputs.cache_store_inputs,
-                )
-            self.create_params(attn_inputs)
-            if attn_inputs.is_cuda_graph is False:
-                self.prepare(attn_inputs)
+        self.rope_impl = rope_impl
+        self.kv_cache_write_op = kv_cache_write_op
+        self.attn_inputs = attn_inputs
+        if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
+            self.write_cache_store_impl = WriteCacheStoreOp(
+                self.attn_inputs.input_lengths,
+                self.attn_inputs.prefix_lengths,
+                self.attn_inputs.kv_cache_block_id_host,
+                self.attn_inputs.cache_store_inputs,
+            )
+        self.create_params(attn_inputs)
 
     def create_params(self, attn_inputs: PyAttentionInputs):
-        if self.support_ and self.fmha_impl is not None:
+        if self.fmha_impl is not None:
             self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
             self.rope_params = self.fmha_params
+            self.prepare(attn_inputs)
 
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.NONE
-
-    def support(self):
-        return self.support_
-
-    def support_cuda_graph(self) -> bool:
-        return False
-
-    def prepare(self, attn_inputs: PyAttentionInputs):
+    def prepare(self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False):
         """Update fmha_params for prepare or CUDA Graph replay.
 
         Note: fmha_params is initialized in __init__, this method only updates it.
+        forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
         assert self.fmha_impl is not None
         assert (
@@ -79,9 +71,9 @@ class MlaFlashInferImplBase(object):
             attn_inputs.input_lengths,
             attn_inputs.kv_cache_block_id_host,
             self.seq_size_per_block,
+            forbid_realloc,
         )
         self.fmha_impl.plan(self.fmha_params)
-        self.rope_params = self.fmha_params
 
     def forward(
         self,
@@ -90,12 +82,19 @@ class MlaFlashInferImplBase(object):
         k_pe: torch.Tensor,
         kv_cache: Optional[KVCache],
         layer_id: int,
-    ):
-        assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        topk_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        assert (
+            topk_indices is None
+        ), "topk_indices should be None for MlaFlashInferImplBase"
+        assert self.rope_impl is not None and self.fmha_params is not None
         q_pe = q[:, :, self.fmha_impl.qk_nope_head_dim :]
-        self.rope_kvcache_impl.forward(
-            q_pe, k_pe, compressed_kv, self.rope_params, kv_cache
-        )
+
+        # Apply RoPE to Q and K
+        self.rope_impl.forward(q_pe, k_pe, self.rope_params)
+
+        # Write compressed KV and position-encoded K to cache
+        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
 
         if (
             self.attn_inputs.is_prefill
@@ -103,6 +102,8 @@ class MlaFlashInferImplBase(object):
             and self.write_cache_store_impl is not None
         ):
             self.write_cache_store_impl(kv_cache)
+
+        # Split query for FMHA
         q_nope, q_pe = torch.split(
             q,
             [self.fmha_impl.qk_nope_head_dim, self.fmha_impl.qk_rope_head_dim],
@@ -132,33 +133,41 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 attn_configs.kv_lora_rank,
                 attn_configs.rope_head_dim,
                 attn_configs.nope_head_dim,
+                attn_configs.v_head_dim,
                 attn_configs.tokens_per_block,
                 attn_configs.softmax_extra_scale,
                 attn_configs.use_mla,
                 weights,
                 quant_config,
+                attn_configs.kv_cache_dtype,
             ),
-            MlaRotaryEmbeddingOp(
-                head_size=attn_configs.nope_head_dim,
+            NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,
-                kv_lora_rank=attn_configs.kv_lora_rank,
-                rope_head_dim=attn_configs.rope_head_dim,
-                token_per_block=attn_configs.tokens_per_block,
-                is_neox_style=False,
+                is_neox_style=attn_configs.rope_config.is_neox_style,
+            ),
+            MlaKVCacheWriteOp(
+                kv_cache_dtype=attn_configs.kv_cache_dtype,
             ),
             attn_inputs,
             attn_configs.tokens_per_block,
             is_cuda_graph,
         )
         self.has_reuse_cache = False
+        # Type narrowing: check and assign
         if attn_inputs.prefix_lengths is not None:
-            self.has_reuse_cache = attn_inputs.prefix_lengths.max().item() > 0
+            max_prefix_val = attn_inputs.prefix_lengths.max().item()  # type: ignore
+            self.has_reuse_cache = max_prefix_val > 0
 
         self.absorb_opt_len = (
             fmha_config.absorb_opt_len if fmha_config is not None else 1024
         )
         q_len = attn_inputs.input_lengths.sum().item()
-        if q_len < self.absorb_opt_len and self.has_reuse_cache:
+        self.absorb_fmha: Optional[MlaFlashInferDecodeOp] = None
+        if (
+            q_len < self.absorb_opt_len
+            and self.has_reuse_cache
+            and attn_configs.kv_cache_dtype == KvCacheDataType.BASE
+        ):
             self.absorb_fmha = MlaFlashInferDecodeOp(
                 attn_configs.head_num,
                 attn_configs.kv_lora_rank,
@@ -167,13 +176,16 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 attn_configs.tokens_per_block,
                 attn_configs.softmax_extra_scale,
                 attn_configs.use_mla,
+                attn_configs.is_sparse,
                 weights,
             )
             self.absorb_fmha.plan(self.fmha_params)
 
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_PREFILL
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        return attn_configs.use_mla and attn_inputs.is_prefill
 
     def _handle_long_sequence(
         self,
@@ -192,6 +204,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     ) -> torch.Tensor:
         """Handle short sequences using absorb operation."""
         # Split query into nope and pe components
+        assert self.absorb_fmha is not None, "absorb_fmha is not initialized"
         q_nope, q_pe = torch.split(
             q,
             [self.absorb_fmha.qk_nope_head_dim, self.absorb_fmha.qk_rope_head_dim],
@@ -210,7 +223,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     ):
         """Compute prefill context with optimized cache reuse logic."""
 
-        if q.size(0) < self.absorb_opt_len and self.has_reuse_cache:
+        if self.absorb_fmha is not None:
             return self._handle_short_sequence(q, kv_cache, layer_id)
         else:
             return self._handle_long_sequence(
@@ -224,12 +237,19 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         k_pe: torch.Tensor,
         kv_cache: Optional[KVCache],
         layer_id: int,
-    ):
-        assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        topk_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        assert (
+            topk_indices is None
+        ), "topk_indices should be None for MlaFlashInferPrefillImpl"
+        assert self.rope_impl is not None and self.rope_params is not None
         q_pe = q[:, :, self.fmha_impl.qk_nope_head_dim :]
-        self.rope_kvcache_impl.forward(
-            q_pe, k_pe, compressed_kv, self.rope_params, kv_cache
-        )
+
+        # Apply RoPE to Q and K
+        self.rope_impl.forward(q_pe, k_pe, self.rope_params)
+
+        # Write compressed KV and position-encoded K to cache
+        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
 
         if (
             self.attn_inputs.is_prefill
@@ -263,28 +283,34 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
                 attn_configs.tokens_per_block,
                 attn_configs.softmax_extra_scale,
                 attn_configs.use_mla,
+                attn_configs.is_sparse,
                 weights,
                 max_bs=attn_inputs.sequence_lengths.size(0),
                 max_context_len=max_seq_len,
-                num_tokens=attn_inputs.sequence_lengths.sum().item(),
+                num_tokens=int(attn_inputs.sequence_lengths.sum().item()),
                 is_cuda_graph=is_cuda_graph,
             ),
-            MlaRotaryEmbeddingOp(
-                head_size=attn_configs.nope_head_dim,
+            NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,
-                kv_lora_rank=attn_configs.kv_lora_rank,
-                rope_head_dim=attn_configs.rope_head_dim,
-                token_per_block=attn_configs.tokens_per_block,
-                is_neox_style=False,
+                is_neox_style=attn_configs.rope_config.is_neox_style,
+            ),
+            MlaKVCacheWriteOp(
+                kv_cache_dtype=attn_configs.kv_cache_dtype,
             ),
             attn_inputs,
             attn_configs.tokens_per_block,
             is_cuda_graph,
         )
 
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.PY_FLASHINFER_DECODE
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        return (
+            attn_configs.use_mla
+            and not attn_inputs.is_prefill
+            and not attn_configs.is_sparse
+        )
 
-    def support_cuda_graph(self) -> bool:
-        return True
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        self.prepare(attn_inputs, forbid_realloc=True)

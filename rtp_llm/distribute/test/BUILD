@@ -27,13 +27,3 @@ py_test(
     exec_properties = {'gpu':'A10','gpu_count':'2'},
     env = {"GPU_COUNT": "2"},
 )
-
-py_test(
-    name = "worker_info_test",
-    srcs = [
-        "worker_info_test.py"
-    ],
-    deps = [
-        "//rtp_llm:rtp_llm_lib",
-    ],
-)

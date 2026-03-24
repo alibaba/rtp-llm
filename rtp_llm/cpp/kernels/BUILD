@@ -1,7 +1,13 @@
 load("//:def.bzl", "copts", "cuda_copts", "rocm_copts", "any_cuda_copts", "gen_cpp_code")
+load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
+
+sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
+    '--cuda-include-ptx=sm_100', '--cuda-gpu-arch=sm_100',
+    '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
+]
 
 cuda_deps = [
     "//rtp_llm/cpp/cuda:cuda_host_utils",
@@ -99,6 +105,27 @@ cc_library(
 )
 
 cc_library(
+    name = "scaled_fp4_quant",
+    srcs = [
+        "scaled_fp4_quant.cu",
+    ],
+    hdrs = [
+        "scaled_fp4_quant.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda/cutlass:fp4_gemm_cu",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = sm100_cuda_copts + [
+        "-DCUTLASS_ARCH_MMA_SM100_SUPPORTED",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_quantization",
     srcs = [
         "per_token_group_quant_8bit.cu",
@@ -115,6 +142,41 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
     copts = cuda_copts(),
+)
+
+cc_library(
+    name = "fast_topk",
+    srcs = [
+        "fast_topk.cu",
+    ],
+    hdrs = [
+        "fast_topk.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "mla_quant_kernel",
+    srcs = [
+        "mla_quant_kernel.cu",
+    ],
+    hdrs = [
+        "mla_quant_kernel.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -157,9 +219,29 @@ cc_library(
         ":cuda_moe",
         ":cuda_comm",
         ":cuda_fused_qk_rmsnorm",
+        ":mla_quant_kernel",
     ],
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "user_buffers",
+    srcs = [
+        "user_buffer/user_buffers.cu",
+    ],
+    hdrs = [
+        "user_buffer/user_buffers.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
 
 # =============================================================================
 # ROCm kernels - split by functionality

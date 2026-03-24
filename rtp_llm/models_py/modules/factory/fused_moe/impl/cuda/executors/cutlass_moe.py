@@ -2,8 +2,11 @@ from math import prod
 from typing import Any, Callable, Dict, Optional
 
 import torch
+from rtp_kernel.fp8_group_gemm import (
+    get_cutlass_batched_moe_mm_data,
+    get_cutlass_moe_mm_without_permute_info,
+)
 
-import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     cutlass_moe_mm_fp8_scaled,
     get_best_config_swap_ab,
@@ -216,7 +219,7 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             num_tokens=M,
             hidden_size=K,
         )
-        compute_ops.get_cutlass_moe_mm_without_permute_info(
+        get_cutlass_moe_mm_without_permute_info(
             topk_ids,
             expert_offsets,
             problem_sizes1,
@@ -443,7 +446,7 @@ class CutlassBatchedExpertsFp8(FusedMoeExpertExecutor):
             (self.local_num_experts, 3), dtype=torch.int32, device=expert_x.device
         )
 
-        compute_ops.get_cutlass_batched_moe_mm_data(
+        get_cutlass_batched_moe_mm_data(
             expert_offsets,
             problem_sizes1,
             problem_sizes2,

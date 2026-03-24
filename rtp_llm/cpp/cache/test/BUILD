@@ -1,5 +1,7 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
+
+cc_test = cc_test_wrapper
 
 test_copts = [
     "-fno-access-control",
@@ -131,21 +133,37 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+        "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
     exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
-    name = "tp_broadcast_manager_test",
+    name = "linear_kv_cache_group_test",
     srcs = [
-        "TpBroadcastManagerTest.cc",
+        "LinearKVCacheGroupTest.cc",
     ],
     data = [],
     copts = test_copts,
     deps = test_deps + [
-        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
-        "@havenask//aios/autil:net",
+        ":block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "hybrid_kv_cache_allocator_test",
+    srcs = [
+        "HybridTypeKVCacheAllocatorTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
     ],
     env = {},
     exec_properties = {'gpu':'A10'},

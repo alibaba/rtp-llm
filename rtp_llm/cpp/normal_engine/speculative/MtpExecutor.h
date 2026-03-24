@@ -137,5 +137,9 @@ private:
 
     bool     warm_up_;
     RoleType role_type_;
+
+    // group id buffer
+    BufferPtr target_kv_cache_layer_to_group;
+    BufferPtr draft_kv_cache_layer_to_group;
 };
 };  // namespace rtp_llm

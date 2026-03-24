@@ -98,8 +98,8 @@ FlashInferAttnParams::create(CudaDevice* device, int batch_size, int input_token
     params->page_num        = page_num;
 
     // batch_prefill_tmp_v may use 256M buffer
-    params->float_workspace = device->allocateBuffer(
-        {DataType::TYPE_INT8, {(256 + 16) * 1024 * 1024}, AllocationType::DEVICE}, {"float_workspace"});
+    params->float_workspace =
+        device->allocateBuffer({DataType::TYPE_INT8, {128 * 1024 * 1024}, AllocationType::DEVICE}, {"float_workspace"});
     params->int_workspace =
         device->allocateBuffer({DataType::TYPE_INT8, {8 * 1024 * 1024}, AllocationType::DEVICE}, {"int_workspace"});
     params->int_host_workspace =
@@ -344,27 +344,71 @@ bool FlashInferAttnParams::check(rtp_llm::DeviceBase*             device,
                                  DataType                         dtype,
                                  bool                             is_prefill) {
     if (rtp_llm::get_sm() < 80) {
+        RTP_LLM_LOG_DEBUG("FlashInfer check failed: sm version < 80");
         return false;
     }
     auto cuda_device = dynamic_cast<CudaDevice*>(device);
     if (!cuda_device) {
+        RTP_LLM_LOG_DEBUG("FlashInfer check failed: cuda_device is null");
         return false;
     }
     const bool disable_flash_infer = device->initParams().fmha_config.disable_flash_infer;
     MlaOpsType mla_ops_type        = device->mla_ops_type;
     if ((!attn_configs.use_mla || mla_ops_type == MlaOpsType::FLASH_INFER) && disable_flash_infer) {
+        RTP_LLM_LOG_DEBUG("FlashInfer check failed: disable_flash_infer=%d", disable_flash_infer);
         return false;
     }
     if (!attn_configs.use_mla) {
         const int size_per_head = attn_configs.size_per_head;
         const int group_size    = attn_configs.head_num / attn_configs.kv_head_num;
-        if ((dtype != DataType::TYPE_FP16 && dtype != DataType::TYPE_BF16 && dtype != DataType::TYPE_FP8_E4M3)
-            || (attn_configs.kv_cache_dtype != KvCacheDataType::BASE
-                && attn_configs.kv_cache_dtype != KvCacheDataType::FP8)
-            || (attn_configs.rope_config.style != RopeStyle::Base && attn_configs.rope_config.style != RopeStyle::No)
-            || !attn_configs.is_causal || attn_configs.q_scaling != 1.0f || attn_configs.use_logn_attn
-            || (size_per_head != 64 && size_per_head != 128 && size_per_head != 192)
-            || (!is_prefill && group_size > 10 && group_size != 16 && group_size != 12)) {
+
+        // Extract all conditions as bool flags
+        bool dtype_valid =
+            (dtype == DataType::TYPE_FP16 || dtype == DataType::TYPE_BF16 || dtype == DataType::TYPE_FP8_E4M3);
+        bool kv_cache_dtype_valid = (attn_configs.kv_cache_dtype == KvCacheDataType::BASE
+                                     || attn_configs.kv_cache_dtype == KvCacheDataType::FP8);
+        bool rope_style_valid =
+            (attn_configs.rope_config.style == RopeStyle::Base || attn_configs.rope_config.style == RopeStyle::No);
+        bool is_causal_valid = attn_configs.is_causal;
+        bool q_scaling_valid = (attn_configs.q_scaling == 1.0f);
+        bool logn_attn_valid = !attn_configs.use_logn_attn;
+        bool size_per_head_valid =
+            (size_per_head == 64 || size_per_head == 128 || size_per_head == 192 || size_per_head == 256);
+        bool group_size_valid = (is_prefill || group_size <= 10 || group_size == 16 || group_size == 12);
+
+        // Log all flags and values for debugging
+        RTP_LLM_LOG_DEBUG("FlashInfer check conditions (use_mla=false): "
+                          "dtype_valid=%d (dtype=%d, expected: FP16/BF16/FP8_E4M3) | "
+                          "kv_cache_dtype_valid=%d (kv_cache_dtype=%d, expected: BASE/FP8) | "
+                          "rope_style_valid=%d (rope_style=%d, expected: Base/No) | "
+                          "is_causal_valid=%d (is_causal=%d) | "
+                          "q_scaling_valid=%d (q_scaling=%f, expected: 1.0) | "
+                          "logn_attn_valid=%d (use_logn_attn=%d, expected: false) | "
+                          "size_per_head_valid=%d (size_per_head=%d, expected: 64/128/192/256) | "
+                          "group_size_valid=%d (is_prefill=%d, group_size=%d, expected: <=10 or 12 or 16)",
+                          dtype_valid,
+                          static_cast<int>(dtype),
+                          kv_cache_dtype_valid,
+                          static_cast<int>(attn_configs.kv_cache_dtype),
+                          rope_style_valid,
+                          static_cast<int>(attn_configs.rope_config.style),
+                          is_causal_valid,
+                          attn_configs.is_causal,
+                          q_scaling_valid,
+                          attn_configs.q_scaling,
+                          logn_attn_valid,
+                          attn_configs.use_logn_attn,
+                          size_per_head_valid,
+                          size_per_head,
+                          group_size_valid,
+                          is_prefill,
+                          group_size);
+
+        // Check if all conditions are satisfied
+        bool all_conditions_met = dtype_valid && kv_cache_dtype_valid && rope_style_valid && is_causal_valid
+                                  && q_scaling_valid && logn_attn_valid && size_per_head_valid && group_size_valid;
+
+        if (!all_conditions_met) {
             return false;
         }
     }
@@ -489,11 +533,27 @@ void FlashInferAttnParams::run(const AttentionModuleParams& params,
                                const BufferPtr&             input_q,
                                const BufferPtr&             f16_out,
                                int64_t                      stream) {
-    const int size_per_head = params.configs.size_per_head;
-    auto      q             = Buffer2torchTensor(input_q, false);
-    auto      k_cache       = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
-    auto      v_cache       = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
+    const int size_per_head    = params.configs.size_per_head;
+    const int kv_head_num      = params.configs.kv_head_num;
+    const int tokens_per_block = params.configs.tokens_per_block;
 
+    auto kv_cache_raw = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
+
+    // 将原始的[blocks, total_size]张量重塑为[blocks, 2, kv_head_num, tokens_per_block, size_per_head]形状
+    // 其中total_size = kv_head_num * tokens_per_block * size_per_head * 2
+    auto kv_cache_reshaped = kv_cache_raw.view({kv_cache_raw.size(0), 2, kv_head_num, tokens_per_block, size_per_head});
+
+    // 分离K和V缓存
+    auto k_cache = kv_cache_reshaped.select(1, 0);  // K缓存在第1维的索引0位置
+    auto v_cache = kv_cache_reshaped.select(1, 1);  // V缓存在第1维的索引1位置
+
+    // 打印 q, k_cache, v_cache 的 shape
+    RTP_LLM_LOG_DEBUG("kv_cache_raw shape: %s", torch::IntArrayRef(kv_cache_raw.sizes()).vec().data());
+    RTP_LLM_LOG_DEBUG("kv_cache_reshaped shape: %s", torch::IntArrayRef(kv_cache_reshaped.sizes()).vec().data());
+    RTP_LLM_LOG_DEBUG("k_cache shape: %s", torch::IntArrayRef(k_cache.sizes()).vec().data());
+    RTP_LLM_LOG_DEBUG("v_cache shape: %s", torch::IntArrayRef(v_cache.sizes()).vec().data());
+
+    auto       q             = Buffer2torchTensor(input_q, false);
     auto       softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
     at::Tensor out;
     if (params.output.type() == DataType::TYPE_FP8_E4M3) {

@@ -58,6 +58,10 @@ public:
         return support_trt_v2_paged_fmha_;
     }
 
+    bool isSPadded() const {
+        return is_s_padded_;
+    }
+
     void runTrtV2Fmha(void*        input,
                       void*        cu_seqlens,
                       void*        output,

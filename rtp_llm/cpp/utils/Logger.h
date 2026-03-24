@@ -124,7 +124,6 @@ public:
     bool isLevelEnabled(int32_t level) {
         return logger_->isLevelEnabled(level);
     }
-    static std::string log_level_;
 
 private:
     void tryFlush(int32_t level) {

@@ -147,7 +147,6 @@ bool TRTNormalPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
         auto runner_config = TrtV2FmhaRunnerConfig::fromAttentionConfigs(attn_configs_);
         trt_v2_runner_.reset(new TrtV2FmhaRunner(runner_config, attn_dtype, attn_inputs.is_s_padded, run_stream));
     }
-
     return trt_v2_runner_->trtV2FmhaSupported();
 }
 
@@ -163,20 +162,17 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              inpu
         }
     }
 
-    const int local_head_num = attn_configs_.head_num;
-    const int size_per_head  = attn_configs_.size_per_head;
-    const int token_num      = input.size(0);
-    const int batch_size     = params->input_lengths.size(0);
-    auto*     device         = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
-    const int max_token_num  = device->initParams().runtime_config.fifo_scheduler_config.max_context_batch_size
-                              * device->initParams().max_seq_len;
-    torch::TensorOptions options = torch::TensorOptions(input.dtype()).device(input.device());
+    const int            local_head_num = attn_configs_.head_num;
+    const int            size_per_head  = attn_configs_.size_per_head;
+    const int            token_num      = input.size(0);
+    const int            batch_size     = params->input_lengths.size(0);
+    auto*                device         = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
+    torch::TensorOptions options        = torch::TensorOptions(input.dtype()).device(input.device());
 
-    static torch::Tensor static_output = torch::zeros({max_token_num, local_head_num * size_per_head}, options);
-    torch::Tensor        output        = static_output.slice(0, 0, token_num);
-    torch::Tensor        tiled_counter = torch::zeros({1}, torch::TensorOptions(torch::kUInt32).device(input.device()));
-    bool                 use_fp8_fmha  = kv_block_array.cache_type == KvCacheDataType::FP8;
-    float*               attention_output_orig_quant_scale = use_fp8_fmha ? static_scale_.data_ptr<float>() : nullptr;
+    torch::Tensor output        = torch::empty({token_num, local_head_num * size_per_head}, options);
+    torch::Tensor tiled_counter = torch::zeros({1}, torch::TensorOptions(torch::kUInt32).device(input.device()));
+    bool          use_fp8_fmha  = kv_block_array.cache_type == KvCacheDataType::FP8;
+    float*        attention_output_orig_quant_scale = use_fp8_fmha ? static_scale_.data_ptr<float>() : nullptr;
 
     torch::Tensor tmp_fmha_input, tmp_fmha_output;
     void*         fmha_input_ptr  = input.data_ptr();
@@ -191,13 +187,16 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              inpu
     }
     RTP_LLM_CHECK_WITH_INFO(fmha_output_ptr, "fmha_output_ptr must be provided for trt v2 fmha");
 
+    // When is_s_padded, layout stride is token_num/batch_size, not max(input_lengths)
+    size_t effective_max_seq_len = trt_v2_runner_->isSPadded() ? static_cast<size_t>(token_num / batch_size) :
+                                                                 static_cast<size_t>(params->max_seq_len);
     trt_v2_runner_->runTrtV2Fmha(fmha_input_ptr,
                                  params->cu_seqlens.data_ptr(),
                                  fmha_output_ptr,
                                  reinterpret_cast<uint32_t*>(tiled_counter.data_ptr()),
                                  attention_output_orig_quant_scale,
                                  batch_size,
-                                 params->max_seq_len,
+                                 effective_max_seq_len,
                                  token_num,
                                  kv_block_array);
     if (use_fp8_fmha) {

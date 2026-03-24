@@ -62,6 +62,11 @@ public:
     }
 
     ::grpc::Status
+    StartProfile(::grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response) override {
+        return local_server_->StartProfile(context, request, response);
+    }
+
+    ::grpc::Status
     CheckHealth(::grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) override {
         return local_server_->CheckHealth(context, request, response);
     }
@@ -120,10 +125,10 @@ public:
         }
     }
 
-    ::grpc::Status BroadcastTp(::grpc::ServerContext*        context,
-                               const ::BroadcastTpRequestPB* request,
-                               ::BroadcastTpResponsePB*      response) override {
-        return local_server_->BroadcastTp(context, request, response);
+    ::grpc::Status ExecuteFunction(::grpc::ServerContext*     context,
+                                   const ::FunctionRequestPB* request,
+                                   ::FunctionResponsePB*      response) override {
+        return local_server_->ExecuteFunction(context, request, response);
     }
 
 protected:

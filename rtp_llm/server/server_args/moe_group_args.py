@@ -133,12 +133,12 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         help="负载均衡的统计窗口大小",
     )
     moe_group.add_argument(
-        "--max_moe_normal_masked_token_num",
-        env_name="RTP_LLM_MAX_MOE_NORMAL_MASKED_TOKEN_NUM",
-        bind_to=(moe_config, 'max_moe_normal_masked_token_num'),
+        "--masked_max_token_num",
+        env_name="MASKED_MAX_TOKEN_NUM",
+        bind_to=(moe_config, 'masked_max_token_num'),
         type=int,
-        default=1024,
-        help="moe normal使用masked的最大token数目",
+        default=256,
+        help="非deepep low latency场景下使用deepgemm masked的最大token数目, 默认为256",
     )
     moe_group.add_argument(
         "--use_all_gather",
@@ -147,4 +147,26 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         type=str2bool,
         default=True,
         help="是否使用 all_gather 进行通信。",
+    )
+    moe_group.add_argument(
+        "--moe_strategy",
+        env_name="MOE_STRATEGY",
+        bind_to=(moe_config, 'moe_strategy'),
+        type=str,
+        choices=["auto", "no_auant_ep_low_latency", "no_auant_cpp", "no_auant_dp_normal",
+                 "fp8_per_block_no_dp_masked", "fp8_per_block_no_dp", "fp8_per_block_ep_low_latency", "fp8_per_block_ep_normal",
+                 "fp8_per_tensor_no_dp", "fp8_per_tensor_ep_low_latency", "fp8_per_tensor_ep_normal",
+                 "w4a8_int4_per_channel_no_dp", "w4a8_int4_per_channel_ep_low_latency", "w4a8_int4_per_channel_ep_normal",
+                 "fp4_ep_low_latency", "fp4_ep_normal", "fp4_no_dp"],
+        default="auto",
+        help="指定moe strategy, 默认为auto",
+    )
+    moe_group.add_argument(
+        "--fp4_moe_op",
+        env_name="FP4_MOE_OP",
+        bind_to=(moe_config, 'fp4_moe_op'),
+        type=str,
+        choices=["auto", "trtllm", "cutedsl"],
+        default="auto",
+        help="指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 TensorRT-LLM), cutedsl (使用 CuTe DSL)。",
     )

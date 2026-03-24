@@ -381,24 +381,30 @@ int getVisibleDeviceNum() {
 }
 
 std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm) {
-    if (useUvm) {
-        size_t         freeSysMem, totalSysMem;
-        struct sysinfo info;
-        sysinfo(&info);
-        totalSysMem = info.totalram * info.mem_unit;
-        freeSysMem  = info.freeram * info.mem_unit;
+    try {
+        if (useUvm) {
+            size_t         freeSysMem, totalSysMem;
+            struct sysinfo info;
+            sysinfo(&info);
+            totalSysMem = info.totalram * info.mem_unit;
+            freeSysMem  = info.freeram * info.mem_unit;
 
-        RTP_LLM_LOG_INFO("Using UVM based system memory for KV cache, total memory %0.2f GB, available memory %0.2f GB",
-                         ((double)totalSysMem / 1e9),
-                         ((double)freeSysMem / 1e9));
-        return {freeSysMem, totalSysMem};
-    } else {
-        size_t free, total;
-        check_cuda_value(cudaMemGetInfo(&free, &total));
-        RTP_LLM_LOG_DEBUG("Using GPU memory for KV cache, total memory %0.2f GB, available memory %0.2f GB",
-                          ((double)total / 1e9),
-                          ((double)free / 1e9));
-        return {free, total};
+            RTP_LLM_LOG_INFO(
+                "Using UVM based system memory for KV cache, total memory %0.2f GB, available memory %0.2f GB",
+                ((double)totalSysMem / 1e9),
+                ((double)freeSysMem / 1e9));
+            return {freeSysMem, totalSysMem};
+        } else {
+            size_t free, total;
+            check_cuda_value(cudaMemGetInfo(&free, &total));
+            RTP_LLM_LOG_DEBUG("Using GPU memory for KV cache, total memory %0.2f GB, available memory %0.2f GB",
+                              ((double)total / 1e9),
+                              ((double)free / 1e9));
+            return {free, total};
+        }
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("Failed to get device memory info: %s", e.what());
+        return {0, 0};
     }
 }
 

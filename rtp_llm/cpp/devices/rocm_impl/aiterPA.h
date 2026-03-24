@@ -21,6 +21,7 @@ private:
     py::module_ hip_pa_api;
     py::object  pa_gluon_load_libs;
     py::object  hip_pa_load_libs;
+    bool        use_asm_pa_;
 };
 
 void runAiterAsmPA(const AttentionModuleParams& params,

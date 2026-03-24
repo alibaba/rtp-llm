@@ -1,6 +1,8 @@
 #pragma once
 
+#include <memory>
 #include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
@@ -29,9 +31,13 @@ public:
         block_stride_bytes_(cache_config.kv_block_stride_bytes),
         scale_stride_bytes_(cache_config.kv_scale_stride_bytes),
         seq_size_per_block_(cache_config.seq_size_per_block),
+        kv_cache_group_nums_(cache_config.groupNums()),
+        layer_to_kv_cache_group_id_(cache_config.layer_to_group_id),
+        kv_cache_group_types_(cache_config.group_types),
         warm_up_(warm_up),
         enable_detail_log_(profiling_debug_logging_config.enable_detail_log),
         device_(rtp_llm::DeviceFactory::getDefaultDevice()) {}
+
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const;
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
@@ -60,22 +66,29 @@ protected:
                               bool                return_all_probs,
                               const BufferPtr&    new_tokens_all) const;
 
+    void setKVCacheGroupTypes(std::vector<CacheGroupType> kv_cache_group_types) {
+        kv_cache_group_types_ = kv_cache_group_types;
+    }
+
 protected:
-    size_t           num_layers_;
-    size_t           vocab_size_;
-    size_t           input_vocab_size_;
-    bool             use_int8_kv_cache_;
-    bool             has_positional_encoding_;
-    bool             is_multimodal_;
-    PositionIdsStyle mm_position_ids_style_;
-    size_t           position_id_len_factor_;
-    RoleType         role_type_;
-    bool             decode_entrance_;
-    size_t           block_stride_bytes_;
-    size_t           scale_stride_bytes_;
-    size_t           seq_size_per_block_;
-    bool             warm_up_;
-    bool             enable_detail_log_;
+    size_t                       num_layers_;
+    size_t                       vocab_size_;
+    size_t                       input_vocab_size_;
+    bool                         use_int8_kv_cache_;
+    bool                         has_positional_encoding_;
+    bool                         is_multimodal_;
+    PositionIdsStyle             mm_position_ids_style_;
+    size_t                       position_id_len_factor_;
+    RoleType                     role_type_;
+    bool                         decode_entrance_;
+    size_t                       block_stride_bytes_;
+    size_t                       scale_stride_bytes_;
+    size_t                       seq_size_per_block_;
+    size_t                       kv_cache_group_nums_ = 1;
+    mutable std::vector<int32_t> layer_to_kv_cache_group_id_;
+    std::vector<CacheGroupType>  kv_cache_group_types_;
+    bool                         warm_up_;
+    bool                         enable_detail_log_;
 
     rtp_llm::DeviceBase* device_;
 };

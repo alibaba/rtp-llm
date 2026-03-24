@@ -4,11 +4,17 @@ from typing import List
 
 import torch
 
+from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
+)
+from rtp_llm.models_py.distributed.deepep_wrapper import (
+    DeepEPWrapper,
+    init_deepep_wrapper,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -22,7 +28,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
     DeepepNormalRouterBase,
 )
-from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.ops import MoeConfig, NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.numeric_util import per_token_cast_back
 from rtp_llm.test.utils.port_util import PortManager
 
@@ -37,11 +43,14 @@ def init_router(
     model_config.hidden_size = 1024
     model_config.moe_k = 16
 
-    # Use the provided parallelism_config directly
     parallelism_config.world_rank = rank
     parallelism_config.local_rank = rank
-    parallelism_config.nccl_ip = "0.0.0.0"
-    parallelism_config.th_nccl_port = nccl_port
+    nccl_comm_config = NcclCommConfig(
+        nccl_ip="0.0.0.0",
+        tp_nccl_port=nccl_port + 9,
+        dp_tp_nccl_port=nccl_port + 1,
+        ffn_tp_nccl_port=nccl_port + 6,
+    )
 
     moe_config = MoeConfig()
     moe_config.use_deepep_low_latency = False
@@ -55,8 +64,39 @@ def init_router(
     torch.cuda.set_device(parallelism_config.local_rank)
     torch.set_default_device(f"cuda:{parallelism_config.local_rank}")
     init_distributed_environment(
-        parallelism_config=parallelism_config, backend="nccl", timeout=60
+        parallelism_config=parallelism_config,
+        nccl_comm_config=nccl_comm_config,
+        nccl_init_port=nccl_port,
+        backend="nccl",
+        timeout=60,
     )
+
+    py_env = PyEnvConfigs()
+    py_env.parallelism_config = parallelism_config
+    py_env.moe_config = moe_config
+    engine_config = EngineConfig(
+        parallelism_config=py_env.parallelism_config,
+        runtime_config=py_env.runtime_config,
+        nccl_comm_config=nccl_comm_config,
+        server_config=py_env.server_config,
+        pd_sep_config=py_env.pd_separation_config,
+        concurrency_config=py_env.concurrency_config,
+        fmha_config=py_env.fmha_config,
+        kv_cache_config=py_env.kv_cache_config,
+        profiling_debug_logging_config=py_env.profiling_debug_logging_config,
+        hw_kernel_config=py_env.py_hw_kernel_config,
+        device_resource_config=py_env.device_resource_config,
+        moe_config=py_env.moe_config,
+        model_specific_config=py_env.model_specific_config,
+        sp_config=py_env.sp_config,
+        cache_store_config=py_env.cache_store_config,
+        misc_config=py_env.misc_config.misc_config,
+        arpc_config=py_env.arpc_config,
+        grpc_config=py_env.grpc_config,
+        load_config=py_env.load_config,
+    )
+    init_deepep_wrapper(engine_config, model_config)
+
     quant_config = FusedMoEQuantConfig(
         quant_dtype=torch.float8_e4m3fn,
         per_act_token_quant=False,
@@ -160,6 +200,7 @@ def worker_function(
                 ref_a2 = a1 * config.world_size
             torch.testing.assert_close(ref_a2[:, :128], a2[:, :128])
     finally:
+        DeepEPWrapper.reset()
         destroy_distributed_environment()
 
 

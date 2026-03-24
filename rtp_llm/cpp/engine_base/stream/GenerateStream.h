@@ -90,6 +90,8 @@ using GenerateStreamPtr = std::shared_ptr<GenerateStream>;
 
 class GenerateStream {
 public:
+    static constexpr uint64_t STREAM_MAGIC = 0xA11CE5DEADBEEF01ULL;
+
     GenerateStream(const std::shared_ptr<GenerateInput>& query,
                    const ModelConfig&                    model_config,
                    const RuntimeConfig&                  runtime_config,
@@ -100,6 +102,11 @@ public:
     virtual ~GenerateStream() {
         reportMetric();
         releaseResource();
+        stream_magic_ = 0;
+    }
+
+    bool isStreamAlive() const {
+        return stream_magic_ == STREAM_MAGIC;
     }
 
 public:
@@ -134,12 +141,11 @@ public:
 
     // Only used in C++ world.
     int                  reuseBlockSize() const;
-    void                 fakeInitKVBlock();
+    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     virtual absl::Status initKVBlock(size_t reserve_step = 0);
     virtual absl::Status incrKVBlock(size_t reserve_step = 0);
-    virtual int          tryReleaseKVBlock(int nums);
     virtual void         releaseResource();
-    int                  nextNeedBlockNums(size_t reserve_step) const;
+    int                  nextNeedBlockNums(int reserve_step) const;
     void                 setNeedReleaseResource(bool need_release_resource);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;
@@ -181,11 +187,9 @@ public:
     // NOTE: In generatestream, set seq len must use setSeqLength api, we need to save start_check_seq_length_
     // for checking EOS and stop words
     void   setSeqLength(int seq_length);
-    int    adjustedCommonLen() const;
     int    seqSizePerBlock() const;
     int    contextLength() const;
     int    prefixLength() const;
-    int    inputPrefixLength() const;
     int    reuseLength() const;
     int    initialReuseLength() const;
     size_t maxTokenNum() const;
@@ -194,6 +198,8 @@ public:
     void   setRemoteReuseLength(int length);
     int    localReuseLength() const;
     int    remoteReuseLength() const;
+    void   setMemoryReuseLength(int length);
+    int    memoryReuseLength() const;
     void   setInitialReuseLength(int initial_reuse_length);
     void   incLastOutputPos();
 
@@ -205,17 +211,15 @@ public:
         return complete_token_ids_;
     }
     std::vector<int> completeTokenIdsVec(int batch_idx = 0);
-    std::vector<int> commonCompleteTokenIdsVec(int batch_idx = 0);
     int              currentExecuteTokenSize();
     std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
     void step();
     void spStep();
 
-    std::vector<torch::Tensor>    multimodalFeatures() const;
-    int                           multimodalFeaturesLength() const;
-    rtp_llm::BufferPtr            multimodalLocations() const;
-    std::vector<std::vector<int>> multimodalIntervals() const;
+    std::vector<torch::Tensor> multimodalFeatures() const;
+    int                        multimodalFeaturesLength() const;
+    rtp_llm::BufferPtr         multimodalLocations() const;
 
     int64_t      getTimeoutMs() const;
     void         checkTimeout();
@@ -289,9 +293,6 @@ public:
         return return_all_probs_;
     }
 
-    void updateLogitProcessorMultiSeqStatus(const rtp_llm::BufferPtr& src_batch_indices);
-    void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
-
     rtp_llm::BufferPtr generateContextPositionIds(rtp_llm::DeviceBase* device);
 
     void generateNextPositionId(int32_t* now_pos, rtp_llm::DeviceBase* device);
@@ -334,10 +335,6 @@ public:
         std::lock_guard<std::mutex> lock(*output_mutex_);
         need_remote_generate_ = need_remote_generate;
         cv_->notify_one();
-    }
-
-    void setNeedRemoteGenerateWithoutLock(bool need_remote_generate) {
-        need_remote_generate_ = need_remote_generate;
     }
 
     std::vector<int> getLatestTokens(size_t token_num);
@@ -403,10 +400,6 @@ public:
         return mtp_token_index_;
     }
 
-    bool containSpOutputBuffer() {
-        return sp_output_buffer_ != nullptr;
-    }
-
     size_t getProposeStep() const {
         if (propose_stream_ && propose_stream_->sp_output_buffer_->propose_step > 0) {
             return propose_stream_->sp_output_buffer_->propose_step;
@@ -437,13 +430,6 @@ public:
     rtp_llm::BufferPtr getProposeTokens() const {
         if (propose_stream_ && propose_stream_->sp_output_buffer_->tokens > 0) {
             return propose_stream_->sp_output_buffer_->tokens;
-        }
-        return nullptr;
-    }
-
-    rtp_llm::BufferPtr getScoreTokens() {
-        if (score_stream_ && score_stream_->sp_output_buffer_->tokens != nullptr) {
-            return score_stream_->sp_output_buffer_->tokens;
         }
         return nullptr;
     }
@@ -484,16 +470,17 @@ public:
         return generate_input_->generate_config->reuse_cache;
     }
 
-    bool enable3FS() const {
-        return generate_input_->generate_config->enable_3fs;
+    bool enableDeviceCache() const {
+        return generate_input_->generate_config->enable_device_cache;
     }
 
-    bool enableMemoryBlockCache() const {
-        return generate_input_->generate_config->enable_memory_block_cache;
+    bool enableMemoryCache() const {
+        return generate_input_->generate_config->enable_memory_cache;
     }
 
-    void fillSubGenerateStatus(StreamState state);
-    void resizeSubGenerateStatus(size_t new_size);
+    bool enableRemoteCache() const {
+        return generate_input_->generate_config->enable_remote_cache;
+    }
 
 public:
     struct TimeInfo {
@@ -506,6 +493,19 @@ public:
     bool     queryPdSep() const;
 
 protected:
+    void updateLogitProcessorMultiSeqStatus(const rtp_llm::BufferPtr& src_batch_indices);
+    void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
+    void setNeedRemoteGenerateWithoutLock(bool need_remote_generate) {
+        need_remote_generate_ = need_remote_generate;
+    }
+    void fillSubGenerateStatus(StreamState state);
+    void resizeSubGenerateStatus(size_t new_size);
+
+    void reportStreamMetrics();
+    void reportCacheReuseMetrics() const;
+
+protected:
+    uint64_t                             stream_magic_ = STREAM_MAGIC;
     rtp_llm::DeviceBase*                 device_;
     std::shared_ptr<GenerateInput>       generate_input_;
     std::shared_ptr<GenerateStatus>      generate_status_;
@@ -526,7 +526,9 @@ protected:
     int                                  reuse_length_         = 0;
     int                                  local_reuse_length_   = 0;
     int                                  remote_reuse_length_  = 0;
+    int                                  memory_reuse_length_  = 0;
     int                                  reuse_mm_length_      = 0;
+
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;
     bool released_              = false;

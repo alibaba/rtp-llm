@@ -133,7 +133,9 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);
     allocator_ptr->setStream(stream_);
 
-    if (init_params_.use_deepep_moe) {
+// cuda12_9_arm use python
+#ifndef USE_CUDA_ARM
+    if (init_params_.use_deepep_moe && !init_params_.model_specific_config.load_python_model) {
         // init deepep buffer before buffer manager init to avoid out of mem
         buffer_manager_.reset(
             new BufferManager(allocator_ptr, host_allocator_ptr, init_params_.profile_debug_logging_config));
@@ -145,6 +147,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         printDeviceMemoryUsage("after init deepep buffer");
         buffer_manager_.reset();
     }
+#endif
 
     if (params.device_reserve_memory_bytes) {
         size_t free_bytes, total_bytes;
@@ -173,6 +176,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     cublas_algo_map_.reset(new cublasAlgoMap(GEMM_CONFIG));
     cublas_mm_wrapper_.reset(new cublasMMWrapper(
         cublas_handle_, cublaslt_handle_, stream_, cublas_algo_map_.get(), &cublas_wrapper_mutex_, allocator_.get()));
+    cublas_mm_wrapper_->setDeterministicGemm(init_params_.hw_kernel_config.deterministic_gemm);
 
     // select mla type
     if (params.mla_ops_type != MlaOpsType::AUTO) {
@@ -238,8 +242,8 @@ void CudaDevice::init() {
 // pre-allocate buffer before buffer managaer
 void CudaDevice::commBarrier(const NcclParam& nccl_param) {
     void* tmpBuffer = nullptr;
-    check_cuda_value(cudaMalloc(&tmpBuffer, 32));
-    check_cuda_value(cudaMemset(tmpBuffer, 0, 32));
+    check_cuda_value(cudaMalloc(&tmpBuffer, 32 * sizeof(float)));
+    check_cuda_value(cudaMemset(tmpBuffer, 0, 32 * sizeof(float)));
     ftNcclAllReduceSum((float*)tmpBuffer, (float*)tmpBuffer, 32, nccl_param, stream_);
     check_cuda_value(cudaStreamSynchronize(stream_));
     check_cuda_value(cudaFree(tmpBuffer));
@@ -370,6 +374,7 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->is_mtp                   = init_params_.is_mtp;
         prop->is_eagle3                = init_params_.is_eagle3;
         prop->ffn_as_service           = init_params_.ffn_as_service;
+        prop->enable_prefill_cp        = init_params_.enable_prefill_cp;
     }
     return *prop;
 }
@@ -447,6 +452,8 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     use_fp8_fmha_           = useFp8Fmha(params);
     DevicePrepOutput output = prepareModelRunCommon(params);
 
+    const bool deterministic_attn = init_params_.hw_kernel_config.deterministic_attn;
+
     fmha_type_ = FMHAType::NONE;
     if (params.attn_dtype == DataType::TYPE_FP32) {
         fmha_type_       = FMHAType::NONE;
@@ -475,7 +482,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
             }
 #endif
             else if (paged_kv_fmha) {
-                if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
+                if (!deterministic_attn && use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
                     fmha_type_ = FMHAType::PAGED_TRT_V2;
                 } else if (use_open_source_fmha_paged && cufmha_runner_->openSourceFmhaSupport()
                            && params.configs.tokens_per_block % 256 == 0) {
@@ -483,14 +490,14 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
                 }
             }
         } else if (paged_kv_fmha) {
-            if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
+            if (!deterministic_attn && use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
                 fmha_type_ = FMHAType::PAGED_TRT_V2;
             } else if (use_open_source_fmha_paged && cufmha_runner_->openSourceFmhaSupport()
                        && params.configs.tokens_per_block % 256 == 0) {
                 fmha_type_ = FMHAType::PAGED_OPEN_SOURCE;
             }
         } else if (!params.diff_qkv_len) {
-            if (use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport()) {
+            if (!deterministic_attn && use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport()) {
                 fmha_type_ = FMHAType::TRT_V2;
             } else if (use_open_source_fmha && cufmha_runner_->openSourceFmhaSupport()) {
                 fmha_type_ = FMHAType::OPEN_SOURCE;
@@ -501,6 +508,18 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
             fmha_type_ = FMHAType::NONE;
         }
         output.need_mask = (fmha_type_ == FMHAType::NONE);
+    }
+    static bool logged_fmha_type = false;
+    if (!logged_fmha_type) {
+        static const char* fmha_names[] = {
+            "FLASH_INFER", "NONE", "OPEN_SOURCE", "PAGED_OPEN_SOURCE",
+            "PAGED_TRT_V2", "TRT_V1", "TRT_V2", "XQA",
+            "AITER_PREFILL", "AITER_ASM_PREFILL", "AITER_DECODE", "AITER_ASM_DECODE",
+            "PY_FLASHINFER_PREFILL_PAGED", "PY_FLASHINFER_PREFILL_RAGGED"};
+        int idx = static_cast<int>(fmha_type_);
+        const char* name = (idx >= 0 && idx < 14) ? fmha_names[idx] : "UNKNOWN";
+        RTP_LLM_LOG_INFO("fmha_type=%d (%s) deterministic_attn=%d", idx, name, (int)deterministic_attn);
+        logged_fmha_type = true;
     }
     return output;
 }
@@ -533,10 +552,8 @@ DevicePrepOutput CudaDevice::prepareModelRunCommon(const DevicePrepParams& param
             nullptr,
         prefill_kv_cache_block_id_d,
         params.attn_dtype);
-    output.decode_trt_attn =
-        prepareTrtAttn(params.configs, params.kv_cache, decode_kv_cache_block_id_d, params.decoder_batch_size);
-    output.prefill_trt_attn =
-        prepareTrtAttn(params.configs, params.kv_cache, prefill_kv_cache_block_id_d, params.context_batch_size);
+    output.decode_trt_attn  = prepareTrtAttn(params.configs, decode_kv_cache_block_id_d, params.decoder_batch_size);
+    output.prefill_trt_attn = prepareTrtAttn(params.configs, prefill_kv_cache_block_id_d, params.context_batch_size);
     return output;
 }
 

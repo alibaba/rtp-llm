@@ -11,3 +11,5 @@ tensorrt-cu12-libs==10.3.0
 flashinfer-python==0.2.5
 apache-tvm-ffi==0.1.1
 http://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_gemm-2.2.0%2B9b680f4-cp310-cp310-linux_x86_64.whl
+nvidia-nvshmem-cu12==3.4.5
+http://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_ep-1.2.1%2B29d31c0-cp310-cp310-linux_x86_64.whl

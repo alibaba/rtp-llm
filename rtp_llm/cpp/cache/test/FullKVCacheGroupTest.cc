@@ -33,6 +33,28 @@ TEST_F(FullKVCacheGroupTest, NeedBlocksNumTest) {
     ASSERT_EQ(0, group1.needBlocksNum(2, 1));
 }
 
+TEST_F(FullKVCacheGroupTest, GetNeedBlocksTest) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 4;
+
+    FullKVCacheGroup group({}, spec, block_pool, 0);
+
+    // common=8 => 2 blocks, seq=12 reserve=3 => ceil(15/4)=4 blocks => extra=2
+    const auto need =
+        group.getNeedBlocks(/*common_seq_len=*/8, /*seq_len=*/12, /*reserve_step=*/3, /*reuse_blocks_len=*/0, false);
+    EXPECT_EQ(need.common_blocks, 2);
+    EXPECT_EQ(need.extra_blocks, 2);
+
+    // no reserve: common=12 => 3, seq=12 => 3 => extra=0
+    const auto need2 =
+        group.getNeedBlocks(/*common_seq_len=*/12, /*seq_len=*/12, /*reserve_step=*/0, /*reuse_blocks_len=*/0, false);
+    EXPECT_EQ(need2.common_blocks, 3);
+    EXPECT_EQ(need2.extra_blocks, 0);
+}
+
 TEST_F(FullKVCacheGroupTest, RemoveSkippedBlocksTest) {
     auto block_pool = createBlockPool();
     block_pool->init();

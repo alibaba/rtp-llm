@@ -20,7 +20,7 @@ public:
                                                    const ParallelismConfig& parallelism_config,
                                                    const EPLBConfig&        eplb_config,
                                                    const MoeConfig&         moe_config) {
-        AttentionConfigs attention_config = model_config.getAttentionConfigs(parallelism_config.tp_size);
+        AttentionConfigs attention_config = model_config.getAttentionConfigs(parallelism_config.get_attn_tp_size());
         // TP在init的时候处理，认为每个MOE Plugin只看到一个TP rank；EP在MOE Plugin中处理；
         auto moe_configs =
             model_config.moe_style ?
@@ -57,6 +57,8 @@ public:
         } else if (model_config.quant_algo.isFp8() && model_config.quant_algo.isGroupwise()) {
             act_qscheme = rtp_llm::QScheme::Qfp8PerTokenBlock;
         } else if (model_config.quant_algo.isFp8PTPC()) {
+            act_qscheme = rtp_llm::QScheme::Qfp8PerToken;
+        } else if (model_config.quant_algo.isW4a8Int4PTPC()) {
             act_qscheme = rtp_llm::QScheme::Qfp8PerToken;
         }
 

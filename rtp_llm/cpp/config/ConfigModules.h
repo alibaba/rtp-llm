@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 #include <string>
 #include <sstream>
 #include <map>
@@ -7,6 +8,36 @@
 
 namespace rtp_llm {
 
+/** NCCL communication config (ip + ports). When set, DeviceFactory::initDevices uses this
+ * instead of ParallelismConfig for master_ip and tp/dp_tp/ffn_tp ports. Aligns with Python NcclCommConfig. */
+struct NcclCommConfig {
+    std::string master_ip   = "";
+    int64_t     tp_port     = 0;
+    int64_t     dp_tp_port  = 0;
+    int64_t     ffn_tp_port = 0;
+    std::string to_string() const;
+};
+
+enum class CPRotateMethod {
+    DISABLED                = 0,
+    ALL_GATHER              = 1,
+    ALL_GATHER_WITH_OVERLAP = 2,
+    ALLTOALL                = 3,
+    PREFILL_CP              = 4,
+    UNKNOWN                 = 5,
+};
+struct PrefillCPConfig {
+    CPRotateMethod method           = CPRotateMethod::DISABLED;
+    size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
+    bool           is_enabled() const {
+        return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
+               && method != CPRotateMethod::PREFILL_CP;
+    }
+    bool is_prefill_enabled() const {
+        return method == CPRotateMethod::PREFILL_CP;
+    }
+    std::string to_string() const;
+};
 struct FfnDisAggregateConfig {
     bool        enable_ffn_disaggregate = false;
     int         attention_tp_size       = 1;
@@ -37,17 +68,23 @@ struct ParallelismConfig {
     int64_t ffn_tp_rank      = 0;
     bool    enable_sp        = false;
 
-    std::string nccl_ip                   = "";
-    int64_t     tp_nccl_port              = 0;
-    int64_t     dp_tp_nccl_port           = 0;
-    int64_t     ffn_tp_nccl_port          = 0;
-    int64_t     th_nccl_port              = 0;  // General NCCL port for compatibility
-    int64_t     http_port                 = 0;
-    int64_t     model_rpc_port            = 0;
-    int64_t     embedding_rpc_server_port = 0;
-
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
 
+    // Context Parallel configuration
+    PrefillCPConfig prefill_cp_config;
+
+    int64_t get_attn_tp_size() const {
+        return prefill_cp_config.is_enabled() ? 1 : tp_size;
+    }
+    int64_t get_attn_tp_rank() const {
+        return prefill_cp_config.is_enabled() ? 0 : tp_rank;
+    }
+    int64_t get_ffn_tp_size() const {
+        return prefill_cp_config.is_enabled() ? 1 : ffn_tp_size;
+    }
+    int64_t get_ffn_tp_rank() const {
+        return prefill_cp_config.is_enabled() ? 0 : ffn_tp_rank;
+    }
     std::string to_string() const;
 };
 
@@ -68,10 +105,17 @@ enum class FMHAType {
     XQA,
     AITER_PREFILL,
     AITER_ASM_PREFILL,
+    AITER_PAGED_PREFILL,
     AITER_DECODE,
     AITER_ASM_DECODE,
-    PY_FLASHINFER_PREFILL,
+    AITER_TRITON_DECODE,
+    PY_FLASHINFER_PREFILL_PAGED,
+    PY_FLASHINFER_PREFILL_RAGGED,
     PY_FLASHINFER_DECODE,
+    FLASHINFER_MLA_PREFILL,
+    FLASHINFER_MLA_DECODE,
+    SPARSE_FLASHMLA,
+    CP_FLASH_INFER,
 };
 
 struct FMHAConfig {
@@ -85,6 +129,7 @@ struct FMHAConfig {
     bool        enable_xqa                    = true;
     bool        use_aiter_pa                  = true;
     bool        use_asm_pa                    = true;
+    bool        use_triton_pa                 = true;
     int64_t     absorb_opt_len                = 1024;
     std::string to_string() const;
 };
@@ -94,25 +139,46 @@ struct KVCacheConfig {
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    int64_t                                 reserve_block_ratio                = 5;
-    bool                                    enable_3fs                         = false;
-    int                                     match_timeout_ms                   = 1000;
-    int                                     rpc_get_cache_timeout_ms           = 2000;
-    int                                     rpc_put_cache_timeout_ms           = 2000;
-    int                                     threefs_read_timeout_ms            = 1000;
-    int                                     threefs_write_timeout_ms           = 2000;
-    int                                     max_block_size_per_item            = 16;
-    int64_t                                 threefs_read_iov_size              = 1LL << 32;  // 4GB
-    int64_t                                 threefs_write_iov_size             = 1LL << 32;  // 4GB
-    int64_t                                 memory_block_cache_size_mb         = 0;
-    int64_t                                 memory_block_cache_sync_timeout_ms = 10000;
+    int64_t                                 reserve_block_ratio          = 5;
+    int                                     max_block_size_per_item      = 16;
+    int64_t                                 memory_cache_size_mb         = 0;
+    int64_t                                 memory_cache_sync_timeout_ms = 10000;
+    int                                     linear_step                  = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
-    int         int8_kv_cache      = 0;
-    int         fp8_kv_cache       = 0;
-    int64_t     kv_cache_mem_mb    = -1;
-    int         seq_size_per_block = 64;
-    int         test_block_num     = 0;
-    int         use_block_cache    = -1;  // -1 means not set, use Optional<int> equivalent
+    int     int8_kv_cache                = 0;
+    int     fp8_kv_cache                 = 0;
+    int64_t kv_cache_mem_mb              = -1;
+    int     seq_size_per_block           = 64;
+    int     test_block_num               = 0;
+    int     use_block_cache              = -1;  // -1 means not set, use Optional<int> equivalent
+    bool    enable_device_cache          = true;
+    bool    enable_memory_cache          = false;
+    bool    enable_remote_cache          = false;
+    bool    write_cache_sync             = false;
+    bool    enable_tiered_memory_cache   = false;
+    int64_t device_cache_min_free_blocks = 0;
+
+    // Remote connector configuration fields
+    bool        reco_enable_vipserver                = false;
+    std::string reco_vipserver_domain                = "";
+    std::string reco_server_address                  = "";
+    std::string reco_instance_group                  = "default";
+    uint32_t    reco_meta_channel_retry_time         = 3;
+    uint32_t    reco_meta_channel_connection_timeout = 6000;
+    uint32_t    reco_meta_channel_call_timeout       = 100;
+    uint32_t    reco_storage_thread_num              = 4;
+    uint32_t    reco_storage_queue_size              = 2000;
+    int         reco_put_timeout_ms                  = 2000;
+    int         reco_get_timeout_ms                  = 2000;
+    std::string reco_model_sdk_config                = R"([{"type":"local","sdk_log_level":"DEBUG"}])";
+    std::string reco_model_user_data                 = "";
+    std::string reco_model_extra_info                = "";
+    std::string reco_instance_id_salt                = "";
+    size_t      reco_asyncwrapper_thread_num         = 16;
+    size_t      reco_asyncwrapper_queue_size         = 1000;
+    int         reco_get_broadcast_timeout           = 2000;
+    int         reco_put_broadcast_timeout           = 2000;
+    std::string reco_client_config                   = "";
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
@@ -156,6 +222,8 @@ struct HWKernelConfig {
     std::vector<int> decode_capture_batch_sizes;
     bool             disable_dpc_random     = false;
     bool             rocm_disable_custom_ag = true;
+    bool             deterministic_gemm     = false;
+    bool             deterministic_attn     = false;
     std::string      to_string() const;
 };
 
@@ -167,20 +235,22 @@ struct DeviceResourceConfig {
     int         m_split                     = 0;
     bool        enable_comm_overlap         = true;
     int         enable_layer_micro_batch    = 0;
-    bool        not_use_default_stream      = false;
     std::string to_string() const;
 };
 
 struct MoeConfig {
-    bool        use_deepep_moe                  = false;
-    bool        use_deepep_internode            = false;
-    bool        use_deepep_low_latency          = true;
-    bool        use_deepep_p2p_low_latency      = false;
-    bool        fake_balance_expert             = false;
-    bool        hack_moe_expert                 = false;
-    int         deep_ep_num_sm                  = 0;
-    int         max_moe_normal_masked_token_num = 1024;
-    bool        use_all_gather                  = false;
+    bool        use_deepep_moe             = false;
+    bool        use_deepep_internode       = false;
+    bool        use_deepep_low_latency     = true;
+    bool        use_deepep_p2p_low_latency = false;
+    bool        fake_balance_expert        = false;
+    bool        hack_moe_expert            = false;
+    int         deep_ep_num_sm             = 0;
+    int         masked_max_token_num       = 256;
+    bool        use_all_gather             = false;
+    int         ll_num_max_token           = 0;
+    std::string moe_strategy               = "auto";
+    std::string fp4_moe_op                 = "auto";
     std::string to_string() const;
 };
 
@@ -210,7 +280,6 @@ struct SpeculativeExecutionConfig {
     bool            force_score_context_attention = true;
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
-    bool            use_new_sp_engine             = false;
     std::string     to_string() const;
 
     // Helper functions for enum conversion
@@ -245,8 +314,9 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size = 1;
-    int64_t     max_batch_tokens_size  = 0;
+    int64_t     max_context_batch_size           = 1;
+    int64_t     scheduler_reserve_resource_ratio = 5;
+    int64_t     max_batch_tokens_size            = 0;
     std::string to_string() const;
 };
 

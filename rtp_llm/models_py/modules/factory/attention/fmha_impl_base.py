@@ -1,131 +1,156 @@
-from typing import Any, Optional
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Optional
 
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.ops import FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, ParamsBase, PyAttentionInputs
 
 
-class FMHAImplBase(object):
-    fmha_impl: Any
-    fmha_params: ParamsBase
-    rope_params: Any
-    rope_kvcache_impl: Any
-    write_cache_store_impl: Any
-    attn_inputs: PyAttentionInputs
-    support_: bool = False
+class MlaImplBase(object):
+    """Base class for MLA attention implementations."""
 
     def __init__(
         self,
-        fmha_impl: Any,
-        rope_kvcache_impl: Any,
+        attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
-        init_params: bool = True,
+        weights: List[Dict[str, torch.Tensor]],
+        cos_sin_cache: torch.Tensor,
+        fmha_config: Optional[FMHAConfig] = None,
+        use_trt_fmha: bool = False,
+        quant_config: Optional[object] = None,
+        max_seq_len: int = 0,
+        is_cuda_graph: bool = False,
     ) -> None:
-        self.fmha_impl = fmha_impl
-        self.input_lengths = attn_inputs.input_lengths
-        self.cu_seq_lens = attn_inputs.cu_seqlens
-        self.support_: bool = self.fmha_impl.support(attn_inputs)
-        self.fmha_params = None
-        self.rope_params = None
-        self.write_cache_store_impl = None
-        if self.support_ and init_params:
-            self.rope_kvcache_impl = rope_kvcache_impl
-            self.attn_inputs = attn_inputs
-            if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
-                self.write_cache_store_impl = WriteCacheStoreOp(
-                    self.attn_inputs.input_lengths,
-                    self.attn_inputs.prefix_lengths,
-                    self.attn_inputs.kv_cache_block_id_host,
-                    self.attn_inputs.cache_store_inputs,
-                )
-            self.create_params(attn_inputs)
-            if attn_inputs.is_cuda_graph is False:
-                self.prepare(attn_inputs)
+        """Initialize MLA implementation base class.
 
+        Args:
+            attn_configs: Attention configuration
+            attn_inputs: Attention input tensors
+            weights: Model weights
+            cos_sin_cache: Cosine and sine cache for RoPE
+            fmha_config: FMHA configuration
+            use_trt_fmha: Whether to use TensorRT FMHA
+            quant_config: Quantization configuration
+            max_seq_len: Maximum sequence length
+            is_cuda_graph: Whether CUDA graph is enabled
+        """
+        self.attn_configs = attn_configs
+        self.attn_inputs = attn_inputs
+        self.weights = weights
+        self.cos_sin_cache = cos_sin_cache
+        self.fmha_config = fmha_config
+        self.use_trt_fmha = use_trt_fmha
+        self.quant_config = quant_config
+        self.max_seq_len = max_seq_len
+        self.is_cuda_graph = is_cuda_graph
+        self.fmha_params: Any = None
+
+    @staticmethod
+    def is_sparse() -> bool:
+        return False
+
+    @staticmethod
+    @abstractmethod
+    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
+        return False
+
+    def support_cuda_graph(self) -> bool:
+        """Check if CUDA graph is supported."""
+        return callable(getattr(self, "prepare_cuda_graph", None))
+
+    def prepare(self, attn_inputs: PyAttentionInputs):
+        """Prepare for attention computation."""
+        pass
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        layer_id: int,
+        topk_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Forward pass for attention computation."""
+        raise NotImplementedError("forward method must be implemented by subclass")
+
+
+class FMHAImplBase(ABC):
+    """Flash Multi-Head Attention 实现的接口基类。
+    该类定义了 FMHA 实现必须提供的接口方法。
+    所有具体的实现类都应该继承此类并实现这些方法。
+    """
+
+    @abstractmethod
     def forward(
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[KVCache],
-        need_rope_kv_cache: bool = True,
     ) -> torch.Tensor:
-        assert self.rope_kvcache_impl is not None and self.rope_params is not None
-        if need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(
-                qkv, self.fmha_type(), kv_cache, self.rope_params
-            )
-        else:
-            fmha_input = qkv
-        if (
-            self.attn_inputs.is_prefill
-            and self.attn_inputs.cache_store_inputs
-            and self.write_cache_store_impl is not None
-        ):
-            self.write_cache_store_impl(kv_cache)
-        assert self.fmha_impl is not None
-        res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
-        return res
+        """执行前向传播计算。
+
+        Args:
+            qkv: 输入的 QKV 张量
+            kv_cache: 可选的 KV Cache，用于存储历史键值对
+            need_rope_kv_cache: 是否需要应用 RoPE 和 KV Cache 处理
+
+        Returns:
+            计算后的注意力输出张量
+        """
+        raise NotImplementedError("Subclass must implement forward method")
 
     @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.NONE
+    @abstractmethod
+    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
+        """检查当前实现是否支持给定的输入。
 
-    def create_params(self, attn_inputs: PyAttentionInputs):
-        pass
+        Args:
+            attn_configs: 注意力配置
+            attn_inputs: 注意力输入参数
 
-    def support(self):
-        return self.support_
-
-    def support_cuda_graph(self) -> bool:
+        Returns:
+            bool: 如果支持则返回 True，否则返回 False
+        """
         return False
 
-    def _update_trt_params(self, attn_inputs: PyAttentionInputs):
-        new_fmha_params = self.fmha_impl.prepare(attn_inputs)
-        new_offset = new_fmha_params.kv_cache_offset
-        old_offset = self.fmha_params.kv_cache_offset
-        self.copy_kv_cache_offset(old_offset, new_offset)
+    @classmethod
+    def support_parallelism_config(
+        cls, parallelism_config: Optional[ParallelismConfig]
+    ) -> bool:
+        """检查当前实现是否支持给定的并行配置。
 
-        new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        new_offset = new_rope_params.kv_cache_offset
-        old_offset = self.rope_params.kv_cache_offset
-        self.copy_kv_cache_offset(old_offset, new_offset)
+        Args:
+            parallelism_config: 并行配置，如果为 None 表示无特殊并行要求
 
-    def copy_kv_cache_offset(self, old_offset: torch.Tensor, new_offset: torch.Tensor):
-        if new_offset.shape == old_offset.shape:
-            old_offset.copy_(new_offset, non_blocking=True)
-        else:
-            # Build slice indices dynamically
-            slice_indices = [
-                slice(0, new_offset.size(dim)) for dim in range(new_offset.dim())
-            ]
-            target_slice = old_offset[tuple(slice_indices)]
-            target_slice.copy_(new_offset, non_blocking=True)
+        Returns:
+            bool: 如果支持则返回 True，否则返回 False
+        """
+        # 如果没有并行配置，默认支持
+        if parallelism_config is None:
+            return True
 
-    def prepare(self, attn_inputs: PyAttentionInputs):
-        assert self.fmha_impl is not None
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        assert self.rope_kvcache_impl is not None
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        # 如果 prefill context parallel 未启用，默认支持
+        if not parallelism_config.prefill_cp_config.is_enabled():
+            return True
+
+        # 如果 prefill CP 已启用，检查实现是否支持
+        return cls.support_prefill_cp()
+
+    def support_cuda_graph(self) -> bool:
+        """检查是否支持 CUDA Graph 优化。
 
 
-class FMHAPrefillImplBase(FMHAImplBase):
+        Returns:
+            bool: 如果支持 CUDA Graph 则返回 True，否则返回 False
+            如果想支持cuda graph需要子类支持prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):这个函数
+        """
+        return callable(getattr(self, "prepare_cuda_graph", None))
 
-    def __init__(
-        self,
-        fmha_impl: Any,
-        rope_kvcache_impl: Any,
-        attn_inputs: PyAttentionInputs,
-    ) -> None:
-        super().__init__(fmha_impl, rope_kvcache_impl, attn_inputs)
+    @classmethod
+    def support_prefill_cp(cls) -> bool:
+        return False
 
-
-class FMHADecodeImplBase(FMHAImplBase):
-
-    def __init__(
-        self,
-        fmha_impl: Any,
-        rope_kvcache_impl: Any,
-        attn_inputs: PyAttentionInputs,
-    ) -> None:
-        super().__init__(fmha_impl, rope_kvcache_impl, attn_inputs)
+    # def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+    #     pass

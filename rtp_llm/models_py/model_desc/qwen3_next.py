@@ -5,14 +5,16 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
+import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
-    AttnImplFactory,
     CausalAttention,
+    DenseMLP,
     Embedding,
     FMHAImplBase,
     LinearFactory,
@@ -34,6 +36,7 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.ops import (
     AttentionConfigs,
     HybridAttentionType,
@@ -47,18 +50,6 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
-
-
-def _is_target_verify(attention_inputs: PyAttentionInputs) -> bool:
-    """Check if the current forward pass is in target verify mode."""
-    return (
-        attention_inputs.prefix_lengths_d.size(0) > 0
-        and torch.all(
-            attention_inputs.input_lengths == attention_inputs.input_lengths[0]
-        ).item()
-        and torch.max(attention_inputs.input_lengths).item() < 10
-        and torch.min(attention_inputs.prefix_lengths).item() > 0
-    )
 
 
 class Qwen3NextMetadata(object):
@@ -300,6 +291,15 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         attn_out = self._fla(
             mixed_qkv, b, a, kv_cache_tensor, seq_size_per_block, attn_inputs
         )
+        if kv_cache is not None:
+            # write kvcache to cache store
+            compute_ops.write_cache_store(
+                attn_inputs.input_lengths,
+                attn_inputs.prefix_lengths,
+                attn_inputs.kv_cache_block_id_host,
+                attn_inputs.cache_store_inputs,
+                kv_cache,
+            )
         return attn_out
 
 
@@ -420,6 +420,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             attn_inputs,
             is_target_verify,
         )
+
         return attn_out
 
     def _get_bs_from_attenion_input(
@@ -469,7 +470,7 @@ class Qwen3NextAttention(CausalAttention):
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
         gate = self.gate(hidden_states)
-        attn_out = super().forward(hidden_states, fmha_impl, kv_cache, True, gate)
+        attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
         return attn_out
 
 
@@ -554,7 +555,8 @@ class Qwen3NextGatedDeltaNet(nn.Module):
     ) -> torch.Tensor:
         assert attention_inputs is not None, "attention_inputs is required"
         assert (
-            not attention_inputs.is_prefill
+            attention_inputs.is_target_verify
+            or not attention_inputs.is_prefill
             or attn_meta.get_prefill_conv1d_meta() is not None
         ), "prefill_conv1d_meta is required for prefill"
         projected_states_qkvz = self.in_proj_qkvz(hidden_states)
@@ -576,7 +578,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         # from [token * head, dim] -> [token, head * dim]
         attn_output = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
         attn_output = self.out_proj(attn_output)
-        if self.parallelism_config.tp_size > 1:
+        if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
         return attn_output
 
@@ -606,7 +608,9 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.quant_config,
             )
         else:
-            attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+            attn_configs = config.getAttentionConfigs(
+                parallelism_config.get_attn_tp_size()
+            )
             self.self_attn = Qwen3NextAttention(
                 attn_configs,
                 parallelism_config,
@@ -614,14 +618,20 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 config.quant_config,
             )
-        self.mlp = GenericMoeLayer(
-            config,
-            parallelism_config,
-            weights,
-            moe_config,
-            max_generate_batch_size,
-            enable_cuda_graph,
-        )
+
+        if config.moe_style == 2:
+            self.mlp = GenericMoeLayer(
+                config,
+                parallelism_config,
+                weights,
+                moe_config,
+                max_generate_batch_size,
+                enable_cuda_graph,
+            )
+        elif config.moe_style == 0:
+            self.mlp = DenseMLP(
+                config.activation_type, parallelism_config, weights, config.quant_config
+            )
 
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
@@ -712,28 +722,26 @@ class Qwen3NextModel(GptModelBase):
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         prefill_conv1d_meta = None
-        if attention_inputs.is_prefill:
-            # cu_seqlen_without_padding = attention_inputs.cu_seqlens[
-            #     : attention_inputs.input_lengths.size(0) + 1
-            # ]
+        is_target_verify = attention_inputs.is_target_verify
+        if attention_inputs.is_prefill and not is_target_verify:
             cu_seqlen_without_padding = attention_inputs.cu_seqlens
             prefill_conv1d_meta = prepare_causal_conv1d_metadata(
                 query_start_loc=cu_seqlen_without_padding,
                 device=hidden_states.device,
             )
-        # hack temp
-        is_target_verify = _is_target_verify(attention_inputs)
-        if is_target_verify:
-            attention_inputs.sequence_lengths_plus_1_d = (
-                attention_inputs.prefix_lengths_d + 1
-            )
+
         attn_meta = Qwen3NextMetadata(prefill_conv1d_meta, is_target_verify)
+
+        # qwen3_next model has only one full group (group 0): use fmha_impl from input param
+        # if there is a model with more than 1 full groups,
+        # we should prepare fmha_impl for each full group/ fix later
+
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(
-                inputs
-            )  # pyright: ignore[reportUnreachable]
-            fmha_impl.prepare(inputs.attention_inputs)
+            fmha_impl = self.prepare_fmha_impl(inputs)
+
         for i, decoder_layer in enumerate(self.layers):
+            # Switch to correct block_map for this layer in hybrid attention mode
+            select_block_map_for_layer(attention_inputs, i)
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,
@@ -741,5 +749,6 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
             )
+
         hidden_states = self.norm(hidden_states)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)

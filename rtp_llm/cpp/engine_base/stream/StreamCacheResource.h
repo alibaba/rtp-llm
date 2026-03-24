@@ -8,6 +8,7 @@
 
 namespace rtp_llm {
 
+class AsyncContext;
 class GenerateStream;
 
 class StreamCacheResource {
@@ -21,22 +22,23 @@ public:
         resource_context_(resource_context),
         need_release_resource_(need_release_resource) {}
 
-    ~StreamCacheResource() {
-        releaseResource();
-    }
+    ~StreamCacheResource() = default;
 
     void                 init(int batch_size);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock(size_t reserve_step = 0);
     absl::Status         incrKVBlock(size_t reserve_step = 0);
-    void                 fakeInitKVBlock();
+    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     int                  tryReleaseKVBlock(size_t nums);
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                 releaseResource();
 
+    // swap all linear groups rhs and lhs
+    void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
+
     // TODO, remove this after remove fallback
-    int singleBatchNeedBlocks(int seq_len) const;
+    int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
 
     int curBlocksNum() const;
     int mallocFailedTimes() const;
@@ -90,9 +92,15 @@ public:
         need_release_resource_ = need_release_resource;
     }
 
+    bool isResourceReleased() const {
+        return resource_released_;
+    }
+
     bool reuseCache() const;
-    bool enable3FS() const;
-    bool enableMemoryBlockCache() const;
+    bool enableMemoryCache() const;
+    bool enableRemoteCache() const;
+    bool enableDeviceCache() const;
+    bool enableTieredMemoryCache() const;
 
     std::string debugString() const {
         std::stringstream debug_string;
@@ -106,6 +114,15 @@ public:
     }
 
 private:
+    void                          loadCacheSync();
+    void                          waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
+    std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
+                                                  bool                                         enable_memory_cache,
+                                                  bool                                         enable_remote_cache);
+    void                          evictDeviceCacheToMemory();
+    void                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
+
+private:
     GenerateStream*          stream_;
     BatchKVCacheResourcePtr  batch_kv_cache_resource_;
     ResourceContext          resource_context_;
@@ -115,6 +132,7 @@ private:
     bool last_block_aligned_    = false;
     int  malloc_failed_times_   = 0;
     bool fake_inited_           = false;
+    bool resource_released_     = false;
 };
 
 }  // namespace rtp_llm

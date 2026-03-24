@@ -12,7 +12,6 @@ class TrtV2FmhaRunner;
 struct TRTAttn;
 using TRTAttnPtr = std::shared_ptr<TRTAttn>;
 
-
 class TRTPrefillOpBase {
 public:
     TRTPrefillOpBase(const AttentionConfigs& attn_configs);

@@ -20,7 +20,6 @@ from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops import (
     DeviceResourceConfig,
     FMHAConfig,
@@ -58,6 +57,7 @@ class BaseModel(object):
         vit_config: Optional[VitConfig],
         merge_lora: bool,
         device_resource_config: Optional[DeviceResourceConfig],
+        force_cpu_load_weights: bool = False,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -85,6 +85,7 @@ class BaseModel(object):
         self.vit_config = vit_config
         self.merge_lora = merge_lora
         self.device_resource_config = device_resource_config
+        self.force_cpu_load_weights = force_cpu_load_weights
         self.weight = None
         self.weight_manager = None
 
@@ -93,7 +94,7 @@ class BaseModel(object):
         self.py_eplb = None
         self.tokenizer: Optional[BaseTokenizer] = None
         self.custom_module: Optional[CustomModule] = None
-        self.py_model: Optional[GptModelBase] = None
+        self.py_model = None
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
 
@@ -163,7 +164,7 @@ class BaseModel(object):
         else:
             logging.info(f"Skip creating python model, use legacy cpp GptModel")
 
-    def _create_python_model(self) -> Optional[GptModelBase]:
+    def _create_python_model(self):
         raise NotImplementedError("Python Model is not implemented for this model.")
 
     def support_cuda_graph(self) -> bool:
@@ -178,7 +179,23 @@ class BaseModel(object):
         )
         self._load_custom_module()
         self._load_multimodal()
-        self.model_weights_loader.force_clean_cuda_memory()
+
+        # 清理checkpoint加载过程中使用的临时资源，释放host内存
+        self._cleanup_loader_resources()
+
+        self.model_weights_loader.force_clean_all_memory()
+
+    def _cleanup_loader_resources(self):
+        """清理模型加载过程中使用的临时资源，释放host内存
+
+        在模型权重加载完成后调用此方法，释放以下资源：
+        1. CkptDatabase 中的 CkptFileInfo 元数据
+        2. checkpoint文件列表
+        3. 临时的LoRA缓存
+
+        这可以显著减少host内存占用，为KV cache等运行时内存需求腾出空间。
+        """
+        self.model_weights_loader.cleanup_database()
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
@@ -194,11 +211,12 @@ class BaseModel(object):
         fmha_config: FMHAConfig,
         moe_config: MoeConfig,
         load_python_model: bool,
-        load_method: LoadMethod,
+        load_method,
         max_generate_batch_size: int,
         vit_config: VitConfig,
         merge_lora: bool,
         device_resource_config: DeviceResourceConfig,
+        force_cpu_load_weights: bool = False,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -229,8 +247,21 @@ class BaseModel(object):
             vit_config=vit_config,
             merge_lora=merge_lora,
             device_resource_config=device_resource_config,
+            force_cpu_load_weights=force_cpu_load_weights,
         )
+
+        import os
+
+        import psutil
+
+        def get_host_memory_usage():
+            process = psutil.Process(os.getpid())
+            return process.memory_info().rss / 1024 / 1024  # MB
+
+        # 在加载前后分别记录内存使用
+        logging.info(f"Before loading: {get_host_memory_usage():.2f} MB")
         model.load()
+        logging.info(f"After loading: {get_host_memory_usage():.2f} MB")
         return model
 
     @staticmethod
@@ -341,4 +372,5 @@ class BaseModel(object):
             misc_weights_info,
             database,
             load_method=self.load_method,
+            force_cpu_load_weights=self.force_cpu_load_weights,
         )

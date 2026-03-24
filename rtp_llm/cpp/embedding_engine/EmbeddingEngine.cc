@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <exception>
 
 using namespace std;
@@ -10,24 +11,28 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
     concurrency_config(params.concurrency_config),
-    metrics_reporter_(params.metrics_reporter) {
-    rtp_llm::DeviceFactory::initDevices(
-        params.parallelism_config,
-        params.model_config_,
-        params.eplb_config,
-        params.fmha_config,
-        params.device_resource_config,
-        params.moe_config,
-        params.sp_config,
-        params.misc_config,
-        params.profiling_debug_logging_config,
-        params.hw_kernel_config,
-        params.concurrency_config,
-        params.ffn_disaggregate_config,
-        params.runtime_config);
+    metrics_reporter_(params.metrics_reporter),
+    step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
+                   params.parallelism_config.dp_rank * params.parallelism_config.tp_size
+                       + params.parallelism_config.tp_rank) {
+    rtp_llm::DeviceFactory::initDevices(params.parallelism_config,
+                                        params.model_config_,
+                                        params.eplb_config,
+                                        params.fmha_config,
+                                        params.device_resource_config,
+                                        params.moe_config,
+                                        params.sp_config,
+                                        params.misc_config,
+                                        params.profiling_debug_logging_config,
+                                        params.hw_kernel_config,
+                                        params.concurrency_config,
+                                        params.ffn_disaggregate_config,
+                                        params.runtime_config,
+                                        params.model_specific_config,
+                                        params.nccl_comm_config);
     executor_.reset(new EmbeddingExecutor(params, rtp_llm::DeviceFactory::getDefaultDevice(), handler));
-    scheduler_.reset(new EmbeddingScheduler(model_config_, concurrency_config, params.runtime_config, metrics_reporter_));
-    gen_timeline_ = params.profiling_debug_logging_config.gen_timeline_sync;
+    scheduler_.reset(
+        new EmbeddingScheduler(model_config_, concurrency_config, params.runtime_config, metrics_reporter_));
 
     (void)startLoop();
 }
@@ -36,7 +41,6 @@ EmbeddingEngine::~EmbeddingEngine() {
     RTP_LLM_LOG_INFO("destory embedding engine");
     (void)stop();
 }
-
 
 absl::Status EmbeddingEngine::startLoop() {
     RTP_LLM_LOG_INFO("start embedding engine");
@@ -56,6 +60,7 @@ absl::Status EmbeddingEngine::stop() {
 }
 
 void EmbeddingEngine::loop() {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     while (running_) {
         auto status = step();
@@ -101,10 +106,7 @@ absl::Status EmbeddingEngine::step() {
         RTP_LLM_LOG_INFO("no query run and sleep");
         return absl::OkStatus();
     }
-    if (gen_timeline_ && nullptr == profiler_) {
-        profiler_ = std::make_shared<CudaProfiler>("embedding_profiler_");
-        profiler_->start();
-    }
+    step_profiler_.tick();
     try {
         auto status = executor_->process(streams);
         if (!status.ok()) {
@@ -127,7 +129,6 @@ absl::Status EmbeddingEngine::step() {
         }
     }
     executor_->device_->syncAndCheck();
-    profiler_.reset();
     return absl::OkStatus();
 }
 

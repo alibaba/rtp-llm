@@ -20,6 +20,7 @@ device_type = get_device().get_device_type()
 
 if device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.base.rocm.activation import FusedSiluAndMul
+    from rtp_llm.models_py.modules.base.rocm.moe_gating import SigmoidGateScaleAdd
     from rtp_llm.models_py.modules.base.rocm.norm import (
         AddBiasResLayerNorm,
         FusedQKRMSNorm,
@@ -30,11 +31,14 @@ if device_type == DeviceType.ROCm:
     # Import NotImplementedOp placeholders for ROCm
     from rtp_llm.models_py.modules.base.rocm.not_implemented_ops import (
         GroupTopK,
+        IndexerOp,
         RMSResNorm,
     )
     from rtp_llm.models_py.modules.base.rocm.select_topk import SelectTopk
 else:
     from rtp_llm.models_py.modules.base.cuda.activation import FusedSiluAndMul
+    from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
+    from rtp_llm.models_py.modules.base.cuda.moe_gating import SigmoidGateScaleAdd
     from rtp_llm.models_py.modules.base.cuda.norm import (
         AddBiasResLayerNorm,
         FusedQKRMSNorm,
@@ -61,4 +65,6 @@ else:
         "SelectTopk",
         "GroupTopK",
         "FusedSiluAndMul",
+        "IndexerOp",
+        "SigmoidGateScaleAdd",
     ]

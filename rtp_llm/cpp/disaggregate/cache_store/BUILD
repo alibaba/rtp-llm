@@ -72,6 +72,7 @@ cc_library(
         "//rtp_llm/cpp/disaggregate/cache_store/proto:cache_store_service_cc_proto",
         "//:rtp_compute_ops",
         ":arpc_dep",
+        "//rtp_llm/cpp/utils:profiling_scope",
     ],
     visibility=['//visibility:public'],
     alwayslink = True,

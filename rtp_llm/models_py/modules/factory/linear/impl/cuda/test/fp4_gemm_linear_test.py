@@ -8,11 +8,11 @@ import torch.nn.functional as F
 from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
     CudaFp4GEMMLinear,
-    has_flashinfer_fp4,
 )
 
 from flashinfer import fp4_quantize
 from rtp_llm.config.quant_config import init_quant_config
+from rtp_llm.device.device_impl import CudaImpl
 
 
 class CudaFp4GEMMLinearTest(unittest.TestCase):
@@ -23,15 +23,12 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         if self.device == "cpu":
             self.skipTest("FP4 tests require CUDA")
 
-        if not has_flashinfer_fp4():
-            self.skipTest("flashinfer FP4 support is not available")
-
         logging.getLogger(
             "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear"
         ).setLevel(logging.WARNING)
 
-        self.hidden_size = 512  # k
-        self.output_size = 1024  # n
+        self.hidden_size = 1024  # k
+        self.output_size = 512  # n
         self.batch_sizes = [1, 32, 64, 128, 256] # m
         weight_fp16 = (
             torch.randn(
@@ -47,8 +44,8 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         fp4_weight, weight_scale = fp4_quantize(weight_fp16,
                                                 global_scale=global_sf_weight,
                                                 is_sf_swizzled_layout=False)
-        self.weight = fp4_weight.T
-        self.weight_scales = weight_scale.T
+        self.weight = fp4_weight
+        self.weight_scales = weight_scale
 
         self.bias = torch.randn(
             self.output_size, dtype=torch.bfloat16, device=self.device
@@ -58,9 +55,12 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def _create_fp4_linear(self, with_bias: bool = True):
         """Helper method to create CudaFp4GEMMLinear instance"""
+        processed_weight, processed_scale = CudaImpl.convert_fp4_gemm_weight_params(
+            self.weight, self.weight_scales
+        )
         return CudaFp4GEMMLinear(
-            weight=self.weight,
-            weight_scales=self.weight_scales,
+            weight=processed_weight,
+            weight_scales=processed_scale,
             input_scales=self.input_scale,
             bias=self.bias if with_bias else None,
             quant_config=init_quant_config('modelopt_fp4'),
@@ -98,7 +98,6 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         """Test dependency availability check"""
         # Test that we can at least import the module
         self.assertIsNotNone(CudaFp4GEMMLinear)
-        self.assertTrue(has_flashinfer_fp4())
 
     def test_input_dtype_validation(self):
         """Test input dtype validation - bfloat16 and float16 are accepted"""
@@ -265,8 +264,8 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         """Test weight shape"""
         fp4_linear = self._create_fp4_linear(with_bias=False)
 
-        # Weight should be stored in original shape [k, n]
-        expected_weight_shape = (self.hidden_size // 2, self.output_size)
+        # Weight should be stored in original shape [n, k]
+        expected_weight_shape = (self.output_size, self.hidden_size // 2)
         self.assertEqual(fp4_linear.weight.shape, expected_weight_shape)
         
     def test_fp4_vs_bf16_accuracy(self):

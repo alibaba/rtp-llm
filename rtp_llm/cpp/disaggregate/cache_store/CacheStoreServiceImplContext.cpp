@@ -2,6 +2,7 @@
 #include <atomic>
 
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
@@ -31,6 +32,7 @@ CacheStoreServiceImplContext::CacheStoreServiceImplContext(
 }
 
 std::shared_ptr<BlockBufferInfo> CacheStoreServiceImplContext::getAndEraseUnLoadedBlock(const std::string& block_key) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::unique_lock<std::shared_mutex> lock(unloaded_blocks_mutex_);
     auto                                it = unloaded_blocks_.find(block_key);
     if (it == unloaded_blocks_.end()) {
@@ -50,6 +52,7 @@ std::shared_ptr<BlockBufferInfo> CacheStoreServiceImplContext::getAndEraseUnLoad
 }
 
 void CacheStoreServiceImplContext::runSuccess(bool direct_write) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] run success", request_id_.c_str());
     bool expected = false;
     if (!done_run_.compare_exchange_strong(expected, true)) {
@@ -78,6 +81,7 @@ void CacheStoreServiceImplContext::runSuccess(bool direct_write) {
 }
 
 void CacheStoreServiceImplContext::runFailed(KvCacheStoreServiceErrorCode error_code) {
+    RTP_LLM_PROFILE_FUNCTION();
     bool expected = false;
     if (!done_run_.compare_exchange_strong(expected, true)) {
         return;

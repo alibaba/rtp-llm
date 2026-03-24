@@ -89,11 +89,12 @@ message GenerateConfigPB {
     float frequency_penalty = 45;
     bool do_sample = 46;
     bool reuse_cache = 47;
-    bool enable_3fs = 48;
-    repeated int32 variable_num_beams = 49;
-    google.protobuf.StringValue trace_id = 50;
-    bool return_all_hidden_states = 51;
-    bool enable_memory_block_cache = 52;
+    repeated int32 variable_num_beams = 48;
+    google.protobuf.StringValue trace_id = 49;
+    bool return_all_hidden_states = 50;
+    bool enable_memory_cache = 51;
+    bool enable_device_cache = 52;
+    bool enable_remote_cache = 53;
 }
 
 message MMPreprocessConfigPB {
@@ -158,6 +159,9 @@ message AuxInfoPB {
     int32 decode_local_reuse_len = 21;
     int32 decode_remote_reuse_len = 22;
     string aux_string = 23;
+    int32 memory_reuse_len = 24;
+    int32 prefill_memory_reuse_len = 25;
+    int32 decode_memory_reuse_len = 26;
 }
 
 message FlattenOutputPB {
@@ -243,6 +247,8 @@ message BroadcastLoadRequestPB {
     int64 dp_rank = 9;
     int32 partition_count = 10;
     int32 partition_id = 11;
+    repeated IntVector group_block_ids = 12;
+
 }
 
 message BroadcastLoadResponsePB {
@@ -326,6 +332,12 @@ message SetLogLevelRequestPB {
     string log_level = 1;
 }
 
+message StartProfileRequestPB {
+    string trace_name = 1;
+    int32 start_step = 2;
+    int32 num_steps = 3;
+}
+
 message CheckHealthResponsePB {
     string health = 1;
 }
@@ -396,33 +408,61 @@ service EmbeddingRpcService {
     rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
 }
 
-message MemoryBroadcastTpRequestPB {
-    message Group {
-        int32 group_id = 1;
-        repeated int32 gpu_block_ids = 2;
-        repeated int32 memory_block_ids = 3;
+message MemoryOperationRequestPB {
+    message CopyItem {
+        int32 mem_block = 1;
+        repeated int32 gpu_blocks = 2;
     }
-    enum Direction {
+    enum CopyDirection {
         H2D = 0;
         D2H = 1;
     }
-    repeated Group groups = 1;
-    Direction direction = 2;
+    repeated CopyItem copy_items = 1;
+    CopyDirection copy_direction = 2;
 }
 
-message MemoryBroadcastTpResponsePB {
+message MemoryOperationResponsePB {
     bool success = 1;
 }
 
-message BroadcastTpRequestPB {
+message FunctionRequestPB {
     oneof request {
-        MemoryBroadcastTpRequestPB mem_request = 1;
+        MemoryOperationRequestPB mem_request = 1;
+        RemoteOperationRequestPB remote_request = 2;
     }
 }
 
-message BroadcastTpResponsePB {
+enum RemoteOpType {
+    REMOTE_OPERATION_UNSPECIFIED = 0;
+    REMOTE_OPERATION_READ = 1;
+    REMOTE_OPERATION_WRITE = 2;
+}
+
+message RemoteBoolMasksTypePB { repeated bool values = 1; }
+message RemoteBlockMaskPB {
+    oneof info {
+        int32 offset = 1;
+        RemoteBoolMasksTypePB bool_masks = 2;
+    }
+}
+
+message RemoteOperationRequestPB {
+    RemoteOpType op = 1;
+    string trace_id = 2;
+    repeated int32 group_ids = 3;
+    repeated int32 block_ids = 4;
+    repeated string uris = 5;
+}
+
+message RemoteOperationResponsePB {
+    RemoteBlockMaskPB succeed_block = 1;  // for read/write, TODO
+    repeated string actual_uris = 2; // only for write
+}
+
+message FunctionResponsePB {
     oneof response {
-        MemoryBroadcastTpResponsePB mem_response = 1;
+        MemoryOperationResponsePB mem_response = 1;
+        RemoteOperationResponsePB remote_response = 2;
     }
 }
 
@@ -440,13 +480,14 @@ service RpcService {
     rpc SetPause(EmptyPB) returns (EmptyPB);
     rpc SetRestart(EmptyPB) returns (EmptyPB);
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
+    rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
-    rpc BroadcastTp(BroadcastTpRequestPB) returns (BroadcastTpResponsePB);
+    rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
 }
 
 service MultimodalRpcService {

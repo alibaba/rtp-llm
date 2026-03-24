@@ -9,6 +9,8 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
     // If decode_capture_batch_sizes_ is provided from Python, use it directly
     if (!decode_capture_batch_sizes_.empty()) {
         RTP_LLM_LOG_INFO("Using decode capture batch sizes from Python: %zu sizes", decode_capture_batch_sizes_.size());
+        // Sort in ascending order (from small to large)
+        std::sort(decode_capture_batch_sizes_.begin(), decode_capture_batch_sizes_.end());
         return decode_capture_batch_sizes_;
     }
 
@@ -36,16 +38,23 @@ void CudaGraphRunner::captureDecodeOneBatchSize(int bs) {
 
 void CudaGraphRunner::captureDecode() {
     RTP_LLM_LOG_INFO("Capture Decode Start");
+    // Pre-initialize all graph instances with keep_graph based on debug mode
+    for (int bs : capture_range_) {
+        graph_instances_.try_emplace(bs, enable_cuda_graph_debug_mode_);
+    }
     int capture_range_size = capture_range_.size();
-    for (int i = 0; i <= capture_range_size - 1; i++) {
+    for (int i = capture_range_size - 1; i >= 0; i--) {
         int           bs = capture_range_[i];
         PyModelInputs inputs;
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, bs, bs * num_tokens_per_bs_);
 
         // calculate context_total_kv_length
-        int max_input_len                               = inputs.attention_inputs.input_lengths.max().item<int>();
-        int max_prefix_len                              = inputs.attention_inputs.prefix_lengths.max().item<int>();
+        int max_input_len  = inputs.attention_inputs.input_lengths.max().item<int>();
+        int max_prefix_len = 0;
+        if (inputs.attention_inputs.prefix_lengths.defined()) {
+            max_prefix_len = inputs.attention_inputs.prefix_lengths.max().item<int>();
+        }
         inputs.attention_inputs.context_total_kv_length = bs * (max_input_len + max_prefix_len);
 
         graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);

@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <ATen/cuda/CUDAGraph.h>
+#include <torch/version.h>
 #include <string>
 
 using namespace torch_ext;
@@ -32,15 +33,21 @@ public:
         py_model_inputs_.attention_inputs.sequence_lengths         = inputs.attention_inputs.sequence_lengths;
         py_model_inputs_.attention_inputs.kv_cache_block_id_device = inputs.attention_inputs.kv_cache_block_id_device;
         py_model_inputs_.attention_inputs.kv_cache_block_id_host   = inputs.attention_inputs.kv_cache_block_id_host;
-        py_model_inputs_.attention_inputs.prefix_lengths           = inputs.attention_inputs.prefix_lengths;
-        py_model_inputs_.input_ids                                 = inputs.input_ids;
+        py_model_inputs_.attention_inputs.kv_cache_block_id_device_by_group =
+            inputs.attention_inputs.kv_cache_block_id_device_by_group;
+        py_model_inputs_.attention_inputs.kv_cache_block_id_host_by_group =
+            inputs.attention_inputs.kv_cache_block_id_host_by_group;
+        py_model_inputs_.attention_inputs.kv_cache_layer_to_group = inputs.attention_inputs.kv_cache_layer_to_group;
+        py_model_inputs_.attention_inputs.prefix_lengths          = inputs.attention_inputs.prefix_lengths;
+        py_model_inputs_.input_ids                                = inputs.input_ids;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
         py_model_inputs_.attention_inputs.cu_seqlens              = inputs.attention_inputs.cu_seqlens;
         py_model_inputs_.attention_inputs.cu_kv_seqlens           = inputs.attention_inputs.cu_kv_seqlens;
         py_model_inputs_.attention_inputs.padding_offset          = inputs.attention_inputs.padding_offset;
-        py_model_inputs_.attention_inputs.is_prefill              = is_embedding;
+        py_model_inputs_.attention_inputs.is_prefill              = inputs.attention_inputs.is_prefill;
+        py_model_inputs_.attention_inputs.is_target_verify        = inputs.attention_inputs.is_target_verify;
         py_model_inputs_.attention_inputs.dtype                   = inputs.attention_inputs.dtype;
         py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
 
@@ -62,6 +69,16 @@ public:
 
 class GraphInstance {
 public:
+    GraphInstance(bool keep_graph = false) {
+#if (TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 8)
+        // PyTorch >= 2.8: CUDAGraph constructor supports keep_graph parameter
+        graph_ = at::cuda::CUDAGraph(keep_graph);
+#else
+        // PyTorch < 2.8: CUDAGraph constructor doesn't support keep_graph parameter
+        graph_ = at::cuda::CUDAGraph();
+        (void)keep_graph;  // Suppress unused parameter warning
+#endif
+    }
     at::cuda::CUDAGraph graph_;
     CaptureMemoryHold   mem_hold_;
 };
@@ -102,17 +119,4 @@ public:
     CudaGraphCaptureGuard& operator=(CudaGraphCaptureGuard&&)      = delete;
 };
 
-namespace rtp_llm {
-
-// Current state of CUDA graph execution
-struct CudaGraphState {
-    int current_batch_size{1};
-    int current_seq_len{1};
-    // for decode
-    int current_real_graph_bs{1};
-    // for prefill
-    int current_real_graph_seq_len{1};
-    int seq_len_sum{0};
-};
-
-}  // namespace rtp_llm
+// CudaGraphState is defined in GraphBase.h (include it when you need the type)

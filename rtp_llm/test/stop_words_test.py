@@ -1,9 +1,13 @@
 from unittest import TestCase, main
 
+import numpy as np
+import torch
+
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
     is_truncated,
     truncate_response_with_stop_words,
+    truncate_token_with_stop_word_id,
 )
 
 
@@ -276,6 +280,57 @@ class IsTruncatedTest(TestCase):
         # Both modes should return False
         self.assertFalse(is_truncated(text_none, slices, True, True))
         self.assertFalse(is_truncated(text_none, slices, False, True))
+
+
+class TruncateTokenWithStopWordIdTest(TestCase):
+    """Unit tests for truncate_token_with_stop_word_id (accepts List[int]; caller converts ndarray/tensor via .tolist())."""
+
+    def test_list_int_input(self):
+        # tokens 末尾匹配 stop_word_id [4, 5]，应截断为 [1, 2, 3]
+        tokens = [1, 2, 3, 4, 5]
+        stop_word_ids = [[4, 5]]
+        result = truncate_token_with_stop_word_id(tokens, stop_word_ids)
+        self.assertEqual(result, [1, 2, 3])
+        self.assertIsInstance(result, list)
+
+    def test_no_match_unchanged(self):
+        # 末尾不匹配任何 stop_word_id，应返回原序列
+        stop_word_ids = [[99, 100]]
+        for tokens in (
+            [1, 2, 3, 4, 5],
+        ):
+            result = truncate_token_with_stop_word_id(tokens, stop_word_ids)
+            self.assertEqual(result, [1, 2, 3, 4, 5])
+            
+    def test_numpy_ndarray_direct_input_fails(self):
+        # 直接传入 np.ndarray 应失败（函数内 assert 要求 tokens 为 list）
+        tokens = np.array([1, 2, 3, 4, 5], dtype=np.int64)
+        stop_word_ids = [[4, 5]]
+        with self.assertRaises(AssertionError):
+            truncate_token_with_stop_word_id(tokens, stop_word_ids)
+
+    def test_multiple_stop_words_first_match_wins(self):
+        # 多个 stop_word，匹配到第一个就截断并 break
+        tokens = [10, 20, 30, 40]
+        stop_word_ids = [
+            [20, 30],
+            [30, 40],
+        ]  # 先检查 [20,30]，不匹配；再检查 [30,40]，匹配
+        result = truncate_token_with_stop_word_id(tokens, stop_word_ids)
+        self.assertEqual(result, [10, 20])
+
+    def test_empty_or_false_stop_word_skipped(self):
+        # 空 stop_word_id 被跳过，不影响结果
+        tokens = [1, 2, 3]
+        stop_word_ids = [[], [3]]  # 先 [], 再 [3] 匹配
+        result = truncate_token_with_stop_word_id(tokens, stop_word_ids)
+        self.assertEqual(result, [1, 2])
+
+    def test_tokens_shorter_than_stop_word(self):
+        # tokens 长度小于 stop_word_id 时不截断
+        tokens = [1, 2]
+        result = truncate_token_with_stop_word_id(tokens, [[1, 2, 3]])
+        self.assertEqual(result, [1, 2])
 
 
 if __name__ == "__main__":

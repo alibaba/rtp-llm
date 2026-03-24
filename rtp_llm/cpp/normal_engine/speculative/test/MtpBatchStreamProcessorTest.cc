@@ -34,7 +34,7 @@ public:
         BatchKVCacheResource addr;
         // New (refactored) BatchKVCacheResource: [batch_id][group_id] -> block_indices
         addr.resetBatchSize(1);
-        addr.initGroups(1);
+        addr.initGroups(1, 1, {0});
         addr.setBatchBlocks(0, 0, {block_id});
         stream->setKVCache(addr);
 
@@ -96,6 +96,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
 
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    processor.setKVCacheGroupTypes({CacheGroupType::FULL});
+
     StreamGroups stream_groups(streams);
 
     MergedOutput target_output;
@@ -131,6 +133,14 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     sp_config.gen_num_per_cycle = 4;
 
     ResourceContext resource_context;
+    resource_context.cache_manager =
+        std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                                        /*block_num=*/10,
+                                                                        /*tokens_per_block=*/2,
+                                                                        rtp_llm::TYPE_INT8,
+                                                                        /*local_head_num_kv=*/128,
+                                                                        /*size_per_head=*/256),
+                                         device_);
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {2, 1}, 2);
@@ -152,6 +162,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    processor.setKVCacheGroupTypes({CacheGroupType::FULL});
+
     auto status = processor.dispatchDecode(stream_groups, spec_decode_output, std::move(draft_prefill_output));
     EXPECT_TRUE(status.ok());
 
@@ -199,6 +211,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
 
     auto processor = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    processor.setKVCacheGroupTypes({CacheGroupType::FULL});
     auto model_input = processor.gatherDecodeModelInput(stream_groups);
     EXPECT_TRUE(model_input.ok());
 
@@ -257,6 +270,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
 
     auto processor = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    processor.setKVCacheGroupTypes({CacheGroupType::FULL});
     auto model_input_status = processor.gatherDecodeModelInput(stream_groups);
     EXPECT_TRUE(model_input_status.ok());
 
@@ -336,6 +350,7 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
 
     auto processor = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    processor.setKVCacheGroupTypes({CacheGroupType::FULL});
     auto model_input_status = processor.gatherDecodeModelInput(stream_groups);
     EXPECT_TRUE(model_input_status.ok());
 
@@ -390,6 +405,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
 
     auto processor = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    processor.setKVCacheGroupTypes({CacheGroupType::FULL});
     auto model_input_status = processor.gatherModelInput(stream_groups);
     EXPECT_TRUE(model_input_status.ok());
 
@@ -446,6 +462,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
 
     auto processor = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    processor.setKVCacheGroupTypes({CacheGroupType::FULL});
     auto model_input_status = processor.gatherModelInput(stream_groups);
     EXPECT_TRUE(model_input_status.ok());
 

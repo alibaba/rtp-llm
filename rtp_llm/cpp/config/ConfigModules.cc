@@ -9,6 +9,44 @@
 
 namespace rtp_llm {
 
+// NcclCommConfig
+std::string NcclCommConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "nccl_ip: " << master_ip << "\n"
+        << "tp_nccl_port: " << tp_port << "\n"
+        << "dp_tp_nccl_port: " << dp_tp_port << "\n"
+        << "ffn_tp_nccl_port: " << ffn_tp_port;
+    return oss.str();
+}
+
+// PrefillCPConfig
+std::string PrefillCPConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "method: ";
+    switch (method) {
+        case CPRotateMethod::DISABLED:
+            oss << "DISABLED";
+            break;
+        case CPRotateMethod::ALL_GATHER:
+            oss << "ALL_GATHER";
+            break;
+        case CPRotateMethod::ALL_GATHER_WITH_OVERLAP:
+            oss << "ALL_GATHER_WITH_OVERLAP";
+            break;
+        case CPRotateMethod::ALLTOALL:
+            oss << "ALLTOALL";
+            break;
+        case CPRotateMethod::PREFILL_CP:
+            oss << "PREFILL_CP";
+            break;
+        default:
+            oss << "UNKNOWN";
+            break;
+    }
+    oss << "\n comm_buffer_size: " << comm_buffer_size << "\n";
+    return oss.str();
+}
+
 // ParallelismConfig
 std::string ParallelismConfig::to_string() const {
     std::ostringstream oss;
@@ -27,16 +65,10 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_tp_size: " << ffn_tp_size << "\n"
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
         << "enable_sp: " << enable_sp << "\n"
-        << "nccl_ip: " << nccl_ip << "\n"
-        << "tp_nccl_port: " << tp_nccl_port << "\n"
-        << "dp_tp_nccl_port: " << dp_tp_nccl_port << "\n"
-        << "ffn_tp_nccl_port: " << ffn_tp_nccl_port << "\n"
-        << "th_nccl_port: " << th_nccl_port << "\n"
-        << "http_port: " << http_port << "\n"
-        << "model_rpc_port: " << model_rpc_port << "\n"
-        << "embedding_rpc_server_port: " << embedding_rpc_server_port << "\n"
         << "ffn_disaggregate_config: {\n"
-        << ffn_disaggregate_config.to_string() << "\n}";
+        << ffn_disaggregate_config.to_string() << "\n}\n"
+        << "prefill_cp_config: {\n"
+        << prefill_cp_config.to_string() << "}\n";
     return oss.str();
 }
 
@@ -61,6 +93,7 @@ std::string FMHAConfig::to_string() const {
         << "enable_xqa: " << enable_xqa << "\n"
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
+        << "use_triton_pa: " << use_triton_pa << "\n"
         << "absorb_opt_len: " << absorb_opt_len << "\n";
     return oss.str();
 }
@@ -81,23 +114,22 @@ std::string KVCacheConfig::to_string() const {
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
         << "multi_task_prompt_tokens: " << (multi_task_prompt_tokens.empty() ? "empty" : "non-empty") << "\n"
         << "reserve_block_ratio: " << reserve_block_ratio << "\n"
-        << "enable_3fs: " << enable_3fs << "\n"
-        << "match_timeout_ms: " << match_timeout_ms << "\n"
-        << "rpc_get_cache_timeout_ms: " << rpc_get_cache_timeout_ms << "\n"
-        << "rpc_put_cache_timeout_ms: " << rpc_put_cache_timeout_ms << "\n"
-        << "threefs_read_timeout_ms: " << threefs_read_timeout_ms << "\n"
-        << "threefs_write_timeout_ms: " << threefs_write_timeout_ms << "\n"
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
-        << "threefs_read_iov_size: " << threefs_read_iov_size << "\n"
-        << "threefs_write_iov_size: " << threefs_write_iov_size << "\n"
-        << "memory_block_cache_size_mb: " << memory_block_cache_size_mb << "\n"
-        << "memory_block_cache_sync_timeout_ms: " << memory_block_cache_sync_timeout_ms << "\n"
+        << "memory_cache_size_mb: " << memory_cache_size_mb << "\n"
+        << "memory_cache_sync_timeout_ms: " << memory_cache_sync_timeout_ms << "\n"
+        << "linear_step: " << linear_step << "\n"
         << "int8_kv_cache: " << int8_kv_cache << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
         << "seq_size_per_block: " << seq_size_per_block << "\n"
         << "test_block_num: " << test_block_num << "\n"
-        << "use_block_cache: " << use_block_cache << "\n";
+        << "use_block_cache: " << use_block_cache << "\n"
+        << "enable_device_cache: " << enable_device_cache << "\n"
+        << "enable_memory_cache: " << enable_memory_cache << "\n"
+        << "enable_remote_cache: " << enable_remote_cache << "\n"
+        << "write_cache_sync: " << write_cache_sync << "\n"
+        << "enable_tiered_memory_cache: " << enable_tiered_memory_cache << "\n"
+        << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n";
     return oss.str();
 }
 
@@ -155,7 +187,9 @@ std::string HWKernelConfig::to_string() const {
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
         << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n"
         << "disable_dpc_random: " << disable_dpc_random << "\n"
-        << "rocm_disable_custom_ag" << rocm_disable_custom_ag;
+        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag << "\n"
+        << "deterministic_gemm: " << deterministic_gemm << "\n"
+        << "deterministic_attn: " << deterministic_attn;
     return oss.str();
 }
 
@@ -168,8 +202,7 @@ std::string DeviceResourceConfig::to_string() const {
         << "overlap_comm_type: " << overlap_comm_type << "\n"
         << "m_split: " << m_split << "\n"
         << "enable_comm_overlap: " << enable_comm_overlap << "\n"
-        << "enable_layer_micro_batch: " << enable_layer_micro_batch << "\n"
-        << "not_use_default_stream: " << not_use_default_stream;
+        << "enable_layer_micro_batch: " << enable_layer_micro_batch;
     return oss.str();
 }
 
@@ -183,8 +216,11 @@ std::string MoeConfig::to_string() const {
         << "fake_balance_expert: " << fake_balance_expert << "\n"
         << "hack_moe_expert: " << hack_moe_expert << "\n"
         << "deep_ep_num_sm: " << deep_ep_num_sm << "\n"
-        << "max_moe_normal_masked_token_num: " << max_moe_normal_masked_token_num << "\n"
-        << "use_all_gather: " << use_all_gather;
+        << "masked_max_token_num: " << masked_max_token_num << "\n"
+        << "use_all_gather: " << use_all_gather << "\n"
+        << "ll_num_max_token: " << ll_num_max_token << "\n"
+        << "moe_strategy: " << moe_strategy << "\n"
+        << "fp4_moe_op: " << fp4_moe_op;
     return oss.str();
 }
 
@@ -245,8 +281,7 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "force_stream_sample: " << force_stream_sample << "\n"
         << "force_score_context_attention: " << force_score_context_attention << "\n"
         << "quantization: " << quantization << "\n"
-        << "checkpoint_path: " << checkpoint_path << "\n"
-        << "use_new_sp_engine: " << use_new_sp_engine;
+        << "checkpoint_path: " << checkpoint_path;
     return oss.str();
 }
 

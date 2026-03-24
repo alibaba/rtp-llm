@@ -98,10 +98,10 @@ class QuantizationConfig(ABC):
     def load_from_ckpt(cls, ckpt_path: str) -> Optional["QuantizationConfig"]:
         """
         Load quantization config from checkpoint directory.
-        
+
         Args:
             ckpt_path: Path to checkpoint directory
-            
+
         Returns:
             QuantizationConfig instance if found, None otherwise
         """
@@ -195,6 +195,20 @@ class QuantizationConfig(ABC):
                 and quark_weights_config["qscheme"] == "per_channel"
             ):
                 quant_method = Fp8PerChannelQuarkQuantConfig.get_method()
+
+        if quant_method == "modelopt":
+            config_groups = quant_config["config_groups"]
+            weights_config = config_groups["group_0"]["weights"]
+            activation_config = config_groups["group_0"]["input_activations"]
+            bits = weights_config["num_bits"]
+            activation_bits = activation_config["num_bits"]
+            group_size = weights_config["group_size"]
+            if (
+                weights_config["type"] == "float"
+                and bits == 4 and activation_bits == 4
+                and group_size == 16
+            ):
+                quant_method = ModelOptFp4Config.get_method()
 
         return cls.from_config(
             {
@@ -414,6 +428,7 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerChannelCompressedQuantConfig(**config)
 
+
 class QuarkQuantConfig(QuantizationConfig):
     def __init__(self, bits: int = 0, is_quanted: bool = False):
         super().__init__(bits=bits, group_size=0, is_quanted=is_quanted)
@@ -580,6 +595,7 @@ class GPTQConfig(QuantizationConfig):
 
 class ModelOptFp4Config(QuantizationConfig):
     """Config class for FP4."""
+
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
 
@@ -600,7 +616,39 @@ class ModelOptFp4Config(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return ModelOptFp4Config(**config)
-    
+
+
+class W4a8Int4PerChannelQuantConfig(QuantizationConfig):
+    def __init__(
+        self,
+        bits: int = 4,
+        group_size: int = 128,
+        is_quanted: bool = False,
+        **kwargs: Any,
+    ):
+        assert (
+            bits == 4 and group_size > 0
+        ), f"invalid params {bits} != 4 or {group_size} > 0"
+        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "W4A8_INT4_PER_CHANNEL"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "w4a8_int4_per_channel"
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float8_e4m3fn, torch.float16, torch.bfloat16]
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return W4a8Int4PerChannelQuantConfig(**config)
+
 
 DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(
     bits=8,
@@ -617,6 +665,12 @@ DEFAULT_MODELOPT_FP4_QUANT_CONFIG = ModelOptFp4Config(
     bits=4, group_size=16, is_quanted=False
 )
 
+DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = W4a8Int4PerChannelQuantConfig(
+    bits=4,
+    group_size=128,
+    is_quanted=False
+)
+
 preset_quant_config = {
     "INT8": DEFAULT_WEIGHT_ONLY_INT8_PER_CHANNEL_QUANT_CONFIG,
     "FP8": DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG,
@@ -625,6 +679,7 @@ preset_quant_config = {
     "FP8_PER_CHANNEL_COMPRESSED": DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG,
     "FP8_PER_CHANNEL_QUARK": DEFAULT_FP8_PER_CHANNEL_QUARK_QUANT_CONFIG,
     "MODELOPT_FP4": DEFAULT_MODELOPT_FP4_QUANT_CONFIG,
+    "W4A8_INT4_PER_CHANNEL": DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG,
 }
 
 

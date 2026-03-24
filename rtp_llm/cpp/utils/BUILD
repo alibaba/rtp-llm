@@ -45,6 +45,16 @@ cc_library(
 )
 
 cc_library(
+    name = "profiling_scope",
+    hdrs = [
+        "ProfilingScope.h",
+    ],
+    deps = torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "error_code",
     hdrs = [
         "ErrorCode.h",
@@ -139,6 +149,16 @@ cc_library(
     name = "math_utils",
     hdrs = [
         "math_utils.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Linear blocks utilities
+cc_library(
+    name = "linear_blocks_util",
+    hdrs = [
+        "LinearBlocksUtil.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

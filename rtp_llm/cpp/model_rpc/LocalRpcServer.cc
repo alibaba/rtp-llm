@@ -2,8 +2,8 @@
 #include <chrono>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
-#include "rtp_llm/cpp/speculative_engine/SpeculativeEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -22,44 +22,26 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     weight_manager_   = maga_init_params.weight_manager;
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s", maga_init_params_.misc_config.aux_string.c_str());
-    const bool use_new_sp_engine = maga_init_params_.sp_config.use_new_sp_engine;
-    propose_maga_init_params_    = propose_params.get();
+    propose_maga_init_params_ = propose_params.get();
 
-    if (propose_params && !use_new_sp_engine) {
-        if (!mm_process_engine.is_none()) {
-            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                                "Multimodal processing is not supported for speculative engine");
-        }
+    {
         pybind11::gil_scoped_release release;
         RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
                                 "running engine init with gil held may cause program hang, please check");
-        std::unique_ptr<SpeculativeEngine> sp_engine =
-            std::make_unique<SpeculativeEngine>(maga_init_params, std::move(propose_params));
-        auto status = sp_engine->init();
-        if (!status.ok()) {
-            return grpc::Status(grpc::StatusCode::INTERNAL, status.ToString());
-        }
-        engine_ = std::move(sp_engine);
-    } else {
-        {
-            pybind11::gil_scoped_release release;
-            RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
-                                    "running engine init with gil held may cause program hang, please check");
-            engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
-        }
-        if (!mm_process_engine.is_none()) {
-            auto vit_separation = maga_init_params.vit_config.vit_separation;
-            if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
-                mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine,
-                                                                  maga_init_params.model_config_.mm_model_config,
-                                                                  maga_init_params.model_config_.max_seq_len));
-            } else if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
-                mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
-                                                                 maga_init_params.model_config_.mm_model_config,
-                                                                 maga_init_params.model_config_.max_seq_len));
-            } else {
-                return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
-            }
+        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
+    }
+    if (!mm_process_engine.is_none()) {
+        auto vit_separation = maga_init_params.vit_config.vit_separation;
+        if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
+            mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine,
+                                                              maga_init_params.model_config_.mm_model_config,
+                                                              maga_init_params.model_config_.max_seq_len));
+        } else if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
+            mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
+                                                             maga_init_params.model_config_.mm_model_config,
+                                                             maga_init_params.model_config_.max_seq_len));
+        } else {
+            return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
         }
     }
 
@@ -89,6 +71,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                               const string&                    request_key,
                                               WriterInterface*                 writer,
                                               std::shared_ptr<GenerateStream>& stream) {
+    RTP_LLM_PROFILE_FUNCTION();
     while (!stream->finished() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
@@ -132,15 +115,34 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
 grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*                   context,
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
+    const bool force_timeline   = engine_->isTimelineProfilingEnabled();
+    const bool request_timeline = request->generate_config().gen_timeline();
+    RTP_LLM_LOG_DEBUG("request [%ld] timeline gate, force_timeline=%d, request_timeline=%d",
+                      request->request_id(),
+                      int(force_timeline),
+                      int(request_timeline));
+
+    RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
     AtomicGuard request_guard(onflight_requests_);
     auto        request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     auto input = QueryConverter::transQuery(request);
+    if (force_timeline) {
+        input->generate_config->gen_timeline = true;
+    }
+
+    // Per-request profiling: if gen_timeline=true in the request and no profiling session is active,
+    // configure the step-window profiler for this request. The profiler auto-stops after num_steps.
+    // configure() internally enforces first-come-first-served if a session is already running.
+    if (request_timeline && !force_timeline) {
+        engine_->startTimelineProfiling("", 0, request->generate_config().profile_step());
+    }
 
     // need to check client has buffer at first
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
+        RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
         auto mm_res = mm_processor_->updateMultimodalFeatures(input);
         if (!mm_res.ok()) {
             generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
@@ -151,7 +153,10 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     input->lora_id  = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
     auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
-    generate_context.setStream(engine_->enqueue(input));
+    {
+        RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
+        generate_context.setStream(engine_->enqueue(input));
+    }
 
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
 
@@ -163,6 +168,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
 
 grpc::Status
 LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionPB* request, CacheStatusPB* response) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s, request cache version: [%d]",
                       context->peer().c_str(),
                       request->latest_cache_version());
@@ -181,6 +187,7 @@ LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionP
 grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
                                              const StatusVersionPB* request,
                                              WorkerStatusPB*        response) {
+    RTP_LLM_PROFILE_FUNCTION();
     int64_t request_begin_time_us   = currentTimeUs();
     int64_t latest_finished_version = request->latest_finished_version();
     RTP_LLM_LOG_DEBUG(
@@ -284,6 +291,9 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
         case QuantMethod::FP8PTPC:
             status_info.precision = "FP8PTPC";
             break;
+        case QuantMethod::W4A8INT4PTPC:
+            status_info.precision = "W4A8INT4PTPC";
+            break;
         case QuantMethod::None:
             status_info.precision = "FP16";
             break;
@@ -361,6 +371,15 @@ LocalRpcServer::SetLogLevel(grpc::ServerContext* context, const SetLogLevelReque
 }
 
 grpc::Status
+LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response) {
+    RTP_LLM_PROFILE_FUNCTION();
+    (void)context;
+    engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
+    RTP_LLM_LOG_INFO("start_profile start_step=%d num_steps=%d", request->start_step(), request->num_steps());
+    return grpc::Status::OK;
+}
+
+grpc::Status
 LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
     response->set_health("OK");
@@ -408,27 +427,32 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     }
 }
 
-::grpc::Status LocalRpcServer::BroadcastTp(::grpc::ServerContext*        context,
-                                           const ::BroadcastTpRequestPB* request,
-                                           ::BroadcastTpResponsePB*      response) {
-    RTP_LLM_LOG_DEBUG("receive broadcast tp request from client: %s, request: [%s]",
+::grpc::Status LocalRpcServer::ExecuteFunction(::grpc::ServerContext*     context,
+                                               const ::FunctionRequestPB* request,
+                                               ::FunctionResponsePB*      response) {
+    RTP_LLM_LOG_DEBUG("receive execute function request from client: %s, request: [%s]",
                       context->peer().c_str(),
                       request->DebugString().c_str());
     if (context->IsCancelled()) {
-        RTP_LLM_LOG_WARNING("broadcast tp failed, request is cancelled");
+        RTP_LLM_LOG_WARNING("execute function failed, request is cancelled");
         return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
     }
     if (!engine_) {
-        RTP_LLM_LOG_WARNING("broadcast tp failed, engine is null");
+        RTP_LLM_LOG_WARNING("execute function failed, engine is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
     }
+
     auto cache_manager = engine_->getCacheManager();
     if (!cache_manager) {
-        RTP_LLM_LOG_WARNING("broadcast tp failed, cache manager is null");
+        RTP_LLM_LOG_WARNING("execute function failed, cache manager is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
-    // TODO(LXQ): need to call corresponding function in cache manager
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "broadcast tp is not implemented");
+    if (!cache_manager->executeFunction(*request, *response)) {
+        RTP_LLM_LOG_WARNING("execute function failed, request: [%s]", request->DebugString().c_str());
+        const std::string error_msg = "execute function failed, request: [" + request->DebugString() + "]";
+        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+    }
+    return grpc::Status::OK;
 }
 
 grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {

@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <string>
 #include <utility>
@@ -29,11 +30,12 @@ struct GptModelDescription {
 };
 
 struct GptModelInitParams {
-    rtp_llm::DeviceBase*               device;
-    const rtp_llm::Weights             weights;
-    const GptModelDescription          description;
-    const std::optional<KVCacheBuffer> kv_cache_buffer;
-    size_t                             model_id;
+    rtp_llm::DeviceBase*      device;
+    const rtp_llm::Weights    weights;
+    const GptModelDescription description;
+    // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
+    const std::optional<CacheLayerLayout> kv_cache_layer_layout;
+    size_t                                model_id;
 };
 
 struct EmbeddingPostOutput {
@@ -47,6 +49,9 @@ enum GptModelInputIndex : size_t {
     sequenceLengths,
     prefixLengths,
     maxBlocksPerBatch,
+    kvCacheGroupNum,
+    kvCacheLayerToGroupLen,
+    kvCacheGroupTypesLen,
     kvCacheUpdateCopyNum,
     lmOutputIndexes,
     lmOutputLengthes,
@@ -191,7 +196,7 @@ public:
 
     virtual GptModelOutputs forward(const GptModelInputs& inputs);
 
-    void releaseBuffers() {
+    virtual void releaseBuffers() {
         buffer_holder_.release();
     }
 
@@ -266,14 +271,13 @@ protected:
     void holdInputsHostBuffers(const GptModelInputs& inputs);
 
 protected:
-    rtp_llm::DeviceBase*            device_;
-    const rtp_llm::DeviceProperties device_props_;
-    const size_t                    layer_num_;
-    const GptModelDescription       description_;
-    rtp_llm::BufferPtr              kv_cache_buffer_;
-    rtp_llm::BufferPtr              kv_scale_buffer_;
-    rtp_llm::BufferPtr              residual_scale_fp32_;
-    rtp_llm::BufferPtr              residual_scale_;
+    rtp_llm::DeviceBase*                     device_;
+    const rtp_llm::DeviceProperties          device_props_;
+    const size_t                             layer_num_;
+    const GptModelDescription                description_;
+    std::optional<rtp_llm::CacheLayerLayout> kv_cache_layer_layout_;
+    rtp_llm::BufferPtr                       residual_scale_fp32_;
+    rtp_llm::BufferPtr                       residual_scale_;
 
     ModelBufferHolder buffer_holder_;
 

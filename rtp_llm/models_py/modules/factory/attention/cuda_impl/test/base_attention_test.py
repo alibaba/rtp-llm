@@ -6,7 +6,7 @@ from typing import List, NamedTuple
 import torch
 
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, get_typemeta
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -80,6 +80,7 @@ class BaseAttentionTest(unittest.TestCase):
         attn_configs.size_per_head = size_per_head
         attn_configs.tokens_per_block = seq_size_per_block
         attn_configs.use_mla = False
+
         # Set dtype based on data_type parameter
         dtype_map = {
             "fp16": torch.float16,
@@ -101,11 +102,46 @@ class BaseAttentionTest(unittest.TestCase):
             tp_size=tp_size,
         )
 
+    def _create_kv_cache_block_ids(
+        self,
+        batch_size: int,
+        sequence_lengths: List[int],
+        seq_size_per_block: int,
+    ) -> torch.Tensor:
+        """Helper to create KV cache block IDs
+
+        Args:
+            batch_size: Number of sequences in the batch
+            sequence_lengths: List of sequence lengths for each batch item
+            seq_size_per_block: Number of tokens per block (page size)
+
+        Returns:
+            Tensor of shape [batch_size, max_blocks] with block IDs
+        """
+        max_blocks = max(
+            [math.ceil(seq_len / seq_size_per_block) for seq_len in sequence_lengths]
+        )
+        kv_cache_block_id = torch.zeros(
+            [batch_size, max_blocks], dtype=torch.int32, device="cpu"
+        )
+
+        # Fill block IDs sequentially for each batch
+        block_offset = 0
+        for i, seq_len in enumerate(sequence_lengths):
+            num_blocks = math.ceil(seq_len / seq_size_per_block)
+            kv_cache_block_id[i, :num_blocks] = torch.arange(
+                block_offset, block_offset + num_blocks, dtype=torch.int32
+            )
+            block_offset += num_blocks
+
+        return kv_cache_block_id
+
     def _create_attention_inputs_base(
         self,
         batch_size: int,
         sequence_lengths: List[int],
         seq_size_per_block: int,
+        dtype: torch.dtype = torch.float16,
     ) -> PyAttentionInputs:
         """Helper to create PyAttentionInputs for decode
 
@@ -129,23 +165,10 @@ class BaseAttentionTest(unittest.TestCase):
         # Use empty tensor for prefix_lengths to trigger decode branch
         attn_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32, device="cpu")
 
-        # Create KV cache block IDs
-        max_blocks = max(
-            [math.ceil(seq_len / seq_size_per_block) for seq_len in sequence_lengths]
+        # Create KV cache block IDs using the extracted helper
+        kv_cache_block_id = self._create_kv_cache_block_ids(
+            batch_size, sequence_lengths, seq_size_per_block
         )
-        kv_cache_block_id = torch.zeros(
-            [batch_size, max_blocks], dtype=torch.int32, device="cpu"
-        )
-
-        # Fill block IDs sequentially for each batch
-        block_offset = 0
-        for i, seq_len in enumerate(sequence_lengths):
-            num_blocks = math.ceil(seq_len / seq_size_per_block)
-            kv_cache_block_id[i, :num_blocks] = torch.arange(
-                block_offset, block_offset + num_blocks, dtype=torch.int32
-            )
-            block_offset += num_blocks
-
         attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
 
@@ -153,6 +176,67 @@ class BaseAttentionTest(unittest.TestCase):
         attn_inputs.cu_seqlens = torch.arange(
             0, batch_size + 1, dtype=torch.int32, device=self.device
         )
+
+        # Set dtype using get_typemeta
+        attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=dtype))
+
+        return attn_inputs
+
+    def _create_prefill_attention_inputs(
+        self,
+        batch_size: int,
+        sequence_lengths: List[int],
+        seq_size_per_block: int,
+        dtype: torch.dtype = torch.float16,
+    ) -> PyAttentionInputs:
+        """Helper to create PyAttentionInputs for prefill mode
+
+        Args:
+            batch_size: Number of sequences in the batch
+            sequence_lengths: List of sequence lengths for each batch item
+            seq_size_per_block: Number of tokens per block (page size)
+            dtype: Data type for attention computation (default: torch.float16)
+
+        Returns:
+            PyAttentionInputs configured for prefill mode
+        """
+        attn_inputs = PyAttentionInputs()
+
+        # Prefill mode
+        attn_inputs.is_prefill = True
+
+        # input_lengths is the length of each sequence in the batch
+        attn_inputs.input_lengths = torch.tensor(
+            sequence_lengths, dtype=torch.int32, device="cpu"
+        ).pin_memory()
+
+        # sequence_lengths for prefill is same as input_lengths
+        attn_inputs.sequence_lengths = torch.tensor(
+            sequence_lengths, dtype=torch.int32, device="cpu"
+        ).pin_memory()
+
+        # prefix_lengths is all zeros for pure prefill (no prefix caching)
+        attn_inputs.prefix_lengths = torch.zeros(
+            batch_size, dtype=torch.int32, device="cpu"
+        )
+
+        # Create KV cache block IDs using the extracted helper
+        kv_cache_block_id = self._create_kv_cache_block_ids(
+            batch_size, sequence_lengths, seq_size_per_block
+        )
+        attn_inputs.kv_cache_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+
+        # Create cu_seqlens (cumulative sequence lengths) for ragged tensor
+        cu_seqlens = [0]
+        for seq_len in sequence_lengths:
+            cu_seqlens.append(cu_seqlens[-1] + seq_len)
+        attn_inputs.cu_seqlens = torch.tensor(
+            cu_seqlens, dtype=torch.int32, device=self.device
+        )
+
+        # Set dtype using get_typemeta
+        attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=dtype))
 
         return attn_inputs
 

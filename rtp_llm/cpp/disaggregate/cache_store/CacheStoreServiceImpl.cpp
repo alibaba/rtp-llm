@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreServiceImpl.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <unistd.h>
@@ -23,6 +24,7 @@ void CacheStoreServiceImpl::load(::google::protobuf::RpcController* controller,
                                  const ::CacheLoadRequest*          request,
                                  ::CacheLoadResponse*               response,
                                  ::google::protobuf::Closure*       done) {
+    RTP_LLM_PROFILE_FUNCTION();
     if (request_block_buffer_store_ == nullptr) {
         RTP_LLM_LOG_WARNING(
             "cache store service has no block cache store, request failed, request from [%s], request id [%s]",
@@ -39,6 +41,7 @@ void CacheStoreServiceImpl::transfer(::google::protobuf::RpcController* controll
                                      const ::CacheTransferRequest*      request,
                                      CacheTransferResponse*             response,
                                      ::google::protobuf::Closure*       done) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("recv transfer request %s", request->ShortDebugString().c_str());
 
     // get peer block infos
@@ -119,6 +122,7 @@ void CacheStoreServiceImpl::blockRead(::google::protobuf::RpcController* control
                                       const ::BlockReadRequest*          request,
                                       ::BlockReadResponse*               response,
                                       ::google::protobuf::Closure*       done) {
+    RTP_LLM_PROFILE_FUNCTION();
     blockReadImpl(controller, request, response, done);
 }
 

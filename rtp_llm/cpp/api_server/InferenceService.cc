@@ -197,7 +197,6 @@ void InferenceService::inferResponse(int64_t                                    
 
     auto [iterate_count, complete_response] = iterateStreams(streams, writer, req, iterate_stage_timer);
 
-    iterate_stage_timer.end_stage();
     writer->WriteDone();
     AccessLogWrapper::logSuccessAccess(body, request_id, complete_response, req.private_request);
     if (metric_reporter_) {
@@ -281,6 +280,7 @@ InferenceService::iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapp
         complete_response.push_back(response);
 
         if (metric_reporter_) {
+            iterate_stage_timer.end_stage();
             if (iterate_counter == 0) {
                 metric_reporter_->reportResponseFirstTokenLatencyMs(iterate_stage_timer.last_ms());
             } else {

@@ -1,21 +1,29 @@
 import json
 import logging
 import os
+import socket
+from typing import Optional
 
 import torch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.distribute.worker_info import g_parallel_info, update_worker_info
 from rtp_llm.model_factory_register import ModelDict
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import (
+    FfnDisAggregateConfig,
+    ParallelismConfig,
+    PrefillCPConfig,
+    RoleType,
+    SpeculativeType,
+)
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 
 def auto_configure_deepep(
     moe_config,
     deep_ep_config,
-    g_parallel_info,
+    parallelism_config: ParallelismConfig,
     role_type: RoleType,
+    ll_num_max_token: int = 0,
 ):
     """
     Automatically configure DeepEP settings based on deployment scenario.
@@ -27,7 +35,7 @@ def auto_configure_deepep(
     Args:
         moe_config: MoeConfig object to modify
         deep_ep_config: DeepEPConfig object containing user-specified values (may be None)
-        g_parallel_info: ParallelInfo object containing parallelism information
+        parallelism_config: ParallelismConfig containing tp_size, ep_size, world_size, local_world_size
         role_type: Role type (PREFILL, DECODE, or PDFUSION)
 
     Note: USE_ALL_GATHER should be enabled for pure TP scenarios (ep_size == tp_size).
@@ -45,14 +53,14 @@ def auto_configure_deepep(
     - PD separation + Decode node + Multi-node multi-GPU (>=9 GPUs): 1, 1, 1
     """
 
-    tp_size = g_parallel_info.tp_size
-    ep_size = g_parallel_info.ep_size
-
+    tp_size = parallelism_config.tp_size
+    ep_size = parallelism_config.ep_size
+    moe_config.ll_num_max_token = ll_num_max_token
     moe_config.use_all_gather = (
         moe_config.use_all_gather
         and not deep_ep_config.use_deepep_low_latency
-        and ep_size == tp_size)
-
+        and ep_size == tp_size
+    )
     if moe_config.use_all_gather:
         moe_config.use_deepep_moe = False
         moe_config.use_deepep_low_latency = False
@@ -72,9 +80,8 @@ def auto_configure_deepep(
         # All are None, use auto configuration
         _apply_auto_deepep_config(
             moe_config=moe_config,
-            world_size=g_parallel_info.world_size,
-            local_world_size=g_parallel_info.local_world_size,
-            tp_size=g_parallel_info.tp_size,
+            world_size=parallelism_config.world_size,
+            local_world_size=parallelism_config.local_world_size,
             role_type=role_type,
         )
     else:
@@ -90,6 +97,7 @@ def auto_configure_deepep(
             f"  USE_DEEPEP_MOE: {moe_config.use_deepep_moe}\n"
             f"  USE_DEEPEP_INTERNODE: {moe_config.use_deepep_internode}\n"
             f"  USE_DEEPEP_LOW_LATENCY: {moe_config.use_deepep_low_latency}"
+            f"  ll_num_max_token: {moe_config.ll_num_max_token}"
         )
 
 
@@ -97,7 +105,6 @@ def _apply_auto_deepep_config(
     moe_config,
     world_size: int,
     local_world_size: int,
-    tp_size: int,
     role_type: RoleType,
 ):
     """
@@ -111,8 +118,8 @@ def _apply_auto_deepep_config(
     is_decode = role_type == RoleType.DECODE
 
     # Determine GPU configuration
-    is_single_gpu = tp_size == 1
-    is_multi_gpu = tp_size > 1
+    is_single_gpu = world_size == 1
+    is_multi_gpu = world_size > 1
     is_multi_node = world_size > local_world_size
 
     # Apply configuration rules
@@ -164,7 +171,6 @@ def _apply_auto_deepep_config(
     logging.info(
         f"Auto-configured DeepEP settings based on deployment scenario:\n"
         f"  Role Type: {role_type}\n"
-        f"  TP Size: {tp_size}\n"
         f"  World Size: {world_size}\n"
         f"  Local World Size: {local_world_size}\n"
         f"  PD Separation: {is_pd_separation}\n"
@@ -174,7 +180,91 @@ def _apply_auto_deepep_config(
     )
 
 
+def set_parallelism_config(
+    parallelism_config: ParallelismConfig,
+    world_rank: Optional[int] = None,
+    py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
+    py_prefill_cp_config: Optional[PrefillCPConfig] = None,
+) -> None:
+    """Update rank-related fields in ParallelismConfig from a given world_rank.
+
+    Uses the same derivation as ParallelInfo: local_rank, tp_rank, dp_rank, ep_rank,
+    ffn_tp_rank are computed from world_rank and the existing size fields.
+
+    Args:
+        parallelism_config: ParallelismConfig to update in place
+        world_rank: World rank to apply (local_rank = world_rank % local_world_size, etc.). Default 0.
+        py_ffn_disaggregate_config: Optional FFN disaggregate config to apply when enabled.
+    """
+    world_size = parallelism_config.world_size
+    need_local = world_size > 1 and parallelism_config.local_world_size == 1
+    if need_local:
+        if torch.cuda.is_available():
+            n = min(torch.cuda.device_count(), world_size)
+        else:
+            n = world_size
+        parallelism_config.local_world_size = max(n, 1)
+
+    expected_ep = parallelism_config.tp_size * parallelism_config.dp_size
+    need_ep = expected_ep > 1 and parallelism_config.ep_size == 1
+    if need_ep:
+        parallelism_config.ep_size = expected_ep
+    ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
+    parallelism_config.ffn_tp_size = ffn_tp_size
+    parallelism_config.enable_sp = parallelism_config.ffn_sp_size > 1
+    if world_rank is not None:
+        parallelism_config.world_rank = world_rank
+    parallelism_config.local_rank = (
+        parallelism_config.world_rank % parallelism_config.local_world_size
+    )
+    parallelism_config.tp_rank = (
+        parallelism_config.world_rank % parallelism_config.tp_size
+    )
+    parallelism_config.dp_rank = (
+        parallelism_config.world_rank // parallelism_config.tp_size
+    )
+    parallelism_config.ep_rank = (
+        parallelism_config.world_rank % parallelism_config.ep_size
+    )
+    parallelism_config.ffn_tp_rank = (
+        parallelism_config.tp_rank % parallelism_config.ffn_tp_size
+    )
+
+    # FfnDisAggregate
+    if (
+        py_ffn_disaggregate_config
+        and py_ffn_disaggregate_config.enable_ffn_disaggregate
+    ):
+        assert (
+            parallelism_config.tp_size == 1 and parallelism_config.world_size > 1
+        ), "enable_ffn_disaggregate must be used in dp = 1 world_size > 1"
+        attention_dp_size = parallelism_config.world_size - 1
+        attention_tp_size = 1
+        ffn_tp_size = 1
+        assert (
+            attention_tp_size == ffn_tp_size
+        ), "attention_tp_size must be equal to ffn_tp_size"
+        parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate = True
+        parallelism_config.ffn_disaggregate_config.attention_tp_size = attention_tp_size
+        parallelism_config.ffn_disaggregate_config.attention_dp_size = attention_dp_size
+        parallelism_config.ffn_disaggregate_config.ffn_tp_size = ffn_tp_size
+        parallelism_config.ffn_disaggregate_config.ffn_dp_size = 1
+        parallelism_config.ffn_disaggregate_config.is_ffn_rank = (
+            parallelism_config.world_rank >= attention_tp_size * attention_dp_size
+        )
+
+    if py_prefill_cp_config:
+        parallelism_config.prefill_cp_config.method = py_prefill_cp_config.method
+        parallelism_config.prefill_cp_config.comm_buffer_size = (
+            py_prefill_cp_config.comm_buffer_size
+        )
+    logging.info(
+        f"set_parallelism_config: rank {world_rank}\nparallelism_config={parallelism_config.to_string()}world_rank={world_rank}\n"
+    )
+
+
 def setup_default_args(py_env_configs):
+    set_parallelism_config(py_env_configs.parallelism_config)
     if not py_env_configs.model_args.tokenizer_path:
         py_env_configs.model_args.tokenizer_path = py_env_configs.model_args.ckpt_path
 
@@ -191,9 +281,6 @@ def setup_default_args(py_env_configs):
         raise ValueError(
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
         )
-
-    if py_env_configs.py_hw_kernel_config.enable_cuda_graph:
-        py_env_configs.device_resource_config.not_use_default_stream = True
 
     # add rocm env config, if using default value, change it to optimize version
     # 这些特殊处理仍然需要设置环境变量（因为可能被 C++ 代码读取）
@@ -222,6 +309,30 @@ def setup_default_args(py_env_configs):
             ):
                 os.environ["NCCL_P2P_DISABLE"] = "1"
                 logging.info("set NCCL_P2P_DISABLE to 1")
+
+    if (
+        py_env_configs.role_config.role_type == RoleType.PREFILL
+        or py_env_configs.role_config.role_type == RoleType.DECODE
+    ):
+        if py_env_configs.pd_separation_config.cache_store_rdma_mode == True:
+            # AcclBarex envs in cache store, can be replaced by user config
+            if os.getenv("ACCL_MAX_USER_MR_GB") is None:
+                os.environ["ACCL_MAX_USER_MR_GB"] = "2000"
+            if os.getenv("ACCL_SOFT_TX_DEPTH") is None:
+                os.environ["ACCL_SOFT_TX_DEPTH"] = "8192"
+            # for mlx
+            if os.getenv("ACCL_RX_DEPTH") is None:
+                os.environ["ACCL_RX_DEPTH"] = "32"
+            if os.getenv("ACCL_TX_DEPTH") is None:
+                os.environ["ACCL_TX_DEPTH"] = "512"
+            # for eic
+            if os.getenv("ACCL_RX_CONN_DEPTH") is None:
+                os.environ["ACCL_RX_CONN_DEPTH"] = "32"
+            if os.getenv("ACCL_TX_CONN_DEPTH") is None:
+                os.environ["ACCL_TX_CONN_DEPTH"] = "512"
+            logging.info(
+                f"role type is {py_env_configs.role_config.role_type}, cache store rdma mode is {py_env_configs.pd_separation_config.cache_store_rdma_mode}, set ACCL_MAX_USER_MR_GB to {os.getenv('ACCL_MAX_USER_MR_GB')}, ACCL_SOFT_TX_DEPTH to {os.getenv('ACCL_SOFT_TX_DEPTH')}, ACCL_RX_DEPTH to {os.getenv('ACCL_RX_DEPTH')}, ACCL_TX_DEPTH to {os.getenv('ACCL_TX_DEPTH')}, ACCL_RX_CONN_DEPTH to {os.getenv('ACCL_RX_CONN_DEPTH')}, ACCL_TX_CONN_DEPTH to {os.getenv('ACCL_TX_CONN_DEPTH')}"
+            )
 
     return py_env_configs
 
@@ -280,30 +391,62 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
     )
 
 
+def setup_cuda_device_and_accl_env(local_rank: int) -> None:
+    """Apply CUDA device and ACCL env side effects (same as ParallelInfo.from_params)."""
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+
+    if os.environ.get("ACCL_SELECT_PATH") == "1":
+        select_port = str(local_rank % 2)
+        os.environ["ACCL_SELECT_PORT"] = select_port
+        logging.info(f"local rank {local_rank} set accl select port to {select_port} ")
+
+    if (
+        os.environ.get("ACCL_USE_NICS") is None
+        and os.environ.get("ACCL_NIC_GPU_AFFINITY") is not None
+    ):
+        content = os.environ.get("ACCL_NIC_GPU_AFFINITY")
+        try:
+            gpu_nic_affinity = json.loads(content)
+            if str(local_rank) in gpu_nic_affinity:
+                affinity_nic = gpu_nic_affinity[str(local_rank)]
+                os.environ["ACCL_USE_NICS"] = affinity_nic
+                logging.info(
+                    f"local rank {local_rank} use cuda device {local_rank} set ACCL_USE_NICS to {affinity_nic}"
+                )
+            else:
+                logging.info(
+                    f"local rank {local_rank} use cuda device {local_rank} get affinity nic failed, content is {content}"
+                )
+        except json.JSONDecodeError:
+            logging.info(
+                f"try decode ACCL_NIC_GPU_AFFINITY failed, content is {content}"
+            )
+
+
 def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     """
-    Setup default arguments, fetch model files, update worker info, and configure DeepEP.
-
-    This function encapsulates the common server initialization steps:
-    1. Setup default arguments
-    2. Fetch model files to local
-    3. Update worker info
-    4. Auto-configure DeepEP settings
+    Build parallelism_config from env and run auto_configure_deepep.
+    Caller should run setup_default_args and fetch_model_files_to_local before this.
 
     Args:
         py_env_configs: PyEnvConfigs object to configure
     """
     setup_default_args(py_env_configs)
     fetch_model_files_to_local(py_env_configs)
-    update_worker_info(
-        py_env_configs.server_config.start_port,
-        py_env_configs.server_config.worker_info_port_num,
-        py_env_configs.distribute_config.remote_server_port,
-    )
+    ll_num_max_token = py_env_configs.concurrency_config.concurrency_limit
+    sp_type = py_env_configs.sp_config.type  # Get SpeculativeType enum value
+    if py_env_configs.sp_config.type != SpeculativeType.NONE:
+        ll_num_max_token *= py_env_configs.sp_config.gen_num_per_cycle + 1
 
     auto_configure_deepep(
         moe_config=py_env_configs.moe_config,
         deep_ep_config=py_env_configs.deep_ep_config,
-        g_parallel_info=g_parallel_info,
+        parallelism_config=py_env_configs.parallelism_config,
         role_type=py_env_configs.role_config.role_type,
+        ll_num_max_token=ll_num_max_token,
     )
+
+    # Set local ip if not already set (e.g. for world_info / distributed_server)
+    if not py_env_configs.server_config.ip:
+        py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())

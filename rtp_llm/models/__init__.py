@@ -7,6 +7,7 @@ from .chat_glm_v3 import ChatGlmV3
 from .chat_glm_v4 import ChatGlmV4
 from .cosyvoice_qwen import CosyVoiceQwen
 from .deepseek_v2 import DeepSeekV2, DeepSeekV3Mtp
+from .deepseek_vl2.deepseek_vl2 import DeepSeekVLV2
 from .falcon import Falcon
 from .gpt_neox import GPTNeox
 from .llama import Baichuan, Llama
@@ -15,8 +16,6 @@ from .phi import Phi
 from .qwen import QWen_1B8, QWen_7B, QWen_13B
 from .qwen_v2 import QWenV2
 from .qwen_v3 import QwenV3
-from .sgpt_bloom import SGPTBloom
-from .sgpt_bloom_vector import SGPTBloomVector
 from .starcoder import StarCoder
 from .starcoder2 import StarCoder2
 

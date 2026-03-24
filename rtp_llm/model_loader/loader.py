@@ -10,7 +10,6 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.device import get_current_device
 from rtp_llm.lora.lora_weights import LoRAWeights
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
 from rtp_llm.model_loader.model_weight_info import (
@@ -45,6 +44,7 @@ class ModelLoader:
         misc_weights_info: Optional[CustomAtomicWeight],
         database: BaseDatabase,
         load_method: LoadMethod = LoadMethod.AUTO,
+        force_cpu_load_weights: bool = False,
     ):
         self.model_config = model_config
         self._task_type = model_config.task_type
@@ -59,6 +59,8 @@ class ModelLoader:
         compute_dtype = model_config.compute_dtype
         logging.info(f"load use type {compute_dtype}")
 
+        from rtp_llm.device import get_current_device
+
         # Get is_attn_model flag from weights_info (calculated in ModelDeployWeightInfo constructor)
         self._is_attn_model = weights_info.is_attn_model
         self._py_eplb, self._phy2log = self.create_eplb()
@@ -67,6 +69,7 @@ class ModelLoader:
             database=database,
             phy2log=self._phy2log,
             exported_device=get_current_device(),
+            force_cpu_load_weights=force_cpu_load_weights,
         )
 
     def get_load_config(self) -> LoadConfig:
@@ -404,14 +407,72 @@ class ModelLoader:
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
+    @staticmethod
+    def force_clean_host_memory():
+        """清理host内存，包括Python垃圾回收和glibc malloc缓存"""
+        gc.collect()
+        # 尝试释放glibc的内存缓存（malloc arena）
+        # 这对于释放已经被Python释放但仍被glibc缓存的内存很重要
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL("libc.so.6")
+            # malloc_trim(0) 会释放所有可以释放的内存回操作系统
+            libc.malloc_trim(0)
+        except Exception:
+            pass  # 某些系统（如macOS）可能不支持
+
+    @staticmethod
+    def force_clean_all_memory():
+        """清理所有内存（GPU显存和Host内存）"""
+        ModelLoader.force_clean_cuda_memory()
+        ModelLoader.force_clean_host_memory()
+
+    def cleanup_database(self):
+        """清理数据库资源，释放checkpoint加载过程中使用的host内存
+
+        在模型权重加载完成后调用此方法，可以释放以下资源：
+        1. CkptFileInfo 中的 metadata 字典（可能包含大量元信息）
+        2. pretrain_file_list 和 finetune_file_list 列表
+        3. LoRA 相关的缓存数据
+
+        注意：调用此方法后，将无法再从checkpoint加载新的权重，
+        但不影响已加载权重的使用和动态LoRA加载功能。
+        """
+        if self._load_config is None:
+            return
+
+        database = self._load_config.database
+        if database is None:
+            return
+
+        # 清理 CkptFileInfo 的元数据
+        if database.pretrain_file_list is not None:
+            for ckpt_file in database.pretrain_file_list:
+                if ckpt_file.metadata is not None:
+                    ckpt_file.metadata = None
+            database.pretrain_file_list.clear()
+
+        if database.finetune_file_list is not None:
+            for ckpt_file in database.finetune_file_list:
+                if ckpt_file.metadata is not None:
+                    ckpt_file.metadata = None
+            database.finetune_file_list.clear()
+
+        # 清理 LoRA 缓存
+        if database.lora_ckpt is not None:
+            database.lora_ckpt = None
+
+        logging.info("Cleaned up database resources to release host memory")
+
     def _create_model_weights(self, device):
         return ModelWeights(
             self._load_config.num_layers, device, self._load_config.compute_dtype
         )
 
     def _choose_weight_convert_device(self, current_device):
-        if "FORCE_CPU_LOAD_WEIGHTS" in os.environ:
-            logging.warning("FORCE_CPU_LOAD_WEIGHTS is set, load weights to cpu")
+        if self._load_config.force_cpu_load_weights:
+            logging.warning("force_cpu_load_weights is enabled, load weights to cpu")
             return "cpu"
         model_size = self._weights_info.model_config.eval_model_weight_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
@@ -604,6 +665,7 @@ def get_model_loader(
     misc_weights_info: Optional[CustomAtomicWeight],
     database: BaseDatabase,
     load_method: LoadMethod = LoadMethod.AUTO,
+    force_cpu_load_weights: bool = False,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception(
@@ -624,4 +686,5 @@ def get_model_loader(
         misc_weights_info,
         database,
         load_method=load_method,
+        force_cpu_load_weights=force_cpu_load_weights,
     )

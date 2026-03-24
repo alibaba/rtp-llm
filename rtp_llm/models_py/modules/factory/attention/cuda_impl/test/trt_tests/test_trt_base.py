@@ -108,7 +108,7 @@ class TRTAttnTestBase(BaseAttentionTest):
             )
             py_env_configs.device_resource_config.host_reserve_memory_bytes = 0
 
-            engine_config = EngineConfig.create(py_env_configs)
+            engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
             model_config = ModelConfig()
             model_config.max_seq_len = 512
 
@@ -126,6 +126,7 @@ class TRTAttnTestBase(BaseAttentionTest):
                 concurrency_config=engine_config.concurrency_config,
                 ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
                 runtime_config=engine_config.runtime_config,
+                model_specific_config=engine_config.model_specific_config,
             )
             print("Device initialized successfully", flush=True)
         except Exception as e:

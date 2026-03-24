@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <memory>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
@@ -64,8 +65,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
          params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
          cache_manager ?
-             std::make_optional(is_propose_ ? cache_manager->getMTPModuleKVCacheBuffer(propose_model_index_) :
-                                              cache_manager->kvCacheBuffer()) :
+             std::make_optional(is_propose_ ? cache_manager->getMTPModuleCacheLayerLayout(propose_model_index_) :
+                                              cache_manager->getMainModelCacheLayerLayout()) :
              std::nullopt,
          params.model_id});
 
@@ -103,7 +104,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     GptModelInputs                 model_input;
     GptModelOutputs                model_output;
     SamplerOutput                  sampler_output;
+    RTP_LLM_PROFILE_FUNCTION();
     {
+        RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
@@ -111,6 +114,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     {
+        RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
         tpSyncModelInputs(model_input, device_);
@@ -126,6 +130,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     {
         // update kv cache
         if (model_input.kv_cache_update_mapping) {
+            RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
             cache_manager_->blockBatchCopy(*model_input.kv_cache_update_mapping);
         }
     }
@@ -141,6 +146,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         } else {
             RTP_LLM_LOG_TRACE("model_input: %s", model_input.debugString(force).c_str());
         }
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.model_forward(ctx_batch=%zu,gen_batch=%zu,tokens=%zu,max_seq=%zu)",
+                                      stream_groups.totalContextBatchSize(),
+                                      stream_groups.totalDecodeBatchSize(),
+                                      stream_groups.modelExecuteTokenSize(),
+                                      stream_groups.maxSeqLen());
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -151,12 +161,14 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+
     if (device_->getDeviceProperties().tp_rank > 0 || warm_up_ || streams.size() == 0) {
         device_->syncAndCheck();
         model_->releaseBuffers();
         return absl::OkStatus();
     }
     {
+        RTP_LLM_PROFILE_SCOPE("executor.sampler_forward");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         CHECK_AND_RETURN_REF(sampler_input,
                              batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
@@ -165,6 +177,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     {
+        RTP_LLM_PROFILE_SCOPE("executor.dispatch_output");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    result =
             batch_stream_processor_->dispatch(stream_groups, {std::move(model_output), std::move(sampler_output)});

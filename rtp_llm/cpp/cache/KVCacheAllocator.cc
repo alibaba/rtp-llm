@@ -1,4 +1,4 @@
-#include <algorithm>
+#include <unordered_set>
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -6,6 +6,26 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
+
+bool KVCacheAllocator::init() {
+    RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");
+
+    // NOTE: `availableBlocksNum()` depends on `block_pool_` and must be queried after `doInit()`.
+    const int64_t reserve_ratio = reserve_block_ratio_;
+    if (reserve_ratio > 0) {
+        const size_t available_blocks = availableBlocksNum();
+        const size_t reserve_blocks = static_cast<size_t>(reserve_ratio) * available_blocks / static_cast<size_t>(100);
+        reserve_block_num_          = reserve_blocks;
+        RTP_LLM_LOG_INFO("KVCacheAllocator set reserve blocks: ratio=%ld%% reserve_blocks=%zu available_blocks=%zu",
+                         reserve_ratio,
+                         reserve_blocks,
+                         available_blocks);
+    } else {
+        reserve_block_num_ = 0;
+    }
+
+    return true;
+}
 
 MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
     auto init_result = initMallocForCommonLen(malloc_info);
@@ -21,24 +41,24 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         free(free_info);
         return incr_result;
     } else {
-        if (metrics_reporter_ && malloc_info.batch_kv_cache_resource->enable_reuse_cache) {
-            int64_t gpu_input_length = 0;
+        if (metrics_reporter_ && malloc_info.enable_device_cache) {
+            int64_t device_input_length = 0;
             if (malloc_info.batch_kv_cache_resource) {
                 const auto& cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
                 size_t      match_keys_size = cache_keys.size();
-                gpu_input_length            = static_cast<int64_t>(match_keys_size) * config_.seq_size_per_block;
+                device_input_length         = static_cast<int64_t>(match_keys_size) * config_.seq_size_per_block;
             }
 
-            if (gpu_input_length > 0) {
-                RtpLLMCacheReuseMetricsCollector collector;
-                collector.kv_cache_reuse_length = init_result.reuse_len;
+            if (device_input_length > 0) {
+                RtpLLMDeviceCacheReuseMetricsCollector collector;
                 collector.match_cost_time_us    = init_result.match_cost_time_us;
-                collector.gpu_input_length      = gpu_input_length;
-                collector.gpu_reuse_length      = init_result.reuse_len;
-                collector.gpu_cache_hit_rate = static_cast<float>(static_cast<int64_t>(collector.gpu_reuse_length) * 100
-                                                                  / collector.gpu_input_length);
+                collector.device_input_length   = device_input_length;
+                collector.device_reuse_length   = init_result.reuse_len;
+                collector.device_cache_hit_rate = static_cast<float>(static_cast<int64_t>(collector.device_reuse_length)
+                                                                     * 100 / collector.device_input_length);
                 kmonitor::MetricsTags tags;
-                metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
+                metrics_reporter_->report<RtpLLMDeviceCacheReuseMetrics, RtpLLMDeviceCacheReuseMetricsCollector>(
+                    &tags, &collector);
             }
         }
         return init_result;
@@ -133,7 +153,7 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
 }
 
 size_t KVCacheAllocator::freeBlocksNum() const {
-    return block_pool_->freeBlocksNum();
+    return block_pool_ ? block_pool_->freeBlocksNum() : 0;
 }
 
 int64_t KVCacheAllocator::getMrCostTimeMs() const {
@@ -141,23 +161,97 @@ int64_t KVCacheAllocator::getMrCostTimeMs() const {
 }
 
 size_t KVCacheAllocator::availableBlocksNum() const {
-    return block_pool_->availableBlocksNum();
+    return block_pool_ ? block_pool_->availableBlocksNum() : 0;
+}
+
+BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
+    if (!block_pool_ || min_blocks_to_free == 0) {
+        return nullptr;
+    }
+
+    auto block_cache = block_pool_->blockCache();
+    if (!block_cache) {
+        return nullptr;
+    }
+
+    auto evict_result = block_cache->selectAndEvict(min_blocks_to_free);
+    if (evict_result.evicted_keys.empty()) {
+        return nullptr;
+    }
+
+    auto batch_resource = std::make_shared<BatchKVCacheResource>();
+    batch_resource->resetBatchSize(1);
+    batch_resource->initGroups(config_.groupNums(), static_cast<int>(config_.layer_all_num), config_.layer_to_group_id);
+    batch_resource->setLastBlockAligned(true);
+
+    for (int gid = 0; gid < config_.groupNums(); ++gid) {
+        batch_resource->mutableBlocks(0, gid).reserve(evict_result.evicted_keys.size());
+    }
+
+    for (const auto cache_key : evict_result.evicted_keys) {
+        batch_resource->pushBackCacheKey(0, cache_key);
+        for (int gid = 0; gid < config_.groupNums(); ++gid) {
+            batch_resource->mutableBlocks(0, gid).push_back(NULL_BLOCK_IDX);
+        }
+        auto& items = evict_result.evicted_items.at(cache_key);
+        for (const auto& item : items) {
+            auto& group_blocks = batch_resource->mutableBlocks(0, item.group_id);
+            RTP_LLM_CHECK_WITH_INFO(!group_blocks.empty(),
+                                    "group blocks must be initialized before assigning removed cache item");
+            group_blocks.back() = item.block_index;
+        }
+    }
+    return batch_resource;
+}
+
+void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {
+    if (!block_pool_ || !batch_kv_cache_resource) {
+        return;
+    }
+
+    BlockIndicesType                 blocks_to_free;
+    std::unordered_set<BlockIdxType> seen_blocks;
+    for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {
+        for (int gid = 0; gid < batch_kv_cache_resource->groupNums(); ++gid) {
+            for (const auto block_idx : batch_kv_cache_resource->blocks(batch_id, gid)) {
+                if (isNullBlockIdx(block_idx) || !seen_blocks.insert(block_idx).second) {
+                    continue;
+                }
+                blocks_to_free.push_back(block_idx);
+            }
+        }
+    }
+    if (!blocks_to_free.empty()) {
+        block_pool_->blockCacheFree(blocks_to_free);
+    }
+}
+
+size_t KVCacheAllocator::requestRefBlocksNum() const {
+    return block_pool_->requestRefBlocksNum();
+}
+
+size_t KVCacheAllocator::connectorRefBlocksNum() const {
+    return block_pool_->connectorRefBlocksNum();
+}
+
+size_t KVCacheAllocator::blockCacheRefBlocksNum() const {
+    return block_pool_ ? block_pool_->blockCacheRefBlocksNum() : 0;
+}
+
+size_t KVCacheAllocator::notInUseBlocksNum() const {
+    return block_pool_ ? block_pool_->notInUseBlocksNum() : 0;
 }
 
 size_t KVCacheAllocator::availableTokensNum() const {
-    return block_pool_->availableBlocksNum() * seqSizePerBlock();
+    return block_pool_ ? (block_pool_->availableBlocksNum() * seqSizePerBlock()) : 0;
 }
 
 size_t KVCacheAllocator::totalBlocksNum() const {
-    return block_pool_->totalBlocksNum();
+    return block_pool_ ? block_pool_->totalBlocksNum() : 0;
 }
 
 size_t KVCacheAllocator::maxAvailableTokensNum() const {
-    return block_pool_->totalBlocksNum() * seqSizePerBlock();
-}
-
-KVCacheBuffer KVCacheAllocator::kvCacheBuffer() const {
-    return block_pool_->kvCacheBuffer();
+    return block_pool_ ? (block_pool_->totalBlocksNum() * seqSizePerBlock()) : 0;
 }
 
 void KVCacheAllocator::regUserMr(size_t model_id) {
@@ -170,9 +264,9 @@ std::vector<std::pair<BufferPtr, size_t>> KVCacheAllocator::getAllBuffers() cons
     std::vector<std::pair<BufferPtr, size_t>> results;
 
     CacheLayerLayout layout = allLayerCacheBase();
-    results.reserve(layout.layers_to_buffer_ptrs.size());
+    results.reserve(layout.layers_to_kv_buffer_ptrs.size());
 
-    for (const auto& buf : layout.layers_to_buffer_ptrs) {
+    for (const auto& buf : layout.layers_to_kv_buffer_ptrs) {
         if (!buf || buf->sizeBytes() == 0) {
             continue;
         }
@@ -189,15 +283,6 @@ std::vector<std::pair<BufferPtr, size_t>> KVCacheAllocator::getAllBuffers() cons
     }
 
     return results;
-}
-
-KVCacheBuffer KVCacheAllocator::getMTPModuleKVCacheBuffer(int mtp_module_id) const {
-    if (!block_pool_) {
-        RTP_LLM_LOG_ERROR("BlockPool is null");
-        return KVCacheBuffer{};
-    }
-    // layer 0 is main
-    return block_pool_->getMemoryLayoutKVCacheBuffer(mtp_module_id + 1);
 }
 
 }  // namespace rtp_llm

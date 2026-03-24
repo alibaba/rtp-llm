@@ -1,13 +1,14 @@
 #!/bin/bash
 
 # 检查参数
-if [ $# -ne 2 ]; then
-    echo "Usage: $0 <COMMIT_ID> <SECURITY>"
+if [ $# -ne 3 ]; then
+    echo "Usage: $0 <COMMIT_ID> <SECURITY> <REPOSITORY>"
     exit 1
 fi
 
 COMMIT_ID=$1
 SECURITY=$2
+REPOSITORY=$3
 PIPELINE_ID="1346"
 PROJECT_ID="2654816"
 
@@ -20,7 +21,7 @@ while true; do
 
     response=$(curl -s  -H "Content-Type: application/json" \
                         -H "Authorization: Basic ${SECURITY}" \
-                        -d "{\"type\": \"RETRIEVE-TASK-STATUS\", \"aone\": { \"projectId\": \"${PROJECT_ID}\", \"pipelineId\": \"${PIPELINE_ID}\"}, \"commitId\": \"${COMMIT_ID}\"}" "https://get-tasend-back-twkvcdsbpj.cn-hangzhou-vpc.fcapp.run")
+                        -d "{\"type\": \"RETRIEVE-TASK-STATUS\", \"aone\": { \"projectId\": \"${PROJECT_ID}\", \"pipelineId\": \"${PIPELINE_ID}\"}, \"repositoryUrl\": \"${REPOSITORY}\",\"commitId\": \"${COMMIT_ID}\"}" "https://get-tasend-back-twkvcdsbpj.cn-hangzhou-vpc.fcapp.run")
     echo "Response: $response"
 
     # 检查curl是否成功
@@ -72,10 +73,14 @@ while true; do
     elif [[ "$status_summary" != "" ]]; then
         # 有 jobs 字段，说明是对象
         echo "Current status: $status_summary"
-        if echo "$status_summary" | grep -q "PENDING"; then
-            main_status="PENDING"
+        # 首先检查是否有失败状态（最高优先级）
+        if echo "$status_summary" | grep -qE "FAILED|ERROR|TIMEOUT|CANCELLED"; then
+            main_status="FAILED"
         elif echo "$status_summary" | grep -q "RUNNING"; then
             main_status="RUNNING"
+        elif echo "$status_summary" | grep -q "PENDING"; then
+            main_status="PENDING"
+        # 兼容旧逻辑：捕获其他未明确列举的失败状态
         elif echo "$status_summary" | sed 's/SUCCESS//g' | sed 's/NOT_RUN//g' | grep -q '[a-zA-Z]'; then
             main_status="FAILED"
         else

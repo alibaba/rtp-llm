@@ -9,9 +9,15 @@ py_library(
 
 # flashinfer-python is only available for CUDA12
 flashinfer = ["flashinfer-python"]
-deep_gemm = ["deep_gemm"]
+deep = ["deep_gemm", "deep_ep"]
+flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
+rtp_kernel = ["rtp-kernel"]
+flashattn = ["flash_attn","flash-attn-3"]
 requirement(flashinfer)
-requirement(deep_gemm)
+requirement(deep)
+requirement(flashmla)
+requirement(rtp_kernel)
+requirement(flashattn)
 
 
 filegroup(
@@ -32,12 +38,25 @@ py_library(
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
-        "@//:using_cuda12": flashinfer + deep_gemm,
+        "@//:using_cuda12": flashinfer + deep,
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12_9_x86": flashmla,
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12_9_x86": rtp_kernel,
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12_9_x86": flashattn,
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
 )
+
+# Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
+exports_files(["modules/factory/sitecustomize.py"])
 
 py_library(
     name = "modules_cuda",

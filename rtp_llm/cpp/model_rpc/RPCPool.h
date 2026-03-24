@@ -41,6 +41,7 @@ public:
             args.SetInt(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, -1);
             args.SetInt(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
             args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, 10000);
+            // 需配合 GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS 使用，例如 500
             args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS, 5000);
             args.SetInt(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 1);
             auto grpc_channel = grpc::CreateCustomChannel(peer, grpc::InsecureChannelCredentials(), args);

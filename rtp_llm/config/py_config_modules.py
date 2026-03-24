@@ -22,6 +22,7 @@ from rtp_llm.ops import (
     MoeConfig,
     ParallelismConfig,
     PDSepConfig,
+    PrefillCPConfig,
     ProfilingDebugLoggingConfig,
     RoleType,
     RuntimeConfig,
@@ -34,23 +35,58 @@ print(f"import rtp_llm.ops took {consume_s:.2f}s")
 
 
 DEFAULT_START_PORT = 8088
-MASTER_INFO_PORT_NUM = 11
+COORDINATOR_INFO_PORT_NUM = 11
 MIN_WORKER_INFO_PORT_NUM = 8
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 
 
 class ServerConfig:
+    """Port layout : base = start_port + rank_id * worker_info_port_num, then +0..+7."""
+
     def __init__(self):
         self.frontend_server_count = 4
         self.start_port = DEFAULT_START_PORT
         self.timeout_keep_alive = 5
         self.frontend_server_id = 0
         self.rank_id = 0
+        self.ip: str = ""
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
         self.shutdown_timeout: int = (
             50  # Default timeout in seconds, -1 means wait indefinitely
         )
         self.monitor_interval: int = 1  # Monitor interval in seconds
+
+    def _server_base(self) -> int:
+        return self.start_port + self.rank_id * self.worker_info_port_num
+
+    @property
+    def server_port(self) -> int:
+        """Port for main server (base + 0). Equals start_port + rank_id * worker_info_port_num."""
+        return self._server_base() + 0
+
+    @property
+    def rpc_server_port(self) -> int:
+        return self._server_base() + 1
+
+    @property
+    def cache_store_listen_port(self) -> int:
+        return self._server_base() + 2
+
+    @property
+    def cache_store_rdma_listen_port(self) -> int:
+        return self._server_base() + 4
+
+    @property
+    def http_port(self) -> int:
+        return self._server_base() + 5
+
+    @property
+    def embedding_rpc_server_port(self) -> int:
+        return self._server_base() + 7
+
+    def set_local_rank(self, local_rank: int):
+        """Update rank_id in place; server_port-related properties reflect new values."""
+        self.rank_id = local_rank
 
     # update_from_args 方法已不再需要
     # 配置绑定现在通过声明式 bind_to 参数在 add_argument 时自动处理
@@ -64,7 +100,13 @@ class ServerConfig:
             f"rank_id: {self.rank_id}\n"
             f"worker_info_port_num: {self.worker_info_port_num}\n"
             f"shutdown_timeout: {self.shutdown_timeout}\n"
-            f"monitor_interval: {self.monitor_interval}"
+            f"monitor_interval: {self.monitor_interval}\n"
+            f"server_port: {self.server_port}\n"
+            f"rpc_server_port: {self.rpc_server_port}\n"
+            f"cache_store_listen_port: {self.cache_store_listen_port}\n"
+            f"cache_store_rdma_listen_port: {self.cache_store_rdma_listen_port}\n"
+            f"http_port: {self.http_port}\n"
+            f"embedding_rpc_server_port: {self.embedding_rpc_server_port}"
         )
 
 
@@ -103,9 +145,10 @@ class LoraConfig:
 class LoadConfig:
     def __init__(self):
         self.load_method: str = "auto"
+        self.force_cpu_load_weights: bool = False
 
     def to_string(self):
-        return f"load_method: {self.load_method}"
+        return f"load_method: {self.load_method}\nforce_cpu_load_weights: {self.force_cpu_load_weights}"
 
 
 class RenderConfig:
@@ -125,6 +168,8 @@ class RenderConfig:
 
 
 class DistributeConfig:
+    """Remote port layout: base_remote = remote_server_port + rank_id * worker_info_port_num."""
+
     def __init__(self):
         self.fake_gang_env: bool = False
         self.gang_annocation_path: str = "/etc/podinfo/annotations"
@@ -137,6 +182,27 @@ class DistributeConfig:
         self.json_gang_parts: Optional[str] = None
         self.leader_address: Optional[str] = None
         self.remote_server_port: int = 0
+        self.rank_id: int = 0
+        self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
+
+    def _remote_base(self) -> int:
+        return self.remote_server_port + self.rank_id * self.worker_info_port_num
+
+    @property
+    def remote_rpc_server_port(self) -> int:
+        return self._remote_base() + 1
+
+    @property
+    def cache_store_connect_port(self) -> int:
+        return self._remote_base() + 2
+
+    @property
+    def cache_store_rdma_connect_port(self) -> int:
+        return self._remote_base() + 4
+
+    def set_local_rank(self, local_rank: int):
+        """Update rank_id in place; remote_server_port-related properties reflect new values."""
+        self.rank_id = local_rank
 
     def to_string(self):
         return (
@@ -151,6 +217,11 @@ class DistributeConfig:
             f"json_gang_parts: {self.json_gang_parts}\n"
             f"lead_address: {self.leader_address}\n"
             f"remote_server_port: {self.remote_server_port}\n"
+            f"rank_id: {self.rank_id}\n"
+            f"worker_info_port_num: {self.worker_info_port_num}\n"
+            f"remote_rpc_server_port: {self.remote_rpc_server_port}\n"
+            f"cache_store_connect_port: {self.cache_store_connect_port}\n"
+            f"cache_store_rdma_connect_port: {self.cache_store_rdma_connect_port}\n"
         )
 
 
@@ -357,6 +428,7 @@ class PyEnvConfigs:
         self.arpc_config = ArpcConfig()
         self.grpc_config = GrpcConfig()
         self.deep_ep_config = DeepEPConfig()
+        self.prefill_cp_config = PrefillCPConfig()
 
     def to_string(self):
         return (
@@ -405,4 +477,5 @@ class PyEnvConfigs:
             + self.runtime_config.fifo_scheduler_config.to_string()
             + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
+            "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )

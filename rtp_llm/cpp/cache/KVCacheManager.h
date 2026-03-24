@@ -6,55 +6,51 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace rtp_llm {
 
+class KVCacheConnectorCoordinator;
+class KVCacheConnectorReadWriteContext;
+
 class KVCacheManager {
 public:
-    bool             init();
-    CacheLayerLayout allLayerCacheBase() const;
-
     KVCacheManager(const CacheConfig&                 config,
                    rtp_llm::DeviceBase*               device,
                    bool                               warmup             = false,
                    const kmonitor::MetricsReporterPtr metrics_reporter   = nullptr,
                    const KVCacheConfig&               kv_cache_config    = KVCacheConfig{},
                    const ParallelismConfig&           parallelism_config = ParallelismConfig{},
-                   const RuntimeConfig&               runtime_config     = RuntimeConfig{});
+                   const RuntimeConfig&               runtime_config     = RuntimeConfig{},
+                   const SpeculativeExecutionConfig&  sp_config          = SpeculativeExecutionConfig{});
     ~KVCacheManager();
 
-    size_t      freeBlocksNum() const;
-    size_t      availableBlocksNum() const;
-    size_t      availableTokensNum() const;
-    size_t      totalBlocksNum() const;
-    size_t      maxAvailableTokensNum() const;
-    KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    // 初始化和配置相关
+    bool init();
 
-    // for main model
-    KVCacheBuffer      kvCacheBuffer() const;
     const CacheConfig& cacheConfig() const;
-    int                singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len) const;
-
-    // for mtp module
-    KVCacheBuffer      getMTPModuleKVCacheBuffer(int mtp_module_id) const;
     const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
 
+    // 显存管理和缓存分配
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
     void         insertIntoCache(const InsertInfo& insert_info);
 
+    int
+    singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
+
+    // 块操作相关
     void blockCopy(int src_block_index, int dest_block_index);
     void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     void blockBatchCopy(const rtp_llm::Buffer& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
-
-    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
-
-    void regUserMr(size_t model_id);
 
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                        const std::vector<int>&        block_src_batch,
@@ -65,10 +61,51 @@ public:
     virtual bool setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
     virtual bool setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
 
+    // 地址转换和缓冲区访问
+    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
+    std::vector<BlockInfo>
+    convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
+
+    CacheLayerLayout allLayerCacheBase() const;
+
+    // for main model; it's too hack for mtp module, but we need to keep it for now
+    CacheLayerLayout getMainModelCacheLayerLayout() const;
+    // for mtp module
+    CacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
+
+    // 资源统计和信息查询
+    size_t                  freeBlocksNum() const;
+    size_t                  availableBlocksNum() const;
+    size_t                  notInUseBlocksNum() const;
+    BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
+    void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);
+    size_t                  availableTokensNum() const;
+    size_t                  totalBlocksNum() const;
+    size_t                  maxAvailableTokensNum() const;
+    KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+
+    // 系统资源管理
+    void regUserMr(size_t model_id);
+
+    // 异步连接器操作
+    // async load cache from connector to gpu, for all rank
+    std::shared_ptr<AsyncContext>
+    asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
+
+    // async store cache from gpu to connector, for all rank
+    std::shared_ptr<AsyncContext>
+    asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
+
+    // for every single rank
+    bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
+
 private:
+    void initConnectorCoordinator();
     void allocateAndSync();
     void reportMetricsLoop();
 
+    // 成员变量
     CacheConfig          config_;
     rtp_llm::DeviceBase* device_;
     KVCacheAllocatorPtr  allocator_;
@@ -77,9 +114,12 @@ private:
     const KVCacheConfig                kv_cache_config_;
     const ParallelismConfig            parallelism_config_;
     const RuntimeConfig                runtime_config_;
+    const SpeculativeExecutionConfig   sp_config_;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
+
+    std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
 };
 
 }  // namespace rtp_llm

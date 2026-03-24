@@ -31,6 +31,7 @@ class CausalAttention(nn.Module):
     ):
         super().__init__()
         self.parallelism_config = parallelism_config
+        self.tp_size = parallelism_config.get_attn_tp_size()
         self.head_num = attn_config.head_num
         self.num_key_value_groups = attn_config.head_num // attn_config.kv_head_num
         self.head_dim = attn_config.size_per_head
@@ -44,6 +45,8 @@ class CausalAttention(nn.Module):
             W.attn_qkv_b,
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
+            weight_scale_2_key=W.attn_qkv_s2,
+            input_scale_key=W.attn_qkv_i_s,
         )
         self.o_proj = LinearFactory.create_linear_from_weights(
             weights,
@@ -52,10 +55,11 @@ class CausalAttention(nn.Module):
             W.attn_o_b,
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
+            weight_scale_2_key=W.attn_o_s2,
+            input_scale_key=W.attn_o_i_s,
         )
         self.cache_scale_len = 1024
         self.o_proj.maybe_cache_quant_scale(self.cache_scale_len)
-        # for qwen3
         self.qk_fuse_norm = None
         if W.q_ln_gamma in weights and W.k_ln_gamma in weights:
             self.qk_fuse_norm = FusedQKRMSNorm(
@@ -72,18 +76,17 @@ class CausalAttention(nn.Module):
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[KVCache],
-        need_rope_kv_cache: bool = True,
         gate: Optional[torch.Tensor] = None,  # for qwen3 next
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         qkv = self.qkv_proj(hidden_states)
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
-        attn_output = fmha_impl.forward(qkv, kv_cache, need_rope_kv_cache)
+        attn_output = fmha_impl.forward(qkv, kv_cache)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
         output = self.o_proj(attn_output)
-        if self.parallelism_config.tp_size > 1:
+        if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output

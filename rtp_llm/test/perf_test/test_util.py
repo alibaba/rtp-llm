@@ -11,6 +11,27 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 
+def _load_tokenizer(model_type: str, tokenizer_path: str) -> PreTrainedTokenizerBase:
+    """Load tokenizer, with GLM-5 compatible path (bypass invalid tokenizer_config.json)."""
+    if model_type == "glm_5":
+        from tokenizers import Tokenizer
+        from transformers import PreTrainedTokenizerFast
+
+        tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
+        if not os.path.exists(tokenizer_file):
+            raise FileNotFoundError(
+                f"GLM-5 tokenizer requires tokenizer.json at {tokenizer_file}"
+            )
+        tokenizer = Tokenizer.from_file(tokenizer_file)
+        return PreTrainedTokenizerFast(
+            tokenizer_object=tokenizer,
+            eos_token="<|endoftext|>",
+            pad_token="<|endoftext|>",
+            unk_token="<|endoftext|>",
+        )
+    return AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
+
 def write_odps(table_name: str, records: List[Any], fields: List[str] = []):
     table = pt.PrettyTable(align="l")
     table.field_names = fields
@@ -86,5 +107,5 @@ def create_query(
                 right = mid
         return base_query[:left]
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    tokenizer = _load_tokenizer(model_type, tokenizer_path)
     return {x: _create_query_single(tokenizer, x) for x in input_len_list}

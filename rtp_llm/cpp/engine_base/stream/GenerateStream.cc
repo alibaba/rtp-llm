@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 
 using namespace std;
 
@@ -131,9 +132,9 @@ absl::Status GenerateStream::initKVBlock(size_t reserve_step) {
     return stream_cache_resource_->initKVBlock(reserve_step);
 }
 
-void GenerateStream::fakeInitKVBlock() {
+void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    stream_cache_resource_->fakeInitKVBlock();
+    stream_cache_resource_->fakeInitKVBlock(reserved_blocks);
 }
 
 absl::Status GenerateStream::incrKVBlock(size_t reserve_step) {
@@ -141,24 +142,19 @@ absl::Status GenerateStream::incrKVBlock(size_t reserve_step) {
     return stream_cache_resource_->incrKVBlock(reserve_step);
 }
 
-int GenerateStream::tryReleaseKVBlock(int nums) {
-    std::lock_guard<std::mutex> lock(*output_mutex_);
-    RTP_LLM_CHECK_WITH_INFO(nums >= 0, "release block nums is < 0");
-    auto release_blocks = stream_cache_resource_->tryReleaseKVBlock(nums);
-    return release_blocks;
-}
-
 void GenerateStream::releaseResource() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    stream_cache_resource_->releaseResource();
+    if (!stream_cache_resource_->isResourceReleased()) {
+        stream_cache_resource_->releaseResource();
+    }
 }
 void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
     need_release_resource_ = need_release_resource;
     stream_cache_resource_->setNeedReleaseResource(need_release_resource);
 }
-int GenerateStream::nextNeedBlockNums(size_t reserve_step) const {
+int GenerateStream::nextNeedBlockNums(int reserve_step) const {
     // TODO: maybe need fix when context and reuse
-    return stream_cache_resource_->singleBatchNeedBlocks(seqLength() + reserve_step) * nextBatchSize();
+    return stream_cache_resource_->singleBatchNeedBlocks(seqLength(), reserve_step) * nextBatchSize();
 }
 
 std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
@@ -311,10 +307,6 @@ int GenerateStream::seqLength() const {
     return complete_token_ids_->seqLength();
 }
 
-int GenerateStream::adjustedCommonLen() const {
-    return maxBatchSize() == 1 ? seqLength() : inputLength() / seqSizePerBlock() * seqSizePerBlock();
-}
-
 int GenerateStream::seqSizePerBlock() const {
     return stream_cache_resource_->seqSizePerBlock();
 }
@@ -323,10 +315,6 @@ int GenerateStream::contextLength() const {
     int begin_pos = prefixLength();
     int end_pos   = seqLength();
     return end_pos - begin_pos;
-}
-
-int GenerateStream::inputPrefixLength() const {
-    return generate_input_->prefix_length;
 }
 
 int GenerateStream::prefixLength() const {
@@ -370,6 +358,14 @@ int GenerateStream::remoteReuseLength() const {
     return remote_reuse_length_;
 }
 
+void GenerateStream::setMemoryReuseLength(int length) {
+    memory_reuse_length_ = length;
+}
+
+int GenerateStream::memoryReuseLength() const {
+    return memory_reuse_length_;
+}
+
 void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     initial_reuse_length_ = initial_reuse_length;
 }
@@ -395,11 +391,6 @@ std::vector<int> GenerateStream::completeTokenIdsVec(int batch_idx) {
     return complete_token_ids_->completeTokenIdsVec(batch_idx);
 }
 
-std::vector<int> GenerateStream::commonCompleteTokenIdsVec(int batch_idx) {
-    RTP_LLM_CHECK(batch_idx < currentBatchSize());
-    return complete_token_ids_->commonCompleteTokenIdsVec(batch_idx);
-}
-
 int GenerateStream::currentExecuteTokenSize() {
     return currentExecuteTokens(0).size() * currentBatchSize();
 }
@@ -423,19 +414,6 @@ rtp_llm::BufferPtr GenerateStream::multimodalLocations() const {
     }
     auto& mm_locs = generate_input_->mm_locs.value();
     return mm_locs->slice(reuse_mm_length_, mm_locs->size() - reuse_mm_length_);
-}
-
-vector<vector<int>> GenerateStream::multimodalIntervals() const {
-    if (!generate_input_->mm_locs && !generate_input_->multimodal_features) {
-        return {};
-    }
-    vector<vector<int>> res;
-    auto                locs     = generate_input_->mm_locs.value();
-    auto                features = generate_input_->multimodal_features.value();
-    for (int i = 0; i < locs->size(); ++i) {
-        res.emplace_back(vector<int>({*locs->dataWithOffset<int>(i), int(features[i].sizes()[0])}));
-    }
-    return res;
 }
 
 vector<int> GenerateStream::textTokensMask() const {
@@ -494,9 +472,9 @@ void GenerateStream::checkTimeout() {
     auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     auto timeout_ms      = getTimeoutMs();
     if (timeout_ms > 0 && timeout_ms < running_time_ms) {
-        stopAndRelease(ErrorCode::GENERATE_TIMEOUT,
-                       "query has been running " + std::to_string(running_time_ms) + " ms, "
-                           + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
+        setStop(ErrorCode::GENERATE_TIMEOUT,
+                "query has been running " + std::to_string(running_time_ms) + " ms, "
+                    + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
     }
 }
 
@@ -672,7 +650,13 @@ size_t GenerateStream::curBlocksNum() const {
 }
 
 size_t GenerateStream::maxTokenNum() const {
-    return std::min(max_seq_len_, generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
+    int propose_step = 0;
+    if (sp_output_buffer_) {
+        propose_step = sp_output_buffer_->propose_step;
+    }
+
+    return std::min(max_seq_len_ - propose_step,
+                    generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
 }
 
 bool GenerateStream::needFinish() {
@@ -773,6 +757,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     }
 
     auto num_new_tokens = update_info.num_new_tokens;
+    int  cur_cached_len = seqLength() - 1;
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
@@ -799,6 +784,35 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
     sp_output_buffer_->all_probs     = update_info.draft_token_probs;
+
+    // for spec-decode linear attention, we need to adjust cache blocks
+    int nxt_cached_len   = seqLength() - 1;
+    int accept_token_num = nxt_cached_len - cur_cached_len;
+    if (accept_token_num > 1 && stream_cache_resource_) {
+        int seq_size_per_block = seqSizePerBlock();
+
+        // 1. swap cache blocks of accept tokens to corresponding blocks
+        auto [cached_src_block_idx, cached_des_block_idx] =
+            getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
+        stream_cache_resource_->swapLinearBlocks(0, cached_src_block_idx, cached_des_block_idx);
+
+        // 2. swap final block of accept tokens to the next sequence block
+        auto [src_block_idx, des_block_idx] =
+            getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
+        stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
+
+        RTP_LLM_LOG_DEBUG("[stream %d (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
+                          streamId(),
+                          cur_cached_len + 1,
+                          nxt_cached_len + 1,
+                          cached_src_block_idx,
+                          cached_des_block_idx,
+                          src_block_idx,
+                          des_block_idx);
+    } else {
+        RTP_LLM_LOG_DEBUG(
+            "[stream %d (%d -> %d)] no swap cache blocks", streamId(), cur_cached_len + 1, nxt_cached_len + 1);
+    }
 
     // update normal output buffer
     updateOutput({new_tokens,
@@ -935,7 +949,13 @@ rtp_llm::BufferPtr GenerateStream::getSoftmaxProbs() {
 void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter) {
     metrics_reporter_ = metrics_reporter;
 }
+
 void GenerateStream::reportMetric() {
+    reportStreamMetrics();
+    reportCacheReuseMetrics();
+}
+
+void GenerateStream::reportStreamMetrics() {
     if (metrics_reporter_) {
         bool                         cancelled = statusInfo().code() == ErrorCode::CANCELLED;
         bool                         timeout   = statusInfo().code() == ErrorCode::GENERATE_TIMEOUT;
@@ -968,6 +988,16 @@ void GenerateStream::reportMetric() {
         static kmonitor::MetricsTags timeout_tag("timeout", "true");
         metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(timeout ? &timeout_tag : nullptr,
                                                                                      &collector);
+    }
+}
+
+void GenerateStream::reportCacheReuseMetrics() const {
+    if (metrics_reporter_ && stream_cache_resource_->reuseCache()) {
+        RtpLLMCacheReuseMetricsCollector collector;
+        collector.kv_cache_reuse_length = reuseLength();
+        collector.kv_cache_hit_rate     = inputLength() > 0 ? (reuseLength() * 100.0 / inputLength()) : 0.0;
+        kmonitor::MetricsTags tags;
+        metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
     }
 }
 
