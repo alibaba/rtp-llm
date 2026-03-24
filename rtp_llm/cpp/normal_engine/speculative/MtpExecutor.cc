@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
 #include <memory>
 #include <thread>
@@ -285,6 +286,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
  */
 absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& streams,
                                       MtpMetricsCollector&                metrics_collector) {
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.prefill_step(prefill_stream_size=%zu)", streams.size());
+
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
     RtpLLMTokenPSMetricsCollector&  tps_collector      = metrics_collector.tps_collector;
 
@@ -296,10 +299,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     SamplerOutput   draft_sampler_output;
 
     // placeholder for some tensors
-    torch::Tensor draft_probs;
-    torch::Tensor draft_token_ids;
+    torch::Tensor                      draft_probs;
+    torch::Tensor                      draft_token_ids;
+    speculative::FastTopKSamplerOutput fast_topk_sampler_output;
 
     {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(gather_model_input)");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
@@ -307,6 +312,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(tp_sync_input)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
         tpSyncModelInputs(model_input, device_);
@@ -326,6 +332,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     // target model prefill
     {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
         maybePrintModelInput(model_input, "prefill target model");
         model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
         model_output                        = std::move(model_->forward(model_input));
@@ -333,6 +340,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     // eplb
     if (expert_balancer_) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(eplb_step_forward)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -340,6 +348,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     // target model sample
     if (isTpRank0()) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
         if (model_input.is_fake_stream) {
             model_input.last_hidden_states = model_output.all_hidden_states;
         } else {
@@ -352,6 +361,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     // draft model prefill
     {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
         tpSyncModelInputs(model_input, device_);
         maybePrintModelInput(model_input, "prefill post draft model");
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
@@ -368,12 +378,16 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     // draft model sample
-    auto fast_topk_sampler_output  = fast_topk_sampler_->forward(Buffer2torchTensor(*draft_model_output.logits, false));
-    draft_sampler_output.all_probs = torchTensor2Buffer(fast_topk_sampler_output.all_probs);
-    draft_sampler_output.token_ids = torchTensor2Buffer(fast_topk_sampler_output.token_ids);
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_sample)");
+        fast_topk_sampler_output = fast_topk_sampler_->forward(Buffer2torchTensor(*draft_model_output.logits, false));
+        draft_sampler_output.all_probs = torchTensor2Buffer(fast_topk_sampler_output.all_probs);
+        draft_sampler_output.token_ids = torchTensor2Buffer(fast_topk_sampler_output.token_ids);
+    }
 
     // collect metrics
     if (metrics_reporter_) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(collect_metrics)");
         executor_collector.context_batch_size = stream_groups.totalContextBatchSize();
         executor_collector.execute_token_size = stream_groups.modelExecuteTokenSize();
         executor_collector.max_seq_len        = stream_groups.maxSeqLen();
@@ -388,6 +402,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     // dispatch
     {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(dispatch_output)");
         auto result =
             batch_stream_processor_->dispatchPrefill(stream_groups,
                                                      {std::move(model_output), std::move(sampler_output)},
@@ -463,6 +478,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
 absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams,
                                      MtpMetricsCollector&                metrics_collector) {
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(decode_stream_size=%zu)", streams.size());
+
     RtpLLMExecutorMetricsCollector&          executor_collector  = metrics_collector.executor_collector;
     RtpLLMTokenPSMetricsCollector&           tps_collector       = metrics_collector.tps_collector;
     RtpLLMSpeculativeEngineMetricsCollector& sp_engine_collector = metrics_collector.sp_engine_collector;
@@ -479,30 +496,36 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     speculative::SpeculativeSamplerOutput speculative_sampler_output;
 
     // placeholder for some tensors
-    torch::Tensor              draft_token_probs_d_t;
-    torch::Tensor              hidden_states_d_t;
-    torch::Tensor              draft_probs_t;
-    torch::Tensor              draft_token_ids_t;
-    torch::Tensor              spec_token_ids_t;
-    std::vector<torch::Tensor> draft_probs_list;
+    torch::Tensor                      draft_token_probs_d_t;
+    torch::Tensor                      hidden_states_d_t;
+    torch::Tensor                      draft_probs_t;
+    torch::Tensor                      draft_token_ids_t;
+    torch::Tensor                      spec_token_ids_t;
+    std::vector<torch::Tensor>         draft_probs_list;
+    speculative::FastTopKSamplerOutput fast_topk_sampler_output;
 
     size_t total_accept_len = 0;
 
     // clone tensors from grpc
-    for (auto& stream : streams) {
-        auto        sp_output_buffer = stream->getSPOutputBuffer();
-        auto const& tensors_holder   = sp_output_buffer->tensors_holder;
-        if (!tensors_holder.empty()) {
-            auto const& propose_probs   = tensors_holder[0];
-            auto const& propose_hidden  = tensors_holder[1];
-            sp_output_buffer->all_probs = device_->clone({*torchTensor2Buffer(propose_probs), AllocationType::DEVICE});
-            sp_output_buffer->hidden_states =
-                device_->clone({*torchTensor2Buffer(propose_hidden), AllocationType::DEVICE});
+    {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(clone_sp_tensors,stream_count=%zu)", streams.size());
+        for (auto& stream : streams) {
+            auto        sp_output_buffer = stream->getSPOutputBuffer();
+            auto const& tensors_holder   = sp_output_buffer->tensors_holder;
+            if (!tensors_holder.empty()) {
+                auto const& propose_probs  = tensors_holder[0];
+                auto const& propose_hidden = tensors_holder[1];
+                sp_output_buffer->all_probs =
+                    device_->clone({*torchTensor2Buffer(propose_probs), AllocationType::DEVICE});
+                sp_output_buffer->hidden_states =
+                    device_->clone({*torchTensor2Buffer(propose_hidden), AllocationType::DEVICE});
+            }
         }
     }
 
     size_t batch_size = streams.size();
     {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(gather_model_input)");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    model_input_status = batch_stream_processor_->gatherDecodeModelInput(stream_groups);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
@@ -511,6 +534,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     if (isTpRank0()) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_input_rank0)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
         if (model_input.skip_run) {
@@ -524,16 +548,19 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // TODO(yinzhi): consider beam search & lora
 
-    if (isTpRank0()) {
-        if (propose_step_ == 1) {
-            batch_stream_processor_->prepareOneStepSpecDecodeModelInput(stream_groups, model_input);
-        } else {
-            batch_stream_processor_->prepareDecodeDraftModelInput(stream_groups, model_input);
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_decode_input_and_tp_sync)");
+        if (isTpRank0()) {
+            if (propose_step_ == 1) {
+                batch_stream_processor_->prepareOneStepSpecDecodeModelInput(stream_groups, model_input);
+            } else {
+                batch_stream_processor_->prepareDecodeDraftModelInput(stream_groups, model_input);
+            }
         }
-    }
-    tpSyncModelInputs(model_input, device_);
-    if (model_input.skip_run) {
-        return absl::OkStatus();
+        tpSyncModelInputs(model_input, device_);
+        if (model_input.skip_run) {
+            return absl::OkStatus();
+        }
     }
 
     // release hold buffers before draft model forward
@@ -545,15 +572,18 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
     }
 
-    maybePrintModelInput(model_input, "decode target model");
-
-    model_input.is_target_verify        = true;
-    model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
-    model_output                        = std::move(model_->forward(model_input));
-    model_input.is_target_verify        = false;
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
+        maybePrintModelInput(model_input, "decode target model");
+        model_input.is_target_verify        = true;
+        model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
+        model_output                        = std::move(model_->forward(model_input));
+        model_input.is_target_verify        = false;
+    }
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
     if (isTpRank0()) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_draft_sampler_output)");
         if (!model_input.is_fake_stream) {
             if (propose_step_ == 1) {
                 batch_stream_processor_->updateOneStepDraftSamplerOutput(
@@ -571,12 +601,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // eplb
     if (expert_balancer_) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(eplb_step_forward)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     if (isTpRank0()) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(rejection_sampling)");
+
         if (model_input.is_fake_stream) {
             BufferPtr accept_tokens = device_->allocateBuffer({DataType::TYPE_INT32, {1, 1}, AllocationType::HOST});
             *accept_tokens->dataWithOffset<int32_t>(0) = 0;
@@ -599,14 +632,23 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, total_accept_len);
     }
 
-    tpSyncModelInputs(model_input, device_);
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_post_rejection)");
+        tpSyncModelInputs(model_input, device_);
+    }
 
-    maybePrintModelInput(model_input, "decode post draft model");
-    const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
-    model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_draft_prefill_input)");
+        maybePrintModelInput(model_input, "decode post draft model");
+        const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
+        model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
+        model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+    }
 
-    draft_prefill_model_output = std::move(draft_model_->forward(model_input));
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
+        draft_prefill_model_output = std::move(draft_model_->forward(model_input));
+    }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         device_->syncAndCheck();
@@ -616,13 +658,17 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     // draft model sample
-    auto fast_topk_sampler_output =
-        fast_topk_sampler_->forward(Buffer2torchTensor(*draft_prefill_model_output.logits, false));
-    draft_prefill_sampler_output.all_probs = torchTensor2Buffer(fast_topk_sampler_output.all_probs);
-    draft_prefill_sampler_output.token_ids = torchTensor2Buffer(fast_topk_sampler_output.token_ids);
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_sample)");
+        fast_topk_sampler_output =
+            fast_topk_sampler_->forward(Buffer2torchTensor(*draft_prefill_model_output.logits, false));
+        draft_prefill_sampler_output.all_probs = torchTensor2Buffer(fast_topk_sampler_output.all_probs);
+        draft_prefill_sampler_output.token_ids = torchTensor2Buffer(fast_topk_sampler_output.token_ids);
+    }
 
     // collect metrics
     if (metrics_reporter_) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(collect_metrics)");
         executor_collector.generate_batch_size = stream_groups.totalModelBatchSize();
         executor_collector.execute_token_size += total_accept_len;
         executor_collector.max_seq_len = stream_groups.maxSeqLen();
@@ -640,24 +686,29 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     // dispatch
-    auto result = batch_stream_processor_->dispatchDecode(
-        stream_groups,
-        speculative_sampler_output,
-        {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)});
-    // clean holder tensors from grpc
-    for (auto& stream : streams) {
-        stream->getSPOutputBuffer()->tensors_holder.clear();
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output)");
+        auto result = batch_stream_processor_->dispatchDecode(
+            stream_groups,
+            speculative_sampler_output,
+            {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)});
+        // clean holder tensors from grpc
+        for (auto& stream : streams) {
+            stream->getSPOutputBuffer()->tensors_holder.clear();
+        }
+
+        draft_model_->releaseBuffers();
+        model_->releaseBuffers();
+
+        return result;
     }
-
-    draft_model_->releaseBuffers();
-    model_->releaseBuffers();
-
-    return result;
 }
 
 void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
                                  std::list<GenerateStreamPtr>&       prefill_streams,
                                  std::list<GenerateStreamPtr>&       decode_streams) {
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.prepare_streams(stream_size=%zu)", streams.size());
+
     for (auto& stream : streams) {
         // split streams into prefill and decode
         if (stream->isContextStream()) {
@@ -689,6 +740,8 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
 }
 
 absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.process(stream_size=%zu,mtp_step=%zu)", streams.size(), propose_step_);
+
     MtpMetricsCollector metrics_collector;
 
     std::list<GenerateStreamPtr> prefill_streams;
@@ -713,6 +766,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
 
     // report metrics
     if (isTpRank0() && metrics_reporter_ && metrics_collector.not_skip) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.process(report_metrics)");
         metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(
             nullptr, &metrics_collector.executor_collector);
         metrics_reporter_->report<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
@@ -735,6 +789,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    const StreamGroups&         stream_groups,
                                    std::vector<torch::Tensor>& draft_probs_list,
                                    torch::Tensor&              draft_token_ids_t) {
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)",
+                                  model_input.combo_tokens->shape()[0]);
+
     // clear host buffers holder
     buffer_holder_.release();
 
@@ -772,6 +829,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
     // n-1 steps draft model decode
     for (int i = 0; i < propose_step_ - 1; i++) {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%d)", i);
         RTP_LLM_LOG_DEBUG("draft model decode step %d batch_size %d", i, batch_size);
         draft_decode_model_output = std::move(draft_model_->forward(model_input));
 
@@ -798,35 +856,38 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         }
     }
 
-    // prepare spec decode input
-    draft_token_ids_t =
-        torch::cat(draft_token_ids_list, 1).reshape({(int)batch_size, (int)(propose_step_ + 1)}).contiguous();
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_model_decode(build_spec_decode_input)");
+        // prepare spec decode input
+        draft_token_ids_t =
+            torch::cat(draft_token_ids_list, 1).reshape({(int)batch_size, (int)(propose_step_ + 1)}).contiguous();
 
-    auto lm_output_indexes = device_->allocateBuffer(
-        {rtp_llm::DataType::TYPE_INT32, {batch_size * (propose_step_ + 1)}, rtp_llm::AllocationType::HOST}, {});
-    auto input_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST});
+        auto lm_output_indexes = device_->allocateBuffer(
+            {rtp_llm::DataType::TYPE_INT32, {batch_size * (propose_step_ + 1)}, rtp_llm::AllocationType::HOST}, {});
+        auto input_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST});
 
-    for (int i = 0; i < batch_size; i++) {
-        input_lengths->data<int>()[i] = propose_step_ + 1;
+        for (int i = 0; i < batch_size; i++) {
+            input_lengths->data<int>()[i] = propose_step_ + 1;
+        }
+        for (int i = 0; i < batch_size * (propose_step_ + 1); i++) {
+            lm_output_indexes->data<int>()[i] = i;
+        }
+
+        model_input.input_lengths     = input_lengths;
+        model_input.lm_output_indexes = lm_output_indexes;
+        model_input.prefix_lengths    = spec_prefix_lengths;
+        model_input.combo_tokens      = torchTensor2Buffer(draft_token_ids_t);
+        model_input.combo_tokens->updateShape({batch_size * (propose_step_ + 1)});
+        model_input.sequence_lengths   = device_->allocateBuffer({DataType::TYPE_INT32, {0}, AllocationType::HOST});
+        model_input.last_hidden_states = nullptr;
+
+        // Since other tp ranks don't have streams, its combo_tokens' first token is not correct.
+        // Thus, we need to broadcast the combo_tokens to other tp ranks.
+        device_->broadcast({{model_input.combo_tokens}, 0});
+
+        const auto& cache_cfg             = cache_manager_->cacheConfig();
+        model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
     }
-    for (int i = 0; i < batch_size * (propose_step_ + 1); i++) {
-        lm_output_indexes->data<int>()[i] = i;
-    }
-
-    model_input.input_lengths     = input_lengths;
-    model_input.lm_output_indexes = lm_output_indexes;
-    model_input.prefix_lengths    = spec_prefix_lengths;
-    model_input.combo_tokens      = torchTensor2Buffer(draft_token_ids_t);
-    model_input.combo_tokens->updateShape({batch_size * (propose_step_ + 1)});
-    model_input.sequence_lengths   = device_->allocateBuffer({DataType::TYPE_INT32, {0}, AllocationType::HOST});
-    model_input.last_hidden_states = nullptr;
-
-    // Since other tp ranks don't have streams, its combo_tokens' first token is not correct.
-    // Thus, we need to broadcast the combo_tokens to other tp ranks.
-    device_->broadcast({{model_input.combo_tokens}, 0});
-
-    const auto& cache_cfg             = cache_manager_->cacheConfig();
-    model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
 }
 
 }  // namespace rtp_llm
