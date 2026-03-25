@@ -234,6 +234,7 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    int32 prefill_cp_size = 13;
 }
 
 // in tp case, decode master broadcast to decode worker
@@ -250,7 +251,7 @@ message BroadcastLoadRequestPB {
     int32 partition_count = 10;
     int32 partition_id = 11;
     repeated IntVector group_block_ids = 12;
-
+    int32 prefill_cp_size = 13;
 }
 
 message BroadcastLoadResponsePB {

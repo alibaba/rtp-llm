@@ -46,6 +46,7 @@ cc_library(
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
+        "//rtp_llm/cpp/kernels:cp_cache_scatter",
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/multimodal_processor",
         "//rtp_llm/cpp/normal_engine",

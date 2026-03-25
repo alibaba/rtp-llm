@@ -33,7 +33,8 @@ public:
                            int64_t                          timeout_ms,
                            int                              partition_count,
                            int                              partition_id,
-                           grpc::ServerContext*             server_context):
+                           grpc::ServerContext*             server_context,
+                           int32_t                          prefill_cp_size = 1):
             request_id(request_id),
             request_key(request_key),
             peer_addrs(peer_addrs),
@@ -43,7 +44,8 @@ public:
             timeout_ms(timeout_ms),
             partition_count(partition_count),
             partition_id(partition_id),
-            server_context(server_context) {}
+            server_context(server_context),
+            prefill_cp_size(prefill_cp_size) {}
         int64_t                          request_id;
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
@@ -55,6 +57,7 @@ public:
         int                              partition_id;
 
         grpc::ServerContext* server_context;
+        int32_t                          prefill_cp_size;
     };
 
 private:
@@ -75,6 +78,15 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
+
+    // CP sharded KV cache helpers
+    std::vector<CacheKeyType> recomputeVirtualCacheKeys(GenerateStream* stream, int32_t cp_size) const;
+    void                      buildCPShardedLayerCache(std::shared_ptr<RequestBlockBuffer>& load_layer_cache,
+                                                       const LoadKVCacheContext&             load_context,
+                                                       size_t                               layer_id,
+                                                       int                                  peer_index,
+                                                       size_t                               model_id) const;
+    void                      scatterCPCacheBlocks(const LoadKVCacheContext& load_context) const;
 
 private:
     autil::ThreadPoolBasePtr thread_pool_;
