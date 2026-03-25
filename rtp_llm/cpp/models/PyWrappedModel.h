@@ -56,6 +56,7 @@ private:
     py::object py_model_;
     py::object held_attn_pyobj_;
     bool       enable_cuda_graph_{false};
+    bool       cuda_graph_ready_{false};  // true only after graph_runner_ is successfully created and captured
     bool       is_prefill_cuda_graph_mode_{false};
     bool       use_spec_decoding_{false};
 
@@ -110,7 +111,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py_model_                 = py_instance;
     auto py_initialize_method = py_model_.attr("initialize");
     py_init_result            = py_initialize_method(init_resources);
-    if (enable_cuda_graph_) {
+    // Skip CUDA graph capture when kv_cache_layer_layout is unavailable (e.g. warmup phase with cache_manager=nullptr)
+    if (enable_cuda_graph_ && (is_prefill_cuda_graph_mode || params.kv_cache_layer_layout.has_value())) {
 #if USING_CUDA
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
 
@@ -172,10 +174,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_INFO("allocation records before capture:");
         params.device->traceMemoryUsage();
         graph_runner_->initCapture();
+        cuda_graph_ready_ = true;
         RTP_LLM_LOG_INFO("allocation records after capture:");
         params.device->traceMemoryUsage();
+    } else if (enable_cuda_graph_) {
+        RTP_LLM_LOG_WARNING(
+            "CUDA graph capture skipped: kv_cache_layer_layout is not available (warmup phase). "
+            "cuda_graph_ready_ remains false. Note: warmup VRAM measurement may be lower than actual "
+            "peak usage because CUDA graph memory is not accounted for, which could lead to over-allocation "
+            "of KV cache blocks and potential OOM when CUDA graph is captured later.");
     }
-
     auto py_init_success = py_init_result.cast<bool>();
     if (!py_init_success) {
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
