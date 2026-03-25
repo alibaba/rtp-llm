@@ -108,8 +108,12 @@ void FullKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices, bool
 MatchResult FullKVCacheGroup::matchSharded(const CacheKeysType& cache_keys, const CPSlotMapper& mapper) {
     // With virtual-block token-level sharding, each rank has one physical block
     // per virtual block and cache keys cover virtual_block_size tokens.  Every
-    // key belongs to every rank, so we delegate directly to the non-sharded path.
-    return match(cache_keys);
+    // key belongs to every rank, so we delegate matching to the non-sharded path
+    // but must fix up reuse_length: each matched key covers virtual_block_size
+    // tokens (not seqSizePerBlock which is the physical block size).
+    auto result         = match(cache_keys);
+    result.reuse_length = result.reuse_blocks * mapper.virtualBlockSize();
+    return result;
 }
 
 void FullKVCacheGroup::insertIntoCacheSharded(const CacheKeysType&    cache_keys,

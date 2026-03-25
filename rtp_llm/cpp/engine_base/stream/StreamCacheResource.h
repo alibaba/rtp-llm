@@ -85,6 +85,14 @@ public:
         return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
     }
 
+    // Number of tokens each cache key covers.  Equals seqSizePerBlock() normally,
+    // but virtualBlockSize() when CP sharding is active (each key spans cp_size
+    // physical blocks).
+    int tokensPerCacheKey() const {
+        auto mapper = resource_context_.cache_manager->cpSlotMapper();
+        return (mapper && mapper->isSharded()) ? mapper->virtualBlockSize() : seqSizePerBlock();
+    }
+
     void setNeedReleaseResource(bool need_release_resource) {
         need_release_resource_ = need_release_resource;
     }

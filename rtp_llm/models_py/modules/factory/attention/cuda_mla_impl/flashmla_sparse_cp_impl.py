@@ -858,8 +858,11 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         # seq_len % cp_size != 0 (padding tokens are filtered out by total_local_ids).
         # Pad back to local_tokens so all ranks contribute equal-sized tensors to all_gather.
         if topk.shape[0] < local_tokens:
-            padded_topk = torch.zeros(
-                local_tokens, *topk.shape[1:], dtype=topk.dtype, device=topk.device
+            padded_topk = torch.full(
+                (local_tokens, *topk.shape[1:]),
+                fill_value=-1,
+                dtype=topk.dtype,
+                device=topk.device,
             )
             padded_topk[self.total_local_ids] = topk
             topk_for_gather = padded_topk
