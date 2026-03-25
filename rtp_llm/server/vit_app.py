@@ -52,7 +52,7 @@ class VitEndpointApp:
     def start(
         self,
         grpc_port: int,
-        http_port: Optional[int] = None,
+        http_port: int,
     ):
         """
         启动 VIT 端点应用
@@ -64,15 +64,6 @@ class VitEndpointApp:
         """
         # 启动 gRPC 服务器
         self._start_grpc(grpc_port)
-
-        # 如果 http_port 为 None，表示工作进程模式（不启动 HTTP 服务器，只由主进程提供 HTTP）
-        if http_port is None:
-            logging.info(
-                f"Vit Worker App: skipping HTTP server (server_id={self.py_env_configs.server_config.vit_server_id})"
-            )
-            # 只启动 gRPC 服务器，不启动 HTTP
-            self.vit_endpoint_server.wait_for_termination()
-            return
 
         # 启动 HTTP 服务器
         self._start_http(http_port)
@@ -155,6 +146,51 @@ class VitEndpointApp:
         @app.post("/worker_status")
         async def worker_status():
             return self.vit_endpoint_server.worker_status()
+
+        @app.post("/start_profile")
+        async def start_profile(request: RawRequest):
+            body = await request.json()
+            count = body.get("count", 10)
+            if not isinstance(count, int) or count <= 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="'count' must be a positive integer",
+                )
+            engine = self.vit_endpoint_server.mm_process_engine
+            if engine is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="mm_process_engine not available",
+                )
+            return ORJSONResponse(
+                engine.profiler.start_profile(
+                    count=count,
+                    output_path=body.get("output_path", "./vit_profile"),
+                    record_shapes=body.get("record_shapes", True),
+                    with_stack=body.get("with_stack", False),
+                    profile_memory=body.get("profile_memory", True),
+                )
+            )
+
+        @app.post("/end_profile")
+        async def end_profile():
+            engine = self.vit_endpoint_server.mm_process_engine
+            if engine is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="mm_process_engine not available",
+                )
+            return ORJSONResponse(engine.profiler.end_profile())
+
+        @app.get("/profile_status")
+        async def profile_status():
+            engine = self.vit_endpoint_server.mm_process_engine
+            if engine is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="mm_process_engine not available",
+                )
+            return ORJSONResponse(engine.profiler.get_status())
 
         return app
 

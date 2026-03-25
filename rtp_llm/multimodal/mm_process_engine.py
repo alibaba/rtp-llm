@@ -9,6 +9,7 @@ from multiprocessing import Lock
 from typing import Any, Callable, List, Optional, Tuple
 
 import torch
+import torch.profiler
 
 from rtp_llm.access_logger.access_logger import MMAccessLogger
 from rtp_llm.config.log_config import get_log_path
@@ -17,6 +18,7 @@ from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitCon
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
 )
@@ -222,8 +224,8 @@ class MMEmbeddingRes:
     def __init__(
         self,
         embeddings: List[torch.Tensor],
-        position_ids: Optional[List[torch.Tensor]] = None,
-        deepstack_embeds: Optional[List[torch.Tensor]] = None,
+        position_ids: List[torch.Tensor] = [],
+        deepstack_embeds: List[torch.Tensor] = [],
     ):
         self.embeddings = embeddings
         self.position_ids = position_ids
@@ -325,6 +327,8 @@ class MMProcessEngine:
                 f"MMProcessEngine: Using MULTIPROCESS preprocessing mode with {vit_config.mm_preprocess_max_workers} workers"
             )
 
+        self.profiler = MMProfiler()
+
         self.query_num: int = 0
         self._access_logger = MMAccessLogger(
             get_log_path(),
@@ -389,35 +393,39 @@ class MMProcessEngine:
         """Core implementation for multimodal embedding processing."""
         logging.debug(f"{self.server_id} request received")
         try:
-            # 如果不是 proxy 模式（即 standalone 模式），记录 QPS
-            if not self.is_proxy_mode:
-                kmonitor.report(
-                    AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"}
-                )
+            with self.profiler.profile_request():
+                with torch.profiler.record_function("mm_embedding_impl"):
+                    if not self.is_proxy_mode:
+                        kmonitor.report(
+                            AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"}
+                        )
 
-            self.inc_query_num()
-            if not self.vit_config.disable_access_log:
-                self._access_logger.log_query_access(mm_inputs)
+                    self.inc_query_num()
+                    if not self.vit_config.disable_access_log:
+                        self._access_logger.log_query_access(mm_inputs)
 
-            work_items = self._create_work_items(mm_inputs)
-            self._wait_for_preprocessing(work_items)
-            emb_res, pos_res, deepstack_embeds_res = self._compute_embeddings(
-                work_items
-            )
+                    with torch.profiler.record_function("preprocess"):
+                        work_items = self._create_work_items(mm_inputs)
+                        self._wait_for_preprocessing(work_items)
 
-            result = MMEmbeddingRes(emb_res, pos_res, deepstack_embeds_res)
-            if not self.vit_config.disable_access_log:
-                self._access_logger.log_success_access(mm_inputs, str(result))
+                    with torch.profiler.record_function("compute_embeddings"):
+                        emb_res, pos_res, deepstack_embeds_res = (
+                            self._compute_embeddings(work_items)
+                        )
 
-            # 如果不是 proxy 模式（即 standalone 模式），记录成功 QPS
-            if not self.is_proxy_mode:
-                kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
+                    with torch.profiler.record_function("postprocess"):
+                        result = MMEmbeddingRes(emb_res, pos_res, deepstack_embeds_res)
+
+                    if not self.vit_config.disable_access_log:
+                        self._access_logger.log_success_access(mm_inputs, str(result))
+
+                    if not self.is_proxy_mode:
+                        kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
 
             return result
         except Exception as e:
             torch.cuda.empty_cache()
             gc.collect()
-            # 如果不是 proxy 模式（即 standalone 模式），记录错误 QPS
             if not self.is_proxy_mode:
                 kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
             self._access_logger.log_exception_access(mm_inputs, e)
@@ -474,10 +482,11 @@ class MMProcessEngine:
             batch_outputs = None
             with Timer() as route_timer:
                 with self.mm_embedding_lock:
-                    batch_outputs = self.mm_part.batched_embedding(
-                        [wi.preprocess_result for _, wi in pending_items],
-                        [wi.mm_type for _, wi in pending_items],
-                    )
+                    with torch.profiler.record_function("batched_embedding"):
+                        batch_outputs = self.mm_part.batched_embedding(
+                            [wi.preprocess_result for _, wi in pending_items],
+                            [wi.mm_type for _, wi in pending_items],
+                        )
             kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
 
             if batch_outputs is not None:

@@ -7,7 +7,7 @@ import logging
 import threading
 from collections import defaultdict
 from concurrent import futures
-from typing import List
+from typing import Optional
 
 import grpc
 
@@ -26,12 +26,13 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 )
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
+from rtp_llm.multimodal.mm_profiler import MMProfiler
 
 
 class LoadBalancer:
     """负载均衡器，支持轮询和最少连接算法"""
 
-    def __init__(self, worker_addresses: List[str], strategy: str = "round_robin"):
+    def __init__(self, worker_addresses: list[str], strategy: str = "round_robin"):
         """
         Args:
             worker_addresses: 工作进程地址列表，格式如 ['localhost:9202', 'localhost:9203']
@@ -93,7 +94,7 @@ class LoadBalancer:
 class WorkerConnectionPool:
     """工作进程连接池，管理到各个工作进程的 gRPC 连接"""
 
-    def __init__(self, worker_addresses: List[str]):
+    def __init__(self, worker_addresses: list[str]):
         self.worker_addresses = worker_addresses
         self.channels: dict[str, grpc.Channel] = {}
         self.stubs: dict[str, MultimodalRpcServiceStub] = {}
@@ -139,44 +140,40 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
     ):
         self.load_balancer = load_balancer
         self.connection_pool = connection_pool
+        self.profiler = MMProfiler()
         kmonitor.init()
 
     def RemoteMultimodalEmbedding(
         self, request: MultimodalInputsPB, context
     ) -> MultimodalOutputPB:
         """将请求转发到工作进程"""
-        # 在 proxy 层记录 QPS
         kmonitor.report(AccMetrics.VIT_QPS_METRIC, 1, {"source": "vit_proxy"})
 
         worker_address = None
         try:
-            # 选择工作进程
             worker_address = self.load_balancer.get_worker()
             self.load_balancer.increment_connections(worker_address)
 
-            # 获取工作进程的 stub
             stub = self.connection_pool.get_stub(worker_address)
 
-            # 转发请求
             logging.debug(
                 f"Forwarding request to worker {worker_address}, "
                 f"connections: {self.load_balancer.connection_counts[worker_address]}"
             )
             response = stub.RemoteMultimodalEmbedding(request)
 
-            # 在 proxy 层记录成功 QPS
             kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
+            self.profiler.on_request_complete()
+
             return response
         except grpc.RpcError as e:
             logging.error(
                 f"RPC error when forwarding to worker {worker_address}: {e.code()} - {e.details()}"
             )
-            # 在 proxy 层记录错误 QPS
             kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
             raise
         except Exception as e:
             logging.error(f"Error forwarding request to worker {worker_address}: {e}")
-            # 在 proxy 层记录错误 QPS
             kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
             raise
         finally:
@@ -209,7 +206,7 @@ class VitProxyServer:
 
     def __init__(
         self,
-        worker_addresses: List[str],
+        worker_addresses: list[str],
         external_grpc_port: int,
         load_balance_strategy: str = "round_robin",
     ):
@@ -224,10 +221,10 @@ class VitProxyServer:
         self.load_balancer = LoadBalancer(worker_addresses, load_balance_strategy)
         self.connection_pool = WorkerConnectionPool(worker_addresses)
         self.rpc_server = None
+        self.proxy_servicer: Optional[VitProxyRpcServer] = None
 
     def start(self):
         """启动代理服务器"""
-        # 创建 gRPC 服务器
         self.rpc_server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=200),
             options=[
@@ -239,11 +236,11 @@ class VitProxyServer:
             ],
         )
 
-        # 添加服务
-        proxy_servicer = VitProxyRpcServer(self.load_balancer, self.connection_pool)
-        add_MultimodalRpcServiceServicer_to_server(proxy_servicer, self.rpc_server)
+        self.proxy_servicer = VitProxyRpcServer(
+            self.load_balancer, self.connection_pool
+        )
+        add_MultimodalRpcServiceServicer_to_server(self.proxy_servicer, self.rpc_server)
 
-        # 绑定端口（不使用 SO_REUSEPORT，因为只有一个主进程）
         self.rpc_server.add_insecure_port(f"0.0.0.0:{self.external_grpc_port}")
         self.rpc_server.start()
 

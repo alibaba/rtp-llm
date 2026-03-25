@@ -4,15 +4,20 @@ VIT Proxy Server 启动模块
 """
 
 import asyncio
+import json
 import logging
 import socket
 import threading
-from typing import List, Optional
+import urllib.request
+from functools import partial
+from typing import Optional
 
 import grpc
 from fastapi import FastAPI
+from fastapi import Request as RawRequest
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 from setproctitle import setproctitle
 from typing_extensions import override
 from uvicorn import Config, Server
@@ -37,7 +42,7 @@ class GracefulShutdownProxyServer(Server):
         self.proxy_server = proxy_server
 
     @override
-    async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
+    async def shutdown(self, sockets: Optional[list[socket.socket]] = None) -> None:
         if hasattr(self, "proxy_server") and self.proxy_server:
             self.proxy_server.stop()
         await super().shutdown(sockets)
@@ -48,15 +53,17 @@ def vit_proxy_start_server(
     worker_addresses: list[str],
     grpc_port: int,
     http_port: int,
+    worker_http_addresses: Optional[list[str]] = None,
 ):
     """
     启动 VIT 代理服务器（主进程）
 
     Args:
         py_env_configs: 配置对象
-        worker_addresses: 工作进程地址列表，格式如 ['localhost:19202', 'localhost:19203']
+        worker_addresses: 工作进程 gRPC 地址列表
         grpc_port: gRPC 端口号（从外部传入）
         http_port: HTTP 端口号（从外部传入）
+        worker_http_addresses: 工作进程 HTTP 地址列表（用于 profile 转发）
     """
     setproctitle("rtp_llm_vit_proxy_server")
 
@@ -82,7 +89,9 @@ def vit_proxy_start_server(
         )
 
         # 创建并启动 HTTP 服务器
-        app = create_proxy_app(proxy_server, worker_addresses)
+        app = create_proxy_app(
+            proxy_server, worker_addresses, worker_http_addresses or []
+        )
         start_http_server(app, http_port, py_env_configs, proxy_server)
 
     except KeyboardInterrupt:
@@ -95,8 +104,65 @@ def vit_proxy_start_server(
         logging.info("[VIT_PROXY] Proxy server stopped")
 
 
+def _forward_http(addr: str, path: str, body: Optional[dict] = None) -> dict:
+    """Send a single HTTP request to a worker and return the parsed JSON."""
+    url = f"http://{addr}{path}"
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"} if data else {},
+        method="POST" if path != "/profile_status" else "GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+async def _forward_to_workers(
+    worker_http_addresses: list[str],
+    path: str,
+    bodies: Optional[list[Optional[dict]]] = None,
+) -> dict:
+    """Forward HTTP requests to all workers concurrently.
+
+    Args:
+        worker_http_addresses: Worker HTTP address list.
+        path: HTTP path to call on each worker.
+        bodies: Per-worker request bodies.  ``None`` sends no body to any
+            worker.  A single-element list broadcasts the same body to all.
+            Otherwise the length must match *worker_http_addresses*.
+    """
+    n = len(worker_http_addresses)
+    if bodies is None:
+        per_worker = [None] * n
+    elif len(bodies) == 1:
+        per_worker = bodies * n
+    else:
+        per_worker = bodies
+
+    loop = asyncio.get_running_loop()
+    tasks = [
+        loop.run_in_executor(None, partial(_forward_http, addr, path, body))
+        for addr, body in zip(worker_http_addresses, per_worker)
+    ]
+    responses = await asyncio.gather(*tasks, return_exceptions=True)
+    results = {}
+    for i, resp in enumerate(responses):
+        key = f"rank_{i}"
+        if isinstance(resp, Exception):
+            results[key] = {"status": "error", "message": str(resp)}
+        else:
+            results[key] = resp
+    return results
+
+
 def create_proxy_app(
-    proxy_server: VitProxyServer, worker_addresses: list[str]
+    proxy_server: VitProxyServer,
+    worker_addresses: list[str],
+    worker_http_addresses: list[str],
 ) -> FastAPI:
     """创建 FastAPI 应用，提供 HTTP 接口"""
     middleware = [
@@ -126,7 +192,6 @@ def create_proxy_app(
 
         for worker_address in worker_addresses:
             try:
-                # 创建临时连接检查 worker 状态
                 channel = grpc.insecure_channel(
                     worker_address,
                     options=[
@@ -154,7 +219,6 @@ def create_proxy_app(
                 )
                 continue
 
-        # 只有当所有 worker 都健康时才返回 ok
         if healthy_count == len(worker_addresses):
             logging.debug(
                 f"[VIT_PROXY_HEALTH] All {len(worker_addresses)} workers are healthy"
@@ -164,8 +228,6 @@ def create_proxy_app(
             logging.warning(
                 f"[VIT_PROXY_HEALTH] Only {healthy_count}/{len(worker_addresses)} workers are healthy"
             )
-            from fastapi.responses import ORJSONResponse
-
             return ORJSONResponse(
                 status_code=503,
                 content={
@@ -173,18 +235,59 @@ def create_proxy_app(
                 },
             )
 
-    # @app.get("/worker_status")
-    # @app.post("/worker_status")
-    # async def worker_status():
-    #     """工作进程状态接口"""
-    #     total_workers = len(proxy_server.worker_addresses)
+    # ------------------------------------------------------------------
+    #  Profile forwarding: proxy → all workers
+    # ------------------------------------------------------------------
 
-    #     return {
-    #         "status": "proxy",
-    #         "proxy_alive": True,
-    #         "total_workers": total_workers,
-    #         "workers": worker_status,
-    #     }
+    @app.post("/start_profile")
+    async def start_profile(request: RawRequest):
+        if not worker_http_addresses:
+            return ORJSONResponse(
+                status_code=503,
+                content={
+                    "status": "error",
+                    "message": "No worker HTTP addresses configured",
+                },
+            )
+        body = await request.json()
+        base_output_path = body.get("output_path", "./vit_profile")
+        per_worker_bodies = []
+        for i in range(len(worker_http_addresses)):
+            wb = dict(body)
+            wb["output_path"] = f"{base_output_path}/rank_{i}"
+            per_worker_bodies.append(wb)
+        results = await _forward_to_workers(
+            worker_http_addresses,
+            "/start_profile",
+            per_worker_bodies,
+        )
+        return ORJSONResponse({"status": "forwarded", "workers": results})
+
+    @app.post("/end_profile")
+    async def end_profile():
+        if not worker_http_addresses:
+            return ORJSONResponse(
+                status_code=503,
+                content={
+                    "status": "error",
+                    "message": "No worker HTTP addresses configured",
+                },
+            )
+        results = await _forward_to_workers(worker_http_addresses, "/end_profile")
+        return ORJSONResponse({"status": "forwarded", "workers": results})
+
+    @app.get("/profile_status")
+    async def profile_status():
+        if not worker_http_addresses:
+            return ORJSONResponse(
+                status_code=503,
+                content={
+                    "status": "error",
+                    "message": "No worker HTTP addresses configured",
+                },
+            )
+        results = await _forward_to_workers(worker_http_addresses, "/profile_status")
+        return ORJSONResponse({"status": "forwarded", "workers": results})
 
     return app
 

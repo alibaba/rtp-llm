@@ -145,16 +145,20 @@ def start_vit_server_impl(
 
         worker_processes = []
         worker_addresses = []
+        worker_http_addresses = []
 
         base_grpc_port = py_env_configs.server_config.rpc_server_port
 
         for i in range(vit_server_count):
-            internal_grpc_port = base_grpc_port + i + 1
+            internal_grpc_port = base_grpc_port + i * 2 + 1
+            internal_http_port = base_grpc_port + i * 2 + 2
             worker_addresses.append(f"127.0.0.1:{internal_grpc_port}")
+            worker_http_addresses.append(f"127.0.0.1:{internal_http_port}")
 
             logging.info(
                 f"[PROCESS_SPAWN] Start vit worker process worker_{i} "
-                f"(internal grpc_port={internal_grpc_port})"
+                f"(internal grpc_port={internal_grpc_port}, "
+                f"internal http_port={internal_http_port})"
             )
             process = torch.multiprocessing.Process(
                 target=vit_start_server,
@@ -162,7 +166,7 @@ def start_vit_server_impl(
                     i,
                     py_env_configs,
                     internal_grpc_port,  # grpc_port
-                    None,  # http_port (工作进程不需要 HTTP，None 表示工作进程模式)
+                    internal_http_port,  # http_port
                     True,  # is_proxy_mode (proxy 模式下的 worker 进程)
                 ),
                 name=f"vit_worker_{i}",
@@ -185,6 +189,7 @@ def start_vit_server_impl(
                 worker_addresses,
                 external_grpc_port,  # grpc_port
                 external_http_port,  # http_port
+                worker_http_addresses,  # worker_http_addresses
             ),
             name="vit_proxy",
         )
