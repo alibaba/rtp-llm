@@ -13,7 +13,7 @@ void IContextParallelProcessor::handleInputs(DeviceBase*                        
     auto device_props    = device->getDeviceProperties();
     int  prefill_cp_rank = device_props.tp_rank;
     int  prefill_cp_size = device_props.tp_size;
-    int  cp_align_size   = prefill_cp_size * 2;
+    int  cp_align_size   = cpAlignSize(prefill_cp_size);
 
     auto& total_input_tokens       = model_input.combo_tokens;
     auto& input_lengths            = model_input.input_lengths;

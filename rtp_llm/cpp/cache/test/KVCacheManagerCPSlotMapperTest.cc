@@ -42,7 +42,6 @@ static BatchKVCacheResourcePtr makeResource(int batch_size, int layer_num) {
     res->resetBatchSize(batch_size);
     std::vector<int> layer_to_group_id(layer_num, 0);
     res->initGroups(/*group_nums=*/1, layer_num, layer_to_group_id);
-
     return res;
 }
 
@@ -208,6 +207,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, InsertAutoInjectsMapper) {
     ASSERT_TRUE(mgr->init());
     // virtual_block_size = 4 * 2 = 8
     // effectiveSeqLenForAlloc(16) = ceil(16/8) * 4 = 8 tokens worth => ceil(8/4) = 2 blocks
+
     const int seq_len   = 16;
     auto      resource  = makeResource(1, config.layer_num);
     auto      token_ids = makeTokenIds(device_, 1, seq_len, seq_size_per_block);

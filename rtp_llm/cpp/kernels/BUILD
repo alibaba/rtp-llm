@@ -524,6 +524,19 @@ cc_library(
 )
 
 cc_library(
+    name = "cp_cache_scatter",
+    srcs = [
+        "cp_cache_scatter_kernel.cu",
+    ],
+    hdrs = [
+        "cp_cache_scatter_kernel.h",
+    ],
+    deps = any_cuda_deps,
+    copts = any_cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kernels_residual",
     srcs = [
         "add_residual_kernels.cu",
