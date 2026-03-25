@@ -40,10 +40,6 @@ class ConfigManager:
 
     @classmethod
     def set_headwise_config(cls, config):
-        if cls._headwise_config is not None:
-            logging.info("Warning: headwise_config already set. Ignoring new config.")
-            return
-
         if not hasattr(config, "headwise_config"):
             logging.info("Model Not Support Headwise")
             return
@@ -57,6 +53,24 @@ class ConfigManager:
     @classmethod
     def is_config_set(cls):
         return cls._headwise_config is not None
+
+    @classmethod
+    def reset(cls):
+        """Reset headwise config to allow re-initialization (e.g. multi-model scenarios)."""
+        cls._headwise_config = None
+
+
+def _headwise_prefill_bf16_runtime_ready() -> bool:
+    """Same gates as HeadWisePrefillAttnOp.support (FlashInfer + rtp_kernel + CUDA >= 12.8 + config)."""
+    if not (_HAS_FLASHINFER and _HAS_RTP_KERNEL):
+        return False
+    if not torch.cuda.is_available():
+        return False
+    try:
+        major, minor = map(int, torch.version.cuda.split(".")[:2])
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return (major, minor) >= (12, 8) and ConfigManager.is_config_set()
 
 
 # ----------------------------
@@ -100,7 +114,7 @@ class HeadWisePrefillAttnOp:
 
         self.dtype = torch.bfloat16
 
-        if ConfigManager.is_config_set() is not None:
+        if ConfigManager.is_config_set():
             self.headwise_all_config = ConfigManager.get_headwise_config()
 
             self.hw_cfg = HeadWiseRuntimeConfig(
@@ -118,9 +132,15 @@ class HeadWisePrefillAttnOp:
             256 * 1024 * 1024, dtype=torch.uint8, device="cuda"
         )
 
+        self._retrieval_wrapper = (
+            BatchPrefillWithPagedKVCacheWrapper(self.workspace_buffer, "HND", backend="fa3")
+            if _HAS_FLASHINFER else None
+        )
+
         # runtime states
         self.retrieval_heads: Optional[torch.Tensor] = None
         self.non_retrieval_heads: Optional[torch.Tensor] = None
+        self.num_retrieval_heads: int = 0
         self.batch_wrappers: List[BatchWrapperItem] = []
         self.input_lengths: Optional[torch.Tensor] = None
         self.kv_lengths: Optional[torch.Tensor] = None
@@ -147,16 +167,28 @@ class HeadWisePrefillAttnOp:
     # ----------------------------
     def _get_headwise_config(self, layer_idx: int):
         """根据层索引提取并分类当前 Rank 负责的头"""
+        layer_key = str(layer_idx)
+        if layer_key not in self.headwise_all_config:
+            logging.warning(
+                f"[HeadWise] layer_idx={layer_idx} not found in headwise_config, "
+                f"falling back to all-retrieval heads"
+            )
+            self.retrieval_heads = torch.ones(self.head_num, dtype=torch.bool, device="cuda")
+            self.non_retrieval_heads = torch.zeros(self.head_num, dtype=torch.bool, device="cuda")
+            self.num_retrieval_heads = self.head_num
+            return
+
         start = self.head_num * self.rank
         end = start + self.head_num
 
         layer_config = torch.tensor(
-            self.headwise_all_config[str(layer_idx)], device="cuda"
+            self.headwise_all_config[layer_key], device="cuda"
         )
         current_rank_weights = layer_config[start:end]
 
         self.non_retrieval_heads = current_rank_weights == 0
         self.retrieval_heads = current_rank_weights == 1
+        self.num_retrieval_heads = int(self.retrieval_heads.sum().cpu())
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> None:
         self.input_lengths = attn_inputs.input_lengths
@@ -165,9 +197,11 @@ class HeadWisePrefillAttnOp:
 
         self.batch_wrappers = []
 
-        for i, length_tensor in enumerate(self.input_lengths):
-            q_len = int(length_tensor.item())
-            kv_len = int(self.kv_lengths[i].item()) if self.kv_lengths[i] > 0 else q_len
+        input_lens_list = self.input_lengths.cpu().tolist()
+        kv_lens_list = self.kv_lengths.cpu().tolist()
+
+        for i, q_len in enumerate(input_lens_list):
+            kv_len = kv_lens_list[i] if kv_lens_list[i] > 0 else q_len
 
             wrapper_item = self._plan_one_sequence(
                 q_len=q_len, kv_len=kv_len, kv_indices=self.kv_indices[i]
@@ -181,22 +215,11 @@ class HeadWisePrefillAttnOp:
 
         # small than 16384
         if kv_len < self.hw_cfg.seqlen_threshold or q_len < self.hw_cfg.sink_token_num:
-            full_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self.workspace_buffer, "HND", backend="fa3"
-            )
-            full_wrapper.plan(
-                *meta,
-                num_qo_heads=self.head_num,
-                num_kv_heads=self.head_num_kv,
-                head_dim_qk=self.size_per_head,
-                page_size=self.paged_size,
-                causal=True,
-                q_data_type=self.dtype,
-                kv_data_type=self.dtype,
-            )
+            # Store meta for lazy re-plan in forward() to avoid workspace buffer
+            # conflicts when multiple short sequences share the same buffer.
             return BatchWrapperItem(
                 use_headwise=False,
-                full_wrappers=full_wrapper,
+                full_wrappers=None,
                 meta=meta,
                 q_len=q_len,
                 kv_len=kv_len,
@@ -258,14 +281,19 @@ class HeadWisePrefillAttnOp:
         kv_base = kv_cache.kv_cache_base  # [block_num, 2*kv_head_num*page_size*head_dim] (packed 2D)
         block_num = kv_base.shape[0]
         kv_expanded = kv_base.view(block_num, 2, self.head_num_kv, self.paged_size, self.size_per_head)
-        k_cache = kv_expanded[:, 0, ...].contiguous()     # [block_num, kv_head_num, page_size, head_dim]
-        v_cache = kv_expanded[:, 1, ...].contiguous()     # [block_num, kv_head_num, page_size, head_dim]
+        k_slice = kv_expanded[:, 0, ...]
+        v_slice = kv_expanded[:, 1, ...]
+        k_cache = k_slice if k_slice.is_contiguous() else k_slice.contiguous()
+        v_cache = v_slice if v_slice.is_contiguous() else v_slice.contiguous()
+
+        input_lens_list = self.input_lengths.cpu().tolist()
+        kv_lens_list = self.kv_lengths.cpu().tolist()
 
         offset = 0
         for i, wrapper_item in enumerate(self.batch_wrappers):
 
-            q_len = int(self.input_lengths[i].item())
-            kv_len = int(self.kv_lengths[i].item()) if self.kv_lengths[i] > 0 else q_len
+            q_len = input_lens_list[i]
+            kv_len = kv_lens_list[i] if kv_lens_list[i] > 0 else q_len
 
             q = self._slice_q(fmha_input, offset, q_len)
 
@@ -274,7 +302,22 @@ class HeadWisePrefillAttnOp:
                     q, k_cache, v_cache, wrapper_item, q_len=q_len, kv_len=kv_len
                 )
             else:
-                res = wrapper_item.full_wrappers.run(q, (k_cache, v_cache))
+                # Lazy plan: create wrapper and plan right before run to avoid
+                # workspace buffer conflicts between multiple short sequences.
+                full_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                    self.workspace_buffer, "HND", backend="fa3"
+                )
+                full_wrapper.plan(
+                    *wrapper_item.meta,
+                    num_qo_heads=self.head_num,
+                    num_kv_heads=self.head_num_kv,
+                    head_dim_qk=self.size_per_head,
+                    page_size=self.paged_size,
+                    causal=True,
+                    q_data_type=self.dtype,
+                    kv_data_type=self.dtype,
+                )
+                res = full_wrapper.run(q, (k_cache, v_cache))
 
             output[offset : offset + q_len] = res
             offset += q_len
@@ -304,13 +347,9 @@ class HeadWisePrefillAttnOp:
         )
 
         if self.retrieval_heads is not None and self.retrieval_heads.any():
-            num_retrieval_heads = self.retrieval_heads.sum().item()
-            retrieval_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self.workspace_buffer, "HND", backend="fa3"
-            )
-            retrieval_wrapper.plan(
+            self._retrieval_wrapper.plan(
                 *wrapper_item.meta,
-                num_qo_heads=num_retrieval_heads,
+                num_qo_heads=self.num_retrieval_heads,
                 num_kv_heads=self.head_num_kv,
                 head_dim_qk=self.size_per_head,
                 page_size=self.paged_size,
@@ -318,7 +357,7 @@ class HeadWisePrefillAttnOp:
                 q_data_type=self.dtype,
                 kv_data_type=self.dtype,
             )
-            out[:, self.retrieval_heads, :] = retrieval_wrapper.run(
+            out[:, self.retrieval_heads, :] = self._retrieval_wrapper.run(
                 q[:, self.retrieval_heads, :], (k_cache, v_cache)
             )
 
@@ -339,8 +378,8 @@ class HeadWisePrefillAttnOp:
         q_len: int,
         kv_len: int,
     ) -> torch.Tensor:
-        k_cache_contiguous = k_cache.contiguous()
-        v_cache_contiguous = v_cache.contiguous()
+        k_cache_contiguous = k_cache if k_cache.is_contiguous() else k_cache.contiguous()
+        v_cache_contiguous = v_cache if v_cache.is_contiguous() else v_cache.contiguous()
 
         if q_len == kv_len:
             qf1 = q_h[: self.hw_cfg.sink_token_num]
@@ -380,8 +419,9 @@ class HeadWisePrefillImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-
-        return not attn_configs.use_mla
+        # Must match factory ordering: only take this path when headwise config + deps exist,
+        # otherwise fall through to other prefill implementations (e.g. FlashInfer).
+        return not attn_configs.use_mla and _headwise_prefill_bf16_runtime_ready()
 
     def forward(
         self,
