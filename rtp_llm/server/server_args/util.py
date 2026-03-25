@@ -1,6 +1,6 @@
 import argparse
 
-from rtp_llm.ops import CPRotateMethod
+from rtp_llm.ops import CPRotateMethod, CPProcessorType
 
 
 def str2bool(v):
@@ -13,6 +13,24 @@ def str2bool(v):
     if v.lower() in ("no", "false", "f", "0", "off"):
         return False
     raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def str2_cp_processor_type(value):
+    """Convert string to CPProcessorType enum."""
+    if value is None:
+        return None
+    if isinstance(value, CPProcessorType):
+        return value
+    value_upper = value.upper()
+    if value_upper == "ZIG_ZAG":
+        return CPProcessorType.ZIG_ZAG
+    elif value_upper == "ROUND_ROBIN":
+        return CPProcessorType.ROUND_ROBIN
+    else:
+        raise ValueError(
+            f"Invalid cp_processor_type: {value}. "
+            f"Must be one of: ZIG_ZAG, ROUND_ROBIN"
+        )
 
 
 def str2_cp_rotate_method(value):

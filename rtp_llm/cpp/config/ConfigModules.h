@@ -26,10 +26,16 @@ enum class CPRotateMethod {
     PREFILL_CP              = 4,
     UNKNOWN                 = 5,
 };
+
+enum class CPProcessorType {
+    ZIG_ZAG     = 0,
+    ROUND_ROBIN = 1,
+};
 struct PrefillCPConfig {
-    CPRotateMethod method           = CPRotateMethod::DISABLED;
-    size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
-    bool           kv_cache_sharded = false;
+    CPRotateMethod  method           = CPRotateMethod::DISABLED;
+    CPProcessorType processor_type   = CPProcessorType::ZIG_ZAG;
+    size_t          comm_buffer_size = 512 * 1024 * 1024;  // 512MB
+    bool            kv_cache_sharded = false;
     bool           is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;

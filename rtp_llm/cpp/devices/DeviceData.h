@@ -66,6 +66,7 @@ struct DeviceInitParams {
     size_t m_split   = 0;
 
     bool enable_prefill_cp = false;
+    CPProcessorType cp_processor_type = CPProcessorType::ZIG_ZAG;
 
     // to init deepep
     int64_t max_seq_len    = 0;
@@ -136,6 +137,7 @@ struct DeviceProperties {
     // std::set<int> eagle3_selected_layer{0,1,2};
     bool ffn_as_service    = false;
     bool enable_prefill_cp = false;
+    CPProcessorType cp_processor_type = CPProcessorType::ZIG_ZAG;
 };
 
 struct MemoryStatus {

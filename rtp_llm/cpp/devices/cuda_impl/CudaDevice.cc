@@ -375,6 +375,7 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->is_eagle3                = init_params_.is_eagle3;
         prop->ffn_as_service           = init_params_.ffn_as_service;
         prop->enable_prefill_cp        = init_params_.enable_prefill_cp;
+        prop->cp_processor_type        = init_params_.cp_processor_type;
     }
     return *prop;
 }
