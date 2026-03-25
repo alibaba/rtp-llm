@@ -10,7 +10,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-_MOE_DEBUG_SYNC = os.environ.get("MOE_DEBUG_SYNC", "1") == "1"
+_MOE_DEBUG_SYNC = os.environ.get("MOE_DEBUG_SYNC", "0") == "1"
 
 
 def _cuda_sync_check(stage: str):
@@ -410,8 +410,11 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
 
         num_experts_local = len(num_recv_tokens_per_expert)
 
-        has_nan = torch.isnan(hidden_states_fp8.float()).any().item()
-        has_inf = torch.isinf(hidden_states_fp8.float()).any().item()
+        has_nan = False
+        has_inf = False
+        if _MOE_DEBUG_SYNC:
+            has_nan = torch.isnan(hidden_states_fp8.float()).any().item()
+            has_inf = torch.isinf(hidden_states_fp8.float()).any().item()
         if has_nan or has_inf:
             logger.error(
                 f"[DeepGemm SKIP] hidden_states_fp8 contains {'NaN' if has_nan else ''}{'&Inf' if has_inf else ''}, "
