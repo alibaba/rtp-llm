@@ -176,6 +176,7 @@ class Indexer(nn.Module):
         if kv_cache_sharded:
             op._ws_slot_mapping = cp_params.ws_slot_mapping
             op._indexer_workspace_block_table = cp_params.ws_block_table
+            op._ws_total_pages = cp_params.ws_total_pages
             op._cu_local_kv_seqlens = cp_params.cu_local_kv_seqlens
             op._total_local_kv = cp_params.total_local_kv
             op._kv_allgather_restore_indices = cp_params.kv_allgather_restore_indices

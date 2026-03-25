@@ -382,10 +382,14 @@ class IndexerOp(nn.Module):
 
             # Build temporary indexer workspace: write full restored_key into a
             # contiguous paged tensor so _get_topk_ragged_cp_roundrobin can read complete K.
-            total_kv = restored_key.size(0)
+            # Use _ws_total_pages (page-aligned) so that the workspace is large enough
+            # for the page-aligned slot_mapping.
             cache_block_size = kv_cache.kv_scale_base.size(1)
             cache_stride = kv_cache.kv_scale_base.size(2)
-            total_pages = (total_kv + cache_block_size - 1) // cache_block_size
+            total_pages = getattr(self, "_ws_total_pages", None)
+            if total_pages is None:
+                total_kv = restored_key.size(0)
+                total_pages = (total_kv + cache_block_size - 1) // cache_block_size
 
             workspace = torch.empty(
                 total_pages,
@@ -722,9 +726,9 @@ class IndexerOp(nn.Module):
             )
         else:
             # Prefix cache: gather from sharded cache via all-gather
-            assert kv_cache is not None, (
-                "kv_cache is required for round-robin CP topk with prefix cache support"
-            )
+            assert (
+                kv_cache is not None
+            ), "kv_cache is required for round-robin CP topk with prefix cache support"
             assert attention_inputs is not None
 
             local_kv_len = self._total_local_kv

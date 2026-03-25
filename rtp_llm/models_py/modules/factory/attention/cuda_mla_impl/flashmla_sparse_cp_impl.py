@@ -503,18 +503,63 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         # Workspace metadata for indexer (all-gathered new KV, no prefix).
         # The workspace stores new tokens only; it is used by indexer_k_quant_and_cache
         # to write the all-gathered new K into a contiguous paged tensor.
+        #
+        # Each request's tokens must start at a page boundary in the workspace so that
+        # triton_convert_req_index_to_global_index (block_table[req][tok//page_size] *
+        # page_size + tok%page_size) maps correctly.  With ragged cu_kv_seqlens the
+        # naive arange(total_kv) slot_mapping would place request i at a non-aligned
+        # offset whenever request i-1's length is not a multiple of page_size.
         new_total_kv = self.kv_restore_unpad_indices.size(0)
         self._ws_total_kv = new_total_kv
         page_size = self.token_per_block
-        self._ws_total_pages = (new_total_kv + page_size - 1) // page_size
-        self._ws_slot_mapping = torch.arange(
-            new_total_kv, dtype=torch.int64, device=self.device
+
+        if not self.has_prefix_cache:
+            # Build page-aligned workspace: each request starts at a page boundary.
+            ws_cu = self.cu_kv_seqlens_global.cpu().int()
+        else:
+            new_kv_lengths = actual_input_lengths.int()
+            cu_new_kv_cpu = torch.zeros(new_kv_lengths.shape[0] + 1, dtype=torch.int32)
+            cu_new_kv_cpu[1:] = torch.cumsum(new_kv_lengths, dim=0)
+            ws_cu = cu_new_kv_cpu
+
+        batch_size_ws = ws_cu.size(0) - 1
+        # Compute page-aligned start for each request in the workspace
+        ws_lengths = (ws_cu[1:] - ws_cu[:-1]).tolist()
+        ws_page_aligned_starts = [0]
+        for length in ws_lengths:
+            pages_needed = (length + page_size - 1) // page_size
+            ws_page_aligned_starts.append(
+                ws_page_aligned_starts[-1] + pages_needed * page_size
+            )
+        ws_total_aligned = ws_page_aligned_starts[-1]
+        self._ws_total_pages = (ws_total_aligned + page_size - 1) // page_size
+
+        # Build slot_mapping: for each token in the ragged layout, map to its
+        # page-aligned position in the workspace.
+        ws_slot_list = []
+        src_offset = 0
+        for i in range(batch_size_ws):
+            length = ws_lengths[i]
+            aligned_start = ws_page_aligned_starts[i]
+            ws_slot_list.append(
+                torch.arange(aligned_start, aligned_start + length, dtype=torch.int64)
+            )
+            src_offset += length
+        if ws_slot_list:
+            self._ws_slot_mapping = torch.cat(ws_slot_list).to(self.device)
+        else:
+            self._ws_slot_mapping = torch.empty(
+                0, dtype=torch.int64, device=self.device
+            )
+
+        # Build page-aligned cu_seqlens for block_table construction
+        ws_cu_aligned = torch.tensor(ws_page_aligned_starts, dtype=torch.int32).to(
+            self.device
         )
 
         if not self.has_prefix_cache:
-            # No prefix cache: workspace block_table built from full cu_kv_seqlens_global
             self._ws_block_table = common.build_contiguous_block_table(
-                self.cu_kv_seqlens_global,
+                ws_cu_aligned,
                 page_size,
                 self.device,
             )
@@ -524,13 +569,8 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
             self._kv_allgather_restore_indices = None
             self._global_fp8_metadata = None
         else:
-            # Workspace block_table for indexer: built from new-token-only cu_seqlens
-            new_kv_lengths = actual_input_lengths.int()
-            cu_new_kv_cpu = torch.zeros(new_kv_lengths.shape[0] + 1, dtype=torch.int32)
-            cu_new_kv_cpu[1:] = torch.cumsum(new_kv_lengths, dim=0)
-            cu_new_kv = cu_new_kv_cpu.to(self.device)
             self._ws_block_table = common.build_contiguous_block_table(
-                cu_new_kv,
+                ws_cu_aligned,
                 page_size,
                 self.device,
             )
@@ -1035,6 +1075,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         if getattr(impl, "kv_cache_sharded", False):
             ws_slot_mapping = impl._ws_slot_mapping
             ws_block_table = impl._ws_block_table
+            ws_total_pages = impl._ws_total_pages
             cu_local_kv_seqlens = impl._cu_local_kv_seqlens
             total_local_kv = impl._total_local_kv
             kv_allgather_restore_indices = impl._kv_allgather_restore_indices
