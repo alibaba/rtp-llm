@@ -174,7 +174,6 @@ void InferenceService::inferResponse(int64_t                                    
     auto             start_time_ms = autil::TimeUtility::currentTimeInMilliSeconds();
     const auto       body          = request.GetBody();
     auto             req           = InferenceParsedRequest::extractRequest(body, model_config_, token_processor_);
-    auto             parse_done_ms = autil::TimeUtility::currentTimeInMilliSeconds();
     if (metric_reporter_) {
         metric_reporter_->reportQpsMetric(req.source);
     }
@@ -190,29 +189,8 @@ void InferenceService::inferResponse(int64_t                                    
     if (writer->isConnected() == false) {
         throw HttpApiServerException(HttpApiServerException::CANCELLED_ERROR, "client disconnects");
     }
-    auto concurrency_done_ms = autil::TimeUtility::currentTimeInMilliSeconds();
-
-    auto inputs = batchFillGenerateInputs(request_id, req.input_texts, req.input_urls, req.generate_configs);
-    auto fill_all_done_ms = autil::TimeUtility::currentTimeInMilliSeconds();
-    RTP_LLM_LOG_INFO("request [%ld] debug_request_id=[%s] batch_size=%d force_batch=%d "
-        "parse=%ldms concurrency=%ldms fill_all=%ldms enqueue begin",
-        request_id,
-        req.generate_configs[0]->debug_request_id.c_str(),
-        (int)inputs.size(),
-        (int)req.generate_configs[0]->force_batch,
-        parse_done_ms - start_time_ms,
-        concurrency_done_ms - parse_done_ms,
-        fill_all_done_ms - concurrency_done_ms);
-    auto                                                ori_streams = engine_->batchEnqueue(inputs);
-    auto enqueue_done_ms = autil::TimeUtility::currentTimeInMilliSeconds();
-    std::string stream_ids_str;
-    for (auto& s : ori_streams) { stream_ids_str += std::to_string(s->streamId()) + ","; }
-    RTP_LLM_LOG_INFO("request [%ld] debug_request_id=[%s] enqueued %d streams: [%s] enqueue_cost=%ldms",
-        request_id,
-        req.generate_configs[0]->debug_request_id.c_str(),
-        (int)ori_streams.size(),
-        stream_ids_str.c_str(),
-        enqueue_done_ms - fill_all_done_ms);
+    auto inputs      = batchFillGenerateInputs(request_id, req.input_texts, req.input_urls, req.generate_configs);
+    auto ori_streams = engine_->batchEnqueue(inputs);
     std::vector<std::shared_ptr<GenerateStreamWrapper>> streams;
     streams.reserve(ori_streams.size());
     for (size_t idx = 0; idx < ori_streams.size(); ++idx) {
@@ -220,22 +198,9 @@ void InferenceService::inferResponse(int64_t                                    
         stream_wrapper->init(ori_streams[idx], engine_);
         streams.push_back(stream_wrapper);
     }
-    auto wrapper_done_ms = autil::TimeUtility::currentTimeInMilliSeconds();
-
     auto [iterate_count, complete_response] = iterateStreams(streams, writer, req, iterate_stage_timer);
 
-    auto iterate_done_ms = autil::TimeUtility::currentTimeInMilliSeconds();
     iterate_stage_timer.end_stage();
-    RTP_LLM_LOG_INFO("request [%ld] debug_request_id=[%s] done: total=%ldms "
-        "parse=%ldms fill_all=%ldms enqueue=%ldms wrapper=%ldms iterate=%ldms",
-        request_id,
-        req.generate_configs[0]->debug_request_id.c_str(),
-        iterate_done_ms - start_time_ms,
-        parse_done_ms - start_time_ms,
-        fill_all_done_ms - concurrency_done_ms,
-        enqueue_done_ms - fill_all_done_ms,
-        wrapper_done_ms - enqueue_done_ms,
-        iterate_done_ms - wrapper_done_ms);
     writer->WriteDone();
     AccessLogWrapper::logSuccessAccess(body, request_id, complete_response, req.private_request);
     if (metric_reporter_) {
@@ -318,7 +283,8 @@ InferenceService::ProcessExtraInputResult InferenceService::processExtraInput(co
 }
 
 void InferenceService::loadExtraInputConfig() {
-    if (extra_input_config_loaded_) return;
+    if (extra_input_config_loaded_)
+        return;
     extra_input_config_loaded_ = true;
 
     // Read config from Python model's tse_config (single GIL acquisition, only once)
@@ -333,10 +299,14 @@ void InferenceService::loadExtraInputConfig() {
                 num_last_tokens_ = py::cast<int>(tse_config.attr("num_last_tokens"));
             }
         }
-        RTP_LLM_LOG_INFO("loadExtraInputConfig: mask_token_id=%d, num_last_tokens=%d", mask_token_id_, num_last_tokens_);
+        RTP_LLM_LOG_INFO(
+            "loadExtraInputConfig: mask_token_id=%d, num_last_tokens=%d", mask_token_id_, num_last_tokens_);
     } catch (const std::exception& e) {
-        RTP_LLM_LOG_WARNING("Failed to load extra input config from Python model: %s, using defaults (mask_token_id=%d, num_last_tokens=%d)",
-            e.what(), mask_token_id_, num_last_tokens_);
+        RTP_LLM_LOG_WARNING(
+            "Failed to load extra input config from Python model: %s, using defaults (mask_token_id=%d, num_last_tokens=%d)",
+            e.what(),
+            mask_token_id_,
+            num_last_tokens_);
     }
 }
 
@@ -355,7 +325,7 @@ InferenceService::ProcessExtraInputResult InferenceService::processExtraInputCpp
         return {input_ids, std::nullopt, -1};
     }
 
-    int first_mask_idx = mask_indices[0];
+    int first_mask_idx  = mask_indices[0];
     int second_mask_idx = mask_indices[1];
 
     // Extract item_input (between two masks)
@@ -370,7 +340,8 @@ InferenceService::ProcessExtraInputResult InferenceService::processExtraInputCpp
     // Compute item_hash_token_id: SHA256 hash matching Python's hashlib.sha256(json.dumps(item_input, sort_keys=True))
     std::string item_json = "[";
     for (size_t i = 0; i < item_input.size(); i++) {
-        if (i > 0) item_json += ", ";
+        if (i > 0)
+            item_json += ", ";
         item_json += std::to_string(item_input[i]);
     }
     item_json += "]";
@@ -379,9 +350,10 @@ InferenceService::ProcessExtraInputResult InferenceService::processExtraInputCpp
     SHA256(reinterpret_cast<const unsigned char*>(item_json.data()), item_json.size(), sha256_hash);
     // Take first 8 hex chars (4 bytes) matching Python's int(hexdigest[:8], 16)
     char hex_buf[9];
-    snprintf(hex_buf, sizeof(hex_buf), "%02x%02x%02x%02x", sha256_hash[0], sha256_hash[1], sha256_hash[2], sha256_hash[3]);
-    unsigned long item_hash = strtoul(hex_buf, nullptr, 16);
-    int item_hash_token_id = 100000 + (int)(item_hash % 900000);
+    snprintf(
+        hex_buf, sizeof(hex_buf), "%02x%02x%02x%02x", sha256_hash[0], sha256_hash[1], sha256_hash[2], sha256_hash[3]);
+    unsigned long item_hash          = strtoul(hex_buf, nullptr, 16);
+    int           item_hash_token_id = 100000 + (int)(item_hash % 900000);
 
     for (int i = 0; i < num_last_tokens_; i++) {
         decoder_input_ids.push_back(item_hash_token_id);
@@ -392,20 +364,20 @@ InferenceService::ProcessExtraInputResult InferenceService::processExtraInputCpp
 }
 
 std::vector<std::shared_ptr<GenerateInput>>
-InferenceService::batchFillGenerateInputs(int64_t                                              request_id,
-                                           const std::vector<std::string>&                      texts,
-                                           const std::vector<std::vector<std::string>>&         urls,
-                                           const std::vector<std::shared_ptr<GenerateConfig>>&  generate_configs) {
+InferenceService::batchFillGenerateInputs(int64_t                                             request_id,
+                                          const std::vector<std::string>&                     texts,
+                                          const std::vector<std::vector<std::string>>&        urls,
+                                          const std::vector<std::shared_ptr<GenerateConfig>>& generate_configs) {
     // Step 1: Batch tokenize all texts (single GIL acquisition)
     auto all_token_ids = token_processor_->batchEncode(texts);
 
     // Step 2: Process each input (no GIL needed - C++ processExtraInput)
-    auto device = rtp_llm::DeviceFactory::getDefaultDevice();
+    auto                                        device = rtp_llm::DeviceFactory::getDefaultDevice();
     std::vector<std::shared_ptr<GenerateInput>> inputs;
     inputs.reserve(texts.size());
 
     for (int i = 0; i < (int)texts.size(); i++) {
-        auto input = std::make_shared<GenerateInput>();
+        auto input             = std::make_shared<GenerateInput>();
         input->request_id      = request_id;
         input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
         input->generate_config = generate_configs[i];
@@ -427,21 +399,23 @@ InferenceService::batchFillGenerateInputs(int64_t                               
         input->lora_id = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
 
         // Process extra input (pure C++, no GIL)
-        auto& vec = all_token_ids[i];
-        auto result = processExtraInput(vec);
-        vec = result.processed_input_ids;
+        auto& vec    = all_token_ids[i];
+        auto  result = processExtraInput(vec);
+        vec          = result.processed_input_ids;
 
         if (result.extra_input_ids.has_value()) {
             input->extra_input_ids = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
                                                              {static_cast<size_t>(result.extra_input_ids->size())},
-                                                             rtp_llm::AllocationType::HOST}, {});
-            std::memcpy((*input->extra_input_ids)->data(), result.extra_input_ids->data(),
+                                                             rtp_llm::AllocationType::HOST},
+                                                            {});
+            std::memcpy((*input->extra_input_ids)->data(),
+                        result.extra_input_ids->data(),
                         (*input->extra_input_ids)->sizeBytes());
             input->extra_input_ids_loc = result.extra_input_ids_loc;
         }
 
-        input->input_ids = device->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT32, {vec.size()}, rtp_llm::AllocationType::HOST}, {});
+        input->input_ids =
+            device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {vec.size()}, rtp_llm::AllocationType::HOST}, {});
         memcpy(input->input_ids->data(), vec.data(), input->input_ids->sizeBytes());
 
         inputs.push_back(input);
