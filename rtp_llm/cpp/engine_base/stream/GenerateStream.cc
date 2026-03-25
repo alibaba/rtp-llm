@@ -129,6 +129,10 @@ absl::Status GenerateStream::initKVBlock(size_t reserve_step) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     if (generate_status_->status == StreamState::WAITING) {
         wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        RTP_LLM_LOG_INFO("initKVBlock: stream [%ld] req=%ld debug_req=[%s] wait_time_us=%ld",
+            stream_id_, generate_input_->request_id,
+            generate_input_->generate_config->debug_request_id.c_str(),
+            wait_time_us_);
     } else if (generate_status_->status == StreamState::PAUSED) {
         pause_time_us_ += autil::TimeUtility::currentTimeInMicroSeconds() - last_pause_us_;
     }

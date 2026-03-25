@@ -82,6 +82,8 @@ class AuxInfoAdapter: public Jsonizable, public AuxInfo {
 public:
     void Jsonize(Jsonizable::JsonWrapper& json) override {
         json.Jsonize("cost_time", cost_time_ms, cost_time_ms);
+        json.Jsonize("wait_time", wait_time_ms, wait_time_ms);
+        json.Jsonize("first_token_cost_time", first_token_cost_time_ms, first_token_cost_time_ms);
         json.Jsonize("iter_count", iter_count, iter_count);
         json.Jsonize("input_len", input_len, input_len);
         json.Jsonize("prefix_len", prefix_len, prefix_len);
@@ -101,21 +103,27 @@ public:
         AuxInfo();
     }
     AuxInfoAdapter(const AuxInfo& base) {
-        cost_time_us     = base.cost_time_us;
-        iter_count       = base.iter_count;
-        input_len        = base.input_len;
-        prefix_len       = base.prefix_len;
-        reuse_len        = base.reuse_len;
-        output_len       = base.output_len;
-        step_output_len  = base.step_output_len;
-        pd_sep           = base.pd_sep;
-        cum_log_probs    = base.cum_log_probs;
-        local_reuse_len  = base.local_reuse_len;
-        remote_reuse_len = base.remote_reuse_len;
+        cost_time_us             = base.cost_time_us;
+        wait_time_us             = base.wait_time_us;
+        first_token_cost_time_us = base.first_token_cost_time_us;
+        iter_count               = base.iter_count;
+        input_len                = base.input_len;
+        prefix_len               = base.prefix_len;
+        reuse_len                = base.reuse_len;
+        output_len               = base.output_len;
+        step_output_len          = base.step_output_len;
+        pd_sep                   = base.pd_sep;
+        cum_log_probs            = base.cum_log_probs;
+        local_reuse_len          = base.local_reuse_len;
+        remote_reuse_len         = base.remote_reuse_len;
 
-        cost_time_ms = cost_time_us / 1000.0;
+        cost_time_ms             = cost_time_us / 1000.0;
+        wait_time_ms             = wait_time_us / 1000.0;
+        first_token_cost_time_ms = first_token_cost_time_us / 1000.0;
     }
     float                    cost_time_ms;
+    float                    wait_time_ms;
+    float                    first_token_cost_time_ms;
     std::vector<std::string> beam_responses;
 };
 

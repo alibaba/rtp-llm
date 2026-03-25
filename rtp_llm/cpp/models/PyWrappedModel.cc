@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "autil/TimeUtility.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include <cstdint>
 #include <stdexcept>
 #include <mutex>
@@ -344,7 +346,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     DevicePerfWrapper wrapper(device_, "py model forward");
     holdInputsHostBuffers(inputs);
+    int64_t gil_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
     py::gil_scoped_acquire gil;
+    int64_t gil_acquired_us = autil::TimeUtility::currentTimeInMicroSeconds();
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
@@ -357,13 +361,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor input_hiddens =
             inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
 
+        int64_t build_attn_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
         auto      attention_inputs      = buildPyAttentionInputs(inputs);
+        int64_t build_attn_done_us = autil::TimeUtility::currentTimeInMicroSeconds();
         auto      bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        int64_t build_emb_done_us = autil::TimeUtility::currentTimeInMicroSeconds();
         BufferPtr kv_cache_block_id_device;
         if (!inputs.warmup && inputs.pd_separation) {
             attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
         }
         setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
+        int64_t setup_kv_done_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
@@ -392,11 +400,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_inputs.extra_input_ids.extra_input_ids_lengths = torch::empty({0}, torch::kInt32);
             py_model_inputs.extra_input_ids.extra_input_ids_locs    = torch::empty({0}, torch::kInt32);
         }
+        int64_t extra_ids_done_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
         PyModelOutputs py_model_outputs;
         BufferPtr      hidden_states;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
+        int64_t py_forward_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
         if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs)) {
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_inputs.attention_inputs.is_s_padded = true;
@@ -410,6 +420,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs                   = outputs.cast<PyModelOutputs>();
             hidden_states                      = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         }
+        int64_t py_forward_done_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
@@ -422,7 +433,22 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             lm_output_indexes = torchTensor2Buffer(py_model_outputs.lm_output_indexes);
         }
 
-        return callForwardPostLayers(hidden_states, inputs, true, lm_output_indexes);
+        int64_t post_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        auto result = callForwardPostLayers(hidden_states, inputs, true, lm_output_indexes);
+        int64_t post_done_us = autil::TimeUtility::currentTimeInMicroSeconds();
+
+        RTP_LLM_LOG_INFO("py_forward: gil_wait=%ldus build_attn=%ldus build_emb=%ldus setup_kv=%ldus "
+            "extra_ids=%ldus py_forward=%ldus post=%ldus total=%ldus",
+            gil_acquired_us - gil_begin_us,
+            build_attn_done_us - build_attn_begin_us,
+            build_emb_done_us - build_attn_done_us,
+            setup_kv_done_us - build_emb_done_us,
+            extra_ids_done_us - setup_kv_done_us,
+            py_forward_done_us - py_forward_begin_us,
+            post_done_us - post_begin_us,
+            post_done_us - gil_begin_us);
+
+        return result;
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

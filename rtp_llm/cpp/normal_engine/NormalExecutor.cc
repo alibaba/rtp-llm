@@ -169,6 +169,18 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         auto    result =
             batch_stream_processor_->dispatch(stream_groups, {std::move(model_output), std::move(sampler_output)});
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+
+        RTP_LLM_LOG_INFO("executor: gather_input=%ldus model_forward=%ldus sample=%ldus dispatch=%ldus "
+            "tp_sync=%ldus context_bs=%d decode_bs=%d token_size=%d",
+            executor_collector.gather_model_input_us,
+            executor_collector.model_forward_us,
+            executor_collector.sample_input_us,
+            executor_collector.dispatch_output_us,
+            executor_collector.tp_sync_input_us,
+            (int)stream_groups.totalContextBatchSize(),
+            (int)stream_groups.totalDecodeBatchSize(),
+            (int)stream_groups.modelExecuteTokenSize());
+
         reportMetrics(stream_groups, executor_collector, tps_collector);
 
         model_->releaseBuffers();
