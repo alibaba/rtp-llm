@@ -312,11 +312,13 @@ class EmbeddingConfig:
     def __init__(self):
         self.embedding_model: int = 0
         self.extra_input_in_mm_embedding = ""
+        self.embedding_arpc_rdma_mode: bool = False
 
     def to_string(self):
         return (
             f"embedding_model: {self.embedding_model}\n"
-            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}"
+            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
+            f"embedding_arpc_rdma_mode: {self.embedding_arpc_rdma_mode}"
         )
 
 

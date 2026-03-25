@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import torch
@@ -10,6 +10,7 @@ from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.py_config_modules import (
     MIN_WORKER_INFO_PORT_NUM,
     WORKER_INFO_PORT_NUM,
+    EmbeddingConfig,
     LoadConfig,
     PyEnvConfigs,
     ServerConfig,
@@ -69,6 +70,7 @@ class EngineConfig:
     arpc_config: ArpcConfig
     grpc_config: GrpcConfig
     load_config: LoadConfig
+    embedding_config: EmbeddingConfig = field(default_factory=EmbeddingConfig)
 
     def to_string(self) -> str:
         """Return a formatted string representation of EngineConfig for debugging.
@@ -179,6 +181,12 @@ class EngineConfig:
         else:
             lines.append(str(self.load_config))
 
+        lines.append("\n[EmbeddingConfig]")
+        if hasattr(self.embedding_config, "to_string"):
+            lines.append(self.embedding_config.to_string())
+        else:
+            lines.append(str(self.embedding_config))
+
         lines.append("\n" + "=" * 80)
         return "\n".join(lines)
 
@@ -227,6 +235,7 @@ class EngineConfig:
         arpc_config = py_env_configs.arpc_config
         grpc_config = py_env_configs.grpc_config
         load_config = py_env_configs.load_config
+        embedding_config = py_env_configs.embedding_config
 
         # Setup pd_sep_config role_type based on vit_separation
         if (
@@ -267,6 +276,7 @@ class EngineConfig:
             arpc_config=arpc_config,
             grpc_config=grpc_config,
             load_config=load_config,
+            embedding_config=embedding_config,
         )
 
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
