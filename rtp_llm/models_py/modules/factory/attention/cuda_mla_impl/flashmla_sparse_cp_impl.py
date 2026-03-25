@@ -34,6 +34,9 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
 from rtp_llm.models_py.triton_kernels.sparse_mla.filter_topk_for_sharded_cache import (
     triton_filter_topk_for_sharded_cache,
 )
+from rtp_llm.models_py.triton_kernels.sparse_mla.merge_states_kv_cascade import (
+    merge_states_kv_cascade_torch_reference,
+)
 from rtp_llm.ops import (
     AttentionConfigs,
     CPProcessorType,
@@ -49,6 +52,11 @@ from .flashmla_sparse_impl import (
     SparseMlaFp8Op,
     SparseMlaImpl,
 )
+
+# FlashInfer cascade merge kernels (MergeState / MergeStates) are tuned for typical MHA
+# head_dim (often <= 128/256). MLA uses kv_lora_rank (e.g. 512) as the last dim of v,
+# which can exceed supported launch configs and fail with cudaErrorInvalidConfiguration.
+_FLASHINFER_MERGE_MAX_HEAD_DIM = 256
 
 
 class ZigZagSparseMlaFp8CPOp(SparseMlaFp8Op):
@@ -687,29 +695,37 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         Returns:
             merged_out: [total_q, num_heads, kv_lora_rank] — merged attention output.
         """
-        from flashinfer.cascade import merge_state
-
         # all-gather across CP ranks: [cp_size * total_q, ...]
         all_out = all_gather(local_out.contiguous(), group=Group.TP)
         all_lse = all_gather(local_lse.contiguous(), group=Group.TP)
 
         n_q = local_out.shape[0]
         C = self.prefill_cp_size
+        head_dim = local_out.shape[-1]
 
         # Reshape to [cp_size, total_q, ...]
         all_out = all_out.view(C, n_q, *local_out.shape[1:])
         all_lse = all_lse.view(C, n_q, *local_lse.shape[1:])
 
-        # Iteratively merge: start with rank 0, merge in rank 1, 2, ...
-        merged_out = all_out[0]
-        merged_lse = all_lse[0]
-        for r in range(1, C):
-            merged_out, merged_lse = merge_state(
-                v_a=merged_out,
-                s_a=merged_lse,
-                v_b=all_out[r],
-                s_b=all_lse[r],
-            )
+        if C == 1:
+            return all_out[0]
+
+        v = all_out.permute(1, 0, 2, 3).contiguous()
+        s = all_lse.permute(1, 0, 2).contiguous()
+
+        if head_dim > _FLASHINFER_MERGE_MAX_HEAD_DIM:
+            try:
+                from rtp_llm.models_py.triton_kernels.sparse_mla.merge_states_kv_cascade import (
+                    triton_merge_states_kv_cascade,
+                )
+
+                return triton_merge_states_kv_cascade(v, s)
+            except Exception:
+                return merge_states_kv_cascade_torch_reference(v, s)
+
+        from flashinfer.cascade import merge_states
+
+        merged_out, _ = merge_states(v, s)
         return merged_out
 
     def forward(
@@ -798,6 +814,12 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
             workspace_topk = workspace_topk.squeeze(1)
         indices_batched = workspace_topk.unsqueeze(0)
 
+        if layer_id == 0 and self._fp8_kernel_metadata_q0 is not None:
+            metadata = self._fp8_kernel_metadata_q0.tile_scheduler_metadata
+            if metadata is not None:
+                metadata.tile_scheduler_metadata = None
+                metadata.num_splits = None
+
         attn_part, _ = flash_mla_with_kvcache(
             q=q_batched,
             k_cache=kv_cache_flat,
@@ -830,11 +852,25 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         layer_id: int = 0,
     ) -> torch.Tensor:
         """Prefix-cache path: all-gather q/topk, local attention on sharded cache, merge states."""
+        local_tokens = q.shape[0]
+
+        # topk has len(total_local_ids) rows which can differ across ranks when
+        # seq_len % cp_size != 0 (padding tokens are filtered out by total_local_ids).
+        # Pad back to local_tokens so all ranks contribute equal-sized tensors to all_gather.
+        if topk.shape[0] < local_tokens:
+            padded_topk = torch.zeros(
+                local_tokens, *topk.shape[1:], dtype=topk.dtype, device=topk.device
+            )
+            padded_topk[self.total_local_ids] = topk
+            topk_for_gather = padded_topk
+        else:
+            topk_for_gather = topk
+
         # Step 3: All-gather q and topk so every rank has ALL q tokens.
         all_q = all_gather(q.contiguous(), group=Group.TP)
         all_q = all_q.reshape(-1, *q.shape[1:])
-        all_topk = all_gather(topk.contiguous(), group=Group.TP)
-        all_topk = all_topk.reshape(-1, *topk.shape[1:])
+        all_topk = all_gather(topk_for_gather.contiguous(), group=Group.TP)
+        all_topk = all_topk.reshape(-1, *topk_for_gather.shape[1:])
 
         # Restore to global unpadded token order (undo CP interleaving/padding).
         all_q = all_q[self.kv_restore_unpad_indices]
@@ -881,12 +917,20 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         local_lse = (
             local_lse.squeeze(0).float().transpose(0, 1)
         )  # [num_heads, total_q] -> [total_q, num_heads]
-
         # Step 6: Merge attention states across all CP ranks.
         merged_out = self._merge_attention_across_ranks(local_out, local_lse)
 
-        # Step 7: Extract this rank's local q tokens from the merged global output.
-        return merged_out[self.total_global_ids]
+        # Step 7: Extract this rank's local q tokens from the merged global output,
+        # and scatter into a local_tokens-sized buffer (consistent with _forward_workspace).
+        local_result = merged_out[self.total_global_ids]
+        out = torch.zeros(
+            local_tokens,
+            *local_result.shape[1:],
+            dtype=local_result.dtype,
+            device=local_result.device,
+        )
+        out[self.total_local_ids] = local_result
+        return out
 
 
 class SparseMlaCpImpl(SparseMlaImpl):
