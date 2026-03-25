@@ -67,6 +67,7 @@ cc_library(
         ":http_client",
         ":embedding_arpc_deps",
         "//rtp_llm/cpp/api_server/common:common_service",
+        "@boringssl//:ssl",
     ],
     visibility = ["//visibility:public"],
 )

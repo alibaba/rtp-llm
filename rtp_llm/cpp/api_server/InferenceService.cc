@@ -5,6 +5,7 @@
 #include <torch/python.h>
 #include <functional>
 #include <fstream>
+#include <openssl/sha.h>
 
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 
@@ -315,36 +316,21 @@ void InferenceService::loadExtraInputConfig() {
     if (extra_input_config_loaded_) return;
     extra_input_config_loaded_ = true;
 
-    if (model_config_.ckpt_path.empty()) return;
+    // Read config from Python model's tse_config (single GIL acquisition, only once)
     try {
-        std::string config_path = model_config_.ckpt_path + "/config.json";
-        std::ifstream f(config_path);
-        if (!f.is_open()) return;
-        std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-        // Parse with nlohmann-style manual extraction: find "mask_token_id": N and "num_last_tokens": N
-        // Simple regex-free approach for robustness
-        auto extractInt = [&](const std::string& key, int default_val) -> int {
-            std::string pattern = "\"" + key + "\"";
-            auto pos = content.find(pattern);
-            if (pos == std::string::npos) return default_val;
-            pos = content.find(':', pos + pattern.size());
-            if (pos == std::string::npos) return default_val;
-            pos++; // skip ':'
-            while (pos < content.size() && (content[pos] == ' ' || content[pos] == '\t')) pos++;
-            int val = 0;
-            bool found_digit = false;
-            while (pos < content.size() && content[pos] >= '0' && content[pos] <= '9') {
-                val = val * 10 + (content[pos] - '0');
-                found_digit = true;
-                pos++;
+        py::gil_scoped_acquire acquire;
+        if (py::hasattr(py_model_, "tse_config")) {
+            auto tse_config = py_model_.attr("tse_config");
+            if (py::hasattr(tse_config, "mask_token_id")) {
+                mask_token_id_ = py::cast<int>(tse_config.attr("mask_token_id"));
             }
-            return found_digit ? val : default_val;
-        };
-        mask_token_id_ = extractInt("mask_token_id", 4);
-        num_last_tokens_ = extractInt("num_last_tokens", 16);
+            if (py::hasattr(tse_config, "num_last_tokens")) {
+                num_last_tokens_ = py::cast<int>(tse_config.attr("num_last_tokens"));
+            }
+        }
         RTP_LLM_LOG_INFO("loadExtraInputConfig: mask_token_id=%d, num_last_tokens=%d", mask_token_id_, num_last_tokens_);
     } catch (const std::exception& e) {
-        RTP_LLM_LOG_WARNING("Failed to load extra input config: %s, using defaults (mask_token_id=%d, num_last_tokens=%d)",
+        RTP_LLM_LOG_WARNING("Failed to load extra input config from Python model: %s, using defaults (mask_token_id=%d, num_last_tokens=%d)",
             e.what(), mask_token_id_, num_last_tokens_);
     }
 }
@@ -376,8 +362,7 @@ InferenceService::ProcessExtraInputResult InferenceService::processExtraInputCpp
     decoder_input_ids.insert(decoder_input_ids.end(), input_ids.begin(), input_ids.begin() + first_mask_idx);
     int placeholder_start = (int)decoder_input_ids.size();
 
-    // Compute item_hash_token_id: FNV-1a 64-bit hash of JSON representation
-    // Deterministic within C++ (same item_input -> same hash token)
+    // Compute item_hash_token_id: SHA256 hash matching Python's hashlib.sha256(json.dumps(item_input, sort_keys=True))
     std::string item_json = "[";
     for (size_t i = 0; i < item_input.size(); i++) {
         if (i > 0) item_json += ", ";
@@ -385,12 +370,13 @@ InferenceService::ProcessExtraInputResult InferenceService::processExtraInputCpp
     }
     item_json += "]";
 
-    uint64_t fnv_hash = 14695981039346656037ULL;
-    for (char c : item_json) {
-        fnv_hash ^= (uint64_t)(unsigned char)c;
-        fnv_hash *= 1099511628211ULL;
-    }
-    int item_hash_token_id = 100000 + (int)(fnv_hash % 900000);
+    unsigned char sha256_hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(item_json.data()), item_json.size(), sha256_hash);
+    // Take first 8 hex chars (4 bytes) matching Python's int(hexdigest[:8], 16)
+    char hex_buf[9];
+    snprintf(hex_buf, sizeof(hex_buf), "%02x%02x%02x%02x", sha256_hash[0], sha256_hash[1], sha256_hash[2], sha256_hash[3]);
+    unsigned long item_hash = strtoul(hex_buf, nullptr, 16);
+    int item_hash_token_id = 100000 + (int)(item_hash % 900000);
 
     for (int i = 0; i < num_last_tokens_; i++) {
         decoder_input_ids.push_back(item_hash_token_id);
