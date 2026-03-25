@@ -12,39 +12,43 @@
 
 namespace rtp_llm {
 
-/// Scatter interleaved CP-sharded KV cache blocks into contiguous decode-layout blocks.
+/// Scatter round-robin interleaved tokens from a contiguous temp buffer into
+/// paged decode KV cache blocks.
 ///
-/// Prefill with CP writes tokens in round-robin interleaved order within each
-/// virtual block.  For virtual block v, peer p's physical block contains tokens
-/// at positions: v * block_size * cp_size + slot * cp_size + p
-/// (slot = 0..block_size-1).
+/// During PD-separated CP prefill, each prefill rank writes its shard of a
+/// virtual block into a contiguous temp buffer via RDMA.  The temp buffer
+/// layout per virtual block is cp_size consecutive physical-block-sized
+/// regions (one per peer), each containing block_size tokens in the peer's
+/// interleaved order.
 ///
-/// Decode expects contiguous token order within standard blocks.  This kernel
-/// merges cp_size interleaved physical blocks (one per peer) into cp_size
-/// contiguous standard blocks.
+/// This kernel reassembles the tokens into contiguous decode-layout blocks:
+///   For peer p, physical slot s (0..block_size-1) in the temp buffer:
+///     global_token_offset = s * cp_size + p
+///   This token goes to:
+///     decode_block_idx = global_token_offset / block_size
+///     decode_slot      = global_token_offset % block_size
 ///
-/// The kernel processes one virtual block at a time using a temporary buffer
-/// of size (block_size * cp_size * elem_stride_bytes).  For each virtual block:
-///   1. Copy all cp_size physical blocks into the temp buffer in interleaved order
-///   2. Scatter from temp buffer back to the cp_size decode blocks in contiguous order
-///
-/// @param block_addrs       Array of block base addresses, indexed by block_id.
-///                          block_addrs[block_id] points to the start of that block's data.
-/// @param block_ids         Decode-side block IDs for this request, length = total_decode_blocks.
-///                          For virtual block v, the cp_size decode blocks are at
-///                          block_ids[v * cp_size + 0..cp_size-1].
-/// @param temp_buffer       Temporary GPU buffer of size >= (virtual_block_count * block_size * cp_size * elem_stride_bytes).
+/// @param dst_block_addrs   Array of decode block base addresses indexed by block_id.
+/// @param dst_block_ids     Decode-side block IDs, length = ceil(total_tokens / block_size).
+///                          dst_block_ids[i] is the physical block id for the i-th
+///                          contiguous decode block of this request.
+/// @param src_temp_buffer   Contiguous GPU buffer holding RDMA-received data.
+///                          Layout: [virtual_block_count, cp_size, block_size, elem_stride_bytes].
+///                          For virtual block v, peer p's data starts at offset
+///                          (v * cp_size + p) * block_size * elem_stride_bytes.
 /// @param virtual_block_count Number of virtual blocks.
-/// @param cp_size           Number of CP peers (= number of physical blocks per virtual block).
+/// @param cp_size           Number of CP peers.
 /// @param block_size        Tokens per physical block.
-/// @param elem_stride_bytes Bytes per token in the KV cache (e.g., compressed_kv_dim * sizeof(dtype)).
+/// @param total_tokens      Actual total token count (may be < virtual_block_count * cp_size * block_size).
+/// @param elem_stride_bytes Bytes per token in the KV cache.
 /// @param stream            CUDA stream.
-void invokeCPCacheScatter(void**       block_addrs,
-                          const int*   block_ids,
-                          void*        temp_buffer,
+void invokeCPCacheScatter(void**       dst_block_addrs,
+                          const int*   dst_block_ids,
+                          const void*  src_temp_buffer,
                           int          virtual_block_count,
                           int          cp_size,
                           int          block_size,
+                          int          total_tokens,
                           int          elem_stride_bytes,
                           cudaStream_t stream);
 

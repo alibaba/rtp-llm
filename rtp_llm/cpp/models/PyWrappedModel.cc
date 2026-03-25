@@ -15,6 +15,8 @@
 #include <iostream>
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 
+#include <iostream>
+
 namespace rtp_llm {
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
@@ -238,11 +240,13 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                               inputs.warmup,
                                               description_.attention_conf.use_mla
                                                   && device_->mla_ops_type != rtp_llm::MlaOpsType::MHA};
-        const auto&        cp_cfg = device_->initParamsRef().parallelism_config.prefill_cp_config;
-        if (cp_cfg.kv_cache_sharded && device_props_.tp_size > 1) {
+        if (device_props_.cp_kv_cache_sharded && device_props_.tp_size > 1) {
             cache_store_inputs.cp_slot_mapper = std::make_shared<rtp_llm::CPSlotMapper>(
                 device_props_.tp_rank, device_props_.tp_size, inputs.seq_size_per_block);
         }
+        std::cout << "[prepareWriteCacheParams] kv_cache_sharded=" << device_props_.cp_kv_cache_sharded
+                  << " tp_size=" << device_props_.tp_size
+                  << " cp_slot_mapper=" << (void*)cache_store_inputs.cp_slot_mapper.get() << std::endl;
         params = cache_store_inputs;
     }
     return params;

@@ -57,7 +57,7 @@ public:
         int                              partition_id;
 
         grpc::ServerContext* server_context;
-        int32_t                          prefill_cp_size;
+        int32_t              prefill_cp_size;
     };
 
 private:
@@ -81,12 +81,25 @@ private:
 
     // CP sharded KV cache helpers
     std::vector<CacheKeyType> recomputeVirtualCacheKeys(GenerateStream* stream, int32_t cp_size) const;
-    void                      buildCPShardedLayerCache(std::shared_ptr<RequestBlockBuffer>& load_layer_cache,
-                                                       const LoadKVCacheContext&             load_context,
-                                                       size_t                               layer_id,
-                                                       int                                  peer_index,
-                                                       size_t                               model_id) const;
-    void                      scatterCPCacheBlocks(const LoadKVCacheContext& load_context) const;
+    /// Build RDMA receive descriptors for one layer from one peer.
+    /// Data is received into temp_buffer at the peer's slice, not into decode blocks.
+    void buildCPShardedLayerCache(std::shared_ptr<RequestBlockBuffer>& load_layer_cache,
+                                  const LoadKVCacheContext&            load_context,
+                                  size_t                               layer_id,
+                                  int                                  peer_index,
+                                  size_t                               model_id,
+                                  void*                                temp_kv,
+                                  size_t                               block_stride_bytes,
+                                  void*                                temp_scale,
+                                  size_t                               scale_stride_bytes) const;
+
+    /// After RDMA completes, scatter interleaved tokens from per-layer temp buffers
+    /// into contiguous decode KV cache blocks.
+    void scatterCPTempToDecodeBlocks(const LoadKVCacheContext&     load_context,
+                                     const std::vector<BufferPtr>& temp_kv_bufs,
+                                     const std::vector<BufferPtr>& temp_scale_bufs,
+                                     const std::vector<size_t>&    kv_strides,
+                                     const std::vector<size_t>&    scale_strides) const;
 
 private:
     autil::ThreadPoolBasePtr thread_pool_;

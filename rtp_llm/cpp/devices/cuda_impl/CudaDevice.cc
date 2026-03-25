@@ -376,6 +376,7 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->ffn_as_service           = init_params_.ffn_as_service;
         prop->enable_prefill_cp        = init_params_.enable_prefill_cp;
         prop->cp_processor_type        = init_params_.cp_processor_type;
+        prop->cp_kv_cache_sharded      = init_params_.cp_kv_cache_sharded;
     }
     return *prop;
 }
