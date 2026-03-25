@@ -29,12 +29,9 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     metrics_reporter_(metrics_reporter) {
-    RTP_LLM_LOG_INFO("FIFOScheduler init: max_generate_batch_size=%d, max_batch_tokens_size=%d, "
-                     "max_seq_len=%d, load_python_model=%d",
+    RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d]",
                      max_generate_batch_size_,
-                     max_batch_tokens_size_,
-                     max_seq_len_,
-                     (int)model_specific_config_.load_python_model);
+                     max_batch_tokens_size_);
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -140,14 +137,10 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
     if (model_specific_config_.load_python_model) {
         // new model py not support prefill and decode togather now
         if (!running_streams_.empty()) {
-            RTP_LLM_LOG_INFO("evaluateRunningMemory: blocked by PY_MODEL, running_size=%d not empty",
-                (int)running_streams_.size());
             return false;
         }
     }
     if (running_streams_.size() + streams.size() + 1 > max_generate_batch_size_) {
-        RTP_LLM_LOG_INFO("evaluateRunningMemory: batch_size %d + %d + 1 > max %d",
-            (int)running_streams_.size(), (int)streams.size(), (int)max_generate_batch_size_);
         return false;
     }
 
@@ -157,10 +150,6 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
     }
     for (auto& stream : streams) {
         max_token_size = std::max(max_token_size, stream->contextLength());
-    }
-    if (max_token_size * (streams.size() + 1) + running_streams_.size() >= int(max_batch_tokens_size_)) {
-        RTP_LLM_LOG_INFO("evaluateRunningMemory: max_token_size=%d * batch=%d + running=%d >= max_batch_tokens=%d",
-            max_token_size, (int)(streams.size() + 1), (int)running_streams_.size(), (int)max_batch_tokens_size_);
     }
     return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_batch_tokens_size_);
 }
@@ -181,9 +170,6 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     int64_t                 batch_epoch = batch_epoch_counter_->incAndReturn();
     int64_t                 force_batch_request_id = -1;
     bool                    first_is_force_batch   = false;  // 标记第一个成功加入的是否是 force_batch
-    RTP_LLM_LOG_INFO("scheduleNew: waiting=%d running=%d remote_running=%d batch_epoch=%ld",
-        (int)waiting_streams_.size(), (int)running_streams_.size(),
-        (int)remote_running_streams_.size(), batch_epoch);
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream      = *it;
         bool  force_batch = stream->generateConfig()->force_batch;
@@ -193,21 +179,12 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             if (first_is_force_batch) {
                 // 第一个是强制凑批，后续必须是相同 request_id 的强制凑批
                 if (!force_batch || stream->requestId() != force_batch_request_id) {
-                    RTP_LLM_LOG_INFO("scheduleNew: skip stream [%ld] req=%ld debug_req=[%s] force_batch=%d "
-                        "first_is_force_batch=%d force_batch_req_id=%ld (req_id mismatch or not force_batch)",
-                        stream->streamId(), stream->requestId(),
-                        stream->generateConfig()->debug_request_id.c_str(),
-                        (int)force_batch, (int)first_is_force_batch, force_batch_request_id);
                     ++it;
                     continue;
                 }
             } else {
                 // 第一个不是强制凑批，后续不能加入强制凑批的 stream
                 if (force_batch) {
-                    RTP_LLM_LOG_INFO("scheduleNew: skip stream [%ld] req=%ld debug_req=[%s] "
-                        "force_batch=1 but first_is_force_batch=0",
-                        stream->streamId(), stream->requestId(),
-                        stream->generateConfig()->debug_request_id.c_str());
                     ++it;
                     continue;
                 }
@@ -218,11 +195,6 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             if (stream->setRunning()) {
                 new_streams.emplace_back(stream);
-                RTP_LLM_LOG_INFO("scheduleNew: add stream [%ld] req=%ld debug_req=[%s] input_len=%d "
-                    "force_batch=%d batch_idx=%d",
-                    stream->streamId(), stream->requestId(),
-                    stream->generateConfig()->debug_request_id.c_str(),
-                    stream->contextLength(), (int)force_batch, (int)new_streams.size());
                 if (new_streams.size() == 1) {
                     first_is_force_batch = force_batch;
                     if (force_batch) {
@@ -236,12 +208,6 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
                 it++;
             }
         } else if (running_streams_.empty() && new_streams.empty() && remote_running_streams_.empty()) {
-            RTP_LLM_LOG_INFO("scheduleNew: cannot add stream [%ld] req=%ld debug_req=[%s] "
-                "running=%d new=%d remote=%d (no running streams, will stop or error)",
-                stream->streamId(), stream->requestId(),
-                stream->generateConfig()->debug_request_id.c_str(),
-                (int)running_streams_.size(), (int)new_streams.size(),
-                (int)remote_running_streams_.size());
             // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
             RTP_LLM_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());
             if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
@@ -261,17 +227,10 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             }
             it++;
         } else {
-            RTP_LLM_LOG_INFO("scheduleNew: cannot add stream [%ld] req=%ld debug_req=[%s] "
-                "running=%d new=%d remote=%d (has running, break)",
-                stream->streamId(), stream->requestId(),
-                stream->generateConfig()->debug_request_id.c_str(),
-                (int)running_streams_.size(), (int)new_streams.size(),
-                (int)remote_running_streams_.size());
             break;
         }
     }
 
-    RTP_LLM_LOG_INFO("scheduleNew: result new_streams=%d epoch=%ld", (int)new_streams.size(), batch_epoch);
     return new_streams;
 }
 
@@ -292,52 +251,22 @@ bool FIFOScheduler::waitPredicate() {
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_step) {
-    int64_t schedule_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
-    int64_t after_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
     evaluateRunningRemote();
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);
     evictDoneStreams(remote_running_streams_);
-
-    // Log waiting streams detail
-    if (!waiting_streams_.empty()) {
-        std::string wait_info;
-        for (auto& s : waiting_streams_) {
-            int64_t age_ms = (schedule_begin_us - s->generateInput()->begin_time_us) / 1000;
-            wait_info += autil::StringUtil::formatString("[sid=%ld,dbg=%s,age=%ldms] ",
-                s->streamId(), s->generateConfig()->debug_request_id.c_str(), age_ms);
-        }
-        RTP_LLM_LOG_INFO("schedule: waiting(%d): %s", (int)waiting_streams_.size(), wait_info.c_str());
-    }
-    // Log running streams detail
-    if (!running_streams_.empty()) {
-        std::string run_info;
-        for (auto& s : running_streams_) {
-            int64_t age_ms = (schedule_begin_us - s->generateInput()->begin_time_us) / 1000;
-            run_info += autil::StringUtil::formatString("[sid=%ld,dbg=%s,age=%ldms,ctx=%d] ",
-                s->streamId(), s->generateConfig()->debug_request_id.c_str(),
-                age_ms, (int)s->isContextStream());
-        }
-        RTP_LLM_LOG_INFO("schedule: running(%d): %s", (int)running_streams_.size(), run_info.c_str());
-    }
 
     // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
     evaluateRunningNext(reserve_step);
     auto new_streams = scheduleNew(reserve_step);
     accountBatchMetrics(new_streams, running_streams_);
     running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
-    int64_t schedule_done_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    RTP_LLM_LOG_INFO("schedule: total running=%d (new=%d) schedule_cost_us=%ld (wait=%ld, logic=%ld)",
-        (int)running_streams_.size(), (int)new_streams.size(),
-        schedule_done_us - schedule_begin_us,
-        after_wait_us - schedule_begin_us,
-        schedule_done_us - after_wait_us);
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     return running_streams_;

@@ -142,8 +142,7 @@ public:
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_3fs: " << enable_3fs
                      << ", enable_device_cache: " << enable_device_cache
-                     << ", enable_memory_cache: " << enable_memory_cache << ", force_batch: " << force_batch
-                     << ", debug_request_id: " << debug_request_id << "}";
+                     << ", enable_memory_cache: " << enable_memory_cache << ", force_batch: " << force_batch << "}";
         return debug_string.str();
     }
 
@@ -223,7 +222,6 @@ public:
         JSONIZE(debug_request_id);
         JSONIZE(enable_memory_cache);
         JSONIZE(force_batch);
-        JSONIZE(debug_request_id);
         JSONIZE(aux_info);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL

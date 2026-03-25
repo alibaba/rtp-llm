@@ -360,10 +360,8 @@ absl::Status NormalEngine::step() {
     }
 
     list<GenerateStreamPtr> streams;
-    int64_t schedule_done_us = 0;
     if (device_->getDeviceProperties().tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step_));
-        schedule_done_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
         if (parallelism_config.dp_size > 1) {
             mayAddFakeStream(streams);
@@ -410,28 +408,7 @@ absl::Status NormalEngine::step() {
         profiler_->start();
     }
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    int64_t      schedule_to_process_us = schedule_done_us > 0 ? step_begin_time_us - schedule_done_us : 0;
     absl::Status status             = executor_->process(streams);
-
-    {
-        int64_t step_done_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        int64_t step_cost_us = step_done_us - step_begin_time_us;
-        int context_count = 0, decode_count = 0;
-        std::string stream_info;
-        for (auto& s : streams) {
-            if (s->isContextStream()) context_count++; else decode_count++;
-            int64_t total_age_ms = (step_done_us - s->generateInput()->begin_time_us) / 1000;
-            int64_t wait_before_step_ms = (step_begin_time_us - s->generateInput()->begin_time_us) / 1000;
-            stream_info += autil::StringUtil::formatString(
-                "[sid=%ld,dbg=%s,ctx=%d,age=%ldms,pre=%ldms] ",
-                s->streamId(),
-                s->generateConfig()->debug_request_id.c_str(),
-                (int)s->isContextStream(),
-                total_age_ms, wait_before_step_ms);
-        }
-        RTP_LLM_LOG_INFO("step done: cost_us=%ld sched_to_proc=%ldus context=%d decode=%d streams: %s",
-            step_cost_us, schedule_to_process_us, context_count, decode_count, stream_info.c_str());
-    }
 
     if (nullptr != profiler_) {
         profiler_step_--;
