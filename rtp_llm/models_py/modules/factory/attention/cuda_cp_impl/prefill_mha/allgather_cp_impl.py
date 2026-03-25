@@ -8,7 +8,7 @@ from numpy import append
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, recv, send
 from rtp_llm.models_py.distributed.user_buffers import get_user_buffers_communicator
-from rtp_llm.ops import AttentionConfigs, CPRotateMethod, FMHAType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, CPProcessorType, CPRotateMethod, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
     ParamsBase,
@@ -54,6 +54,10 @@ class PCPAllGatherAttnOp:
             kv_layout: KV cache layout ("NHD" or "HND")
         """
         super().__init__()
+        assert parallelism_config.prefill_cp_config.processor_type == CPProcessorType.ZIG_ZAG, (
+            f"PCPAllGatherAttnOp only supports ZIG_ZAG processor type, "
+            f"got {parallelism_config.prefill_cp_config.processor_type}"
+        )
         self.attn_inputs = attn_inputs
         self.attn_configs = attn_configs
         self.num_qo_heads = attn_configs.head_num

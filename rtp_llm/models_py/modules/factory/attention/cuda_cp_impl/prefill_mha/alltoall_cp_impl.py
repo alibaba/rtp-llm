@@ -15,7 +15,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     get_py_flashinfer_workspace_buffer,
 )
-from rtp_llm.ops import AttentionConfigs, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, CPProcessorType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     CPSlotMapper,
     KVCache,
@@ -48,6 +48,10 @@ class PCPAll2AllAttnOp:
             kv_layout: KV cache layout ("NHD" or "HND")
         """
         super().__init__()
+        assert parallelism_config.prefill_cp_config.processor_type == CPProcessorType.ZIG_ZAG, (
+            f"PCPAll2AllAttnOp only supports ZIG_ZAG processor type, "
+            f"got {parallelism_config.prefill_cp_config.processor_type}"
+        )
         self.attn_inputs = attn_inputs
         self.attn_configs = attn_configs
         self.num_qo_heads = attn_configs.head_num

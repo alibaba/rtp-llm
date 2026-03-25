@@ -38,3 +38,38 @@ py_test(
     exec_properties = {'gpu':'A10'},
 )
 
+cc_library(
+    name = "th_round_robin_py_wrapper_test_lib",
+    srcs = [
+        "round_robin_processor_py_wrapper_test.cc",
+    ],
+    deps = torch_deps() + [
+        "//rtp_llm/cpp/models:context_parallel",
+        "//rtp_llm/cpp/pybind:th_utils",
+        "//rtp_llm/cpp/pybind:th_compute_lib",
+    ],
+    copts = cuda_copts(),
+    alwayslink = True,
+)
+
+cc_binary(
+    name = "th_round_robin_py_wrapper_test",
+    deps = [":th_round_robin_py_wrapper_test_lib"],
+    linkshared = 1,
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "round_robin_py_wrapper_test",
+    srcs = [
+        "round_robin_py_wrapper_test.py"
+    ],
+    data = [
+        ":th_round_robin_py_wrapper_test"
+    ],
+    deps = [
+        "//rtp_llm:torch"
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
