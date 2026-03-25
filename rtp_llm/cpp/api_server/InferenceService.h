@@ -101,6 +101,20 @@ private:
         int extra_input_ids_loc = -1;  // extra_input_ids location in processed_input_ids (relative to single sequence)
     };
     ProcessExtraInputResult processExtraInput(const std::vector<int>& input_ids);
+    ProcessExtraInputResult processExtraInputCpp(const std::vector<int>& input_ids);
+
+    // Batch version: tokenize all texts and process extra input in one shot (fewer GIL acquisitions)
+    std::vector<std::shared_ptr<GenerateInput>>
+    batchFillGenerateInputs(int64_t                                              request_id,
+                            const std::vector<std::string>&                      texts,
+                            const std::vector<std::vector<std::string>>&         urls,
+                            const std::vector<std::shared_ptr<GenerateConfig>>&  generate_configs);
+
+    // Config for C++ processExtraInput (loaded lazily from ckpt_path/config.json)
+    bool extra_input_config_loaded_ = false;
+    int  mask_token_id_             = 4;
+    int  num_last_tokens_           = 16;
+    void loadExtraInputConfig();
 };
 
 }  // namespace rtp_llm

@@ -21,6 +21,7 @@ public:
     // virtual for test
     virtual std::string                              decode(const std::vector<int>& token_ids);
     virtual std::vector<int>                         encode(const std::string& prompt);
+    virtual std::vector<std::vector<int>>            batchEncode(const std::vector<std::string>& prompts);
     virtual std::shared_ptr<TokenizerEncodeResponse> tokenizer(const std::string& prompt);
     virtual std::vector<std::string>                 decodeTokens(std::shared_ptr<TokenProcessorPerStream> tps,
                                                                   GenerateOutputs&                         responses,

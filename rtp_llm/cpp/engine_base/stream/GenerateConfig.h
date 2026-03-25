@@ -87,6 +87,7 @@ public:
     bool             enable_memory_cache = true;
     bool             force_batch         = false;  // If true, streams with same request_id must be scheduled together
     std::string      trace_id;
+    std::string      debug_request_id;
 
     bool top1() {
         return top_k == 1;
@@ -218,6 +219,7 @@ public:
         JSONIZE(reuse_cache);
         JSONIZE(enable_3fs);
         JSONIZE(enable_device_cache);
+        JSONIZE(debug_request_id);
         JSONIZE(enable_memory_cache);
         JSONIZE(force_batch);
         JSONIZE(aux_info);
