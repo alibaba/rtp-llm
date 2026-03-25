@@ -240,6 +240,81 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
     }
 }
 
+void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
+                                 int                          seq_size_per_block,
+                                 bool                         forbid_realloc,
+                                 int                          cp_rank,
+                                 int                          cp_size,
+                                 bool                         kv_cache_sharded) {
+    // Step 1: Call base class fillParams with CP parameters
+    FlashInferMlaAttnParams::fillParams(attn_inputs.prefix_lengths,
+                                        attn_inputs.sequence_lengths,
+                                        attn_inputs.input_lengths,
+                                        attn_inputs.kv_cache_block_id_host,
+                                        seq_size_per_block,
+                                        forbid_realloc,
+                                        cp_rank,
+                                        cp_size,
+                                        kv_cache_sharded);
+
+    // Step 2: Fill SparseMlaParams-specific parameters (same as non-CP overload)
+    bool is_prefill = attn_inputs.is_prefill;
+    int  batch_size = is_prefill ? attn_inputs.input_lengths.size(0) : attn_inputs.sequence_lengths.size(0);
+
+    int64_t total_tokens = 0;
+    if (is_prefill) {
+        const auto input_lengths_ptr = attn_inputs.input_lengths.data_ptr<int32_t>();
+        for (int i = 0; i < batch_size; ++i) {
+            total_tokens += input_lengths_ptr[i];
+        }
+
+        if (total_tokens > 0) {
+            ensureTensorSize(batch_size, static_cast<int>(total_tokens), forbid_realloc);
+            fillParamsInternal(true,
+                               attn_inputs.input_lengths,
+                               attn_inputs.prefix_lengths,
+                               attn_inputs.sequence_lengths,
+                               batch_size,
+                               seq_size_per_block,
+                               total_tokens,
+                               positions_h);
+            refreshBuffer(batch_size, static_cast<int>(total_tokens), true);
+
+            expanded_seq_lens   = expanded_seq_lens_d_;
+            topk_indices_offset = topk_indices_offset_d_;
+            ks                  = ks_d_;
+            ke                  = ke_d_;
+        } else {
+            auto options_cuda   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            expanded_seq_lens   = torch::empty({0}, options_cuda);
+            topk_indices_offset = torch::empty({0}, options_cuda);
+            ks                  = torch::empty({0}, options_cuda);
+            ke                  = torch::empty({0}, options_cuda);
+        }
+    } else {
+        expanded_seq_lens = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+        auto options_cuda   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        topk_indices_offset = torch::empty({0}, options_cuda);
+        ks                  = torch::empty({0}, options_cuda);
+        ke                  = torch::empty({0}, options_cuda);
+
+        if (batch_size != 0) {
+            ensureTensorSize(batch_size, batch_size, forbid_realloc);
+            fillParamsInternal(false,
+                               attn_inputs.input_lengths,
+                               attn_inputs.prefix_lengths,
+                               attn_inputs.sequence_lengths,
+                               batch_size,
+                               seq_size_per_block,
+                               0,
+                               positions_h);
+            refreshBuffer(batch_size, batch_size, false);
+        }
+        expanded_seq_lens = kvlen_d;
+    }
+}
+
 void registerPySparseMlaParams(pybind11::module& m) {
     // Third template parameter must be FlashInferMlaAttnParams (not ParamsBase)
     // This allows Python to access all def_readonly attributes of the base class
@@ -250,10 +325,22 @@ void registerPySparseMlaParams(pybind11::module& m) {
             [](rtp_llm::SparseMlaParams&    self,
                torch_ext::PyAttentionInputs attn_inputs,
                int                          seq_size_per_block,
-               bool forbid_realloc) { self.fillParams(attn_inputs, seq_size_per_block, forbid_realloc); },
+               bool                         forbid_realloc,
+               int                          cp_rank,
+               int                          cp_size,
+               bool                         kv_cache_sharded) {
+                if (cp_size > 1) {
+                    self.fillParams(attn_inputs, seq_size_per_block, forbid_realloc, cp_rank, cp_size, kv_cache_sharded);
+                } else {
+                    self.fillParams(attn_inputs, seq_size_per_block, forbid_realloc);
+                }
+            },
             pybind11::arg("attention_inputs"),
             pybind11::arg("seq_size_per_block"),
-            pybind11::arg("forbid_realloc") = false)
+            pybind11::arg("forbid_realloc")   = false,
+            pybind11::arg("cp_rank")           = 0,
+            pybind11::arg("cp_size")           = 1,
+            pybind11::arg("kv_cache_sharded")  = false)
         .def_readonly("expanded_seq_lens", &SparseMlaParams::expanded_seq_lens)
         .def_readonly("topk_indices_offset", &SparseMlaParams::topk_indices_offset)
         .def_readonly("ks", &SparseMlaParams::ks)

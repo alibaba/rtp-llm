@@ -105,3 +105,45 @@ def update_trt_params(
     new_offset = new_rope_params.kv_cache_offset
     old_offset = rope_params.kv_cache_offset
     copy_kv_cache_offset(old_offset, new_offset)
+
+
+def build_contiguous_block_table(
+    cu_kv_seqlens: torch.Tensor,
+    page_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build a contiguous block table from cumulative KV sequence lengths.
+
+    Given cu_kv_seqlens [batch+1] and a page_size, produces a [batch, max_pages]
+    int32 tensor where entry [i, j] = start_page_of_request_i + j.
+
+    This is used for workspace paged tensors where pages are laid out contiguously
+    (no gaps), so the block table is simply a range per request.
+
+    Args:
+        cu_kv_seqlens: Cumulative KV lengths [batch_size + 1], int32, on device.
+        page_size: Number of tokens per page/block.
+        device: Target device.
+
+    Returns:
+        block_table: [batch_size, max_pages_per_req], int32, on device.
+    """
+    cu_kv = cu_kv_seqlens.cpu()
+    batch_size = cu_kv.size(0) - 1
+    if batch_size == 0:
+        return torch.empty(0, 0, dtype=torch.int32, device=device)
+
+    # Vectorized: compute start_page and n_pages per request
+    starts = cu_kv[:-1]
+    ends = cu_kv[1:]
+    start_pages = starts // page_size
+    n_pages = ((ends + page_size - 1) // page_size) - start_pages
+    max_pages = int(n_pages.max().item())
+
+    block_table = torch.zeros(batch_size, max_pages, dtype=torch.int32)
+    cols = torch.arange(max_pages, dtype=torch.int32)
+    for i in range(batch_size):
+        np_i = int(n_pages[i].item())
+        block_table[i, :np_i] = start_pages[i].int() + cols[:np_i]
+
+    return block_table.to(device)

@@ -15,7 +15,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.alltoa
     PCPAll2AllAttnOp,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, CPRotateMethod, FMHAType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, CPProcessorType, CPRotateMethod, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQKVOut,
     KVCache,
@@ -136,6 +136,10 @@ class CPFlashInferImpl(FMHAImplBase):
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
 
         method = parallelism_config.prefill_cp_config.method
+        assert parallelism_config.prefill_cp_config.processor_type == CPProcessorType.ZIG_ZAG, (
+            f"CPFlashInferImpl (prefill_mha) only supports ZIG_ZAG processor type, "
+            f"got {parallelism_config.prefill_cp_config.processor_type}"
+        )
         self.fmha_impl = impl_map[method](attn_configs, attn_inputs, parallelism_config)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
 
