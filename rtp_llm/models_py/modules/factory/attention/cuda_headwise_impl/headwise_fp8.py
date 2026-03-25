@@ -39,6 +39,19 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplB
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig
 
 
+def _headwise_prefill_fp8_runtime_ready() -> bool:
+    """Same gates as HeadWiseFP8PrefillAttnOp.support."""
+    if not (_HAS_FLASH_ATTN_3 and _HAS_RTP_KERNEL_FP8):
+        return False
+    if not torch.cuda.is_available():
+        return False
+    try:
+        major, minor = map(int, torch.version.cuda.split(".")[:2])
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return (major, minor) >= (12, 8) and ConfigManager.is_config_set()
+
+
 @dataclass
 class FP8BatchItem:
     use_headwise: bool
@@ -65,7 +78,7 @@ class HeadWiseFP8PrefillAttnOp:
         self.size_per_head = attn_configs.size_per_head
         self.paged_size = attn_configs.tokens_per_block
 
-        if ConfigManager.is_config_set() is not None:
+        if ConfigManager.is_config_set():
             self.headwise_all_config = ConfigManager.get_headwise_config()
 
             self.hw_cfg = HeadWiseRuntimeConfig(
@@ -92,11 +105,21 @@ class HeadWiseFP8PrefillAttnOp:
         return (major, minor) >= (12, 8) and ConfigManager.is_config_set()
 
     def _get_headwise_config(self, layer_idx: int):
+        layer_key = str(layer_idx)
+        if layer_key not in self.headwise_all_config:
+            logging.warning(
+                f"[HeadWiseFP8] layer_idx={layer_idx} not found in headwise_config, "
+                f"falling back to all-retrieval heads"
+            )
+            self.retrieval_heads = torch.ones(self.head_num, dtype=torch.bool, device="cuda")
+            self.non_retrieval_heads = torch.zeros(self.head_num, dtype=torch.bool, device="cuda")
+            return
+
         start = self.head_num * self.rank
         end = start + self.head_num
 
         layer_config = torch.tensor(
-            self.headwise_all_config[str(layer_idx)], device="cuda"
+            self.headwise_all_config[layer_key], device="cuda"
         )
         current_rank_weights = layer_config[start:end]
 
@@ -110,9 +133,11 @@ class HeadWiseFP8PrefillAttnOp:
 
         self.batch_items = []
 
-        for i, length_tensor in enumerate(self.input_lengths):
-            q_len = int(length_tensor.item())
-            kv_len = int(self.kv_lengths[i].item()) if self.kv_lengths[i] > 0 else q_len
+        input_lens_list = self.input_lengths.cpu().tolist()
+        kv_lens_list = self.kv_lengths.cpu().tolist()
+
+        for i, q_len in enumerate(input_lens_list):
+            kv_len = kv_lens_list[i] if kv_lens_list[i] > 0 else q_len
 
             use_headwise = (
                 kv_len >= self.hw_cfg.seqlen_threshold
@@ -144,8 +169,10 @@ class HeadWiseFP8PrefillAttnOp:
             block_num, 2, self.head_num_kv, self.paged_size, self.size_per_head
         )
         # HND: [block_num, kv_head_num, page_size, head_dim] — FP8
-        k_cache_hnd = kv_expanded[:, 0, ...].contiguous()
-        v_cache_hnd = kv_expanded[:, 1, ...].contiguous()
+        k_slice = kv_expanded[:, 0, ...]
+        v_slice = kv_expanded[:, 1, ...]
+        k_cache_hnd = k_slice if k_slice.is_contiguous() else k_slice.contiguous()
+        v_cache_hnd = v_slice if v_slice.is_contiguous() else v_slice.contiguous()
 
         offset = 0
         for i, item in enumerate(self.batch_items):
@@ -328,10 +355,9 @@ class HeadWiseFP8PrefillImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return (
-            not attn_configs.use_mla
-            and attn_configs.kv_cache_dtype == KvCacheDataType.FP8
-        )
+        if attn_configs.use_mla or attn_configs.kv_cache_dtype != KvCacheDataType.FP8:
+            return False
+        return _headwise_prefill_fp8_runtime_ready()
 
     def forward(
         self,

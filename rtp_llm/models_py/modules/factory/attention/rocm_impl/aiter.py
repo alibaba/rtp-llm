@@ -960,6 +960,7 @@ class AiterPrefillImplPaged(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         cu_seqlens_q = self.fmha_params.cu_seqlens_q
         batch_size = cu_seqlens_q.shape[0] - 1
@@ -1123,6 +1124,7 @@ class AiterDecodeImplTriton(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         if self.need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)

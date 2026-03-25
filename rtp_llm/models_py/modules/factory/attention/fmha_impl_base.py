@@ -88,13 +88,14 @@ class FMHAImplBase(ABC):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         """执行前向传播计算。
 
         Args:
             qkv: 输入的 QKV 张量
             kv_cache: 可选的 KV Cache，用于存储历史键值对
-            need_rope_kv_cache: 是否需要应用 RoPE 和 KV Cache 处理
+            layer_idx: 当前层索引，用于 headwise 等需要 per-layer 配置的实现
 
         Returns:
             计算后的注意力输出张量
