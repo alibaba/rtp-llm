@@ -892,6 +892,7 @@ class RocmImpl(GpuImpl):
         if key in [
             W.attn_qkv_w,
             W.attn_o_w,
+            W.attn_gate_w,
             W.ffn_w2,
             W.ffn_w13,
             W.ffn_w3,

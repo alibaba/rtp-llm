@@ -8,13 +8,13 @@ from pydantic import BaseModel
 
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 from rtp_llm.utils.util import check_with_info
 
@@ -255,11 +255,15 @@ class FfnWeight(CompositeWeight):
         return False
 
     @torch.inference_mode()
-    def update(self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs):
+    def update(
+        self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs
+    ):
         if "module_name" in kwargs:
             name: str = kwargs["module_name"]
             if name not in self.sub_weights:
-                raise KeyError(f"can not find key: {name} in ffn weights, allow key names are {[name for name in self.sub_weights]}")
+                raise KeyError(
+                    f"can not find key: {name} in ffn weights, allow key names are {[name for name in self.sub_weights]}"
+                )
             return self.sub_weights[name].update(tensor, device, load_config)
         else:
             return super().update(tensor, device, load_config)
@@ -308,7 +312,7 @@ class MoeAtomicWeight(AtomicWeight):
         load_config: LoadConfig,
     ):
         raw_tensor = tensor.get(self.name) if isinstance(tensor, dict) else tensor
-        if self.name in [W.moe_w1, W.moe_w2]:
+        if self.name in [W.moe_w1, W.moe_w2, W.moe_s1]:
             raw_tensor = load_config.exported_device.shuffle_moe_weight(
                 raw_tensor, load_config.compute_dtype, self.name
             )
@@ -326,7 +330,9 @@ class MoeAtomicWeight(AtomicWeight):
         load_config: LoadConfig,
     ):
         if self.config.weight_stack:
-            return super()._load_raw_tensor(tensor_source, layer_id, device, load_config)
+            return super()._load_raw_tensor(
+                tensor_source, layer_id, device, load_config
+            )
 
         # weight should be expand by experts
         before_merge_tensors = []
@@ -360,7 +366,7 @@ class MoeAtomicWeight(AtomicWeight):
         after_merge_tensor = self.process_fun(before_merge_tensors).to(convert_type)
         logging.debug("load weight :%s, %s ", self.name, after_merge_tensor.shape)
         return {self.name: after_merge_tensor}
-    
+
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:
