@@ -1,5 +1,5 @@
 """
-Unit tests for SparseMlaFp8CPOp (Context Parallel prefill for Sparse MLA FP8).
+Unit tests for ZigZagSparseMlaFp8CPOp (Context Parallel prefill for Sparse MLA FP8).
 
 Tests the CP path with tp_size=1 (single rank): all_gather is identity,
 so output should match non-CP SparseMlaFp8Op on the same inputs.
@@ -69,7 +69,7 @@ def _make_block_table(
 
 @skipIf(not CUDA_FLASHMLA_OK, SKIP_REASON)
 class SparseMlaFp8CPOpTest(TestCase):
-    """Test SparseMlaFp8CPOp with single rank (tp_size=1)."""
+    """Test ZigZagSparseMlaFp8CPOp with single rank (tp_size=1)."""
 
     @classmethod
     def setUpClass(cls):
@@ -92,7 +92,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         Run both CP op and non-CP op on same inputs and check output shape and equality.
         """
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
-            SparseMlaFp8CPOp,
+            ZigZagSparseMlaFp8CPOp,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
             SparseMlaFp8Op,
@@ -197,7 +197,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         kv_cache = KVCache()
         kv_cache.kv_cache_base = kv_cache_base
 
-        cp_op = SparseMlaFp8CPOp(
+        cp_op = ZigZagSparseMlaFp8CPOp(
             num_heads=num_heads,
             kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
@@ -220,7 +220,6 @@ class SparseMlaFp8CPOpTest(TestCase):
 
         topk0 = torch.index_select(topk_indices, 0, cp_op.q0_idx).contiguous()
         topk1 = torch.index_select(topk_indices, 0, cp_op.q1_idx).contiguous()
-        # CP forward expects single topk tensor aligned with total_local_ids (q0 then q1)
         topk_cat = torch.cat([topk0, topk1], dim=0)
         with patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
@@ -254,7 +253,6 @@ class SparseMlaFp8CPOpTest(TestCase):
         non_cp_op.plan(mla_params, block_table_device)
         out_non_cp = non_cp_op.forward(q, kv_cache_flat, topk_indices, layer_id=0)
         torch.cuda.synchronize()
-
         self.assertTrue(
             torch.allclose(out_cp, out_non_cp, atol=1e-2, rtol=1e-2),
             "CP output should match non-CP when tp_size=1 (all_gather identity)",
@@ -263,7 +261,7 @@ class SparseMlaFp8CPOpTest(TestCase):
     def test_cp_op_forward_output_shape(self):
         """CP op forward returns correct shape [total_q_len, num_heads, kv_lora_rank]."""
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
-            SparseMlaFp8CPOp,
+            ZigZagSparseMlaFp8CPOp,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
             MlaKVCacheWriteOp,
@@ -355,7 +353,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         kv_cache = KVCache()
         kv_cache.kv_cache_base = kv_cache_base
 
-        cp_op = SparseMlaFp8CPOp(
+        cp_op = ZigZagSparseMlaFp8CPOp(
             num_heads=num_heads,
             kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
@@ -405,7 +403,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         (new tokens only).
         """
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
-            SparseMlaFp8CPOp,
+            ZigZagSparseMlaFp8CPOp,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
             SparseMlaFp8Op,
@@ -507,13 +505,24 @@ class SparseMlaFp8CPOpTest(TestCase):
         batch_indice_d = torch.zeros(new_tokens, dtype=torch.int32, device=device)
 
         num_blocks = block_table_host.shape[1]
-        kv_cache_base = torch.randn(
-            num_blocks, page_size, fp8_bytes_per_token, device=device
-        ).to(torch.uint8)
+        kv_cache_base = (
+            (
+                torch.randn(
+                    num_blocks,
+                    page_size,
+                    fp8_bytes_per_token,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+                * 0.1
+            )
+            .to(torch.float8_e4m3fn)
+            .view(torch.uint8)
+        )
         kv_cache = KVCache()
         kv_cache.kv_cache_base = kv_cache_base
 
-        cp_op = SparseMlaFp8CPOp(
+        cp_op = ZigZagSparseMlaFp8CPOp(
             num_heads=num_heads,
             kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
