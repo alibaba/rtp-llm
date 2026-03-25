@@ -46,19 +46,24 @@ std::vector<int> TokenProcessor::encode(const std::string& prompt) {
 
 std::vector<std::vector<int>> TokenProcessor::batchEncode(const std::vector<std::string>& prompts) {
     py::gil_scoped_acquire acquire;
-    std::vector<std::vector<int>> results;
-    results.reserve(prompts.size());
+    py::list py_prompts;
     for (const auto& prompt : prompts) {
-        py::bytes        py_prompt_bytes(prompt);
-        auto             res = token_processor_.attr("encode")(py_prompt_bytes);
+        py_prompts.append(py::bytes(prompt));
+    }
+    auto res = token_processor_.attr("batch_encode")(py_prompts);
+    if (!py::isinstance<py::list>(res)) {
+        throw HttpApiServerException(HttpApiServerException::TOKENIZER_ERROR,
+                                     "batch_encode: expected a list, but get " + py::cast<std::string>(py::str(res)));
+    }
+    std::vector<std::vector<int>> results;
+    py::list outer_list = py::reinterpret_borrow<py::list>(res);
+    results.reserve(outer_list.size());
+    for (auto item : outer_list) {
         std::vector<int> vecInt;
-        if (!py::isinstance<py::list>(res)) {
-            throw HttpApiServerException(HttpApiServerException::TOKENIZER_ERROR,
-                                         "Expected a list, but get " + py::cast<std::string>(py::str(res)));
-        }
-        py::list py_list = py::reinterpret_borrow<py::list>(res);
-        for (auto item : py_list) {
-            vecInt.push_back(py::cast<int>(item));
+        py::list inner_list = py::reinterpret_borrow<py::list>(item);
+        vecInt.reserve(inner_list.size());
+        for (auto val : inner_list) {
+            vecInt.push_back(py::cast<int>(val));
         }
         results.push_back(std::move(vecInt));
     }

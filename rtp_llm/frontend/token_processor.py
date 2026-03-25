@@ -1,4 +1,5 @@
 from typing import Any, List, Optional, Union
+import logging
 
 import numpy as np
 import numpy.typing as npt
@@ -37,6 +38,28 @@ class TokenProcessor:
                 prompt = prompt.decode("utf-8", errors="ignore")
             th = self.tokenizer.encode(prompt)
             return th
+        except Exception as e:
+            raise e
+
+    def batch_encode(self, prompts: List[Union[str, bytes]]) -> List[List[int]]:
+        """Batch encode using Rust backend tokenizer for better performance."""
+        try:
+            texts = []
+            for p in prompts:
+                if isinstance(p, bytes):
+                    p = p.decode("utf-8", errors="ignore")
+                texts.append(p)
+            # BaseTokenizer wraps HF tokenizer at self.tokenizer.tokenizer
+            inner = getattr(self.tokenizer, 'tokenizer', self.tokenizer)
+            backend = getattr(inner, 'backend_tokenizer', None)
+            if backend is not None and hasattr(backend, 'encode_batch_fast'):
+                encodings = backend.encode_batch_fast(texts, add_special_tokens=False)
+                return [enc.ids for enc in encodings]
+            else:
+                logging.warning("batch_encode: no Rust backend, falling back to Python encode. "
+                                "tokenizer_type=%s inner_type=%s",
+                                type(self.tokenizer).__name__, type(inner).__name__)
+                return [self.tokenizer.encode(t) for t in texts]
         except Exception as e:
             raise e
 
