@@ -123,7 +123,12 @@ InferenceService::InferenceService(const std::shared_ptr<EngineBase>&           
     controller_(controller),
     model_config_(model_config),
     metric_reporter_(metric_reporter),
-    py_model_(py_model) {}
+    py_model_(py_model) {
+    // Load extra input config once at construction time (no per-request overhead)
+    if (!py_model_.is_none()) {
+        loadExtraInputConfig();
+    }
+}
 
 void checkMasterWorker(bool isInternal) {
     if (isInternal) {
@@ -336,7 +341,7 @@ void InferenceService::loadExtraInputConfig() {
 }
 
 InferenceService::ProcessExtraInputResult InferenceService::processExtraInputCpp(const std::vector<int>& input_ids) {
-    loadExtraInputConfig();
+    // Config already loaded in constructor
 
     // Find mask token positions
     std::vector<int> mask_indices;
