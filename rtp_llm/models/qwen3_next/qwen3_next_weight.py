@@ -59,12 +59,12 @@ def split_q_gate(ts: List[torch.Tensor], head_num: int, head_dim: int, part: int
 def plus_one(ts: List[torch.Tensor]):
     """Add one to the tensor. Qwen3Next uses gemma_rms_norm."""
     if ts[0].dtype in {
-        torch.float8_e4m3fn, 
-        torch.float8_e5m2, 
-        torch.float8_e4m3fnuz, 
-        torch.float8_e5m2fnuz
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2fnuz,
     }:
-        # above dtypes do not support in-place addition, and adding 1 may cause overflow, 
+        # above dtypes do not support in-place addition, and adding 1 may cause overflow,
         # so we convert to float32 for addition and then convert back.
         _ = ts[0].float() + 1.0
         return _.to(ts[0].dtype)
@@ -531,8 +531,7 @@ class Qwen3NextWeight(Qwen3NextBaseWeight):
                 CkptWeightInfo(
                     self.prefix + "layers.{i}.linear_attn.in_proj_qkvz.weight",
                     functools.partial(
-                        reorder_qkvz,
-                        linear_attention_config=self.model_config.linear_attention_config,
+                        identity,
                     ),
                 )
             ],

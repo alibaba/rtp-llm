@@ -522,17 +522,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
         load_config: LoadConfig,
     ):
-        for name in self.sub_weights:
-            sub_tensor = tensor.get(name) if isinstance(tensor, dict) else tensor
-            shape_info = sub_tensor.shape if hasattr(sub_tensor, "shape") else "N/A"
-            dtype_info = sub_tensor.dtype if hasattr(sub_tensor, "dtype") else "N/A"
-            logging.info(
-                f"[PerChannelFp8 Split] name={name}, before_shape={shape_info}, dtype={dtype_info}"
-            )
         result = super()._split(tensor, load_config)
-        for name, sub_tensor in result.items():
-            shape_info = sub_tensor.shape if hasattr(sub_tensor, "shape") else "N/A"
-            logging.info(f"[PerChannelFp8 Split] name={name}, after_shape={shape_info}")
         return result
 
     def _postprocess(
@@ -557,10 +547,11 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                 if scale_weight.dim() == 2
                 else scale_weight
             )
-            kernel_weight, scale_weight = (
-                load_config.exported_device.convert_fp8_weight_params(
-                    kernel_weight, scale_weight
-                )
+            kernel_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
+                "weight", kernel_weight
+            )
+            scale_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
+                "scale", scale_weight
             )
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight

@@ -260,6 +260,82 @@ def split_qkvz_channel_scale(
     return torch.cat([q, k, v, z], dim=0)
 
 
+def split_qkvz_by_group(
+    t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
+) -> torch.Tensor:
+    """Split qkvz weight by group (keeping QKVZ together per head group).
+
+    Input layout (after transpose in split_qkvz_by_group_t):
+        [hidden_size, head_num_k * (head_k_dim + head_k_dim + head_v_dim * group_v + head_v_dim * group_v)]
+
+    This function splits along the head_num_k dimension, keeping QKVZ together for each head group.
+    Each group contains: Q(head_k_dim) + K(head_k_dim) + V(head_v_dim * group_v) + Z(head_v_dim * group_v)
+
+    Output layout:
+        [hidden_size, local_head_num_k * (head_k_dim + head_k_dim + head_v_dim * group_v + head_v_dim * group_v)]
+    """
+    group_v = linear_config.linear_num_value_heads // linear_config.linear_num_key_heads
+
+    group_size = (
+        linear_config.linear_key_head_dim  # Q
+        + linear_config.linear_key_head_dim  # K
+        + linear_config.linear_value_head_dim * group_v  # V
+        + linear_config.linear_value_head_dim * group_v  # Z
+    )
+
+    hidden_size = t.shape[0]
+    total_groups = linear_config.linear_num_key_heads
+
+    t = t.view(hidden_size, total_groups, group_size)
+
+    local_head_num_k = total_groups // load_config.tp_size
+    start_idx = local_head_num_k * load_config.tp_rank
+    end_idx = start_idx + local_head_num_k
+
+    t = t[:, start_idx:end_idx, :].contiguous()
+
+    return t.view(hidden_size, -1)
+
+
+def split_qkvz_by_group_t(
+    t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
+) -> torch.Tensor:
+
+    t = split_qkvz_by_group(t.transpose(0, 1), load_config, linear_config)
+    return t.transpose(0, 1).contiguous()
+
+
+def split_qkvz_channel_scale_by_group(
+    t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
+) -> torch.Tensor:
+    """Split per-channel scale by group (keeping QKVZ together per head group).
+
+    Input layout: [head_num_k * group_size, 1]
+    Output layout: [local_head_num_k * group_size, 1]
+    """
+
+    group_v = linear_config.linear_num_value_heads // linear_config.linear_num_key_heads
+
+    group_size = (
+        linear_config.linear_key_head_dim  # Q
+        + linear_config.linear_key_head_dim  # K
+        + linear_config.linear_value_head_dim * group_v  # V
+        + linear_config.linear_value_head_dim * group_v  # Z
+    )
+
+    total_groups = linear_config.linear_num_key_heads
+
+    t = t.view(total_groups, group_size, -1)
+
+    local_head_num_k = total_groups // load_config.tp_size
+    start_idx = local_head_num_k * load_config.tp_rank
+    end_idx = start_idx + local_head_num_k
+
+    t = t[start_idx:end_idx, :, :].contiguous()
+    t = t.view(-1, t.shape[-1])
+    return t.view(-1, t.shape[-1])
+
+
 def split_out_linear_channel_scale(
     t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
 ) -> torch.Tensor:
@@ -273,8 +349,8 @@ def split_out_linear_channel_scale(
 
 
 _linear_attn_w8a8_per_channel_split_strategy = {
-    W.linear_attn_qkvz_w: split_qkvz_t,
-    W.linear_attn_qkvz_s: split_qkvz_channel_scale,
+    W.linear_attn_qkvz_w: split_qkvz_by_group_t,
+    W.linear_attn_qkvz_s: split_qkvz_channel_scale_by_group,
     W.linear_attn_out_w: split_out_linear_t,
     W.linear_attn_out_s: sp_id,
 }
