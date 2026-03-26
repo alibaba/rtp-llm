@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mutex>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
@@ -81,60 +83,21 @@ private:
 
     // CP sharded KV cache helpers
     std::vector<CacheKeyType> recomputeVirtualCacheKeys(GenerateStream* stream, int32_t cp_size) const;
-    /// Build RDMA receive descriptors for one layer from one peer.
-    /// Data is received into temp_buffer at the peer's slice, not into decode blocks.
-    void buildCPShardedLayerCache(std::shared_ptr<RequestBlockBuffer>& load_layer_cache,
-                                  const LoadKVCacheContext&            load_context,
-                                  size_t                               layer_id,
-                                  int                                  peer_index,
-                                  size_t                               model_id,
-                                  void*                                temp_kv,
-                                  size_t                               block_stride_bytes,
-                                  void*                                temp_scale,
-                                  size_t                               scale_stride_bytes) const;
 
-    /// After RDMA completes, scatter interleaved tokens from per-layer temp buffers
-    /// into contiguous decode KV cache blocks.
-    void scatterCPTempToDecodeBlocks(const LoadKVCacheContext&     load_context,
-                                     const std::vector<BufferPtr>& temp_kv_bufs,
-                                     const std::vector<BufferPtr>& temp_scale_bufs,
-                                     const std::vector<size_t>&    kv_strides,
-                                     const std::vector<size_t>&    scale_strides) const;
+    /// Scatter from paged staging blocks to paged decode blocks using the new
+    /// paged scatter kernel. Staging blocks are borrowed from BlockPool.
+    void scatterStagingToDecodeBlocks(const LoadKVCacheContext& load_context,
+                                      const std::vector<int>&   staging_block_ids,
+                                      cudaStream_t              stream) const;
 
 private:
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<size_t>      onflight_load_cache_requests_{0};
     size_t                   model_id;
 
-    /// Lazy-initialized staging buffer for CP sharded PD transfer.
-    /// Allocated on first use, registered for RDMA, reused across requests.
-    struct CPStagingBuffer {
-        BufferPtr kv_buf;     // [layer_num * max_temp_slots * kv_stride]
-        BufferPtr scale_buf;  // [layer_num * max_temp_slots * scale_stride] (may be null)
-        size_t    kv_stride      = 0;
-        size_t    scale_stride   = 0;
-        int       max_temp_slots = 0;  // max vblock_count * cp_size
-        size_t    layer_num      = 0;
-
-        /// Get KV address for (layer_id, slot_index) within the staging buffer.
-        void* kvAddr(size_t layer_id, int slot_index) const {
-            size_t offset = (layer_id * max_temp_slots + slot_index) * kv_stride;
-            return static_cast<char*>(kv_buf->data()) + offset;
-        }
-        /// Get scale address for (layer_id, slot_index), or nullptr if no scale.
-        void* scaleAddr(size_t layer_id, int slot_index) const {
-            if (!scale_buf || scale_stride == 0)
-                return nullptr;
-            size_t offset = (layer_id * max_temp_slots + slot_index) * scale_stride;
-            return static_cast<char*>(scale_buf->data()) + offset;
-        }
-    };
-    std::mutex                       staging_mutex_;
-    std::unique_ptr<CPStagingBuffer> cp_staging_;
-
-    /// Ensure staging buffer is allocated for the given cp_size.
-    /// Thread-safe; only allocates once (or re-allocates if cp_size grows).
-    void ensureCPStagingBuffer(int cp_size);
+    void*          scatter_stream_ = nullptr;
+    std::once_flag scatter_stream_init_;
+    cudaStream_t   getOrCreateScatterStream();
 };
 
 }  // namespace rtp_llm

@@ -52,4 +52,33 @@ void invokeCPCacheScatter(void**       dst_block_addrs,
                           int          elem_stride_bytes,
                           cudaStream_t stream);
 
+/// Paged variant: both source (staging) and destination (decode) are paged blocks.
+///
+/// Used when staging blocks are borrowed from BlockPool instead of a contiguous
+/// temp buffer.  Source data layout within each staging block is identical to
+/// the contiguous version: peer p's slot s holds the token at
+/// global offset (s * cp_size + p) within the virtual block.
+///
+/// @param dst_block_addrs  Array of decode block base addresses indexed by block_id.
+/// @param dst_block_ids    Decode-side block IDs, length = ceil(total_tokens / block_size).
+/// @param src_block_addrs  Array of staging block base addresses indexed by block_id.
+/// @param src_block_ids    Staging block IDs, length = virtual_block_count * cp_size.
+///                         Layout: [vblock_0_peer_0, vblock_0_peer_1, ..., vblock_1_peer_0, ...].
+/// @param virtual_block_count Number of virtual blocks.
+/// @param cp_size           Number of CP peers.
+/// @param block_size        Tokens per physical block.
+/// @param total_tokens      Actual total token count.
+/// @param elem_stride_bytes Bytes per token in the KV cache (must be 16-byte aligned).
+/// @param stream            CUDA stream.
+void invokeCPCacheScatterPaged(void**       dst_block_addrs,
+                               const int*   dst_block_ids,
+                               void**       src_block_addrs,
+                               const int*   src_block_ids,
+                               int          virtual_block_count,
+                               int          cp_size,
+                               int          block_size,
+                               int          total_tokens,
+                               int          elem_stride_bytes,
+                               cudaStream_t stream);
+
 }  // namespace rtp_llm

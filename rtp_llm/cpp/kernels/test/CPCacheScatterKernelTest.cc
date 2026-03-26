@@ -283,5 +283,317 @@ TEST_F(CPCacheScatterKernelTest, NonContiguousBlockIds) {
     }
 }
 
+// ===================================================================
+// Tests for invokeCPCacheScatterPaged (paged src + paged dst)
+// ===================================================================
+
+class CPCacheScatterPagedKernelTest: public CPCacheScatterKernelTest {
+protected:
+    /// Paged variant: both source (staging) and destination (decode) are
+    /// individually allocated blocks addressed via indirection tables.
+    void runPagedScatterTest(
+        int virtual_block_count, int cp_size, int block_size, int elem_stride_bytes, int total_tokens = -1) {
+        ASSERT_EQ(elem_stride_bytes % 16, 0);
+
+        const int tokens_per_vb = block_size * cp_size;
+        if (total_tokens < 0) {
+            total_tokens = virtual_block_count * tokens_per_vb;
+        }
+        const int    decode_blocks = (total_tokens + block_size - 1) / block_size;
+        const int    staging_cnt   = virtual_block_count * cp_size;
+        const size_t block_bytes   = static_cast<size_t>(block_size) * elem_stride_bytes;
+
+        // Allocate individual src/dst blocks (non-contiguous)
+        std::vector<BufferPtr> src_block_bufs(staging_cnt);
+        std::vector<BufferPtr> dst_block_bufs(decode_blocks);
+        for (int i = 0; i < staging_cnt; ++i) {
+            src_block_bufs[i] =
+                device_->allocateBuffer({DataType::TYPE_BYTES, {block_bytes}, AllocationType::DEVICE}, {});
+        }
+        for (int i = 0; i < decode_blocks; ++i) {
+            dst_block_bufs[i] =
+                device_->allocateBuffer({DataType::TYPE_BYTES, {block_bytes}, AllocationType::DEVICE}, {});
+        }
+
+        // Use shuffled block IDs to test indirection
+        // Src IDs: [staging_cnt-1, staging_cnt-2, ..., 0] reversed
+        // Dst IDs: [decode_blocks+5, decode_blocks+4, ..., 6] offset+reversed
+        std::vector<int> src_ids(staging_cnt);
+        std::vector<int> dst_ids(decode_blocks);
+        for (int i = 0; i < staging_cnt; ++i)
+            src_ids[i] = staging_cnt - 1 - i;
+        for (int i = 0; i < decode_blocks; ++i)
+            dst_ids[i] = decode_blocks + 5 - i;
+
+        int max_src_id      = *std::max_element(src_ids.begin(), src_ids.end());
+        int max_dst_id      = *std::max_element(dst_ids.begin(), dst_ids.end());
+        int addr_table_size = std::max(max_src_id, max_dst_id) + 1;
+
+        std::vector<void*> src_addrs(addr_table_size, nullptr);
+        std::vector<void*> dst_addrs(addr_table_size, nullptr);
+        for (int i = 0; i < staging_cnt; ++i)
+            src_addrs[src_ids[i]] = src_block_bufs[i]->data();
+        for (int i = 0; i < decode_blocks; ++i)
+            dst_addrs[dst_ids[i]] = dst_block_bufs[i]->data();
+
+        // Fill staging blocks with expected pattern
+        // Staging block layout: src_ids[v*cp_size + p] holds peer p's data for vblock v
+        // Peer p's slot s holds token at global offset (s * cp_size + p) within the vblock
+        for (int v = 0; v < virtual_block_count; ++v) {
+            for (int p = 0; p < cp_size; ++p) {
+                int                  src_idx = v * cp_size + p;
+                std::vector<uint8_t> block_host(block_bytes, 0);
+                for (int s = 0; s < block_size; ++s) {
+                    int global_token = v * tokens_per_vb + s * cp_size + p;
+                    if (global_token >= total_tokens)
+                        continue;
+                    uint8_t tag = static_cast<uint8_t>(global_token & 0xFF);
+                    std::memset(block_host.data() + s * elem_stride_bytes, tag, elem_stride_bytes);
+                }
+                device_->copy({*src_block_bufs[src_idx],
+                               Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {block_bytes}, block_host.data())});
+            }
+        }
+
+        // Upload address tables and IDs to GPU
+        auto src_addrs_gpu =
+            device_->allocateBuffer({DataType::TYPE_UINT64, {(size_t)addr_table_size}, AllocationType::DEVICE}, {});
+        auto dst_addrs_gpu =
+            device_->allocateBuffer({DataType::TYPE_UINT64, {(size_t)addr_table_size}, AllocationType::DEVICE}, {});
+        auto src_ids_gpu =
+            device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)staging_cnt}, AllocationType::DEVICE}, {});
+        auto dst_ids_gpu =
+            device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)decode_blocks}, AllocationType::DEVICE}, {});
+
+        device_->copy(
+            {*src_addrs_gpu,
+             Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT64, {(size_t)addr_table_size}, src_addrs.data())});
+        device_->copy(
+            {*dst_addrs_gpu,
+             Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT64, {(size_t)addr_table_size}, dst_addrs.data())});
+        device_->copy({*src_ids_gpu,
+                       Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INT32, {(size_t)staging_cnt}, src_ids.data())});
+        device_->copy({*dst_ids_gpu,
+                       Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INT32, {(size_t)decode_blocks}, dst_ids.data())});
+
+        // Run paged kernel
+        invokeCPCacheScatterPaged(reinterpret_cast<void**>(dst_addrs_gpu->data()),
+                                  dst_ids_gpu->data<int>(),
+                                  reinterpret_cast<void**>(src_addrs_gpu->data()),
+                                  src_ids_gpu->data<int>(),
+                                  virtual_block_count,
+                                  cp_size,
+                                  block_size,
+                                  total_tokens,
+                                  elem_stride_bytes,
+                                  nullptr);
+        device_->syncAndCheck();
+
+        // Verify: each decode block should contain contiguous tokens
+        for (int t = 0; t < total_tokens; ++t) {
+            int     blk_idx  = t / block_size;
+            int     slot     = t % block_size;
+            uint8_t expected = static_cast<uint8_t>(t & 0xFF);
+
+            std::vector<uint8_t> block_host(block_bytes);
+            device_->copy({Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {block_bytes}, block_host.data()),
+                           *dst_block_bufs[blk_idx]});
+            device_->syncAndCheck();
+
+            const uint8_t* ptr = block_host.data() + slot * elem_stride_bytes;
+            for (int b = 0; b < elem_stride_bytes; ++b) {
+                ASSERT_EQ(ptr[b], expected) << "token=" << t << " blk=" << blk_idx << " dst_id=" << dst_ids[blk_idx]
+                                            << " slot=" << slot << " byte=" << b;
+            }
+        }
+    }
+};
+
+// Basic paged scatter tests
+TEST_F(CPCacheScatterPagedKernelTest, Basic_1VB_CP2_BS4) {
+    runPagedScatterTest(1, 2, 4, 32);
+}
+
+TEST_F(CPCacheScatterPagedKernelTest, MultiVB_CP2_BS4) {
+    runPagedScatterTest(3, 2, 4, 32);
+}
+
+TEST_F(CPCacheScatterPagedKernelTest, CP4_BS4) {
+    runPagedScatterTest(2, 4, 4, 64);
+}
+
+TEST_F(CPCacheScatterPagedKernelTest, CP2_BS8) {
+    runPagedScatterTest(2, 2, 8, 32);
+}
+
+// Partial last virtual block
+TEST_F(CPCacheScatterPagedKernelTest, Partial_75tokens_CP4_BS64) {
+    runPagedScatterTest(1, 4, 64, 576, 75);
+}
+
+TEST_F(CPCacheScatterPagedKernelTest, Partial_130tokens_CP2_BS64) {
+    runPagedScatterTest(2, 2, 64, 32, 130);
+}
+
+TEST_F(CPCacheScatterPagedKernelTest, Partial_1token_CP4_BS4) {
+    runPagedScatterTest(1, 4, 4, 32, 1);
+}
+
+// Realistic MLA dimensions
+TEST_F(CPCacheScatterPagedKernelTest, RealisticMLA_BS64_CP2_Stride576) {
+    runPagedScatterTest(4, 2, 64, 576);
+}
+
+TEST_F(CPCacheScatterPagedKernelTest, RealisticMLA_BS64_CP4_Stride576) {
+    runPagedScatterTest(8, 4, 64, 576);
+}
+
+// Edge cases
+TEST_F(CPCacheScatterPagedKernelTest, CP1_NoOp) {
+    invokeCPCacheScatterPaged(nullptr, nullptr, nullptr, nullptr, 5, 1, 4, 20, 32, nullptr);
+}
+
+TEST_F(CPCacheScatterPagedKernelTest, ZeroVB_NoOp) {
+    invokeCPCacheScatterPaged(nullptr, nullptr, nullptr, nullptr, 0, 2, 4, 0, 32, nullptr);
+}
+
+TEST_F(CPCacheScatterPagedKernelTest, ZeroTokens_NoOp) {
+    invokeCPCacheScatterPaged(nullptr, nullptr, nullptr, nullptr, 1, 2, 4, 0, 32, nullptr);
+}
+
+TEST_F(CPCacheScatterPagedKernelTest, MinAlignment_Stride16) {
+    runPagedScatterTest(2, 2, 4, 16);
+}
+
+TEST_F(CPCacheScatterPagedKernelTest, LargeScale_32VB_CP4_BS64) {
+    runPagedScatterTest(32, 4, 64, 576);
+}
+
+// Verify paged and contiguous kernels produce identical results
+TEST_F(CPCacheScatterPagedKernelTest, MatchesContiguousKernel) {
+    const int    vblock_count      = 3;
+    const int    cp_size           = 2;
+    const int    block_size        = 4;
+    const int    elem_stride_bytes = 32;
+    const int    tokens_per_vb     = block_size * cp_size;
+    const int    total_tokens      = vblock_count * tokens_per_vb;
+    const int    decode_blocks     = total_tokens / block_size;
+    const int    staging_cnt       = vblock_count * cp_size;
+    const size_t block_bytes       = static_cast<size_t>(block_size) * elem_stride_bytes;
+
+    // Build contiguous temp buffer
+    const size_t         temp_size = static_cast<size_t>(staging_cnt) * block_bytes;
+    std::vector<uint8_t> temp_host(temp_size, 0);
+    for (int v = 0; v < vblock_count; ++v) {
+        for (int p = 0; p < cp_size; ++p) {
+            int      slot_idx = v * cp_size + p;
+            uint8_t* slot_ptr = temp_host.data() + slot_idx * block_bytes;
+            for (int s = 0; s < block_size; ++s) {
+                int     global_token = v * tokens_per_vb + s * cp_size + p;
+                uint8_t tag          = static_cast<uint8_t>(global_token & 0xFF);
+                std::memset(slot_ptr + s * elem_stride_bytes, tag, elem_stride_bytes);
+            }
+        }
+    }
+    auto temp_gpu = device_->allocateBuffer({DataType::TYPE_BYTES, {temp_size}, AllocationType::DEVICE}, {});
+    device_->copy({*temp_gpu, Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {temp_size}, temp_host.data())});
+
+    // Allocate two sets of decode blocks: one for contiguous, one for paged
+    auto dst_contig = device_->allocateBuffer(
+        {DataType::TYPE_BYTES, {(size_t)decode_blocks * block_bytes}, AllocationType::DEVICE}, {});
+    std::vector<BufferPtr> dst_paged_bufs(decode_blocks);
+    for (int i = 0; i < decode_blocks; ++i)
+        dst_paged_bufs[i] = device_->allocateBuffer({DataType::TYPE_BYTES, {block_bytes}, AllocationType::DEVICE}, {});
+
+    // Identity IDs for both
+    std::vector<int> dst_ids(decode_blocks);
+    std::iota(dst_ids.begin(), dst_ids.end(), 0);
+    std::vector<int> src_ids(staging_cnt);
+    std::iota(src_ids.begin(), src_ids.end(), 0);
+
+    // Contiguous dst addresses
+    std::vector<void*> contig_addrs(decode_blocks);
+    for (int i = 0; i < decode_blocks; ++i)
+        contig_addrs[i] = static_cast<char*>(dst_contig->data()) + i * block_bytes;
+
+    // Paged dst/src addresses
+    std::vector<void*> paged_dst_addrs(decode_blocks);
+    std::vector<void*> paged_src_addrs(staging_cnt);
+    for (int i = 0; i < decode_blocks; ++i)
+        paged_dst_addrs[i] = dst_paged_bufs[i]->data();
+    for (int i = 0; i < staging_cnt; ++i)
+        paged_src_addrs[i] = static_cast<char*>(temp_gpu->data()) + i * block_bytes;
+
+    // Upload all tables to GPU
+    auto contig_addrs_gpu =
+        device_->allocateBuffer({DataType::TYPE_UINT64, {(size_t)decode_blocks}, AllocationType::DEVICE}, {});
+    auto contig_ids_gpu =
+        device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)decode_blocks}, AllocationType::DEVICE}, {});
+    auto paged_dst_addrs_gpu =
+        device_->allocateBuffer({DataType::TYPE_UINT64, {(size_t)decode_blocks}, AllocationType::DEVICE}, {});
+    auto paged_dst_ids_gpu =
+        device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)decode_blocks}, AllocationType::DEVICE}, {});
+    auto paged_src_addrs_gpu =
+        device_->allocateBuffer({DataType::TYPE_UINT64, {(size_t)staging_cnt}, AllocationType::DEVICE}, {});
+    auto paged_src_ids_gpu =
+        device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)staging_cnt}, AllocationType::DEVICE}, {});
+
+    device_->copy(
+        {*contig_addrs_gpu,
+         Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT64, {(size_t)decode_blocks}, contig_addrs.data())});
+    device_->copy({*contig_ids_gpu,
+                   Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INT32, {(size_t)decode_blocks}, dst_ids.data())});
+    device_->copy(
+        {*paged_dst_addrs_gpu,
+         Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT64, {(size_t)decode_blocks}, paged_dst_addrs.data())});
+    device_->copy({*paged_dst_ids_gpu,
+                   Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INT32, {(size_t)decode_blocks}, dst_ids.data())});
+    device_->copy(
+        {*paged_src_addrs_gpu,
+         Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT64, {(size_t)staging_cnt}, paged_src_addrs.data())});
+    device_->copy({*paged_src_ids_gpu,
+                   Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INT32, {(size_t)staging_cnt}, src_ids.data())});
+
+    // Run both kernels
+    invokeCPCacheScatter(reinterpret_cast<void**>(contig_addrs_gpu->data()),
+                         contig_ids_gpu->data<int>(),
+                         temp_gpu->data(),
+                         vblock_count,
+                         cp_size,
+                         block_size,
+                         total_tokens,
+                         elem_stride_bytes,
+                         nullptr);
+
+    invokeCPCacheScatterPaged(reinterpret_cast<void**>(paged_dst_addrs_gpu->data()),
+                              paged_dst_ids_gpu->data<int>(),
+                              reinterpret_cast<void**>(paged_src_addrs_gpu->data()),
+                              paged_src_ids_gpu->data<int>(),
+                              vblock_count,
+                              cp_size,
+                              block_size,
+                              total_tokens,
+                              elem_stride_bytes,
+                              nullptr);
+    device_->syncAndCheck();
+
+    // Compare results byte-by-byte
+    for (int blk = 0; blk < decode_blocks; ++blk) {
+        std::vector<uint8_t> contig_data(block_bytes), paged_data(block_bytes);
+        device_->copy({Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {block_bytes}, contig_data.data()),
+                       Buffer(MemoryType::MEMORY_GPU,
+                              DataType::TYPE_BYTES,
+                              {block_bytes},
+                              static_cast<char*>(dst_contig->data()) + blk * block_bytes)});
+        device_->copy({Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {block_bytes}, paged_data.data()),
+                       *dst_paged_bufs[blk]});
+        device_->syncAndCheck();
+
+        for (size_t b = 0; b < block_bytes; ++b) {
+            ASSERT_EQ(contig_data[b], paged_data[b]) << "mismatch at block=" << blk << " byte=" << b;
+        }
+    }
+}
+
 }  // namespace test
 }  // namespace rtp_llm

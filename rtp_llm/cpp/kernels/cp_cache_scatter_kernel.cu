@@ -78,4 +78,68 @@ void invokeCPCacheScatter(void**       dst_block_addrs,
         dst_block_addrs, dst_block_ids, src_temp_buffer, cp_size, block_size, total_tokens, elem_stride_bytes);
 }
 
+__global__ void cpCacheScatterPagedKernel(void**     dst_block_addrs,
+                                          const int* dst_block_ids,
+                                          void**     src_block_addrs,
+                                          const int* src_block_ids,
+                                          int        cp_size,
+                                          int        block_size,
+                                          int        total_tokens,
+                                          int        elem_stride_bytes) {
+    const int vb             = blockIdx.x;
+    const int tokens_per_vb  = block_size * cp_size;
+    const int stride_int4    = elem_stride_bytes / 16;
+    const int vb_token_start = vb * tokens_per_vb;
+
+    for (int t = 0; t < tokens_per_vb; t++) {
+        int global_token = vb_token_start + t;
+        if (global_token >= total_tokens)
+            break;
+
+        int peer         = t % cp_size;
+        int slot_in_peer = t / cp_size;
+
+        int         src_idx    = vb * cp_size + peer;
+        int         src_bid    = src_block_ids[src_idx];
+        const int4* src        = reinterpret_cast<const int4*>(src_block_addrs[src_bid]);
+        int         src_offset = slot_in_peer * stride_int4;
+
+        int   dst_block_idx = global_token / block_size;
+        int   dst_slot      = global_token % block_size;
+        int   dst_bid       = dst_block_ids[dst_block_idx];
+        int4* dst           = reinterpret_cast<int4*>(dst_block_addrs[dst_bid]);
+        int   dst_offset    = dst_slot * stride_int4;
+
+        for (int e = threadIdx.x; e < stride_int4; e += blockDim.x) {
+            dst[dst_offset + e] = src[src_offset + e];
+        }
+    }
+}
+
+void invokeCPCacheScatterPaged(void**       dst_block_addrs,
+                               const int*   dst_block_ids,
+                               void**       src_block_addrs,
+                               const int*   src_block_ids,
+                               int          virtual_block_count,
+                               int          cp_size,
+                               int          block_size,
+                               int          total_tokens,
+                               int          elem_stride_bytes,
+                               cudaStream_t stream) {
+    if (virtual_block_count <= 0 || cp_size <= 1 || total_tokens <= 0) {
+        return;
+    }
+    assert(elem_stride_bytes % 16 == 0);
+
+    const int threads_per_block = 256;
+    cpCacheScatterPagedKernel<<<virtual_block_count, threads_per_block, 0, stream>>>(dst_block_addrs,
+                                                                                     dst_block_ids,
+                                                                                     src_block_addrs,
+                                                                                     src_block_ids,
+                                                                                     cp_size,
+                                                                                     block_size,
+                                                                                     total_tokens,
+                                                                                     elem_stride_bytes);
+}
+
 }  // namespace rtp_llm
