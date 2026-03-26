@@ -105,6 +105,7 @@ class IndexerOp(nn.Module):
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
         self.kv_len = None  # set in quant_q_k_cp (total KV length) for CP topk methods
+        self.total_kv_len = None
         self.q0_idx = None
         self.q1_idx = None
         self.q0_idx_global = None
@@ -355,7 +356,7 @@ class IndexerOp(nn.Module):
             When kv_cache_sharded, also sets self._indexer_workspace and
             self._indexer_workspace_block_table for _get_topk_ragged_cp_roundrobin.
         """
-        self.kv_len = self.kv_restore_unpad_indices.shape[0]
+        self.kv_len = self.total_kv_len
 
         assert kv_cache is not None, "kv_cache is required"
         gathered_key = all_gather(key.contiguous(), group=Group.TP)
@@ -406,11 +407,6 @@ class IndexerOp(nn.Module):
                 self.scale_fmt,
             )
             self._indexer_workspace = workspace
-
-            # For round-robin with prefix cache, kv_len must include prefix tokens.
-            # cu_kv_seqlens_global[-1] gives the total full KV length (prefix + new).
-            if self.cu_kv_seqlens_global is not None:
-                self.kv_len = int(self.cu_kv_seqlens_global[-1].item())
         else:
             self._indexer_workspace = None
             self._indexer_workspace_block_table = None

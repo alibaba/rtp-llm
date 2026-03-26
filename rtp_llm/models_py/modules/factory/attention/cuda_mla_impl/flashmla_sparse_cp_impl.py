@@ -495,6 +495,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         kv_lengths = actual_input_lengths.int() + prefix_lengths.int()
         cu_kv_seqlens_cpu = torch.zeros(kv_lengths.shape[0] + 1, dtype=torch.int32)
         cu_kv_seqlens_cpu[1:] = torch.cumsum(kv_lengths, dim=0)
+        self.total_kv_len = int(cu_kv_seqlens_cpu[-1])
         self.cu_kv_seqlens_global = cu_kv_seqlens_cpu.to(self.device)
 
         # Determine whether prefix cache is active
@@ -1072,6 +1073,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         cu_local_kv_seqlens = None
         total_local_kv = None
         kv_allgather_restore_indices = None
+        ws_total_pages = None
         if getattr(impl, "kv_cache_sharded", False):
             ws_slot_mapping = impl._ws_slot_mapping
             ws_block_table = impl._ws_block_table

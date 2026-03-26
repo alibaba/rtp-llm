@@ -168,6 +168,7 @@ class Indexer(nn.Module):
         op.total_global_ids = cp_params.total_global_ids
         op.total_local_ids = cp_params.total_local_ids
         op.cu_kv_seqlens_global = cp_params.cu_kv_seqlens_global
+        op.total_kv_len = cp_params.total_kv_len
 
         # Pre-compute workspace metadata for round-robin (reuse MLA block_table)
         kv_cache_sharded = self._is_roundrobin and getattr(
