@@ -52,7 +52,7 @@ class Indexer(nn.Module):
         self.parallelism_config = parallelism_config
 
         cp = parallelism_config.prefill_cp_config
-        self._is_cp = cp.is_enabled() or cp.is_prefill_enabled()
+        self._is_cp = cp.is_enabled()
         self._is_roundrobin = (
             self._is_cp and cp.processor_type == CPProcessorType.ROUND_ROBIN
         )
