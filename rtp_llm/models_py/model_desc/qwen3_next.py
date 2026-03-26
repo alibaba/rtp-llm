@@ -35,6 +35,9 @@ from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
 from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
+from rtp_llm.models_py.triton_kernels.fla.fused_sigmoid_gating_recurrent import (
+    fused_sigmoid_gating_delta_rule_update,
+)
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
@@ -350,18 +353,16 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             ],
             dim=2,
         )
-        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
 
-        # contiguous will be applyed when call fused_recurrent_gated_delta_rule
-        g = g.view(batch, seq, self.local_num_v_heads)
-        beta = beta.view(batch, seq, self.local_num_v_heads)
         ssm_states = self._get_ssm_states(kv_cache_tensor)
-        core_attn_out, _ = fused_recurrent_gated_delta_rule(
+        core_attn_out, _ = fused_sigmoid_gating_delta_rule_update(
+            A_log=self.alog,
+            a=a,
+            dt_bias=self.dt_bias,
             q=query,
             k=key,
             v=value,
-            g=g,
-            beta=beta,
+            b=b,
             scale=None,
             initial_state=ssm_states,
             inplace_final_state=True,
@@ -369,6 +370,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
             use_qk_l2norm_in_kernel=True,
+            softplus_beta=1.0,
+            softplus_threshold=20.0,
         )
         res = core_attn_out.reshape(
             [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
