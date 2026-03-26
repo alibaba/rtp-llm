@@ -48,6 +48,70 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
     return grpc::Status::OK;
 }
 
+void DecodeRpcServer::ensureCPStagingBuffer(int cp_size) {
+    std::lock_guard<std::mutex> lock(staging_mutex_);
+
+    auto         cache_manager  = engine_->resourceContext().cache_manager;
+    const auto&  cache_config   = cache_manager->cacheConfig();
+    auto         device         = engine_->getDevice();
+    const int    block_size     = static_cast<int>(cache_config.seq_size_per_block);
+    const int    vbs            = block_size * cp_size;
+    const int    max_seq_len    = static_cast<int>(maga_init_params_.model_config_.max_seq_len);
+    const int    max_vblocks    = (max_seq_len + vbs - 1) / vbs;
+    const int    max_temp_slots = max_vblocks * cp_size;
+    const size_t layer_num      = maga_init_params_.model_config_.num_layers;
+    const size_t kv_stride      = cache_config.kv_block_stride_bytes;
+    const size_t sc_stride      = cache_config.kv_scale_stride_bytes;
+
+    // Already allocated and large enough?
+    if (cp_staging_ && cp_staging_->max_temp_slots >= max_temp_slots) {
+        return;
+    }
+
+    auto staging            = std::make_unique<CPStagingBuffer>();
+    staging->kv_stride      = kv_stride;
+    staging->scale_stride   = sc_stride;
+    staging->max_temp_slots = max_temp_slots;
+    staging->layer_num      = layer_num;
+
+    size_t kv_total = layer_num * max_temp_slots * kv_stride;
+    staging->kv_buf =
+        device->allocateBuffer({DataType::TYPE_BYTES, {kv_total}, AllocationType::DEVICE}, {"cp_staging_kv"});
+
+    if (sc_stride > 0) {
+        size_t sc_total = layer_num * max_temp_slots * sc_stride;
+        staging->scale_buf =
+            device->allocateBuffer({DataType::TYPE_BYTES, {sc_total}, AllocationType::DEVICE}, {"cp_staging_scale"});
+    }
+
+    // Register staging buffer for RDMA (if RDMA is enabled).
+    if (resource_.cache_store) {
+        auto memory_util = resource_.cache_store->getMemoryUtil();
+        if (memory_util) {
+            bool gpu = true;
+            if (!memory_util->regUserMr(staging->kv_buf->data(), kv_total, gpu)) {
+                RTP_LLM_LOG_WARNING("Failed to register CP staging KV buffer for RDMA (non-fatal for TCP)");
+            }
+            if (staging->scale_buf) {
+                size_t sc_total = layer_num * max_temp_slots * sc_stride;
+                if (!memory_util->regUserMr(staging->scale_buf->data(), sc_total, gpu)) {
+                    RTP_LLM_LOG_WARNING("Failed to register CP staging scale buffer for RDMA (non-fatal for TCP)");
+                }
+            }
+        }
+    }
+
+    RTP_LLM_LOG_INFO("CP staging buffer allocated: layers=%zu max_temp_slots=%d kv_stride=%zu "
+                     "scale_stride=%zu kv_total=%.1fMB",
+                     layer_num,
+                     max_temp_slots,
+                     kv_stride,
+                     sc_stride,
+                     kv_total / 1048576.0);
+
+    cp_staging_ = std::move(staging);
+}
+
 void DecodeRpcServer::initThreadPool() {
     if (resource_.workers.size() > 0) {
         return;
@@ -769,32 +833,14 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const int vblock_count = (cp_size > 1 && use_mla) ? static_cast<int>(load_context.cache_keys.size()) : 0;
     const int temp_slots   = vblock_count * cp_size;  // one physical block per peer per vblock
 
-    // Per-layer temp buffers (kept alive until scatter completes).
-    struct LayerTempBuffers {
-        BufferPtr kv;
-        BufferPtr scale;
-        size_t    kv_stride    = 0;
-        size_t    scale_stride = 0;
-    };
-    std::vector<LayerTempBuffers> layer_temps(layer_num);
-
+    // Ensure CP staging buffer is allocated and RDMA-registered (lazy init).
     if (temp_slots > 0) {
-        auto device = engine_->getDevice();
-        for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
-            size_t kv_stride                = cache_config.kv_block_stride_bytes;
-            layer_temps[layer_id].kv_stride = kv_stride;
-            layer_temps[layer_id].kv =
-                device->allocateBuffer({DataType::TYPE_BYTES, {(size_t)temp_slots * kv_stride}, AllocationType::DEVICE},
-                                       {"cp_temp_kv_L" + std::to_string(layer_id)});
-
-            if (cache_config.kv_scale_stride_bytes > 0) {
-                size_t scale_stride                = cache_config.kv_scale_stride_bytes;
-                layer_temps[layer_id].scale_stride = scale_stride;
-                layer_temps[layer_id].scale        = device->allocateBuffer(
-                    {DataType::TYPE_BYTES, {(size_t)temp_slots * scale_stride}, AllocationType::DEVICE},
-                    {"cp_temp_scale_L" + std::to_string(layer_id)});
-            }
-        }
+        ensureCPStagingBuffer(cp_size);
+        RTP_LLM_CHECK_WITH_INFO(cp_staging_ != nullptr, "CP staging buffer not initialized");
+        RTP_LLM_CHECK_WITH_INFO(temp_slots <= cp_staging_->max_temp_slots,
+                                "temp_slots=%d exceeds staging capacity=%d",
+                                temp_slots,
+                                cp_staging_->max_temp_slots);
     }
 
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
@@ -822,18 +868,17 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             auto        block_num = block_ids.size();
             size_t      model_id  = maga_init_params_.model_id;
 
-            // CP sharded path: RDMA receives into temp buffer, scatter later.
+            // CP sharded path: RDMA receives into staging buffer, scatter later.
             if (cp_size > 1 && use_mla) {
-                auto& lt = layer_temps[layer_id];
                 buildCPShardedLayerCache(load_layer_cache,
                                          load_context,
                                          layer_id,
                                          i,
                                          model_id,
-                                         lt.kv->data(),
-                                         lt.kv_stride,
-                                         lt.scale ? lt.scale->data() : nullptr,
-                                         lt.scale_stride);
+                                         cp_staging_->kvAddr(layer_id, 0),
+                                         cp_staging_->kv_stride,
+                                         cp_staging_->scaleAddr(layer_id, 0),
+                                         cp_staging_->scale_stride);
             } else {
                 // Original non-CP path
                 // Hybrid cache: Linear group only needs the last block; Full group needs all blocks.
@@ -1062,13 +1107,24 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
     // After RDMA completes, scatter interleaved CP blocks to contiguous layout.
     if (cp_size > 1 && use_mla && vblock_count > 0) {
+        // Build per-layer BufferPtr wrappers pointing into the staging buffer.
         std::vector<BufferPtr> temp_kv_bufs(layer_num), temp_scale_bufs(layer_num);
         std::vector<size_t>    kv_strides(layer_num, 0), scale_strides(layer_num, 0);
         for (size_t l = 0; l < layer_num; l++) {
-            temp_kv_bufs[l]    = layer_temps[l].kv;
-            temp_scale_bufs[l] = layer_temps[l].scale;
-            kv_strides[l]      = layer_temps[l].kv_stride;
-            scale_strides[l]   = layer_temps[l].scale_stride;
+            // Wrap staging buffer slice as a non-owning BufferPtr for the scatter interface.
+            size_t kv_size  = (size_t)temp_slots * cp_staging_->kv_stride;
+            temp_kv_bufs[l] = std::make_shared<Buffer>(
+                MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, std::vector<size_t>{kv_size}, cp_staging_->kvAddr(l, 0));
+            kv_strides[l] = cp_staging_->kv_stride;
+
+            if (cp_staging_->scale_stride > 0 && cp_staging_->scale_buf) {
+                size_t sc_size     = (size_t)temp_slots * cp_staging_->scale_stride;
+                temp_scale_bufs[l] = std::make_shared<Buffer>(MemoryType::MEMORY_GPU,
+                                                              DataType::TYPE_BYTES,
+                                                              std::vector<size_t>{sc_size},
+                                                              cp_staging_->scaleAddr(l, 0));
+                scale_strides[l]   = cp_staging_->scale_stride;
+            }
         }
         scatterCPTempToDecodeBlocks(load_context, temp_kv_bufs, temp_scale_bufs, kv_strides, scale_strides);
     }

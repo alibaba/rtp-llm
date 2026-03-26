@@ -105,6 +105,36 @@ private:
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<size_t>      onflight_load_cache_requests_{0};
     size_t                   model_id;
+
+    /// Lazy-initialized staging buffer for CP sharded PD transfer.
+    /// Allocated on first use, registered for RDMA, reused across requests.
+    struct CPStagingBuffer {
+        BufferPtr kv_buf;     // [layer_num * max_temp_slots * kv_stride]
+        BufferPtr scale_buf;  // [layer_num * max_temp_slots * scale_stride] (may be null)
+        size_t    kv_stride      = 0;
+        size_t    scale_stride   = 0;
+        int       max_temp_slots = 0;  // max vblock_count * cp_size
+        size_t    layer_num      = 0;
+
+        /// Get KV address for (layer_id, slot_index) within the staging buffer.
+        void* kvAddr(size_t layer_id, int slot_index) const {
+            size_t offset = (layer_id * max_temp_slots + slot_index) * kv_stride;
+            return static_cast<char*>(kv_buf->data()) + offset;
+        }
+        /// Get scale address for (layer_id, slot_index), or nullptr if no scale.
+        void* scaleAddr(size_t layer_id, int slot_index) const {
+            if (!scale_buf || scale_stride == 0)
+                return nullptr;
+            size_t offset = (layer_id * max_temp_slots + slot_index) * scale_stride;
+            return static_cast<char*>(scale_buf->data()) + offset;
+        }
+    };
+    std::mutex                       staging_mutex_;
+    std::unique_ptr<CPStagingBuffer> cp_staging_;
+
+    /// Ensure staging buffer is allocated for the given cp_size.
+    /// Thread-safe; only allocates once (or re-allocates if cp_size grows).
+    void ensureCPStagingBuffer(int cp_size);
 };
 
 }  // namespace rtp_llm
