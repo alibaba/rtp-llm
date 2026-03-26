@@ -798,6 +798,7 @@ class KVCacheConfig:
     reuse_cache: bool
     seq_size_per_block: int
     kernel_seq_size_per_block: int
+    ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int
     write_cache_sync: bool
@@ -934,8 +935,10 @@ class LinearAttentionConfig:
     linear_num_key_heads: int
     linear_num_value_heads: int
     linear_value_head_dim: int
+    ssm_state_dtype: DataType
+    conv_state_dtype: DataType
 
-    def __init__(self, linear_conv_kernel_dim: int = 0, linear_key_head_dim: int = 0, linear_num_key_heads: int = 0, linear_num_value_heads: int = 0, linear_value_head_dim: int = 0) -> None:
+    def __init__(self, linear_conv_kernel_dim: int = 0, linear_key_head_dim: int = 0, linear_num_key_heads: int = 0, linear_num_value_heads: int = 0, linear_value_head_dim: int = 0, ssm_state_dtype: DataType = DataType.TYPE_BF16, conv_state_dtype: DataType = DataType.TYPE_BF16) -> None:
         ...
 
     def to_string(self) -> str:

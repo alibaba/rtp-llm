@@ -11,7 +11,7 @@ from rtp_llm.config.quant_config import (
     QuantizationConfig,
     init_quant_config,
 )
-from rtp_llm.ops import KVCacheConfig, KvCacheDataType
+from rtp_llm.ops import DataType, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
 from rtp_llm.ops import TaskType
 from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
@@ -37,6 +37,15 @@ def kv_cache_dtype_to_torch_dtype(
         return torch.float8_e4m3fn
     else:  # BASE
         return data_type.to_torch_dtype()
+
+
+def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
+    ssm_state_dtype = ssm_state_dtype.lower()
+    if ssm_state_dtype == "bf16":
+        return DataType.TYPE_BF16
+    if ssm_state_dtype == "fp32":
+        return DataType.TYPE_FP32
+    raise ValueError(f"Unsupported ssm_state_dtype: {ssm_state_dtype}")
 
 
 class VitParameters:
@@ -817,6 +826,10 @@ def build_model_config(
         if kv_cache_config.kernel_seq_size_per_block > 0
         else kv_cache_config.seq_size_per_block
     )
+    model_config.linear_attention_config.ssm_state_dtype = (
+        ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)
+    )
+    model_config.linear_attention_config.conv_state_dtype = model_config.data_type
 
     model_config.use_kvcache = model_config.task_type == TaskType.LANGUAGE_MODEL
     logging.info(

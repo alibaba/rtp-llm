@@ -25,6 +25,7 @@ cc_library(
         "@havenask//aios/autil:env_util",
         ":role_types",
         ":eplb_config",
+        "//rtp_llm/cpp/core:types",
     ],
     copts = copts(),
 )

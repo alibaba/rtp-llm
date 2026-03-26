@@ -291,6 +291,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
+        .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
         .def_readwrite("kernel_seq_size_per_block", &KVCacheConfig::kernel_seq_size_per_block)
@@ -366,10 +367,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_asyncwrapper_queue_size,
                                       self.reco_get_broadcast_timeout,
                                       self.reco_put_broadcast_timeout,
-                                      self.reco_client_config);
+                                      self.reco_client_config,
+                                      self.ssm_state_dtype);
             },
             [](py::tuple t) {
-                if (t.size() != 42)
+                if (t.size() != 43)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -415,6 +417,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_get_broadcast_timeout           = t[39].cast<int>();
                     c.reco_put_broadcast_timeout           = t[40].cast<int>();
                     c.reco_client_config                   = t[41].cast<std::string>();
+                    c.ssm_state_dtype                      = t[42].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }
@@ -654,21 +657,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                             }
                             return c;
                         }));
-
-    // LinearAttentionConfig
-    pybind11::class_<LinearAttentionConfig>(m, "LinearAttentionConfig")
-        .def(pybind11::init<int, int, int, int, int>(),
-             pybind11::arg("linear_conv_kernel_dim") = 0,
-             pybind11::arg("linear_key_head_dim")    = 0,
-             pybind11::arg("linear_num_key_heads")   = 0,
-             pybind11::arg("linear_num_value_heads") = 0,
-             pybind11::arg("linear_value_head_dim")  = 0)
-        .def("to_string", &LinearAttentionConfig::to_string)
-        .def_readwrite("linear_conv_kernel_dim", &LinearAttentionConfig::linear_conv_kernel_dim)
-        .def_readwrite("linear_key_head_dim", &LinearAttentionConfig::linear_key_head_dim)
-        .def_readwrite("linear_num_key_heads", &LinearAttentionConfig::linear_num_key_heads)
-        .def_readwrite("linear_num_value_heads", &LinearAttentionConfig::linear_num_value_heads)
-        .def_readwrite("linear_value_head_dim", &LinearAttentionConfig::linear_value_head_dim);
 
     // HybridAttentionConfig
     py::enum_<HybridAttentionType>(m, "HybridAttentionType")
@@ -1153,6 +1141,25 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("TYPE_INT4X2", DataType::TYPE_INT4X2)
         .value("TYPE_QINT4X2", DataType::TYPE_QINT4X2)
         .value("TYPE_QFP8_E4M3", DataType::TYPE_QFP8_E4M3);
+
+    // LinearAttentionConfig
+    pybind11::class_<LinearAttentionConfig>(m, "LinearAttentionConfig")
+        .def(pybind11::init<int, int, int, int, int, DataType, DataType>(),
+             pybind11::arg("linear_conv_kernel_dim") = 0,
+             pybind11::arg("linear_key_head_dim")    = 0,
+             pybind11::arg("linear_num_key_heads")   = 0,
+             pybind11::arg("linear_num_value_heads") = 0,
+             pybind11::arg("linear_value_head_dim")  = 0,
+             pybind11::arg("ssm_state_dtype")        = DataType::TYPE_BF16,
+             pybind11::arg("conv_state_dtype")       = DataType::TYPE_BF16)
+        .def("to_string", &LinearAttentionConfig::to_string)
+        .def_readwrite("linear_conv_kernel_dim", &LinearAttentionConfig::linear_conv_kernel_dim)
+        .def_readwrite("linear_key_head_dim", &LinearAttentionConfig::linear_key_head_dim)
+        .def_readwrite("linear_num_key_heads", &LinearAttentionConfig::linear_num_key_heads)
+        .def_readwrite("linear_num_value_heads", &LinearAttentionConfig::linear_num_value_heads)
+        .def_readwrite("linear_value_head_dim", &LinearAttentionConfig::linear_value_head_dim)
+        .def_readwrite("ssm_state_dtype", &LinearAttentionConfig::ssm_state_dtype)
+        .def_readwrite("conv_state_dtype", &LinearAttentionConfig::conv_state_dtype);
 
     // Register KvCacheDataType enum
     py::enum_<KvCacheDataType>(m, "KvCacheDataType")

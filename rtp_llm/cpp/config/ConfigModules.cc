@@ -120,6 +120,7 @@ std::string KVCacheConfig::to_string() const {
         << "linear_step: " << linear_step << "\n"
         << "int8_kv_cache: " << int8_kv_cache << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
+        << "ssm_state_dtype: " << ssm_state_dtype << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
         << "seq_size_per_block: " << seq_size_per_block << "\n"
         << "kernel_seq_size_per_block: " << kernel_seq_size_per_block << "\n"
@@ -161,7 +162,9 @@ std::string LinearAttentionConfig::to_string() const {
         << "linear_key_head_dim: " << linear_key_head_dim << "\n"
         << "linear_num_key_heads: " << linear_num_key_heads << "\n"
         << "linear_num_value_heads: " << linear_num_value_heads << "\n"
-        << "linear_value_head_dim: " << linear_value_head_dim;
+        << "linear_value_head_dim: " << linear_value_head_dim << "\n"
+        << "ssm_state_dtype: " << getDataTypeStr(ssm_state_dtype) << "\n"
+        << "conv_state_dtype: " << getDataTypeStr(conv_state_dtype);
     return oss.str();
 }
 // HybridAttentionConfig

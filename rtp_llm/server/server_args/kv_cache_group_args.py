@@ -110,6 +110,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="线性注意力（Linear Attention）缓存重用的步长：每隔 linear_step 个 block 额外保留一个 block（>=1）。",
     )
     kv_cache_group.add_argument(
+        "--ssm_state_dtype",
+        env_name="SSM_STATE_DTYPE",
+        bind_to=(kv_cache_config, "ssm_state_dtype"),
+        type=str,
+        choices=["bf16", "fp32"],
+        default="bf16",
+        help="线性注意力 SSM state 的数据类型。默认 bf16，可选 fp32 和 bf16。",
+    )
+    kv_cache_group.add_argument(
         "--test_block_num",
         env_name="TEST_BLOCK_NUM",
         bind_to=(kv_cache_config, "test_block_num"),

@@ -21,6 +21,8 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     uint32_t head_k_dim        = 0;
     uint32_t head_v_dim        = 0;
     uint32_t conv_kernel_dim   = 0;
+    DataType ssm_state_dtype   = DataType::TYPE_BF16;
+    DataType conv_state_dtype  = DataType::TYPE_BF16;
 
     LinearKVCacheSpec() = default;
 
@@ -60,6 +62,8 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         head_k_dim         = static_cast<uint32_t>(linear_config.linear_key_head_dim);
         head_v_dim         = static_cast<uint32_t>(linear_config.linear_value_head_dim);
         conv_kernel_dim    = static_cast<uint32_t>(linear_config.linear_conv_kernel_dim);
+        ssm_state_dtype    = linear_config.ssm_state_dtype;
+        conv_state_dtype   = linear_config.conv_state_dtype;
     }
 
     size_t ssm_state_size() const {
@@ -95,13 +99,13 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     }
 
     size_t block_size_bytes() const override {
-        return block_size() * rtp_llm::getTypeSize(dtype);
+        return k_block_size_bytes() + v_block_size_bytes();
     }
     size_t k_block_size_bytes() const override {
-        return k_block_size() * rtp_llm::getTypeSize(dtype);
+        return k_block_size() * rtp_llm::getTypeSize(ssm_state_dtype);
     }
     size_t v_block_size_bytes() const override {
-        return v_block_size() * rtp_llm::getTypeSize(dtype);
+        return v_block_size() * rtp_llm::getTypeSize(conv_state_dtype);
     }
 
     // Static helper function for Linear attention - no head partitioning
@@ -141,6 +145,8 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         os << indent1 << "head_k_dim=" << head_k_dim << "\n";
         os << indent1 << "head_v_dim=" << head_v_dim << "\n";
         os << indent1 << "conv_kernel_dim=" << conv_kernel_dim << "\n";
+        os << indent1 << "ssm_state_dtype=" << getDataTypeStr(ssm_state_dtype) << "\n";
+        os << indent1 << "conv_state_dtype=" << getDataTypeStr(conv_state_dtype) << "\n";
         os << indent1 << "ssm_state_size=" << ssm_state_size() << "\n";
         os << indent1 << "qkv_size=" << qkv_size() << "\n";
         os << indent1 << "conv_state_size=" << conv_state_size() << "\n";

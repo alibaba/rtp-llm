@@ -57,7 +57,7 @@ def load_initial_state_from_block_map_kernel(
     b_in = tl.where(
         is_zero,
         tl.zeros([BLOCK_V, K], dtype=initial_states.dtype.element_ty),
-        tl.load(p_in, boundary_check=(0, 1)),
+        tl.load(p_in, boundary_check=(0, 1)).to(initial_states.dtype.element_ty),
     )
 
     tl.store(p_out, b_in, boundary_check=(0, 1))
@@ -171,7 +171,11 @@ def store_ssm_state_to_block_map_kernel(
         (1, 0),
     )
 
-    tl.store(p_out, tl.load(p_in, boundary_check=(0, 1)), boundary_check=(0, 1))
+    tl.store(
+        p_out,
+        tl.load(p_in, boundary_check=(0, 1)).to(ssm_states.dtype.element_ty),
+        boundary_check=(0, 1),
+    )
 
 
 def store_ssm_state_to_block_map(
@@ -185,6 +189,9 @@ def store_ssm_state_to_block_map(
     chunk_size: int,
     block_v: int = 64,
 ):
+    assert (
+        h.dtype == torch.float32 and final_states.dtype == torch.float32
+    ), "h and final_states must be float32"
     chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     _, head_num, v, k = ssm_states.shape
     chunk_num = chunk_indices.shape[0]
