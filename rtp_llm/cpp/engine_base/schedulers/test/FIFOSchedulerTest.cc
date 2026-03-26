@@ -445,27 +445,27 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
 
     // Enqueue only 2 of 3 — group incomplete, should not be scheduled
     {
-        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-        query->generate_config               = make_shared<GenerateConfig>();
+        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = 10;
-        query->batch_group_id                = group_id;
-        query->batch_group_size              = group_size;
-        query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+        query->batch_group_id                       = group_id;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }
     {
-        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-        query->generate_config               = make_shared<GenerateConfig>();
+        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = 10;
-        query->batch_group_id                = group_id;
-        query->batch_group_size              = group_size;
-        query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+        query->batch_group_id                       = group_id;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -478,14 +478,14 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
 
     // Enqueue the 3rd — group complete, all 3 should be scheduled together
     {
-        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-        query->generate_config               = make_shared<GenerateConfig>();
+        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = 10;
-        query->batch_group_id                = group_id;
-        query->batch_group_size              = group_size;
-        query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+        query->batch_group_id                       = group_id;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -523,27 +523,27 @@ TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
 
     // Enqueue only 2 of 3 with begin_time far in the past so timeout has expired
     {
-        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-        query->generate_config               = make_shared<GenerateConfig>();
+        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = timeout_ms;
-        query->batch_group_id                = group_id;
-        query->batch_group_size              = group_size;
-        query->begin_time_us                 = past_time;
+        query->batch_group_id                       = group_id;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = past_time;
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }
     {
-        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-        query->generate_config               = make_shared<GenerateConfig>();
+        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = timeout_ms;
-        query->batch_group_id                = group_id;
-        query->batch_group_size              = group_size;
-        query->begin_time_us                 = past_time;
+        query->batch_group_id                       = group_id;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = past_time;
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -584,31 +584,32 @@ TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
         query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
         query->generate_config               = make_shared<GenerateConfig>();
         query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
-        normal_stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        normal_stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(normal_stream).ok());
     }
     {
-        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-        query->generate_config               = make_shared<GenerateConfig>();
+        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = 10;
-        query->batch_group_id                = group_id;
-        query->batch_group_size              = group_size;
-        query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+        query->batch_group_id                       = group_id;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }
     {
-        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-        query->generate_config               = make_shared<GenerateConfig>();
+        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = 10;
-        query->batch_group_id                = group_id;
-        query->batch_group_size              = group_size;
-        query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+        query->batch_group_id                       = group_id;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -624,6 +625,77 @@ TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
     // Finish the normal stream
     normal_stream->setFinishedWithoutLock();
     // Round 2: force batch group should now be scheduled
+    auto result2 = scheduler.schedule();
+    ASSERT_TRUE(result2.ok());
+    ASSERT_EQ(result2.value().size(), 2);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 2);
+}
+
+// Two different complete force batch groups: only one group per scheduling round
+TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    int64_t group_id_a = 500;
+    int64_t group_id_b = 600;
+    int     group_size = 2;
+
+    // Enqueue group A (2 streams), then group B (2 streams), both complete
+    vector<shared_ptr<GenerateStream>> group_a_streams;
+    for (int i = 0; i < group_size; i++) {
+        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config                      = make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = 10;
+        query->batch_group_id                       = group_id_a;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        group_a_streams.push_back(stream);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+    for (int i = 0; i < group_size; i++) {
+        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config                      = make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = 10;
+        query->batch_group_id                       = group_id_b;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+
+    // Round 1: group A first in FIFO, locks batch — group B skipped
+    auto result1 = scheduler.schedule();
+    ASSERT_TRUE(result1.ok());
+    ASSERT_EQ(result1.value().size(), 2);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 2);
+
+    // Finish group A
+    for (auto& s : group_a_streams) {
+        s->setFinishedWithoutLock();
+    }
+
+    // Round 2: group B should now be scheduled
     auto result2 = scheduler.schedule();
     ASSERT_TRUE(result2.ok());
     ASSERT_EQ(result2.value().size(), 2);
