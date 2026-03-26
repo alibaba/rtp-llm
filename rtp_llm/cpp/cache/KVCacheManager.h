@@ -101,6 +101,10 @@ public:
         return cp_slot_mapper_;
     }
 
+    BlockPoolPtr getBlockPool() const {
+        return allocator_ ? allocator_->getBlockPool() : nullptr;
+    }
+
 private:
     void initConnectorCoordinator();
     void allocateAndSync();

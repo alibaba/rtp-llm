@@ -724,11 +724,16 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
         kv_cache = params["kv_cache"]
         kv_cache.kv_cache_base.zero_()
 
-        # Mark even-indexed tokens as non-owned to simulate sharding
+        # Mark even-indexed tokens as non-owned to simulate sharding.
+        # Must also update the precomputed _local_mla_slot_mapping, which is
+        # what _write_local_cache actually uses for cache writes.
         slot_mapping = params["mla_params"].slot_mapping
         for i in range(0, slot_mapping.shape[0], 2):
             slot_mapping[i] = -1
         original_slot_mapping = slot_mapping.clone()
+        op._local_mla_slot_mapping = op._build_local_slot_mapping(
+            slot_mapping, slot_mapping.shape[0], op.prefill_cp_size
+        )
 
         def _identity_all_gather(tensor, group=None):
             return tensor
@@ -831,15 +836,23 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
 
         With cp_size=1, virtual_block_size = page_size * 1 = page_size.
         local capacity = ceil(kv_len / vbs) * page_size.
+        Sharded metadata is always computed (used by indexer topk).
         """
         _set_seed(300)
         total_q_len = 8
         chunk_lengths = [8]
         params = self._build_common_params(total_q_len, chunk_lengths, prefix_len=0)
         op = self._make_roundrobin_op(params)
-        # Without prefix, these are None (workspace path is used instead)
-        self.assertIsNone(op._total_local_kv)
-        self.assertIsNone(op._cu_local_kv_seqlens)
+
+        page_size = params["page_size"]
+        kv_len = sum(chunk_lengths)
+        vbs = page_size * 1
+        n_vblocks = (kv_len + vbs - 1) // vbs
+        expected_local_capacity = n_vblocks * page_size
+
+        self.assertEqual(op._total_local_kv, expected_local_capacity)
+        cu = op._cu_local_kv_seqlens.cpu().tolist()
+        self.assertEqual(cu, [0, expected_local_capacity])
 
     def test_roundrobin_plan_sharded_kv_seqlens_with_prefix(self):
         """Verify _cu_local_kv_seqlens includes prefix tokens.
@@ -871,11 +884,11 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
 
         For cp_size=1, every token is owned by rank 0. The all-gather is identity,
         so restore_indices[p] should equal p for all valid positions.
+        Restore indices are always computed (used by indexer topk).
         """
         _set_seed(302)
         total_q_len = 8
         chunk_lengths = [8]
-        # Use prefix_len > 0 so the prefix-cache path is taken and restore indices are computed
         prefix_len = 64
         params = self._build_common_params(
             total_q_len, chunk_lengths, prefix_len=prefix_len
@@ -932,11 +945,25 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
         # just verify the attribute exists.
         self.assertTrue(hasattr(op._global_fp8_metadata, "num_splits"))
 
-    def test_roundrobin_plan_workspace_metadata(self):
-        """Verify workspace metadata (_ws_total_kv, _ws_slot_mapping, _ws_block_table)
-        is correctly computed for the indexer workspace (new tokens only, no prefix).
-        """
+    def test_roundrobin_plan_workspace_metadata_no_prefix(self):
+        """Verify workspace metadata is computed only for non-prefix path."""
         _set_seed(305)
+        total_q_len = 8
+        chunk_lengths = [8]
+        params = self._build_common_params(
+            total_q_len, chunk_lengths, prefix_len=0
+        )
+        op = self._make_roundrobin_op(params)
+
+        n_restore = sum(chunk_lengths)
+        self.assertEqual(op._ws_total_kv, n_restore)
+        self.assertIsNotNone(op._ws_slot_mapping)
+        self.assertEqual(op._ws_slot_mapping.shape[0], n_restore)
+        self.assertIsNotNone(op._ws_block_table)
+
+    def test_roundrobin_plan_workspace_none_with_prefix(self):
+        """With prefix cache, workspace metadata should be None (not needed)."""
+        _set_seed(306)
         total_q_len = 8
         chunk_lengths = [8]
         prefix_len = 64
@@ -945,18 +972,27 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
         )
         op = self._make_roundrobin_op(params)
 
-        n_restore = sum(chunk_lengths)
-        # Workspace covers new tokens only (not prefix)
-        self.assertEqual(op._ws_total_kv, n_restore)
-        self.assertEqual(op._ws_slot_mapping.shape[0], n_restore)
-        # ws_slot_mapping should be [0, 1, ..., n_restore-1]
-        expected_ws_slots = torch.arange(
-            n_restore, dtype=torch.int64, device=self.device
+        self.assertIsNone(op._ws_slot_mapping)
+        self.assertIsNone(op._ws_block_table)
+        self.assertIsNone(op._ws_total_pages)
+
+    def test_roundrobin_plan_local_slot_mappings(self):
+        """Verify local slot mappings are computed for direct cache write."""
+        _set_seed(307)
+        total_q_len = 8
+        chunk_lengths = [8]
+        prefix_len = 64
+        params = self._build_common_params(
+            total_q_len, chunk_lengths, prefix_len=prefix_len
         )
-        self.assertTrue(
-            torch.equal(op._ws_slot_mapping, expected_ws_slots),
-            "Workspace slot_mapping should be contiguous [0..n_restore)",
-        )
+        op = self._make_roundrobin_op(params)
+
+        local_tokens = sum(chunk_lengths)
+        self.assertEqual(op._local_mla_slot_mapping.shape[0], local_tokens)
+        self.assertEqual(op._local_indexer_slot_mapping.shape[0], local_tokens)
+        # Owned tokens should have non-negative slot values
+        owned = op._local_mla_slot_mapping >= 0
+        self.assertTrue(owned.any(), "At least some tokens should be owned by this rank")
 
 
 if __name__ == "__main__":

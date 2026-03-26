@@ -1,14 +1,15 @@
 #include <mutex>
 #include <memory>
+#include <functional>
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
+#include <cstdlib>
 
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
-#include "rtp_llm/cpp/kernels/cp_cache_scatter_kernel.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
@@ -49,69 +50,6 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
     return grpc::Status::OK;
 }
 
-void DecodeRpcServer::ensureCPStagingBuffer(int cp_size) {
-    std::lock_guard<std::mutex> lock(staging_mutex_);
-
-    auto         cache_manager  = engine_->resourceContext().cache_manager;
-    const auto&  cache_config   = cache_manager->cacheConfig();
-    auto         device         = engine_->getDevice();
-    const int    block_size     = static_cast<int>(cache_config.seq_size_per_block);
-    const int    vbs            = block_size * cp_size;
-    const int    max_seq_len    = static_cast<int>(maga_init_params_.model_config_.max_seq_len);
-    const int    max_vblocks    = (max_seq_len + vbs - 1) / vbs;
-    const int    max_temp_slots = max_vblocks * cp_size;
-    const size_t layer_num      = maga_init_params_.model_config_.num_layers;
-    const size_t kv_stride      = cache_config.kv_block_stride_bytes;
-    const size_t sc_stride      = cache_config.kv_scale_stride_bytes;
-
-    // Already allocated and large enough?
-    if (cp_staging_ && cp_staging_->max_temp_slots >= max_temp_slots) {
-        return;
-    }
-
-    auto staging            = std::make_unique<CPStagingBuffer>();
-    staging->kv_stride      = kv_stride;
-    staging->scale_stride   = sc_stride;
-    staging->max_temp_slots = max_temp_slots;
-    staging->layer_num      = layer_num;
-
-    size_t kv_total = layer_num * max_temp_slots * kv_stride;
-    staging->kv_buf =
-        device->allocateBuffer({DataType::TYPE_BYTES, {kv_total}, AllocationType::DEVICE}, {"cp_staging_kv"});
-
-    if (sc_stride > 0) {
-        size_t sc_total = layer_num * max_temp_slots * sc_stride;
-        staging->scale_buf =
-            device->allocateBuffer({DataType::TYPE_BYTES, {sc_total}, AllocationType::DEVICE}, {"cp_staging_scale"});
-    }
-
-    // Register staging buffer for RDMA (if RDMA is enabled).
-    if (resource_.cache_store) {
-        auto memory_util = resource_.cache_store->getMemoryUtil();
-        if (memory_util) {
-            bool gpu = true;
-            if (!memory_util->regUserMr(staging->kv_buf->data(), kv_total, gpu)) {
-                RTP_LLM_LOG_WARNING("Failed to register CP staging KV buffer for RDMA (non-fatal for TCP)");
-            }
-            if (staging->scale_buf) {
-                size_t sc_total = layer_num * max_temp_slots * sc_stride;
-                if (!memory_util->regUserMr(staging->scale_buf->data(), sc_total, gpu)) {
-                    RTP_LLM_LOG_WARNING("Failed to register CP staging scale buffer for RDMA (non-fatal for TCP)");
-                }
-            }
-        }
-    }
-
-    RTP_LLM_LOG_INFO("CP staging buffer allocated: layers=%zu max_temp_slots=%d kv_stride=%zu "
-                     "scale_stride=%zu kv_total=%.1fMB",
-                     layer_num,
-                     max_temp_slots,
-                     kv_stride,
-                     sc_stride,
-                     kv_total / 1048576.0);
-
-    cp_staging_ = std::move(staging);
-}
 
 void DecodeRpcServer::initThreadPool() {
     if (resource_.workers.size() > 0) {
@@ -683,131 +621,6 @@ std::vector<CacheKeyType> DecodeRpcServer::recomputeVirtualCacheKeys(GenerateStr
     return virtual_cache_keys;
 }
 
-void DecodeRpcServer::buildCPShardedLayerCache(std::shared_ptr<RequestBlockBuffer>& load_layer_cache,
-                                               const LoadKVCacheContext&            load_context,
-                                               size_t                               layer_id,
-                                               int                                  peer_index,
-                                               size_t                               model_id,
-                                               void*                                temp_kv,
-                                               size_t                               block_stride_bytes,
-                                               void*                                temp_scale,
-                                               size_t                               scale_stride_bytes) const {
-    const int32_t cp_size             = load_context.prefill_cp_size;
-    const int     virtual_block_count = static_cast<int>(load_context.cache_keys.size());
-
-    for (int v = 0; v < virtual_block_count; ++v) {
-        auto cache_key = makeCacheKey(model_id, std::to_string(load_context.cache_keys[v]), layer_id);
-
-        // Temp buffer slot for virtual block v, peer peer_index
-        size_t slot = static_cast<size_t>(v) * cp_size + peer_index;
-
-        // KV data
-        void*                 kv_addr = static_cast<char*>(temp_kv) + slot * block_stride_bytes;
-        std::shared_ptr<void> kv_ptr(kv_addr, [](void*) {});
-        load_layer_cache->addBlock("kv_" + cache_key, kv_ptr, static_cast<uint32_t>(block_stride_bytes), true, true);
-
-        // Scale data (if present)
-        if (temp_scale && scale_stride_bytes > 0) {
-            void*                 sc_addr = static_cast<char*>(temp_scale) + slot * scale_stride_bytes;
-            std::shared_ptr<void> sc_ptr(sc_addr, [](void*) {});
-            load_layer_cache->addBlock(
-                "kv_scale_" + cache_key, sc_ptr, static_cast<uint32_t>(scale_stride_bytes), true, true);
-        }
-    }
-}
-
-void DecodeRpcServer::scatterCPTempToDecodeBlocks(const LoadKVCacheContext&     load_context,
-                                                  const std::vector<BufferPtr>& temp_kv_bufs,
-                                                  const std::vector<BufferPtr>& temp_scale_bufs,
-                                                  const std::vector<size_t>&    kv_strides,
-                                                  const std::vector<size_t>&    scale_strides) const {
-
-    auto        cache_manager = engine_->resourceContext().cache_manager;
-    const auto& cache_config  = cache_manager->cacheConfig();
-    const bool  use_hybrid    = cache_config.groupNums() > 1;
-    const int   cp_size       = load_context.prefill_cp_size;
-    const int   block_size    = static_cast<int>(cache_config.seq_size_per_block);
-    const int   vblock_count  = static_cast<int>(load_context.cache_keys.size());
-    auto        device        = engine_->getDevice();
-    auto        layer_num     = temp_kv_bufs.size();
-
-    const int total_tokens = static_cast<int>(load_context.block_ids_by_group[0]->blocks().size()) * block_size;
-
-    for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
-        size_t gid = 0;
-        if (use_hybrid && layer_id < cache_config.layer_to_group_id.size()) {
-            const int mapped_gid = cache_config.layer_to_group_id[layer_id];
-            if (mapped_gid >= 0)
-                gid = static_cast<size_t>(mapped_gid);
-        }
-        const auto& block_ids     = load_context.block_ids_by_group[gid]->blocks();
-        const int   decode_blocks = static_cast<int>(block_ids.size());
-
-        int elem_stride = static_cast<int>(kv_strides[layer_id] / block_size);
-        if (elem_stride <= 0 || elem_stride % 16 != 0)
-            continue;
-
-        // Build decode block address table
-        int                max_bid = *std::max_element(block_ids.begin(), block_ids.end());
-        std::vector<void*> dst_addrs(max_bid + 1, nullptr);
-        for (int b = 0; b < decode_blocks; ++b) {
-            if (!dst_addrs[block_ids[b]]) {
-                dst_addrs[block_ids[b]] = cache_manager->convertIndexToBuffer(block_ids[b], layer_id, 1, 0)[0].addr;
-            }
-        }
-
-        auto dst_addrs_gpu =
-            device->allocateBuffer({DataType::TYPE_UINT64, {dst_addrs.size()}, AllocationType::DEVICE}, {});
-        auto dst_ids_gpu =
-            device->allocateBuffer({DataType::TYPE_INT32, {(size_t)decode_blocks}, AllocationType::DEVICE}, {});
-        device->copy({*dst_addrs_gpu,
-                      Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT64, {dst_addrs.size()}, dst_addrs.data())});
-        device->copy(
-            {*dst_ids_gpu,
-             Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INT32, {(size_t)decode_blocks}, (void*)block_ids.data())});
-
-        invokeCPCacheScatter(reinterpret_cast<void**>(dst_addrs_gpu->data()),
-                             dst_ids_gpu->data<int>(),
-                             temp_kv_bufs[layer_id]->data(),
-                             vblock_count,
-                             cp_size,
-                             block_size,
-                             total_tokens,
-                             elem_stride,
-                             nullptr);
-
-        // Scale scatter
-        if (layer_id < temp_scale_bufs.size() && temp_scale_bufs[layer_id] && scale_strides[layer_id] > 0) {
-            int sc_stride = static_cast<int>(scale_strides[layer_id] / block_size);
-            if (sc_stride > 0 && sc_stride % 16 == 0) {
-                std::vector<void*> sc_addrs(max_bid + 1, nullptr);
-                for (int b = 0; b < decode_blocks; ++b) {
-                    if (!sc_addrs[block_ids[b]]) {
-                        auto parts = cache_manager->convertIndexToBuffer(block_ids[b], layer_id, 1, 0);
-                        if (parts.size() == 2)
-                            sc_addrs[block_ids[b]] = parts[1].addr;
-                    }
-                }
-                auto sc_addrs_gpu =
-                    device->allocateBuffer({DataType::TYPE_UINT64, {sc_addrs.size()}, AllocationType::DEVICE}, {});
-                device->copy(
-                    {*sc_addrs_gpu,
-                     Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT64, {sc_addrs.size()}, sc_addrs.data())});
-                invokeCPCacheScatter(reinterpret_cast<void**>(sc_addrs_gpu->data()),
-                                     dst_ids_gpu->data<int>(),
-                                     temp_scale_bufs[layer_id]->data(),
-                                     vblock_count,
-                                     cp_size,
-                                     block_size,
-                                     total_tokens,
-                                     sc_stride,
-                                     nullptr);
-            }
-        }
-    }
-    device->syncAndCheck();
-}
-
 ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard request_guard(onflight_load_cache_requests_);
@@ -842,18 +655,15 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
     const int32_t cp_size = load_context.prefill_cp_size;
 
-    // --- CP sharded: allocate per-layer temp buffers for RDMA receive ---
+    // --- CP sharded: use CPCacheScatterHelper for staging + scatter ---
     const int vblock_count = (cp_size > 1 && use_mla) ? static_cast<int>(load_context.cache_keys.size()) : 0;
-    const int temp_slots   = vblock_count * cp_size;  // one physical block per peer per vblock
 
-    // Ensure CP staging buffer is allocated and RDMA-registered (lazy init).
-    if (temp_slots > 0) {
-        ensureCPStagingBuffer(cp_size);
-        RTP_LLM_CHECK_WITH_INFO(cp_staging_ != nullptr, "CP staging buffer not initialized");
-        RTP_LLM_CHECK_WITH_INFO(temp_slots <= cp_staging_->max_temp_slots,
-                                "temp_slots=%d exceeds staging capacity=%d",
-                                temp_slots,
-                                cp_staging_->max_temp_slots);
+    std::unique_ptr<CPCacheScatterHelper::StagingPlan> staging_plan;
+    if (vblock_count > 0) {
+        if (!scatter_helper_) {
+            scatter_helper_ = std::make_unique<CPCacheScatterHelper>(cache_manager.get(), engine_->getDevice());
+        }
+        staging_plan = scatter_helper_->prepareStagingPlan(vblock_count, cp_size, layer_num);
     }
 
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
@@ -881,17 +691,29 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             auto        block_num = block_ids.size();
             size_t      model_id  = maga_init_params_.model_id;
 
-            // CP sharded path: RDMA receives into staging buffer, scatter later.
-            if (cp_size > 1 && use_mla) {
-                buildCPShardedLayerCache(load_layer_cache,
-                                         load_context,
-                                         layer_id,
-                                         i,
-                                         model_id,
-                                         cp_staging_->kvAddr(layer_id, 0),
-                                         cp_staging_->kv_stride,
-                                         cp_staging_->scaleAddr(layer_id, 0),
-                                         cp_staging_->scale_stride);
+            // CP sharded path: RDMA receives into staging blocks, scatter via helper later.
+            if (cp_size > 1 && use_mla && staging_plan) {
+                const int virtual_block_count = staging_plan->vblock_count;
+                const auto& staging_layer = staging_plan->layer_infos[layer_id];
+                for (int v = 0; v < virtual_block_count; ++v) {
+                    auto cache_key = makeCacheKey(model_id, std::to_string(load_context.cache_keys[v]), layer_id);
+
+                    int staging_idx = v * cp_size + i;
+                    const auto& part = staging_layer.infos[staging_idx];
+
+                    std::shared_ptr<void> kv_ptr(part.addr, [](void*) {});
+                    load_layer_cache->addBlock(
+                        "kv_" + cache_key, kv_ptr, static_cast<uint32_t>(part.size_bytes), true, true);
+
+                    // Scale: re-query from cache_manager (staging_layer only stores kv part)
+                    int  staging_bid   = staging_plan->staging_block_ids[staging_idx];
+                    auto scale_parts   = cache_manager->convertIndexToBuffer(staging_bid, layer_id, 1, 0);
+                    if (scale_parts.size() == 2 && scale_parts[1].size_bytes > 0) {
+                        std::shared_ptr<void> sc_ptr(scale_parts[1].addr, [](void*) {});
+                        load_layer_cache->addBlock(
+                            "kv_scale_" + cache_key, sc_ptr, static_cast<uint32_t>(scale_parts[1].size_bytes), true, true);
+                    }
+                }
             } else {
                 // Original non-CP path
                 // Hybrid cache: Linear group only needs the last block; Full group needs all blocks.
@@ -1119,27 +941,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     }
 
     // After RDMA completes, scatter interleaved CP blocks to contiguous layout.
-    if (cp_size > 1 && use_mla && vblock_count > 0) {
-        // Build per-layer BufferPtr wrappers pointing into the staging buffer.
-        std::vector<BufferPtr> temp_kv_bufs(layer_num), temp_scale_bufs(layer_num);
-        std::vector<size_t>    kv_strides(layer_num, 0), scale_strides(layer_num, 0);
-        for (size_t l = 0; l < layer_num; l++) {
-            // Wrap staging buffer slice as a non-owning BufferPtr for the scatter interface.
-            size_t kv_size  = (size_t)temp_slots * cp_staging_->kv_stride;
-            temp_kv_bufs[l] = std::make_shared<Buffer>(
-                MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, std::vector<size_t>{kv_size}, cp_staging_->kvAddr(l, 0));
-            kv_strides[l] = cp_staging_->kv_stride;
-
-            if (cp_staging_->scale_stride > 0 && cp_staging_->scale_buf) {
-                size_t sc_size     = (size_t)temp_slots * cp_staging_->scale_stride;
-                temp_scale_bufs[l] = std::make_shared<Buffer>(MemoryType::MEMORY_GPU,
-                                                              DataType::TYPE_BYTES,
-                                                              std::vector<size_t>{sc_size},
-                                                              cp_staging_->scaleAddr(l, 0));
-                scale_strides[l]   = cp_staging_->scale_stride;
-            }
-        }
-        scatterCPTempToDecodeBlocks(load_context, temp_kv_bufs, temp_scale_bufs, kv_strides, scale_strides);
+    if (staging_plan && scatter_helper_) {
+        scatter_helper_->scatterAndRelease(
+            std::move(staging_plan), load_context.block_ids_by_group, cache_config, layer_num);
     }
 
     return ErrorInfo::OkStatus();
