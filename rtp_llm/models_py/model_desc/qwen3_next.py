@@ -37,6 +37,7 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
+from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
     HybridAttentionType,
@@ -50,6 +51,7 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.util import to_torch_dtype
 
 
 class Qwen3NextMetadata(object):
@@ -100,6 +102,21 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
             + self.head_v_dim * self.local_num_v_heads
         )
         self.conv_state_size: int = (self.linear_conv_kernel_dim - 1) * self.qkv_size
+        self.ssm_state_dtype: torch.dtype = to_torch_dtype(
+            linear_attn_config.ssm_state_dtype
+        )
+        self.conv_state_dtype: torch.dtype = to_torch_dtype(
+            linear_attn_config.conv_state_dtype
+        )
+        self.linear_cache_converter = LinearCacheConverter(
+            local_num_v_heads=self.local_num_v_heads,
+            head_v_dim=self.head_v_dim,
+            head_k_dim=self.head_k_dim,
+            ssm_state_dtype=self.ssm_state_dtype,
+            linear_conv_kernel_dim=self.linear_conv_kernel_dim,
+            qkv_size=self.qkv_size,
+            conv_state_dtype=self.conv_state_dtype,
+        )
         # weights
         self.conv_weights = weights[W.linear_attn_conv1d_w].squeeze(1)
         self.dt_bias = weights[W.linear_attn_dt_b]
@@ -117,40 +134,11 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         raise NotImplementedError
 
     def _get_conv_states(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
-        _, block_size = kv_cache_tensor.view(kv_cache_tensor.shape[0], -1).shape
-        assert (
-            block_size >= self.ssm_state_size + self.conv_state_size
-        ), "block_size is too small, please check seq_size_per_block"
-        conv_states = torch.as_strided(
-            kv_cache_tensor,
-            (kv_cache_tensor.shape[0], self.linear_conv_kernel_dim - 1, self.qkv_size),
-            (kv_cache_tensor.stride()[0], self.qkv_size, 1),
-            storage_offset=self.ssm_state_size + kv_cache_tensor.storage_offset(),
-        )
+        conv_states = self.linear_cache_converter.get_conv_state_tensor(kv_cache_tensor)
         return conv_states
 
     def _get_ssm_states(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
-        # maybe should support smsm cahe with difference dtype(fp32/bf16/fp16)
-        _, block_size = kv_cache_tensor.view(kv_cache_tensor.shape[0], -1).shape
-        assert (
-            block_size >= self.ssm_state_size + self.conv_state_size
-        ), "block_size is too small, please check seq_size_per_block"
-        ssm_states = torch.as_strided(
-            kv_cache_tensor,
-            (
-                kv_cache_tensor.shape[0],
-                self.local_num_v_heads,
-                self.head_v_dim,
-                self.head_k_dim,
-            ),
-            (
-                kv_cache_tensor.stride()[0],
-                self.head_k_dim * self.head_v_dim,
-                self.head_k_dim,
-                1,
-            ),
-            storage_offset=kv_cache_tensor.storage_offset(),
-        )
+        ssm_states = self.linear_cache_converter.get_ssm_state_tensor(kv_cache_tensor)
         return ssm_states
 
 
@@ -219,7 +207,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 self.head_v_dim,
                 self.head_k_dim,
                 device=mixed_qkv.device,
-                dtype=mixed_qkv.dtype,
+                dtype=self.ssm_state_dtype,
             )
 
             load_initial_state_from_block_map(
@@ -255,7 +243,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         if ssm_states is not None:
             store_ssm_state_to_block_map(
                 h,
-                final_state.to(h.dtype),
+                final_state,
                 attn_inputs.prefix_lengths_d,
                 cu_seqlens_without_padding,
                 attn_inputs.kv_cache_kernel_block_id_device,

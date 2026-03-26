@@ -142,6 +142,7 @@ try:
         SpeculativeType,
         EPLBConfig,
         ActivationType,
+        DataType,
         KvCacheDataType,
         ModelConfig,
         HybridAttentionConfig,

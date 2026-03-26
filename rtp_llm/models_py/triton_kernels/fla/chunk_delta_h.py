@@ -308,7 +308,7 @@ def chunk_gated_delta_rule_fwd_h(
         )
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
-    h = k.new_empty(B, NT, H, K, V)
+    h = k.new_empty(B, NT, H, K, V, dtype=torch.float32)
     final_state = (
         k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
     )
