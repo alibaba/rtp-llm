@@ -20,7 +20,7 @@ namespace rtp_llm {
 //       For the second part, different samplers should be created for different params.
 //       So they can not be batched together for now.
 
-enum class ReturnAllProbsMode {
+enum class ReturnLogProbsMode {
     NONE     = 0,
     DEFAULT  = 1,
     ORIGINAL = 2
@@ -168,12 +168,10 @@ public:
                      << ", is_streaming:" << is_streaming << ", timeout_ms:" << timeout_ms << ", top_k:" << top_k
                      << ", top_p:" << top_p << ", force_disable_sp_run: " << force_disable_sp_run
                      << ", force_sp_accept: " << force_sp_accept
-                     << ", return_all_probs: " << static_cast<int>(return_all_probs)
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", json_schema: " << (json_schema.has_value() ? std::to_string(json_schema->size()) : "none")
                      << ", regex: " << (regex.has_value() ? std::to_string(regex->size()) : "none")
-                     << ", ebnf: " << (ebnf.has_value() ? std::to_string(ebnf->size()) : "none")
-                     << ", structural_tag: "
+                     << ", ebnf: " << (ebnf.has_value() ? std::to_string(ebnf->size()) : "none") << ", structural_tag: "
                      << (structural_tag.has_value() ? std::to_string(structural_tag->size()) : "none")
                      << ", response_format: "
                      << (response_format.has_value() ? std::to_string(response_format->size()) : "none")

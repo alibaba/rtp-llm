@@ -18,10 +18,15 @@ void RenderContext::init(int n, std::string body, std::shared_ptr<ChatRender> ch
     complete_responses_           = std::make_shared<py::list>();
 }
 
-std::tuple<std::vector<int>, std::vector<int>, std::vector<int>, std::vector<th::Tensor>, std::vector<th::Tensor>>
+std::tuple<std::vector<int>,
+           std::vector<int>,
+           std::vector<int>,
+           std::vector<th::Tensor>,
+           std::vector<th::Tensor>,
+           std::vector<th::Tensor>>
 getArgs(const GenerateOutputs& outputs) {
     std::vector<int>        input_len_list, output_len_list, reuse_len_list;
-    std::vector<th::Tensor> all_probs_list, output_ids_list;
+    std::vector<th::Tensor> top_logprobs_list, top_token_ids_list, output_ids_list;
     for (const auto& output : outputs.generate_outputs) {
         const auto& aux_info = output.aux_info;
         input_len_list.push_back(aux_info.input_len);
@@ -30,11 +35,13 @@ getArgs(const GenerateOutputs& outputs) {
         if (aux_info.all_probs.has_value()) {
             all_probs_list.push_back(aux_info.all_probs.value());
         } else {
-            all_probs_list.push_back(th::empty({0}));
+            top_logprobs_list.push_back(th::empty({0}));
+            top_token_ids_list.push_back(th::empty({0}));
         }
         output_ids_list.push_back(output.output_ids);
     }
-    return std::make_tuple(input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list);
+    return std::make_tuple(
+        input_len_list, output_len_list, reuse_len_list, top_logprobs_list, top_token_ids_list, output_ids_list);
 }
 
 void RenderContext::render_stream_response_first_blocking(int n) {
@@ -47,12 +54,14 @@ void RenderContext::render_stream_response_blocking(const GenerateOutputs&      
                                                     const std::shared_ptr<GenerateConfig>& config,
                                                     bool                                   is_streaming) {
     py::gil_scoped_acquire acquire;
-    auto [input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list] = getArgs(outputs);
+    auto [input_len_list, output_len_list, reuse_len_list, top_logprobs_list, top_token_ids_list, output_ids_list] =
+        getArgs(outputs);
     auto response = render_->attr("render_stream_response_blocking")(*status_list_,
                                                                      input_len_list,
                                                                      output_len_list,
                                                                      reuse_len_list,
-                                                                     all_probs_list,
+                                                                     top_logprobs_list,
+                                                                     top_token_ids_list,
                                                                      output_ids_list,
                                                                      config->max_new_tokens,
                                                                      config->stop_words_str,
@@ -64,12 +73,14 @@ void RenderContext::render_stream_response_flush_blocking(const GenerateOutputs&
                                                           const std::shared_ptr<GenerateConfig>& config,
                                                           bool                                   is_streaming) {
     py::gil_scoped_acquire acquire;
-    auto [input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list] = getArgs(outputs);
+    auto [input_len_list, output_len_list, reuse_len_list, top_logprobs_list, top_token_ids_list, output_ids_list] =
+        getArgs(outputs);
     auto response = render_->attr("render_stream_response_flush_blocking")(*status_list_,
                                                                            input_len_list,
                                                                            output_len_list,
                                                                            reuse_len_list,
-                                                                           all_probs_list,
+                                                                           top_logprobs_list,
+                                                                           top_token_ids_list,
                                                                            output_ids_list,
                                                                            config->stop_words_str,
                                                                            is_streaming);
@@ -78,7 +89,8 @@ void RenderContext::render_stream_response_flush_blocking(const GenerateOutputs&
 
 void RenderContext::render_stream_response_final_blocking(const GenerateOutputs& outputs) {
     py::gil_scoped_acquire acquire;
-    auto [input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list] = getArgs(outputs);
+    auto [input_len_list, output_len_list, reuse_len_list, top_logprobs_list, top_token_ids_list, output_ids_list] =
+        getArgs(outputs);
     auto response = render_->attr("render_stream_response_final_blocking")(
         *status_list_, input_len_list, output_len_list, reuse_len_list);
     complete_responses_->append(response);
@@ -96,12 +108,14 @@ std::string RenderContext::render_common_response(const GenerateOutputs&        
                                                   const char*                            function_name,
                                                   bool                                   is_streaming) {
     py::gil_scoped_acquire acquire;
-    auto [input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list] = getArgs(outputs);
+    auto [input_len_list, output_len_list, reuse_len_list, top_logprobs_list, top_token_ids_list, output_ids_list] =
+        getArgs(outputs);
     auto json_response = render_->attr(function_name)(*status_list_,
                                                       input_len_list,
                                                       output_len_list,
                                                       reuse_len_list,
-                                                      all_probs_list,
+                                                      top_logprobs_list,
+                                                      top_token_ids_list,
                                                       output_ids_list,
                                                       config->max_new_tokens,
                                                       config->stop_words_str,
@@ -127,12 +141,14 @@ std::string RenderContext::render_stream_response_flush(const GenerateOutputs&  
                                                         const std::shared_ptr<GenerateConfig>& config,
                                                         bool                                   is_streaming) {
     py::gil_scoped_acquire acquire;
-    auto [input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list] = getArgs(outputs);
+    auto [input_len_list, output_len_list, reuse_len_list, top_logprobs_list, top_token_ids_list, output_ids_list] =
+        getArgs(outputs);
     auto json_response = render_->attr("render_stream_response_flush")(*status_list_,
                                                                        input_len_list,
                                                                        output_len_list,
                                                                        reuse_len_list,
-                                                                       all_probs_list,
+                                                                       top_logprobs_list,
+                                                                       top_token_ids_list,
                                                                        output_ids_list,
                                                                        config->stop_words_str,
                                                                        is_streaming);
@@ -142,7 +158,8 @@ std::string RenderContext::render_stream_response_flush(const GenerateOutputs&  
 
 std::string RenderContext::render_stream_response_final(const GenerateOutputs& outputs) {
     py::gil_scoped_acquire acquire;
-    auto [input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list] = getArgs(outputs);
+    auto [input_len_list, output_len_list, reuse_len_list, top_logprobs_list, top_token_ids_list, output_ids_list] =
+        getArgs(outputs);
     auto json_response =
         render_->attr("render_stream_response_final")(*status_list_, input_len_list, output_len_list, reuse_len_list);
     auto res = py::cast<std::string>(json_response);

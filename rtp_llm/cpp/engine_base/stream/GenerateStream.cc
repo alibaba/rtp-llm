@@ -84,8 +84,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     stream_cache_resource_->init(init_batch_size);
 
-    setReturnAllProbs(generate_input_->generate_config->return_all_probs);
-
     logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
         generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
 

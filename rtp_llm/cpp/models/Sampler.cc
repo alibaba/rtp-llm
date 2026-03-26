@@ -305,6 +305,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     return SamplerOutput({std::move(all_token_ids_out),
                           std::move(all_cum_log_probs_out),
                           std::move(inputs.all_probs),
+                          std::move(inputs.top_logprobs),
+                          std::move(inputs.top_token_ids),
                           std::move(all_beam_indices),
                           std::move(all_success)});
 }

@@ -228,8 +228,12 @@ def trans_input(input_py: GenerateInput):
 
     # 生成式推荐：组合 token 约束
     generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
-    generate_config_pb.enable_cross_sequence_ban = input_py.generate_config.enable_cross_sequence_ban
-    generate_config_pb.cross_seq_diverge_start_combo = input_py.generate_config.cross_seq_diverge_start_combo
+    generate_config_pb.enable_cross_sequence_ban = (
+        input_py.generate_config.enable_cross_sequence_ban
+    )
+    generate_config_pb.cross_seq_diverge_start_combo = (
+        input_py.generate_config.cross_seq_diverge_start_combo
+    )
     for i in range(len(input_py.generate_config.banned_combo_token_ids)):
         banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
         banned_combo.values.extend(input_py.generate_config.banned_combo_token_ids[i])
@@ -352,11 +356,18 @@ def trans_output(
         and output_pb.logits.shape[0] > 0
         else None
     )
-    all_all_probs = (
-        trans_tensor(output_pb.all_probs)
-        if output_pb.HasField("all_probs")
-        and len(output_pb.all_probs.shape) > 0
-        and output_pb.all_probs.shape[0] > 0
+    all_top_logprobs = (
+        trans_tensor(output_pb.top_logprobs)
+        if output_pb.HasField("top_logprobs")
+        and len(output_pb.top_logprobs.shape) > 0
+        and output_pb.top_logprobs.shape[0] > 0
+        else None
+    )
+    all_top_token_ids = (
+        trans_tensor(output_pb.top_token_ids)
+        if output_pb.HasField("top_token_ids")
+        and len(output_pb.top_token_ids.shape) > 0
+        and output_pb.top_token_ids.shape[0] > 0
         else None
     )
 
@@ -451,8 +462,10 @@ def trans_output(
         if all_logits is not None:
             output_py.logits = all_logits[i]
 
-        if all_all_probs is not None:
-            output_py.all_probs = all_all_probs[i]
+        if all_top_logprobs is not None:
+            output_py.top_logprobs = all_top_logprobs[i]
+        if all_top_token_ids is not None:
+            output_py.top_token_ids = all_top_token_ids[i]
 
         if prompt_logits_data is not None:
             output_py.prompt_logits = prompt_logits_data

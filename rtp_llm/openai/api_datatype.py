@@ -184,7 +184,6 @@ class ChatCompletionRequest(BaseModel):
     seed: Optional[int] = None
     n: Optional[int] = None
     logprobs: Optional[bool] = None
-    logprobs_mode: Optional[Literal["original", "default"]] = None
     top_logprobs: Optional[int] = None
     prompt_logprobs: Optional[int] = None
     response_format: Optional[Union[ResponseFormat, str, Dict[str, Any]]] = None

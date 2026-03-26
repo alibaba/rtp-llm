@@ -588,38 +588,40 @@ class CustomChatRenderer:
         assert output is not None
         if not status.request.logprobs:
             return None
-        prob_return_num = status.request.top_logprobs or 1
-        all_probs = output.all_probs
+        top_logprobs = output.top_logprobs
+        top_token_ids = output.top_token_ids
         output_id = output.output_ids
         if output_id == None:
             return None
         selected_id = output_id[-1].item()
-        if all_probs == None:
+        if top_logprobs is None or top_token_ids is None:
             raise Exception(
-                "all_probs is None when logprobs is true. There should be a internal bug."
+                "top_logprobs/top_token_ids is None when logprobs is true. There should be an internal bug."
             )
-        all_probs = all_probs.squeeze()
-        non_zero_size = all_probs.nonzero().shape[0]
-        prob_return_num = min(prob_return_num, non_zero_size)
-        # 使用 topk 提高计算效率，只计算需要的前 k 个值
-        probs, tokens = all_probs.topk(
-            prob_return_num, dim=-1, largest=True, sorted=True
-        )
-        log_values = probs.log()
+        top_logprobs = top_logprobs.flatten()
+        top_token_ids = top_token_ids.flatten()
+        prob_return_num = min(status.request.top_logprobs or 1, top_logprobs.shape[0])
 
         selected_token = self.tokenizer.decode([selected_id])
+        # Find selected token's logprob from topk results
+        selected_logprob = float("-inf")
+        for i in range(top_logprobs.shape[0]):
+            if top_token_ids[i].item() == selected_id:
+                selected_logprob = top_logprobs[i].item()
+                break
+
         chat_logprob = ChatCompletionTokenLogprob(
             token=selected_token,
             bytes=list(selected_token.encode("utf-8", errors="replace")),
-            logprob=all_probs[selected_id].log().item(),
+            logprob=selected_logprob,
             top_logprobs=[],
         )
         for i in range(prob_return_num):
-            token = self.tokenizer.decode(tokens[i].item())
+            token = self.tokenizer.decode(top_token_ids[i].item())
             chat_logprob.top_logprobs.append(
                 TopLogprob(
                     token=token,
-                    logprob=log_values[i].item(),
+                    logprob=top_logprobs[i].item(),
                     bytes=list(token.encode("utf-8", errors="replace")),
                 )
             )
@@ -1091,43 +1093,45 @@ class CustomChatRenderer:
     def _generate_log_probs_sync(
         self,
         status: StreamStatusSync,
-        all_probs: Optional[torch.Tensor],
+        top_logprobs_tensor: Optional[torch.Tensor],
+        top_token_ids_tensor: Optional[torch.Tensor],
         output_ids: Optional[torch.Tensor],
     ) -> Optional[ChatCompletionTokenLogprob]:
         if not status.request.logprobs:
             return None
-        prob_return_num = status.request.top_logprobs or 1
-        all_probs = all_probs
         output_id = output_ids
         if output_id == None:
             return None
         selected_id = output_id[-1].item()
-        if all_probs == None:
+        if top_logprobs_tensor is None or top_token_ids_tensor is None:
             raise Exception(
-                "all_probs is None when logprobs is true. There should be a internal bug."
+                "top_logprobs/top_token_ids is None when logprobs is true. There should be an internal bug."
             )
-        all_probs = all_probs.squeeze()
-        non_zero_size = all_probs.nonzero().shape[0]
-        prob_return_num = min(prob_return_num, non_zero_size)
-        # 使用 topk 提高计算效率，只计算需要的前 k 个值
-        probs, tokens = all_probs.topk(
-            prob_return_num, dim=-1, largest=True, sorted=True
+        top_logprobs_tensor = top_logprobs_tensor.squeeze()
+        top_token_ids_tensor = top_token_ids_tensor.squeeze()
+        prob_return_num = min(
+            status.request.top_logprobs or 1, top_logprobs_tensor.shape[0]
         )
-        log_values = probs.log()
 
         selected_token = self.tokenizer.decode([selected_id])
+        selected_logprob = float("-inf")
+        for i in range(top_logprobs_tensor.shape[0]):
+            if top_token_ids_tensor[i].item() == selected_id:
+                selected_logprob = top_logprobs_tensor[i].item()
+                break
+
         chat_logprob = ChatCompletionTokenLogprob(
             token=selected_token,
             bytes=list(selected_token.encode("utf-8", errors="replace")),
-            logprob=all_probs[selected_id].log().item(),
+            logprob=selected_logprob,
             top_logprobs=[],
         )
         for i in range(prob_return_num):
-            token = self.tokenizer.decode(tokens[i].item())
+            token = self.tokenizer.decode(top_token_ids_tensor[i].item())
             chat_logprob.top_logprobs.append(
                 TopLogprob(
                     token=token,
-                    logprob=log_values[i].item(),
+                    logprob=top_logprobs_tensor[i].item(),
                     bytes=list(token.encode("utf-8", errors="replace")),
                 )
             )
@@ -1142,7 +1146,8 @@ class CustomChatRenderer:
         input_len: int,  # output.aux_info
         output_len: int,  # output.aux_info
         reuse_len: int,  # output.aux_info
-        all_probs: torch.Tensor,
+        top_logprobs_tensor: torch.Tensor,
+        top_token_ids_tensor: torch.Tensor,
         output_ids: torch.Tensor,
         max_new_tokens: int,
         stop_words_str: List[str],
@@ -1185,7 +1190,9 @@ class CustomChatRenderer:
             status.update_result()
             delta = OutputDelta(
                 output_str=status.delta_output_string,
-                logprobs=self._generate_log_probs_sync(status, all_probs, output_ids),
+                logprobs=self._generate_log_probs_sync(
+                    status, top_logprobs_tensor, top_token_ids_tensor, output_ids
+                ),
                 input_length=input_len,
                 output_length=output_len,
                 reuse_length=reuse_len,
@@ -1255,18 +1262,28 @@ class CustomChatRenderer:
         input_len_list,
         output_len_list,
         reuse_len_list,
-        all_probs_list,
+        top_logprobs_list,
+        top_token_ids_list,
         output_ids_list,
         stop_words_str: List[str],
         is_streaming: bool,
     ):
         output_items: List[OutputDelta] = []
-        for buffer, input_len, output_len, reuse_len, all_probs, output_ids in zip(
+        for (
+            buffer,
+            input_len,
+            output_len,
+            reuse_len,
+            topk_lp,
+            topk_ti,
+            output_ids,
+        ) in zip(
             buffer_list,
             input_len_list,
             output_len_list,
             reuse_len_list,
-            all_probs_list,
+            top_logprobs_list,
+            top_token_ids_list,
             output_ids_list,
         ):
             trunc_string = truncate_response_with_stop_words(
@@ -1275,7 +1292,7 @@ class CustomChatRenderer:
             output_items.append(
                 OutputDelta(
                     trunc_string,
-                    self._generate_log_probs_sync(buffer, all_probs, output_ids),
+                    self._generate_log_probs_sync(buffer, topk_lp, topk_ti, output_ids),
                     input_len,
                     output_len,
                     reuse_len,
@@ -1347,7 +1364,8 @@ class CustomChatRenderer:
         input_len_list,  # output.aux_info
         output_len_list,  # output.aux_info
         reuse_len_list,  # output.aux_info
-        all_probs_list,  # GenerateOutput
+        top_logprobs_list,  # GenerateOutput
+        top_token_ids_list,  # GenerateOutput
         output_ids_list,  # GenerateOutput
         max_new_tokens,  # GenerateConfig
         stop_words_str,  # GenerateConfig
@@ -1357,12 +1375,21 @@ class CustomChatRenderer:
             stop_words_str
         )  # move into cpp, then pass in
         delta_list: List[OutputDelta] = []
-        for status, input_len, output_len, reuse_len, all_probs, output_ids in zip(
+        for (
+            status,
+            input_len,
+            output_len,
+            reuse_len,
+            topk_lp,
+            topk_ti,
+            output_ids,
+        ) in zip(
             status_list,
             input_len_list,
             output_len_list,
             reuse_len_list,  # AuxInfo
-            all_probs_list,
+            top_logprobs_list,
+            top_token_ids_list,
             output_ids_list,  # GenerateOutput
         ):
             delta_list.append(
@@ -1371,7 +1398,8 @@ class CustomChatRenderer:
                     input_len,
                     output_len,
                     reuse_len,
-                    all_probs,
+                    topk_lp,
+                    topk_ti,
                     output_ids,
                     max_new_tokens,
                     stop_words_str,
@@ -1393,7 +1421,8 @@ class CustomChatRenderer:
         input_len_list,
         output_len_list,
         reuse_len_list,
-        all_probs_list,
+        top_logprobs_list,
+        top_token_ids_list,
         output_ids_list,
         stop_words_str,
         is_streaming,
@@ -1403,7 +1432,8 @@ class CustomChatRenderer:
             input_len_list,
             output_len_list,
             reuse_len_list,
-            all_probs_list,
+            top_logprobs_list,
+            top_token_ids_list,
             output_ids_list,
             stop_words_str,
             is_streaming,
@@ -1438,7 +1468,8 @@ class CustomChatRenderer:
         input_len_list,  # output.aux_info
         output_len_list,  # output.aux_info
         reuse_len_list,  # output.aux_info
-        all_probs_list,  # GenerateOutput
+        top_logprobs_list,  # GenerateOutput
+        top_token_ids_list,  # GenerateOutput
         output_ids_list,  # GenerateOutput
         max_new_tokens,  # GenerateConfig
         stop_words_str,  # GenerateConfig
@@ -1448,12 +1479,21 @@ class CustomChatRenderer:
             stop_words_str
         )  # move into cpp, then pass in
         delta_list: List[OutputDelta] = []
-        for status, input_len, output_len, reuse_len, all_probs, output_ids in zip(
+        for (
+            status,
+            input_len,
+            output_len,
+            reuse_len,
+            topk_lp,
+            topk_ti,
+            output_ids,
+        ) in zip(
             status_list,
             input_len_list,
             output_len_list,
             reuse_len_list,  # AuxInfo
-            all_probs_list,
+            top_logprobs_list,
+            top_token_ids_list,
             output_ids_list,  # GenerateOutput
         ):
             delta_list.append(
@@ -1462,7 +1502,8 @@ class CustomChatRenderer:
                     input_len,
                     output_len,
                     reuse_len,
-                    all_probs,
+                    topk_lp,
+                    topk_ti,
                     output_ids,
                     max_new_tokens,
                     stop_words_str,
@@ -1479,7 +1520,8 @@ class CustomChatRenderer:
         input_len_list,
         output_len_list,
         reuse_len_list,
-        all_probs_list,
+        top_logprobs_list,
+        top_token_ids_list,
         output_ids_list,
         stop_words_str,
         is_streaming,
@@ -1489,7 +1531,8 @@ class CustomChatRenderer:
             input_len_list,
             output_len_list,
             reuse_len_list,
-            all_probs_list,
+            top_logprobs_list,
+            top_token_ids_list,
             output_ids_list,
             stop_words_str,
             is_streaming,

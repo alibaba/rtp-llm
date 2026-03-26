@@ -18,10 +18,7 @@ from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_trace_id,
 )
-from rtp_llm.utils.base_model_datatypes import (
-    GenerateInput,
-    GenerateOutputs,
-)
+from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 from rtp_llm.utils.time_util import Timer
 
 if TYPE_CHECKING:
@@ -301,12 +298,6 @@ class BackendRPCServerVisitor:
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "speculative decoding does not support num_return_sequences > 1 or num_beams > 1",
             )
-        # speculative decoding does not support return_all_probs
-        if input.generate_config.return_all_probs:
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "speculative decoding does not support return_all_probs",
-            )
 
     def fill_request_info(self, input: GenerateInput) -> None:
         request_info = input.request_info
@@ -321,9 +312,7 @@ class BackendRPCServerVisitor:
             request_info.frontend_ip = self.source_ip
 
         trace_id = str(
-            input.generate_config.trace_id
-            or extract_trace_id(input.headers)
-            or ""
+            input.generate_config.trace_id or extract_trace_id(input.headers) or ""
         )
         if not request_info.trace_id:
             request_info.trace_id = trace_id

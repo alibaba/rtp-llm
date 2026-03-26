@@ -763,7 +763,7 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         }
 
         // set base properties
-        stream->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
+        stream->setReturnAllProbs(true);
         if (stream->getSPOutputBuffer() == nullptr) {
             auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
             sp_output_buffer->tokens = torch::zeros({1, 2}, torch::kInt32);
