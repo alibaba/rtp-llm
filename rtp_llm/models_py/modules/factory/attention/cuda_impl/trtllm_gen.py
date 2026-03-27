@@ -494,7 +494,7 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
 
         self._cg = _init_prefill_cg_params(
             self.fmha_params.batch_size,
-            attn_inputs.kv_cache_block_id_device,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.fmha_params.seq_lens,
             self.fmha_params.cu_kv_seqlens,
             self.rope_params.kv_cache_offset,
@@ -529,7 +529,7 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
             attn_inputs.input_lengths_d,
             attn_inputs.prefix_lengths_d,
             p.seq_lens, p.cu_kv_seqlens,
-            attn_inputs.kv_cache_block_id_device,
+            attn_inputs.kv_cache_kernel_block_id_device,
             p.kv_cache_offset, p.page_size, p.N, p.M, p.total_bm,
             BLOCK_SIZE=p.BLOCK_SIZE,
         )
@@ -554,7 +554,7 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
 
         self._cg = _init_decode_cg_params(
             self.fmha_params.batch_size,
-            attn_inputs.kv_cache_block_id_device,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.fmha_params.seq_lens,
             self.rope_params.kv_cache_offset,
         )
@@ -589,7 +589,7 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
             _prepare_cg_decode_kernel[p.grid](
                 attn_inputs.sequence_lengths_plus_1_d,
                 p.seq_lens,
-                attn_inputs.kv_cache_block_id_device,
+                attn_inputs.kv_cache_kernel_block_id_device,
                 p.kv_cache_offset, p.N, p.M, p.total_bm,
                 BLOCK_SIZE=p.BLOCK_SIZE,
             )
@@ -598,7 +598,7 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
                 attn_inputs.prefix_lengths_d,
                 attn_inputs.input_lengths_d,
                 p.seq_lens,
-                attn_inputs.kv_cache_block_id_device,
+                attn_inputs.kv_cache_kernel_block_id_device,
                 p.kv_cache_offset, p.N, p.M, p.total_bm,
                 BLOCK_SIZE=p.BLOCK_SIZE,
             )
@@ -623,7 +623,7 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
 
         self._cg = _init_decode_cg_params(
             self.fmha_params.batch_size,
-            attn_inputs.kv_cache_block_id_device,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.fmha_params.seq_lens,
             self.rope_params.kv_cache_offset,
         )
@@ -657,7 +657,7 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
         _prepare_cg_decode_kernel[p.grid](
             attn_inputs.sequence_lengths_plus_1_d,
             p.seq_lens,
-            attn_inputs.kv_cache_block_id_device,
+            attn_inputs.kv_cache_kernel_block_id_device,
             p.kv_cache_offset, p.N, p.M, p.total_bm,
             BLOCK_SIZE=p.BLOCK_SIZE,
         )
