@@ -102,6 +102,7 @@ check_human_review_approved() {
 
 # 函数：检查最新一条 AI Code Review 评论是否包含 "LGTM ready to ci"
 # 不限定具体用户，只要最新一条包含 AI Code Review 标识的评论中有 "LGTM ready to ci" 即可通过
+# 返回码：0=通过，1=还没有 AI Review 评论（可重试），2=明确不通过（不应重试）
 check_ai_review_approved() {
     local response
     response=$(curl -s -L \
@@ -150,11 +151,12 @@ check_ai_review_approved() {
         return 0
     else
         echo "  ✗ Latest AI Code Review from ${comment_user} (${comment_date}) does NOT contain 'LGTM ready to ci'"
-        return 1
+        return 2
     fi
 }
 
 # 主循环：带重试机制
+# 只有"还没有 AI Review 评论"的情况才会重试，明确不通过的情况直接失败退出
 attempt=0
 while true; do
     attempt=$((attempt + 1))
@@ -174,33 +176,41 @@ while true; do
         exit 1
     fi
 
-    # 检查条件1：人工 CR
-    local human_passed=false
+    # 检查条件1：人工 CR（明确不通过则立即失败）
     echo "Checking human review approval..."
-    if check_human_review_approved; then
-        human_passed=true
+    check_human_review_approved
+    human_result=$?
+    if [ "$human_result" -ne 0 ]; then
+        echo ""
+        echo "=== Final Result ==="
+        echo "✗ CR check failed: Human review has CHANGES_REQUESTED"
+        exit 1
     fi
 
     # 检查条件2：AI Code Review
-    local ai_passed=false
+    # 返回码：0=通过，1=还没有评论（可重试），2=明确不通过（立即失败）
     echo "Checking AI Code Review approval..."
-    if check_ai_review_approved; then
-        ai_passed=true
+    check_ai_review_approved
+    ai_result=$?
+    if [ "$ai_result" -eq 2 ]; then
+        echo ""
+        echo "=== Final Result ==="
+        echo "✗ CR check failed: AI Code Review does NOT contain 'LGTM ready to ci'"
+        exit 1
     fi
 
     # 两个条件都通过才放行
-    if [ "$human_passed" = true ] && [ "$ai_passed" = true ]; then
+    if [ "$human_result" -eq 0 ] && [ "$ai_result" -eq 0 ]; then
         echo ""
         echo "=== Final Result ==="
         echo "✓ CR check passed: Both human review and AI Code Review approved"
         exit 0
     fi
 
-    # 输出当前等待状态
+    # 只有"还没有 AI Review 评论"的情况才会走到这里
     echo ""
     echo "Waiting for:"
-    [ "$human_passed" != true ] && echo "  - Human review approval"
-    [ "$ai_passed" != true ] && echo "  - AI Code Review approval"
+    echo "  - AI Code Review comment to be posted"
     echo "Will retry in ${RETRY_INTERVAL}s..."
     sleep $RETRY_INTERVAL
 done
