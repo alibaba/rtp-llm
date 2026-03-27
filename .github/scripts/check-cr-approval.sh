@@ -102,7 +102,7 @@ check_human_review_approved() {
 
 # 函数：检查最新一条 AI Code Review 评论是否包含 "LGTM ready to ci"
 # 不限定具体用户，只要最新一条包含 AI Code Review 标识的评论中有 "LGTM ready to ci" 即可通过
-# 返回码：0=通过，1=还没有 AI Review 评论（可重试），2=明确不通过（不应重试）
+# 返回码：0=通过，非0=不通过（均可重试，因为 AI bot 可能会发新评论覆盖旧的）
 check_ai_review_approved() {
     local response
     response=$(curl -s -L \
@@ -151,7 +151,7 @@ check_ai_review_approved() {
         return 0
     else
         echo "  ✗ Latest AI Code Review from ${comment_user} (${comment_date}) does NOT contain 'LGTM ready to ci'"
-        return 2
+        return 1
     fi
 }
 
@@ -187,17 +187,10 @@ while true; do
         exit 1
     fi
 
-    # 检查条件2：AI Code Review
-    # 返回码：0=通过，1=还没有评论（可重试），2=明确不通过（立即失败）
+    # 检查条件2：AI Code Review（不通过时继续重试，因为 AI bot 可能会发新评论）
     echo "Checking AI Code Review approval..."
     check_ai_review_approved
     ai_result=$?
-    if [ "$ai_result" -eq 2 ]; then
-        echo ""
-        echo "=== Final Result ==="
-        echo "✗ CR check failed: AI Code Review does NOT contain 'LGTM ready to ci'"
-        exit 1
-    fi
 
     # 两个条件都通过才放行
     if [ "$human_result" -eq 0 ] && [ "$ai_result" -eq 0 ]; then
@@ -207,10 +200,10 @@ while true; do
         exit 0
     fi
 
-    # 只有"还没有 AI Review 评论"的情况才会走到这里
+    # AI CR 未通过（可能是还没有评论，也可能是旧评论不通过等待新评论）
     echo ""
     echo "Waiting for:"
-    echo "  - AI Code Review comment to be posted"
+    echo "  - AI Code Review approval"
     echo "Will retry in ${RETRY_INTERVAL}s..."
     sleep $RETRY_INTERVAL
 done
