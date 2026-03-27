@@ -198,18 +198,31 @@ MemoryLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id, int parti
     return createPartitionedBlockInfo(layer_id, block_id, partition_count, partition_id);
 }
 
+static inline void* getBlockPtr(const torch::Tensor& layer_tensor, int block_id) {
+    size_t block_num = layer_tensor.size(0);
+    RTP_LLM_CHECK_WITH_INFO(block_id >= 0 && static_cast<size_t>(block_id) < block_num,
+                            "Block ID %d out of range (max: %zu)",
+                            block_id,
+                            block_num);
+    return static_cast<char*>(layer_tensor.data_ptr())
+           + block_id * layer_tensor.stride(0) * layer_tensor.element_size();
+}
+
 // Helper functions for creating block info
 std::vector<BlockInfo> MemoryLayoutStrategy::createBasicBlockInfo(int layer_id, int block_id) const {
+    // Do **NOT** use operator[] on a tensor and get the pointer here!!! It creates new torch::tensor and trashes the
+    // performance of beam search where massive kv cache info is required
+
     checkLayerIdValidity(layer_id);
     auto& layer_tensor = layer_kv_tensors_[layer_id];
-    void* kv_addr      = layer_tensor[block_id].data_ptr();
-    auto  kv_info = makeBlockInfo(layer_tensor[block_id], kv_addr, static_cast<size_t>(config_.kv_block_stride_bytes));
+    void* kv_addr      = getBlockPtr(layer_tensor, block_id);
+    auto  kv_info      = makeBlockInfo(layer_tensor, kv_addr, static_cast<size_t>(config_.kv_block_stride_bytes));
 
     if (config_.hasScale()) {
         auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
-        void* kv_scale_addr      = layer_scale_tensor[block_id].data_ptr();
-        auto  scale_info         = makeBlockInfo(
-            layer_scale_tensor[block_id], kv_scale_addr, static_cast<size_t>(config_.kv_scale_stride_bytes));
+        void* kv_scale_addr      = getBlockPtr(layer_scale_tensor, block_id);
+        auto  scale_info =
+            makeBlockInfo(layer_scale_tensor, kv_scale_addr, static_cast<size_t>(config_.kv_scale_stride_bytes));
         return {kv_info, scale_info};
     }
 
@@ -220,9 +233,12 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createPartitionedBlockInfo(int laye
                                                                         int block_id,
                                                                         int partition_count,
                                                                         int partition_id) const {
+    // Do **NOT** use operator[] on a tensor and get the pointer here!!! It creates new torch::tensor and trashes the
+    // performance of beam search where massive kv cache info is required
+
     checkLayerIdValidity(layer_id);
     auto& layer_tensor = layer_kv_tensors_[layer_id];
-    void* kv_addr      = layer_tensor[block_id].data_ptr();
+    void* kv_addr      = getBlockPtr(layer_tensor, block_id);
 
     const int heads = static_cast<int>(config_.local_head_num_kv);
 
@@ -234,11 +250,11 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createPartitionedBlockInfo(int laye
                                                           partition_id,
                                                           "kv_cache");
 
-    std::vector<BlockInfo> out = createPartitionedSubBlocks(layer_tensor[block_id], kv_addr, kv_parts);
+    std::vector<BlockInfo> out = createPartitionedSubBlocks(layer_tensor, kv_addr, kv_parts);
 
     if (config_.hasScale()) {
         auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
-        void* scale_addr         = layer_scale_tensor[block_id].data_ptr();
+        void* scale_addr         = getBlockPtr(layer_scale_tensor, block_id);
         auto  sc_parts     = MHAKVCacheSpec::splitKVPartitionBytes(static_cast<size_t>(config_.kv_scale_stride_bytes),
                                                               static_cast<size_t>(config_.kv_scale_stride_bytes / 2),
                                                               static_cast<size_t>(config_.kv_scale_stride_bytes / 2),
@@ -246,7 +262,7 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createPartitionedBlockInfo(int laye
                                                               partition_count,
                                                               partition_id,
                                                               "kv_cache_scale");
-        auto  scale_blocks = createPartitionedSubBlocks(layer_scale_tensor[block_id], scale_addr, sc_parts);
+        auto  scale_blocks = createPartitionedSubBlocks(layer_scale_tensor, scale_addr, sc_parts);
         out.insert(out.end(), scale_blocks.begin(), scale_blocks.end());
     }
 
