@@ -56,7 +56,7 @@ jobs:
           PR_NUMBER=${{ github.event.pull_request.number }}
           REPOSITORY=${{ github.repository }}
           echo "Checking CR approval for PR #${PR_NUMBER} in ${REPOSITORY}"
-          ./check-cr-approval.sh "$PR_NUMBER" "$REPOSITORY" "${{ secrets.GITHUB_TOKEN }}"
+          ./check-cr-approval.sh "$PR_NUMBER" "$REPOSITORY" "${{ secrets.GITHUB_TOKEN }}" "$GITHUB_OUTPUT"
 
       # Pre-check if CI already completed
       - name: Pre-check CI status
