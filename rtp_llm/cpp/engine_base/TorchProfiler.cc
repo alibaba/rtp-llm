@@ -166,10 +166,11 @@ void StepWindowProfiler::tick() {
                          prefix.c_str(),
                          start_step_.load(),
                          num_steps_.load());
-        return;
+        // Fall through to count this step — the profiler is now active and the
+        // engine will execute process() (including prefill) after this tick().
     }
 
-    // Profiler is running, count steps
+    // Profiler is running, count steps (including the step that started it)
     profiled_steps_++;
     const int target = num_steps_.load();
     if (target > 0 && profiled_steps_ >= target) {
