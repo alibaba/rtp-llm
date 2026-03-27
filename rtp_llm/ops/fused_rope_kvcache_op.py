@@ -9,7 +9,7 @@ from rtp_kernel.fused_rope_kvcache import (
     prefill_fused_rope_kvcache,
 )
 
-from librtp_compute_ops import KVCache, PyAttentionInputs, get_scalar_type
+from librtp_compute_ops import LayerKVCache, PyAttentionInputs, get_scalar_type
 from libth_transformer_config import (
     AttentionConfigs,
     check_rope_cache,
@@ -41,15 +41,15 @@ class FusedRopeKVCachePrefillOpBase:
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> FusedRopeAttnParams:
         if (
-            attn_inputs.kv_cache_block_id_host is not None
-            and attn_inputs.kv_cache_block_id_host.numel() > 0
+            attn_inputs.kv_cache_kernel_block_id_host is not None
+            and attn_inputs.kv_cache_kernel_block_id_host.numel() > 0
         ):
             kv_cache_offset = convert_offset_to_block_array(
-                attn_inputs.kv_cache_block_id_device
+                attn_inputs.kv_cache_kernel_block_id_device
             )
         else:
             kv_cache_offset = None
-        kv_cache_offset_h = None
+        kv_cache_offset_h = None # not used
 
         cp_position_ids = None
         if attn_inputs.context_parallel_info is not None:
@@ -75,7 +75,7 @@ class FusedRopeKVCachePrefillOpBase:
     def _forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         params: FusedRopeAttnParams,
         store_q_no_transpose: bool,
         store_q: bool,
@@ -97,7 +97,7 @@ class FusedRopeKVCachePrefillOpBase:
             self.attn_configs.head_num,
             self.attn_configs.kv_head_num,
             self.attn_configs.size_per_head,
-            tokens_per_block=self.attn_configs.tokens_per_block,
+            tokens_per_block=self.attn_configs.kernel_tokens_per_block,
             store_q_no_transpose=store_q_no_transpose,
             store_q=store_q,
             store_kv=store_kv,
@@ -137,7 +137,7 @@ class FusedRopeKVCachePrefillOpBase:
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         params: FusedRopeAttnParams,
     ) -> torch.Tensor:
         raise NotImplementedError()
@@ -147,7 +147,7 @@ class FusedRopeKVCachePrefillOpQKVOut(FusedRopeKVCachePrefillOpBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         params: FusedRopeAttnParams,
     ) -> torch.Tensor:
         return self._forward(
@@ -159,7 +159,7 @@ class FusedRopeKVCachePrefillOpQOut(FusedRopeKVCachePrefillOpBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         params: FusedRopeAttnParams,
     ) -> torch.Tensor:
         use_paged_fmha = kv_cache is not None and params.max_prefix_length > 0
@@ -176,12 +176,13 @@ class FusedRopeKVCacheDecodeOp:
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         params: FusedRopeAttnParams,
     ) -> torch.Tensor:
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
         assert params.kv_cache_offset is not None
+        assert params.sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory"
         return decode_fused_rope_kvcache(
             qkv,
             params.sequence_lengths,
@@ -191,7 +192,7 @@ class FusedRopeKVCacheDecodeOp:
             self.attn_configs.size_per_head,
             kv_cache.kv_cache_base,
             params.kv_cache_offset,
-            tokens_per_block=self.attn_configs.tokens_per_block,
+            tokens_per_block=self.attn_configs.kernel_tokens_per_block,
             store_kv=False,
             kv_cache_scale=kv_cache.kv_scale_base,
             kv_cache_offset_h=params.kv_cache_offset_h,
@@ -217,13 +218,13 @@ class FusedRopeKVCacheDecodeOp:
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> FusedRopeAttnParams:
         assert (
-            attn_inputs.kv_cache_block_id_host is not None
-            and attn_inputs.kv_cache_block_id_host.numel() > 0
+            attn_inputs.kv_cache_kernel_block_id_host is not None
+            and attn_inputs.kv_cache_kernel_block_id_host.numel() > 0
         )
         kv_cache_offset = convert_offset_to_block_array(
-            attn_inputs.kv_cache_block_id_device
+            attn_inputs.kv_cache_kernel_block_id_device
         )
-        kv_cache_offset_h = None
+        kv_cache_offset_h = None # not used
         return FusedRopeAttnParams(
             kv_cache_offset,
             kv_cache_offset_h,
