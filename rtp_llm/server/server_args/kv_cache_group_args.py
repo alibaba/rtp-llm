@@ -213,7 +213,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="RECO_META_CHANNEL_CALL_TIMEOUT",
         bind_to=(kv_cache_config, "reco_meta_channel_call_timeout"),
         type=int,
-        default=2000,
+        default=1500,
         help="超时时间",
     )
     kv_cache_group.add_argument(
@@ -237,7 +237,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="RECO_PUT_TIMEOUT_MS",
         bind_to=(kv_cache_config, "reco_put_timeout_ms"),
         type=int,
-        default=10000,
+        default=12000,
         help="PUT操作超时时间（毫秒）",
     )
     kv_cache_group.add_argument(
@@ -245,7 +245,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="RECO_GET_TIMEOUT_MS",
         bind_to=(kv_cache_config, "reco_get_timeout_ms"),
         type=int,
-        default=10000,
+        default=12000,
         help="GET操作超时时间（毫秒）",
     )
     kv_cache_group.add_argument(
@@ -301,7 +301,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="RECO_GET_BROADCAST_TIMEOUT",
         bind_to=(kv_cache_config, "reco_get_broadcast_timeout"),
         type=int,
-        default=12000,
+        default=15000,
         help="GET广播超时时间（毫秒）",
     )
     kv_cache_group.add_argument(
@@ -309,7 +309,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="RECO_PUT_BROADCAST_TIMEOUT",
         bind_to=(kv_cache_config, "reco_put_broadcast_timeout"),
         type=int,
-        default=12000,
+        default=15000,
         help="PUT广播超时时间（毫秒）",
     )
     kv_cache_group.add_argument(
