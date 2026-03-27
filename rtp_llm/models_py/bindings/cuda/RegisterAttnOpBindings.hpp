@@ -13,7 +13,7 @@
 namespace torch_ext {
 
 void registerAttnOpBindings(py::module& rtp_ops_m) {
-    rtp_llm::registerFusedRopeKVCacheOp(rtp_ops_m);
+    rtp_llm::registerTRTAttn(rtp_ops_m);
     rtp_llm::registerFlashInferOp(rtp_ops_m);
     rtp_llm::registerTRTAttnOp(rtp_ops_m);
     rtp_llm::registerPyFlashInferMlaParams(rtp_ops_m);

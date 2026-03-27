@@ -291,13 +291,6 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
             "__cpp_ptr__",
             [](KVBlockArray& self) { return reinterpret_cast<uintptr_t>(&self); },
             "Get C++ object pointer address");
-    pybind11::class_<TRTAttn, std::shared_ptr<TRTAttn>, rtp_llm::ParamsBase>(m, "TRTAttn")
-        .def(pybind11::init<>())
-        .def_readwrite("kv_cache_offset", &TRTAttn::kv_cache_offset)
-        .def(
-            "__cpp_ptr__",
-            [](TRTAttn& self) { return reinterpret_cast<uintptr_t>(&self); },
-            "Get C++ object pointer address");
     pybind11::class_<FusedRopeKVCachePrefillOpQKVOut>(m, "FusedRopeKVCachePrefillOpQKVOut")
         .def(pybind11::init<const AttentionConfigs&, size_t, bool>(),
              py::arg("attn_configs"),
@@ -326,6 +319,16 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
              py::arg("use_fp8_fmha") = false)
         .def("prepare", &FusedRopeKVCacheDecodeOp::prepare, py::arg("attn_inputs"))
         .def("forward", &FusedRopeKVCacheDecodeOp::forward, py::arg("qkv"), py::arg("kv_cache"), py::arg("params"));
+}
+
+void registerTRTAttn(const py::module& m) {
+    pybind11::class_<TRTAttn, std::shared_ptr<TRTAttn>, rtp_llm::ParamsBase>(m, "TRTAttn")
+        .def(pybind11::init<>())
+        .def_readwrite("kv_cache_offset", &TRTAttn::kv_cache_offset)
+        .def(
+            "__cpp_ptr__",
+            [](TRTAttn& self) { return reinterpret_cast<uintptr_t>(&self); },
+            "Get C++ object pointer address");
 }
 
 }  // namespace rtp_llm
