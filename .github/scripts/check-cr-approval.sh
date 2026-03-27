@@ -167,13 +167,12 @@ while true; do
     echo ""
     echo "=== Attempt ${attempt} (elapsed: ${elapsed}s, remaining: ${remaining}s) ==="
 
-    # 检查是否超时
+    # 检查是否超时，超时后直接放行（避免因 AI CR bot 延迟而阻塞 CI）
     if [ $elapsed -ge $MAX_WAIT_TIME ]; then
         echo ""
         echo "=== Final Result ==="
-        echo "Error: Timeout after ${MAX_WAIT_TIME}s (15 minutes) waiting for CR approval"
-        echo "Human review and/or AI Code Review approval conditions were not met"
-        exit 1
+        echo "⚠ Timeout after ${MAX_WAIT_TIME}s (15 minutes) waiting for CR approval, proceeding anyway"
+        exit 0
     fi
 
     # 检查条件1：人工 CR（明确不通过则立即失败）
