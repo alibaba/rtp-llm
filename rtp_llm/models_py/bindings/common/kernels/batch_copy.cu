@@ -30,9 +30,14 @@ static inline int getMultiProcessorCount() {
     return nSM;
 }
 
+#if USING_CUDA
 static constexpr size_t WARP_SIZE = 32;
-static constexpr size_t SEG_SIZE  = WARP_SIZE * sizeof(uint4);
-using CopyUnit                    = uint4;
+#elif USING_ROCM
+static constexpr size_t WARP_SIZE = 64;
+#endif
+
+static constexpr size_t SEG_SIZE = WARP_SIZE * sizeof(uint4);
+using CopyUnit                   = uint4;
 
 template<bool NeedsCleanup>
 __global__ void
@@ -166,8 +171,6 @@ static __global__ void batchCopy(char* __restrict__ const* __restrict__ dst,
                     }
 #if USING_CUDA
                     __syncwarp();
-#elif USING_ROCM
-                    __syncthreads();
 #endif
                 }
             }
