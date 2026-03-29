@@ -170,25 +170,19 @@ class Indexer(nn.Module):
         op.cu_kv_seqlens_global = cp_params.cu_kv_seqlens_global
         op.total_kv_len = cp_params.total_kv_len
 
-        # Pre-compute workspace metadata for round-robin (reuse MLA block_table)
         kv_cache_sharded = self._is_roundrobin and getattr(
             cp_params, "kv_cache_sharded", False
         )
         if kv_cache_sharded:
-            op._ws_slot_mapping = cp_params.ws_slot_mapping
-            op._indexer_workspace_block_table = cp_params.ws_block_table
-            op._ws_total_pages = cp_params.ws_total_pages
             op._cu_local_kv_seqlens = cp_params.cu_local_kv_seqlens
             op._total_local_kv = cp_params.total_local_kv
             op._kv_allgather_restore_indices = cp_params.kv_allgather_restore_indices
-            op._has_prefix_cache = getattr(cp_params, "has_prefix_cache", False)
+            op._local_indexer_slot_mapping = cp_params.local_indexer_slot_mapping
         else:
-            op._ws_slot_mapping = None
-            op._indexer_workspace_block_table = None
             op._cu_local_kv_seqlens = None
             op._total_local_kv = None
             op._kv_allgather_restore_indices = None
-            op._has_prefix_cache = False
+            op._local_indexer_slot_mapping = None
 
     def _quant_q_k_cp(
         self,
@@ -199,9 +193,14 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         cp_params: Any,
     ):
-        """CP quant: zigzag uses full cache, round-robin uses sharded cache + workspace."""
+        """CP quant: zigzag uses full cache, round-robin writes local K directly."""
         kv_cache_sharded = self._is_roundrobin and getattr(
             cp_params, "kv_cache_sharded", False
+        )
+        local_indexer_slot_mapping = (
+            getattr(cp_params, "local_indexer_slot_mapping", None)
+            if kv_cache_sharded
+            else None
         )
         return self.indexer_op.quant_q_k_cp(
             query,
@@ -210,6 +209,7 @@ class Indexer(nn.Module):
             slot_mapping,
             attention_inputs,
             kv_cache_sharded=kv_cache_sharded,
+            local_indexer_slot_mapping=local_indexer_slot_mapping,
         )
 
     def _get_topk_cp(

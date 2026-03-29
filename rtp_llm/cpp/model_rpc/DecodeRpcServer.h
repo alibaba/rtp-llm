@@ -1,12 +1,11 @@
 #pragma once
 
-#include <mutex>
-
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/CPCacheScatterHelper.h"
 
 namespace rtp_llm {
 
@@ -84,20 +83,12 @@ private:
     // CP sharded KV cache helpers
     std::vector<CacheKeyType> recomputeVirtualCacheKeys(GenerateStream* stream, int32_t cp_size) const;
 
-    /// Scatter from paged staging blocks to paged decode blocks using the new
-    /// paged scatter kernel. Staging blocks are borrowed from BlockPool.
-    void scatterStagingToDecodeBlocks(const LoadKVCacheContext& load_context,
-                                      const std::vector<int>&   staging_block_ids,
-                                      cudaStream_t              stream) const;
-
 private:
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<size_t>      onflight_load_cache_requests_{0};
     size_t                   model_id;
 
-    void*          scatter_stream_ = nullptr;
-    std::once_flag scatter_stream_init_;
-    cudaStream_t   getOrCreateScatterStream();
+    std::unique_ptr<CPCacheScatterHelper> scatter_helper_;
 };
 
 }  // namespace rtp_llm

@@ -114,13 +114,10 @@ class IndexerOp(nn.Module):
         self.total_global_ids = None
         self.total_local_ids = None
         self.cu_kv_seqlens_global = None
-        self._indexer_workspace = None
-        self._indexer_workspace_block_table = None
-        self._ws_slot_mapping = None
         self._cu_local_kv_seqlens = None
         self._total_local_kv = None
         self._kv_allgather_restore_indices = None
-        self._has_prefix_cache = False
+        self._local_indexer_slot_mapping = None
 
     def apply_rope_and_rotate_q_k(
         self,
@@ -323,19 +320,18 @@ class IndexerOp(nn.Module):
         slot_mapping: torch.Tensor,
         attention_inputs: Any,
         kv_cache_sharded: bool = False,
+        local_indexer_slot_mapping: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Context-parallel variant: all-gather only K from all CP ranks, restore to logical
-        order and write to KV cache; quantize Q locally (no all_gather of Q).
+        Context-parallel variant: write local K to indexer cache, quantize Q locally.
 
-        Each rank keeps its local query and only quantizes it; all ranks all-gather
-        key so that full K is written to cache once per rank, ensuring decode and
-        indexer topk see the same full K.
+        When kv_cache_sharded=True (round-robin), local K is written directly to the
+        sharded indexer cache using local_indexer_slot_mapping (no all_gather needed
+        for cache write). The topk computation path gathers FP8 K from the sharded
+        cache later via _get_topk_ragged_cp_roundrobin.
 
-        When kv_cache_sharded=True, the indexer cache is also sharded (slot_mapping has
-        -1 for non-owned tokens). We additionally build a temporary indexer workspace
-        by writing the full restored key into a contiguous paged tensor, so that
-        _get_topk_ragged_cp_roundrobin can read complete K for topk computation.
+        When kv_cache_sharded=False (zigzag), all K is all-gathered, restored, and
+        written to the full cache as before.
 
         Args:
             query: Local query tensor [local_tokens, index_n_heads, index_head_dim]
@@ -344,72 +340,42 @@ class IndexerOp(nn.Module):
             slot_mapping: Physical slot indices [total_tokens] for full context
             attention_inputs: Must have context_parallel_info with prefill_qkv_restore_indice
                 and prefill_qkv_padding_mask
-            kv_cache_sharded: If True, slot_mapping has -1 for non-owned tokens and
-                a temporary workspace is built for topk computation.
+            kv_cache_sharded: If True, use direct local cache write (no all_gather for cache write).
+            local_indexer_slot_mapping: [local_tokens] slot mapping with physical slots
+                for owned tokens, -1 for non-owned. Required when kv_cache_sharded=True.
 
         Returns:
             Tuple of (q_fp8, q_scale) for local context only, shapes [local_tokens, ...].
 
         Side effect:
-            Sets self.kv_len from kv_restore_unpad_indices for CP topk methods to use
-            when allocating gathered k_fp8/k_scale (avoids all_gather of key just for length).
-            When kv_cache_sharded, also sets self._indexer_workspace and
-            self._indexer_workspace_block_table for _get_topk_ragged_cp_roundrobin.
+            Sets self.kv_len for CP topk methods.
         """
         self.kv_len = self.total_kv_len
-
         assert kv_cache is not None, "kv_cache is required"
-        gathered_key = all_gather(key.contiguous(), group=Group.TP)
-        gathered_key = gathered_key.reshape(-1, key.size(-1))
-        restored_key = gathered_key[self.kv_restore_unpad_indices]  # element wise
-
-        # Write to indexer cache (sharded or full depending on slot_mapping)
-        rtp_llm_ops.indexer_k_quant_and_cache(
-            restored_key,
-            kv_cache.kv_scale_base,
-            slot_mapping,
-            self.block_size,
-            self.scale_fmt,
-        )
 
         if kv_cache_sharded:
-            # slot_mapping and block_table are pre-computed in _setup_cp_params.
-            assert (
-                self._ws_slot_mapping is not None
-            ), "ws_slot_mapping must be pre-computed via _setup_cp_params before quant_q_k_cp"
-            assert (
-                self._indexer_workspace_block_table is not None
-            ), "indexer_workspace_block_table must be pre-computed via _setup_cp_params before quant_q_k_cp"
-
-            # Build temporary indexer workspace: write full restored_key into a
-            # contiguous paged tensor so _get_topk_ragged_cp_roundrobin can read complete K.
-            # Use _ws_total_pages (page-aligned) so that the workspace is large enough
-            # for the page-aligned slot_mapping.
-            cache_block_size = kv_cache.kv_scale_base.size(1)
-            cache_stride = kv_cache.kv_scale_base.size(2)
-            total_pages = getattr(self, "_ws_total_pages", None)
-            if total_pages is None:
-                total_kv = restored_key.size(0)
-                total_pages = (total_kv + cache_block_size - 1) // cache_block_size
-
-            workspace = torch.empty(
-                total_pages,
-                cache_block_size,
-                cache_stride,
-                dtype=kv_cache.kv_scale_base.dtype,
-                device=restored_key.device,
+            assert local_indexer_slot_mapping is not None, (
+                "local_indexer_slot_mapping is required when kv_cache_sharded=True"
             )
             rtp_llm_ops.indexer_k_quant_and_cache(
-                restored_key,
-                workspace,
-                self._ws_slot_mapping,
+                key,
+                kv_cache.kv_scale_base,
+                local_indexer_slot_mapping,
                 self.block_size,
                 self.scale_fmt,
             )
-            self._indexer_workspace = workspace
         else:
-            self._indexer_workspace = None
-            self._indexer_workspace_block_table = None
+            gathered_key = all_gather(key.contiguous(), group=Group.TP)
+            gathered_key = gathered_key.reshape(-1, key.size(-1))
+            restored_key = gathered_key[self.kv_restore_unpad_indices]
+
+            rtp_llm_ops.indexer_k_quant_and_cache(
+                restored_key,
+                kv_cache.kv_scale_base,
+                slot_mapping,
+                self.block_size,
+                self.scale_fmt,
+            )
 
         query_flat = query.view(-1, self.index_head_dim)
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(
@@ -705,56 +671,38 @@ class IndexerOp(nn.Module):
         kv_cache: Any = None,
         attention_inputs: Any = None,
     ) -> Optional[torch.Tensor]:
-        """Round-robin CP topk: read from workspace (no prefix) or gather from sharded cache (prefix)."""
+        """Round-robin CP topk: gather FP8 K from sharded cache, all_gather, restore to global order."""
         total_kv_tokens = self.kv_len
         assert total_kv_tokens is not None and total_kv_tokens > 0
+        assert kv_cache is not None, "kv_cache is required for round-robin CP topk"
+        assert attention_inputs is not None
 
-        if not getattr(self, "_has_prefix_cache", False):
-            assert self._indexer_workspace is not None, (
-                "Workspace must be built by quant_q_k_cp(kv_cache_sharded=True) "
-                "before calling _get_topk_ragged_cp_roundrobin"
-            )
-            k_fp8, k_scale = self._gather_kv_fp8(
-                total_kv_tokens,
-                self._indexer_workspace,
-                self._indexer_workspace_block_table,
-                q_fp8.device,
-            )
-        else:
-            # Prefix cache: gather from sharded cache via all-gather
-            assert (
-                kv_cache is not None
-            ), "kv_cache is required for round-robin CP topk with prefix cache support"
-            assert attention_inputs is not None
+        local_kv_len = self._total_local_kv
+        k_fp8_local = torch.empty(
+            (local_kv_len, self.index_head_dim),
+            dtype=torch.float8_e4m3fn,
+            device=q_fp8.device,
+        )
+        k_scale_local = torch.empty(
+            (local_kv_len, self.index_head_dim // self.block_size * 4),
+            dtype=torch.uint8,
+            device=q_fp8.device,
+        )
+        rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+            kv_cache.kv_scale_base,
+            k_fp8_local,
+            k_scale_local,
+            attention_inputs.kv_cache_block_id_device,
+            self._cu_local_kv_seqlens,
+        )
 
-            local_kv_len = self._total_local_kv
-            k_fp8_local = torch.empty(
-                (local_kv_len, self.index_head_dim),
-                dtype=torch.float8_e4m3fn,
-                device=q_fp8.device,
-            )
-            k_scale_local = torch.empty(
-                (local_kv_len, self.index_head_dim // self.block_size * 4),
-                dtype=torch.uint8,
-                device=q_fp8.device,
-            )
-            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-                kv_cache.kv_scale_base,
-                k_fp8_local,
-                k_scale_local,
-                attention_inputs.kv_cache_block_id_device,
-                self._cu_local_kv_seqlens,
-            )
+        k_fp8_all = all_gather(k_fp8_local.contiguous(), group=Group.TP)
+        k_scale_all = all_gather(k_scale_local.contiguous(), group=Group.TP)
 
-            # All-gather across CP ranks to get all ranks' local K
-            k_fp8_all = all_gather(k_fp8_local.contiguous(), group=Group.TP)
-            k_scale_all = all_gather(k_scale_local.contiguous(), group=Group.TP)
-
-            # Restore to global order using precomputed indices
-            k_fp8_all = k_fp8_all.reshape(-1, self.index_head_dim)
-            k_scale_all = k_scale_all.reshape(-1, k_scale_local.shape[-1])
-            k_fp8 = k_fp8_all[self._kv_allgather_restore_indices]
-            k_scale = k_scale_all[self._kv_allgather_restore_indices]
+        k_fp8_all = k_fp8_all.reshape(-1, self.index_head_dim)
+        k_scale_all = k_scale_all.reshape(-1, k_scale_local.shape[-1])
+        k_fp8 = k_fp8_all[self._kv_allgather_restore_indices]
+        k_scale = k_scale_all[self._kv_allgather_restore_indices]
 
         kv_fp8 = (k_fp8, k_scale.view(torch.float32))
         return self._run_cp_logits_topk(q_fp8, weights, kv_fp8, fmha_params)

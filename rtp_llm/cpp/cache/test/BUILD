@@ -199,3 +199,16 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "cp_cache_scatter_helper_test",
+    srcs = [
+        "CPCacheScatterHelperTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache:cp_cache_scatter_helper",
+    ],
+    exec_properties = {'gpu': 'A10'},
+)

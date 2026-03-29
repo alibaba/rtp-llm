@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "copts", "any_cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
@@ -192,4 +192,16 @@ cc_library(
         ":cache_core",
         "//rtp_llm/cpp/cache/connector",
     ] + torch_deps(),
+)
+
+cc_library(
+    name = "cp_cache_scatter_helper",
+    srcs = ["CPCacheScatterHelper.cc"],
+    hdrs = ["CPCacheScatterHelper.h"],
+    copts = any_cuda_copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache",
+        "//rtp_llm/cpp/kernels:cp_cache_scatter",
+    ],
 )

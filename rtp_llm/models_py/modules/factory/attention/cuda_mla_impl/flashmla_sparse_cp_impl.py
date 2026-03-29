@@ -501,120 +501,84 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         # Determine whether prefix cache is active
         self.has_prefix_cache = prefix_lengths.sum().item() > 0
 
-        # Workspace metadata for indexer (all-gathered new KV, no prefix).
-        # The workspace stores new tokens only; it is used by indexer_k_quant_and_cache
-        # to write the all-gathered new K into a contiguous paged tensor.
-        #
-        # Each request's tokens must start at a page boundary in the workspace so that
-        # triton_convert_req_index_to_global_index (block_table[req][tok//page_size] *
-        # page_size + tok%page_size) maps correctly.  With ragged cu_kv_seqlens the
-        # naive arange(total_kv) slot_mapping would place request i at a non-aligned
-        # offset whenever request i-1's length is not a multiple of page_size.
         new_total_kv = self.kv_restore_unpad_indices.size(0)
         self._ws_total_kv = new_total_kv
         page_size = self.token_per_block
 
+        # --- MLA workspace metadata (non-prefix path only) ---
+        # The workspace stores all-gathered KV in a contiguous paged tensor
+        # for the _forward_workspace attention path.
         if not self.has_prefix_cache:
-            # Build page-aligned workspace: each request starts at a page boundary.
             ws_cu = self.cu_kv_seqlens_global.cpu().int()
-        else:
-            new_kv_lengths = actual_input_lengths.int()
-            cu_new_kv_cpu = torch.zeros(new_kv_lengths.shape[0] + 1, dtype=torch.int32)
-            cu_new_kv_cpu[1:] = torch.cumsum(new_kv_lengths, dim=0)
-            ws_cu = cu_new_kv_cpu
+            ws_lengths_t = ws_cu[1:] - ws_cu[:-1]
+            ws_pages_per_req = (ws_lengths_t + page_size - 1) // page_size
+            ws_aligned_sizes = ws_pages_per_req * page_size
+            ws_cu_aligned = torch.zeros(ws_aligned_sizes.size(0) + 1, dtype=torch.int32)
+            ws_cu_aligned[1:] = torch.cumsum(ws_aligned_sizes, dim=0)
+            ws_total_aligned = int(ws_cu_aligned[-1].item())
+            self._ws_total_pages = (ws_total_aligned + page_size - 1) // page_size
 
-        batch_size_ws = ws_cu.size(0) - 1
-        # Compute page-aligned start for each request in the workspace
-        ws_lengths = (ws_cu[1:] - ws_cu[:-1]).tolist()
-        ws_page_aligned_starts = [0]
-        for length in ws_lengths:
-            pages_needed = (length + page_size - 1) // page_size
-            ws_page_aligned_starts.append(
-                ws_page_aligned_starts[-1] + pages_needed * page_size
-            )
-        ws_total_aligned = ws_page_aligned_starts[-1]
-        self._ws_total_pages = (ws_total_aligned + page_size - 1) // page_size
-
-        # Build slot_mapping: for each token in the ragged layout, map to its
-        # page-aligned position in the workspace.
-        ws_slot_list = []
-        src_offset = 0
-        for i in range(batch_size_ws):
-            length = ws_lengths[i]
-            aligned_start = ws_page_aligned_starts[i]
-            ws_slot_list.append(
-                torch.arange(aligned_start, aligned_start + length, dtype=torch.int64)
-            )
-            src_offset += length
-        if ws_slot_list:
-            self._ws_slot_mapping = torch.cat(ws_slot_list).to(self.device)
-        else:
-            self._ws_slot_mapping = torch.empty(
-                0, dtype=torch.int64, device=self.device
-            )
-
-        # Build page-aligned cu_seqlens for block_table construction
-        ws_cu_aligned = torch.tensor(ws_page_aligned_starts, dtype=torch.int32).to(
-            self.device
-        )
-
-        if not self.has_prefix_cache:
-            self._ws_block_table = common.build_contiguous_block_table(
-                ws_cu_aligned,
-                page_size,
-                self.device,
-            )
-            # Not needed for non-prefix path
-            self._cu_local_kv_seqlens = None
-            self._total_local_kv = None
-            self._kv_allgather_restore_indices = None
-            self._global_fp8_metadata = None
-        else:
-            self._ws_block_table = common.build_contiguous_block_table(
-                ws_cu_aligned,
-                page_size,
-                self.device,
-            )
-
-            # Sharded cu_kv_seqlens: each rank's local token capacity per request.
-            # All ranks have the same capacity per request (localBlockCount * block_size),
-            # which ensures all_gather tensors have equal size across ranks.
-            kv_lengths_list = kv_lengths.int().tolist()
-            local_kv_counts = []
-            vbs = self.virtual_block_size
-            for kv_len in kv_lengths_list:
-                n_vblocks = (kv_len + vbs - 1) // vbs
-                local_capacity = n_vblocks * page_size
-                local_kv_counts.append(local_capacity)
-            self._local_kv_counts = local_kv_counts
-            cu_local_kv_cpu = torch.zeros(len(local_kv_counts) + 1, dtype=torch.int32)
-            cu_local_kv_cpu[1:] = torch.cumsum(
-                torch.tensor(local_kv_counts, dtype=torch.int32), dim=0
-            )
-            self._cu_local_kv_seqlens = cu_local_kv_cpu.to(self.device)
-            self._total_local_kv = int(cu_local_kv_cpu[-1].item())
-
-            # Precompute restore indices: map all-gathered local K tokens to global order.
-            restore_pieces: list[torch.Tensor] = []
-            for s, kv_len in enumerate(kv_lengths_list):
-                positions = torch.arange(kv_len, dtype=torch.long)
-                ranks = (positions % vbs) % C
-                local_idx = (positions // vbs) * page_size + (positions % vbs) // C
-                cu_s = int(cu_local_kv_cpu[s].item())
-                flat_idx = ranks * self._total_local_kv + cu_s + local_idx
-                restore_pieces.append(flat_idx)
-            if restore_pieces:
-                self._kv_allgather_restore_indices = torch.cat(restore_pieces).to(
-                    self.device
+            total_ws_tokens = int(ws_lengths_t.sum().item())
+            if total_ws_tokens > 0:
+                offsets = ws_cu_aligned[:-1].long()
+                lengths = ws_lengths_t.long()
+                req_ids = torch.cat(
+                    [torch.full((int(l),), i, dtype=torch.long) for i, l in enumerate(lengths.tolist())]
                 )
+                within_req = torch.cat(
+                    [torch.arange(int(l), dtype=torch.long) for l in lengths.tolist()]
+                )
+                self._ws_slot_mapping = (offsets[req_ids] + within_req).to(self.device)
             else:
-                self._kv_allgather_restore_indices = torch.empty(
-                    0, dtype=torch.long, device=self.device
+                self._ws_slot_mapping = torch.empty(
+                    0, dtype=torch.int64, device=self.device
                 )
 
-            # get_mla_metadata for the GLOBAL total_q (all ranks' q tokens after
-            # all-gather + restore), because each rank runs attention for ALL q
-            # tokens against its own KV shard.
+            self._ws_block_table = common.build_contiguous_block_table(
+                ws_cu_aligned.to(self.device),
+                page_size,
+                self.device,
+            )
+        else:
+            self._ws_total_pages = None
+            self._ws_slot_mapping = None
+            self._ws_block_table = None
+
+        # --- Sharded-cache metadata (always computed for indexer topk) ---
+        # Used by both indexer (gather-from-sharded-cache + all_gather FP8) and
+        # MLA prefix-cache path (all_gather Q/topk, local attention, merge).
+        kv_lengths_t = kv_lengths.int()
+        kv_lengths_list = kv_lengths_t.tolist()
+        vbs = self.virtual_block_size
+        n_vblocks = (kv_lengths_t + vbs - 1) // vbs
+        local_kv_counts_t = n_vblocks * page_size
+        self._local_kv_counts = local_kv_counts_t.tolist()
+        cu_local_kv_cpu = torch.zeros(local_kv_counts_t.size(0) + 1, dtype=torch.int32)
+        cu_local_kv_cpu[1:] = torch.cumsum(local_kv_counts_t, dim=0)
+        self._cu_local_kv_seqlens = cu_local_kv_cpu.to(self.device)
+        self._total_local_kv = int(cu_local_kv_cpu[-1].item())
+
+        total_kv = sum(kv_lengths_list)
+        if total_kv > 0:
+            positions_flat = torch.cat(
+                [torch.arange(kv_len, dtype=torch.long) for kv_len in kv_lengths_list]
+            )
+            req_ids = torch.cat(
+                [torch.full((kv_len,), s, dtype=torch.long) for s, kv_len in enumerate(kv_lengths_list)]
+            )
+            cu_offsets = cu_local_kv_cpu[req_ids].long()
+            ranks = (positions_flat % vbs) % C
+            local_idx = (positions_flat // vbs) * page_size + (positions_flat % vbs) // C
+            self._kv_allgather_restore_indices = (
+                ranks * self._total_local_kv + cu_offsets + local_idx
+            ).to(self.device)
+        else:
+            self._kv_allgather_restore_indices = torch.empty(
+                0, dtype=torch.long, device=self.device
+            )
+
+        # --- Global MLA metadata for prefix-cache attention path ---
+        if self.has_prefix_cache:
             global_total_q = self.kv_restore_unpad_indices.size(0)
             if global_total_q > 0:
                 tile_sched, num_splits = get_mla_metadata(
@@ -630,6 +594,17 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
                 )
             else:
                 self._global_fp8_metadata = None
+        else:
+            self._global_fp8_metadata = None
+
+        # --- Precompute local slot mapping for direct cache write ---
+        # Both MLA and indexer use the same physical slot mapping (derived from
+        # mla_params.slot_mapping), so we compute it once and share.
+        local_slot_mapping = self._build_local_slot_mapping(
+            mla_params.slot_mapping, local_tokens, C
+        )
+        self._local_mla_slot_mapping = local_slot_mapping
+        self._local_indexer_slot_mapping = local_slot_mapping
 
         # Local metadata for the indexer / non-prefix workspace path (valid q rows only)
         n_q = self.total_global_ids.size(0)
@@ -647,6 +622,58 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
             )
         else:
             self._fp8_kernel_metadata_q0 = None
+
+    def _build_local_slot_mapping(
+        self,
+        global_slot_mapping: torch.Tensor,
+        local_tokens: int,
+        cp_size: int,
+    ) -> torch.Tensor:
+        """Build a slot mapping for local tokens that maps only owned tokens to physical slots.
+
+        Uses the already-computed total_local_ids (valid local indices) and
+        total_global_ids (corresponding global unpadded indices) from plan().
+        For owned tokens, the global slot_mapping already has the correct
+        physical slot. For non-owned tokens, slot_mapping has -1.
+
+        Args:
+            global_slot_mapping: [total_unpadded_kv_tokens] physical slot indices
+                (with -1 for non-owned in sharded mode).
+            local_tokens: Number of local tokens on this rank.
+            cp_size: Context parallel size.
+
+        Returns:
+            local_slot_mapping: [local_tokens] with physical slots for owned tokens, -1 otherwise.
+        """
+        if local_tokens == 0:
+            return torch.empty(0, dtype=torch.int64, device=self.device)
+
+        result = torch.full((local_tokens,), -1, dtype=torch.int64, device=self.device)
+        if self.total_local_ids.numel() > 0:
+            global_slot = global_slot_mapping.to(self.device)
+            result[self.total_local_ids] = global_slot[self.total_global_ids]
+        return result
+
+    def _write_local_cache(
+        self,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: KVCache,
+    ) -> None:
+        """Write only this rank's owned tokens to the sharded MLA cache.
+
+        Uses the precomputed _local_mla_slot_mapping which has -1 for non-owned tokens.
+        The underlying concat_and_cache_mla kernel skips slot_idx < 0.
+        """
+        scale = torch.tensor(1.0, dtype=torch.float32, device=compressed_kv.device)
+        compute_ops.concat_and_cache_mla(
+            compressed_kv,
+            k_pe,
+            kv_cache.kv_cache_base,
+            self._local_mla_slot_mapping,
+            self.kv_cache_write_op.kv_cache_type,
+            scale,
+        )
 
     def _convert_topk_indices_to_workspace(
         self,
@@ -779,22 +806,8 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         kv_cache=None,
         layer_id: int = 0,
     ) -> torch.Tensor:
-        # Step 1: All-gather KV and restore to global order
-        gathered_ckv = all_gather(compressed_kv.contiguous(), group=Group.TP)
-        gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
-        gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP)
-        gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
-
-        restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
-        restored_k_pe = gathered_k_pe[self.kv_restore_unpad_indices]
-
-        # Step 2: Write sharded cache (slot_mapping has -1 for non-owned tokens)
-        self.kv_cache_write_op.forward(
-            restored_ckv,
-            restored_k_pe,
-            kv_cache,
-            self.mla_params,
-        )
+        # Step 1: Write local KV to sharded cache (owned tokens only, no all_gather needed)
+        self._write_local_cache(compressed_kv, k_pe, kv_cache)
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
@@ -803,8 +816,17 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
             return None
 
         if self.has_prefix_cache:
+            # Prefix path: no need to all_gather KV — attention gathers Q/topk instead
             return self._forward_prefix_cache(q, topk, kv_cache, layer_id)
         else:
+            # Non-prefix: still need all-gathered KV to build workspace for attention
+            gathered_ckv = all_gather(compressed_kv.contiguous(), group=Group.TP)
+            gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
+            gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP)
+            gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
+
+            restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
+            restored_k_pe = gathered_k_pe[self.kv_restore_unpad_indices]
             return self._forward_workspace(
                 q, restored_ckv, restored_k_pe, topk, kv_cache, layer_id
             )
@@ -1063,24 +1085,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         )
         self.fmha_impl.plan(self.fmha_params, attn_inputs.kv_cache_block_id_device)
 
-        # Build shared workspace block_table & slot_mapping (per-request, not per-layer).
-        # These are computed in plan() and depend on has_prefix_cache:
-        # - No prefix: ws_block_table from cu_kv_seqlens_global (full KV = new tokens only)
-        # - With prefix: ws_block_table from new-token-only cu_seqlens (for indexer workspace)
         impl = self.fmha_impl
-        ws_block_table = None
-        ws_slot_mapping = None
-        cu_local_kv_seqlens = None
-        total_local_kv = None
-        kv_allgather_restore_indices = None
-        ws_total_pages = None
-        if getattr(impl, "kv_cache_sharded", False):
-            ws_slot_mapping = impl._ws_slot_mapping
-            ws_block_table = impl._ws_block_table
-            ws_total_pages = impl._ws_total_pages
-            cu_local_kv_seqlens = impl._cu_local_kv_seqlens
-            total_local_kv = impl._total_local_kv
-            kv_allgather_restore_indices = impl._kv_allgather_restore_indices
 
         self.cp_params = SimpleNamespace(
             kv_restore_unpad_indices=impl.kv_restore_unpad_indices,
@@ -1093,13 +1098,13 @@ class SparseMlaCpImpl(SparseMlaImpl):
             cu_kv_seqlens_global=impl.cu_kv_seqlens_global,
             total_kv_len=getattr(impl, "total_kv_len", 0),
             kv_cache_sharded=impl.kv_cache_sharded,
-            ws_block_table=ws_block_table,
-            ws_slot_mapping=ws_slot_mapping,
-            ws_total_pages=ws_total_pages,
-            cu_local_kv_seqlens=cu_local_kv_seqlens,
-            total_local_kv=total_local_kv,
-            kv_allgather_restore_indices=kv_allgather_restore_indices,
             has_prefix_cache=getattr(impl, "has_prefix_cache", False),
+            # Sharded-cache metadata (always available for indexer topk)
+            cu_local_kv_seqlens=impl._cu_local_kv_seqlens,
+            total_local_kv=impl._total_local_kv,
+            kv_allgather_restore_indices=impl._kv_allgather_restore_indices,
+            # Local slot mappings for direct cache write
+            local_indexer_slot_mapping=impl._local_indexer_slot_mapping,
         )
 
     @classmethod

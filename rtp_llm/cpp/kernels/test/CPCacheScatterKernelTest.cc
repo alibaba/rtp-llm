@@ -215,7 +215,6 @@ TEST_F(CPCacheScatterKernelTest, NonContiguousBlockIds) {
     const int    block_size        = 4;
     const int    elem_stride_bytes = 32;
     const int    total_tokens      = 13;                                            // partial
-    const int    tokens_per_vb     = block_size * cp_size;                          // 16
     const int    decode_blocks     = (total_tokens + block_size - 1) / block_size;  // 4
     const size_t block_bytes       = static_cast<size_t>(block_size) * elem_stride_bytes;
 

@@ -5,13 +5,11 @@
 #include <limits.h>
 #include <condition_variable>
 #include <cstdlib>
-#include <cuda_runtime.h>
 
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
-#include "rtp_llm/cpp/kernels/cp_cache_scatter_kernel.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
@@ -51,16 +49,6 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
     return grpc::Status::OK;
 }
 
-cudaStream_t DecodeRpcServer::getOrCreateScatterStream() {
-    std::call_once(scatter_stream_init_, [this]() {
-        cudaStream_t stream = nullptr;
-        auto         err    = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
-        RTP_LLM_CHECK_WITH_INFO(
-            err == cudaSuccess, "Failed to create scatter CUDA stream: %s", cudaGetErrorString(err));
-        scatter_stream_ = reinterpret_cast<void*>(stream);
-    });
-    return reinterpret_cast<cudaStream_t>(scatter_stream_);
-}
 
 void DecodeRpcServer::initThreadPool() {
     if (resource_.workers.size() > 0) {
@@ -76,10 +64,6 @@ DecodeRpcServer::~DecodeRpcServer() {
     if (thread_pool_) {
         thread_pool_->stop();
         thread_pool_.reset();
-    }
-    if (scatter_stream_) {
-        cudaStreamDestroy(reinterpret_cast<cudaStream_t>(scatter_stream_));
-        scatter_stream_ = nullptr;
     }
 }
 
@@ -625,147 +609,6 @@ std::vector<CacheKeyType> DecodeRpcServer::recomputeVirtualCacheKeys(GenerateStr
     return virtual_cache_keys;
 }
 
-void DecodeRpcServer::scatterStagingToDecodeBlocks(const LoadKVCacheContext& load_context,
-                                                   const std::vector<int>&   staging_block_ids,
-                                                   cudaStream_t              stream) const {
-    auto        cache_manager = engine_->resourceContext().cache_manager;
-    const auto& cache_config  = cache_manager->cacheConfig();
-    const bool  use_hybrid    = cache_config.groupNums() > 1;
-    const int   cp_size       = load_context.prefill_cp_size;
-    const int   block_size    = static_cast<int>(cache_config.seq_size_per_block);
-    const int   vblock_count  = static_cast<int>(load_context.cache_keys.size());
-    auto        device        = engine_->getDevice();
-    auto        layer_num     = maga_init_params_.model_config_.num_layers;
-    const int   staging_cnt   = vblock_count * cp_size;
-
-    RTP_LLM_LOG_DEBUG("[SCATTER-PAGED] begin: layers=%zu vblock_count=%d cp_size=%d block_size=%d",
-                      layer_num,
-                      vblock_count,
-                      cp_size,
-                      block_size);
-
-    std::vector<BufferPtr> temp_gpu_buffers;
-
-    for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
-        size_t gid = 0;
-        if (use_hybrid && layer_id < cache_config.layer_to_group_id.size()) {
-            const int mapped_gid = cache_config.layer_to_group_id[layer_id];
-            if (mapped_gid >= 0)
-                gid = static_cast<size_t>(mapped_gid);
-        }
-        const auto& block_ids     = load_context.block_ids_by_group[gid]->blocks();
-        const int   decode_blocks = static_cast<int>(block_ids.size());
-        const int   total_tokens  = decode_blocks * block_size;
-
-        auto   sample_parts = cache_manager->convertIndexToBuffer(block_ids[0], layer_id, 1, 0);
-        size_t kv_stride    = sample_parts[0].size_bytes;
-        int    elem_stride  = static_cast<int>(kv_stride / block_size);
-        if (elem_stride <= 0 || elem_stride % 16 != 0) {
-            continue;
-        }
-
-        int max_dst_bid     = *std::max_element(block_ids.begin(), block_ids.end());
-        int max_src_bid     = *std::max_element(staging_block_ids.begin(), staging_block_ids.end());
-        int addr_table_size = std::max(max_dst_bid, max_src_bid) + 1;
-
-        std::vector<void*> dst_addrs(addr_table_size, nullptr);
-        std::vector<void*> src_addrs(addr_table_size, nullptr);
-
-        for (int b = 0; b < decode_blocks; ++b) {
-            auto parts              = cache_manager->convertIndexToBuffer(block_ids[b], layer_id, 1, 0);
-            dst_addrs[block_ids[b]] = parts[0].addr;
-        }
-        for (int s = 0; s < staging_cnt; ++s) {
-            auto parts                      = cache_manager->convertIndexToBuffer(staging_block_ids[s], layer_id, 1, 0);
-            src_addrs[staging_block_ids[s]] = parts[0].addr;
-        }
-
-        // Upload address tables and block ID arrays to GPU
-        auto addrs_gpu =
-            device->allocateBuffer({DataType::TYPE_UINT64, {(size_t)addr_table_size}, AllocationType::DEVICE}, {});
-        auto dst_ids_gpu =
-            device->allocateBuffer({DataType::TYPE_INT32, {(size_t)decode_blocks}, AllocationType::DEVICE}, {});
-        auto src_addrs_gpu =
-            device->allocateBuffer({DataType::TYPE_UINT64, {(size_t)addr_table_size}, AllocationType::DEVICE}, {});
-        auto src_ids_gpu =
-            device->allocateBuffer({DataType::TYPE_INT32, {(size_t)staging_cnt}, AllocationType::DEVICE}, {});
-        temp_gpu_buffers.insert(temp_gpu_buffers.end(), {addrs_gpu, dst_ids_gpu, src_addrs_gpu, src_ids_gpu});
-
-        cudaMemcpyAsync(
-            addrs_gpu->data(), dst_addrs.data(), addr_table_size * sizeof(void*), cudaMemcpyHostToDevice, stream);
-        cudaMemcpyAsync(
-            dst_ids_gpu->data(), block_ids.data(), decode_blocks * sizeof(int), cudaMemcpyHostToDevice, stream);
-        cudaMemcpyAsync(
-            src_addrs_gpu->data(), src_addrs.data(), addr_table_size * sizeof(void*), cudaMemcpyHostToDevice, stream);
-        cudaMemcpyAsync(
-            src_ids_gpu->data(), staging_block_ids.data(), staging_cnt * sizeof(int), cudaMemcpyHostToDevice, stream);
-
-        invokeCPCacheScatterPaged(reinterpret_cast<void**>(addrs_gpu->data()),
-                                  dst_ids_gpu->data<int>(),
-                                  reinterpret_cast<void**>(src_addrs_gpu->data()),
-                                  src_ids_gpu->data<int>(),
-                                  vblock_count,
-                                  cp_size,
-                                  block_size,
-                                  total_tokens,
-                                  elem_stride,
-                                  stream);
-
-        // Scale scatter (same pattern)
-        if (sample_parts.size() == 2 && sample_parts[1].size_bytes > 0) {
-            size_t sc_stride = sample_parts[1].size_bytes;
-            int    sc_elem   = static_cast<int>(sc_stride / block_size);
-            if (sc_elem > 0 && sc_elem % 16 == 0) {
-                std::vector<void*> sc_dst_addrs(addr_table_size, nullptr);
-                std::vector<void*> sc_src_addrs(addr_table_size, nullptr);
-                for (int b = 0; b < decode_blocks; ++b) {
-                    auto parts = cache_manager->convertIndexToBuffer(block_ids[b], layer_id, 1, 0);
-                    if (parts.size() == 2)
-                        sc_dst_addrs[block_ids[b]] = parts[1].addr;
-                }
-                for (int s = 0; s < staging_cnt; ++s) {
-                    auto parts = cache_manager->convertIndexToBuffer(staging_block_ids[s], layer_id, 1, 0);
-                    if (parts.size() == 2)
-                        sc_src_addrs[staging_block_ids[s]] = parts[1].addr;
-                }
-
-                auto sc_dst_gpu = device->allocateBuffer(
-                    {DataType::TYPE_UINT64, {(size_t)addr_table_size}, AllocationType::DEVICE}, {});
-                auto sc_src_gpu = device->allocateBuffer(
-                    {DataType::TYPE_UINT64, {(size_t)addr_table_size}, AllocationType::DEVICE}, {});
-                temp_gpu_buffers.insert(temp_gpu_buffers.end(), {sc_dst_gpu, sc_src_gpu});
-
-                cudaMemcpyAsync(sc_dst_gpu->data(),
-                                sc_dst_addrs.data(),
-                                addr_table_size * sizeof(void*),
-                                cudaMemcpyHostToDevice,
-                                stream);
-                cudaMemcpyAsync(sc_src_gpu->data(),
-                                sc_src_addrs.data(),
-                                addr_table_size * sizeof(void*),
-                                cudaMemcpyHostToDevice,
-                                stream);
-
-                invokeCPCacheScatterPaged(reinterpret_cast<void**>(sc_dst_gpu->data()),
-                                          dst_ids_gpu->data<int>(),
-                                          reinterpret_cast<void**>(sc_src_gpu->data()),
-                                          src_ids_gpu->data<int>(),
-                                          vblock_count,
-                                          cp_size,
-                                          block_size,
-                                          total_tokens,
-                                          sc_elem,
-                                          stream);
-            }
-        }
-    }
-
-    auto err = cudaStreamSynchronize(stream);
-    RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess, "scatter stream sync failed: %s", cudaGetErrorString(err));
-    temp_gpu_buffers.clear();
-    RTP_LLM_LOG_DEBUG("[SCATTER-PAGED] all layers done");
-}
-
 ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     AtomicGuard request_guard(onflight_load_cache_requests_);
     const auto& request_key   = load_context.request_key;
@@ -799,47 +642,16 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
     const int32_t cp_size = load_context.prefill_cp_size;
 
-    // --- CP sharded: borrow staging blocks from BlockPool for RDMA receive ---
+    // --- CP sharded: use CPCacheScatterHelper for staging + scatter ---
     const int vblock_count = (cp_size > 1 && use_mla) ? static_cast<int>(load_context.cache_keys.size()) : 0;
-    const int staging_cnt  = vblock_count * cp_size;
 
-    std::vector<int> staging_block_ids;
-    if (staging_cnt > 0) {
-        auto block_pool = cache_manager->getBlockPool();
-        RTP_LLM_CHECK_WITH_INFO(block_pool != nullptr, "BlockPool is null");
-        staging_block_ids = block_pool->malloc(staging_cnt);
-        if (static_cast<int>(staging_block_ids.size()) < staging_cnt) {
-            if (!staging_block_ids.empty()) {
-                block_pool->requestFree(staging_block_ids);
-            }
-            return ErrorInfo(ErrorCode::DECODE_MALLOC_FAILED,
-                             "CP staging: need " + std::to_string(staging_cnt) + " blocks but only got "
-                                 + std::to_string(staging_block_ids.size()));
+    std::unique_ptr<CPCacheScatterHelper::StagingPlan> staging_plan;
+    if (vblock_count > 0) {
+        if (!scatter_helper_) {
+            scatter_helper_ = std::make_unique<CPCacheScatterHelper>(cache_manager.get(), engine_->getDevice());
         }
-        RTP_LLM_LOG_DEBUG(
-            "CP staging: borrowed %d blocks from pool for request [%s]", staging_cnt, request_key.c_str());
+        staging_plan = scatter_helper_->prepareStagingPlan(vblock_count, cp_size, layer_num);
     }
-
-    // RAII guard: ensure staging blocks are returned to pool even on error
-    auto staging_guard_func = [&]() {
-        if (!staging_block_ids.empty()) {
-            auto block_pool = cache_manager->getBlockPool();
-            if (block_pool) {
-                block_pool->requestFree(staging_block_ids);
-                RTP_LLM_LOG_DEBUG("CP staging: returned %zu blocks to pool for request [%s]",
-                                  staging_block_ids.size(),
-                                  request_key.c_str());
-            }
-            staging_block_ids.clear();
-        }
-    };
-    struct StagingGuard {
-        std::function<void()> cleanup;
-        ~StagingGuard() {
-            if (cleanup)
-                cleanup();
-        }
-    } staging_guard{staging_guard_func};
 
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
@@ -866,23 +678,27 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             auto        block_num = block_ids.size();
             size_t      model_id  = maga_init_params_.model_id;
 
-            // CP sharded path: RDMA receives into borrowed staging blocks, scatter later.
-            if (cp_size > 1 && use_mla) {
-                const int virtual_block_count = static_cast<int>(load_context.cache_keys.size());
+            // CP sharded path: RDMA receives into staging blocks, scatter via helper later.
+            if (cp_size > 1 && use_mla && staging_plan) {
+                const int virtual_block_count = staging_plan->vblock_count;
+                const auto& staging_layer = staging_plan->layer_infos[layer_id];
                 for (int v = 0; v < virtual_block_count; ++v) {
                     auto cache_key = makeCacheKey(model_id, std::to_string(load_context.cache_keys[v]), layer_id);
 
-                    int  staging_bid = staging_block_ids[v * cp_size + i];
-                    auto parts       = cache_manager->convertIndexToBuffer(staging_bid, layer_id, 1, 0);
+                    int staging_idx = v * cp_size + i;
+                    const auto& part = staging_layer.infos[staging_idx];
 
-                    std::shared_ptr<void> kv_ptr(parts[0].addr, [](void*) {});
+                    std::shared_ptr<void> kv_ptr(part.addr, [](void*) {});
                     load_layer_cache->addBlock(
-                        "kv_" + cache_key, kv_ptr, static_cast<uint32_t>(parts[0].size_bytes), true, true);
+                        "kv_" + cache_key, kv_ptr, static_cast<uint32_t>(part.size_bytes), true, true);
 
-                    if (parts.size() == 2 && parts[1].size_bytes > 0) {
-                        std::shared_ptr<void> sc_ptr(parts[1].addr, [](void*) {});
+                    // Scale: re-query from cache_manager (staging_layer only stores kv part)
+                    int  staging_bid   = staging_plan->staging_block_ids[staging_idx];
+                    auto scale_parts   = cache_manager->convertIndexToBuffer(staging_bid, layer_id, 1, 0);
+                    if (scale_parts.size() == 2 && scale_parts[1].size_bytes > 0) {
+                        std::shared_ptr<void> sc_ptr(scale_parts[1].addr, [](void*) {});
                         load_layer_cache->addBlock(
-                            "kv_scale_" + cache_key, sc_ptr, static_cast<uint32_t>(parts[1].size_bytes), true, true);
+                            "kv_scale_" + cache_key, sc_ptr, static_cast<uint32_t>(scale_parts[1].size_bytes), true, true);
                     }
                 }
             } else {
@@ -1112,9 +928,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     }
 
     // After RDMA completes, scatter interleaved CP blocks to contiguous layout.
-    if (cp_size > 1 && use_mla && vblock_count > 0) {
-        cudaStream_t s_stream = getOrCreateScatterStream();
-        scatterStagingToDecodeBlocks(load_context, staging_block_ids, s_stream);
+    if (staging_plan && scatter_helper_) {
+        scatter_helper_->scatterAndRelease(
+            std::move(staging_plan), load_context.block_ids_by_group, cache_config, layer_num);
     }
 
     return ErrorInfo::OkStatus();
