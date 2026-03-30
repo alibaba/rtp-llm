@@ -14,7 +14,7 @@
 namespace rtp_llm {
 namespace test {
 
-class CPCacheScatterHelperTest : public ::testing::Test {
+class CPCacheScatterHelperTest: public ::testing::Test {
 protected:
     void SetUp() override {
         rtp_llm::initLogger();
@@ -32,8 +32,7 @@ protected:
         config.seq_size_per_block = static_cast<size_t>(block_size);
         config.use_mla            = true;
 
-        // Element stride per token must be 16-byte aligned for the scatter kernel.
-        // kv_lora_rank=8, FP16 => K per token = 8*2 = 16 bytes (aligned).
+        // kv_lora_rank=8, FP16 => per-token stride = (8+8)*2 = 32 bytes.
         const uint32_t kv_lora_rank = 8;
         const uint32_t rope_dim     = 8;
 
@@ -123,15 +122,15 @@ TEST_F(CPCacheScatterHelperTest, StagingPlanRAIIFreesBlocksOnDestruction) {
 }
 
 TEST_F(CPCacheScatterHelperTest, ScatterAndReleaseProducesContiguousLayout) {
-    const int layer_num  = 1;
-    const int block_num  = 30;
-    const int block_size = 4;
-    const int cp_size    = 2;
+    const int layer_num    = 1;
+    const int block_num    = 30;
+    const int block_size   = 4;
+    const int cp_size      = 2;
     const int vblock_count = 2;
-    auto      mgr = createMlaCacheManager(layer_num, block_num, block_size);
+    auto      mgr          = createMlaCacheManager(layer_num, block_num, block_size);
 
     CPCacheScatterHelper helper(mgr.get(), device_);
-    auto plan = helper.prepareStagingPlan(vblock_count, cp_size, layer_num);
+    auto                 plan = helper.prepareStagingPlan(vblock_count, cp_size, layer_num);
     ASSERT_NE(plan, nullptr);
 
     const int tokens_per_vb = block_size * cp_size;
@@ -139,23 +138,23 @@ TEST_F(CPCacheScatterHelperTest, ScatterAndReleaseProducesContiguousLayout) {
     const int decode_blocks = total_tokens / block_size;
 
     // Determine element stride from the first staging block
-    auto sample_parts   = mgr->convertIndexToBuffer(plan->staging_block_ids[0], 0, 1, 0);
-    int  elem_stride    = static_cast<int>(sample_parts[0].size_bytes / block_size);
+    auto sample_parts = mgr->convertIndexToBuffer(plan->staging_block_ids[0], 0, 1, 0);
+    int  elem_stride  = static_cast<int>(sample_parts[0].size_bytes / block_size);
     ASSERT_GT(elem_stride, 0);
-    size_t block_bytes  = static_cast<size_t>(block_size) * elem_stride;
+    size_t block_bytes = static_cast<size_t>(block_size) * elem_stride;
 
     // Fill staging blocks with known pattern:
     // For vblock v, peer p, slot s: tag = global_token & 0xFF
     for (int v = 0; v < vblock_count; ++v) {
         for (int p = 0; p < cp_size; ++p) {
-            int staging_idx = v * cp_size + p;
-            int bid         = plan->staging_block_ids[staging_idx];
-            auto parts      = mgr->convertIndexToBuffer(bid, 0, 1, 0);
+            int  staging_idx = v * cp_size + p;
+            int  bid         = plan->staging_block_ids[staging_idx];
+            auto parts       = mgr->convertIndexToBuffer(bid, 0, 1, 0);
 
             std::vector<uint8_t> block_data(block_bytes, 0);
             for (int s = 0; s < block_size; ++s) {
-                int global_token = v * tokens_per_vb + s * cp_size + p;
-                uint8_t tag = static_cast<uint8_t>(global_token & 0xFF);
+                int     global_token = v * tokens_per_vb + s * cp_size + p;
+                uint8_t tag          = static_cast<uint8_t>(global_token & 0xFF);
                 std::memset(block_data.data() + s * elem_stride, tag, elem_stride);
             }
             device_->copy({Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, {block_bytes}, parts[0].addr),
@@ -168,8 +167,8 @@ TEST_F(CPCacheScatterHelperTest, ScatterAndReleaseProducesContiguousLayout) {
     auto decode_block_ids = mgr->getBlockPool()->malloc(decode_blocks);
     ASSERT_EQ(static_cast<int>(decode_block_ids.size()), decode_blocks);
 
-    auto block_ids_holder = std::make_shared<BlockIds>();
-    block_ids_holder->blocks() = decode_block_ids;
+    auto block_ids_holder            = std::make_shared<BlockIds>();
+    block_ids_holder->blocks()       = decode_block_ids;
     GroupBlockIds block_ids_by_group = {block_ids_holder};
 
     // Run scatter
@@ -177,11 +176,11 @@ TEST_F(CPCacheScatterHelperTest, ScatterAndReleaseProducesContiguousLayout) {
 
     // Verify: each decode block should contain contiguous tokens
     for (int t = 0; t < total_tokens; ++t) {
-        int blk_idx = t / block_size;
-        int slot    = t % block_size;
+        int     blk_idx  = t / block_size;
+        int     slot     = t % block_size;
         uint8_t expected = static_cast<uint8_t>(t & 0xFF);
 
-        auto parts = mgr->convertIndexToBuffer(decode_block_ids[blk_idx], 0, 1, 0);
+        auto                 parts = mgr->convertIndexToBuffer(decode_block_ids[blk_idx], 0, 1, 0);
         std::vector<uint8_t> block_data(block_bytes);
         device_->copy({Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {block_bytes}, block_data.data()),
                        Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, {block_bytes}, parts[0].addr)});
@@ -201,22 +200,23 @@ TEST_F(CPCacheScatterHelperTest, ScatterReleasesBlocksAfterCompletion) {
     const int layer_num  = 1;
     const int block_num  = 30;
     const int block_size = 4;
-    auto      mgr = createMlaCacheManager(layer_num, block_num, block_size);
+    auto      mgr        = createMlaCacheManager(layer_num, block_num, block_size);
 
     auto   block_pool  = mgr->getBlockPool();
     size_t free_before = block_pool->freeBlocksNum();
 
     CPCacheScatterHelper helper(mgr.get(), device_);
-    auto plan = helper.prepareStagingPlan(2, 2, layer_num);
+    auto                 plan = helper.prepareStagingPlan(2, 2, layer_num);
     ASSERT_NE(plan, nullptr);
 
     // Allocate decode blocks
-    auto decode_block_ids = block_pool->malloc(4);  // 2 vblocks * cp_size 2 = 8 tokens, block_size=4 => 2 decode blocks ... wait
+    auto decode_block_ids =
+        block_pool->malloc(4);  // 2 vblocks * cp_size 2 = 8 tokens, block_size=4 => 2 decode blocks ... wait
     // Actually: 2 vblocks, cp_size 2, block_size 4 => total_tokens = 2*4*2=16, decode_blocks = 16/4 = 4
     ASSERT_EQ(static_cast<int>(decode_block_ids.size()), 4);
 
-    auto block_ids_holder = std::make_shared<BlockIds>();
-    block_ids_holder->blocks() = decode_block_ids;
+    auto block_ids_holder            = std::make_shared<BlockIds>();
+    block_ids_holder->blocks()       = decode_block_ids;
     GroupBlockIds block_ids_by_group = {block_ids_holder};
 
     helper.scatterAndRelease(std::move(plan), block_ids_by_group, mgr->cacheConfig(), layer_num);

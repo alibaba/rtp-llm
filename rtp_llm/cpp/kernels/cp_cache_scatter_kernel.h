@@ -68,7 +68,7 @@ void invokeCPCacheScatter(void**       dst_block_addrs,
 /// @param cp_size           Number of CP peers.
 /// @param block_size        Tokens per physical block.
 /// @param total_tokens      Actual total token count.
-/// @param elem_stride_bytes Bytes per token in the KV cache (must be 16-byte aligned).
+/// @param elem_stride_bytes Bytes per token in the KV cache.
 /// @param stream            CUDA stream.
 void invokeCPCacheScatterPaged(void**       dst_block_addrs,
                                const int*   dst_block_ids,
