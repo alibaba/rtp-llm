@@ -76,6 +76,11 @@ public class AppStateHookServer {
         }
     }
 
+    // NOTE: Intentionally blocking the Reactor event loop here.
+    // This hook is invoked only once during startup by the local sidecar,
+    // before any traffic is served. Blocking ensures the 200 response is
+    // returned only after online() completes, so the sidecar can reliably
+    // determine startup success. No need to offload to boundedElastic.
     public Mono<ServerResponse> handleAppStartUp(ServerRequest request) {
         log.warn("recv /hook/after_start request.");
         if (isNonLocalRequest(request)) {

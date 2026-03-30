@@ -1,44 +1,52 @@
-
 package org.flexlb.service.grace;
 
-import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.StringUtils;
-import org.flexlb.listener.AppOnlineHooker;
+import org.flexlb.service.grace.strategy.LbConsistencyHooker;
+import org.flexlb.service.grace.strategy.QueryWarmerHooker;
 import org.springframework.context.EnvironmentAware;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import java.util.Arrays;
-import java.util.Comparator;
-import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 
+/**
+ * Graceful online orchestrator.
+ * <p>
+ * Executes online hooks in a fixed order:
+ * 1. LB consistency — register with service discovery (ZK)
+ * 2. Query warmer — warm up service before accepting traffic
+ */
 @Slf4j
 @Component
 public class GracefulOnlineService implements EnvironmentAware {
 
-    private static final List<AppOnlineHooker> ONLINE_LISTENERS = new CopyOnWriteArrayList<>();
-    @Setter
+    private final LbConsistencyHooker lbConsistencyHooker;
+    private final QueryWarmerHooker queryWarmerHooker;
     private Environment environment;
 
-    public static void addOnlineListener(AppOnlineHooker listener) {
-        ONLINE_LISTENERS.add(listener);
+    public GracefulOnlineService(LbConsistencyHooker lbConsistencyHooker,
+                                 QueryWarmerHooker queryWarmerHooker) {
+        this.lbConsistencyHooker = lbConsistencyHooker;
+        this.queryWarmerHooker = queryWarmerHooker;
+    }
+
+    @Override
+    public void setEnvironment(Environment environment) {
+        this.environment = environment;
     }
 
     public void online() {
         boolean isTestEnv = Arrays.stream(environment.getActiveProfiles())
-                .anyMatch(e -> StringUtils.equals(e, "test"));
+                .anyMatch(e -> "test".equals(e));
         if (isTestEnv) {
             log.info("test env, skip online service");
             return;
         }
 
-        // Warm up service in descending priority order
-        ONLINE_LISTENERS.sort(Comparator.comparingInt(AppOnlineHooker::priority).reversed());
-        for (AppOnlineHooker appOnlineHooker : ONLINE_LISTENERS) {
-            appOnlineHooker.afterStartUp();
-        }
-    }
+        log.info("Graceful online: step 1 — register with service discovery");
+        lbConsistencyHooker.afterStartUp();
 
+        log.info("Graceful online: step 2 — warm up service");
+        queryWarmerHooker.afterStartUp();
+    }
 }
