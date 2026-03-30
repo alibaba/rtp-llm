@@ -247,9 +247,6 @@ class ModelDeployWeightInfo:
             else VitSeparation.VIT_SEPARATION_LOCAL
         )
 
-        # for moe
-        self._use_stack_weight = False
-
         self.gen_dummy_reciprocal = (
             model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
             and not isinstance(model_config.quant_config, 
@@ -591,7 +588,6 @@ class ModelDeployWeightInfo:
             head_num=self._head_num,
             head_num_kv=self._head_num_kv,
             size_per_head=self._size_per_head,
-            use_stack_weight=self._use_stack_weight,
             align_size=self._align_size,
             moe_align_size=self._moe_align_size_for_padding,
             moe_layer_index=self.moe_layer_index_,

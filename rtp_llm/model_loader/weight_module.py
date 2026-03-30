@@ -158,7 +158,7 @@ class WeightModule(ABC):
         device: str,
         load_config: LoadConfig,
     ):
-        raw_tensors = self._load_raw_tensor(
+        raw_tensors = self._load_raw_tenwsor(
             tensor_source, layer_id, device, load_config
         )
 
@@ -445,7 +445,6 @@ class AtomicWeight(WeightModule):
             head_num=load_config.head_num,
             head_num_kv=load_config.head_num_kv,
             size_per_head=load_config.size_per_head,
-            use_stack_weight=load_config.use_stack_weight,
             bits=load_config.bit,
         )
 

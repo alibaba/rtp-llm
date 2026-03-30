@@ -208,10 +208,10 @@ def create_w8a8_fp8_per_block_weight(
         return W8A8Fp8PerBlockMoeAtomicWeight(*args, **kwargs)
     if isinstance(src_weight_info, FfnAtomicWeight):
         return W8A8Fp8PerBlockFfnAtomicWeight(*args, **kwargs)
-    if isinstance(src_weight_info, AtomicWeight):
-        return W8A8Fp8PerBlockAtomicWeight(*args, **kwargs)
     if isinstance(src_weight_info, LinearAttnAtomicWeight):
         return W8A8Fp8PerBlockLinearAttnAtomicWeight(*args, **kwargs)
+    if isinstance(src_weight_info, AtomicWeight):
+        return W8A8Fp8PerBlockAtomicWeight(*args, **kwargs)
     raise NotImplementedError(f"Unsupported weight type: {src_weight_info}")
 
 
@@ -817,7 +817,7 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         scale_name = self.w8a8_weight_list.get(src_weight_info.name)
         scale = None
         if scale_name:
-            scale_params = copy.deepcopy(params)
+            scale_params = {**params}
             scale_params["name"] = scale_name
             scale: AtomicWeight = create_w8a8_fp8_per_block_weight(
                 src_weight_info, **scale_params

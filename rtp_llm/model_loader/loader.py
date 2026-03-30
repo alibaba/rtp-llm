@@ -1,7 +1,6 @@
 import gc
 import logging
 import os
-import time
 from collections import OrderedDict
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -11,6 +10,7 @@ import torch.nn.functional as F
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.lora.lora_weights import LoRAWeights
+from rtp_llm.model_loader.ffn_weight import iter_stacked_moe_weights
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
@@ -21,7 +21,7 @@ from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorColle
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight, WeightModule
 from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
-from rtp_llm.utils.model_weight import W, WeightStyle
+from rtp_llm.utils.model_weight import W, WeightStyle, identity
 from rtp_llm.utils.module_util import has_module
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import check_with_info
@@ -271,21 +271,47 @@ class ModelLoader:
         )
         return (free_mem - model_mem) > (3 * max_file_mem)
 
+    @staticmethod
+    def _build_stacked_key_config(weight_info_list) -> dict:
+        """Build mapping: stacked ckpt key -> per-expert name template."""
+        stacked_key_config = {}
+        for wi in weight_info_list:
+            for moe_weight in iter_stacked_moe_weights(wi.weight):
+                for idx, ckpt_weight in enumerate(moe_weight.weights):
+                    if ckpt_weight.merge_fun is not identity:
+                        continue
+                    stacked_key = ckpt_weight.tensor_name(wi.layer_id)
+                    template = moe_weight._expert_key_pattern(idx).format(
+                        i=str(wi.layer_id),
+                        expert_id="{expert_id}",
+                    )
+                    stacked_key_config[stacked_key] = template
+        return stacked_key_config
+
     def _load_from_fastsafetensor(self, device: str):
-        all_tensors = self._load_config.database.fastsafetensors_weights_iterator(
-            device, True
-        )
         logging.info(f"load weight by device: {device}")
         model_weights = self._create_model_weights(device)
         tensor_to_weight_map, weight_info_list = self._generate_weight_info()
-        direct_io = self._load_config.exported_device.support_dio_load
+
+        stacked_key_config = self._build_stacked_key_config(weight_info_list)
+        if stacked_key_config:
+            logging.info(
+                f"fastsafetensors per-expert split enabled for {len(stacked_key_config)} stacked keys"
+            )
+
+        all_tensors = self._load_config.database.fastsafetensors_weights_iterator(
+            device,
+            True,
+            stacked_key_config=stacked_key_config,
+        )
+
         for key, loaded_tensor in all_tensors:
             if key not in tensor_to_weight_map:
                 continue
             weight_info = tensor_to_weight_map[key]
+
             complete = weight_info.collector.store_tensor(key, loaded_tensor)
             if complete:
-                start = time.time()
                 tensors = weight_info.weight.load(
                     tensor_source=weight_info.collector,
                     layer_id=weight_info.layer_id,
@@ -299,9 +325,6 @@ class ModelLoader:
                         )
                     else:
                         model_weights.set_global_weight(name, tensor)
-                logging.debug(
-                    f"weight: {type(weight_info.weight).__name__} load cost {time.time() - start}"
-                )
                 weight_info.collector.clear()
 
         for weight_info in weight_info_list:
