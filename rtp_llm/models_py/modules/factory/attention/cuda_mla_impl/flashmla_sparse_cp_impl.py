@@ -108,6 +108,10 @@ class ZigZagSparseMlaFp8CPOp(SparseMlaFp8Op):
         self.q1_idx_global = None
         self.kv0_idx = None
         self.kv1_idx = None
+        self._cu_local_kv_seqlens = None
+        self._total_local_kv = None
+        self._kv_allgather_restore_indices = None
+        self._local_indexer_slot_mapping = None
         self.kv_cache_write_op = None
         self.write_cache_store_impl = None
 
@@ -523,7 +527,10 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
                 offsets = ws_cu_aligned[:-1].long()
                 lengths = ws_lengths_t.long()
                 req_ids = torch.cat(
-                    [torch.full((int(l),), i, dtype=torch.long) for i, l in enumerate(lengths.tolist())]
+                    [
+                        torch.full((int(l),), i, dtype=torch.long)
+                        for i, l in enumerate(lengths.tolist())
+                    ]
                 )
                 within_req = torch.cat(
                     [torch.arange(int(l), dtype=torch.long) for l in lengths.tolist()]
@@ -564,11 +571,16 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
                 [torch.arange(kv_len, dtype=torch.long) for kv_len in kv_lengths_list]
             )
             req_ids = torch.cat(
-                [torch.full((kv_len,), s, dtype=torch.long) for s, kv_len in enumerate(kv_lengths_list)]
+                [
+                    torch.full((kv_len,), s, dtype=torch.long)
+                    for s, kv_len in enumerate(kv_lengths_list)
+                ]
             )
             cu_offsets = cu_local_kv_cpu[req_ids].long()
             ranks = (positions_flat % vbs) % C
-            local_idx = (positions_flat // vbs) * page_size + (positions_flat % vbs) // C
+            local_idx = (positions_flat // vbs) * page_size + (
+                positions_flat % vbs
+            ) // C
             self._kv_allgather_restore_indices = (
                 ranks * self._total_local_kv + cu_offsets + local_idx
             ).to(self.device)
@@ -812,18 +824,31 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        if topk is None:
-            return None
+        no_valid_tokens = topk is None
 
         if self.has_prefix_cache:
-            # Prefix path: no need to all_gather KV — attention gathers Q/topk instead
+            if no_valid_tokens:
+                # Pad-only rank (input_tokens < cp_size): create a dummy topk so
+                # _forward_prefix_cache can participate in all_gathers without hanging.
+                # Shape (0, top_k) triggers the padding branch inside the function.
+                topk = torch.empty(0, self.top_k, dtype=torch.int32, device=q.device)
             return self._forward_prefix_cache(q, topk, kv_cache, layer_id)
         else:
-            # Non-prefix: still need all-gathered KV to build workspace for attention
+            # Non-prefix: all ranks must participate in KV all_gather
             gathered_ckv = all_gather(compressed_kv.contiguous(), group=Group.TP)
             gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
             gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP)
             gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
+
+            if no_valid_tokens:
+                # Pad-only rank: participated in all_gathers above; return dummy output.
+                return torch.empty(
+                    q.shape[0],
+                    self.num_heads,
+                    self.kv_lora_rank,
+                    dtype=q.dtype,
+                    device=q.device,
+                )
 
             restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
             restored_k_pe = gathered_k_pe[self.kv_restore_unpad_indices]
@@ -964,8 +989,21 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
                 ts.tile_scheduler_metadata = None
                 ts.num_splits = None
 
-        q_batched = all_q.unsqueeze(0)
-        indices_batched = sharded_indices.unsqueeze(0)
+        all_q = all_q.contiguous()
+        q_batched = torch.as_strided(
+            all_q,
+            (1, *all_q.shape),
+            (0, *all_q.stride()),
+        )
+        # FlashMLA sparse decode checks strides with int32 bounds. For this path
+        # the external batch dim is always 1, so a zero batch stride is safe and
+        # avoids overflow when total_q * topk becomes very large.
+        sharded_indices = sharded_indices.contiguous()
+        indices_batched = torch.as_strided(
+            sharded_indices,
+            (1, *sharded_indices.shape),
+            (0, *sharded_indices.stride()),
+        )
 
         local_out, local_lse = flash_mla_with_kvcache(
             q=q_batched,
@@ -1100,11 +1138,15 @@ class SparseMlaCpImpl(SparseMlaImpl):
             kv_cache_sharded=impl.kv_cache_sharded,
             has_prefix_cache=getattr(impl, "has_prefix_cache", False),
             # Sharded-cache metadata (always available for indexer topk)
-            cu_local_kv_seqlens=impl._cu_local_kv_seqlens,
-            total_local_kv=impl._total_local_kv,
-            kv_allgather_restore_indices=impl._kv_allgather_restore_indices,
+            cu_local_kv_seqlens=getattr(impl, "_cu_local_kv_seqlens", None),
+            total_local_kv=getattr(impl, "_total_local_kv", None),
+            kv_allgather_restore_indices=getattr(
+                impl, "_kv_allgather_restore_indices", None
+            ),
             # Local slot mappings for direct cache write
-            local_indexer_slot_mapping=impl._local_indexer_slot_mapping,
+            local_indexer_slot_mapping=getattr(
+                impl, "_local_indexer_slot_mapping", None
+            ),
         )
 
     @classmethod

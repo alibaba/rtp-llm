@@ -30,6 +30,7 @@ public:
                            const std::vector<std::string>&  peer_addrs,
                            const std::vector<CacheKeyType>& cache_keys,
                            const GroupBlockIds&             block_ids_by_group,
+                           int32_t                          total_token_num,
                            int64_t                          reuse_block_size,
                            int64_t                          timeout_ms,
                            int                              partition_count,
@@ -41,6 +42,7 @@ public:
             peer_addrs(peer_addrs),
             cache_keys(cache_keys),
             block_ids_by_group(block_ids_by_group),
+            total_token_num(total_token_num),
             reuse_block_size(reuse_block_size),
             timeout_ms(timeout_ms),
             partition_count(partition_count),
@@ -52,6 +54,7 @@ public:
         const std::vector<std::string>&  peer_addrs;
         const std::vector<CacheKeyType>& cache_keys;
         const GroupBlockIds&             block_ids_by_group;
+        int32_t                          total_token_num;
         int64_t                          reuse_block_size;
         int64_t                          timeout_ms;
         int                              partition_count;

@@ -659,6 +659,39 @@ TEST_F(NormalCacheStoreTest, testLoadContext_Success) {
     set_block_thread.join();
 }
 
+TEST_F(NormalCacheStoreTest, testLoadBuffers_MlaKvAndScaleSuccess) {
+    ASSERT_TRUE(initCacheStores());
+
+    const std::string requestid        = "test-request-id";
+    const std::string cache_key        = "123456789";
+    const std::string kv_key           = "kv_" + cache_key;
+    const std::string kv_scale_key     = "kv_scale_" + cache_key;
+    const uint32_t    kv_block_size    = 32;
+    const uint32_t    scale_block_size = 20;
+
+    auto store_buffer = std::make_shared<RequestBlockBuffer>(requestid);
+    store_buffer->addBlock(block_buffer_util_->makeBlockBuffer(kv_key, kv_block_size, 'K', true));
+    store_buffer->addBlock(block_buffer_util_->makeBlockBuffer(kv_scale_key, scale_block_size, 'S', true));
+    cache_store2_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) {
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(CacheStoreErrorCode::None, ec);
+    });
+
+    auto load_cache = std::make_shared<RequestBlockBuffer>(requestid);
+    load_cache->addBlock(block_buffer_util_->makeBlockBuffer(kv_key, kv_block_size, 'a', true));
+    load_cache->addBlock(block_buffer_util_->makeBlockBuffer(kv_scale_key, scale_block_size, 'b', true));
+    std::vector<std::shared_ptr<RequestBlockBuffer>> load_caches{load_cache};
+
+    auto load_context = cache_store1_->loadBuffers(
+        load_caches, autil::NetUtil::getBindIp(), port2_, 0, 1000, []() { return false; }, 1, 0);
+    ASSERT_TRUE(load_context != nullptr);
+    load_context->waitDone();
+    ASSERT_TRUE(load_context->success());
+
+    verifyBlock(load_cache->getBlock(kv_key), kv_key, kv_block_size, true, 'K');
+    verifyBlock(load_cache->getBlock(kv_scale_key), kv_scale_key, scale_block_size, true, 'S');
+}
+
 TEST_F(NormalCacheStoreTest, testLoadContext_loadTimeout) {
     ASSERT_TRUE(initCacheStores());
 

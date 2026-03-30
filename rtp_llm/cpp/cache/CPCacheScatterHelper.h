@@ -35,10 +35,10 @@ public:
 
         ~StagingPlan();
 
-        StagingPlan() = default;
-        StagingPlan(StagingPlan&&) = default;
-        StagingPlan& operator=(StagingPlan&&) = default;
-        StagingPlan(const StagingPlan&) = delete;
+        StagingPlan()                              = default;
+        StagingPlan(StagingPlan&&)                 = default;
+        StagingPlan& operator=(StagingPlan&&)      = default;
+        StagingPlan(const StagingPlan&)            = delete;
         StagingPlan& operator=(const StagingPlan&) = delete;
 
     private:
@@ -49,7 +49,7 @@ public:
     CPCacheScatterHelper(KVCacheManager* cache_manager, DeviceBase* device);
     ~CPCacheScatterHelper();
 
-    CPCacheScatterHelper(const CPCacheScatterHelper&) = delete;
+    CPCacheScatterHelper(const CPCacheScatterHelper&)            = delete;
     CPCacheScatterHelper& operator=(const CPCacheScatterHelper&) = delete;
 
     /// Phase 1: Allocate staging blocks and resolve per-layer GPU addresses.
@@ -62,9 +62,10 @@ public:
     /// into contiguous decode blocks, then release staging blocks.
     /// The plan is consumed (moved) and freed after scatter completes.
     void scatterAndRelease(std::unique_ptr<StagingPlan> plan,
-                           const GroupBlockIds&          block_ids_by_group,
+                           const GroupBlockIds&         block_ids_by_group,
                            const CacheConfig&           cache_config,
-                           size_t                       layer_num);
+                           size_t                       layer_num,
+                           int                          total_tokens);
 
 private:
     void* getOrCreateScatterStream();
