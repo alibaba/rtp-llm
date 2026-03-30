@@ -8,6 +8,7 @@ import org.flexlb.dao.loadbalance.Response;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * @author zjw
@@ -32,7 +33,7 @@ public class BalanceContext {
 
     private AtomicBoolean cancelled = new AtomicBoolean(false);
 
-    private int retryCount = 0;
+    private final AtomicInteger retryCount = new AtomicInteger(0);
 
     //======================== Meters =======================//
 
@@ -70,8 +71,16 @@ public class BalanceContext {
 
     /**
      * Increment retry count
+     * @return the new retry count after incrementing
      */
-    public void incrementRetryCount() {
-        retryCount++;
+    public int incrementRetryCount() {
+        return retryCount.incrementAndGet();
+    }
+
+    /**
+     * Get current retry count
+     */
+    public int getRetryCount() {
+        return retryCount.get();
     }
 }

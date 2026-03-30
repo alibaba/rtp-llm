@@ -99,7 +99,8 @@ public class WorkerStatus {
     }
 
     public void decKvCacheFree(long len) {
-        availableKvCacheTokens.addAndGet(-len);
+        availableKvCacheTokens.accumulateAndGet(len, (current, decrement) ->
+                Math.max(0, current - decrement));
     }
 
     /**

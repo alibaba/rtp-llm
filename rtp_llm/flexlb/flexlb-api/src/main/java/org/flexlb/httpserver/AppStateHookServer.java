@@ -15,9 +15,9 @@ import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.net.InetAddress;
-import java.time.Duration;
 
 import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
@@ -100,11 +100,9 @@ public class AppStateHookServer {
         if (isNonLocalRequest(request)) {
             return buildErrorResponse("handleAppStop");
         }
-        gracefulShutdownService.offline();
-        log.info("shutDown Service run success, waiting for active request complete.");
-
-        return Mono.delay(Duration.ofMillis(3000))
-                .flatMap(v -> {
+        return Mono.fromRunnable(gracefulShutdownService::offline)
+                .subscribeOn(Schedulers.boundedElastic())
+                .then(Mono.defer(() -> {
                     if (ActiveRequestShutdownHooker.shutdownCompletedSuccessfully) {
                         log.info("shutDown Service offline success, active request complete.");
                         return ServerResponse.ok().body(Mono.just("Shutdown complete. Ready for termination."), String.class);
@@ -112,6 +110,10 @@ public class AppStateHookServer {
                         log.error("shutDown Service offline error, active request still pending.");
                         return ServerResponse.status(503).body(Mono.just("Shutdown error. Active requests still pending."), String.class);
                     }
+                }))
+                .onErrorResume(e -> {
+                    log.error("shutDown Service offline execution error.", e);
+                    return ServerResponse.status(500).body(Mono.just("Shutdown error."), String.class);
                 });
     }
 

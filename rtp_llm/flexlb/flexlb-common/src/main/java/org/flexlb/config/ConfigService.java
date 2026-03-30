@@ -85,7 +85,8 @@ public class ConfigService {
                 || type == double.class
                 || type == Double.class
                 || type == boolean.class
-                || type == Boolean.class;
+                || type == Boolean.class
+                || type.isEnum();
     }
 
     /**
@@ -107,6 +108,7 @@ public class ConfigService {
     /**
      * Parse string value based on target type
      */
+    @SuppressWarnings({"unchecked", "rawtypes"})
     private Object parseValue(String value, Class<?> targetType) {
         if (targetType == int.class || targetType == Integer.class) {
             return Integer.parseInt(value);
@@ -116,6 +118,8 @@ public class ConfigService {
             return Double.parseDouble(value);
         } else if (targetType == boolean.class || targetType == Boolean.class) {
             return Boolean.parseBoolean(value);
+        } else if (targetType.isEnum()) {
+            return Enum.valueOf((Class<Enum>) targetType, value);
         }
         throw new IllegalArgumentException("Unsupported type: " + targetType);
     }

@@ -18,7 +18,8 @@ import java.util.concurrent.TimeUnit;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 
 /**
- * Request scheduler - manages worker thread pool, consumes request queue, and executes routing
+ * Request scheduler - manages worker thread pool, consumes request queue, and executes routing.
+ * Includes configurable max retry count to prevent infinite retry loops.
  *
  * @author saichen.sm
  * @since 2025/12/23
@@ -71,22 +72,34 @@ public class RequestScheduler {
      * Worker thread main loop
      * <p>
      * Workflow:
-     *   1. Wait for resource availability
+     *   1. Wait for resource availability (acquire permit with timeout)
      *   2. Take request from queue
      *   3. Process request
+     * <p>
+     * Both steps use timeouts to avoid blocking indefinitely and to allow
+     * graceful shutdown checks.
      */
     private void workerLoop() {
         Logger.info("Worker thread started, ready to process requests...");
 
         while (running && !Thread.currentThread().isInterrupted()) {
             try {
-                dynamicWorkerManager.acquirePermit();
+                // Step 1: Wait for resource permit (with timeout to avoid indefinite blocking)
+                boolean acquired = dynamicWorkerManager.tryAcquirePermit(500, TimeUnit.MILLISECONDS);
+                if (!acquired) {
+                    continue;
+                }
+
                 try {
-                    BalanceContext ctx = queueManager.takeRequest(true, 50);
-                    if (ctx != null) {
-                        Logger.debug("Worker processing request id: {}", ctx.getRequestId());
-                        processRequest(ctx);
+                    // Step 2: Take request from queue
+                    BalanceContext ctx = queueManager.takeRequest(true, 500);
+                    if (ctx == null) {
+                        continue; // permit released in finally
                     }
+
+                    // Step 3: Process request
+                    Logger.debug("Worker processing request id: {}", ctx.getRequestId());
+                    processRequest(ctx);
                 } finally {
                     dynamicWorkerManager.releasePermit();
                 }
@@ -109,9 +122,11 @@ public class RequestScheduler {
     }
 
     private void handleRoutingResult(BalanceContext ctx, Response response) {
-        if (!response.isSuccess() && shouldRetry(response)) {
+        int maxRetry = ctx.getConfig() != null ? ctx.getConfig().getMaxRetryCount() : 0;
+        boolean retryAllowed = maxRetry <= 0 || ctx.getRetryCount() < maxRetry;
+        if (!response.isSuccess() && shouldRetry(response) && retryAllowed) {
             ctx.incrementRetryCount();
-            Logger.warn("Route failed for request id:{}, error: {}, attempting retry {}",
+            Logger.warn("Route failed for request id:{}, error: {}, retry count: {}",
                     ctx.getRequestId(),
                     response.getCode(),
                     ctx.getRetryCount());
@@ -119,6 +134,10 @@ public class RequestScheduler {
 
             queueManager.offerToHead(ctx);
         } else {
+            if (!response.isSuccess() && !retryAllowed) {
+                Logger.warn("Max retry count ({}) exceeded for request id:{}, completing with error",
+                        maxRetry, ctx.getRequestId());
+            }
             ctx.getFuture().complete(response);
             metrics.reportRoutingSuccessQps(ctx.getRetryCount());
         }

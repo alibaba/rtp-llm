@@ -64,13 +64,11 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
         if (invoker == null) {
             Logger.warn("ip:{} {} grpc channel not found, creating and adding to pool", ip, serviceType);
             ManagedChannel newChannel = createChannel(channelKey);
-            invoker = new Invoker(channelKey, newChannel);
-            channelPool.put(channelKey, invoker);
+            invoker = putInvokerIfAbsent(channelKey, newChannel);
         } else if (invoker.getChannel().isShutdown() || invoker.getChannel().isTerminated()) {
             Logger.warn("ip:{} {} grpc channel is shutdown or terminated, recreating and updating pool", ip, serviceType);
             ManagedChannel newChannel = createChannel(channelKey);
-            invoker = new Invoker(channelKey, newChannel);
-            channelPool.put(channelKey, invoker);
+            invoker = replaceInvoker(channelKey, invoker, newChannel);
         }
 
         try {
@@ -100,7 +98,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
                 grpcReporter.reportConnectionDuration(ip, serviceType.getOperationName(), connectionDuration);
                 Logger.warn("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once, msh:{}",
                         ip, port, serviceType, connectionDuration, e.getMessage());
-                return retryWithNewChannel(channelKey, grpcCall, requestTimeoutMs, ip, port, serviceType);
+                return retryWithNewChannel(channelKey, invoker, grpcCall, requestTimeoutMs, ip, port, serviceType);
             }
             Logger.error("Exception during {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
             throw e;
@@ -121,13 +119,13 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
     }
 
     private <R> R retryWithNewChannel(String channelKey,
+                                      Invoker staleInvoker,
                                       Function<GrpcStubWrapper, R> grpcCall,
                                       long requestTimeoutMs,
                                       String ip, int port,
                                       ServiceType serviceType) {
         ManagedChannel newChannel = createChannel(channelKey);
-        Invoker newInvoker = new Invoker(channelKey, newChannel);
-        channelPool.put(channelKey, newInvoker);
+        Invoker newInvoker = replaceInvoker(channelKey, staleInvoker, newChannel);
 
         Logger.info("Retrying gRPC call with new channel for {}:{} {}", ip, port, serviceType);
 

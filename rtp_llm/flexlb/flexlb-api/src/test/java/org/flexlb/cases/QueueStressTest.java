@@ -7,7 +7,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.web.reactive.function.BodyInserters;
@@ -15,7 +14,6 @@ import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
 import java.lang.reflect.Field;
 import java.time.Duration;
-import java.util.Map;
 import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -25,7 +23,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.flexlb.dao.loadbalance.StrategyErrorType.QUEUE_FULL;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 
 /**
  * FlexLB queue stress test
@@ -71,37 +71,47 @@ public class QueueStressTest {
     }
 
     /**
+     * Queue timeout in milliseconds for queued requests (used as generate_timeout).
+     * Queued requests will timeout after this duration when no worker is available.
+     */
+    private static final long QUEUE_TIMEOUT_MS = 5000;
+
+    /**
      * Test scenario 1: Correct request rejection when queue is full
      * <p>
      * Test flow:
      * 1. Set maxQueueSize = 10
      * 2. Set Worker resources unavailable, forcing all requests into queue
-     * 3. Send 20 requests (exceeding queue capacity)
-     * 5. Verify last 10 requests are rejected (return QUEUE_FULL 8502)
+     * 3. Send 20 requests concurrently (exceeding queue capacity)
+     * 4. Phase 1: ~10 requests rejected immediately with QUEUE_FULL (8502)
+     * 5. Phase 2: ~10 queued requests timeout after generate_timeout with QUEUE_TIMEOUT (8503)
      */
     @SneakyThrows
     public void testQueueFullRejection() {
         log.info("=== Starting test: Queue full rejection ===");
 
         try {
-            // 1. Configuration adjustment
+            // 1. Configuration
             configService.loadBalanceConfig().setEnableQueueing(true);
 
             // 2. Set Worker status (insufficient resources, force queuing)
             setupLimitedWorkerResources();
 
-            // 3. Statistics variables
+            // 3. Counters
             AtomicInteger rejectedCount = new AtomicInteger(0);
-            CountDownLatch completionLatch = new CountDownLatch(10);
+            AtomicInteger timeoutCount = new AtomicInteger(0);
+            int totalRequests = 20;
+            CountDownLatch allDoneLatch = new CountDownLatch(totalRequests);
 
-            // 4. Concurrently send 20 requests (exceeding queue capacity 10)
-            try (ExecutorService executor = Executors.newFixedThreadPool(20)) {
-                for (int i = 0; i < 20; i++) {
-                    final int requestId = i;
+            // 4. Send 20 requests concurrently
+            ExecutorService executor = Executors.newFixedThreadPool(totalRequests);
+            try {
+                for (int i = 0; i < totalRequests; i++) {
+                    final int requestId = i + 1;
                     executor.submit(() -> {
                         try {
                             String response = webClient.mutate()
-                                    .responseTimeout(Duration.ofMinutes(5))
+                                    .responseTimeout(Duration.ofSeconds(30))
                                     .build()
                                     .post()
                                     .uri("/rtp_llm/schedule")
@@ -114,32 +124,47 @@ public class QueueStressTest {
                                     .returnResult()
                                     .getResponseBody();
 
-                            if (response != null && response.contains(QUEUE_FULL.getErrorMsg())) { // QUEUE_FULL
+                            if (response != null && response.contains(QUEUE_FULL.getErrorMsg())) {
                                 rejectedCount.incrementAndGet();
                             }
+                            if (response != null && response.contains(StrategyErrorType.QUEUE_TIMEOUT.getErrorMsg())) {
+                                timeoutCount.incrementAndGet();
+                            }
                             log.info("Request {} result: {}", requestId, response);
-                            completionLatch.countDown();
-
                         } catch (Exception e) {
                             log.error("Request {} failed", requestId, e);
-                            completionLatch.countDown();
+                        } finally {
+                            allDoneLatch.countDown();
                         }
                     });
                 }
 
-                // 5. Wait for completion
-                //noinspection ResultOfMethodCallIgnored
-                completionLatch.await(2, TimeUnit.SECONDS);
+                // --- Phase 1: QUEUE_FULL requests return immediately ---
+                // Wait a short time for the fast rejections to come back
+                Thread.sleep(3000);
+                log.info("Phase 1 check: rejected(QUEUE_FULL)={}, timeout(QUEUE_TIMEOUT)={}",
+                        rejectedCount.get(), timeoutCount.get());
+                assertTrue(rejectedCount.get() >= 9 && rejectedCount.get() <= 11,
+                        "Phase 1: ~10 requests should be rejected (QUEUE_FULL), actual: " + rejectedCount.get());
+                assertTrue(timeoutCount.get() == 0,
+                        "Phase 1: no requests should have timed out yet, actual: " + timeoutCount.get());
+
+                // --- Phase 2: QUEUE_TIMEOUT requests return after generate_timeout ---
+                // Total wait = generate_timeout(5s) + buffer, minus the 3s already waited
+                boolean allCompleted = allDoneLatch.await(30, TimeUnit.SECONDS);
+                assertTrue(allCompleted, "All requests should complete within 30s");
+
+                log.info("Phase 2 check: rejected(QUEUE_FULL)={}, timeout(QUEUE_TIMEOUT)={}",
+                        rejectedCount.get(), timeoutCount.get());
+                assertTrue(rejectedCount.get() >= 9 && rejectedCount.get() <= 11,
+                        "Phase 2: ~10 requests should be rejected (QUEUE_FULL), actual: " + rejectedCount.get());
+                assertTrue(timeoutCount.get() >= 9 && timeoutCount.get() <= 11,
+                        "Phase 2: ~10 requests should have timed out (QUEUE_TIMEOUT), actual: " + timeoutCount.get());
+
+            } finally {
                 executor.shutdownNow();
+                executor.awaitTermination(5, TimeUnit.SECONDS);
             }
-
-            // 6. Verify results
-            log.info("Queue full test results: rejected={}", rejectedCount.get());
-
-            // Verify: First 10 requests should successfully enqueue, last 10 should be rejected
-            // Allow +/- 1 margin due to concurrent processing race conditions
-            assert rejectedCount.get() >= 9 && rejectedCount.get() <= 11 :
-                    "Should have approximately 10 requests rejected, actual: " + rejectedCount.get();
 
             log.info("=== Queue full rejection test passed ===");
 
@@ -173,20 +198,17 @@ public class QueueStressTest {
 
             AtomicInteger rejectedCount = new AtomicInteger(0);
             CountDownLatch startLatch = new CountDownLatch(1);
-            CountDownLatch completionLatch = new CountDownLatch(500);
+            CountDownLatch completionLatch = new CountDownLatch(threadCount);
 
-            // 4. Create thread pool
-            boolean completed;
-
+            // 4. Create threads
             for (int t = 0; t < threadCount; t++) {
-                final int threadId = t;
+                final int threadId = t + 1;
                 new Thread(() -> {
                     try {
-                       // Wait for all threads to start simultaneously
                        startLatch.await();
 
                        String responseBody = webClient.mutate()
-                               .responseTimeout(Duration.ofMinutes(5))
+                               .responseTimeout(Duration.ofSeconds(30))
                                .build()
                                .post()
                                .uri("/rtp_llm/schedule")
@@ -203,29 +225,31 @@ public class QueueStressTest {
                            rejectedCount.incrementAndGet();
                        }
                        log.info("Thread {} received response: {}", threadId, responseBody);
-                       completionLatch.countDown();
 
                    } catch (Exception e) {
                        log.error("Thread {} failed", threadId, e);
+                   } finally {
+                       completionLatch.countDown();
                    }
                }).start();
             }
 
-            // 6. Start all threads simultaneously
-            Thread.sleep(100); // Ensure all threads are ready
+            // 5. Start all threads simultaneously
+            Thread.sleep(100);
             startLatch.countDown();
 
-            // 7. Wait for all threads to complete
+            // 6. Wait for all threads to complete (queued requests need generate_timeout to expire)
             log.info("=== Waiting for concurrent test completion ===");
-            completed = completionLatch.await(2, TimeUnit.SECONDS);
+            boolean completed = completionLatch.await(60, TimeUnit.SECONDS);
+            assertTrue(completed, "All concurrent enqueue requests should complete before assertions");
 
-            // 8. Verify results
+            // 7. Verify results
             log.info("Concurrent test results: rejected={}, completed={}", rejectedCount.get(), completed);
 
             // Verify: First 500 requests should successfully enqueue, last 400 should be rejected
             // Allow +/- 10 margin due to concurrent processing race conditions
-            assert rejectedCount.get() >= 390 && rejectedCount.get() <= 410 :
-                    "Should have approximately 400 requests rejected, actual: " + rejectedCount.get();
+            assertTrue(rejectedCount.get() >= 390 && rejectedCount.get() <= 410,
+                    "Should have approximately 400 requests rejected, actual: " + rejectedCount.get());
 
             log.info("=== Concurrent enqueue thread safety test passed ===");
 
@@ -267,9 +291,10 @@ public class QueueStressTest {
                   "model": "engine_service",
                   "block_cache_keys": [%d, %d, %d],
                   "seq_len": 1000,
+                  "generate_timeout": %d,
                   "debug": 1
                 }
-                """, requestId, requestId * 1000, requestId * 1000 + 1, requestId * 1000 + 2);
+                """, requestId, requestId * 1000, requestId * 1000 + 1, requestId * 1000 + 2, QUEUE_TIMEOUT_MS);
     }
 
     /**

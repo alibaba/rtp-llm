@@ -288,7 +288,7 @@ class WorkerStatusTest {
             boolean result1 = workerStatus.updateResourceAvailabilityWithHysteresis(100, threshold, hysteresisBias);
             assertFalse(result1);
 
-            boolean result2 = workerStatus.updateResourceAvailabilityWithHysteresis(100, threshold, hysteresisBias);
+            boolean result2 = workerStatus.updateResourceAvailabilityWithHysteresis(99, threshold, hysteresisBias);
             assertTrue(result2); // Should toggle immediately
         }
 

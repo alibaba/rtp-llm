@@ -1,5 +1,6 @@
 package org.flexlb.httpserver;
 
+import org.flexlb.service.grace.strategy.ActiveRequestShutdownHooker;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
 import org.flexlb.service.grace.GracefulOnlineService;
 import org.flexlb.service.grace.GracefulShutdownService;
@@ -19,6 +20,8 @@ import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.util.Optional;
 
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -42,6 +45,7 @@ class AppStateHookServerTest {
     @BeforeEach
     void setUp() {
         server = new AppStateHookServer(gracefulOnlineService, gracefulShutdownService, lifecycleReporter);
+        ActiveRequestShutdownHooker.shutdownCompletedSuccessfully = false;
     }
 
     @Test
@@ -124,5 +128,37 @@ class AppStateHookServerTest {
         StepVerifier.create(result)
                 .expectNextMatches(response -> response.statusCode().value() == 200)
                 .verifyComplete();
+    }
+
+    @Test
+    @DisplayName("Should return 200 when shutdown completes successfully")
+    void handleAppStop_ShouldReturn200_WhenShutdownCompletes() {
+        when(serverRequest.remoteAddress()).thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
+        doAnswer(invocation -> {
+            ActiveRequestShutdownHooker.shutdownCompletedSuccessfully = true;
+            return null;
+        }).when(gracefulShutdownService).offline();
+
+        Mono<ServerResponse> result = server.handleAppStop(serverRequest);
+
+        StepVerifier.create(result)
+                .expectNextMatches(response -> response.statusCode().value() == 200)
+                .verifyComplete();
+
+        verify(gracefulShutdownService).offline();
+    }
+
+    @Test
+    @DisplayName("Should return 503 when shutdown leaves active requests pending")
+    void handleAppStop_ShouldReturn503_WhenShutdownIncomplete() {
+        when(serverRequest.remoteAddress()).thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
+
+        Mono<ServerResponse> result = server.handleAppStop(serverRequest);
+
+        StepVerifier.create(result)
+                .expectNextMatches(response -> response.statusCode().value() == 503)
+                .verifyComplete();
+
+        verify(gracefulShutdownService).offline();
     }
 }

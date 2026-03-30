@@ -55,6 +55,13 @@ public class FlexlbConfig {
     private int maxQueueSize = 1000000;
 
     /**
+     * Maximum retry count for failed routing attempts.
+     * When exceeded, the request is completed with an error instead of being re-queued.
+     * Default 0 means unlimited retries (bounded by generateTimeout).
+     */
+    private int maxRetryCount = 0;
+
+    /**
      * Prefill role queuing threshold
      * When below this threshold, the Worker is considered available
      */
@@ -137,10 +144,10 @@ public class FlexlbConfig {
                 return this.loadBalanceStrategy != null ? loadBalanceStrategy : SHORTEST_TTFT;
             }
             case DECODE -> {
-                return this.loadBalanceStrategy != null ? loadBalanceStrategy : WEIGHTED_CACHE;
+                return this.decodeLoadBalanceStrategy != null ? decodeLoadBalanceStrategy : WEIGHTED_CACHE;
             }
             case VIT -> {
-                return this.loadBalanceStrategy != null ? loadBalanceStrategy : RANDOM;
+                return this.vitLoadBalanceStrategy != null ? vitLoadBalanceStrategy : RANDOM;
             }
             default -> {
                 return null;
