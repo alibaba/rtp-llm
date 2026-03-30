@@ -206,7 +206,6 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     for (const auto& task : engine_schedule_info.running_task_info_list) {
         TaskInfoPB* task_info = response->add_running_task_info();
         task_info->set_request_id(task.request_id);
-        task_info->set_inter_request_id(task.inter_request_id);
         task_info->set_prefix_length(task.prefix_length);
         task_info->set_input_length(task.input_length);
         task_info->set_waiting_time_ms(task.waiting_time_ms);
@@ -219,7 +218,6 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     for (const auto& task : engine_schedule_info.finished_task_info_list) {
         TaskInfoPB* task_info = response->add_finished_task_list();
         task_info->set_request_id(task.request_id);
-        task_info->set_inter_request_id(task.inter_request_id);
         task_info->set_prefix_length(task.prefix_length);
         task_info->set_input_length(task.input_length);
         task_info->set_waiting_time_ms(task.waiting_time_ms);
@@ -231,6 +229,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     response->set_dp_size(status_info.dp_size);
     response->set_tp_size(status_info.tp_size);
     response->set_status_version(status_info.status_version);
+    response->set_latest_finished_version(status_info.latest_finished_version);
     response->set_alive(status_info.alive);
     response->set_precision(status_info.precision);
     reportWorkerStatusTime(request_begin_time_us, request_after_ws_time_us);
@@ -259,12 +258,13 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
         default:
             status_info.role = "RoleType.UNKNOWN";
     }
-    status_info.dp_size        = maga_init_params_.parallelism_config.dp_size;
-    status_info.tp_size        = maga_init_params_.parallelism_config.tp_size;
-    status_info.dp_rank        = maga_init_params_.parallelism_config.dp_rank;
-    status_info.status_version = currentTimeUs();
-    status_info.alive          = true;
-    auto quant_method          = maga_init_params_.model_config_.quant_algo.getQuantMethod();
+    status_info.dp_size                 = maga_init_params_.parallelism_config.dp_size;
+    status_info.tp_size                 = maga_init_params_.parallelism_config.tp_size;
+    status_info.dp_rank                 = maga_init_params_.parallelism_config.dp_rank;
+    status_info.status_version          = currentTimeUs();
+    status_info.latest_finished_version = status_info.engine_schedule_info.latest_finished_version;
+    status_info.alive                   = true;
+    auto quant_method                   = maga_init_params_.model_config_.quant_algo.getQuantMethod();
 
     switch (quant_method) {
         case QuantMethod::WeightOnlyPerCol:
@@ -329,7 +329,7 @@ EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished
     std::vector<EngineScheduleInfo::TaskInfo> running_task_info_list = engine_->getScheduler().runningTaskList();
     for (auto& task_info : info.running_task_info_list) {
         for (auto& running_task : running_task_info_list) {
-            if (task_info.inter_request_id == running_task.inter_request_id) {
+            if (task_info.request_id == running_task.request_id) {
                 task_info.is_waiting = false;
             }
         }

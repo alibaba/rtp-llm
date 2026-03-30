@@ -24,10 +24,6 @@ grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*        
     auto request_id = loading_cache_requests_.fetch_add(1, std::memory_order_relaxed);
     mutable_input->set_request_id(request_id);
 
-    // ignore inter_request_id in prefill
-    auto modified_config = mutable_input->mutable_generate_config();
-    modified_config->set_inter_request_id(-1);
-
     PrefillGenerateContextNew prefill_context(&resource_, context, request, response, metrics_reporter_, meta_);
     RTP_LLM_LOG_INFO("request [%s] RemoteGenerateNew", prefill_context.request_key.c_str());
 

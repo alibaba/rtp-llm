@@ -228,7 +228,6 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(1, response.getServerStatus().size(), "Should have 1 server status");
-        assertEquals(12345L, response.getInterRequestId(), "Inter request ID should match");
     }
 
     @Test
@@ -473,7 +472,6 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
-        assertEquals(12345L, response.getInterRequestId(), "Inter request ID should match");
     }
 
     @Test

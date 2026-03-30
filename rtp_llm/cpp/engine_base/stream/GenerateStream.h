@@ -411,10 +411,6 @@ public:
         return generate_input_->generate_config->force_sp_accept;
     }
 
-    int64_t interRequestId() const {
-        return generate_input_->generate_config->inter_request_id;
-    }
-
     std::string traceId() const {
         return generate_input_->generate_config->trace_id;
     }

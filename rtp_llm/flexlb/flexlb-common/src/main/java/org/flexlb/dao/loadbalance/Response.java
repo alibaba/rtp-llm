@@ -13,9 +13,6 @@ public class Response {
     @JsonProperty("server_status")
     private List<ServerStatus> serverStatus;
 
-    @JsonProperty("inter_request_id")
-    private long interRequestId;
-
     @JsonProperty("success")
     private boolean success;
 

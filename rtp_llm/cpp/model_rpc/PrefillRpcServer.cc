@@ -198,11 +198,7 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     GenerateRequestPB alloc_request;
     alloc_request.set_stage(RemoteStage::ALLOCATE);
     alloc_request.set_client_id(process_id_);
-    // alloc_request.set_request_id(prefill_context.request_id);
-    auto inter_request_id = prefill_context.generate_input->generate_config->inter_request_id;
-    auto real_request_id  = inter_request_id != -1 ? inter_request_id : prefill_context.request_id;
-    RTP_LLM_LOG_DEBUG("inter_request_id is %d, real_request_id is %d", inter_request_id, real_request_id);
-    alloc_request.set_request_id(real_request_id);
+    alloc_request.set_request_id(prefill_context.request_id);
     // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
     alloc_request.set_allocated_input(new_request);

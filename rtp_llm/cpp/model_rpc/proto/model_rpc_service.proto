@@ -82,7 +82,8 @@ message GenerateConfigPB {
     bool normalized_hidden_states = 39;
     int32 profile_step = 40;
     repeated RoleAddrPB role_addrs = 41;
-    int64 inter_request_id = 42;
+    reserved 42;
+    reserved "inter_request_id";
     bool ignore_eos = 43;
     float presence_penalty = 44;
     float frequency_penalty = 45;
@@ -365,7 +366,8 @@ message UpdateEplbConfigRequestPB {
 
 message TaskInfoPB {
     int64 request_id = 1;
-    int64 inter_request_id = 2;
+    reserved 2;
+    reserved "inter_request_id";
     int64 prefix_length = 3;
     int64 input_length = 4;
     int64 waiting_time_ms = 5;
@@ -395,6 +397,7 @@ message WorkerStatusPB {
     int64 status_version = 12;
     bool alive = 13;
     string precision = 14;
+    int64 latest_finished_version = 15;
 }
 
 message EmbeddingInputPB {
