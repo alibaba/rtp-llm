@@ -3,6 +3,7 @@ Unified Sparse MLA implementation for both prefill and decode stages.
 Uses flash_mla_sparse_fwd kernel with triton-based index conversion.
 """
 
+import copy
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -335,47 +336,37 @@ class SparseMlaCpImpl(SparseMlaImpl):
     ) -> None:
         self.cp_info = attn_inputs.context_parallel_info
         # ContextParallelProcessor leaves per-chunk lengths on shared attn_inputs; sparse
-        # fill_params / cache store need per-request actual lengths. Temporarily swap for
-        # the whole parent __init__ (write_cache_store runs before prepare).
-        orig_input_lengths = attn_inputs.input_lengths
-        attn_inputs.input_lengths = self.cp_info.prefill_actual_input_lengths_cpu
-        try:
-            super().__init__(
-                attn_configs=attn_configs,
-                attn_inputs=attn_inputs,
-                weights=weights,
-                cos_sin_cache=cos_sin_cache,
-                fmha_config=fmha_config,
-                use_trt_fmha=use_trt_fmha,
-                quant_config=quant_config,
-                max_seq_len=max_seq_len,
-                is_cuda_graph=is_cuda_graph,
-                parallelism_config=parallelism_config,
-                fmha_impl=SparseMlaFp8CPOp,
-            )
-        finally:
-            attn_inputs.input_lengths = orig_input_lengths
+        # fill_params / cache store need per-request actual lengths. Shallow-copy and set
+        # input_lengths on the copy only (pattern 1.22: do not mutate shared attn_inputs).
+        attn_inputs_for_init = copy.copy(attn_inputs)
+        attn_inputs_for_init.input_lengths = (
+            self.cp_info.prefill_actual_input_lengths_cpu
+        )
+        super().__init__(
+            attn_configs=attn_configs,
+            attn_inputs=attn_inputs_for_init,
+            weights=weights,
+            cos_sin_cache=cos_sin_cache,
+            fmha_config=fmha_config,
+            use_trt_fmha=use_trt_fmha,
+            quant_config=quant_config,
+            max_seq_len=max_seq_len,
+            is_cuda_graph=is_cuda_graph,
+            parallelism_config=parallelism_config,
+            fmha_impl=SparseMlaFp8CPOp,
+        )
         self.fmha_impl.kv_cache_write_op = self.kv_cache_write_op
         self.fmha_impl.write_cache_store_impl = self.write_cache_store_impl
 
     def prepare(
         self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
     ) -> None:
-        """Swap input_lengths to prefill_actual for fill_params/plan, then restore.
-
-        After __init__, shared attn_inputs.input_lengths is the CP-chunk view again; this
-        is required for ``prepare_cuda_graph`` / any later ``prepare``. The first call from
-        ``create_params`` during ``__init__`` already runs under the outer try that sets
-        actual lengths, so the swap is redundant there but harmless.
-        """
+        """Parent prepare sees prefill_actual_input_lengths on a shallow copy; caller's attn_inputs unchanged."""
         cp_info = attn_inputs.context_parallel_info
         assert cp_info is not None
-        orig_input_lengths = attn_inputs.input_lengths
-        attn_inputs.input_lengths = cp_info.prefill_actual_input_lengths_cpu
-        try:
-            super().prepare(attn_inputs, forbid_realloc=forbid_realloc)
-        finally:
-            attn_inputs.input_lengths = orig_input_lengths
+        attn_for_prepare = copy.copy(attn_inputs)
+        attn_for_prepare.input_lengths = cp_info.prefill_actual_input_lengths_cpu
+        super().prepare(attn_for_prepare, forbid_realloc=forbid_realloc)
 
     @staticmethod
     def fmha_type() -> FMHAType:
