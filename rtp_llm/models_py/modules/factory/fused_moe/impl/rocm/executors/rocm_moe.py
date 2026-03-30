@@ -29,6 +29,25 @@ def _moe_activation_type(activation: str) -> aiter.ActivationType:
     return aiter.ActivationType.Gelu
 
 
+def build_ep_expert_mask(
+    num_experts: int,
+    ep_rank: int,
+    ep_size: int,
+    w1: torch.Tensor,
+) -> Optional[torch.Tensor]:
+    """Mask for aiter fused_moe when EP>1: global topk_ids, local w1/w2 rows.
+    Length ``num_experts``; entries for experts owned by this rank are 1, else 0.
+    """
+    if ep_size <= 1:
+        return None
+    local_e = w1.size(0)
+    start = ep_rank * local_e
+    end = start + local_e
+    mask = torch.zeros(num_experts, dtype=torch.int32, device=w1.device)
+    mask[start:end] = 1
+    return mask
+
+
 class RocmExpertsBf16(FusedMoeExpertExecutor):
     """ROCm BF16 (no quantization) MoE expert executor."""
 
@@ -60,6 +79,10 @@ class RocmExpertsBf16(FusedMoeExpertExecutor):
         self.ep_size = config.ep_size
         self.w1 = weights[W.moe_w1]
         self.w2 = weights[W.moe_w2]
+
+        self.expert_mask = build_ep_expert_mask(
+            self.num_experts, self.ep_rank, self.ep_size, self.w1
+        )
 
     @property
     def local_num_experts(self) -> int:
@@ -111,7 +134,7 @@ class RocmExpertsBf16(FusedMoeExpertExecutor):
             topk_weights,
             topk_ids,
             activation=_moe_activation_type(activation),
-            expert_mask=expert_map,
+            expert_mask=expert_map if expert_map is not None else self.expert_mask,
         )
 
         return CombineForwardPayload(fused_expert_output=output)
@@ -166,16 +189,9 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         self.w1_scale = weights[W.moe_s1]
         self.w2_scale = weights[W.moe_s2]
 
-        if self.ep_size > 1:
-            local_e = self.w1.size(0)
-            start = self.ep_rank * local_e
-            end = start + local_e
-            self.expert_mask = torch.zeros(
-                self.num_experts, dtype=torch.int32, device=self.w1.device
-            )
-            self.expert_mask[start:end] = 1
-        else:
-            self.expert_mask = None
+        self.expert_mask = build_ep_expert_mask(
+            self.num_experts, self.ep_rank, self.ep_size, self.w1
+        )
 
         if self.ep_size > 1:
             local_E = self.w1.size(0)
@@ -209,9 +225,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         assert self.w2.stride(-1) == 1, "Stride of last dimension must be 1"
         assert payload.expert_tokens_meta is not None
 
-        global_E = self.num_experts
         E = self.local_num_experts
-        N = self.w1.size(1)
         assert payload.expert_topk_ids is not None
 
         assert self.w1.size(0) == E, f"w1 expert dim mismatch: {self.w1.size(0)} != {E}"
@@ -236,8 +250,6 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
-        effective_mask = expert_map if expert_map is not None else self.expert_mask
-
         output = fused_moe(
             hidden_states,
             self.w1,
@@ -248,7 +260,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),
-            expert_mask=effective_mask,
+            expert_mask=expert_map if expert_map is not None else self.expert_mask,
         )
 
         return CombineForwardPayload(fused_expert_output=output)
