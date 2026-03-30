@@ -1,0 +1,231 @@
+// Minimal REAPI v2 proto - only the messages/RPCs needed for pytest-remote-gpu.
+// Derived from build.bazel.remote.execution.v2 but self-contained (no googleapis deps).
+syntax = "proto3";
+package build.bazel.remote.execution.v2;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// ---- Core data types ----
+
+message Digest {
+  string hash = 1;
+  int64 size_bytes = 2;
+}
+
+message Directory {
+  repeated FileNode files = 1;
+  repeated DirectoryNode directories = 2;
+  repeated SymlinkNode symlinks = 3;
+}
+
+message FileNode {
+  string name = 1;
+  Digest digest = 2;
+  bool is_executable = 4;
+}
+
+message DirectoryNode {
+  string name = 1;
+  Digest digest = 2;
+}
+
+message SymlinkNode {
+  string name = 1;
+  string target = 2;
+}
+
+message OutputFile {
+  string path = 1;
+  Digest digest = 2;
+  bool is_executable = 4;
+}
+
+// ---- Command & Action ----
+
+message Command {
+  repeated string arguments = 1;
+  repeated EnvironmentVariable environment_variables = 2;
+  repeated string output_files = 3;
+  repeated string output_directories = 4;
+  Platform platform = 5;
+  string working_directory = 6;
+
+  message EnvironmentVariable {
+    string name = 1;
+    string value = 2;
+  }
+}
+
+message Platform {
+  repeated Property properties = 1;
+  message Property {
+    string name = 1;
+    string value = 2;
+  }
+}
+
+message Action {
+  Digest command_digest = 1;
+  Digest input_root_digest = 2;
+  google.protobuf.Duration timeout = 6;
+  bool do_not_cache = 7;
+}
+
+message ActionResult {
+  repeated OutputFile output_files = 2;
+  int32 exit_code = 4;
+  bytes stdout_raw = 5;
+  Digest stdout_digest = 6;
+  bytes stderr_raw = 7;
+  Digest stderr_digest = 8;
+  // REAPI v2: worker id often appears here when partial_execution_metadata.worker was empty on the stream.
+  ExecutedActionMetadata execution_metadata = 9;
+}
+
+// ---- CAS RPCs ----
+
+message FindMissingBlobsRequest {
+  string instance_name = 1;
+  repeated Digest blob_digests = 2;
+}
+
+message FindMissingBlobsResponse {
+  repeated Digest missing_blob_digests = 2;
+}
+
+message BatchUpdateBlobsRequest {
+  string instance_name = 1;
+  repeated Request requests = 2;
+  message Request {
+    Digest digest = 1;
+    bytes data = 2;
+  }
+}
+
+message BatchUpdateBlobsResponse {
+  repeated Response responses = 1;
+  message Response {
+    Digest digest = 1;
+    Status status = 2;
+  }
+}
+
+message BatchReadBlobsRequest {
+  string instance_name = 1;
+  repeated Digest digests = 2;
+}
+
+message BatchReadBlobsResponse {
+  repeated Response responses = 1;
+  message Response {
+    Digest digest = 1;
+    bytes data = 2;
+    Status status = 3;
+  }
+}
+
+message Status {
+  int32 code = 1;
+  string message = 2;
+}
+
+// ---- Execution RPCs ----
+
+message ExecuteRequest {
+  string instance_name = 1;
+  reserved 2, 4, 5;
+  bool skip_cache_lookup = 3;
+  Digest action_digest = 6;
+  // ExecutionPolicy execution_policy = 7;
+  // ResultsCachePolicy results_cache_policy = 8;
+  int32 digest_function = 9;
+}
+
+message ExecuteResponse {
+  ActionResult result = 1;
+  bool cached_result = 2;
+  Status status = 3;
+}
+
+message WaitExecutionRequest {
+  string name = 1;
+}
+
+// ---- REAPI v2 execution metadata (aligned with bazelbuild remote-apis) ----
+
+message DigestFunction {
+  enum Value {
+    UNKNOWN = 0;
+    SHA256 = 1;
+    SHA1 = 2;
+    MD5 = 3;
+    VSO = 4;
+    SHA384 = 5;
+    SHA512 = 6;
+    MURMUR3 = 7;
+    SHA256TREE = 8;
+    BLAKE3 = 9;
+    GITSHA1 = 10;
+  }
+}
+
+message ExecutionStage {
+  enum Value {
+    UNKNOWN = 0;
+    CACHE_CHECK = 1;
+    QUEUED = 2;
+    EXECUTING = 3;
+    COMPLETED = 4;
+  }
+}
+
+// Details about a completed (or in-progress) execution; worker id is here.
+message ExecutedActionMetadata {
+  string worker = 1;
+  google.protobuf.Timestamp queued_timestamp = 2;
+  google.protobuf.Timestamp worker_start_timestamp = 3;
+  google.protobuf.Timestamp worker_completed_timestamp = 4;
+  google.protobuf.Timestamp input_fetch_start_timestamp = 5;
+  google.protobuf.Timestamp input_fetch_completed_timestamp = 6;
+  google.protobuf.Timestamp execution_start_timestamp = 7;
+  google.protobuf.Timestamp execution_completed_timestamp = 8;
+  google.protobuf.Timestamp output_upload_start_timestamp = 9;
+  google.protobuf.Timestamp output_upload_completed_timestamp = 10;
+  repeated google.protobuf.Any auxiliary_metadata = 11;
+  google.protobuf.Duration virtual_execution_duration = 12;
+}
+
+// Packed in Operation.metadata during Execution.Execute stream.
+message ExecuteOperationMetadata {
+  ExecutionStage.Value stage = 1;
+  Digest action_digest = 2;
+  string stdout_stream_name = 3;
+  string stderr_stream_name = 4;
+  ExecutedActionMetadata partial_execution_metadata = 5;
+  DigestFunction.Value digest_function = 6;
+}
+
+// google.longrunning.Operation (inlined)
+message Operation {
+  string name = 1;
+  google.protobuf.Any metadata = 2;
+  bool done = 3;
+  google.protobuf.Any response = 5;
+}
+
+// ---- Service definitions ----
+
+service ContentAddressableStorage {
+  rpc FindMissingBlobs(FindMissingBlobsRequest) returns (FindMissingBlobsResponse);
+  rpc BatchUpdateBlobs(BatchUpdateBlobsRequest) returns (BatchUpdateBlobsResponse);
+  rpc BatchReadBlobs(BatchReadBlobsRequest) returns (BatchReadBlobsResponse);
+}
+
+service Execution {
+  rpc Execute(ExecuteRequest) returns (stream Operation);
+  rpc WaitExecution(WaitExecutionRequest) returns (stream Operation);
+}
+
+// ByteStream is in google.bytestream package - defined in separate file
