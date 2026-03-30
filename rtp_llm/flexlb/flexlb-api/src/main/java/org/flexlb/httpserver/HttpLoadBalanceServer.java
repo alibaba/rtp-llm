@@ -93,24 +93,29 @@ public class HttpLoadBalanceServer {
                         throw new IllegalArgumentException("requestId is 0");
                     }
                     ctx.setRequest(req);
-                    activeRequestCounter.increment();
-
-                    engineHealthReporter.reportArriveDelayTime(ctx);
-
-                    if (lbStatusConsistencyService.isNeedConsistency() && !lbStatusConsistencyService.isMaster()) {
-                        return forwardRequestToMaster(ctx, req);
-                    }
-
-                    return routeService.route(ctx)
-                            .flatMap(response -> handleRoutingResult(ctx, response))
-                            .doOnCancel(() -> {
-                                ctx.setSuccess(false);
-                                ctx.setErrorMessage("REQUEST_CANCELLED");
-                                routeService.cancel(ctx);
-                            });
+                    return Mono.using(
+                            activeRequestCounter::acquire,
+                            ignored -> processScheduledRequest(ctx, req),
+                            ActiveRequestCounter.RequestToken::close);
                 })
                 .onErrorResume(e -> handleRequestError(ctx, e))
                 .doFinally(signal -> finalizeRequestContext(ctx));
+    }
+
+    private Mono<ServerResponse> processScheduledRequest(BalanceContext ctx, Request req) {
+        engineHealthReporter.reportArriveDelayTime(ctx);
+
+        if (lbStatusConsistencyService.isNeedConsistency() && !lbStatusConsistencyService.isMaster()) {
+            return forwardRequestToMaster(ctx, req);
+        }
+
+        return routeService.route(ctx)
+                .flatMap(response -> handleRoutingResult(ctx, response))
+                .doOnCancel(() -> {
+                    ctx.setSuccess(false);
+                    ctx.setErrorMessage("REQUEST_CANCELLED");
+                    routeService.cancel(ctx);
+                });
     }
 
     private Mono<ServerResponse> debugMode(ServerRequest serverRequest) {
@@ -207,7 +212,7 @@ public class HttpLoadBalanceServer {
         if (master == null) {
             Logger.error("Master unreachable, routing locally");
             engineHealthReporter.reportForwardToMasterResult("LOCAL", "MASTER_NULL");
-            return fallbackToLocalRouting(request);
+            return fallbackToLocalRouting(ctx);
         }
         Logger.info("Forwarding request to master: {}, request: {}", master, request);
         URI uri = URI.create("http://" + master);
@@ -223,13 +228,11 @@ public class HttpLoadBalanceServer {
                     String errorCode = e instanceof TimeoutException ? "TIMEOUT" : "CONNECT_FAILED";
                     Logger.error("[Fallback] Master unreachable, routing locally: {}, errorCode: {}", e.getMessage(), errorCode);
                     engineHealthReporter.reportForwardToMasterResult("LOCAL", errorCode);
-                    return fallbackToLocalRouting(request);
+                    return fallbackToLocalRouting(ctx);
                 });
     }
 
-    private Mono<ServerResponse> fallbackToLocalRouting(Request request) {
-        BalanceContext ctx = new BalanceContext();
-        ctx.setRequest(request);
+    private Mono<ServerResponse> fallbackToLocalRouting(BalanceContext ctx) {
         return routeService.route(ctx)
                 .flatMap(response -> handleRoutingResult(ctx, response))
                 .onErrorResume(e -> {
@@ -309,7 +312,6 @@ public class HttpLoadBalanceServer {
      * @param ctx the balance context to finalize
      */
     private void finalizeRequestContext(BalanceContext ctx) {
-        activeRequestCounter.decrement();
         engineHealthReporter.reportBalancingService(ctx);
         logPvRecord(ctx);
     }

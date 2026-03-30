@@ -117,7 +117,7 @@ public class DynamicWorkerManager {
         return Math.max(0, maxWorkers);
     }
 
-    private void adjustPermitCapacity(int desiredCapacity) {
+    private synchronized void adjustPermitCapacity(int desiredCapacity) {
         int currentPermits = totalPermits.get();
         int capacityDelta = desiredCapacity - currentPermits;
 
@@ -136,8 +136,13 @@ public class DynamicWorkerManager {
         }
     }
 
-    public void acquirePermit() {
-        workerPermitSemaphore.acquireUninterruptibly();
+    public boolean tryAcquirePermit(long timeout, TimeUnit unit) {
+        try {
+            return workerPermitSemaphore.tryAcquire(timeout, unit);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     public void releasePermit() {

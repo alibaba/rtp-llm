@@ -1,6 +1,7 @@
 package org.flexlb.service;
 
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
 
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.QueueManager;
@@ -56,7 +57,10 @@ public class RouteService {
         FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
         if (flexlbConfig.isEnableQueueing()) {
             balanceContext.cancel();
-            balanceContext.getFuture().completeExceptionally(new CancellationException("Request cancelled by client"));
+            CompletableFuture<Response> future = balanceContext.getFuture();
+            if (future != null) {
+                future.completeExceptionally(new CancellationException("Request cancelled by client"));
+            }
         }
         balanceContext.setSuccess(false);
         balanceContext.setErrorMessage("request cancelled");

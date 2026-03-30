@@ -12,6 +12,7 @@ import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 
+import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -72,7 +73,7 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
      * @param ipPortList Latest worker address list in format ip:httpPort
      */
     private void updateGrpcChannelPool(List<String> ipPortList) {
-        Logger.warn("address update, ip:port list size:{}, channel pool size:{}", ipPortList.size(), channelPool.size());
+        Logger.info("address update, ip:port list size:{}, channel pool size:{}", ipPortList.size(), channelPool.size());
 
         Set<String/*ip:port:serviceType*/> currentKeys = new HashSet<>(channelPool.keySet());
         List<String/*ip:port:serviceType*/> addedKeys = new ArrayList<>();
@@ -101,14 +102,14 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
 
         // Create channels for newly online workers
         for (String newKey : addedKeys) {
-            if (!channelPool.containsKey(newKey)) {
-                try {
-                    ManagedChannel managedChannel = createChannel(newKey);
-                    channelPool.put(newKey, new Invoker(newKey, managedChannel));
+            try {
+                ManagedChannel managedChannel = createChannel(newKey);
+                Invoker invoker = putInvokerIfAbsent(newKey, managedChannel);
+                if (invoker.getChannel() == managedChannel) {
                     Logger.info("add channel for ipPort {}", newKey);
-                } catch (Exception e) {
-                    Logger.error("create channel for ipPort {} failed", newKey, e);
                 }
+            } catch (Exception e) {
+                Logger.error("create channel for ipPort {} failed", newKey, e);
             }
         }
 
@@ -169,6 +170,53 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
             Logger.warn("ip:{} grpc channel not found, channelPool:{}", channelKey, channelPool);
         }
         return invoker;
+    }
+
+    protected Invoker putInvokerIfAbsent(String channelKey, ManagedChannel managedChannel) {
+        Invoker newInvoker = new Invoker(channelKey, managedChannel);
+        Invoker existing = channelPool.putIfAbsent(channelKey, newInvoker);
+        if (existing != null) {
+            newInvoker.shutdown();
+            return existing;
+        }
+        return newInvoker;
+    }
+
+    protected Invoker replaceInvoker(String channelKey, Invoker expectedInvoker, ManagedChannel managedChannel) {
+        Invoker newInvoker = new Invoker(channelKey, managedChannel);
+        if (expectedInvoker == null) {
+            Invoker existing = channelPool.putIfAbsent(channelKey, newInvoker);
+            if (existing != null) {
+                newInvoker.shutdown();
+                return existing;
+            }
+            return newInvoker;
+        }
+
+        boolean replaced = channelPool.replace(channelKey, expectedInvoker, newInvoker);
+        if (!replaced) {
+            newInvoker.shutdown();
+            return channelPool.get(channelKey);
+        }
+
+        expectedInvoker.shutdown();
+        return newInvoker;
+    }
+
+    @PreDestroy
+    public void shutdownChannelPool() {
+        Set<String> channelKeys = new HashSet<>(channelPool.keySet());
+        for (String channelKey : channelKeys) {
+            Invoker invoker = channelPool.remove(channelKey);
+            if (invoker != null) {
+                try {
+                    invoker.shutdown();
+                } catch (Exception e) {
+                    Logger.error("shutdown channel for ipPort {} failed in pre-destroy", channelKey, e);
+                }
+            }
+        }
+        Logger.warn("grpc channel pool shutdown finished");
     }
 
     protected abstract ManagedChannel createChannel(String hostKey);
@@ -250,8 +298,20 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
         }
 
         public void shutdown() {
-            if (channel != null) {
+            if (channel == null) {
+                return;
+            }
+            try {
                 channel.shutdown();
+                if (!channel.awaitTermination(1000, TimeUnit.MILLISECONDS)) {
+                    channel.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                channel.shutdownNow();
+            } catch (Exception e) {
+                Logger.warn("shutdown grpc channel {} failed", channelKey, e);
+                channel.shutdownNow();
             }
         }
     }

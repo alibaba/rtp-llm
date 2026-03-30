@@ -96,7 +96,11 @@ public class QueueManager {
      * @param ctx Load balancing context
      */
     public void offerToHead(BalanceContext ctx) {
-        queue.offerFirst(ctx);
+        boolean added = queue.offerFirst(ctx);
+        if (!added) {
+            Logger.warn("Failed to re-queue request id: {} (queue full), completing with error", ctx.getRequestId());
+            ctx.getFuture().complete(Response.error(StrategyErrorType.QUEUE_FULL));
+        }
     }
 
     /**

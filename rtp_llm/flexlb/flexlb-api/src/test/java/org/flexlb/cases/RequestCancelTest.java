@@ -6,7 +6,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.RouteService;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
 import org.mockito.ArgumentMatchers;
 import org.springframework.http.MediaType;
 import org.springframework.web.reactive.function.BodyInserters;
@@ -14,7 +13,6 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.Disposable;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
-import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;

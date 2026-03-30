@@ -10,7 +10,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class HealthCheckHooker implements AppShutDownHooker {
 
-    public static boolean isShutDownSignalReceived;
+    public static volatile boolean isShutDownSignalReceived;
     private final GracefulLifecycleReporter lifecycleReporter;
 
     public HealthCheckHooker(GracefulLifecycleReporter lifecycleReporter) {

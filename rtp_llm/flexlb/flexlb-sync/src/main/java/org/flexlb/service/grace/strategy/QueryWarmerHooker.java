@@ -13,7 +13,7 @@ import java.util.TimerTask;
 @Component
 public class QueryWarmerHooker implements AppOnlineHooker {
 
-    public static boolean warmUpFinished;
+    public static volatile boolean warmUpFinished;
     private static final int maxWaitTimeSeconds = 3;
     private final GracefulLifecycleReporter lifecycleReporter;
 
