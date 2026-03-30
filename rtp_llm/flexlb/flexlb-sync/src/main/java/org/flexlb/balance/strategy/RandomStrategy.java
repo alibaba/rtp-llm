@@ -32,7 +32,7 @@ public class RandomStrategy implements LoadBalancer {
     }
 
     @Override
-    public void rollBack(String ipPort, long interRequestId) {
+    public void rollBack(String ipPort, long requestId) {
     }
 
     @Override
@@ -72,7 +72,7 @@ public class RandomStrategy implements LoadBalancer {
         return buildServerStatus(selectedWorker, roleType, balanceContext.getRequestId());
     }
 
-    private ServerStatus buildServerStatus(WorkerStatus worker, RoleType roleType, long interRequestId) {
+    private ServerStatus buildServerStatus(WorkerStatus worker, RoleType roleType, long requestId) {
         ServerStatus result = new ServerStatus();
         try {
             result.setSuccess(true);
@@ -81,7 +81,7 @@ public class RandomStrategy implements LoadBalancer {
             result.setGrpcPort(CommonUtils.toGrpcPort(worker.getPort()));
             result.setRole(roleType);
             result.setGroup(worker.getGroup());
-            result.setInterRequestId(interRequestId);
+            result.setRequestId(requestId);
         } catch (Exception e) {
             Logger.error("buildServerStatus error", e);
             result.setSuccess(false);

@@ -63,9 +63,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             logger.info("GrpcWorkerStatusRunner run for {}", ipPort);
             long startTime = System.nanoTime() / 1000;
 
-            long latestFinishedTaskVersion = Optional.ofNullable(workerStatus.getLatestFinishedTaskVersion())
-                    .map(AtomicLong::get)
-                    .orElse(-1L);
+            long latestFinishedTaskVersion = workerStatus.getLatestFinishedTaskVersion().get();
 
             WorkerStatusResponse response = launchGrpcStatusCheck(ip, grpcPort, latestFinishedTaskVersion);
             handleStatusResponse(response, startTime);
@@ -113,7 +111,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setGroup(group);
             workerStatus.setRole(newWorkerStatus.getRole());
 
-            Long currentVersion = workerStatus.getStatusVersion();
+            long currentVersion = workerStatus.getStatusVersion().get();
             if (currentVersion >= responseVersion) {
                 logger.info("query engine worker status via gRPC, version is not updated, currentVersion: {}, responseVersion: {}",
                         currentVersion, responseVersion);
@@ -152,8 +150,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setDpSize(newWorkerStatus.getDpSize());
             workerStatus.setTpSize(newWorkerStatus.getTpSize());
             workerStatus.setAlive(newWorkerStatus.isAlive());
-            workerStatus.setVersion(String.valueOf(newWorkerStatus.getVersion()));
-            workerStatus.setStatusVersion(responseVersion);
+            workerStatus.getStatusVersion().set(responseVersion != null ? responseVersion : -1L);
+            workerStatus.getLatestFinishedTaskVersion().set(newWorkerStatus.getLatestFinishedVersion() != null ? newWorkerStatus.getLatestFinishedVersion() : -1L);
 
             Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
             Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();

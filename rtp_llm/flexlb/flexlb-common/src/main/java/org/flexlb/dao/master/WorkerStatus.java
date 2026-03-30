@@ -23,7 +23,6 @@ public class WorkerStatus {
     public final transient ReentrantLock lock = new ReentrantLock();
     private String role;
     private String group;
-    private String version;
     private String ip;
     private int port;
     private String site;
@@ -35,7 +34,7 @@ public class WorkerStatus {
     private AtomicLong runningQueueTime = new AtomicLong();
     private Map<String, TaskInfo> waitingTaskList;
     private Map<String, TaskInfo> runningTaskList;
-    private AtomicLong latestFinishedTaskVersion = new AtomicLong(-1);
+    private AtomicLong latestFinishedTaskVersion = new AtomicLong(-1L);
 
     private ConcurrentHashMap<Long/*requestId*/, TaskInfo> localTaskMap = new ConcurrentHashMap<>();
     private double stepLatencyMs;
@@ -50,7 +49,7 @@ public class WorkerStatus {
     private AtomicBoolean resourceAvailable = new AtomicBoolean(true); // Resource availability state
     private AtomicBoolean statusCheckInProgress = new AtomicBoolean(false); // Status check in progress flag
     private AtomicBoolean cacheCheckInProgress = new AtomicBoolean(false); // Cache check in progress flag
-    private Long statusVersion = -1L;
+    private AtomicLong statusVersion = new AtomicLong(-1L);
 
     /**
      * Add task to local running queue
@@ -105,34 +104,17 @@ public class WorkerStatus {
 
     /**
      * Update task states
-     * Check for lost tasks, update running tasks, and clean up finished tasks
+     * Check for lost tasks, update running/waiting tasks, and clean up finished tasks
      */
     public void updateTaskStates(Map<String, TaskInfo> waitingTaskInfo, Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
-
-        // Update version of finished tasks
-        if (MapUtils.isNotEmpty(finishedTaskInfo)) {
-            long maxEndTime = finishedTaskInfo.values().stream()
-                .mapToLong(TaskInfo::getEndTimeMs)
-                .max().orElse(-1);
-            if (maxEndTime != -1) {
-                latestFinishedTaskVersion.accumulateAndGet(maxEndTime, Math::max);
-            }
-        }
-
-        // Iterate through local tasks and update task states
         Iterator<Map.Entry<Long, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<Long, TaskInfo> entry = iterator.next();
             Long requestId = entry.getKey();
             TaskInfo localTask = entry.getValue();
+            String requestIdStr = String.valueOf(requestId);
 
-            // Check if in running list
-            TaskInfo runningTask = runningTaskInfo.get(String.valueOf(requestId));
-
-            // Check if in finished list
-            TaskInfo finishedTask = finishedTaskInfo.get(String.valueOf(requestId));
-
-            // Handle finished tasks
+            TaskInfo finishedTask = finishedTaskInfo != null ? finishedTaskInfo.get(requestIdStr) : null;
             if (finishedTask != null) {
                 if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
                     localTask.updateTaskState(TaskStateEnum.CONFIRMED);
@@ -145,12 +127,11 @@ public class WorkerStatus {
                     safeDecrementQueueTime(runningQueueTime, delta);
                 }
                 Logger.debug("Task {} finished and removed", requestId);
-                // Remove task from local task map
                 iterator.remove();
                 continue;
             }
 
-            // Handle running tasks
+            TaskInfo runningTask = runningTaskInfo != null ? runningTaskInfo.get(requestIdStr) : null;
             if (runningTask != null) {
                 localTask.setLastActiveTimeUs(System.nanoTime() / 1000);
 
@@ -162,7 +143,6 @@ public class WorkerStatus {
                     localTask.updateTaskState(TaskStateEnum.RUNNING);
                 }
 
-                // Update fields returned by engine
                 localTask.setPrefixLength(runningTask.getPrefixLength());
                 localTask.setPrefillTime(runningTask.getPrefillTime());
                 localTask.setInputLength(runningTask.getInputLength());
@@ -174,10 +154,26 @@ public class WorkerStatus {
                 continue;
             }
 
-            // If task has been confirmed but not in running or finished list, mark as lost
+            TaskInfo waitingTask = waitingTaskInfo != null ? waitingTaskInfo.get(requestIdStr) : null;
+            if (waitingTask != null) {
+                localTask.setLastActiveTimeUs(System.nanoTime() / 1000);
+
+                if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
+                    localTask.updateTaskState(TaskStateEnum.CONFIRMED);
+                    Logger.debug("Task {} first confirmed by worker (waiting)", requestId);
+                }
+
+                localTask.setPrefixLength(waitingTask.getPrefixLength());
+                localTask.setInputLength(waitingTask.getInputLength());
+                localTask.setWaitingTime(waitingTask.getWaitingTime());
+                localTask.setDpRank(waitingTask.getDpRank());
+
+                continue;
+            }
+
             if (localTask.getTaskState() == TaskStateEnum.CONFIRMED || localTask.getTaskState() == TaskStateEnum.RUNNING) {
                 localTask.updateTaskState(TaskStateEnum.LOST);
-                logger.warn("Task {} marked as LOST - not in running or finished list", requestId);
+                logger.warn("Task {} marked as LOST - not in waiting, running or finished list", requestId);
             }
         }
     }

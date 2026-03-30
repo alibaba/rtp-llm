@@ -8,5 +8,5 @@ public interface LoadBalancer {
 
     ServerStatus select(BalanceContext context, RoleType roleType, String group);
 
-    void rollBack(String ipPort, long interRequestId);
+    void rollBack(String ipPort, long requestId);
 }

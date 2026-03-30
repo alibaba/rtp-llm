@@ -84,17 +84,17 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * Release local cached tasks on the specified worker
      *
      * @param ipPort Worker IP address
-     * @param interRequestId Internal request ID
+     * @param requestId Request ID
      */
     @Override
-    public void rollBack(String ipPort, long interRequestId) {
+    public void rollBack(String ipPort, long requestId) {
 
         Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
-        Logger.debug("Prefill rollBack - ipPort: {}, interRequestId: {}", ipPort, interRequestId);
+        Logger.debug("Prefill rollBack - ipPort: {}, requestId: {}", ipPort, requestId);
 
         WorkerStatus workerStatus = workerStatusMap.get(ipPort);
         if (workerStatus != null) {
-            workerStatus.removeLocalTask(interRequestId);
+            workerStatus.removeLocalTask(requestId);
         }
     }
 
@@ -107,7 +107,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @return Selected server status
      */
     private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
-        long interRequestId = balanceContext.getRequestId();
+        long requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
 
         Logger.debug("Starting shortest TTFT selection for role: {}", roleType);
@@ -131,7 +131,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        return finalizeWorkerSelection(bestWorker, balanceContext, roleType, interRequestId, seqLen);
+        return finalizeWorkerSelection(bestWorker, balanceContext, roleType, requestId, seqLen);
     }
 
     /**
@@ -211,24 +211,24 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param selectedWorker Selected worker
      * @param balanceContext Load balancing context
      * @param roleType Worker role type
-     * @param interRequestId Internal request ID
+     * @param requestId Request ID
      * @param seqLen Sequence length
      * @return Server status
      */
     private ServerStatus finalizeWorkerSelection(ScoredWorker selectedWorker,
                                                  BalanceContext balanceContext,
                                                  RoleType roleType,
-                                                 long interRequestId,
+                                                 long requestId,
                                                  long seqLen) {
         WorkerStatus workerStatus = selectedWorker.worker();
 
         logWorkerSelection(selectedWorker, roleType);
         reportCacheHitMetrics(roleType, workerStatus.getIp(), selectedWorker.hitCacheTokens(), seqLen);
 
-        TaskInfo task = createTaskInfo(interRequestId, balanceContext.getRequest().getSeqLen(), selectedWorker.hitCacheTokens());
-        workerStatus.putLocalTask(interRequestId, task);
+        TaskInfo task = createTaskInfo(requestId, balanceContext.getRequest().getSeqLen(), selectedWorker.hitCacheTokens());
+        workerStatus.putLocalTask(requestId, task);
 
-        return buildServerStatus(selectedWorker, roleType, interRequestId);
+        return buildServerStatus(selectedWorker, roleType, requestId);
     }
 
     /**
@@ -263,14 +263,14 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     /**
      * Create task information
      *
-     * @param interRequestId Internal request ID
+     * @param requestId Request ID
      * @param inputLength Input length
      * @param prefixLength Prefix length
      * @return Task information
      */
-    private TaskInfo createTaskInfo(long interRequestId, long inputLength, long prefixLength) {
+    private TaskInfo createTaskInfo(long requestId, long inputLength, long prefixLength) {
         TaskInfo task = new TaskInfo();
-        task.setInterRequestId(interRequestId);
+        task.setRequestId(requestId);
         task.setInputLength(inputLength);
         task.setPrefixLength(prefixLength);
         return task;
@@ -298,7 +298,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         }
 
         long minTTFT = candidates.getFirst().ttft();
-        double threshold = calculateTTFTThreshold(candidates);
+        double threshold = calculateTTFTThreshold(candidates, minTTFT);
 
         List<ScoredWorker> similarWorkers = filterSimilarWorkers(candidates, minTTFT, threshold);
 
@@ -338,7 +338,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param candidates Candidate worker list
      * @return TTFT threshold
      */
-    private double calculateTTFTThreshold(List<ScoredWorker> candidates) {
+    private double calculateTTFTThreshold(List<ScoredWorker> candidates, long minTTFT) {
         double avgTTFT = candidates.stream().mapToLong(ScoredWorker::ttft).average().orElse(0.0);
 
         double stdDev = Math.sqrt(
@@ -347,10 +347,11 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                         .mapToDouble(v -> Math.pow(v - avgTTFT, 2))
                         .average()
                         .orElse(0.0));
-        double percentageAvgTTFT = avgTTFT * TTFT_THRESHOLD_PERCENTAGE;
+        double percentageMinTTFT = minTTFT * TTFT_THRESHOLD_PERCENTAGE;
         double factoredStdDev = stdDev * STDDEV_THRESHOLD_FACTOR;
-        Logger.debug("Calculate TTFT threshold, avgTTFT: {}, stdDev: {}, percentageAvgTTFT: {}, factoredStdDev: {}", avgTTFT, stdDev, percentageAvgTTFT, factoredStdDev);
-        return Math.max(percentageAvgTTFT, factoredStdDev);
+        Logger.debug("Calculate TTFT threshold, minTTFT: {}, avgTTFT: {}, stdDev: {}, percentageMinTTFT: {}, factoredStdDev: {}",
+                minTTFT, avgTTFT, stdDev, percentageMinTTFT, factoredStdDev);
+        return Math.max(percentageMinTTFT, factoredStdDev);
     }
 
     /**
@@ -370,22 +371,38 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     }
 
     /**
-     * Select worker based on scheduling fairness
-     * Among workers with similar TTFT, prioritize recently unscheduled workers
+     * Select worker based on scheduling fairness.
+     * Among workers with similar TTFT, prefer the least recently scheduled one.
+     * CAS on lastSelectedTime ensures concurrent requests are spread across different workers
+     * rather than all landing on the same one.
      *
-     * @param similarWorkers List of workers with similar TTFT
-     * @param fallbackCandidates Fallback candidate worker list
-     * @return Finally selected worker
+     * @param similarWorkers workers with similar TTFT
+     * @param fallbackCandidates fallback candidate list
+     * @return selected worker
      */
     private ScoredWorker selectWorkerByScheduleFairness(List<ScoredWorker> similarWorkers, List<ScoredWorker> fallbackCandidates) {
         if (similarWorkers.isEmpty()) {
             return fallbackCandidates.getFirst();
         }
 
-        return similarWorkers.stream()
-                // Prioritize recently unscheduled worker
-                .min(Comparator.comparingLong(ScoredWorker::lastSelectedTime))
-                .orElse(fallbackCandidates.getFirst());
+        // Sort ascending by lastSelectedTime so the least recently used worker is tried first
+        List<ScoredWorker> sorted = similarWorkers.stream()
+                .sorted(Comparator.comparingLong(ScoredWorker::lastSelectedTime))
+                .toList();
+
+        long now = System.nanoTime() / 1000;
+        for (ScoredWorker candidate : sorted) {
+            long expected = candidate.lastSelectedTime();
+            // CAS: claim this worker only if lastSelectedTime hasn't changed since we read it.
+            // A failed CAS means another concurrent request already claimed this worker.
+            if (candidate.worker().getLastSelectedTime().compareAndSet(expected, now)) {
+                return candidate;
+            }
+            // Another request claimed this worker; try the next candidate
+        }
+
+        // All candidates were claimed concurrently; fall back to the first candidate
+        return fallbackCandidates.getFirst();
     }
 
     /**
@@ -393,23 +410,23 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      *
      * @param selectedWorker Selected worker
      * @param roleType Worker role type
-     * @param interRequestId Internal request ID
+     * @param requestId Request ID
      * @return Server status
      */
-    private ServerStatus buildServerStatus(ScoredWorker selectedWorker, RoleType roleType, long interRequestId) {
+    private ServerStatus buildServerStatus(ScoredWorker selectedWorker, RoleType roleType, long requestId) {
         WorkerStatus workerStatus = selectedWorker.worker();
         ServerStatus result = new ServerStatus();
         try {
             result.setSuccess(true);
             result.setRole(roleType);
-            result.setInterRequestId(interRequestId);
+            result.setRequestId(requestId);
             result.setPrefillTime(selectedWorker.ttft());
             result.setGroup(workerStatus.getGroup());
             result.setServerIp(workerStatus.getIp());
             result.setHttpPort(workerStatus.getPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(workerStatus.getPort()));
         } catch (Exception e) {
-            Logger.error("Failed to build server status for requestId: {}", interRequestId, e);
+            Logger.error("Failed to build server status for requestId: {}", requestId, e);
             result.setCode(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
             result.setMessage(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg());
             result.setSuccess(false);

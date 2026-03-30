@@ -29,8 +29,8 @@ public class ServerStatus {
     @JsonProperty("debug_info")
     private DebugInfo debugInfo;
 
-    @JsonProperty("inter_request_id")
-    private long interRequestId;
+    @JsonProperty("request_id")
+    private long requestId;
 
     @JsonProperty("success")
     private boolean success;

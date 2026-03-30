@@ -339,6 +339,7 @@ class RandomStrategyTest {
     void should_handle_null_request_id() {
         // Given: Model with a worker
         Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillStatusMap.clear();
 
         WorkerStatus worker = createWorkerStatus("127.0.0.1");
         prefillStatusMap.put("127.0.0.1:8080", worker);
