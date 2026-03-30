@@ -40,3 +40,12 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "request_id_generator_test",
+    srcs = ["request_id_generator_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:frontend",
+    ],
+)
