@@ -306,12 +306,12 @@ struct GreedyOutput {
 };
 
 struct BeamSearchParams {
-    const torch::Tensor& logits;            // [batch_size, num_beams_in, vocab_size]
-    torch::Tensor        token_ids;         // [batch_size, num_beams_in, max_seq_len]
-    torch::Tensor        input_lengths;     // [batch_size, num_beams_in]
-    torch::Tensor        sequence_lengths;  // [batch_size, num_beams_in]
-    torch::Tensor        cum_log_probs;     // [batch_size, num_beams_in]
-    size_t               num_beams_out = 0;
+    torch::Tensor& logits;            // [batch_size, num_beams_in, vocab_size]
+    torch::Tensor  token_ids;         // [batch_size, num_beams_in, max_seq_len]
+    torch::Tensor  input_lengths;     // [batch_size, num_beams_in]
+    torch::Tensor  sequence_lengths;  // [batch_size, num_beams_in]
+    torch::Tensor  cum_log_probs;     // [batch_size, num_beams_in]
+    size_t         num_beams_out = 0;
 };
 
 struct BeamSearchOutput {
