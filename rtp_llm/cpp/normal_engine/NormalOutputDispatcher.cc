@@ -166,8 +166,14 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
     for (size_t i = 0; i < next_batch_size; ++i) {
-        new_tokens.data_ptr<int32_t>()[i] =
-            new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
+        int32_t token_id;
+        if (has_beam_search) {
+            size_t seq_pos = stream->seqLength();
+            token_id       = new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + seq_pos];
+        } else {
+            token_id = new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
+        }
+        new_tokens.data_ptr<int32_t>()[i] = token_id;
     }
 
     torch::Tensor current_softmax_result;
