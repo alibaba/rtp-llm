@@ -11,3 +11,15 @@ py_test(
     ],
     tags = ["manual"],
 )
+
+py_test(
+    name = "host_service_test",
+    srcs = ["host_service_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:pydantic",
+    ],
+    tags = ["manual"],
+)
