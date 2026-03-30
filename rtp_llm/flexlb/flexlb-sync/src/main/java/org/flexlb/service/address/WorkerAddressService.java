@@ -35,7 +35,7 @@ public class WorkerAddressService {
     private final ModelMetaConfig modelMetaConfig;
     private final ServiceDiscovery serviceDiscovery;
     /**
-     * 服务发现请求线程池
+     * Service discovery request thread pool
      */
     public static final ExecutorService serviceDiscoveryExecutor = new ThreadPoolExecutor(
             10,
@@ -82,19 +82,19 @@ public class WorkerAddressService {
     }
 
     public List<WorkerHost> getServiceHosts(String modelName, String address) {
-        // 使用ServiceRoute里面第一个service discovery地址挂载的所有机器
+        // Use all machines mounted on the first service discovery address in ServiceRoute
         ServiceDiscoveryRunner serviceDiscoveryRunner = new ServiceDiscoveryRunner(modelName, address, engineHealthReporter, serviceDiscovery);
         Future<List<WorkerHost>> future = serviceDiscoveryExecutor.submit(serviceDiscoveryRunner);
         try {
-            // 设置超时时间，防止部分service discovery没有机器，返回时间很长阻塞线程
+            // Set timeout to prevent blocking threads when service discovery has no machines and takes long to return
             return future.get(500, TimeUnit.MILLISECONDS);
         } catch (Exception e) {
             if (e instanceof TimeoutException) {
                 logger.error("query service discovery timeout, model={}, address={}, msg:{}", modelName, address, "timeout");
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
+                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null, null);
             } else {
                 logger.error("query service discovery error, model={}, address={}, msg:{}", modelName, address, e.getMessage());
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null);
             }
             future.cancel(true);
             return new ArrayList<>();
@@ -143,7 +143,7 @@ public class WorkerAddressService {
             } catch (Throwable e) {
                 logger.error("query service discovery exception, cost={}ms, model={}, address={}, msg:{}",
                         System.nanoTime() / 1000 - start, modelName, address, e.getMessage());
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null);
                 return new ArrayList<>();
             }
         }

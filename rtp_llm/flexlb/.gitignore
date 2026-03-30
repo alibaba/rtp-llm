@@ -65,3 +65,4 @@ spring-output/
 # Test
 test-output/
 coverage/
+.factorypath

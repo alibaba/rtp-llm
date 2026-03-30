@@ -92,6 +92,29 @@
         </extensions>
         <plugins>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>prepare-proto</id>
+                        <phase>generate-sources</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <mkdir dir="${project.build.directory}/proto-java"/>
+                                <copy file="${project.basedir}/../../cpp/model_rpc/proto/model_rpc_service.proto"
+                                      tofile="${project.build.directory}/proto-java/engine_rpc_service.proto"/>
+                                <replaceregexp file="${project.build.directory}/proto-java/engine_rpc_service.proto"
+                                               match="(syntax\s*=\s*&quot;proto3&quot;\s*;\s*\n)(?:option\s+java_package\s*=\s*&quot;[^&quot;]*&quot;\s*;\s*\n)*(import[^\n]*)"
+                                               replace="\1option java_package = &quot;org.flexlb.engine.grpc&quot;;${line.separator}\2"
+                                               flags="s"/>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <groupId>org.xolstice.maven.plugins</groupId>
                 <artifactId>protobuf-maven-plugin</artifactId>
                 <version>0.6.1</version>
@@ -99,7 +122,7 @@
                     <protocArtifact>com.google.protobuf:protoc:${protoc.version}:exe:${os.detected.classifier}</protocArtifact>
                     <pluginId>grpc-java</pluginId>
                     <pluginArtifact>io.grpc:protoc-gen-grpc-java:${grpc.version}:exe:${os.detected.classifier}</pluginArtifact>
-                    <protoSourceRoot>src/main/resources/proto</protoSourceRoot>
+                    <protoSourceRoot>${project.build.directory}/proto-java</protoSourceRoot>
                 </configuration>
                 <executions>
                     <execution>

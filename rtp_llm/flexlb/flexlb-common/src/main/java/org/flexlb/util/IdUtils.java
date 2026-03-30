@@ -9,15 +9,15 @@ public class IdUtils {
     private static final char[] HEX_ARRAY = "0123456789abcdef".toCharArray();
 
     /**
-     * 生成高性能UUID
-     * 性能比UUID.randomUUID()高
+     * Generate high-performance UUID
+     * Higher performance than UUID.randomUUID()
      */
     public static String fastUuid() {
         ThreadLocalRandom random = ThreadLocalRandom.current();
         long mostSigBits = random.nextLong();
         long leastSigBits = random.nextLong();
 
-        // 手动格式化，避免String.format的开销
+        // Manual formatting to avoid String.format overhead
         return formatUuid(mostSigBits, leastSigBits);
     }
 

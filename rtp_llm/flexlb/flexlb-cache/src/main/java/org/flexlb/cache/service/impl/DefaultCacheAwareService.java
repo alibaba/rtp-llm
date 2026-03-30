@@ -17,9 +17,9 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 缓存感知服务默认实现
- * 提供统一的缓存管理服务，封装底层的KvCacheManager
- * 
+ * Default implementation of cache-aware service
+ * Provides unified cache management service, encapsulating underlying KvCacheManager
+ *
  * @author FlexLB
  */
 @Slf4j
@@ -34,24 +34,24 @@ public class DefaultCacheAwareService implements CacheAwareService {
     
     @Override
     public Map<String, Integer> findMatchingEngines(List<Long> blockCacheKeys,
-        String modelName, RoleType roleType, String group) {
+        RoleType roleType, String group) {
 
         long startTime = System.nanoTime() / 1000;
-        
+
         try {
             if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
                 return Collections.emptyMap();
             }
-            
+
             Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> resultMap
-                = kvCacheManager.findMatchingEngines(blockCacheKeys, modelName, roleType, group);
-            
-            cacheMetricsReporter.reportFindMatchingEnginesRT(modelName, roleType, startTime, "0");
-            
+                = kvCacheManager.findMatchingEngines(blockCacheKeys, roleType, group);
+
+            cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime, "0");
+
             return resultMap;
         } catch (Exception e) {
-            cacheMetricsReporter.reportFindMatchingEnginesRT(modelName, roleType, startTime, "1");
-            log.error("Error finding matching engines for: {}", modelName, e);
+            cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime, "1");
+            log.error("Error finding matching engines for role: {}", roleType, e);
             return Collections.emptyMap();
         }
     }
@@ -79,7 +79,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
 
             Set<Long> cachedKeys = cacheStatus.getCachedKeys();
             
-            // 更新缓存
+            // Update cache
             kvCacheManager.updateEngineCache(ipPort, role, cachedKeys);
             
             WorkerCacheUpdateResult result = buildSuccessResult(workerStatus, cacheStatus);
@@ -100,7 +100,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
     }
 
     /**
-     * 构建成功结果
+     * Build success result
      */
     private WorkerCacheUpdateResult buildSuccessResult(WorkerStatus workerStatus, CacheStatus cacheStatus) {
         return WorkerCacheUpdateResult.builder()
@@ -114,7 +114,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
     }
     
     /**
-     * 构建失败结果
+     * Build failure result
      */
     private WorkerCacheUpdateResult buildFailureResult(String engineIpPort, String errorMessage) {
         return WorkerCacheUpdateResult.builder()

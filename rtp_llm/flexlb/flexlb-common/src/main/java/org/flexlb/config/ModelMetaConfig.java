@@ -13,7 +13,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ModelMetaConfig {
 
     /**
-     * 模型元信息配置
+     * Model metadata configuration
      */
     private static final ConcurrentHashMap<String/*serviceId*/, ServiceRoute> modelServiceRoute = new ConcurrentHashMap<>();
 

@@ -8,7 +8,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * ServiceDiscoveryConfiguration - 服务发现默认配置
+ * ServiceDiscoveryConfiguration - Service discovery default configuration
  *
  * @author saichen.sm
  */
@@ -16,10 +16,10 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class ServiceDiscoveryConfiguration {
     /**
-     * 创建默认的ServiceDiscovery Bean
-     * 当没有其他ServiceDiscovery实现时使用
+     * Create default ServiceDiscovery Bean
+     * Used when no other ServiceDiscovery implementation is available
      *
-     * @return NoOpServiceDiscovery实例
+     * @return NoOpServiceDiscovery instance
      */
     @Bean
     @ConditionalOnMissingBean(ServiceDiscovery.class)

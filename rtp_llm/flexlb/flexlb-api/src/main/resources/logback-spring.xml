@@ -9,6 +9,7 @@
     <property name="PV_LOG_FILE" value="${LOG_PATH}/pv.log" />
     <property name="SYNC_LOG_FILE" value="${LOG_PATH}/sync.log" />
     <property name="SYNC_CONSISTENCY_LOG_FILE" value="${LOG_PATH}/sync_consistency.log" />
+    <property name="FLEXLB_LOG_FILE" value="${LOG_PATH}/flexlb.log" />
 
     <!-- 标准化日志格式 - 包含级别、线程、类名等关键信息 -->
     <property name="LOG_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"/>
@@ -93,6 +94,26 @@
         <appender-ref ref="sync_consistency"/>
     </appender>
 
+    <appender name="FLEXLB" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${FLEXLB_LOG_FILE}</file>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${FLEXLB_LOG_FILE}.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxHistory>5</maxHistory>
+            <maxFileSize>50MB</maxFileSize>
+            <totalSizeCap>4GB</totalSizeCap>
+        </rollingPolicy>
+    </appender>
+
+    <appender name="FLEXLB-async" class="ch.qos.logback.classic.AsyncAppender">
+        <discardingThreshold>0</discardingThreshold>
+        <queueSize>512</queueSize>
+        <neverBlock>true</neverBlock>
+        <appender-ref ref="FLEXLB"/>
+    </appender>
+
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
             <pattern>${CONSOLE_LOG_PATTERN}</pattern>
@@ -119,16 +140,19 @@
         <appender-ref ref="sync_consistency-async"/>
     </logger>
 
+    <logger name="flexlbLogger" level="INFO" additivity="false">
+        <appender-ref ref="FLEXLB-async"/>
+    </logger>
+
     <logger name="io.opentelemetry.exporter.internal.grpc.OkHttpGrpcExporter" level="OFF">
         <appender-ref ref="APPLICATION-async" />
     </logger>
 
-    <logger name="io.opentelemetry.exporter.logging.LoggingSpanExporter" level="OFF">
-        <appender-ref ref="APPLICATION-async" />
-    </logger>
 
     <springProfile name="pre,test">
         <!-- 开发/测试环境：同时输出到控制台和文件 -->
+        <!-- 降低 gRPC 客户端日志级别，避免测试环境中打印大量连接超时错误 -->
+        <logger name="org.flexlb.engine.grpc.EngineGrpcClient" level="OFF"/>
         <root level="INFO">
             <appender-ref ref="APPLICATION-async" />
             <appender-ref ref="CONSOLE-async" />
