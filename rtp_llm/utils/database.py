@@ -26,15 +26,18 @@ class BaseDatabase:
     ) -> List[torch.Tensor]:
         raise NotImplementedError
 
+    def has_tensor(self, name: str) -> bool:
+        raise NotImplementedError
+
     def get_tensor_order(self, name: str) -> List[int]:
         raise NotImplementedError
 
     def get_tensor_type(self, name: str) -> torch.dtype:
         raise NotImplementedError
-    
+
     def get_max_file_size(self) -> int:
         raise NotImplementedError
-    
+
     @property
     def is_safetensor(self) -> bool:
         return False
@@ -85,7 +88,7 @@ class CkptDatabase(BaseDatabase):
     @property
     def is_ft_style(self) -> bool:
         return self._is_ft_style
-    
+
     @property
     def is_safetensor(self) -> bool:
         return all(map(lambda file: file.is_safetensor(), self.pretrain_file_list))
@@ -93,7 +96,7 @@ class CkptDatabase(BaseDatabase):
     @property
     def ft_weight_params(self) -> Optional[Dict[str, Any]]:
         return self._ft_weight_params
-    
+
     def get_max_file_size(self) -> int:
         return max([file.file_size for file in self.pretrain_file_list])
 
@@ -165,6 +168,15 @@ class CkptDatabase(BaseDatabase):
 
         return tensors
 
+    def has_tensor(self, name: str) -> bool:
+        for ckpt_file in self.pretrain_file_list:
+            if name in ckpt_file.get_tensor_names():
+                return True
+        for ckpt_file in self.finetune_file_list:
+            if name in ckpt_file.get_tensor_names():
+                return True
+        return False
+
     def get_tensor_type(self, name: str) -> torch.dtype:
         return self.pretrain_file_list[0].get_tensor_type(name)
 
@@ -189,8 +201,11 @@ class CkptDatabase(BaseDatabase):
     ) -> dict[str, List[torch.Tensor]]:
         try:
             from fast_safetensors import LoadWithShm
+
             loader = LoadWithShm(2 * 1024 * 1024 * 1024, device, direct_io)
-            load_tensors = lambda ckptfile: loader.load_safetensors_to_device(ckptfile.file_name)
+            load_tensors = lambda ckptfile: loader.load_safetensors_to_device(
+                ckptfile.file_name
+            )
         except (ModuleNotFoundError, ImportError):
             load_tensors = lambda ckptfile: ckptfile.load_tensors(device, direct_io)
 
@@ -208,9 +223,19 @@ class CkptDatabase(BaseDatabase):
                     else:
                         res[k].append(v)
         return res
-    
-    def fastsafetensors_weights_iterator(self, device: str, use_tqdm_on_load: bool):
+
+    def fastsafetensors_weights_iterator(
+        self,
+        device: str,
+        use_tqdm_on_load: bool,
+        stacked_key_config: Optional[Dict[str, str]] = None,
+    ):
         from fastsafetensors import ParallelLoader, SingleGroup
+
+        from rtp_llm.model_loader.per_expert_parallel_loader import (
+            PerExpertParallelLoader,
+        )
+
         def iterator(device: str, use_tqdm_on_load: bool):
             if torch.distributed.is_initialized():
                 pg = torch.distributed.group.WORLD
@@ -223,20 +248,24 @@ class CkptDatabase(BaseDatabase):
             if device == "cuda":
                 device = f"cuda:{pg.rank()}"
                 logging.debug(f"origin device is cuda, set to {device}")
-            # Create loader
-            iterator = ParallelLoader(
-                pg,
+
+            loader_kwargs: Dict[str, Any] = dict(
+                pg=pg,
                 hf_weights_files=hf_weights_files,
                 use_tqdm_on_load=use_tqdm_on_load,
                 device=device,
                 bbuf_size_kb=1024 * 1024 * 2,
                 use_shm=True,
             )
+            if stacked_key_config:
+                loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
+            else:
+                loader = ParallelLoader(**loader_kwargs)
             try:
-                # Execute parallel iteration
-                yield from iterator.iterate_weights()
+                yield from loader.iterate_weights()
             finally:
-                iterator.loader.close()
+                loader.loader.close()
+
         return iterator(device, use_tqdm_on_load)
 
     def get_lora_tensor_names(self, config_name: str) -> List[str]:

@@ -26,7 +26,6 @@ class LoadConfig(BaseModel):
     head_num: int
     head_num_kv: int
     size_per_head: int
-    use_stack_weight: bool
     align_size: int  # Alignment size for FFN weights
     moe_align_size: int  # Alignment size for MoE weights
     moe_layer_index: List[int]

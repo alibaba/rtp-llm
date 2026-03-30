@@ -288,14 +288,9 @@ def sp_moe_neg1(
     ep_rank: int,
     dp: int,
     dp_rank: int,
-    use_stack_weight: bool,
     **kwargs: Any,
 ) -> torch.Tensor:
-    if use_stack_weight:
-        assert len(t.shape) == 3, "t.shape: " + str(t.shape)
-        return t.split(t.shape[0] // ep, dim=0)[ep_rank]
-    else:
-        return t
+    return t
 
 
 def sp_moe_w1(
@@ -306,19 +301,17 @@ def sp_moe_w1(
     ep_rank: int,
     dp: int,
     dp_rank: int,
-    use_stack_weight: bool,
     **kwargs: Any,
 ) -> torch.Tensor:
-    # [expert_num, 2*n, k]
-    if use_stack_weight:
-        assert len(t.shape) == 3, "t.shape: " + str(t.shape)
-        return t.split(t.shape[0] // ep, dim=0)[ep_rank]
-    else:
-        return t
+    return t
 
 
 def stack_(ts: List[torch.Tensor]):
     return stack_0(ts)
+
+
+def transpose_stack(ts: List[torch.Tensor]):
+    return stack_0(ts).transpose(-1, -2).contiguous()
 
 
 def stack_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
