@@ -30,7 +30,6 @@ class TestScheduleMetaRoleConversion(unittest.TestCase):
                 },
             ],
             "cache_local": 0,
-            "inter_request_id": 12345,
             "code": 200,
         }
 
@@ -41,7 +40,6 @@ class TestScheduleMetaRoleConversion(unittest.TestCase):
         # Verify the schedule meta was created successfully
         self.assertEqual(len(schedule_meta.server_status), 2)
         self.assertEqual(schedule_meta.cache_local, 0)
-        self.assertEqual(schedule_meta.inter_request_id, 12345)
         self.assertEqual(schedule_meta.code, 200)
 
         # Verify roles were converted to RoleType enum
@@ -64,7 +62,6 @@ class TestScheduleMetaRoleConversion(unittest.TestCase):
                     }
                 ],
                 "cache_local": 0,
-                "inter_request_id": 12345,
                 "code": 200,
             }
 
@@ -93,7 +90,6 @@ class TestScheduleMetaRoleConversion(unittest.TestCase):
                 }
             ],
             "cache_local": 0,
-            "inter_request_id": 12345,
             "code": 200,
         }
 
@@ -120,7 +116,6 @@ class TestScheduleMetaRoleConversion(unittest.TestCase):
         test_data = {
             "server_status": [],
             "cache_local": 0,
-            "inter_request_id": 12345,
             "code": 200,
         }
 

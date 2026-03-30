@@ -162,7 +162,6 @@ public class DefaultRouter implements Router {
 
     private Response buildSuccessResponse(long interRequestId, List<ServerStatus> serverStatusList) {
         Response response = new Response();
-        response.setInterRequestId(interRequestId);
         response.setSuccess(true);
         response.setServerStatus(serverStatusList);
         return response;
@@ -173,7 +172,6 @@ public class DefaultRouter implements Router {
         String detailMessage = routingResult.errorMessage();
 
         Response response = new Response();
-        response.setInterRequestId(interRequestId);
         response.setSuccess(false);
         response.setCode(errorType.getErrorCode());
         response.setErrorMessage(errorType.getErrorMsg() + ": " + detailMessage);

@@ -92,7 +92,6 @@ public:
     }
 
     std::vector<RoleAddr> role_addrs;
-    int64_t               inter_request_id = -1;  // used for master scheduling
 
     int maxNumBeams() {
         if (variable_num_beams.size() > 0) {

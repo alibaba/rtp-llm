@@ -297,7 +297,6 @@ class BackendRPCServerVisitor:
                 ExceptionType.LONG_PROMPT_ERROR,
                 f"model tokens can not be empty, request length is {input.prompt_length}",
             )
-        input.generate_config.inter_request_id = input.request_id
 
         self.check_sp_supported(input)
 

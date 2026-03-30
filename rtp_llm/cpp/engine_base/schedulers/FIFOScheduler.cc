@@ -268,9 +268,9 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::waitingTaskList() {
     waiting_task_list_.reserve(waiting_streams_.size());
     for (const auto& stream : waiting_streams_) {
         EngineScheduleInfo::TaskInfo task_info;
-        task_info.inter_request_id = stream->interRequestId();
-        task_info.prefix_length    = stream->prefixLength();
-        task_info.input_length     = stream->inputLength();
+        task_info.request_id    = stream->streamId();
+        task_info.prefix_length = stream->prefixLength();
+        task_info.input_length  = stream->inputLength();
         waiting_task_list_.emplace_back(task_info);
     }
     return waiting_task_list_;
@@ -282,9 +282,9 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::runningTaskList() {
     running_task_list_.reserve(running_streams_.size());
     for (const auto& stream : running_streams_) {
         EngineScheduleInfo::TaskInfo task_info;
-        task_info.inter_request_id = stream->interRequestId();
-        task_info.prefix_length    = stream->prefixLength();
-        task_info.input_length     = stream->inputLength();
+        task_info.request_id    = stream->streamId();
+        task_info.prefix_length = stream->prefixLength();
+        task_info.input_length  = stream->inputLength();
         running_task_list_.emplace_back(task_info);
     }
     return running_task_list_;

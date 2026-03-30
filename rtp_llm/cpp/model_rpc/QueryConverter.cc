@@ -83,7 +83,6 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
             RoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
     }
 
-    generate_config->inter_request_id    = config_proto->inter_request_id();
     generate_config->reuse_cache         = config_proto->reuse_cache();
     generate_config->enable_device_cache = config_proto->enable_device_cache();
     generate_config->enable_memory_cache = config_proto->enable_memory_cache();

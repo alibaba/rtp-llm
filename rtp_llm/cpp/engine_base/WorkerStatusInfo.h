@@ -15,6 +15,7 @@ struct WorkerStatusInfo {
     std::string        role;
     EngineScheduleInfo engine_schedule_info;
     int64_t            status_version;
+    int64_t            latest_finished_version;
     bool               alive;
     int32_t            dp_size;
     int32_t            tp_size;
