@@ -2,11 +2,17 @@ import random
 from typing import Dict, Optional
 from unittest import SkipTest, TestCase, main, skipIf
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 device = torch.device("cuda")
 
-import deep_gemm
+try:
+    import deep_gemm
+except (AssertionError, RuntimeError):
+    pytest.skip("deep_gemm unavailable (CUDA_HOME not set)", allow_module_level=True)
 
 
 def check_cuda_version() -> bool:

@@ -2,6 +2,10 @@ import logging
 import unittest
 from typing import List
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest, compare_tensors

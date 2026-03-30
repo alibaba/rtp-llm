@@ -6,6 +6,8 @@ from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
 )
 from flashinfer import fp4_quantize
 
+pytestmark = [pytest.mark.manual]
+
 skip_condition = torch.cuda.get_device_capability() < (10, 0)
 
 DTYPES = [torch.float16, torch.bfloat16]

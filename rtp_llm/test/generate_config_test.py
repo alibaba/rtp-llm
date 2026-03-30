@@ -2,6 +2,8 @@ import os
 from typing import Any, List, Optional
 from unittest import TestCase, main
 
+import pytest
+
 from transformers import AutoTokenizer
 
 from rtp_llm.ops import SpecialTokens
@@ -18,6 +20,9 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.config.model_config import ModelConfig
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 
 class GenerateConfigTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
@@ -245,8 +250,6 @@ class OpenaiGenerateConfigTest(TestCase):
         )
         self.tokenizer = QWenTokenizer(
             os.path.join(self.test_data_path, "qwen_7b/tokenizer/qwen.tiktoken"),
-            *args,
-            **kwargs,
         )
 
 

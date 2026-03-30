@@ -6,6 +6,10 @@ This mode is used for dynamic batch processing.
 
 import unittest
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.test_trt_base import (
     TRTAttnTestBase,
 )

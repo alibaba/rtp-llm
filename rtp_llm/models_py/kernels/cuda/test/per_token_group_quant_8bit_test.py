@@ -2,6 +2,10 @@ import itertools
 from typing import Tuple
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 import triton
 import triton.language as tl
@@ -339,7 +343,7 @@ class PerTokenGroupQuantTest(TestCase):
                 num_tokens=params[0],
                 hidden_dim=params[1],
                 group_size=params[2],
-                dst_dtype=params[3],
+                dst_dtype=str(params[3]),
                 column_major_scales=params[4],
                 scale_tma_aligned=params[5],
             ):

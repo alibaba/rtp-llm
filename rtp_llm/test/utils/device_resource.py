@@ -16,49 +16,95 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-python_code = """
-import torch
-import json
-import sys
-
-try:
-    if torch.cuda.is_available():
-        device_info = {torch.cuda.get_device_name(0): torch.cuda.device_count()}
-    else:
-        device_info = {}
-    print(json.dumps(device_info))
-except Exception as e:
-    # 捕获并打印内部错误，避免子进程静默失败
-    print(json.dumps({"error": str(e), "note": "Failed to get CUDA info"}), file=sys.stderr)
-    sys.exit(1) # 告知外部进程执行失败
-"""
+_NVIDIA_SMI_PATHS = [
+    "nvidia-smi",
+    "/usr/local/cuda/bin/nvidia-smi",
+    "/usr/local/nvidia/bin/nvidia-smi",
+    "/usr/bin/nvidia-smi",
+]
 
 
-def get_cuda_info():
-    result = subprocess.run(
-        [sys.executable, "-c", python_code], capture_output=True, text=True, check=False
-    )
-    logging.info(f"cuda info result: {result.stdout}, return code: {result.returncode}")
+def _detect_nvidia():
+    """Detect NVIDIA GPUs via nvidia-smi (driver-level, no torch needed).
 
+    Tries multiple known paths because Bazel sandbox / PPU workers may not
+    have nvidia-smi on PATH.  Rejects output containing "error" to avoid
+    false positives from PPU's wrapper when the driver is absent.
+    """
+    for smi in _NVIDIA_SMI_PATHS:
+        try:
+            result = subprocess.run(
+                [smi, "--query-gpu=name", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if result.returncode != 0:
+                continue
+            lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+            if not lines:
+                continue
+            if "error" in lines[0].lower():
+                logging.info(f"nvidia-smi returned error string: {lines[0]}")
+                continue
+            return lines[0], len(lines)
+        except FileNotFoundError:
+            continue
+    return None
+
+
+def _detect_rocm():
+    """Detect AMD GPUs via rocm-smi / rocminfo."""
     try:
-        if result.returncode != 0:
-            raise Exception(f"get cuda info returncode error, self ip: {get_ip()}")
-        cuda_info = json.loads(result.stdout)
-        if not cuda_info:
-            return None
-    except Exception as e:
-        # fallback to get device count when subprocess execute failed
-        import torch
+        result = subprocess.run(
+            ["rocm-smi", "--showproductname"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        if result.returncode == 0:
+            gpu_names = []
+            for line in result.stdout.strip().splitlines():
+                if "GPU[" in line and ":" in line:
+                    parts = line.split(":")
+                    if len(parts) >= 3 and parts[-1].strip():
+                        gpu_names.append(parts[-1].strip())
+            if gpu_names:
+                return gpu_names[0], len(gpu_names)
+    except FileNotFoundError:
+        pass
+    try:
+        result = subprocess.run(
+            ["rocminfo"], capture_output=True, text=True, timeout=10, check=False,
+        )
+        if result.returncode == 0:
+            names = [
+                line.split(":")[-1].strip()
+                for line in result.stdout.splitlines()
+                if "Marketing Name" in line and line.split(":")[-1].strip() != "Host"
+            ]
+            if names:
+                return names[0], len(names)
+    except FileNotFoundError:
+        pass
+    return None
 
-        if torch.cuda.is_available():
-            device_info = {torch.cuda.get_device_name(0): torch.cuda.device_count()}
-        else:
-            device_info = {}
-        cuda_info = device_info
 
-    name = list(cuda_info.keys())[0]
-    count = cuda_info[name]
-    return name, count
+def get_device_info():
+    """Detect GPU/accelerator name and count. NVIDIA/PPU via nvidia-smi, ROCm via rocm-smi.
+
+    PPU exposes a CUDA-compatible driver so nvidia-smi works identically.
+    No torch dependency — works in Bazel sandbox without pip packages.
+
+    Returns: (device_name, device_count) or None if no device found.
+    """
+    for detector in [_detect_nvidia, _detect_rocm]:
+        result = detector()
+        if result:
+            name, count = result
+            logging.info(f"Detected device: {name} x{count} (via {detector.__name__})")
+            return name, count
+    logging.info("No GPU/accelerator detected")
+    return None
+
+
+get_cuda_info = get_device_info
 
 
 def get_ip():
@@ -66,13 +112,13 @@ def get_ip():
 
 
 def get_gpu_ids():
-    cuda_info = get_cuda_info()
-    logging.info(f"{cuda_info}")
+    device_info = get_device_info()
+    logging.info(f"{device_info}")
 
-    if not cuda_info:
+    if not device_info:
         return list(range(128))
-    device_name = cuda_info[0]
-    total_gpus = range(cuda_info[1])
+    device_name = device_info[0]
+    total_gpus = range(device_info[1])
 
     gpus = os.environ.get("CUDA_VISIBLE_DEVICES", os.environ.get("HIP_VISIBLE_DEVICES"))
     if gpus is not None:
@@ -95,18 +141,25 @@ class DeviceResource:
         self.gpu_status_root_path = "/tmp/rtp_llm/smoke/test/gpu_status"
 
     def _get_gpu_pids(self, gpu_id: str) -> List[int]:
-        """Return PIDs of compute processes on a physical GPU via nvidia-smi."""
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-compute-apps=pid",
-                 "--format=csv,noheader", f"--id={gpu_id}"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return [int(p.strip()) for p in result.stdout.strip().splitlines()
-                        if p.strip()]
-        except Exception:
-            pass
+        """Return PIDs of compute processes on a physical GPU.
+
+        nvidia-smi provides per-GPU PID queries; for ROCm/PPU we degrade
+        gracefully to empty (file-based locking still provides isolation).
+        """
+        for smi in _NVIDIA_SMI_PATHS:
+            try:
+                result = subprocess.run(
+                    [smi, "--query-compute-apps=pid",
+                     "--format=csv,noheader", f"--id={gpu_id}"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return [int(p.strip()) for p in result.stdout.strip().splitlines()
+                            if p.strip()]
+                if result.returncode == 0:
+                    return []
+            except FileNotFoundError:
+                continue
         return []
 
     @staticmethod
@@ -231,28 +284,33 @@ class DeviceResource:
             logging.info("release done")
 
 
+def _get_visible_devices_env(device_name: str) -> str:
+    """Return the env var name for device visibility control."""
+    if "308" in device_name or "MI3" in device_name:
+        return "HIP_VISIBLE_DEVICES"
+    return "CUDA_VISIBLE_DEVICES"
+
+
 if __name__ == "__main__":
-    cuda_info = get_cuda_info()
-    if not cuda_info:
-        logging.info("no gpu, continue")
+    device_info = get_device_info()
+    if not device_info:
+        logging.info("no device detected, running without GPU isolation")
         result = subprocess.run(sys.argv[1:])
         logging.info("exitcode: %d", result.returncode)
-
         sys.exit(result.returncode)
     else:
-        from jit_sys_path_setup import setup_jit_cache
+        try:
+            from jit_sys_path_setup import setup_jit_cache
+            setup_jit_cache()
+        except Exception as e:
+            logging.warning(f"JIT cache setup skipped: {e}")
 
-        setup_jit_cache()
-
-        device_name, _ = cuda_info
+        device_name, _ = device_info
         require_count = int(
             os.environ.get("WORLD_SIZE", os.environ.get("GPU_COUNT", "1"))
         )
         with DeviceResource(require_count) as gpu_resource:
-            if "308" in device_name:
-                env_name = "HIP_VISIBLE_DEVICES"
-            else:
-                env_name = "CUDA_VISIBLE_DEVICES"
+            env_name = _get_visible_devices_env(device_name)
             os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
             result = subprocess.run(sys.argv[1:])
             logging.info("exitcode: %d", result.returncode)

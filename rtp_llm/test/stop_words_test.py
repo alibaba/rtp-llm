@@ -1,6 +1,7 @@
 from unittest import TestCase, main
 
 import numpy as np
+import pytest
 import torch
 
 from rtp_llm.utils.word_util import (
@@ -9,6 +10,8 @@ from rtp_llm.utils.word_util import (
     truncate_response_with_stop_words,
     truncate_token_with_stop_word_id,
 )
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 class StopWordTest(TestCase):

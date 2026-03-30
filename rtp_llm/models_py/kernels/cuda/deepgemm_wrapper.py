@@ -105,7 +105,14 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
         # deep_gemm is not available
         return
 
-    import deep_gemm
+    try:
+        import deep_gemm
+    except (AssertionError, RuntimeError, OSError) as e:
+        # deep_gemm found by find_spec but fails to import
+        # (e.g. CUDA_HOME not set, missing shared libs)
+        import logging
+        logging.debug("deep_gemm import failed: %s", e)
+        return
 
     # resolve symbols
     for i, symbol in enumerate(symbols):

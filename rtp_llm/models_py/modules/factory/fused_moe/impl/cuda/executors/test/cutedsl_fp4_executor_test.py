@@ -4,7 +4,10 @@ import random
 import unittest
 from typing import Dict, Tuple, Optional
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="SM100_ARM")]
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter

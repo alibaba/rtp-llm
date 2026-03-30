@@ -5,8 +5,11 @@
 import math
 from unittest import SkipTest, TestCase, main, skipIf
 
+import pytest
 import torch
 import torch.nn.functional as F
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 
 # Check if CUDA version >= 12.9 for flash_mla support

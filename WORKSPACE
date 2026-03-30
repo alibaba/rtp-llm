@@ -18,34 +18,11 @@ load("//deps:git.bzl", "git_deps")
 
 git_deps()
 
-load("@rules_python//python:repositories.bzl", "py_repositories")
-
-py_repositories()
-
-load("//deps:pip.bzl", "pip_deps")
-
-pip_deps()
-
-load("@pip_cpu_torch//:requirements.bzl", pip_cpu_torch_install_deps = "install_deps")
-pip_cpu_torch_install_deps()
-
-load("@pip_arm_torch//:requirements.bzl", pip_arm_torch_install_deps = "install_deps")
-pip_arm_torch_install_deps()
-
-load("@pip_ppu_torch//:requirements.bzl", pip_ppu_torch_install_deps = "install_deps")
-pip_ppu_torch_install_deps()
-
-load("@pip_gpu_cuda12_torch//:requirements.bzl", pip_gpu_cuda12_torch_install_deps = "install_deps")
-pip_gpu_cuda12_torch_install_deps()
-
-load("@pip_gpu_cuda12_9_torch//:requirements.bzl", pip_gpu_cuda12_9_torch_install_deps = "install_deps")
-pip_gpu_cuda12_9_torch_install_deps()
-
-load("@pip_cuda12_arm_torch//:requirements.bzl", pip_cuda12_arm_torch_install_deps = "install_deps")
-pip_cuda12_arm_torch_install_deps()
-
-load("@pip_gpu_rocm_torch//:requirements.bzl", pip_gpu_rocm_torch_install_deps = "install_deps")
-pip_gpu_rocm_torch_install_deps()
-
-load("//:def.bzl", "read_release_version")
+# rules_python is still needed by external deps
+load("//:def.bzl", "read_release_version", "torch_local_repository")
 read_release_version(name = "release_version")
+
+torch_local_repository(
+    name = "torch",
+    build_file = "//:BUILD.pytorch",
+)

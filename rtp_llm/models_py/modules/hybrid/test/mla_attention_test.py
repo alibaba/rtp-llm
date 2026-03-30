@@ -6,6 +6,10 @@ import sys
 from typing import Any, Dict, List, Optional
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 import torch.nn.functional as F
 

@@ -1,6 +1,10 @@
 import itertools
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 from torch import dtype as _dtype
 

@@ -89,76 +89,6 @@ def upload_pkg(name, **kwargs):
 
     _upload_pkg( name = name, **kwargs)
 
-def upload_wheel(name, src, dir, wheel_prefix):
-    oss_path = "oss://search-ad/%s/%s" % (dir, wheel_prefix) + "_$$(date '+%Y-%m-%d_%H_%M_%S')"
-    native.genrule(
-        name = name,
-        srcs = [src],
-        outs = ["tmp_wheel.whl"],
-        cmd = "bash -c 'set -xe;" +
-            "mkdir tmp;" +
-            "cp $(locations %s) tmp; " % (src) +
-            "osscmd put $(locations %s) %s/$$(basename $(locations %s));" % (src, oss_path, src) +
-            "mv tmp/$$(basename $(locations %s)) $(OUTS);" % (src) +
-            "rm tmp -rf;" +
-            "'",
-        tags = [
-            "local",
-            "manual",
-        ],
-        visibility = ["//visibility:public"],
-    )
-
-def pyc_wheel(name, package_name, src):
-    native.genrule(
-        name = name,
-        srcs = [src],
-        outs = [package_name + "-cp310-cp310-manylinux1_x86_64.whl"],
-        exec_tools = ["//bazel:pyc_wheel.py"],
-        cmd = "bash -c 'set -xe;" +
-            "cp $(locations %s) $(OUTS);" % (src) +
-            "chmod a+w $(OUTS);" +
-            "/opt/conda310/bin/python $(location //bazel:pyc_wheel.py) $(OUTS);" +
-            "'",
-        tags = [
-            "local",
-            "manual",
-        ],
-        visibility = ["//visibility:public"],
-    )
-
-def rename_wheel(name, package_name, src):
-    native.genrule(
-        name = name,
-        srcs = [src],
-        outs = [package_name + "-cp310-cp310-manylinux1_x86_64.whl"],
-        cmd = "bash -c 'set -xe;" +
-            "cp $(locations %s) $(OUTS);" % (src) +
-            "chmod a+w $(OUTS);" +
-            "'",
-        tags = [
-            "local",
-            "manual",
-        ],
-        visibility = ["//visibility:public"],
-    )
-
-def rename_wheel_aarch64(name, package_name, src):
-    native.genrule(
-        name = name,
-        srcs = [src],
-        outs = [package_name + "-cp310-cp310-linux_aarch64.whl"],
-        cmd = "bash -c 'set -xe;" +
-            "cp $(locations %s) $(OUTS);" % (src) +
-            "chmod a+w $(OUTS);" +
-            "'",
-        tags = [
-            "local",
-            "manual",
-        ],
-        visibility = ["//visibility:public"],
-    )
-
 def rpm_library(
         name,
         hdrs,
@@ -307,3 +237,22 @@ copy_files = rule(
         "srcs": attr.label_list(allow_files = True, mandatory = True),
     },
 )
+
+# RPATH entries for pip-installed layout, matching libtorch_cuda.so pattern.
+# From site-packages/rtp_llm/libs/ -> $ORIGIN/../.. = site-packages/
+_NVIDIA_RPATH_PKGS = [
+    "cublas", "cuda_cupti", "cuda_nvrtc", "cuda_runtime",
+    "cudnn", "cufft", "curand", "cusolver", "cusparse",
+    "cusparselt", "nccl", "nvtx", "cufile", "nvjitlink",
+]
+
+def pip_rpath_linkopts():
+    """Return linkopts with RPATH entries for pip install layout.
+
+    Mirrors libtorch_cuda.so: $ORIGIN/../../nvidia/*/lib + $ORIGIN/../../torch/lib.
+    Harmless in Bazel sandbox (non-existent paths are silently skipped by ld.so).
+    """
+    entries = ["'$$ORIGIN'"]
+    entries += ["'$$ORIGIN/../../nvidia/%s/lib'" % p for p in _NVIDIA_RPATH_PKGS]
+    entries.append("'$$ORIGIN/../../torch/lib'")
+    return ["-Wl,-rpath=" + ":".join(entries)]

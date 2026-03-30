@@ -136,7 +136,7 @@ class DebugTest(TestCase):
         dtypes = [torch.float16, torch.bfloat16, torch.float32]
 
         for dtype in dtypes:
-            with self.subTest(dtype=dtype):
+            with self.subTest(dtype=str(dtype)):
                 data = torch.randn((8, 16), dtype=dtype, device="cuda")
 
                 # Capture stdout

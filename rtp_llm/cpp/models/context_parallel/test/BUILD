@@ -24,17 +24,4 @@ cc_binary(
     visibility = ["//visibility:public"],
 )
 
-py_test(
-    name = "context_parallel_py_wrapper_test",
-    srcs = [
-        "context_parallel_py_wrapper_test.py"
-    ],
-    data = [
-        ":th_context_parallel_py_wrapper_test"
-    ],
-    deps = [
-        "//rtp_llm:torch"
-    ],
-    exec_properties = {'gpu':'A10'},
-)
 

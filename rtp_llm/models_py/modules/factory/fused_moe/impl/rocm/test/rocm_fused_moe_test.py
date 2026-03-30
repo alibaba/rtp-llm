@@ -1,6 +1,7 @@
 import itertools
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 from aiter.ops.shuffle import shuffle_weight
 from torch import dtype as _dtype
@@ -21,6 +22,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deepep_norm
 )
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 
 class FusedMoeTest(TestCase):

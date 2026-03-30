@@ -5,6 +5,10 @@ import sys
 from typing import List, Optional
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="SM100_ARM")]
+
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.atten_test_util import (

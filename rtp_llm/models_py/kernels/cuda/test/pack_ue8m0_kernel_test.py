@@ -7,7 +7,10 @@ identical results to deep_gemm's get_mn_major_tma_aligned_packed_ue8m0_tensor.
 
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 
 def _is_sm100() -> bool:

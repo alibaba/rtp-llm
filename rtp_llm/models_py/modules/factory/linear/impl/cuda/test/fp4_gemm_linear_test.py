@@ -2,8 +2,11 @@ import logging
 import os
 import unittest
 
+import pytest
 import torch
 import torch.nn.functional as F
+
+pytestmark = [pytest.mark.gpu(type="SM100_ARM")]
 
 from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (

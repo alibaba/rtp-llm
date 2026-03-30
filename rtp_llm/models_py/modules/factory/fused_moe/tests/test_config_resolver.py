@@ -3,6 +3,10 @@
 import unittest
 from unittest.mock import patch
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (

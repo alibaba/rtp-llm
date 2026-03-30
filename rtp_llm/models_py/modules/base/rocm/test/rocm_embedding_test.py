@@ -1,6 +1,7 @@
 import itertools
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 from torch import dtype as _dtype
 
@@ -8,6 +9,8 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules import Embedding
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.ops import ParallelismConfig
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 
 class EmbedingTest(TestCase):

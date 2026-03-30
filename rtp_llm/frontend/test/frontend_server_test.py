@@ -3,6 +3,10 @@ import json
 from typing import Any
 from unittest import TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 from pydantic import BaseModel
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -84,4 +88,5 @@ class FrontendServerTest(TestCase):
         self.assertEqual(json.loads(res.body.decode("utf-8"))["error_code"], 514)
 
 
-main()
+if __name__ == "__main__":
+    main()

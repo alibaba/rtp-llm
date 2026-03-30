@@ -3,12 +3,15 @@ import math
 from typing import List, Optional, Tuple
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import aiter
 import torch
 import torch.nn.functional as F
 from aiter import dtypes
 from einops import rearrange, repeat
 from rtp_llm.ops.compute_ops import paged_attention_atrex
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 
 def construct_local_mask(

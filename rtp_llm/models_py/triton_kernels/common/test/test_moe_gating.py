@@ -13,6 +13,10 @@ or directly:
 import sys
 import unittest
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 from torch.profiler import ProfilerActivity, profile
 
@@ -114,7 +118,7 @@ class TestCorrectness(unittest.TestCase):
         for T in T_VALUES:
             for H in H_VALUES:
                 for dtype in DTYPES:
-                    with self.subTest(T=T, H=H, dtype=dtype):
+                    with self.subTest(T=T, H=H, dtype=str(dtype)):
                         max_diff = self._check(T, H, dtype)
                         print(
                             f"  correctness  T={T:5d} H={H:5d} "
@@ -129,7 +133,7 @@ class TestCorrectness(unittest.TestCase):
             (32, 5000, torch.float16),
             (128, 6500, torch.bfloat16),
         ]:
-            with self.subTest(T=T, H=H, dtype=dtype):
+            with self.subTest(T=T, H=H, dtype=str(dtype)):
                 self._check(T, H, dtype)
 
     def test_inplace_same_object(self):
@@ -260,7 +264,7 @@ class TestPerformance(unittest.TestCase):
         for dtype in DTYPES:
             for T in T_VALUES:
                 for H in H_VALUES:
-                    with self.subTest(T=T, H=H, dtype=dtype):
+                    with self.subTest(T=T, H=H, dtype=str(dtype)):
                         torch_us, triton_us = self._bench_pair(T, H, dtype)
                         dtype_str = str(dtype).replace("torch.", "")
                         self.__class__._results.append(

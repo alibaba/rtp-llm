@@ -47,4 +47,5 @@ class KmonTest(unittest.TestCase):
             self.assertEqual(tokens[3], "tag_a=aa")
 
 
-unittest.main()
+if __name__ == "__main__":
+    unittest.main()

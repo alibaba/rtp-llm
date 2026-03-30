@@ -4,9 +4,12 @@ import random
 from typing import Optional
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 import torch.nn.functional as F
 from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 
 def to_fp8(tensor: torch.Tensor):

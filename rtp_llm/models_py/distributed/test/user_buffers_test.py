@@ -10,6 +10,8 @@ import os
 import unittest
 from unittest import mock
 
+import pytest
+
 logging.basicConfig(level=logging.INFO)
 
 import torch
@@ -31,6 +33,8 @@ from rtp_llm.ops import (
     PrefillCPConfig,
 )
 from rtp_llm.test.utils.port_util import PortManager
+
+pytestmark = [pytest.mark.gpu(type="H20", count=4)]
 
 BUFFER_SIZE = 128 * 1024 * 1024
 

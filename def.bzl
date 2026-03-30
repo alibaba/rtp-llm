@@ -291,3 +291,24 @@ read_release_version = repository_rule(
     implementation = _read_release_version_impl,
     attrs = {},
 )
+
+def _torch_repo_impl(ctx):
+    torch_path = ctx.os.environ.get("TORCH_ROOT")
+    if not torch_path:
+        fail("TORCH_ROOT environment variable is not set. " +
+             "Run 'pip install -e .' first (setup.py generates .torch_bazelrc), " +
+             "or set TORCH_ROOT manually to your torch installation path.")
+
+    if not ctx.path(torch_path).exists:
+        fail("TORCH_ROOT path does not exist: " + torch_path)
+
+    ctx.file("BUILD", ctx.read(ctx.attr.build_file))
+    ctx.symlink(torch_path, "torch_root")
+
+torch_local_repository = repository_rule(
+    implementation = _torch_repo_impl,
+    attrs = {
+        "build_file": attr.label(mandatory = True, allow_single_file = True),
+    },
+    environ = ["TORCH_ROOT"],
+)

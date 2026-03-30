@@ -1,11 +1,14 @@
 import unittest
 from unittest import SkipTest
 
+import pytest
 import torch
 import torch.nn.functional as F
 from aiter import dtypes
 
 from rtp_llm.models_py.utils.arch import is_hip
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 try:
     import aiter

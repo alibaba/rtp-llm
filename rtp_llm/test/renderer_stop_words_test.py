@@ -2,6 +2,7 @@ from typing import List
 from unittest import IsolatedAsyncioTestCase, TestCase, main
 from unittest.mock import MagicMock, Mock
 
+import pytest
 import torch
 
 from rtp_llm.openai.api_datatype import (
@@ -21,6 +22,8 @@ from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
 from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
 from rtp_llm.utils.word_util import get_stop_word_slices
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 class RemoveStopWordIdsTest(TestCase):

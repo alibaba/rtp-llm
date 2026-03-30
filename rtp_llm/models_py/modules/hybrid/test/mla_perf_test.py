@@ -7,6 +7,10 @@ import time
 from typing import Any, Dict, List, Optional
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20"), pytest.mark.manual]
+
 import torch
 
 MAX_ITERATIONS = 100000

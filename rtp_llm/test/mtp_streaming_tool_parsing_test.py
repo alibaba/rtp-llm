@@ -1,6 +1,10 @@
 import json
 import unittest
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import (
     Function,
     Tool,

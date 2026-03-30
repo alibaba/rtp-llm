@@ -3,6 +3,7 @@ import itertools
 from typing import Optional
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 from torch import dtype as _dtype
 from torch import nn
@@ -11,6 +12,8 @@ from torch.nn import functional as F
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.utils.swizzle_utils import swizzle_tensor
 from rtp_llm.ops import HWKernelConfig
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 
 class LinearTorch(nn.Module):

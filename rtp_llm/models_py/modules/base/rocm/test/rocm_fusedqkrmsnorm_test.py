@@ -1,10 +1,13 @@
 import itertools
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 from torch import dtype as _dtype
 
 from rtp_llm.models_py.modules import FusedQKRMSNorm, QKRMSNorm
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 
 class FusedQKRMSNormTest(TestCase):
