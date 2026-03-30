@@ -106,7 +106,7 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
     *new_tokens->dataWithOffset<int32_t>(0) = 0;
 
     StreamUpdateInfo update_info{
-        new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false};
+        new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false};
 
     fake_stream->update(update_info);
     fake_stream->setSPOutputBuffer(sp_buffer);

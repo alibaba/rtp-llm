@@ -822,6 +822,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   nullptr,
                   nullptr,
                   nullptr,
+                  nullptr,
                   update_info.update_remote_generate,
                   update_info.force_update_info});
 }

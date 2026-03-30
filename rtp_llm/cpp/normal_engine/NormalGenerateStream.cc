@@ -121,11 +121,13 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                        sizeof(float));
             }
             if (generate_input_->generate_config->return_all_probs) {
-                if (!update_info.all_probs) {
-                    throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
+                if (!update_info.topk_logprobs) {
+                    throw std::runtime_error("topk_logprobs is null while generate_config return_all_probs is true");
                 }
-                generate_output.aux_info.all_probs =
-                    device_->clone({all_probs_->view(i, 1), rtp_llm::AllocationType::HOST});
+                generate_output.aux_info.topk_logprobs =
+                    device_->clone({topk_logprobs_->view(i, 1), rtp_llm::AllocationType::HOST});
+                generate_output.aux_info.topk_token_ids =
+                    device_->clone({topk_token_ids_->view(i, 1), rtp_llm::AllocationType::HOST});
             }
         }
         // hidden_states post process
@@ -190,8 +192,11 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     if (update_info.cum_log_probs) {
         cum_log_probs_ = device_->clone({*update_info.cum_log_probs, rtp_llm::AllocationType::HOST});
     }
-    if (update_info.all_probs) {
-        all_probs_ = device_->clone({*update_info.all_probs, rtp_llm::AllocationType::HOST});
+    if (update_info.topk_logprobs) {
+        topk_logprobs_ = device_->clone({*update_info.topk_logprobs, rtp_llm::AllocationType::HOST});
+    }
+    if (update_info.topk_token_ids) {
+        topk_token_ids_ = device_->clone({*update_info.topk_token_ids, rtp_llm::AllocationType::HOST});
     }
 
     // TODO: move it to better position

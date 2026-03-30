@@ -107,6 +107,7 @@ class GenerateConfig(BaseModel):
     force_sp_accept: bool = False
     return_cum_log_probs: bool = False
     return_all_probs: bool = False
+    top_logprobs: int = 0
     return_softmax_probs: bool = False
     aux_info: bool = True
     can_use_pd_separation: bool = True

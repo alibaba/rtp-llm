@@ -37,6 +37,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->force_sp_accept          = config_proto->force_sp_accept();
     generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
     generate_config->return_all_probs         = config_proto->return_all_probs();
+    generate_config->top_logprobs             = config_proto->top_logprobs();
     generate_config->return_softmax_probs     = config_proto->return_softmax_probs();
     generate_config->can_use_pd_separation    = config_proto->can_use_pd_separation();
     generate_config->gen_timeline             = config_proto->gen_timeline();
@@ -457,6 +458,14 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
 
     stackBuffersToTensorPB(
         flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
+
+    stackBuffersToTensorPB(flatten_output->mutable_topk_logprobs(), source_outputs, [](const auto& r) {
+        return r.aux_info.topk_logprobs;
+    });
+
+    stackBuffersToTensorPB(flatten_output->mutable_topk_token_ids(), source_outputs, [](const auto& r) {
+        return r.aux_info.topk_token_ids;
+    });
 
     RTP_LLM_LOG_DEBUG("transResponse done");
 }

@@ -85,6 +85,7 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     }
     if (req.logprobs.has_value()) {
         config.return_all_probs = req.logprobs.value();
+        config.top_logprobs     = req.top_logprobs.value_or(1);
     }
     config.addSpecialTokens(model_config_.special_tokens);
 

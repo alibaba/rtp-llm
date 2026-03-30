@@ -83,7 +83,8 @@ struct AuxInfo {
     int32_t                                decode_remote_reuse_len  = 0;
     int32_t                                decode_memory_reuse_len  = 0;
     std::optional<rtp_llm::ConstBufferPtr> cum_log_probs;
-    std::optional<rtp_llm::ConstBufferPtr> all_probs;
+    std::optional<rtp_llm::ConstBufferPtr> topk_logprobs;
+    std::optional<rtp_llm::ConstBufferPtr> topk_token_ids;
     std::optional<rtp_llm::ConstBufferPtr> softmax_probs;
 };
 

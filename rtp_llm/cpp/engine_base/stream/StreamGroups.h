@@ -121,6 +121,21 @@ public:
         return false;
     }
 
+    int maxTopLogprobs() const {
+        int max_val = 0;
+        for (auto& stream : context_streams_) {
+            if (stream->getReturnAllProbs()) {
+                max_val = std::max(max_val, stream->generateConfig()->top_logprobs);
+            }
+        }
+        for (auto& stream : decode_streams_) {
+            if (stream->getReturnAllProbs()) {
+                max_val = std::max(max_val, stream->generateConfig()->top_logprobs);
+            }
+        }
+        return max_val;
+    }
+
     bool needReturnCumLogProbs() const {
         // beam kernel need cum log probs input, tmp set true
         for (auto& stream : context_streams_) {

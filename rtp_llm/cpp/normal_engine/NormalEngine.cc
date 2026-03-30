@@ -255,8 +255,19 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
             device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, 1}, rtp_llm::AllocationType::HOST});
         *new_tokens->dataWithOffset<int32_t>(0) = 0;
 
-        StreamUpdateInfo update_info{
-            new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false};
+        StreamUpdateInfo update_info{new_tokens,
+                                     1,
+                                     nullptr,
+                                     nullptr,
+                                     nullptr,
+                                     nullptr,
+                                     nullptr,
+                                     nullptr,
+                                     nullptr,
+                                     nullptr,
+                                     nullptr,
+                                     false,
+                                     false};
         stream->update(update_info);
     }
     return stream;

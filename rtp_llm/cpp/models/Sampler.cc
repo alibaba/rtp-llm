@@ -9,10 +9,7 @@ using namespace std;
 
 namespace rtp_llm {
 
-Sampler::Sampler(const SamplerInitParams& params)
-  : device_(params.device)
-{
-}
+Sampler::Sampler(const SamplerInitParams& params): device_(params.device) {}
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -21,7 +18,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     (buffer_ptr.get() ? buffer_ptr->view((offset), (size)) : Buffer::emptyBuffer())
 
 #define SCOPED_UPDATE_BUFFER_SHAPE(buffer, ...)                                                                        \
-    const auto org_##buffer##_shape__ = buffer.shape();                                                                \
+    const auto        org_##buffer##_shape__ = buffer.shape();                                                         \
     autil::ScopeGuard guard_##buffer([&]() { buffer.updateShape(org_##buffer##_shape__); });                           \
     buffer.updateShape(__VA_ARGS__);
 
@@ -97,11 +94,17 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto frequency_penalty  = MAY_GET_BUFFER_VIEW(inputs.frequency_penalty, from_batch_idx_in, batch_size_in);
             auto no_repeat_ngram_size =
                 MAY_GET_BUFFER_VIEW(inputs.no_repeat_ngram_size, from_batch_idx_in, batch_size_in);
+            auto topk_logprobs =
+                (inputs.topk_logprobs.get() ? inputs.topk_logprobs->view(from_batch_idx_in, batch_size_in) :
+                                              Buffer::emptyBuffer());
+            auto topk_token_ids_buf =
+                (inputs.topk_token_ids.get() ? inputs.topk_token_ids->view(from_batch_idx_in, batch_size_in) :
+                                               Buffer::emptyBuffer());
             auto all_probs = (inputs.all_probs.get() ? inputs.all_probs->view(from_batch_idx_in, batch_size_in) :
                                                        Buffer::emptyBuffer());
             auto do_sample = MAY_GET_BUFFER_VIEW(inputs.do_sample, from_batch_idx_in, batch_size_in);
             auto generator = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
-                inputs.generator.begin() + from_batch_idx_in + batch_size_in};
+                                                        inputs.generator.begin() + from_batch_idx_in + batch_size_in};
             auto greedy_output =
                 device_->sampleGreedy({logits,
                                        input_lengths,
@@ -115,6 +118,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                        inputs.no_repeat_ngram_size ? (OptionalBufferRef)no_repeat_ngram_size : nullopt,
                                        inputs.cum_log_probs ? (OptionalBufferRef)cum_log_probs_out : nullopt,
                                        nullopt,  // output_log_probs
+                                       inputs.topk_logprobs ? (OptionalBufferRef)topk_logprobs : nullopt,
+                                       inputs.topk_token_ids ? (OptionalBufferRef)topk_token_ids_buf : nullopt,
                                        inputs.all_probs ? (OptionalBufferRef)all_probs : nullopt,
                                        inputs.presence_penalty ? (OptionalBufferRef)presence_penalty : nullopt,
                                        inputs.frequency_penalty ? (OptionalBufferRef)frequency_penalty : nullopt,
@@ -177,6 +182,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     return SamplerOutput({std::move(all_token_ids_out),
                           std::move(all_cum_log_probs_out),
                           std::move(inputs.all_probs),
+                          std::move(inputs.topk_logprobs),
+                          std::move(inputs.topk_token_ids),
                           std::move(all_beam_indices),
                           std::move(all_success)});
 }

@@ -68,6 +68,7 @@ message GenerateConfigPB {
     repeated int32 sp_advice_prompt_token_ids = 25;
     bool force_disable_sp_run = 26;
     bool return_all_probs = 27;
+    int32 top_logprobs = 54;
     bool sp_input_lookup = 28;
     bool can_use_pd_separation = 29;
     bool return_softmax_probs = 30;
@@ -174,6 +175,8 @@ message FlattenOutputPB {
     TensorPB logits = 6;
     TensorPB all_probs = 7;
     TensorPB all_hidden_states = 8;
+    TensorPB topk_logprobs = 9;
+    TensorPB topk_token_ids = 10;
 }
 
 message GenerateOutputsPB {

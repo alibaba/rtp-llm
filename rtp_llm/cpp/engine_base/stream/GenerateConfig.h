@@ -63,6 +63,7 @@ public:
     bool                          force_disable_sp_run     = false;
     bool                          force_sp_accept          = false;
     bool                          return_all_probs         = false;
+    int                           top_logprobs             = 0;
     bool                          return_softmax_probs     = false;
     bool                          aux_info                 = true;
     std::vector<std::vector<int>> stop_words_list;
@@ -207,6 +208,7 @@ public:
         JSONIZE(force_disable_sp_run);
         JSONIZE(force_sp_accept);
         JSONIZE(return_all_probs);
+        JSONIZE(top_logprobs);
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);

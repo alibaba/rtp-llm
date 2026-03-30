@@ -201,6 +201,7 @@ class OpenaiEndpoint(object):
             config.random_seed = request.seed
         if request.logprobs != None:
             config.return_all_probs = request.logprobs
+            config.top_logprobs = request.top_logprobs or 1
         if request.logprobs or request.functions:
             config.is_streaming = True
         config.convert_select_tokens(len(self.tokenizer), self.tokenizer)

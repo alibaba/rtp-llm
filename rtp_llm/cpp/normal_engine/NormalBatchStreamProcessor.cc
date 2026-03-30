@@ -314,6 +314,7 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
     auto total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
     auto total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     bool return_all_probs     = stream_groups.needReturnAllProbs();
+    int  max_top_logprobs     = stream_groups.maxTopLogprobs();
 
     SamplerInputs sampler_inputs =
         allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out, model_inputs.sequence_lengths);
@@ -358,10 +359,13 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
 
     auto vocab_size           = model_output.logits->shape()[1];
     sampler_inputs.vocab_size = vocab_size;
-    if (return_all_probs) {
-        sampler_inputs.all_probs = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {total_batch_size_in, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
-        device_->bufMemset(*sampler_inputs.all_probs, 0);
+    if (return_all_probs && max_top_logprobs > 0) {
+        size_t k                     = (size_t)max_top_logprobs;
+        sampler_inputs.topk_logprobs = device_->allocateBuffer(
+            {rtp_llm::DataType::TYPE_FP32, {total_batch_size_in, k}, rtp_llm::AllocationType::DEVICE}, {});
+        sampler_inputs.topk_token_ids = device_->allocateBuffer(
+            {rtp_llm::DataType::TYPE_INT32, {total_batch_size_in, k}, rtp_llm::AllocationType::DEVICE}, {});
+        sampler_inputs.top_logprobs = max_top_logprobs;
     }
 
     // copy logits when needs tiling or returning logits
@@ -580,10 +584,13 @@ void NormalBatchStreamProcessor::dispatchSingleStream(GenerateStreamPtr   stream
         batch_logits = model_output.logits->slice(batch_idx_in, cur_batch_size);
     }
 
-    BufferPtr all_probs = nullptr;
-    if (return_all_probs) {
-        all_probs = sampler_output.all_probs->slice(batch_idx_out, next_batch_size, false);
-        all_probs->updateParent(sampler_output.all_probs);
+    BufferPtr topk_logprobs  = nullptr;
+    BufferPtr topk_token_ids = nullptr;
+    if (return_all_probs && sampler_output.topk_logprobs) {
+        topk_logprobs = sampler_output.topk_logprobs->slice(batch_idx_out, next_batch_size, false);
+        topk_logprobs->updateParent(sampler_output.topk_logprobs);
+        topk_token_ids = sampler_output.topk_token_ids->slice(batch_idx_out, next_batch_size, false);
+        topk_token_ids->updateParent(sampler_output.topk_token_ids);
     };
 
     BufferPtr batch_cum_log_probs;
@@ -640,7 +647,8 @@ void NormalBatchStreamProcessor::dispatchSingleStream(GenerateStreamPtr   stream
                     batch_logits,
                     current_softmax_result,
                     batch_cum_log_probs,
-                    all_probs,
+                    topk_logprobs,
+                    topk_token_ids,
                     loss,
                     src_batch_indices,
                     all_hidden_states});

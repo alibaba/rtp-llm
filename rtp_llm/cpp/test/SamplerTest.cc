@@ -81,6 +81,9 @@ TEST_F(SamplerTest, testGeneralSampling) {
         nullptr,  // finished_mask
         device_->clone({*cum_log_probs}),
         nullptr,  // all_probs
+        nullptr,  // topk_logprobs
+        nullptr,  // topk_token_ids
+        0,        // top_logprobs
         generator,
     };
 

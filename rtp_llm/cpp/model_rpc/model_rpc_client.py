@@ -122,6 +122,7 @@ def trans_input(input_py: GenerateInput):
         input_py.generate_config.return_cum_log_probs
     )
     generate_config_pb.return_all_probs = input_py.generate_config.return_all_probs
+    generate_config_pb.top_logprobs = input_py.generate_config.top_logprobs
     generate_config_pb.return_softmax_probs = (
         input_py.generate_config.return_softmax_probs
     )
@@ -243,11 +244,18 @@ def trans_output(
         and output_pb.logits.shape[0] > 0
         else None
     )
-    all_all_probs = (
-        trans_tensor(output_pb.all_probs)
-        if output_pb.HasField("all_probs")
-        and len(output_pb.all_probs.shape) > 0
-        and output_pb.all_probs.shape[0] > 0
+    all_topk_logprobs = (
+        trans_tensor(output_pb.topk_logprobs)
+        if output_pb.HasField("topk_logprobs")
+        and len(output_pb.topk_logprobs.shape) > 0
+        and output_pb.topk_logprobs.shape[0] > 0
+        else None
+    )
+    all_topk_token_ids = (
+        trans_tensor(output_pb.topk_token_ids)
+        if output_pb.HasField("topk_token_ids")
+        and len(output_pb.topk_token_ids.shape) > 0
+        and output_pb.topk_token_ids.shape[0] > 0
         else None
     )
 
@@ -321,8 +329,10 @@ def trans_output(
         if all_logits is not None:
             output_py.logits = all_logits[i]
 
-        if all_all_probs is not None:
-            output_py.all_probs = all_all_probs[i]
+        if all_topk_logprobs is not None:
+            output_py.topk_logprobs = all_topk_logprobs[i]
+        if all_topk_token_ids is not None:
+            output_py.topk_token_ids = all_topk_token_ids[i]
 
         if (
             logits_index is not None
