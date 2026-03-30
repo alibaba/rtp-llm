@@ -3,7 +3,6 @@ package org.flexlb.service.grace.strategy;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.listener.AppOnlineHooker;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
-import org.flexlb.service.grace.GracefulOnlineService;
 import org.springframework.stereotype.Component;
 
 import java.util.Timer;
@@ -19,7 +18,6 @@ public class QueryWarmerHooker implements AppOnlineHooker {
 
     public QueryWarmerHooker(GracefulLifecycleReporter lifecycleReporter) {
         this.lifecycleReporter = lifecycleReporter;
-        GracefulOnlineService.addOnlineListener(this);
     }
 
     @Override

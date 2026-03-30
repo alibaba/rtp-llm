@@ -29,7 +29,6 @@ public:
 
     void enqueue(int64_t request_id, const GenerateStreamPtr& stream) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
-        version_.fetch_add(1, std::memory_order_relaxed);
         running_streams_[request_id] = EngineScheduleInfo::TaskInfo(
             {request_id, stream->prefixLength(), stream->inputLength(), stream->getTimeInfo().wait_time_us});
     }
@@ -57,6 +56,10 @@ public:
     }
 
 protected:
+    // Note: finished_streams_ pairs are (monotonic_version, TaskInfo).
+    // The list is ordered by insertion time (append-only via push_back), so end_time_ms
+    // is approximately monotonic. The break below relies on this approximate time ordering
+    // to stop early — it does NOT use pair.first (version) for trimming decisions.
     void trimFinishedStreams() {
         auto current = autil::TimeUtility::currentTimeInMilliSeconds();
         auto iter    = finished_streams_.begin();

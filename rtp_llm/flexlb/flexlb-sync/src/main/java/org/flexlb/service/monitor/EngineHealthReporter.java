@@ -270,16 +270,16 @@ public class EngineHealthReporter {
             monitor.report(CACHE_BLOCK_SIZE, metricTags, blockSize);
             monitor.report(CACHE_KEY_SIZE, metricTags, cacheKeySize);
         }
-        
+
         long usedKvCacheTokens = workerStatus.getUsedKvCacheTokens().get();
         long availableKvCacheTokens = workerStatus.getAvailableKvCacheTokens().get();
         long totalKvCacheTokens = usedKvCacheTokens + availableKvCacheTokens;
-        
+
         FlexMetricTags kvCacheMetricTags = FlexMetricTags.of(
                 "model", modelName,
                 "engineIp", workerStatus.getIp(),
                 "role", workerStatus.getRole());
-        
+
         monitor.report(CACHE_USED_KV_CACHE_TOKENS, kvCacheMetricTags, usedKvCacheTokens);
         monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, kvCacheMetricTags, availableKvCacheTokens);
         monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS, kvCacheMetricTags, totalKvCacheTokens);
@@ -290,7 +290,7 @@ public class EngineHealthReporter {
     }
 
     public void reportBalancingService(BalanceContext ctx) {
-        if (ctx == null) {
+        if (ctx == null || ctx.getResponse() == null) {
             return;
         }
 

@@ -5,8 +5,6 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.listener.AppOnlineHooker;
 import org.flexlb.listener.AppShutDownHooker;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
-import org.flexlb.service.grace.GracefulOnlineService;
-import org.flexlb.service.grace.GracefulShutdownService;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
@@ -20,8 +18,6 @@ public class LbConsistencyHooker implements AppShutDownHooker, AppOnlineHooker {
     public LbConsistencyHooker(LBStatusConsistencyService lbStatusConsistencyService, GracefulLifecycleReporter lifecycleReporter) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.lifecycleReporter = lifecycleReporter;
-        GracefulShutdownService.addShutdownListener(this);
-        GracefulOnlineService.addOnlineListener(this);
     }
 
     @Override
