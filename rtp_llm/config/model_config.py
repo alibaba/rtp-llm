@@ -71,6 +71,7 @@ class ModelConfig(CppModelConfig):
         "generate_env_config",
         "render_config",
         "phy2log_path",
+        "emb_dim",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -507,6 +508,7 @@ class ModelConfig(CppModelConfig):
         self.render_config: Optional[Any] = None  # RenderConfig for renderer factory
         self.mm_related_params = VitParameters()
         self.quant_config = None
+        self.emb_dim: int = 0
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
