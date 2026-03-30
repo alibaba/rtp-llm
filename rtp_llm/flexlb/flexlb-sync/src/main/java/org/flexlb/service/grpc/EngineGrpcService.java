@@ -85,7 +85,7 @@ public class EngineGrpcService {
         if (engineGrpcClient == null) {
             throw new RuntimeException("EngineGrpcService not initialized");
         }
-        // 只在 PD 分离情况下的 Prefill 节点和非 PD 分离情况下需要 cacheKeys
+        // Only need cacheKeys for Prefill nodes in PD-separated mode and non PD-separated mode
         boolean needCacheKeys = RoleType.PREFILL.matches(workerStatus.getRole()) || RoleType.PDFUSION.matches(workerStatus.getRole());
         EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
                 .setLatestCacheVersion((int) cacheVersion)
@@ -97,6 +97,13 @@ public class EngineGrpcService {
 
     /**
      * Get cache status via gRPC with RoleType routing
+     *
+     * @param ip           worker IP
+     * @param grpcPort     worker gRPC port
+     * @param workerStatus worker status
+     * @param cacheVersion cache version for status check
+     * @param roleType     role type to determine which service to use
+     * @return CompletableFuture of CacheStatusPB
      */
     public EngineRpcService.CacheStatusPB getCacheStatus(
         String ip, int grpcPort, WorkerStatus workerStatus, long cacheVersion, long requestTimeoutMs, RoleType roleType) {
@@ -104,13 +111,14 @@ public class EngineGrpcService {
         if (engineGrpcClient == null) {
             throw new RuntimeException("EngineGrpcService not initialized");
         }
-        boolean needCacheKeys = RoleType.PREFILL.matches(workerStatus.getRole()) || RoleType.PDFUSION.matches(workerStatus.getRole());
+        boolean isPrefill = RoleType.PREFILL.matches(workerStatus.getRole());
         EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
                 .setLatestCacheVersion((int) cacheVersion)
-                .setNeedCacheKeys(needCacheKeys)
+                .setNeedCacheKeys(isPrefill)
                 .build();
-        logger.info("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}", ip, cacheVersion, needCacheKeys);
+        logger.info("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}", ip, cacheVersion, isPrefill);
 
+        // Use MultimodalRpcService for VIT role, RpcService for others
         if (RoleType.VIT.equals(roleType)) {
             return engineGrpcClient.getMultimodalCacheStatus(ip, grpcPort, request, requestTimeoutMs);
         } else {

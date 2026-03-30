@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * GlobalCacheIndex 单元测试
+ * GlobalCacheIndex unit tests
  */
 @ExtendWith(MockitoExtension.class)
 class GlobalCacheIndexTest {
@@ -28,7 +28,7 @@ class GlobalCacheIndexTest {
 
     @Test
     void testEmptyInput() {
-        // 测试空输入情况
+        // Test empty input cases
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(
                 Collections.emptyList(), Arrays.asList(1L, 2L, 3L));
         assertTrue(result.isEmpty(), "Empty engines should return empty result");
@@ -43,7 +43,7 @@ class GlobalCacheIndexTest {
 
     @Test
     void testBasicPrefixMatching() {
-        // 设置测试数据
+        // Set up test data
         // Block 1L: engine1, engine2, engine3
         // Block 2L: engine1, engine3  
         // Block 3L: engine1
@@ -59,7 +59,7 @@ class GlobalCacheIndexTest {
 
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
-        // 验证结果
+        // Verify results
         assertEquals(3, result.get("engine1").intValue(), "Engine1 should match all 3 blocks");
         assertEquals(1, result.get("engine2").intValue(), "Engine2 should match only first block");
         assertEquals(2, result.get("engine3").intValue(), "Engine3 should match first 2 blocks");
@@ -67,7 +67,7 @@ class GlobalCacheIndexTest {
 
     @Test
     void testNoMatchingEngines() {
-        // 测试没有引擎匹配任何block的情况
+        // Test case where no engine matches any block
         globalCacheIndex.addCacheBlock(1L, "other_engine");
         globalCacheIndex.addCacheBlock(2L, "another_engine");
 
@@ -82,11 +82,11 @@ class GlobalCacheIndexTest {
 
     @Test
     void testAllEnginesMatchAllBlocks() {
-        // 测试所有引擎都匹配所有block的情况
+        // Test case where all engines match all blocks
         List<String> engines = Arrays.asList("engine1", "engine2", "engine3");
         List<Long> blocks = Arrays.asList(1L, 2L, 3L, 4L);
 
-        // 为所有block添加所有引擎
+        // Add all engines to all blocks
         for (Long block : blocks) {
             for (String engine : engines) {
                 globalCacheIndex.addCacheBlock(block, engine);
@@ -102,12 +102,12 @@ class GlobalCacheIndexTest {
 
     @Test
     void testEarlyTermination() {
-        // 测试提前终止的情况
-        // 设置数据使得在第2个block后没有候选引擎了
+        // Test early termination case
+        // Set up data so there are no candidate engines after the 2nd block
         globalCacheIndex.addCacheBlock(1L, "engine1");
         globalCacheIndex.addCacheBlock(1L, "engine2");
         globalCacheIndex.addCacheBlock(2L, "engine1");
-        // block 3L 和 4L 没有任何引擎
+        // block 3L and 4L have no engines
 
         List<String> engines = Arrays.asList("engine1", "engine2");
         List<Long> blocks = Arrays.asList(1L, 2L, 3L, 4L);
@@ -120,7 +120,7 @@ class GlobalCacheIndexTest {
 
     @Test
     void testPartialMatching() {
-        // 测试部分匹配的复杂场景
+        // Test complex partial matching scenario
         globalCacheIndex.addCacheBlock(1L, "engine1");
         globalCacheIndex.addCacheBlock(1L, "engine2");
         globalCacheIndex.addCacheBlock(1L, "engine3");
@@ -148,7 +148,7 @@ class GlobalCacheIndexTest {
 
     @Test
     void testSingleBlockSingleEngine() {
-        // 测试单个block单个引擎的情况
+        // Test single block single engine case
         globalCacheIndex.addCacheBlock(1L, "engine1");
 
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(
@@ -159,11 +159,11 @@ class GlobalCacheIndexTest {
 
     @Test
     void testNonExistentBlocks() {
-        // 测试不存在的block
+        // Test non-existent blocks
         globalCacheIndex.addCacheBlock(1L, "engine1");
 
         List<String> engines = Arrays.asList("engine1", "engine2");
-        List<Long> blocks = Arrays.asList(1L, 999L); // 999L 不存在
+        List<Long> blocks = Arrays.asList(1L, 999L); // 999L does not exist
 
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
@@ -173,13 +173,13 @@ class GlobalCacheIndexTest {
 
     @Test
     void testEngineRemoval() {
-        // 测试引擎移除后的匹配情况
+        // Test matching after engine removal
         globalCacheIndex.addCacheBlock(1L, "engine1");
         globalCacheIndex.addCacheBlock(1L, "engine2");
         globalCacheIndex.addCacheBlock(2L, "engine1");
         globalCacheIndex.addCacheBlock(2L, "engine2");
 
-        // 移除engine2从block 2L
+        // Remove engine2 from block 2L
         globalCacheIndex.removeCacheBlock("engine2", 2L);
 
         List<String> engines = Arrays.asList("engine1", "engine2");
@@ -193,11 +193,11 @@ class GlobalCacheIndexTest {
 
     @Test
     void testLargeScaleScenario() {
-        // 测试大规模场景以验证性能优化
+        // Test large-scale scenario to verify performance optimization
         List<String> engines = Arrays.asList("engine1", "engine2", "engine3", "engine4", "engine5");
         List<Long> blocks = Arrays.asList(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L);
 
-        // 设置渐进式匹配：engine1匹配所有，engine2匹配前9个，以此类推
+        // Set up progressive matching: engine1 matches all, engine2 matches first 9, and so on
         for (int i = 0; i < engines.size(); i++) {
             String engine = engines.get(i);
             for (int j = 0; j <= blocks.size() - 1 - i; j++) {

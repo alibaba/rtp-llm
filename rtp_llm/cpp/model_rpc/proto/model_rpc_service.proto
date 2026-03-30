@@ -2,7 +2,6 @@
 syntax = "proto3";
 import "google/protobuf/wrappers.proto";
 
-
 message TensorPB {
     enum DataType {
         FP32 = 0;
@@ -577,4 +576,6 @@ service RpcService {
 
 service MultimodalRpcService {
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
+    rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
+    rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
 }

@@ -73,6 +73,7 @@ class MasterClient:
         # connect to master using long connection
         try:
             session = await self._get_session()
+            request_timeout = ClientTimeout(total=generate_timeout / 1000.0)
             async with session.post(
                 url, data=json.dumps(payload), headers=headers
             ) as response:

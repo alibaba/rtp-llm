@@ -19,10 +19,10 @@ public class EngineWorkerStatusProvider implements WorkerStatusProvider {
     private EngineWorkerStatus engineWorkerStatus;
     
     @Override
-    public List<String> getWorkerIpPorts(String modelName, RoleType roleType, String group) {
+    public List<String> getWorkerIpPorts(RoleType roleType, String group) {
 
         Map<String/*ip:port*/, WorkerStatus> workerStatusMap
-                = engineWorkerStatus.selectModelWorkerStatus(modelName, roleType, group);
+                = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
 
         return new ArrayList<>(workerStatusMap.keySet());
     }

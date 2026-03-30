@@ -6,8 +6,8 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 /**
- * Worker缓存更新结果
- * 
+ * Worker cache update result
+ *
  * @author FlexLB
  */
 @Data

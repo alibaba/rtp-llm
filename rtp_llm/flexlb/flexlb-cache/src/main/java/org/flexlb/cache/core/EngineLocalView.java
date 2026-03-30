@@ -14,9 +14,9 @@ import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinTask;
 
 /**
- * 引擎本地视图 (小Hash表)
- * 管理每个引擎的本地缓存状态和元数据
- * 存储结构: EngineIpPort -> HashMap<Long>
+ * Engine local view (small hash table)
+ * Manages local cache state and metadata for each engine
+ * Storage structure: EngineIpPort -> HashMap<Long>
  *
  * @author FlexLB
  */
@@ -25,34 +25,34 @@ import java.util.concurrent.ForkJoinTask;
 public class EngineLocalView {
 
     /**
-     * 核心存储结构: EngineIpPort -> Set<Long>
+     * Core storage structure: EngineIpPort -> Set<Long>
      */
     private final ConcurrentHashMap<String, Set<Long>> engineViews = new ConcurrentHashMap<>();
 
     /**
-     * 自定义ForkJoin线程池用于并行计算
+     * Custom ForkJoin thread pool for parallel computation
      */
     private final ForkJoinPool customPool = new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
 
     /**
-     * 缓存监控指标上报器
+     * Cache metrics reporter
      */
     @Autowired
     private CacheMetricsReporter cacheMetricsReporter;
     
     /**
-     * 动态同步间隔管理器
+     * Dynamic sync interval manager
      */
     @Autowired
     private DynamicCacheIntervalService dynamicIntervalManager;
 
     /**
-     * 计算Diff结果
+     * Calculate diff result
      *
-     * @param engineIPort       引擎IP
-     * @param newCacheBlocks 新的缓存块集合
-     * @param role           引擎角色
-     * @return Diff计算结果
+     * @param engineIPort       Engine IP
+     * @param newCacheBlocks New cache block set
+     * @param role           Engine role
+     * @return Diff calculation result
      */
     public DiffResult calculateDiff(String engineIPort, Set<Long> newCacheBlocks, String role) {
         if (engineIPort == null || newCacheBlocks == null) {
@@ -61,11 +61,11 @@ public class EngineLocalView {
 
         Set<Long> oldCacheBlocks = getEngineCacheBlocks(engineIPort);
 
-        // 高效计算差异
+        // Efficiently calculate differences
         Set<Long> addedBlocks = ConcurrentHashMap.newKeySet(128);
         Set<Long> removedBlocks = ConcurrentHashMap.newKeySet(128);
 
-        // 使用自定义ForkJoin线程池并行计算新增和删除的缓存块
+        // Use custom ForkJoin thread pool to parallel compute added and removed cache blocks
         ForkJoinTask<?> addedTask = customPool.submit(() ->
             newCacheBlocks.parallelStream()
                  .filter(blockCacheKey -> !oldCacheBlocks.contains(blockCacheKey))
@@ -83,7 +83,7 @@ public class EngineLocalView {
 
         cacheMetricsReporter.reportCacheDiffMetrics(engineIPort, role, addedBlocks.size(), removedBlocks.size());
 
-        // 更新动态同步间隔管理器的统计信息
+        // Update statistics in dynamic sync interval manager
         int diffSize = addedBlocks.size() + removedBlocks.size();
         dynamicIntervalManager.updateDiffStatistics(diffSize);
 
@@ -97,10 +97,10 @@ public class EngineLocalView {
     }
 
     /**
-     * 添加或更新引擎缓存块
+     * Add or update engine cache block
      *
-     * @param engineIPort     引擎IP
-     * @param blockCacheKey   缓存块哈希值
+     * @param engineIPort     Engine IP
+     * @param blockCacheKey   Cache block hash value
      */
     public void addOrUpdateCacheBlock(String engineIPort, Long blockCacheKey) {
         if (engineIPort == null || blockCacheKey == null) {
@@ -113,10 +113,10 @@ public class EngineLocalView {
     }
 
     /**
-     * 移除引擎缓存块
+     * Remove engine cache block
      *
-     * @param engineIPort   引擎IP
-     * @param blockCacheKey 缓存块哈希值
+     * @param engineIPort   Engine IP
+     * @param blockCacheKey Cache block hash value
      */
     public void removeCacheBlock(String engineIPort, Long blockCacheKey) {
         if (engineIPort == null || blockCacheKey == null) {
@@ -132,7 +132,7 @@ public class EngineLocalView {
 
         if (isRemoveSuccess) {
 
-            // 如果引擎缓存为空，可以选择移除整个引擎条目
+            // If engine cache is empty, optionally remove the entire engine entry
             if (engineCache.isEmpty()) {
                 engineViews.remove(engineIPort);
             }
@@ -140,9 +140,9 @@ public class EngineLocalView {
     }
 
     /**
-     * 移除某个引擎的所有缓存块
+     * Remove all cache blocks of an engine
      *
-     * @param engineIPort 引擎 IP
+     * @param engineIPort Engine IP
      */
     public void removeAllCacheBlockOfEngine(String engineIPort) {
         if (engineIPort == null) {
@@ -150,17 +150,17 @@ public class EngineLocalView {
         }
 
         Set<Long> removed = engineViews.remove(engineIPort);
-        // 如果移除失败则告警
+        // Warn if removal fails
         if (removed == null) {
             log.warn("Remove failed, the engine: {} not exist.", engineIPort);
         }
     }
 
     /**
-     * 获取引擎的所有缓存块ID
+     * Get all cache block IDs of an engine
      *
-     * @param engineIPort 引擎IP
-     * @return 缓存块ID集合
+     * @param engineIPort Engine IP
+     * @return Cache block ID set
      */
     public Set<Long> getEngineCacheBlocks(String engineIPort) {
         if (engineIPort == null) {
@@ -171,7 +171,7 @@ public class EngineLocalView {
     }
 
     /**
-     * 清空所有数据
+     * Clear all data
      */
     public void clear() {
 
@@ -186,18 +186,18 @@ public class EngineLocalView {
     }
 
     /**
-     * 获取引擎视图Map的大小（即当前有多少个引擎）
+     * Get engine view map size (number of current engines)
      *
-     * @return engineViews Map的大小
+     * @return engineViews map size
      */
     public int getEngineViewsMapSize() {
         return engineViews.size();
     }
 
     /**
-     * 获取所有引擎的IP:Port集合
+     * Get all engine IP:Port set
      *
-     * @return 所有引擎的IP:Port集合
+     * @return All engine IP:Port set
      */
     public Set<String> getAllEngineIpPorts() {
         return engineViews.keySet();

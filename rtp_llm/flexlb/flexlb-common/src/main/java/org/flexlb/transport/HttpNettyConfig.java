@@ -20,13 +20,10 @@ import org.springframework.context.annotation.Configuration;
 
 import java.util.concurrent.TimeUnit;
 
-/**
- * @author lushirong
- */
 @Configuration
 public class HttpNettyConfig {
 
-    private final int responseTimeoutSeconds = 120;
+    private final int responseTimeoutMs = 500;
     private final int nettyMaxChunkSize = 8192;
     private final int eventExecuteThreads = 10 * Runtime.getRuntime().availableProcessors();
 
@@ -37,7 +34,7 @@ public class HttpNettyConfig {
         HttpNettyClientHandler handler = new HttpNettyClientHandler(bootstrap);
         EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(eventExecuteThreads,
                 new DefaultThreadFactory("default-custom-executor"),
-                // 使用有界队列，容量为1000
+                // Use bounded queue with capacity of 1000
                 1000, RejectedExecutionHandlers.reject());
         int requestTimeoutMillis = 500;
         bootstrap.group(group)
@@ -48,11 +45,10 @@ public class HttpNettyConfig {
                 .handler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
-                        // pipeline里面的ChannelHandler顺序很重要
+                        // ChannelHandler order in pipeline is important
                         ch.pipeline()
                                 .addLast(CommonConstants.CODEC, new HttpClientCodec(8192, 8192, nettyMaxChunkSize))
-                                .addLast("timeoutHandler", new ReadTimeoutHandler(responseTimeoutSeconds,
-                                        TimeUnit.SECONDS))
+                                .addLast("timeoutHandler", new ReadTimeoutHandler(responseTimeoutMs, TimeUnit.MILLISECONDS))
                                 .addLast(defaultEventExecutorGroup, "inboundHandler", handler);
                         handler.channelEnhance(ch);
                     }
@@ -61,8 +57,8 @@ public class HttpNettyConfig {
     }
 
     /**
-     * 同步集群的netty配置
-     * 连接超时：300ms, 读超时：2s
+     * Netty configuration for cluster synchronization
+     * Connection timeout: 300ms, read timeout: 2s
      */
     @Bean(name = "syncNettyClient")
     public HttpNettyClientHandler createSyncNettyClientHandler() {
@@ -71,7 +67,7 @@ public class HttpNettyConfig {
         HttpNettyClientHandler handler = new HttpNettyClientHandler(bootstrap);
         EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(eventExecuteThreads,
                 new DefaultThreadFactory("default-custom-executor-sync"),
-                // 使用有界队列，容量为1000
+                // Use bounded queue with capacity of 1000
                 1000, RejectedExecutionHandlers.reject());
         bootstrap.group(group)
                 .channel(NioSocketChannel.class)
@@ -81,7 +77,7 @@ public class HttpNettyConfig {
                 .handler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
-                        // pipeline里面的ChannelHandler顺序很重要
+                        // ChannelHandler order in pipeline is important
                         ch.pipeline()
                                 .addLast(CommonConstants.CODEC, new HttpClientCodec(8192, 8192, nettyMaxChunkSize))
                                 .addLast(CommonConstants.TIMEOUT_HANDLER, new ReadTimeoutHandler(3, TimeUnit.SECONDS))

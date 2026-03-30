@@ -43,53 +43,54 @@ class EngineWorkerStatusTest {
     @Test
     void should_return_filtered_worker_status_when_selecting_model_worker_status_with_group_filter() {
         // Given
-        String modelName = "testModel";
         String ipPort1 = "127.0.0.1:8080";
         String ipPort2 = "127.0.0.1:8081";
 
-        ModelWorkerStatus modelStatus = new ModelWorkerStatus();
-        modelStatus.getDecodeStatusMap().put(ipPort1, workerStatus1); // group1
-        modelStatus.getDecodeStatusMap().put(ipPort2, workerStatus2); // group2
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put(modelName, modelStatus);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort1, workerStatus1); // group1
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort2, workerStatus2); // group2
 
         // When
-        var result = engineWorkerStatus.selectModelWorkerStatus(modelName, RoleType.DECODE, "group1");
+        var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, "group1");
 
         // Then
         assertNotNull(result);
         assertEquals(1, result.size());
         assertTrue(result.containsKey(ipPort1));
         assertFalse(result.containsKey(ipPort2));
+
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
     }
 
     @Test
     void should_return_all_worker_status_when_selecting_model_worker_status_without_group_filter() {
         // Given
-        String modelName = "testModel";
         String ipPort1 = "127.0.0.1:8080";
         String ipPort2 = "127.0.0.1:8081";
 
-        ModelWorkerStatus modelStatus = new ModelWorkerStatus();
-        modelStatus.getPrefillStatusMap().put(ipPort1, workerStatus1);
-        modelStatus.getPrefillStatusMap().put(ipPort2, workerStatus2);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put(modelName, modelStatus);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put(ipPort1, workerStatus1);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put(ipPort2, workerStatus2);
 
         // When
-        var result = engineWorkerStatus.selectModelWorkerStatus(modelName, RoleType.PREFILL, null);
+        var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
 
         // Then
         assertNotNull(result);
         assertEquals(2, result.size());
         assertTrue(result.containsKey(ipPort1));
         assertTrue(result.containsKey(ipPort2));
+
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
     }
 
     @Test
-    void should_return_empty_map_when_selecting_model_worker_status_with_nonexistent_model() {
-        // Given - no model in the map
+    void should_return_empty_map_when_selecting_model_worker_status_with_null_status() {
+        // Given - clear all status maps
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
 
         // When
-        var result = engineWorkerStatus.selectModelWorkerStatus("nonExistentModel", RoleType.PDFUSION, null);
+        var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.PDFUSION, null);
 
         // Then
         assertNotNull(result);
@@ -99,18 +100,18 @@ class EngineWorkerStatusTest {
     @Test
     void should_return_empty_map_after_group_filtering_when_no_matching_group_exists() {
         // Given
-        String modelName = "testModel";
         String ipPort = "127.0.0.1:8080";
 
-        ModelWorkerStatus modelStatus = new ModelWorkerStatus();
-        modelStatus.getVitStatusMap().put(ipPort, workerStatus1); // group1
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put(modelName, modelStatus);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put(ipPort, workerStatus1); // group1
 
         // When
-        var result = engineWorkerStatus.selectModelWorkerStatus(modelName, RoleType.VIT, "nonExistentGroup");
+        var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.VIT, "nonExistentGroup");
 
         // Then
         assertNotNull(result);
         assertTrue(result.isEmpty());
+
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
     }
 }
