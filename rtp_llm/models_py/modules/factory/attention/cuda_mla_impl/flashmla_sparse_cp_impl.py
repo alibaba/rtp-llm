@@ -523,7 +523,10 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
                 offsets = ws_cu_aligned[:-1].long()
                 lengths = ws_lengths_t.long()
                 req_ids = torch.cat(
-                    [torch.full((int(l),), i, dtype=torch.long) for i, l in enumerate(lengths.tolist())]
+                    [
+                        torch.full((int(l),), i, dtype=torch.long)
+                        for i, l in enumerate(lengths.tolist())
+                    ]
                 )
                 within_req = torch.cat(
                     [torch.arange(int(l), dtype=torch.long) for l in lengths.tolist()]
@@ -564,11 +567,16 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
                 [torch.arange(kv_len, dtype=torch.long) for kv_len in kv_lengths_list]
             )
             req_ids = torch.cat(
-                [torch.full((kv_len,), s, dtype=torch.long) for s, kv_len in enumerate(kv_lengths_list)]
+                [
+                    torch.full((kv_len,), s, dtype=torch.long)
+                    for s, kv_len in enumerate(kv_lengths_list)
+                ]
             )
             cu_offsets = cu_local_kv_cpu[req_ids].long()
             ranks = (positions_flat % vbs) % C
-            local_idx = (positions_flat // vbs) * page_size + (positions_flat % vbs) // C
+            local_idx = (positions_flat // vbs) * page_size + (
+                positions_flat % vbs
+            ) // C
             self._kv_allgather_restore_indices = (
                 ranks * self._total_local_kv + cu_offsets + local_idx
             ).to(self.device)
@@ -812,18 +820,31 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        if topk is None:
-            return None
+        no_valid_tokens = topk is None
 
         if self.has_prefix_cache:
-            # Prefix path: no need to all_gather KV — attention gathers Q/topk instead
+            if no_valid_tokens:
+                # Pad-only rank (input_tokens < cp_size): create a dummy topk so
+                # _forward_prefix_cache can participate in all_gathers without hanging.
+                # Shape (0, top_k) triggers the padding branch inside the function.
+                topk = torch.empty(0, self.top_k, dtype=torch.int32, device=q.device)
             return self._forward_prefix_cache(q, topk, kv_cache, layer_id)
         else:
-            # Non-prefix: still need all-gathered KV to build workspace for attention
+            # Non-prefix: all ranks must participate in KV all_gather
             gathered_ckv = all_gather(compressed_kv.contiguous(), group=Group.TP)
             gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
             gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP)
             gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
+
+            if no_valid_tokens:
+                # Pad-only rank: participated in all_gathers above; return dummy output.
+                return torch.empty(
+                    q.shape[0],
+                    self.num_heads,
+                    self.kv_lora_rank,
+                    dtype=q.dtype,
+                    device=q.device,
+                )
 
             restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
             restored_k_pe = gathered_k_pe[self.kv_restore_unpad_indices]
