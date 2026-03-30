@@ -95,6 +95,7 @@ class WeightedCacheLoadBalancerTest {
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
+        balanceContext.setConfig(configService.loadBalanceConfig());
 
         ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
 
@@ -135,6 +136,7 @@ class WeightedCacheLoadBalancerTest {
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
+        balanceContext.setConfig(configService.loadBalanceConfig());
 
         ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
 
@@ -166,6 +168,7 @@ class WeightedCacheLoadBalancerTest {
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
+        balanceContext.setConfig(configService.loadBalanceConfig());
 
         ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, "group-a");
 
@@ -200,6 +203,7 @@ class WeightedCacheLoadBalancerTest {
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
+        balanceContext.setConfig(configService.loadBalanceConfig());
 
         // Run multiple iterations to verify weight distribution
         int totalRuns = 10000;

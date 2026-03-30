@@ -97,18 +97,18 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
      * Release local cached tasks on the specified worker
      *
      * @param ipPort Worker IP address
-     * @param interRequestId Internal request ID
+     * @param requestId Request ID
      */
     @Override
-    public void rollBack(String ipPort, long interRequestId) {
+    public void rollBack(String ipPort, long requestId) {
 
         Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
-        Logger.debug("Decode rollBack - ip: {}, interRequestId: {}",
-                ipPort, interRequestId);
+        Logger.debug("Decode rollBack - ip: {}, requestId: {}",
+                ipPort, requestId);
 
         WorkerStatus workerStatus = workerStatusMap.get(ipPort);
         if (workerStatus != null) {
-            workerStatus.removeLocalTask(interRequestId);
+            workerStatus.removeLocalTask(requestId);
         }
     }
 
@@ -208,7 +208,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
                 .orElse(null);
     }
 
-    private ServerStatus buildServerStatus(WorkerStatus optimalWorker, long seqLen, long prefixLength, RoleType roleType, long interRequestId) {
+    private ServerStatus buildServerStatus(WorkerStatus optimalWorker, long seqLen, long prefixLength, RoleType roleType, long requestId) {
         ServerStatus result = new ServerStatus();
         try {
             TaskInfo taskInfo = new TaskInfo();
@@ -216,10 +216,10 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             taskInfo.setWaitingTime(0);
             taskInfo.setInputLength(seqLen);
             taskInfo.setPrefixLength(prefixLength);
-            taskInfo.setInterRequestId(interRequestId);
+            taskInfo.setRequestId(requestId);
 
             // Update local task state
-            optimalWorker.putLocalTask(interRequestId, taskInfo);
+            optimalWorker.putLocalTask(requestId, taskInfo);
 
             result.setSuccess(true);
             result.setRole(roleType);
@@ -227,7 +227,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             result.setHttpPort(optimalWorker.getPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(optimalWorker.getPort()));
             result.setGroup(optimalWorker.getGroup());
-            result.setInterRequestId(interRequestId);
+            result.setRequestId(requestId);
         } catch (Exception e) {
             Logger.error("buildServerStatus error", e);
             result.setSuccess(false);

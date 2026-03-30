@@ -41,6 +41,9 @@ public class WorkerStatusResponse {
     @JsonProperty("status_version")
     private Long statusVersion = 0L;
 
+    @JsonProperty("latest_finished_version")
+    private Long latestFinishedVersion = 0L;
+
     @JsonProperty("cache_status")
     private CacheStatus cacheStatus;
 

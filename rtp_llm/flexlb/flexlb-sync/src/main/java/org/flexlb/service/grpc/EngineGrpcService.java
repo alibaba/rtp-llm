@@ -111,12 +111,12 @@ public class EngineGrpcService {
         if (engineGrpcClient == null) {
             throw new RuntimeException("EngineGrpcService not initialized");
         }
-        boolean isPrefill = RoleType.PREFILL.matches(workerStatus.getRole());
+        boolean needCacheKeys = RoleType.PREFILL.matches(workerStatus.getRole()) || RoleType.PDFUSION.matches(workerStatus.getRole());
         EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
                 .setLatestCacheVersion((int) cacheVersion)
-                .setNeedCacheKeys(isPrefill)
+                .setNeedCacheKeys(needCacheKeys)
                 .build();
-        logger.info("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}", ip, cacheVersion, isPrefill);
+        logger.info("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}", ip, cacheVersion, needCacheKeys);
 
         // Use MultimodalRpcService for VIT role, RpcService for others
         if (RoleType.VIT.equals(roleType)) {
