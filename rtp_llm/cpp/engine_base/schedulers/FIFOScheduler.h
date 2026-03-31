@@ -21,8 +21,9 @@ public:
                            const ParallelismConfig&               parallelism_config,
                            const ModelSpecificConfig&             model_specific_config,
                            const std::shared_ptr<KVCacheManager>& cache_manager,
-                           const kmonitor::MetricsReporterPtr     metrics_reporter = nullptr,
-                           const int                              max_score_len    = 1);
+                           const kmonitor::MetricsReporterPtr     metrics_reporter          = nullptr,
+                           const int                              max_score_len             = 1,
+                           bool                                   enable_batch_cache_reuse  = false);
 
     ~FIFOScheduler() override;
 
@@ -84,6 +85,12 @@ protected:
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
+
+    // Static atomic counter for generating unique batch Epoch IDs (shared across all scheduler instances)
+    static std::atomic<int64_t> batch_epoch_counter_;
+
+    // Feature toggle: when false, epoch is always 0 (no batch-level cache reuse)
+    bool enable_batch_cache_reuse_ = false;
 
     // TODO @wangyin support different beams run togather
 };

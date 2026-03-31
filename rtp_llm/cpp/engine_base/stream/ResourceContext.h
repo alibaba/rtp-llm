@@ -23,6 +23,7 @@ struct ResourceContext {
     bool    enable_memory_cache{false};
     bool    enable_remote_cache{false};
     bool    enable_device_cache{true};
+    bool    enable_batch_cache_reuse{false};
     bool    write_cache_sync{false};
     bool    enable_tiered_memory_cache{false};
     int64_t device_cache_min_free_blocks{0};
