@@ -112,7 +112,8 @@ class CASClient:
         result = build_merkle_tree(root, files)
         total_size = sum(result.sizes.values())
         total_count = len(result.file_map) + len(result.dir_blobs)
-        log.info("Merkle tree: %d blobs, %.1f MB total", total_count, total_size / 1024 / 1024)
+        total_mb = total_size / 1024 / 1024
+        log.info("Merkle tree: %d blobs, %.1f MB total", total_count, total_mb)
 
         all_digests = [re_pb2.Digest(hash=h, size_bytes=s) for h, s in result.sizes.items()]
         if progress:
@@ -121,6 +122,7 @@ class CASClient:
         missing = self._find_missing(all_digests)
         if not missing:
             log.info("All blobs already in CAS")
+            log.info("[CAS_SUMMARY] blobs=%d total_mb=%.1f missing=0 uploaded_mb=0.0", total_count, total_mb)
             if progress:
                 progress.set_skipped(total_count, total_size)
                 progress.set_totals(0, 0)
@@ -129,6 +131,13 @@ class CASClient:
 
         missing_size = sum(result.sizes.get(h, 0) for h in missing)
         log.info("Uploading %d missing blobs (%.1f MB)", len(missing), missing_size / 1024 / 1024)
+        log.info(
+            "[CAS_SUMMARY] blobs=%d total_mb=%.1f missing=%d uploaded_mb=%.1f",
+            total_count,
+            total_mb,
+            len(missing),
+            missing_size / 1024 / 1024,
+        )
 
         skipped_blobs = total_count - len(missing)
         skipped_bytes = total_size - missing_size

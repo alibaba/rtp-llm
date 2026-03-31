@@ -10,7 +10,10 @@ import torch
 from torch import dtype as _dtype
 
 import rtp_llm.ops  # isort:skip
-from rtp_llm.ops.compute_ops import per_token_quant_fp8  # isort:skip
+try:
+    from rtp_llm.ops.compute_ops import per_token_quant_fp8  # isort:skip
+except ImportError as e:
+    pytest.skip(f"CUDA-only compute_ops unavailable: {e}", allow_module_level=True)
 
 
 class PerTokenFp8QuantTest(TestCase):

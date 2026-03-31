@@ -3,8 +3,9 @@
 Reads [tool.rtp_llm.pytest_ci].profiles.<name> from the nearest pyproject.toml
 (github-opensource root or open_source/pyproject.toml).
 
-Use --rtp-ci-profile=NAME or env RTP_PYTEST_CI_PROFILE=NAME.
-Cannot be combined with -m (explicit marker expression).
+Use --rtp-ci-profile=NAME.
+Can be combined with -m; final markexpr is:
+    (<profile markexpr>) and (<user -m markexpr>)
 
 When a profile is active, [tool.rtp_llm.pytest_ci].default_pytest_cli is applied:
 sets PYTEST_ARGS for --remote-session workers and updates local pytest options
@@ -12,7 +13,6 @@ unless PYTEST_ARGS is already set in the environment.
 """
 from __future__ import annotations
 
-import os
 import shlex
 import sys
 from pathlib import Path
@@ -31,17 +31,29 @@ def _load_toml(path: Path) -> Dict[str, Any]:
 
 
 def _find_pyproject(start: Path) -> Optional[Path]:
-    """Resolve pyproject.toml: prefer repo root (symlink to internal_source), else open_source."""
+    """Resolve pyproject.toml that contains CI profiles."""
     cur = start.resolve()
     for base in (cur, *cur.parents):
-        # Root pyproject.toml (symlink → stub_source/pyproject.toml → internal_source)
-        # has CI profiles; open_source/pyproject.toml does not.
-        root_pp = base / "pyproject.toml"
-        if root_pp.is_file():
-            return root_pp
-        oss = base / "open_source" / "pyproject.toml"
-        if oss.is_file():
-            return oss
+        candidates = [
+            base / "pyproject.toml",
+            base / "internal_source" / "pyproject.toml",
+            base / "open_source" / "pyproject.toml",
+        ]
+        for pp in candidates:
+            if not pp.is_file():
+                continue
+            try:
+                data = _load_toml(pp)
+            except Exception:
+                continue
+            profiles = (
+                data.get("tool", {})
+                .get("rtp_llm", {})
+                .get("pytest_ci", {})
+                .get("profiles")
+            )
+            if isinstance(profiles, dict):
+                return pp
     return None
 
 
@@ -103,7 +115,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="NAME",
         help=(
             "Load markexpr/paths from [tool.rtp_llm.pytest_ci].profiles.NAME "
-            "in pyproject.toml (or set RTP_PYTEST_CI_PROFILE)"
+            "in pyproject.toml"
         ),
     )
 
@@ -112,27 +124,24 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def pytest_configure(config: pytest.Config) -> None:
     name = config.getoption("--rtp-ci-profile")
     if not name:
-        name = os.environ.get("RTP_PYTEST_CI_PROFILE", "").strip() or None
-    if not name:
         return
-
-    if getattr(config.option, "markexpr", None):
-        raise pytest.UsageError(
-            "Cannot combine --rtp-ci-profile / RTP_PYTEST_CI_PROFILE with -m (markexpr already set)"
-        )
 
     root = Path(config.rootpath)
     pytest_ci = _get_pytest_ci_section(root)
     default_cli = (pytest_ci.get("default_pytest_cli") or "-v --tb=short --timeout=300").strip()
-    if default_cli and not os.environ.get("PYTEST_ARGS", "").strip():
-        os.environ["PYTEST_ARGS"] = default_cli
+    if default_cli:
         _apply_default_cli(config, default_cli)
 
     prof = _get_profile(root, name)
     markexpr = prof["markexpr"]
     if not isinstance(markexpr, str) or not markexpr.strip():
         raise pytest.UsageError(f"--rtp-ci-profile: profile {name!r} has empty markexpr")
-    config.option.markexpr = markexpr.strip()
+    profile_markexpr = markexpr.strip()
+    user_markexpr = (getattr(config.option, "markexpr", None) or "").strip()
+    if user_markexpr:
+        config.option.markexpr = f"({profile_markexpr}) and ({user_markexpr})"
+    else:
+        config.option.markexpr = profile_markexpr
 
     paths = prof.get("paths")
     if paths is not None:

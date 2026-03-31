@@ -490,6 +490,11 @@ def setup_args(args: Optional[List[str]] = None) -> PyEnvConfigs:
               on environment variables — useful in tests run under pytest where
               ``sys.argv`` contains pytest's own flags.
     """
+    if args is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        # Under pytest, sys.argv belongs to pytest itself.
+        # Use env/defaults unless callers explicitly pass server args.
+        args = []
+
     parser = EnvArgumentParser(description="RTP LLM")
 
     py_env_configs = PyEnvConfigs()

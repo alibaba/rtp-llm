@@ -151,6 +151,7 @@ def build_remote_setup_command(rootdir: Path) -> str:
         "export HOME=/home/admin; "
         "echo \">>>PHASE:pip_install_start $(date +%s)\"; "
         "export RTP_SKIP_BAZEL_BUILD=1; "
+        "export RTP_LOG_COMPACT=1; "
         "source internal_source/ci/pip_install.sh; "
         "echo \">>>PHASE:pip_install_done $(date +%s)\"; "
     )
@@ -163,8 +164,16 @@ def build_remote_setup_command(rootdir: Path) -> str:
 def _collect_base_files(rootdir: Path) -> List[str]:
     """Build config files present in rootdir."""
     files: List[str] = []
-    for name in ("pyproject.toml", "open_source/pyproject.toml", "setup.py", "setup.cfg",
-                  "conftest.py", "internal_source/ci/pip_install.sh"):
+    for name in (
+        "pyproject.toml",
+        "open_source/pyproject.toml",
+        "internal_source/pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "conftest.py",
+        "internal_source/ci/pip_install.sh",
+        "internal_source/ci/package_index_config.py",
+    ):
         if (rootdir / name).exists():
             files.append(name)
     return files
@@ -183,7 +192,10 @@ def _collect_repo_runtime_files(rootdir: Path) -> List[str]:
         files.extend(str(p.relative_to(rootdir)) for p in rootdir.glob(pattern) if p.is_file())
     for pattern in ("rtp_llm/**/*.tiktoken", "rtp_llm/**/*.conf"):
         files.extend(str(p.relative_to(rootdir)) for p in rootdir.glob(pattern) if p.is_file())
-    for pattern in ("rtp_llm/test/**/testdata/**/*",):
+    for pattern in (
+        "rtp_llm/**/testdata/**/*",
+        "rtp_llm/**/test/testdata/**/*",
+    ):
         files.extend(str(p.relative_to(rootdir)) for p in rootdir.glob(pattern) if p.is_file())
     return files
 

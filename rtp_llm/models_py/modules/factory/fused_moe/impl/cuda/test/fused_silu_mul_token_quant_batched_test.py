@@ -18,7 +18,10 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 )
 
 import rtp_llm.ops  # isort:skip
-from rtp_llm.ops.compute_ops import per_token_quant_fp8  # isort:skip
+try:
+    from rtp_llm.ops.compute_ops import per_token_quant_fp8  # isort:skip
+except ImportError as e:
+    pytest.skip(f"CUDA-only compute_ops unavailable: {e}", allow_module_level=True)
 
 
 class FusedSiluMulPerTokenQuantBatchedTest(TestCase):

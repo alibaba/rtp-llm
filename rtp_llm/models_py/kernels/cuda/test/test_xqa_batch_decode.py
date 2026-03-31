@@ -11,7 +11,10 @@ from flashinfer.utils import get_compute_capability
 pytestmark = [pytest.mark.gpu(type="H20")]
 from packaging import version
 
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
+try:
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
+except ImportError as e:
+    pytest.skip(f"CUDA-only XQA stack unavailable: {e}", allow_module_level=True)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import (
     AttentionConfigs,

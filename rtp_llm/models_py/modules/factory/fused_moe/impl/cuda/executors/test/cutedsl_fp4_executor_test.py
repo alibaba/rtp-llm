@@ -19,14 +19,17 @@ from rtp_llm.ops import ParallelismConfig, MoeConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutedsl_fp4_executor import (
-    CutedslFp4Executor,
-)
 from rtp_llm.utils.model_weight import W
 
-from flashinfer import fp4_quantize
+try:
+    from flashinfer import fp4_quantize
+    from flashinfer import scaled_fp4_grouped_quantize
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutedsl_fp4_executor import (
+        CutedslFp4Executor,
+    )
+except ImportError as e:
+    pytest.skip(f"flashinfer API not available: {e}", allow_module_level=True)
 from torch.nn import functional as F
-from flashinfer import scaled_fp4_grouped_quantize
 
 
 class CutedslFp4ExecutorTestBase:

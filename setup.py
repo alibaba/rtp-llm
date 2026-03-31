@@ -1008,10 +1008,7 @@ def copy_extensions(project_root: Path, build_config: str) -> None:
     """
     bazel_bin = project_root / "bazel-bin"
     target_dir = project_root / "rtp_llm" / "libs"
-    
-    # Delete and recreate libs directory to ensure clean state
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
+
     target_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"\nCopying extensions to {target_dir}:")
@@ -1038,8 +1035,16 @@ def copy_extensions(project_root: Path, build_config: str) -> None:
 
 def build_all():
     project_root = get_project_root()
+    target_dir = project_root / "rtp_llm" / "libs"
 
     ensure_proto_files_generated(project_root)
+
+    # Clear repo-local copied artifacts before a full install/build so a failed
+    # platform build cannot leave stale libs from a previous platform behind.
+    if not should_skip_bazel_build():
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
 
     # Skip Bazel build only if explicitly disabled
     if not should_skip_bazel_build():
@@ -1337,4 +1342,3 @@ if __name__ == "__main__":
             ],
         },
     )
-

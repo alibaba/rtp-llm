@@ -69,6 +69,9 @@ class ExecutionResult:
     worker_host_ip: Optional[str] = None
     # REAPI ExecutedActionMetadata.worker when the server populates partial_execution_metadata
     metadata_worker: Optional[str] = None
+    cached_result: Optional[bool] = None
+    response_status_code: Optional[int] = None
+    response_status_message: Optional[str] = None
     # Local paths for live-tailed stream logs (ByteStream); same as logged at execute() start
     stream_stdout_path: Optional[str] = None
     stream_stderr_path: Optional[str] = None
@@ -130,6 +133,7 @@ class RemoteExecutor:
         on_stage: StageCallback = None,
         stream_stdout_file: Optional[Path] = None,
         stream_stderr_file: Optional[Path] = None,
+        no_cache: bool = False,
     ) -> ExecutionResult:
         # Build Command proto — platform.properties are the REAPI equivalent of Bazel
         # exec_properties / remote_default_exec_properties (gpu, gpu_count, …).
@@ -152,11 +156,12 @@ class RemoteExecutor:
             command_digest=cmd_digest,
             input_root_digest=input_root_digest,
             timeout=duration_pb2.Duration(seconds=timeout),
-            do_not_cache=False,
+            do_not_cache=no_cache,
         )
         action_digest = self.cas.upload_blob(action.SerializeToString())
 
         log.info("Submitting action %s (cmd=%s)", action_digest.hash[:12], " ".join(command[:5]))
+        log.info("[REMOTE_SUBMIT] action=%s timeout=%ds", action_digest.hash[:12], timeout)
 
         abs_stdout: Optional[str] = None
         abs_stderr: Optional[str] = None
@@ -179,7 +184,7 @@ class RemoteExecutor:
         request = re_pb2.ExecuteRequest(
             instance_name=self.instance_name,
             action_digest=action_digest,
-            skip_cache_lookup=False,
+            skip_cache_lookup=no_cache,
         )
 
         stop_event = threading.Event()
@@ -279,9 +284,11 @@ class RemoteExecutor:
                 stage = self._extract_stage(op)
                 if on_stage:
                     on_stage(stage, op.name)
+                log.info("[REMOTE_STAGE] stage=%s op=%s", stage, (op.name or "")[:48])
                 log.debug("Operation %s stage=%s", op.name, stage)
         except grpc.RpcError as e:
             log.error("Execute RPC failed: %s", e)
+            log.error("[RESULT] status=blocked category=executor_rpc detail=%s", e.code().name)
             stop_event.set()
             for t in stream_threads:
                 t.join(timeout=5)
@@ -370,9 +377,15 @@ class RemoteExecutor:
                 )
 
         r = resp.result
-        log.info("Remote result: exit_code=%d stdout_digest=%s stderr_digest=%s",
-                 r.exit_code, r.stdout_digest.hash[:12] if r.stdout_digest.hash else "none",
-                 r.stderr_digest.hash[:12] if r.stderr_digest.hash else "none")
+        log.info(
+            "Remote result: exit_code=%d cached=%s status_code=%s status_message=%r stdout_digest=%s stderr_digest=%s",
+            r.exit_code,
+            resp.cached_result,
+            resp.status.code if resp.HasField("status") else None,
+            resp.status.message if resp.HasField("status") else "",
+            r.stdout_digest.hash[:12] if r.stdout_digest.hash else "none",
+            r.stderr_digest.hash[:12] if r.stderr_digest.hash else "none",
+        )
 
         output_files = {f.path: f.digest for f in r.output_files}
 
@@ -412,6 +425,9 @@ class RemoteExecutor:
             output_files=output_files,
             worker_host_ip=worker_ip,
             metadata_worker=meta_worker or None,
+            cached_result=resp.cached_result,
+            response_status_code=resp.status.code if resp.HasField("status") else None,
+            response_status_message=resp.status.message if resp.HasField("status") else None,
         )
 
     def download_output(self, digest: re_pb2.Digest) -> str:

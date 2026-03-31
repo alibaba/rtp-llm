@@ -1,17 +1,18 @@
 """pytest plugin: dispatch GPU tests to remote NativeLink workers via REAPI."""
+from __future__ import annotations
 import logging
+import os
 import re
+import shlex
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import pytest
 
-from .cas_client import CASClient, UploadProgress
-from .executor import RemoteExecutor, ExecutionResult
 from .endpoint_info import extract_remote_worker_ip
 from .remote_exec_rtp import (
     GPURequest,
@@ -26,12 +27,35 @@ from .remote_exec_rtp import (
     quote_args,
 )
 
+if TYPE_CHECKING:
+    from .cas_client import CASClient, UploadProgress
+    from .executor import ExecutionResult, RemoteExecutor
+
 log = logging.getLogger(__name__)
 
 DEFAULT_CONCURRENCY = 20
 MAX_RETRIES = 2
+MAX_REMOTE_TIMEOUT = 7200
 
 _PHASE_LINE_RE = re.compile(r"^>>>PHASE:\S+\s+\d+\s*$")
+
+
+def _get_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning("Ignoring invalid %s=%r; using default %d", name, raw, default)
+        return default
+
+
+def _load_remote_execution_types():
+    from .cas_client import CASClient, UploadProgress
+    from .executor import ExecutionResult, RemoteExecutor
+
+    return CASClient, UploadProgress, ExecutionResult, RemoteExecutor
 
 
 def _remote_stream_log_paths(rootdir: Path, key: str) -> Tuple[Path, Path]:
@@ -125,20 +149,22 @@ def pytest_addoption(parser):
                 help="CAS gRPC endpoint (grpc://host:port)")
     g.addoption("--remote-header", action="append", default=[],
                 help="gRPC metadata header (key=value), repeatable")
-    g.addoption("--remote-timeout", type=int, default=7200,
+    g.addoption("--remote-timeout", type=int, default=_get_int_env("REMOTE_TIMEOUT", 7200),
                 help="Per-test timeout in seconds (default: 7200)")
     g.addoption("--remote-concurrency", type=int, default=DEFAULT_CONCURRENCY,
                 help=f"Max concurrent remote executions (default: {DEFAULT_CONCURRENCY})")
     g.addoption("--remote-env", default="daily", choices=["daily", "online"],
                 help="REAPI environment: 'daily' or 'online' (default: daily)")
-    g.addoption("--remote-gpu-type", default=None,
+    g.addoption("--remote-gpu-type", default=os.getenv("REMOTE_GPU_TYPE"),
                 help="Override GPU type for session mode (auto-detected from markers if omitted)")
-    g.addoption("--remote-workers", type=int, default=4,
+    g.addoption("--remote-workers", type=int, default=_get_int_env("REMOTE_WORKERS", _get_int_env("REMOTE_GPU_COUNT", 4)),
                 help="Number of xdist workers on remote session worker (default: 4)")
     g.addoption("--remote-pytest-args", default="",
                 help="Extra pytest args forwarded to the remote session command")
     g.addoption("--remote-ci-profile", default=None,
-                help="RTP CI profile name forwarded as RTP_PYTEST_CI_PROFILE to remote worker")
+                help="RTP CI profile name forwarded as --rtp-ci-profile on remote worker pytest")
+    g.addoption("--remote-no-cache", action="store_true", default=False,
+                help="Disable REAPI action cache lookup/store for remote executions")
     g.addoption("--remote-cas-upload-workers", type=int, default=12,
                 help="Max concurrent CAS BatchUpdateBlobs RPCs (default: 12)")
     g.addoption(
@@ -199,6 +225,7 @@ def _upload_directory_with_progress(
     config: pytest.Config,
 ):
     """Run CAS upload in a background thread and refresh a one-line progress display."""
+    _, UploadProgress, _, _ = _load_remote_execution_types()
     progress = UploadProgress()
     err_holder: List[BaseException] = []
     result_holder: List = []
@@ -213,6 +240,7 @@ def _upload_directory_with_progress(
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     tw = config.get_terminal_writer()
+    compact = bool(config.getoption("--remote-session", default=False) or config.getoption("-q", default=0))
     while t.is_alive():
         with progress._lock:
             ub, tb = progress.uploaded_blobs, progress.total_blobs
@@ -220,16 +248,18 @@ def _upload_directory_with_progress(
             phase = progress.phase
         mb_up = ubytes / (1024 * 1024)
         mb_tot = tbytes / (1024 * 1024) if tbytes else 0.0
-        if tb > 0:
-            tw.write(
-                f"\rCAS upload: {ub}/{tb} blobs ({mb_up:.1f}/{mb_tot:.1f} MiB) [{phase}]",
-                flush=True,
-            )
-        else:
-            tw.write(f"\rCAS upload: [{phase}]", flush=True)
+        if not compact:
+            if tb > 0:
+                tw.write(
+                    f"\rCAS upload: {ub}/{tb} blobs ({mb_up:.1f}/{mb_tot:.1f} MiB) [{phase}]",
+                    flush=True,
+                )
+            else:
+                tw.write(f"\rCAS upload: [{phase}]", flush=True)
         time.sleep(0.2)
     t.join()
-    tw.line("")
+    if not compact:
+        tw.line("")
     if err_holder:
         e = err_holder[0]
         raise RuntimeError(
@@ -245,13 +275,19 @@ class RemoteREAPIPlugin:
         self.mode = mode
         self.config = config
         self.rootdir = Path(config.rootdir)
-        executor_ep, cas_ep = _resolve_endpoints(config)
+        self._executor_ep, self._cas_ep = _resolve_endpoints(config)
         self.metadata = _parse_metadata(config)
-        self.timeout = config.getoption("--remote-timeout")
-        cas_workers = config.getoption("--remote-cas-upload-workers")
-
-        self.cas = CASClient(cas_ep, self.metadata, batch_upload_workers=cas_workers)
-        self.executor = RemoteExecutor(executor_ep, self.cas, self.metadata)
+        requested_timeout = config.getoption("--remote-timeout")
+        self.timeout = min(requested_timeout, MAX_REMOTE_TIMEOUT)
+        if requested_timeout > MAX_REMOTE_TIMEOUT:
+            log.warning(
+                "Clamping --remote-timeout from %d to %d to satisfy current REAPI server limit",
+                requested_timeout,
+                MAX_REMOTE_TIMEOUT,
+            )
+        self._cas_workers = config.getoption("--remote-cas-upload-workers")
+        self.cas: Optional[CASClient] = None
+        self.executor: Optional[RemoteExecutor] = None
 
         self._remote_file_handler: Optional[logging.Handler] = None
         log_file_opt = config.getoption("--remote-log-file", default=None)
@@ -271,6 +307,7 @@ class RemoteREAPIPlugin:
             self.workers = config.getoption("--remote-workers")
             self.pytest_args = config.getoption("--remote-pytest-args")
             self.ci_profile = config.getoption("--remote-ci-profile")
+            self.no_cache = config.getoption("--remote-no-cache")
             self._result = None
             self._gpu_request: Optional[GPURequest] = None
 
@@ -298,9 +335,22 @@ class RemoteREAPIPlugin:
             if tw:
                 tw.line(f"Remote diagnostics log file: {p}")
 
+    def _ensure_remote_clients(self) -> None:
+        if self.cas is not None and self.executor is not None:
+            return
+        CASClient, _, _, RemoteExecutor = _load_remote_execution_types()
+        cas = CASClient(
+            self._cas_ep,
+            self.metadata,
+            batch_upload_workers=self._cas_workers,
+        )
+        self.cas = cas
+        self.executor = RemoteExecutor(self._executor_ep, cas, self.metadata)
+
     def _ensure_uploaded(self, items) -> None:
         if self._input_root:
             return
+        self._ensure_remote_clients()
         files = collect_remote_files(self.rootdir, items)
         self._input_root = _upload_directory_with_progress(self.cas, self.rootdir, files, self.config)
         log.info("Input root uploaded: %s (%d bytes)", self._input_root.hash[:12], self._input_root.size_bytes)
@@ -326,6 +376,7 @@ class RemoteREAPIPlugin:
         return ["bash", "-c", f"{runtime.remote_setup_prefix}{run_cmd}"]
 
     def _execute_with_retry(self, **kwargs) -> ExecutionResult:
+        self._ensure_remote_clients()
         last_result = None
         for attempt in range(MAX_RETRIES + 1):
             result = self.executor.execute(**kwargs)
@@ -399,6 +450,7 @@ class RemoteREAPIPlugin:
         try:
             result = future.result()
         except Exception as e:
+            _, _, ExecutionResult, _ = _load_remote_execution_types()
             tail = f"{e}\n[reapi-targets] {self.executor.reapi_targets_combined}"
             result = ExecutionResult(exit_code=-1, stderr_raw=tail.encode())
 
@@ -506,17 +558,22 @@ class RemoteREAPIPlugin:
 
         gpu_req = self._gpu_request
 
+        self._ensure_remote_clients()
         files = collect_session_files(self.rootdir)
         input_root = _upload_directory_with_progress(self.cas, self.rootdir, files, self.config)
+        log.info("[SESSION_INPUT] files=%d gpu_type=%s gpu_count=%d", len(files), gpu_req.gpu_type, gpu_req.gpu_count)
         log.info("Input root uploaded: %s (%d bytes)", input_root.hash[:12], input_root.size_bytes)
+        log.info("[SESSION_INPUT] input_root=%s size_bytes=%d", input_root.hash[:12], input_root.size_bytes)
 
-        extra_env: dict = {}
-        if self.ci_profile:
-            extra_env["RTP_PYTEST_CI_PROFILE"] = self.ci_profile
-
-        runtime = build_runtime_config(self.rootdir, gpu_req, extra_env=extra_env)
-        cmd = self._build_session_command(self.pytest_args, runtime)
-        log.info("Session command: %s", cmd[-1][:200])
+        runtime = build_runtime_config(self.rootdir, gpu_req)
+        cmd = self._build_session_command(self.pytest_args, runtime, self.ci_profile)
+        log.info(
+            "[REMOTE_CMD] mode=session pytest_workers=%d markexpr=%s pytest_args=%s no_cache=%s",
+            self.workers,
+            bool(getattr(self.config.option, "markexpr", "") or ""),
+            bool((self.pytest_args or "").strip()),
+            self.no_cache,
+        )
 
         log.info("Submitting session to remote worker (timeout=%ds, gpu=%s x%d)...",
                  self.timeout, gpu_req.gpu_type, gpu_req.gpu_count)
@@ -528,6 +585,7 @@ class RemoteREAPIPlugin:
         def _on_stage(stage: str, op_name: str):
             if stage != last_stage[0]:
                 elapsed = time.time() - t0
+                log.info("[REMOTE_STAGE] stage=%s elapsed=%.0fs op=%s", stage, elapsed, (op_name or "")[:48])
                 tw.line(f"Session remote: stage={stage} ({elapsed:.0f}s elapsed)")
                 last_stage[0] = stage
 
@@ -541,6 +599,7 @@ class RemoteREAPIPlugin:
             on_stage=_on_stage,
             stream_stdout_file=sess_out,
             stream_stderr_file=sess_err,
+            no_cache=self.no_cache,
         )
 
         self._result = self._parse_remote_output(result, tw)
@@ -584,6 +643,14 @@ class RemoteREAPIPlugin:
             log.info("Session %s", meta_msg)
             if tw:
                 tw.line(meta_msg)
+        if result.response_status_code is not None or result.response_status_message:
+            status_msg = (
+                f"Remote ExecuteResponse status: code={result.response_status_code} "
+                f"message={result.response_status_message or ''}".rstrip()
+            )
+            log.info("Session %s", status_msg)
+            if tw:
+                tw.line(status_msg)
 
         _display_phase_breakdown(stdout, stderr, tw, prefix="")
 
@@ -614,6 +681,11 @@ class RemoteREAPIPlugin:
                 f"[remote] worker_host_ip={worker_ip or 'n/a'} | "
                 f"{self.executor.reapi_targets_combined}"
             )
+            if result.response_status_code is not None or result.response_status_message:
+                diag += (
+                    f" | response_status={result.response_status_code}:"
+                    f"{result.response_status_message or ''}"
+                )
             log.error("Session remote diagnostics: %s", diag)
             if tw:
                 tw.line(diag)
@@ -621,15 +693,22 @@ class RemoteREAPIPlugin:
 
         return exit_code
 
-    def _build_session_command(self, pytest_args: str, runtime: RemoteRuntimeConfig) -> List[str]:
+    def _build_session_command(
+        self,
+        pytest_args: str,
+        runtime: RemoteRuntimeConfig,
+        ci_profile: Optional[str] = None,
+    ) -> List[str]:
         ignore_args = quote_args(runtime.ignore_args)
         # Forward markexpr to remote worker if set locally
         markexpr = getattr(self.config.option, "markexpr", "") or ""
         mark_arg = f"-m '{markexpr}' " if markexpr else ""
+        profile_arg = f"--rtp-ci-profile={shlex.quote(ci_profile)} " if ci_profile else ""
         run_cmd = (
             "echo \">>>RTP_REMOTE_HOST_IP $(hostname -I 2>/dev/null | awk '{print $1}')\"; "
             "echo \">>>PHASE:pytest_start $(date +%s)\"; "
             f"python -m pytest {pytest_args} "
+            f"{profile_arg}"
             f"{mark_arg}"
             f"-n {self.workers} "
             f"--continue-on-collection-errors "
@@ -641,4 +720,3 @@ class RemoteREAPIPlugin:
             f"echo '<<<JUNIT_XML>>>'; cat pytest_results.xml 2>/dev/null; echo '<<<END_JUNIT_XML>>>'"
         )
         return ["bash", "-c", f"{runtime.remote_setup_prefix}{run_cmd}"]
-

@@ -56,7 +56,8 @@ cuda12 = [
     "autoawq>=0.2.9",
 
     # Data
-    "datasets",
+    # Keep datasets aligned with pinned pyarrow 16.x.
+    "datasets==3.1.0",
 
     # Deep EP & Deep Gemm
     "deep-ep @ http://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_ep-1.2.1%2B29d31c0-cp310-cp310-linux_x86_64.whl",
@@ -147,7 +148,8 @@ cuda12_9 = [
     "apache-tvm-ffi",
 
     # Data & Utils
-    "datasets",
+    # Keep datasets aligned with pinned pyarrow 16.x.
+    "datasets==3.1.0",
     "mysql-connector-python",
     "sqlglot @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/sqlglot-19.8.4.dev4-py3-none-any.whl",
     "tabulate==0.9.0",
@@ -234,6 +236,9 @@ base-dependencies = [
     "aiohttp",
     "orjson",
     "pydantic",
+    # Pin pyarrow to 16.x: pyarrow 23.x reproducibly crashes TP convert tests
+    # in libarrow background_thread_entry during import/runtime initialization.
+    "pyarrow==16.1.0",
 
     # Utilities
     "setuptools==60.5.0",
