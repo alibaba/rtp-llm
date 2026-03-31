@@ -204,7 +204,7 @@ TEST_F(LinearKVCacheGroupTest, MatchSingleKeyReturnsMatchedBlockOrEmpty) {
     item.group_id    = 7;
     item.block_index = blocks[0];
     item.is_resident = false;
-    ASSERT_TRUE(block_cache->put(item));
+    ASSERT_EQ(block_cache->put(item).action, BlockCache::PutResult::Action::INSERTED);
 
     auto hit = group.matchSingleKey(123);
     ASSERT_EQ(hit.block_indices.size(), 1u);

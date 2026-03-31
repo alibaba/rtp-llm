@@ -43,11 +43,11 @@ TEST_F(BlockCacheTest, MatchBasicTest) {
 
     CacheItem item    = {101, 0, 1, false};
     auto      result1 = cache_->put(item);
-    EXPECT_TRUE(result1);
+    EXPECT_EQ(result1.action, BlockCache::PutResult::Action::INSERTED);
 
     // Put a duplicate key
     auto result2 = cache_->put(item);
-    EXPECT_FALSE(result2);
+    EXPECT_EQ(result2.action, BlockCache::PutResult::Action::REPLACED);
 
     auto result3 = cache_->match(101);
     EXPECT_EQ(result3.matched_index, 1);
@@ -63,19 +63,19 @@ TEST_F(BlockCacheTest, PopBasicTest) {
 
     CacheItem item1   = {101, 0, 1, false};
     auto      result1 = cache_->put(item1);
-    EXPECT_TRUE(result1);
+    EXPECT_EQ(result1.action, BlockCache::PutResult::Action::INSERTED);
     CacheItem item2   = {102, 0, 2, false};
     auto      result2 = cache_->put(item2);
-    EXPECT_TRUE(result2);
+    EXPECT_EQ(result2.action, BlockCache::PutResult::Action::INSERTED);
     CacheItem item3   = {103, 0, 3, false};
     auto      result3 = cache_->put(item3);
-    EXPECT_TRUE(result3);
+    EXPECT_EQ(result3.action, BlockCache::PutResult::Action::INSERTED);
     CacheItem item4   = {104, 0, 4, false};
     auto      result4 = cache_->put(item4);
-    EXPECT_TRUE(result4);
+    EXPECT_EQ(result4.action, BlockCache::PutResult::Action::INSERTED);
     CacheItem item5   = {105, 0, 5, false};
     auto      result5 = cache_->put(item5);
-    EXPECT_TRUE(result5);
+    EXPECT_EQ(result5.action, BlockCache::PutResult::Action::INSERTED);
 
     EXPECT_EQ(cache_->size(), 5);
 
@@ -102,7 +102,7 @@ TEST_F(BlockCacheTest, PopBasicTest) {
     // 设置resident
     CacheItem item6   = {101, 0, 1, true};
     auto      result6 = cache_->put(item6);
-    EXPECT_TRUE(result6);
+    EXPECT_EQ(result6.action, BlockCache::PutResult::Action::INSERTED);
     EXPECT_EQ(cache_->size(), 1);
 
     // Resident entries won't be popped

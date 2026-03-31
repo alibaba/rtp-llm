@@ -42,11 +42,11 @@ bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reus
     return true;
 }
 
-MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
+MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys, int64_t current_batch_epoch) {
     MatchResult final_result;
 
     for (const auto& cache_key : cache_keys) {
-        auto result = block_cache_->match(cache_key, group_id_);
+        auto result = block_cache_->match(cache_key, group_id_, current_batch_epoch);
         if (isNullBlockIdx(result.matched_index)) {
             break;
         }
@@ -75,7 +75,8 @@ void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& ne
 
 void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
                                        const BlockIndicesType& block_indices,
-                                       bool                    is_resident) {
+                                       bool                    is_resident,
+                                       int64_t                 epoch) {
     if (cache_keys.empty()) {
         return;
     }
@@ -93,12 +94,11 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         item.group_id    = group_id_;
         item.block_index = block_indices[i];
         item.is_resident = is_resident;
-        if (block_cache_->put(item)) {
-            block_pool_->blockCacheReference(block_indices[i]);
-        }
-    }
+        item.epoch       = epoch;
 
-    RTP_LLM_LOG_DEBUG("Inserted %zu blocks into cache", block_indices.size());
+        auto result = block_cache_->put(item);
+        handlePutResult(result, block_indices[i]);
+    }
 }
 
 void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/, bool /*enable_reuse_cache*/, int /*reserve_step*/) {
