@@ -24,7 +24,10 @@ from rtp_llm.server.server_args.fifo_scheduler_group_args import (
 from rtp_llm.server.server_args.fmha_group_args import init_fmha_group_args
 from rtp_llm.server.server_args.gang_group_args import init_gang_group_args
 from rtp_llm.server.server_args.generate_group_args import init_generate_group_args
-from rtp_llm.server.server_args.grpc_group_args import init_grpc_group_args
+from rtp_llm.server.server_args.grpc_group_args import (
+    init_bailian_grpc_group_args,
+    init_model_grpc_group_args,
+)
 from rtp_llm.server.server_args.hw_kernel_group_args import init_hw_kernel_group_args
 from rtp_llm.server.server_args.jit_group_args import init_jit_group_args
 from rtp_llm.server.server_args.kv_cache_group_args import init_kv_cache_group_args
@@ -478,7 +481,8 @@ def init_all_group_args(
     init_vit_group_args(parser, py_env_configs.vit_config)
     init_jit_group_args(parser, py_env_configs.jit_config)
     init_pd_separation_group_args(parser, py_env_configs.pd_separation_config)
-    init_grpc_group_args(parser, py_env_configs.grpc_config)
+    init_model_grpc_group_args(parser, py_env_configs.grpc_config)
+    init_bailian_grpc_group_args(parser, py_env_configs.bailian_grpc_config)
 
 
 def setup_args() -> PyEnvConfigs:

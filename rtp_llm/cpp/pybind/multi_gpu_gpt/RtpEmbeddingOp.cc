@@ -153,6 +153,10 @@ void RtpEmbeddingOp::initGrpcServer(int64_t                              embeddi
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);
     }
+    if (grpc_config.max_server_pollers > 0) {
+        builder.SetSyncServerOption(grpc::ServerBuilder::MAX_POLLERS, grpc_config.max_server_pollers);
+        RTP_LLM_LOG_INFO("embedding grpc sync server MAX_POLLERS: %d", grpc_config.max_server_pollers);
+    }
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(embedding_grpc_service_.get());
     grpc_server_ = builder.BuildAndStart();
