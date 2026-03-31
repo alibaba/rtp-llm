@@ -5,16 +5,19 @@
 
 namespace rtp_llm {
 
-BlockCache::MatchResult BlockCache::match(CacheKeyType cache_key, int group_id) {
+BlockCache::MatchResult BlockCache::match(CacheKeyType cache_key, int group_id, int64_t current_batch_epoch) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
     CacheKeyGroupPair           key{cache_key, group_id};
     auto [success, item] = lru_cache_.get(key);
     if (success) {
-        return {item.block_index};
-    } else {
-        return {NULL_BLOCK_IDX};
+        if (current_batch_epoch == NO_EPOCH_FILTER
+            || item.epoch == 0
+            || (current_batch_epoch > 0 && item.epoch == current_batch_epoch)) {
+            return {item.block_index};
+        }
     }
+    return {NULL_BLOCK_IDX};
 }
 
 bool BlockCache::contains(CacheKeyType cache_key, int group_id) const {
@@ -23,21 +26,25 @@ bool BlockCache::contains(CacheKeyType cache_key, int group_id) const {
     return lru_cache_.contains(key);
 }
 
-bool BlockCache::put(CacheItem& item) {
+BlockCache::PutResult BlockCache::put(CacheItem& item) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null block");
 
     CacheKeyGroupPair key{item.cache_key, item.group_id};
+    auto [found, old_item] = lru_cache_.get(key);
+    if (found) {
+        if (old_item.epoch == 0 && item.epoch != 0) {
+            return {PutResult::Action::SKIPPED, NULL_BLOCK_IDX};
+        }
 
-    if (lru_cache_.contains(key)) {
-        // It already exists; increase its popularity.
-        lru_cache_.get(key);
-        return false;
+        BlockIdxType old_block_index = old_item.block_index;
+        lru_cache_.put(key, item);
+        return {PutResult::Action::REPLACED, old_block_index};
+    } else {
+        lru_cache_.put(key, item);
+        return {PutResult::Action::INSERTED, NULL_BLOCK_IDX};
     }
-
-    lru_cache_.put(key, item);
-    return true;
 }
 
 BlockIndicesType BlockCache::pop(int nums) {
@@ -46,10 +53,22 @@ BlockIndicesType BlockCache::pop(int nums) {
     RTP_LLM_CHECK_WITH_INFO(nums > 0, "pop nums should > 0, nums = " + std::to_string(nums));
     BlockIndicesType pop_blocks;
 
-    auto cond = [&](const CacheKeyGroupPair& key, const CacheItem& item) { return !item.is_resident; };
-
+    // Phase 1: prefer evicting stale epoch>0 entries (batch-specific, likely dead)
+    auto stale_cond = [](const CacheKeyGroupPair& key, const CacheItem& item) {
+        return !item.is_resident && item.epoch > 0;
+    };
     while (nums > 0 && !lru_cache_.empty()) {
-        auto [success, item] = lru_cache_.popWithCond(cond);
+        auto [success, item] = lru_cache_.popWithCond(stale_cond);
+        if (!success)
+            break;
+        pop_blocks.push_back(item.block_index);
+        nums--;
+    }
+
+    // Phase 2: fall back to normal LRU eviction
+    auto normal_cond = [](const CacheKeyGroupPair& key, const CacheItem& item) { return !item.is_resident; };
+    while (nums > 0 && !lru_cache_.empty()) {
+        auto [success, item] = lru_cache_.popWithCond(normal_cond);
         if (!success)
             break;
         pop_blocks.push_back(item.block_index);

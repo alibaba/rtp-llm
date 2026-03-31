@@ -151,6 +151,8 @@ public:
     std::vector<int>                 textTokensMask() const;
     bool                             isStreaming() const;
     int64_t                          streamId() const;
+    int64_t                          batchEpoch() const;
+    void                             setBatchEpoch(int64_t epoch);
     std::string                      adapterName() const;
     rtp_llm::SpecialTokens           specialTokens() const;
 
@@ -550,6 +552,7 @@ protected:
     int                                   max_seq_len_;
     int64_t                               vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
+    int64_t                               batch_epoch_ = 0;  // Batch Epoch ID: 0 = not assigned, >0 = batch-specific
     int64_t                               begin_time_us_;
     int64_t                               wait_time_us_ = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;

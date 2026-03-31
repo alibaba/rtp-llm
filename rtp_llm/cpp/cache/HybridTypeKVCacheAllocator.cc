@@ -332,7 +332,7 @@ void HybridTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
                 put_blocks.push_back(blocks[i]);
             }
             kv_cache_groups_[static_cast<size_t>(gid)]->insertIntoCache(
-                put_cache_keys, put_blocks, insert_info.is_resident);
+                put_cache_keys, put_blocks, insert_info.is_resident, insert_info.epoch);
         }
     }
 }
