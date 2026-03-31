@@ -92,6 +92,7 @@ def init_router(
         misc_config=py_env.misc_config.misc_config,
         arpc_config=py_env.arpc_config,
         grpc_config=py_env.grpc_config,
+        bailian_grpc_config=py_env.bailian_grpc_config,
         load_config=py_env.load_config,
     )
     init_deepep_wrapper(engine_config, model_config)
