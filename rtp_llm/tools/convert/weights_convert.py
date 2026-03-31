@@ -172,7 +172,7 @@ class WeightConverter:
         pc.world_size = _env_int("WORLD_SIZE", 1)
         pc.world_rank = _env_int("WORLD_RANK", 0)
         pc.local_world_size = _env_int("LOCAL_WORLD_SIZE", 1)
-        pc.ep_size = _env_int("EP_SIZE", 1)
+        pc.ep_size = _env_int("EP_SIZE", 0)
         pc.ffn_sp_size = _env_int("FFN_SP_SIZE", 1)
 
         if pc.world_size > 1 and pc.local_world_size == 1:
@@ -182,8 +182,21 @@ class WeightConverter:
                 else pc.world_size
             )
             pc.local_world_size = max(min(n, pc.world_size), 1)
-        if pc.ep_size == 1 and pc.tp_size * pc.dp_size > 1:
+        if pc.ep_size == 1:
+            assert pc.tp_size >= 1, (
+                f"Pure TP mode (ep_size=1) requires tp_size >= 1, got tp_size={pc.tp_size}"
+            )
+            assert pc.dp_size == 1, (
+                f"Pure TP mode (ep_size=1) requires dp_size == 1, got dp_size={pc.dp_size}"
+            )
+        elif pc.ep_size == 0:
+            logging.info("ep_size == 0, auto set to world size")
             pc.ep_size = pc.tp_size * pc.dp_size
+        else:
+            assert pc.ep_size == pc.tp_size * pc.dp_size, (
+                f"ep_size must be equal to 1 or tp_size * dp_size, got ep_size={pc.ep_size}, "
+                f"tp_size={pc.tp_size}, dp_size={pc.dp_size}"
+            )
 
         pc.tp_rank = _env_int("TP_RANK", pc.world_rank % pc.tp_size)
         pc.dp_rank = _env_int("DP_RANK", pc.world_rank // pc.tp_size)
