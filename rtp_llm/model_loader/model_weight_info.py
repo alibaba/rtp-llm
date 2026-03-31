@@ -6,9 +6,13 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.config.quant_config import Fp8PerTensorQuantConfig, QuantizationConfig, ModelOptFp4Config
+from rtp_llm.config.quant_config import (
+    Fp8PerTensorQuantConfig,
+    ModelOptFp4Config,
+    QuantizationConfig,
+)
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
-from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight, MoeWithSharedWeight
+from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
@@ -249,8 +253,9 @@ class ModelDeployWeightInfo:
 
         self.gen_dummy_reciprocal = (
             model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
-            and not isinstance(model_config.quant_config, 
-                               (Fp8PerTensorQuantConfig, ModelOptFp4Config))
+            and not isinstance(
+                model_config.quant_config, (Fp8PerTensorQuantConfig, ModelOptFp4Config)
+            )
             and not model_config.attn_config.use_mla
         )
 
@@ -431,7 +436,7 @@ class ModelDeployWeightInfo:
             return origin_weight_info
 
         def __update_weight_config(weight: WeightModule):
-            if isinstance(weight, FfnWeight) or isinstance(weight, MoeWithSharedWeight):
+            if isinstance(weight, FfnWeight):
                 logging.info(f"src_weights: {weight}")
                 params = weight.extract_params(weight.__class__, weight, None)
                 return weight.__class__(**params)

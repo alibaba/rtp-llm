@@ -10,8 +10,7 @@ from rtp_llm.model_loader.ffn_weight import (
     FfnWeight,
     MoeAtomicWeight,
     MoeConfig,
-    MoeWithSharedWeight,
-    SharedMoeConfig,
+    MoeWeight,
 )
 from rtp_llm.model_loader.linear_attn_weight import (
     LinearAttnAtomicWeight,
@@ -329,15 +328,21 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
 
     def _create_ffn_weight(self) -> List[WeightModule]:
         moe_config = self._get_moe_config()
-        shared_moe_config = self._get_shared_moe_config()
         ffn_config = FfnConfig(
             is_gated_activation=self._is_gated_activation,
             align_size=self._align_size,
         )
-        sub_weights = self._create_ffn_common_weights(moe_config, ffn_config)
-        sub_weights.extend(self._create_moe_expert_weights(moe_config))
+        moe_gate, shared_expert_gate, ffn_sub_weights = self._create_ffn_common_weights(
+            moe_config, ffn_config
+        )
+        moe_sub_weights = [moe_gate] + self._create_moe_expert_weights(moe_config)
 
-        return [MoeWithSharedWeight(sub_weights, shared_moe_config)]
+        result: List[WeightModule] = []
+        result.append(FfnWeight(sub_weights=ffn_sub_weights, config=ffn_config))
+        result.append(MoeWeight(sub_weights=moe_sub_weights, config=moe_config))
+        if shared_expert_gate is not None:
+            result.append(shared_expert_gate)
+        return result
 
     def _get_moe_config(self) -> MoeConfig:
         return MoeConfig(
@@ -345,22 +350,14 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
             align_size=self._align_size,
         )
 
-    def _get_shared_moe_config(self) -> SharedMoeConfig:
-        return SharedMoeConfig(
-            expert_num=self.expert_num_,
-            align_size=self._align_size,
+    def _create_ffn_common_weights(self, moe_config: MoeConfig, ffn_config: FfnConfig):
+        moe_gate = MoeAtomicWeight(
+            W.moe_gate,
+            [CkptWeightInfo(self.prefix + "layers.{i}.mlp.gate.weight", identity)],
+            process_fun=transpose,
+            config=moe_config,
         )
-
-    def _create_ffn_common_weights(
-        self, moe_config: MoeConfig, ffn_config: FfnConfig
-    ) -> List[WeightModule]:
-        return [
-            MoeAtomicWeight(
-                W.moe_gate,
-                [CkptWeightInfo(self.prefix + "layers.{i}.mlp.gate.weight", identity)],
-                process_fun=transpose,
-                config=moe_config,
-            ),
+        ffn_sub_weights = [
             FfnAtomicWeight(
                 W.ffn_w1,
                 [
@@ -394,17 +391,18 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 process_fun=transpose,
                 config=ffn_config,
             ),
-            FfnAtomicWeight(
-                W.shared_expert_gate,
-                [
-                    CkptWeightInfo(
-                        self.prefix + "layers.{i}.mlp.shared_expert_gate.weight",
-                        identity,
-                    )
-                ],
-                process_fun=transpose,
-            ),
         ]
+        shared_expert_gate = AtomicWeight(
+            W.shared_expert_gate,
+            [
+                CkptWeightInfo(
+                    self.prefix + "layers.{i}.mlp.shared_expert_gate.weight",
+                    identity,
+                )
+            ],
+            process_fun=transpose,
+        )
+        return moe_gate, shared_expert_gate, ffn_sub_weights
 
     def _create_moe_expert_weights(
         self, moe_config: MoeConfig
@@ -577,12 +575,6 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
 
     def _get_moe_config(self) -> MoeConfig:
         return MoeConfig(
-            expert_num=self.expert_num_,
-            align_size=self._align_size,
-        )
-
-    def _get_shared_moe_config(self) -> SharedMoeConfig:
-        return SharedMoeConfig(
             expert_num=self.expert_num_,
             align_size=self._align_size,
         )
