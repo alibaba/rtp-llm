@@ -989,8 +989,21 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
                 ts.tile_scheduler_metadata = None
                 ts.num_splits = None
 
-        q_batched = all_q.unsqueeze(0)
-        indices_batched = sharded_indices.unsqueeze(0)
+        all_q = all_q.contiguous()
+        q_batched = torch.as_strided(
+            all_q,
+            (1, *all_q.shape),
+            (0, *all_q.stride()),
+        )
+        # FlashMLA sparse decode checks strides with int32 bounds. For this path
+        # the external batch dim is always 1, so a zero batch stride is safe and
+        # avoids overflow when total_q * topk becomes very large.
+        sharded_indices = sharded_indices.contiguous()
+        indices_batched = torch.as_strided(
+            sharded_indices,
+            (1, *sharded_indices.shape),
+            (0, *sharded_indices.stride()),
+        )
 
         local_out, local_lse = flash_mla_with_kvcache(
             q=q_batched,
