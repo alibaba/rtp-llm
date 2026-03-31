@@ -257,22 +257,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# ROCm quantization kernels
-cc_library(
-    name = "rocm_quantization",
-    srcs = [
-        "rocm/quantization_rocm.cu",
-    ],
-    hdrs = [
-        "rocm/quantization_rocm.h",
-    ],
-    deps = rocm_deps + [
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
-    ],
-    copts = rocm_copts(),
-    visibility = ["//visibility:public"],
-)
-
 # ROCm fused QK RMSNorm kernels
 cc_library(
     name = "rocm_fused_qk_rmsnorm",
@@ -297,7 +281,6 @@ cc_library(
     name = "rocm_basic",
     deps = [
         ":rocm_layernorm",
-        ":rocm_quantization",
         ":rocm_fused_qk_rmsnorm",
     ],
     visibility = ["//visibility:public"],
@@ -507,24 +490,6 @@ cc_library(
 )
 
 cc_library(
-    name = "kernels_residual",
-    srcs = [
-        "add_residual_kernels.cu",
-    ],
-    hdrs = [
-        "add_residual_kernels.h",
-    ],
-    deps = any_cuda_deps + [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:launch_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
-    ],
-    copts = any_cuda_copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "kernels_copy",
     srcs = [
         "batch_copy.cu",
@@ -540,23 +505,6 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/cuda:cuda_utils_cu",
         "//rtp_llm/cpp/cuda:launch_utils",
-    ],
-    copts = any_cuda_copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "kernels_quantization",
-    srcs = [
-        "quantization_tensor.cu",
-    ],
-    hdrs = [
-        "quantization_tensor.h",
-    ],
-    deps = any_cuda_deps + [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -602,23 +550,6 @@ cc_library(
 )
 
 cc_library(
-    name = "kernels_eplb",
-    srcs = glob([
-        "eplb/*.cu",
-    ]),
-    hdrs = glob([
-        "eplb/*.h",
-    ]),
-    deps = any_cuda_deps + [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:launch_utils",
-    ],
-    copts = any_cuda_copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "kernels_mla",
     srcs = glob([
         "mla_kernels/*.cu",
@@ -645,11 +576,8 @@ cc_library(
         ":kernels_embedding",
         ":kernels_tensor_ops",
         ":kernels_kv_cache",
-        ":kernels_residual",
         ":kernels_copy",
-        ":kernels_quantization",
         ":kernels_moe",
-        ":kernels_eplb",
         ":kernels_mla",
         "//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:mmha",
     ] + select({
