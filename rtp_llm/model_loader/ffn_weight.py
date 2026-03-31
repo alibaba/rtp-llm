@@ -16,7 +16,6 @@ from rtp_llm.model_loader.weight_module import (
     WeightModule,
 )
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
-from rtp_llm.utils.util import check_with_info
 
 
 class FfnConfig(BaseModel):
@@ -449,108 +448,7 @@ class MoeWeight(CompositeWeight):
 
         self.moe_w1 = self.sub_weights[W.moe_w1]
         self.moe_w2 = self.sub_weights[W.moe_w2]
-        self.moe_gate = self.sub_weights[W.moe_gate]
-
-    @classmethod
-    def support(
-        cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
-    ) -> bool:
-        return False
-
-    def _load_raw_tensor(
-        self,
-        tensor_source: TensorSource,
-        layer_id: Optional[int],
-        device: str,
-        load_config: LoadConfig,
-    ):
-        tensor_source = _wrap_stacked_moe_source(
-            tensor_source, self.sub_weights, layer_id, load_config
-        )
-        return super()._load_raw_tensor(tensor_source, layer_id, device, load_config)
-
-    def _shuff_moe_weight(
-        self,
-        name: str,
-        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
-        load_config: LoadConfig,
-    ):
-        w = tensor.get(name)
-        if isinstance(w, torch.Tensor):
-            w = load_config.exported_device.shuffle_moe_weight(
-                w, load_config.compute_dtype, name
-            )
-            tensor[name] = w
-        elif isinstance(w, dict):
-            self._shuff_moe_weight(name, w, load_config)
-        else:
-            raise ValueError("unsupported type")
-
-    def _postprocess(
-        self, tensor: Dict[str, torch.Tensor], device: str, load_config: LoadConfig
-    ):
-        moe_w1 = tensor.get(W.moe_w1)
-        moe_w2 = tensor.get(W.moe_w2)
-        for weight, keys in [
-            (moe_w1, [W.moe_w1, W.moe_s1]),
-            (moe_w2, [W.moe_w2, W.moe_s2]),
-        ]:
-            if isinstance(weight, dict):
-                for key in keys:
-                    if key in weight:
-                        self._shuff_moe_weight(key, weight, load_config)
-            else:
-                self._shuff_moe_weight(keys[0], tensor, load_config)
-        return super()._postprocess(tensor, device, load_config)
-
-
-class SharedMoeConfig(FfnConfig, MoeConfig):
-    pass
-
-
-class MoeWithSharedWeight(CompositeWeight):
-    def __init__(
-        self,
-        sub_weights: List[Union[FfnAtomicWeight, MoeAtomicWeight]],
-        config: SharedMoeConfig,
-        **kwargs: Any,
-    ):
-        self.config = config
-        check_with_info(
-            all(
-                isinstance(sub_weight, MoeAtomicWeight)
-                or isinstance(sub_weight, FfnAtomicWeight)
-                or isinstance(sub_weight, QuantWeight)
-                for sub_weight in sub_weights
-            ),
-            f"{[sub_weight.__class__ for sub_weight in sub_weights]}, {sub_weights}",
-        )
-        kwargs["name"] = W.moe
-        sub_weight_dict = {sub_weight.name: sub_weight for sub_weight in sub_weights}
-
-        if W.ffn_w1 in sub_weight_dict and W.ffn_w3 in sub_weight_dict:
-            self.origin_w1 = sub_weight_dict[W.ffn_w1]
-            self.origin_w3 = sub_weight_dict[W.ffn_w3]
-            sub_weight_dict = fix_merge_w13(sub_weight_dict)
-        if W.ffn_b1 in sub_weight_dict and W.ffn_b3 in sub_weight_dict:
-            self.origin_b1 = sub_weight_dict[W.ffn_b1]
-            self.origin_b3 = sub_weight_dict[W.ffn_b3]
-            sub_weight_dict = fix_merge_b13(sub_weight_dict)
-
-        super().__init__(sub_weight_dict, **kwargs)
-
-        self.moe_w1 = self.sub_weights.get(W.moe_w1)
-        self.moe_w2 = self.sub_weights.get(W.moe_w2)
         self.moe_gate = self.sub_weights.get(W.moe_gate)
-        self.ffn_w1 = self.sub_weights.get(W.ffn_w1)
-        self.ffn_w2 = self.sub_weights.get(W.ffn_w2)
-        self.ffn_w3 = self.sub_weights.get(W.ffn_w3)
-        self.w13 = self.sub_weights.get(W.ffn_w13)
-        self.ffn_b1 = self.sub_weights.get(W.ffn_b1)
-        self.ffn_b2 = self.sub_weights.get(W.ffn_b2)
-        self.ffn_b3 = self.sub_weights.get(W.ffn_b3)
-        self.ffn_b13 = self.sub_weights.get(W.ffn_b13)
-        self.shared_expert_gate = self.sub_weights.get(W.shared_expert_gate)
 
     @classmethod
     def support(
@@ -574,15 +472,6 @@ class MoeWithSharedWeight(CompositeWeight):
             self._shuff_moe_weight(name, w, load_config)
         else:
             raise ValueError("unsupported type")
-
-    def _split(
-        self,
-        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
-        load_config: LoadConfig,
-    ):
-        res = super()._split(tensor, load_config)
-
-        return res
 
     def _postprocess(
         self, tensor: Dict[str, torch.Tensor], device: str, load_config: LoadConfig

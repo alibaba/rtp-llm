@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 import torch
 
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import (
@@ -14,7 +15,7 @@ from rtp_llm.model_loader.ffn_weight import (
     FfnWeight,
     MoeAtomicWeight,
     MoeConfig,
-    MoeWithSharedWeight,
+    MoeWeight,
 )
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
@@ -22,7 +23,6 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.deepseek_v2 import DeepSeekV2
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -209,18 +209,8 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                 expert_num=self.expert_num_,
             )
             layer_weights = [
-                MoeWithSharedWeight(
+                FfnWeight(
                     sub_weights=[
-                        MoeAtomicWeight(
-                            W.moe_gate,
-                            [
-                                CkptWeightInfo(
-                                    "model.layers.{i}.mlp.gate.weight", identity
-                                )
-                            ],
-                            transpose,
-                            config=moe_config,
-                        ),
                         FfnAtomicWeight(
                             W.ffn_w1,
                             [
@@ -266,6 +256,21 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             ),
                             config=ffn_config,
                         ),
+                    ],
+                    config=ffn_config,
+                ),
+                MoeWeight(
+                    sub_weights=[
+                        MoeAtomicWeight(
+                            W.moe_gate,
+                            [
+                                CkptWeightInfo(
+                                    "model.layers.{i}.mlp.gate.weight", identity
+                                )
+                            ],
+                            transpose,
+                            config=moe_config,
+                        ),
                         MoeAtomicWeight(
                             W.moe_w2,
                             [
@@ -296,7 +301,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                         ),
                     ],
                     config=moe_config,
-                )
+                ),
             ]
             if self.has_e_score_correction_bias:
                 layer_weights.append(
@@ -436,7 +441,9 @@ class Glm4Moe(DeepSeekV2):
     def _from_config_json(config: "ModelConfig", config_json: Dict[str, Any]):
         config.inter_size = config_json["intermediate_size"]
         config.attn_config.head_num = config_json["num_attention_heads"]
-        config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
+        config.attn_config.kv_head_num = config_json.get(
+            "num_key_value_heads", config.attn_config.head_num
+        )
         config.attn_config.size_per_head = (
             int(config_json.get("head_dim", 0))
             if "head_dim" in config_json
@@ -445,9 +452,9 @@ class Glm4Moe(DeepSeekV2):
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
         config.num_layers = config_json["num_hidden_layers"]
-        config.attn_config.rope_config.base = int(config_json.get(
-            "rope_theta", config.attn_config.rope_config.base
-        ))
+        config.attn_config.rope_config.base = int(
+            config_json.get("rope_theta", config.attn_config.rope_config.base)
+        )
         config.vocab_size = config_json["vocab_size"]
         partial_rotary_factor = config_json.get("partial_rotary_factor", 1.0)
         config.attn_config.rope_config.dim = int(

@@ -6,10 +6,12 @@ from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.ffn_weight import (
     FfnAtomicWeight,
     FfnConfig,
+    FfnWeight,
     MoeAtomicWeight,
     MoeConfig,
-    MoeWithSharedWeight,
+    MoeWeight,
 )
+from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -39,14 +41,8 @@ class QWenV2MoeWeight(QWenV2Weight):
             align_size=self._align_size,
         )
         return [
-            MoeWithSharedWeight(
+            FfnWeight(
                 sub_weights=[
-                    MoeAtomicWeight(
-                        W.moe_gate,
-                        [CkptWeightInfo("model.layers.{i}.mlp.gate.weight", identity)],
-                        transpose,
-                        config=moe_config,
-                    ),
                     FfnAtomicWeight(
                         W.ffn_w1,
                         [
@@ -80,6 +76,17 @@ class QWenV2MoeWeight(QWenV2Weight):
                         transpose,
                         config=ffn_config,
                     ),
+                ],
+                config=ffn_config,
+            ),
+            MoeWeight(
+                sub_weights=[
+                    MoeAtomicWeight(
+                        W.moe_gate,
+                        [CkptWeightInfo("model.layers.{i}.mlp.gate.weight", identity)],
+                        transpose,
+                        config=moe_config,
+                    ),
                     MoeAtomicWeight(
                         W.moe_w1,
                         [
@@ -108,20 +115,19 @@ class QWenV2MoeWeight(QWenV2Weight):
                         stack_,
                         config=moe_config,
                     ),
-                    MoeAtomicWeight(
-                        W.shared_expert_gate,
-                        [
-                            CkptWeightInfo(
-                                "model.layers.{i}.mlp.shared_expert_gate.weight",
-                                identity,
-                            )
-                        ],
-                        transpose,
-                        config=moe_config,
-                    ),
                 ],
                 config=moe_config,
-            )
+            ),
+            AtomicWeight(
+                W.shared_expert_gate,
+                [
+                    CkptWeightInfo(
+                        "model.layers.{i}.mlp.shared_expert_gate.weight",
+                        identity,
+                    )
+                ],
+                transpose,
+            ),
         ]
 
 

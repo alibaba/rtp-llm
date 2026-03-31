@@ -10,7 +10,7 @@ from rtp_llm.model_loader.ffn_weight import (
     FfnWeight,
     MoeAtomicWeight,
     MoeConfig,
-    MoeWithSharedWeight,
+    MoeWeight,
 )
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
@@ -130,19 +130,8 @@ class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                 expert_num=self.expert_num_,
             )
             layer_weights = [
-                MoeWithSharedWeight(
+                FfnWeight(
                     sub_weights=[
-                        MoeAtomicWeight(
-                            W.moe_gate,
-                            [
-                                CkptWeightInfo(
-                                    "language.model.layers.{i}.mlp.gate.weight",
-                                    identity,
-                                )
-                            ],
-                            transpose,
-                            config=moe_config,
-                        ),
                         FfnAtomicWeight(
                             W.ffn_w1,
                             [
@@ -188,6 +177,22 @@ class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                             ),
                             config=ffn_config,
                         ),
+                    ],
+                    config=ffn_config,
+                ),
+                MoeWeight(
+                    sub_weights=[
+                        MoeAtomicWeight(
+                            W.moe_gate,
+                            [
+                                CkptWeightInfo(
+                                    "language.model.layers.{i}.mlp.gate.weight",
+                                    identity,
+                                )
+                            ],
+                            transpose,
+                            config=moe_config,
+                        ),
                         MoeAtomicWeight(
                             W.moe_w2,
                             [
@@ -218,7 +223,7 @@ class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                         ),
                     ],
                     config=moe_config,
-                )
+                ),
             ]
             if self.has_e_score_correction_bias:
                 layer_weights.append(

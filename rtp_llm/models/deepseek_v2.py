@@ -15,7 +15,7 @@ from rtp_llm.model_loader.ffn_weight import (
     FfnWeight,
     MoeAtomicWeight,
     MoeConfig,
-    MoeWithSharedWeight,
+    MoeWeight,
 )
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
@@ -200,8 +200,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                         W.mla_indexer_k_w,
                         [
                             CkptWeightInfo(
-                                "model.layers.{i}.self_attn.indexer.wk.weight",
-                                identity
+                                "model.layers.{i}.self_attn.indexer.wk.weight", identity
                             )
                         ],
                         transpose,
@@ -300,18 +299,8 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 expert_num=self.expert_num_,
             )
             layer_weights = [
-                MoeWithSharedWeight(
+                FfnWeight(
                     sub_weights=[
-                        MoeAtomicWeight(
-                            W.moe_gate,
-                            [
-                                CkptWeightInfo(
-                                    "model.layers.{i}.mlp.gate.weight", identity
-                                )
-                            ],
-                            transpose,
-                            config=moe_config,
-                        ),
                         FfnAtomicWeight(
                             W.ffn_w1,
                             [
@@ -357,6 +346,21 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             ),
                             config=ffn_config,
                         ),
+                    ],
+                    config=ffn_config,
+                ),
+                MoeWeight(
+                    sub_weights=[
+                        MoeAtomicWeight(
+                            W.moe_gate,
+                            [
+                                CkptWeightInfo(
+                                    "model.layers.{i}.mlp.gate.weight", identity
+                                )
+                            ],
+                            transpose,
+                            config=moe_config,
+                        ),
                         MoeAtomicWeight(
                             W.moe_w2,
                             [
@@ -387,7 +391,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                         ),
                     ],
                     config=moe_config,
-                )
+                ),
             ]
             if self.has_e_score_correction_bias:
                 layer_weights.append(

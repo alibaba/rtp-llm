@@ -86,7 +86,7 @@ class QWenV3MoeWeight(QWenV2MoeWeight):
                     ),
                 ],
                 config=moe_config,
-            )
+            ),
         ]
 
 

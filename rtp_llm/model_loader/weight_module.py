@@ -158,7 +158,7 @@ class WeightModule(ABC):
         device: str,
         load_config: LoadConfig,
     ):
-        raw_tensors = self._load_raw_tenwsor(
+        raw_tensors = self._load_raw_tensor(
             tensor_source, layer_id, device, load_config
         )
 
