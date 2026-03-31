@@ -175,4 +175,81 @@ void invokeCPCacheScatterPaged(void**       dst_block_addrs,
                                                                                      addr_table_size);
 }
 
+__global__ void cpCacheScatterPagedPackedScaleKernel(void**     dst_block_addrs,
+                                                     const int* dst_block_ids,
+                                                     void**     src_block_addrs,
+                                                     const int* src_block_ids,
+                                                     int        cp_size,
+                                                     int        block_size,
+                                                     int        total_tokens,
+                                                     int        quant_bytes_per_token,
+                                                     int        scale_bytes_per_token,
+                                                     int        addr_table_size) {
+    const int vb = blockIdx.x;
+    (void)addr_table_size;
+
+    const int    tokens_per_vb      = block_size * cp_size;
+    const int    vb_token_start     = vb * tokens_per_vb;
+    const size_t scale_region_start = static_cast<size_t>(block_size) * static_cast<size_t>(quant_bytes_per_token);
+
+    for (int t = 0; t < tokens_per_vb; ++t) {
+        const int global_token = vb_token_start + t;
+        if (global_token >= total_tokens) {
+            break;
+        }
+
+        const int peer          = t % cp_size;
+        const int slot_in_peer  = t / cp_size;
+        const int src_idx       = vb * cp_size + peer;
+        const int src_bid       = src_block_ids[src_idx];
+        const int dst_block_idx = global_token / block_size;
+        const int dst_slot      = global_token % block_size;
+        const int dst_bid       = dst_block_ids[dst_block_idx];
+
+        const char* src = static_cast<const char*>(src_block_addrs[src_bid]);
+        char*       dst = static_cast<char*>(dst_block_addrs[dst_bid]);
+
+        const size_t src_quant_off = static_cast<size_t>(slot_in_peer) * static_cast<size_t>(quant_bytes_per_token);
+        const size_t dst_quant_off = static_cast<size_t>(dst_slot) * static_cast<size_t>(quant_bytes_per_token);
+        copyTokenData(dst + dst_quant_off, src + src_quant_off, quant_bytes_per_token);
+
+        const size_t src_scale_off =
+            scale_region_start + static_cast<size_t>(slot_in_peer) * static_cast<size_t>(scale_bytes_per_token);
+        const size_t dst_scale_off =
+            scale_region_start + static_cast<size_t>(dst_slot) * static_cast<size_t>(scale_bytes_per_token);
+        copyTokenData(dst + dst_scale_off, src + src_scale_off, scale_bytes_per_token);
+    }
+}
+
+void invokeCPCacheScatterPagedPackedScale(void**       dst_block_addrs,
+                                          const int*   dst_block_ids,
+                                          void**       src_block_addrs,
+                                          const int*   src_block_ids,
+                                          int          virtual_block_count,
+                                          int          cp_size,
+                                          int          block_size,
+                                          int          total_tokens,
+                                          int          quant_bytes_per_token,
+                                          int          scale_bytes_per_token,
+                                          int          addr_table_size,
+                                          cudaStream_t stream) {
+    if (virtual_block_count <= 0 || cp_size <= 1 || total_tokens <= 0) {
+        return;
+    }
+    assert(quant_bytes_per_token > 0);
+    assert(scale_bytes_per_token > 0);
+
+    const int threads_per_block = 256;
+    cpCacheScatterPagedPackedScaleKernel<<<virtual_block_count, threads_per_block, 0, stream>>>(dst_block_addrs,
+                                                                                                dst_block_ids,
+                                                                                                src_block_addrs,
+                                                                                                src_block_ids,
+                                                                                                cp_size,
+                                                                                                block_size,
+                                                                                                total_tokens,
+                                                                                                quant_bytes_per_token,
+                                                                                                scale_bytes_per_token,
+                                                                                                addr_table_size);
+}
+
 }  // namespace rtp_llm

@@ -82,4 +82,20 @@ void invokeCPCacheScatterPaged(void**       dst_block_addrs,
                                int          addr_table_size,
                                cudaStream_t stream);
 
+/// Paged variant for indexer K cache stored in kv_scale with packed layout:
+/// [all token fp8 K][all token fp32 scales], i.e. scales live at block tail
+/// instead of being interleaved per token.
+void invokeCPCacheScatterPagedPackedScale(void**       dst_block_addrs,
+                                          const int*   dst_block_ids,
+                                          void**       src_block_addrs,
+                                          const int*   src_block_ids,
+                                          int          virtual_block_count,
+                                          int          cp_size,
+                                          int          block_size,
+                                          int          total_tokens,
+                                          int          quant_bytes_per_token,
+                                          int          scale_bytes_per_token,
+                                          int          addr_table_size,
+                                          cudaStream_t stream);
+
 }  // namespace rtp_llm

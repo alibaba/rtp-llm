@@ -8,6 +8,32 @@
 
 namespace rtp_llm {
 
+namespace {
+
+bool inferPackedIndexerScaleLayout(const CacheConfig& cache_config,
+                                   int                scale_bytes_per_token,
+                                   int&               quant_bytes_per_token,
+                                   int&               tail_scale_bytes_per_token) {
+    if (!cache_config.use_mla || scale_bytes_per_token <= 0) {
+        return false;
+    }
+
+    // Indexer K cache in kv_scale uses packed block layout:
+    //   [all token fp8 K][all token fp32 scales]
+    // For each quant group, 128 bytes FP8 data are paired with 4 bytes scale,
+    // so total_bytes_per_token = quant_bytes_per_token + tail_scale_bytes_per_token
+    // and quant : scale = 32 : 1.
+    if (scale_bytes_per_token % 33 != 0) {
+        return false;
+    }
+
+    tail_scale_bytes_per_token = scale_bytes_per_token / 33;
+    quant_bytes_per_token      = scale_bytes_per_token - tail_scale_bytes_per_token;
+    return quant_bytes_per_token > 0 && tail_scale_bytes_per_token > 0;
+}
+
+}  // namespace
+
 // --- StagingPlan RAII destructor ---
 
 CPCacheScatterHelper::StagingPlan::~StagingPlan() {
@@ -90,11 +116,11 @@ void CPCacheScatterHelper::scatterAndRelease(std::unique_ptr<StagingPlan> plan,
     auto       stream_opaque = getOrCreateScatterStream();
     auto       stream        = reinterpret_cast<cudaStream_t>(stream_opaque);
     const bool use_hybrid    = cache_config.groupNums() > 1;
-    const int  block_size   = static_cast<int>(cache_config.seq_size_per_block);
-    const int  vblock_count = plan->vblock_count;
-    const int  cp_size      = plan->cp_size;
-    const int  staging_cnt  = vblock_count * cp_size;
-    const int  max_tokens   = vblock_count * cp_size * block_size;
+    const int  block_size    = static_cast<int>(cache_config.seq_size_per_block);
+    const int  vblock_count  = plan->vblock_count;
+    const int  cp_size       = plan->cp_size;
+    const int  staging_cnt   = vblock_count * cp_size;
+    const int  max_tokens    = vblock_count * cp_size * block_size;
 
     RTP_LLM_CHECK_WITH_INFO(total_tokens >= 0, "[SCATTER-PAGED] invalid total_tokens=%d", total_tokens);
     RTP_LLM_CHECK_WITH_INFO(total_tokens <= max_tokens,
@@ -232,6 +258,10 @@ void CPCacheScatterHelper::scatterAndRelease(std::unique_ptr<StagingPlan> plan,
             size_t sc_stride = sample_parts[1].size_bytes;
             int    sc_elem   = static_cast<int>(sc_stride / block_size);
             if (sc_elem > 0) {
+                int        quant_bytes_per_token      = 0;
+                int        tail_scale_bytes_per_token = 0;
+                const bool packed_indexer_scale       = inferPackedIndexerScaleLayout(
+                    cache_config, sc_elem, quant_bytes_per_token, tail_scale_bytes_per_token);
                 std::vector<void*> sc_dst_addrs(addr_table_size, nullptr);
                 std::vector<void*> sc_src_addrs(addr_table_size, nullptr);
                 for (int b = 0; b < decode_blocks; ++b) {
@@ -263,17 +293,32 @@ void CPCacheScatterHelper::scatterAndRelease(std::unique_ptr<StagingPlan> plan,
                 cudaMemcpyAsync(
                     sc_src_ptr, sc_src_addrs.data(), addr_table_size * sizeof(void*), cudaMemcpyHostToDevice, stream);
 
-                invokeCPCacheScatterPaged(reinterpret_cast<void**>(sc_dst_ptr),
-                                          reinterpret_cast<int*>(dst_ids_gpu_ptr),
-                                          reinterpret_cast<void**>(sc_src_ptr),
-                                          reinterpret_cast<int*>(src_ids_gpu_ptr),
-                                          vblock_count,
-                                          cp_size,
-                                          block_size,
-                                          layer_total_tokens,
-                                          sc_elem,
-                                          addr_table_size,
-                                          stream);
+                if (packed_indexer_scale) {
+                    invokeCPCacheScatterPagedPackedScale(reinterpret_cast<void**>(sc_dst_ptr),
+                                                         reinterpret_cast<int*>(dst_ids_gpu_ptr),
+                                                         reinterpret_cast<void**>(sc_src_ptr),
+                                                         reinterpret_cast<int*>(src_ids_gpu_ptr),
+                                                         vblock_count,
+                                                         cp_size,
+                                                         block_size,
+                                                         layer_total_tokens,
+                                                         quant_bytes_per_token,
+                                                         tail_scale_bytes_per_token,
+                                                         addr_table_size,
+                                                         stream);
+                } else {
+                    invokeCPCacheScatterPaged(reinterpret_cast<void**>(sc_dst_ptr),
+                                              reinterpret_cast<int*>(dst_ids_gpu_ptr),
+                                              reinterpret_cast<void**>(sc_src_ptr),
+                                              reinterpret_cast<int*>(src_ids_gpu_ptr),
+                                              vblock_count,
+                                              cp_size,
+                                              block_size,
+                                              layer_total_tokens,
+                                              sc_elem,
+                                              addr_table_size,
+                                              stream);
+                }
             }
         }
     }

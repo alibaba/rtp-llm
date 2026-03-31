@@ -22,7 +22,8 @@ protected:
         ASSERT_NE(device_, nullptr);
     }
 
-    std::shared_ptr<KVCacheManager> createMlaCacheManager(int layer_num, int block_num, int block_size) {
+    std::shared_ptr<KVCacheManager>
+    createMlaCacheManager(int layer_num, int block_num, int block_size, size_t scale_bytes_per_token = 0) {
         // MLA config: use MLAKVCacheSpec so convertIndexToBuffer returns fused kv
         CacheConfig config;
         config.dtype              = DataType::TYPE_FP16;
@@ -54,9 +55,13 @@ protected:
 
         config.kv_block_stride_bytes = spec->block_size_bytes();
         config.kv_block_size_bytes   = static_cast<size_t>(spec->block_size_bytes() * layer_num);
-        config.block_size_bytes      = config.kv_block_size_bytes;
+        if (scale_bytes_per_token > 0) {
+            config.kv_scale_stride_bytes = static_cast<size_t>(block_size) * scale_bytes_per_token;
+            config.kv_scale_size_bytes   = config.kv_scale_stride_bytes * static_cast<size_t>(layer_num);
+        }
+        config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
-        const size_t per_layer_stride = config.kv_block_stride_bytes;
+        const size_t per_layer_stride = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
         config.layer_to_block_stride_bytes.assign(layer_num, static_cast<int>(per_layer_stride));
 
         auto mgr = std::make_shared<KVCacheManager>(config, device_);
@@ -292,6 +297,176 @@ TEST_F(CPCacheScatterHelperTest, ScatterAndReleaseHandlesPartialLastBlock) {
         const uint8_t* ptr = result.data() + t * elem_stride;
         for (int b = 0; b < elem_stride; ++b) {
             ASSERT_EQ(ptr[b], 0xAB) << "untouched token=" << t << " byte=" << b;
+        }
+    }
+
+    mgr->getBlockPool()->requestFree(decode_block_ids);
+}
+
+TEST_F(CPCacheScatterHelperTest, ScatterAndReleaseAlsoScattersScaleForPartialLastBlock) {
+    const int    layer_num             = 1;
+    const int    block_num             = 30;
+    const int    block_size            = 4;
+    const int    cp_size               = 2;
+    const int    vblock_count          = 1;
+    const int    total_tokens          = 3;
+    const size_t scale_bytes_per_token = 20;
+    auto mgr = createMlaCacheManager(layer_num, block_num, block_size, /*scale_bytes_per_token=*/scale_bytes_per_token);
+
+    CPCacheScatterHelper helper(mgr.get(), device_);
+    auto                 plan = helper.prepareStagingPlan(vblock_count, cp_size, layer_num);
+    ASSERT_NE(plan, nullptr);
+
+    auto sample_parts = mgr->convertIndexToBuffer(plan->staging_block_ids[0], 0, 1, 0);
+    ASSERT_EQ(sample_parts.size(), 2u);
+
+    const int kv_elem_stride    = static_cast<int>(sample_parts[0].size_bytes / block_size);
+    const int scale_elem_stride = static_cast<int>(sample_parts[1].size_bytes / block_size);
+    ASSERT_GT(kv_elem_stride, 0);
+    ASSERT_GT(scale_elem_stride, 0);
+
+    const size_t kv_block_bytes    = static_cast<size_t>(block_size) * kv_elem_stride;
+    const size_t scale_block_bytes = static_cast<size_t>(block_size) * scale_elem_stride;
+
+    for (int p = 0; p < cp_size; ++p) {
+        int  bid   = plan->staging_block_ids[p];
+        auto parts = mgr->convertIndexToBuffer(bid, 0, 1, 0);
+        ASSERT_EQ(parts.size(), 2u);
+
+        std::vector<uint8_t> kv_block_data(kv_block_bytes, 0xEE);
+        std::vector<uint8_t> scale_block_data(scale_block_bytes, 0xDD);
+        for (int s = 0; s < block_size; ++s) {
+            int     global_token = s * cp_size + p;
+            uint8_t kv_tag       = static_cast<uint8_t>(global_token & 0xFF);
+            uint8_t scale_tag    = static_cast<uint8_t>((global_token + 0x40) & 0xFF);
+            std::memset(kv_block_data.data() + s * kv_elem_stride, kv_tag, kv_elem_stride);
+            std::memset(scale_block_data.data() + s * scale_elem_stride, scale_tag, scale_elem_stride);
+        }
+        device_->copy({Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, {kv_block_bytes}, parts[0].addr),
+                       Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {kv_block_bytes}, kv_block_data.data())});
+        device_->copy(
+            {Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, {scale_block_bytes}, parts[1].addr),
+             Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {scale_block_bytes}, scale_block_data.data())});
+    }
+    device_->syncAndCheck();
+
+    auto decode_block_ids = mgr->getBlockPool()->malloc(1);
+    ASSERT_EQ(static_cast<int>(decode_block_ids.size()), 1);
+    auto block_ids_holder            = std::make_shared<BlockIds>();
+    block_ids_holder->blocks()       = decode_block_ids;
+    GroupBlockIds block_ids_by_group = {block_ids_holder};
+
+    auto decode_parts = mgr->convertIndexToBuffer(decode_block_ids[0], 0, 1, 0);
+    ASSERT_EQ(decode_parts.size(), 2u);
+    std::vector<uint8_t> init_kv(kv_block_bytes, 0xAB);
+    std::vector<uint8_t> init_scale(scale_block_bytes, 0xBC);
+    device_->copy({Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, {kv_block_bytes}, decode_parts[0].addr),
+                   Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {kv_block_bytes}, init_kv.data())});
+    device_->copy({Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, {scale_block_bytes}, decode_parts[1].addr),
+                   Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {scale_block_bytes}, init_scale.data())});
+    device_->syncAndCheck();
+
+    helper.scatterAndRelease(std::move(plan), block_ids_by_group, mgr->cacheConfig(), layer_num, total_tokens);
+
+    std::vector<uint8_t> kv_result(kv_block_bytes);
+    std::vector<uint8_t> scale_result(scale_block_bytes);
+    device_->copy({Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {kv_block_bytes}, kv_result.data()),
+                   Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, {kv_block_bytes}, decode_parts[0].addr)});
+    device_->copy({Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {scale_block_bytes}, scale_result.data()),
+                   Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, {scale_block_bytes}, decode_parts[1].addr)});
+    device_->syncAndCheck();
+
+    for (int t = 0; t < total_tokens; ++t) {
+        const uint8_t  expected_kv    = static_cast<uint8_t>(t & 0xFF);
+        const uint8_t  expected_scale = static_cast<uint8_t>((t + 0x40) & 0xFF);
+        const uint8_t* kv_ptr         = kv_result.data() + t * kv_elem_stride;
+        const uint8_t* scale_ptr      = scale_result.data() + t * scale_elem_stride;
+        for (int b = 0; b < kv_elem_stride; ++b) {
+            ASSERT_EQ(kv_ptr[b], expected_kv) << "kv token=" << t << " byte=" << b;
+        }
+        for (int b = 0; b < scale_elem_stride; ++b) {
+            ASSERT_EQ(scale_ptr[b], expected_scale) << "scale token=" << t << " byte=" << b;
+        }
+    }
+    for (int t = total_tokens; t < block_size; ++t) {
+        const uint8_t* kv_ptr    = kv_result.data() + t * kv_elem_stride;
+        const uint8_t* scale_ptr = scale_result.data() + t * scale_elem_stride;
+        for (int b = 0; b < kv_elem_stride; ++b) {
+            ASSERT_EQ(kv_ptr[b], 0xAB) << "untouched kv token=" << t << " byte=" << b;
+        }
+        for (int b = 0; b < scale_elem_stride; ++b) {
+            ASSERT_EQ(scale_ptr[b], 0xBC) << "untouched scale token=" << t << " byte=" << b;
+        }
+    }
+
+    mgr->getBlockPool()->requestFree(decode_block_ids);
+}
+
+TEST_F(CPCacheScatterHelperTest, ScatterPackedIndexerScaleLayout) {
+    const int    layer_num             = 1;
+    const int    block_num             = 30;
+    const int    block_size            = 4;
+    const int    cp_size               = 2;
+    const int    vblock_count          = 1;
+    const int    total_tokens          = 4;
+    const size_t scale_bytes_per_token = 132;
+    const int    quant_bytes_per_token = 128;
+    const int    scale_tail_bytes      = 4;
+    auto mgr = createMlaCacheManager(layer_num, block_num, block_size, /*scale_bytes_per_token=*/scale_bytes_per_token);
+
+    CPCacheScatterHelper helper(mgr.get(), device_);
+    auto                 plan = helper.prepareStagingPlan(vblock_count, cp_size, layer_num);
+    ASSERT_NE(plan, nullptr);
+
+    auto sample_parts = mgr->convertIndexToBuffer(plan->staging_block_ids[0], 0, 1, 0);
+    ASSERT_EQ(sample_parts.size(), 2u);
+    const int scale_elem_stride = static_cast<int>(sample_parts[1].size_bytes / block_size);
+    ASSERT_EQ(scale_elem_stride, quant_bytes_per_token + scale_tail_bytes);
+
+    const size_t scale_block_bytes = static_cast<size_t>(block_size) * scale_elem_stride;
+    for (int p = 0; p < cp_size; ++p) {
+        auto parts = mgr->convertIndexToBuffer(plan->staging_block_ids[p], 0, 1, 0);
+        ASSERT_EQ(parts.size(), 2u);
+
+        std::vector<uint8_t> packed_scale(scale_block_bytes, 0);
+        for (int s = 0; s < block_size; ++s) {
+            const int     global_token = s * cp_size + p;
+            const uint8_t q_tag        = static_cast<uint8_t>(0x10 + global_token);
+            const uint8_t s_tag        = static_cast<uint8_t>(0x80 + global_token);
+            std::memset(packed_scale.data() + s * quant_bytes_per_token, q_tag, quant_bytes_per_token);
+            std::memset(packed_scale.data() + block_size * quant_bytes_per_token + s * scale_tail_bytes,
+                        s_tag,
+                        scale_tail_bytes);
+        }
+
+        device_->copy({Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, {scale_block_bytes}, parts[1].addr),
+                       Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {scale_block_bytes}, packed_scale.data())});
+    }
+    device_->syncAndCheck();
+
+    auto decode_block_ids = mgr->getBlockPool()->malloc(1);
+    ASSERT_EQ(static_cast<int>(decode_block_ids.size()), 1);
+    auto block_ids_holder      = std::make_shared<BlockIds>();
+    block_ids_holder->blocks() = decode_block_ids;
+
+    helper.scatterAndRelease(std::move(plan), {block_ids_holder}, mgr->cacheConfig(), layer_num, total_tokens);
+
+    auto                 decode_parts = mgr->convertIndexToBuffer(decode_block_ids[0], 0, 1, 0);
+    std::vector<uint8_t> scale_result(scale_block_bytes);
+    device_->copy({Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {scale_block_bytes}, scale_result.data()),
+                   Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, {scale_block_bytes}, decode_parts[1].addr)});
+    device_->syncAndCheck();
+
+    for (int t = 0; t < total_tokens; ++t) {
+        const uint8_t* q_ptr       = scale_result.data() + t * quant_bytes_per_token;
+        const uint8_t* scale_ptr   = scale_result.data() + block_size * quant_bytes_per_token + t * scale_tail_bytes;
+        const uint8_t  expected_q  = static_cast<uint8_t>(0x10 + t);
+        const uint8_t  expected_sc = static_cast<uint8_t>(0x80 + t);
+        for (int b = 0; b < quant_bytes_per_token; ++b) {
+            ASSERT_EQ(q_ptr[b], expected_q) << "packed-q token=" << t << " byte=" << b;
+        }
+        for (int b = 0; b < scale_tail_bytes; ++b) {
+            ASSERT_EQ(scale_ptr[b], expected_sc) << "packed-scale token=" << t << " byte=" << b;
         }
     }
 
