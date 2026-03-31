@@ -32,12 +32,18 @@ class RMSResNorm(BaseResNorm):
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, eps)
 
-    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+    def forward(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         stream_id = torch.cuda.current_stream().cuda_stream
         rtp_llm_ops.fused_add_rmsnorm(
-            hidden_states, residual, self.weight.data, self.variance_epsilon, stream_id
+            hidden_states,
+            residual,
+            self.weight.data,
+            self.variance_epsilon,
+            stream_id,
         )
-        return hidden_states
+        return hidden_states, residual
 
 
 class QKRMSNorm(nn.Module):

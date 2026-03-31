@@ -40,7 +40,9 @@ class RMSResNorm(BaseResNorm):
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, eps)
 
-    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+    def forward(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         output = torch.empty_like(hidden_states)
         residual_out = torch.empty_like(hidden_states)
         fused_add_rmsnorm(
@@ -50,11 +52,9 @@ class RMSResNorm(BaseResNorm):
             residual_out,
             self.weight.data,
             self.variance_epsilon,
-            0, #use_model_sensitive_rmsnorm
+            0,
         )
-        # NOTE: copy_ may introduce extra overhead.
-        residual.copy_(residual_out)
-        return output
+        return output, residual_out
 
 
 class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
