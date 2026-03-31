@@ -9,20 +9,10 @@ namespace rtp_llm {
 namespace transfer {
 namespace tcp_test_internal {
 
-/// Fills device_reserve_memory_bytes for tests that call DeviceFactory::initDevices with a
-/// default-constructed DeviceResourceConfig (otherwise the struct default is negative).
+/// No-op after TrackerAllocator removal — PyTorch native allocator manages GPU memory.
+/// Kept as a stub so callers don't need to be changed.
 inline void apply_device_reserve_from_env(DeviceResourceConfig& cfg) {
-    constexpr int64_t k_default_reserve_bytes = 512000000;
-    cfg.device_reserve_memory_bytes           = k_default_reserve_bytes;
-    if (const char* p = std::getenv("DEVICE_RESERVE_MEMORY_BYTES")) {
-        try {
-            const auto v = std::stoll(p);
-            if (v > 0) {
-                cfg.device_reserve_memory_bytes = v;
-            }
-        } catch (...) {
-        }
-    }
+    // device_reserve_memory_bytes was removed; nothing to configure.
 }
 
 }  // namespace tcp_test_internal

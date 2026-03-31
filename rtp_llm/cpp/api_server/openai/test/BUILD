@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
-load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
+load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_copts = [
     "-fno-access-control",

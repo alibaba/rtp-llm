@@ -17,10 +17,11 @@ namespace rtp_llm {
 /// @note Requires (num_tokens + cp_padding_size) to be divisible by (2 * cp_size)
 class ZigZagProcessor: public IContextParallelProcessor {
 public:
+    explicit ZigZagProcessor(const ParallelismConfig& parallelism_config):
+        IContextParallelProcessor(parallelism_config) {}
     ~ZigZagProcessor() override = default;
 
-    size_t handleOutputs(DeviceBase*                               device,
-                         BufferPtr&                                hidden_states,
+    size_t handleOutputs(torch::Tensor&                            hidden_states,
                          const GptModelInputs&                     inputs,
                          const torch_ext::PyContextParallelParams& cp_params) override;
 

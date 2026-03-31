@@ -9,18 +9,15 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
 KVCacheManager::KVCacheManager(const CacheConfig&                 config,
-                               rtp_llm::DeviceBase*               device,
                                bool                               warmup,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
                                const KVCacheConfig&               kv_cache_config,
@@ -30,7 +27,6 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const PDSepConfig&                 pd_sep_config,
                                const CacheStoreConfig&            cache_store_config):
     config_(config),
-    device_(device),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
     parallelism_config_(parallelism_config),
@@ -68,11 +64,11 @@ bool KVCacheManager::init() {
     const bool is_hybrid = config_.groupNums() > 1;
     if (is_hybrid) {
         allocator_ = std::make_shared<rtp_llm::HybridTypeKVCacheAllocator>(
-            config_, device_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
+            config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
         RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "HybridTypeKVCacheAllocator init failed");
     } else {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(
-            config_, device_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
+            config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
         RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "SingleTypeKVCacheAllocator init failed");
     }
 
@@ -137,7 +133,7 @@ void KVCacheManager::blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping
     return allocator_->blockBatchCopy(copy_mapping);
 }
 
-void KVCacheManager::blockBatchCopy(const rtp_llm::Buffer& copy_mapping) {
+void KVCacheManager::blockBatchCopy(const torch::Tensor& copy_mapping) {
     return allocator_->blockBatchCopy(copy_mapping);
 }
 
@@ -153,17 +149,17 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache
     return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
 }
 
-// Write one KV block (optionally per-layer) from host/device buffers for test
-bool KVCacheManager::setKVBlockValue(int              block_index,
-                                     int              layer_id,
-                                     rtp_llm::Buffer& k_buffer,
-                                     rtp_llm::Buffer& v_buffer) {
+// Write one KV block (optionally per-layer) from host/device tensors for test
+bool KVCacheManager::setKVBlockValue(int                  block_index,
+                                     int                  layer_id,
+                                     const torch::Tensor& k_buffer,
+                                     const torch::Tensor& v_buffer) {
     // Basic size/type validation to prevent out-of-bounds copy
     auto&  spec             = config_.cache_specs[0];
     size_t expected_k_bytes = spec->k_block_size_bytes();
     size_t expected_v_bytes = spec->v_block_size_bytes();
-    size_t src_k_bytes      = k_buffer.size() * rtp_llm::getTypeSize(k_buffer.type());
-    size_t src_v_bytes      = v_buffer.size() * rtp_llm::getTypeSize(v_buffer.type());
+    size_t src_k_bytes      = k_buffer.nbytes();
+    size_t src_v_bytes      = v_buffer.nbytes();
     if (src_k_bytes < expected_k_bytes || src_v_bytes < expected_v_bytes) {
         RTP_LLM_LOG_ERROR("setKVBlockValue src bytes too small: k[%zu]<[%zu] or v[%zu]<[%zu]",
                           src_k_bytes,
@@ -181,9 +177,9 @@ bool KVCacheManager::setKVBlockValue(int              block_index,
         return false;
     }
 
-    auto copyFunc = [&](rtp_llm::Buffer& src_buffer, const BlockInfo& dst_block, size_t dst_byte_offset) -> bool {
+    auto copyFunc = [&](const torch::Tensor& src_tensor, const BlockInfo& dst_block, size_t dst_byte_offset) -> bool {
         const size_t dst_bytes = dst_block.size_bytes;
-        const size_t src_bytes = src_buffer.sizeBytes();
+        const size_t src_bytes = src_tensor.nbytes();
         if (dst_bytes < dst_byte_offset + src_bytes) {
             RTP_LLM_LOG_ERROR("dst block bytes[%zu] < dst_offset[%zu] + src bytes[%zu] in setKVBlockValue(layer=%d)",
                               dst_bytes,
@@ -193,11 +189,15 @@ bool KVCacheManager::setKVBlockValue(int              block_index,
             return false;
         }
 
-        auto*           dst_ptr   = static_cast<char*>(dst_block.addr) + dst_byte_offset;
-        auto            dst_where = dst_block.is_cuda ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
-        rtp_llm::Buffer dst_view(dst_where, src_buffer.type(), {src_buffer.size()}, dst_ptr);
-        rtp_llm::Buffer src_view(src_buffer.where(), src_buffer.type(), {src_buffer.size()}, src_buffer.data());
-        device_->copy({dst_view, src_view});
+        auto* dst_ptr    = static_cast<char*>(dst_block.addr) + dst_byte_offset;
+        auto  dst_device = dst_block.is_cuda ? torch::kCUDA : torch::kCPU;
+        auto  src_device = src_tensor.is_cuda() ? torch::kCUDA : torch::kCPU;
+        auto  dst_t      = torch::from_blob(
+            dst_ptr, {(int64_t)src_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(dst_device));
+        auto src_t = torch::from_blob(src_tensor.data_ptr(),
+                                      {(int64_t)src_bytes},
+                                      torch::TensorOptions().dtype(torch::kUInt8).device(src_device));
+        dst_t.copy_(src_t);
         return true;
     };
 
@@ -209,11 +209,11 @@ bool KVCacheManager::setKVBlockValue(int              block_index,
         return false;
     }
 
-    device_->syncAndCheck();
+    cudaSyncAndCheck();
     return true;
 }
 
-bool KVCacheManager::setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer) {
+bool KVCacheManager::setKVBlockValue(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer) {
     if (block_index < 0 || block_index >= config_.block_num) {
         RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_num);
         return false;
@@ -422,8 +422,18 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
 
 // 系统资源管理
 
-void KVCacheManager::regUserMr(size_t model_id) {
-    allocator_->regUserMr(model_id);
+void KVCacheManager::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
+    allocator_->regUserMr(model_id, std::move(cache_store));
+}
+
+void KVCacheManager::setCacheStore(std::shared_ptr<CacheStore> cache_store) {
+    std::lock_guard<std::mutex> lock(cache_store_mutex_);
+    cache_store_ = std::move(cache_store);
+}
+
+std::shared_ptr<CacheStore> KVCacheManager::getCacheStore() const {
+    std::lock_guard<std::mutex> lock(cache_store_mutex_);
+    return cache_store_;
 }
 
 bool KVCacheManager::hasActiveConnectors() const {
@@ -462,7 +472,6 @@ void KVCacheManager::initConnectorCoordinator() {
                                                                  parallelism_config_,
                                                                  sp_config_,
                                                                  allocator_,
-                                                                 device_,
                                                                  metrics_reporter_,
                                                                  pd_sep_config_,
                                                                  cache_store_config_);
@@ -470,19 +479,17 @@ void KVCacheManager::initConnectorCoordinator() {
 }
 
 void KVCacheManager::allocateAndSync() {
-    const auto properties = device_->getDeviceProperties();
-    size_t     world_size = properties.tp_size * properties.dp_size;
+    size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
     if (world_size > 1) {
-        size_t    local_rank = properties.tp_size * properties.dp_rank + properties.tp_rank;
-        BufferPtr block_num_infos =
-            device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {world_size}, rtp_llm::AllocationType::HOST});
-        auto block_num_ptr        = block_num_infos->data<int>();
+        size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
+        auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
+        auto   block_num_ptr = block_num_t.data_ptr<int>();
         block_num_ptr[local_rank] = config_.block_num;
-        device_->allGather({{block_num_infos}, ParallelMode::DP_AND_TP});
-        device_->syncCommunication(false);
-        device_->syncAndCheck();
+        execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});
+        execSyncCommunication(false);
+        cudaSyncAndCheck();
 
-        if (properties.ffn_as_service) {
+        if (parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
             config_.block_num = 1;
         } else {
             config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);

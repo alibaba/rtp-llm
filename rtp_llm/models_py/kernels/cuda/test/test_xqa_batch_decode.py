@@ -35,7 +35,7 @@ from rtp_llm.ops.compute_ops import (
     LayerKVCache,
     PyAttentionInputs,
     get_typemeta,
-    init_device,
+    init_exec_ctx,
 )
 
 DTYPE_MAP = {
@@ -335,7 +335,7 @@ class TestXQABatchDecode(unittest.TestCase):
         model_config.attn_config.kernel_tokens_per_block = 64
         model_config.max_seq_len = 2048
 
-        init_device(
+        init_exec_ctx(
             parallelism_config=ParallelismConfig(),
             model_config=model_config,
             eplb_config=EPLBConfig(),

@@ -1,7 +1,6 @@
 #include <vector>
 
-#include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 
 namespace rtp_llm {
 
@@ -19,8 +18,7 @@ public:
     bool  memcopy(void* dst, bool dst_gpu, const void* src, bool src_gpu, size_t size);
 
 public:
-    rtp_llm::DeviceBase*                          device_;
-    std::unordered_map<void*, rtp_llm::BufferPtr> buffer_map_;
+    std::unordered_map<void*, torch::Tensor> buffer_map_;
 
 private:
     std::mutex mutex_;

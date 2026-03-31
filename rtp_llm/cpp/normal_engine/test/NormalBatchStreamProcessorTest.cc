@@ -7,13 +7,22 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace std;
 
 namespace rtp_llm {
+
+template<typename T>
+std::vector<T> toVec(const torch::Tensor& t) {
+    auto c = t.contiguous();
+    return std::vector<T>(c.data_ptr<T>(), c.data_ptr<T>() + c.numel());
+}
+
+static torch::Tensor hostIntBuffer(std::vector<int32_t> data) {
+    return torch::tensor(data, torch::kInt32);
+}
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {};
 
@@ -34,11 +43,11 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     processor.setKVCacheGroupTypes({CacheGroupType::FULL});
 
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
-    query1->input_ids                     = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
+    query1->input_ids                     = hostIntBuffer({1, 2});
     query1->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr stream1 =
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
-    query1->input_ids = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->input_ids = hostIntBuffer({1});
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
     addr1.initGroups(1, 3, {0, 0, 0});
@@ -47,11 +56,11 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     stream1->setIsContextStream(false);
 
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
-    query2->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
+    query2->input_ids                     = hostIntBuffer({1, 2, 3});
     query2->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr stream2 =
         make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
-    query2->input_ids = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
+    query2->input_ids = hostIntBuffer({1, 2});
     BatchKVCacheResource addr2;
     addr2.resetBatchSize(1);
     addr2.initGroups(1, 3, {0, 0, 0});
@@ -60,7 +69,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     stream2->setIsContextStream(false);
 
     std::shared_ptr<GenerateInput> query3 = make_shared<GenerateInput>();
-    query3->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
+    query3->input_ids                     = hostIntBuffer({1, 2, 3});
     query3->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr stream3 =
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
@@ -71,7 +80,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4 = make_shared<GenerateInput>();
-    query4->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
+    query4->input_ids                     = hostIntBuffer({1, 2, 3, 4});
     query4->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr stream4 =
         make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
@@ -104,11 +113,11 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         vector<int> sequence_lengths  = {1, 2};
         vector<int> prefix_lengths    = {0, 1};
         vector<int> kv_cache_block_id = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 0, 11, 12, 13, 14};
-        EXPECT_EQ(combo_tokens, buffer2vector<int>(*model_input.combo_tokens));
-        EXPECT_EQ(input_lengths, buffer2vector<int>(*model_input.input_lengths));
-        EXPECT_EQ(sequence_lengths, buffer2vector<int>(*model_input.sequence_lengths));
-        EXPECT_EQ(prefix_lengths, buffer2vector<int>(*model_input.prefix_lengths));
-        EXPECT_EQ(kv_cache_block_id, buffer2vector<int>(*model_input.kv_cache_kernel_block_id));
+        EXPECT_EQ(combo_tokens, toVec<int>(model_input.combo_tokens));
+        EXPECT_EQ(input_lengths, toVec<int>(model_input.input_lengths));
+        EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
+        EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
+        EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
     }
     {
         MMModelConfig mm_model_config;
@@ -121,7 +130,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         auto         merge_input_status = processor.gatherModelInput(stream_groups);
         EXPECT_TRUE(merge_input_status.ok());
         auto& model_input = merge_input_status.value();
-        EXPECT_EQ(model_input.attention_mask.get(), nullptr);
+        EXPECT_FALSE(model_input.attention_mask.defined());
     }
 }
 
@@ -137,10 +146,9 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     CacheConfig                    cache_config;
     RuntimeConfig                  runtime_config;
     std::shared_ptr<GenerateInput> query1         = make_shared<GenerateInput>();
-    query1->input_ids                             = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->input_ids                             = hostIntBuffer({1});
     query1->generate_config                       = make_shared<GenerateConfig>();
     query1->generate_config->return_softmax_probs = true;
-    // query1->generate_config->is_streaming   = true;
     GenerateStreamPtr stream1 =
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
@@ -165,17 +173,19 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
 
     SamplerInputs sampler_inputs;
     MergedOutput  merge_outputs;
-    merge_outputs.model_output.hidden_states   = createBuffer<float>({1, 2}, {1, 2});
-    merge_outputs.model_output.logits          = createBuffer<float>({1, 2}, {1, 2});
-    merge_outputs.sampler_output.token_ids     = createBuffer<int>({1, 2}, {0, 1}, AllocationType::HOST);
-    merge_outputs.sampler_output.cum_log_probs = createBuffer<float>({1}, {1});
+    auto          hidden_tensor                = torch::tensor({1.0f, 2.0f}).reshape({1, 2}).to(torch::kCUDA);
+    auto          logits_tensor                = torch::tensor({1.0f, 2.0f}).reshape({1, 2}).to(torch::kCUDA);
+    merge_outputs.model_output.hidden_states   = hidden_tensor;
+    merge_outputs.model_output.logits          = logits_tensor;
+    merge_outputs.sampler_output.token_ids     = torch::tensor({0, 1}, torch::kInt32).reshape({1, 2});
+    merge_outputs.sampler_output.cum_log_probs = torch::tensor({1.0f}).to(torch::kCUDA);
     auto status                                = processor.dispatch(stream_groups, merge_outputs);
     EXPECT_TRUE(status.ok());
 
     auto softmax_probs = stream1->getSoftmaxProbs();
-    EXPECT_TRUE(softmax_probs);
-    EXPECT_EQ(2048, softmax_probs->size());
-    EXPECT_NEAR(0.731058, *(softmax_probs->dataWithOffset<float>(1)), 0.0001);
+    EXPECT_TRUE(softmax_probs.defined());
+    EXPECT_EQ(2048, softmax_probs.numel());
+    EXPECT_NEAR(0.731058, softmax_probs.data_ptr<float>()[1], 0.0001);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testLoss) {
@@ -189,7 +199,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     CacheConfig                    cache_config;
     RuntimeConfig                  runtime_config;
     std::shared_ptr<GenerateInput> query1   = make_shared<GenerateInput>();
-    query1->input_ids                       = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->input_ids                       = hostIntBuffer({1});
     query1->generate_config                 = make_shared<GenerateConfig>();
     query1->generate_config->calculate_loss = 1;
     GenerateStreamPtr stream1 =
@@ -201,7 +211,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     stream1->setKVCache(addr1);
 
     std::shared_ptr<GenerateInput> query3   = make_shared<GenerateInput>();
-    query3->input_ids                       = createBuffer<int32_t>({2}, {0, 1}, AllocationType::HOST);
+    query3->input_ids                       = hostIntBuffer({0, 1});
     query3->generate_config                 = make_shared<GenerateConfig>();
     query3->generate_config->calculate_loss = 2;
     GenerateStreamPtr stream3 =
@@ -213,7 +223,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4   = make_shared<GenerateInput>();
-    query4->input_ids                       = createBuffer<int32_t>({3}, {0, 1, 0}, AllocationType::HOST);
+    query4->input_ids                       = hostIntBuffer({0, 1, 0});
     query4->generate_config                 = make_shared<GenerateConfig>();
     query4->generate_config->calculate_loss = 1;
     GenerateStreamPtr stream4 =
@@ -243,23 +253,29 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
 
     SamplerInputs sampler_inputs;
     MergedOutput  merge_outputs;
-    merge_outputs.model_output.hidden_states = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
-    merge_outputs.model_output.logits        = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
-    merge_outputs.model_output.all_logits    = createBuffer<float>({6, 2}, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12});
+    auto loss_hidden_tensor = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}).reshape({3, 2}).to(torch::kCUDA);
+    auto loss_logits_tensor = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}).reshape({3, 2}).to(torch::kCUDA);
+    auto loss_all_logits_tensor =
+        torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f})
+            .reshape({6, 2})
+            .to(torch::kCUDA);
+    merge_outputs.model_output.hidden_states = loss_hidden_tensor;
+    merge_outputs.model_output.logits        = loss_logits_tensor;
+    merge_outputs.model_output.all_logits    = loss_all_logits_tensor;
     merge_outputs.sampler_output.token_ids =
-        createBuffer<int>({3, 4}, {0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1}, AllocationType::HOST);
-    merge_outputs.sampler_output.cum_log_probs = createBuffer<float>({3}, {1, 2, 3});
+        torch::tensor({0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1}, torch::kInt32).reshape({3, 4});
+    merge_outputs.sampler_output.cum_log_probs = torch::tensor({1.0f, 2.0f, 3.0f}).to(torch::kCUDA);
     auto status                                = processor.dispatch(stream_groups, merge_outputs);
     EXPECT_TRUE(status.ok());
-    EXPECT_FALSE(stream1->getLoss());
-    EXPECT_TRUE(stream3->getLoss());
+    EXPECT_FALSE(stream1->getLoss().defined());
+    EXPECT_TRUE(stream3->getLoss().defined());
     auto loss3 = stream3->getLoss();
-    EXPECT_EQ(1, loss3->size());
-    EXPECT_NEAR(0.31326, *(loss3->data<float>()), 0.0001);
-    EXPECT_TRUE(stream4->getLoss());
+    EXPECT_EQ(1, loss3.numel());
+    EXPECT_NEAR(0.31326, loss3.data_ptr<float>()[0], 0.0001);
+    EXPECT_TRUE(stream4->getLoss().defined());
     auto loss4 = stream4->getLoss();
-    EXPECT_EQ(2, loss4->size());
-    EXPECT_NEAR(2.25525, *(torch::mean(rtp_llm::Buffer2torchTensor(*loss4)).exp().data_ptr<float>()), 0.0001);
+    EXPECT_EQ(2, loss4.numel());
+    EXPECT_NEAR(2.25525, *(torch::mean(loss4).exp().data_ptr<float>()), 0.0001);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
@@ -279,27 +295,27 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     processor.setKVCacheGroupTypes({CacheGroupType::FULL});
 
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
-    query1->input_ids                     = createBuffer<int32_t>({5}, {1, -1, -1, -1, 2}, AllocationType::HOST);
+    query1->input_ids                     = hostIntBuffer({1, -1, -1, -1, 2});
     query1->generate_config               = make_shared<GenerateConfig>();
-    query1->mm_locs                       = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-    query1->text_tokens_mask              = createBuffer<int32_t>({5}, {1, 0, 0, 0, 1}, AllocationType::HOST);
+    query1->mm_locs                       = torch::tensor({1}, torch::kInt32);
+    query1->text_tokens_mask              = torch::tensor({1, 0, 0, 0, 1}, torch::kInt32);
     query1->multimodal_features           = {torch::rand({3, 10}, torch::kFloat16)};
     GenerateStreamPtr stream1 =
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     stream1->setIsContextStream(true);
 
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
-    query2->input_ids                     = createBuffer<int32_t>({3}, {3, 4, 5}, AllocationType::HOST);
+    query2->input_ids                     = hostIntBuffer({3, 4, 5});
     query2->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr stream2 =
         make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
     stream2->setIsContextStream(true);
 
     std::shared_ptr<GenerateInput> query3 = make_shared<GenerateInput>();
-    query3->input_ids                     = createBuffer<int32_t>({5}, {6, 7, -1, -1, 8}, AllocationType::HOST);
+    query3->input_ids                     = hostIntBuffer({6, 7, -1, -1, 8});
     query3->generate_config               = make_shared<GenerateConfig>();
-    query3->mm_locs                       = createBuffer<int32_t>({1}, {2}, AllocationType::HOST);
-    query3->text_tokens_mask              = createBuffer<int32_t>({5}, {1, 1, 0, 0, 1}, AllocationType::HOST);
+    query3->mm_locs                       = torch::tensor({2}, torch::kInt32);
+    query3->text_tokens_mask              = torch::tensor({1, 1, 0, 0, 1}, torch::kInt32);
     query3->multimodal_features           = {torch::rand({2, 10}, torch::kFloat16)};
     GenerateStreamPtr stream3 =
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
@@ -326,14 +342,14 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
         vector<int> text_tokens_mask = {1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1};
         vector<int> mm_features_locs = {1, 10};
 
-        EXPECT_EQ(combo_tokens, buffer2vector<int>(*model_input.combo_tokens));
-        EXPECT_EQ(input_lengths, buffer2vector<int>(*model_input.input_lengths));
-        EXPECT_EQ(text_tokens_mask, buffer2vector<int>(*model_input.text_tokens_mask));
-        EXPECT_EQ(mm_features_locs, buffer2vector<int>(*model_input.mm_features_locs));
+        EXPECT_EQ(combo_tokens, toVec<int>(model_input.combo_tokens));
+        EXPECT_EQ(input_lengths, toVec<int>(model_input.input_lengths));
+        EXPECT_EQ(text_tokens_mask, toVec<int>(model_input.text_tokens_mask));
+        EXPECT_EQ(mm_features_locs, toVec<int>(model_input.mm_features_locs));
 
         EXPECT_EQ(model_input.multimodal_features.value().size(), 2);
-        EXPECT_EQ(model_input.multimodal_features.value()[0]->size(), 3 * 10);
-        EXPECT_EQ(model_input.multimodal_features.value()[1]->size(), 2 * 10);
+        EXPECT_EQ(model_input.multimodal_features.value()[0].numel(), 3 * 10);
+        EXPECT_EQ(model_input.multimodal_features.value()[1].numel(), 2 * 10);
     }
 }
 

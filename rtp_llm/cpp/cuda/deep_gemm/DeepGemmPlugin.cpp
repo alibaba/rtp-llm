@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/cuda/deep_gemm/utils.h"
 #include "rtp_llm/cpp/cuda/deep_gemm/ConfigUtils.h"
 #include "rtp_llm/cpp/cuda/deep_gemm/JITRuntime.h"
-#include "rtp_llm/cpp/core/QBuffer.h"
 #include "rtp_llm/cpp/cuda/deep_gemm/DeepGemmPlugin.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/utils/math_utils.h"
@@ -35,11 +34,38 @@ static void runDeepGemm(__nv_bfloat16* output,
                         uint32_t       num_sms,
                         uint32_t       smem_size,
                         bool           swap_ab) {
-    RTP_LLM_LOG_DEBUG("m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_stages:%u, num_tma_multicast:%u, swap_ab:%u\n",
-                      m, n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, swap_ab);
-    runKernel(output, lhs, lhs_scale, rhs, rhs_scale, grouped_layout,
-              m, n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast,
-              gemm_type, stream, num_sms, smem_size, swap_ab);
+    RTP_LLM_LOG_DEBUG(
+        "m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_stages:%u, num_tma_multicast:%u, swap_ab:%u\n",
+        m,
+        n,
+        k,
+        bm,
+        bn,
+        bk,
+        num_groups,
+        num_stages,
+        num_tma_multicast,
+        swap_ab);
+    runKernel(output,
+              lhs,
+              lhs_scale,
+              rhs,
+              rhs_scale,
+              grouped_layout,
+              m,
+              n,
+              k,
+              bm,
+              bn,
+              bk,
+              num_groups,
+              num_stages,
+              num_tma_multicast,
+              gemm_type,
+              stream,
+              num_sms,
+              smem_size,
+              swap_ab);
 }
 #endif
 
@@ -92,20 +118,20 @@ inline int DeepGemmPlugin::getNumSms(int user_deep_gemm_num_sm) {
     return num_sms;
 }
 
-torch::Tensor getColMajorTmaAlignedTensor(Buffer lhs_scale) {
+torch::Tensor getColMajorTmaAlignedTensor(const torch::Tensor& lhs_scale) {
     RTP_LLM_CHECK_WITH_INFO(lhs_scale.dim() == 2 || lhs_scale.dim() == 3, "lhs scale must be dim 2 or 3");
-    RTP_LLM_CHECK_WITH_INFO(lhs_scale.type() == DataType::TYPE_FP32, "lhs scale must be fp32");
+    RTP_LLM_CHECK_WITH_INFO(lhs_scale.scalar_type() == torch::kFloat32, "lhs scale must be fp32");
     int remove_dim = 0;
     if (lhs_scale.dim() == 2) {
         remove_dim = 1;
     }
 
     size_t g, m, k;
-    g = remove_dim ? 1 : lhs_scale.shape()[0];
-    m = lhs_scale.shape()[1 - remove_dim];
-    k = lhs_scale.shape()[2 - remove_dim];
+    g = remove_dim ? 1 : lhs_scale.size(0);
+    m = lhs_scale.size(1 - remove_dim);
+    k = lhs_scale.size(2 - remove_dim);
 
-    int  aligned_m = getTmaAlignedSize(m, lhs_scale.typeSize());
+    int  aligned_m = getTmaAlignedSize(m, sizeof(float));
     auto col_major_lhs_scale =
         torch::transpose(torch::empty({int(g), int(k), int(aligned_m)},
                                       torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)),
@@ -113,7 +139,7 @@ torch::Tensor getColMajorTmaAlignedTensor(Buffer lhs_scale) {
                          2);
     col_major_lhs_scale.index_put_(
         {torch::indexing::Slice(), torch::indexing::Slice(0, m), torch::indexing::Slice()},
-        torch::from_blob(lhs_scale.data(),
+        torch::from_blob(lhs_scale.data_ptr(),
                          {int(g), int(m), int(k)},
                          torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)));
     if (remove_dim) {
@@ -123,31 +149,31 @@ torch::Tensor getColMajorTmaAlignedTensor(Buffer lhs_scale) {
     }
 }
 
-void DeepGemmPlugin::gemmFp8(
-    const Buffer& lhs, const Buffer& rhs, Buffer& output, int user_deep_gemm_num_sm, cudaStream_t stream) {
+void DeepGemmPlugin::gemmFp8(const torch::Tensor& lhs_kernel,
+                             const torch::Tensor& lhs_scales,
+                             const torch::Tensor& rhs_kernel,
+                             const torch::Tensor& rhs_scales,
+                             torch::Tensor&       output,
+                             int                  user_deep_gemm_num_sm,
+                             cudaStream_t         stream) {
 #ifdef ENABLE_FP8
-    // lhs.fp8 e4m3, [m, k]; scales -> fp32, [m, k / 128]
-    // rhs.fp8 e4m3, [n, k]; scales -> fp32, [n / 128, k / 128]
-    // output.bf16, [m, n]
+    // lhs_kernel: fp8 e4m3, [m, k]; lhs_scales: fp32, [m, k / 128]
+    // rhs_kernel: fp8 e4m3, [n, k]; rhs_scales: fp32, [n / 128, k / 128]
+    // output: bf16, [m, n]
     size_t m, n, k;
-    m = lhs.shape()[0];
-    k = lhs.shape()[1];
-    n = rhs.size() / k;
+    m = lhs_kernel.size(0);
+    k = lhs_kernel.size(1);
+    n = rhs_kernel.numel() / k;
     RTP_LLM_CHECK_WITH_INFO(n % 64 == 0 && k % 128 == 0, "n(%d) % 64 or k(%d) % 128 != 0", n, k);
-    RTP_LLM_LOG_DEBUG("lhs:%s, scale:%s, rhs:%s, scale:%s out:%s",
-                      lhs.debugString().c_str(),
-                      reinterpret_cast<const QBuffer&>(lhs).scales().debugString().c_str(),
-                      rhs.debugString().c_str(),
-                      reinterpret_cast<const QBuffer&>(rhs).scales().debugString().c_str(),
-                      output.debugString().c_str());
+
     int  num_sms     = getNumSms(user_deep_gemm_num_sm);
     auto best_config = getBestConfig(m, n, k, 1, num_sms, DeepGemmType::Normal);
 
-    runDeepGemm(output.data<__nv_bfloat16>(),
-                reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(),
-                reinterpret_cast<const QBuffer&>(lhs).scales().data<float>(),
-                reinterpret_cast<const QBuffer&>(rhs).kernel().data<__nv_fp8_e4m3>(),
-                reinterpret_cast<const QBuffer&>(rhs).scalesData<float>(),
+    runDeepGemm((__nv_bfloat16*)output.data_ptr(),
+                (__nv_fp8_e4m3*)lhs_kernel.data_ptr(),
+                (float*)lhs_scales.data_ptr(),
+                (__nv_fp8_e4m3*)rhs_kernel.data_ptr(),
+                (float*)rhs_scales.data_ptr(),
                 nullptr,  // grouped_layout
                 m,
                 n,
@@ -166,36 +192,38 @@ void DeepGemmPlugin::gemmFp8(
 #endif
 }
 
-void DeepGemmPlugin::groupedGemmFp8Contiguous(const Buffer& lhs,
-                                              const Buffer& rhs,
-                                              Buffer&       output,
-                                              const Buffer& m_indices,
-                                              int           user_deep_gemm_num_sm,
-                                              bool          use_64_padding,
-                                              cudaStream_t  stream) {
+void DeepGemmPlugin::groupedGemmFp8Contiguous(const torch::Tensor& lhs_kernel,
+                                              const torch::Tensor& lhs_scales,
+                                              const torch::Tensor& rhs_kernel,
+                                              const torch::Tensor& rhs_scales,
+                                              torch::Tensor&       output,
+                                              const torch::Tensor& m_indices,
+                                              int                  user_deep_gemm_num_sm,
+                                              bool                 use_64_padding,
+                                              cudaStream_t         stream) {
 #ifdef ENABLE_FP8
-    // lhs.fp8 e4m3, [m_sum, k]; scales -> fp32, [m_sum, k / 128]
-    // rhs.fp8 e4m3, [num_groups, n, k]; scales -> fp32, [num_groups, n / 128, k / 128]
-    // output.bf16, [m_sum, n]
-    // m_indices -> int32, [m_sum]
+    // lhs_kernel: fp8 e4m3, [m_sum, k]; lhs_scales: fp32, [m_sum, k / 128]
+    // rhs_kernel: fp8 e4m3, [num_groups, n, k]; rhs_scales: fp32, [num_groups, n / 128, k / 128]
+    // output: bf16, [m_sum, n]
+    // m_indices: int32, [m_sum]
     size_t m, n, k;
-    m              = lhs.shape()[0];
-    k              = lhs.shape()[1];
-    n              = rhs.shape()[1];
-    int num_groups = rhs.shape()[0];
+    m              = lhs_kernel.size(0);
+    k              = lhs_kernel.size(1);
+    n              = rhs_kernel.size(1);
+    int num_groups = rhs_kernel.size(0);
     RTP_LLM_CHECK_WITH_INFO(n % 64 == 0 && k % 128 == 0, "n(%d) % 64 or k(%d) % 128 != 0", n, k);
 
-    auto lhs_scales = getColMajorTmaAlignedTensor(reinterpret_cast<const QBuffer&>(lhs).scales());
-    int  num_sms    = getNumSms(user_deep_gemm_num_sm);
+    auto lhs_scales_aligned = getColMajorTmaAlignedTensor(lhs_scales);
+    int  num_sms            = getNumSms(user_deep_gemm_num_sm);
 
     auto best_config = getBestConfig(m, n, k, 1, num_sms, DeepGemmType::GroupedContiguous, -1, use_64_padding);
 
-    runDeepGemm(output.data<__nv_bfloat16>(),
-                reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(),
-                (float*)lhs_scales.data_ptr(),
-                reinterpret_cast<const QBuffer&>(rhs).kernel().data<__nv_fp8_e4m3>(),
-                reinterpret_cast<const QBuffer&>(rhs).scalesData<float>(),
-                m_indices.data<int>(),  // grouped_layout
+    runDeepGemm((__nv_bfloat16*)output.data_ptr(),
+                (__nv_fp8_e4m3*)lhs_kernel.data_ptr(),
+                (float*)lhs_scales_aligned.data_ptr(),
+                (__nv_fp8_e4m3*)rhs_kernel.data_ptr(),
+                (float*)rhs_scales.data_ptr(),
+                m_indices.data_ptr<int>(),  // grouped_layout
                 m,
                 n,
                 k,
@@ -213,35 +241,37 @@ void DeepGemmPlugin::groupedGemmFp8Contiguous(const Buffer& lhs,
 #endif
 }
 
-void DeepGemmPlugin::groupedGemmFp8Masked(const Buffer& lhs,
-                                          const Buffer& rhs,
-                                          Buffer&       output,
-                                          const Buffer& masked_m,
-                                          int           expected_m,
-                                          int           user_deep_gemm_num_sm,
-                                          cudaStream_t  stream) {
+void DeepGemmPlugin::groupedGemmFp8Masked(const torch::Tensor& lhs_kernel,
+                                          const torch::Tensor& lhs_scales,
+                                          const torch::Tensor& rhs_kernel,
+                                          const torch::Tensor& rhs_scales,
+                                          torch::Tensor&       output,
+                                          const torch::Tensor& masked_m,
+                                          int                  expected_m,
+                                          int                  user_deep_gemm_num_sm,
+                                          cudaStream_t         stream) {
 #ifdef ENABLE_FP8
-    // lhs.fp8 e4m3, [num_groups, m_max, k]; scales -> fp32, [num_groups, k / 128, m_max]
-    // rhs.fp8 e4m3, [num_groups, n, k]; scales -> fp32, [num_groups, n / 128, k / 128]
-    // output.bf16, [num_groups, m_max, n]
-    // masked_m -> int32, [num_groups]
+    // lhs_kernel: fp8 e4m3, [num_groups, m_max, k]; lhs_scales: fp32, [num_groups, k / 128, m_max]
+    // rhs_kernel: fp8 e4m3, [num_groups, n, k]; rhs_scales: fp32, [num_groups, n / 128, k / 128]
+    // output: bf16, [num_groups, m_max, n]
+    // masked_m: int32, [num_groups]
     size_t m, n, k;
-    m              = lhs.shape()[1];
-    k              = lhs.shape()[2];
-    n              = rhs.shape()[1];
-    int num_groups = rhs.shape()[0];
+    m              = lhs_kernel.size(1);
+    k              = lhs_kernel.size(2);
+    n              = rhs_kernel.size(1);
+    int num_groups = rhs_kernel.size(0);
     RTP_LLM_CHECK_WITH_INFO(n % 64 == 0 && k % 128 == 0, "n(%ld) % 64 or k(%ld) % 128 != 0", n, k);
 
     int num_sms = getNumSms(user_deep_gemm_num_sm);
 
     auto best_config = getBestConfig(m, n, k, num_groups, num_sms, DeepGemmType::GroupedMasked, expected_m);
 
-    runDeepGemm(output.data<__nv_bfloat16>(),
-                reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(),
-                reinterpret_cast<const QBuffer&>(lhs).scalesData<float>(),
-                reinterpret_cast<const QBuffer&>(rhs).kernel().data<__nv_fp8_e4m3>(),
-                reinterpret_cast<const QBuffer&>(rhs).scalesData<float>(),
-                masked_m.data<int>(),  // grouped_layout
+    runDeepGemm((__nv_bfloat16*)output.data_ptr(),
+                (__nv_fp8_e4m3*)lhs_kernel.data_ptr(),
+                (float*)lhs_scales.data_ptr(),
+                (__nv_fp8_e4m3*)rhs_kernel.data_ptr(),
+                (float*)rhs_scales.data_ptr(),
+                masked_m.data_ptr<int>(),  // grouped_layout
                 m,
                 n,
                 k,
@@ -259,36 +289,38 @@ void DeepGemmPlugin::groupedGemmFp8Masked(const Buffer& lhs,
 #endif
 }
 
-void DeepGemmPlugin::groupedGemmFp8Masked_V2(const Buffer& lhs,
-                                             const Buffer& rhs,
-                                             Buffer&       output,
-                                             const Buffer& masked_m,
-                                             int           expected_m,
-                                             int           user_deep_gemm_num_sm,
-                                             cudaStream_t  stream) {
+void DeepGemmPlugin::groupedGemmFp8Masked_V2(const torch::Tensor& lhs_kernel,
+                                             const torch::Tensor& lhs_scales,
+                                             const torch::Tensor& rhs_kernel,
+                                             const torch::Tensor& rhs_scales,
+                                             torch::Tensor&       output,
+                                             const torch::Tensor& masked_m,
+                                             int                  expected_m,
+                                             int                  user_deep_gemm_num_sm,
+                                             cudaStream_t         stream) {
 #ifdef ENABLE_FP8
-    // lhs.fp8 e4m3, [num_groups, m_max, k]; scales -> fp32, [num_groups, m_max, k / 128]
-    // rhs.fp8 e4m3, [num_groups, n, k]; scales -> fp32, [num_groups, n / 128, k / 128]
-    // output.bf16, [num_groups, m_max, n]
-    // masked_m -> int32, [num_groups]
+    // lhs_kernel: fp8 e4m3, [num_groups, m_max, k]; lhs_scales: fp32, [num_groups, m_max, k / 128]
+    // rhs_kernel: fp8 e4m3, [num_groups, n, k]; rhs_scales: fp32, [num_groups, n / 128, k / 128]
+    // output: bf16, [num_groups, m_max, n]
+    // masked_m: int32, [num_groups]
     size_t m, n, k;
-    m              = lhs.shape()[1];
-    k              = lhs.shape()[2];
-    n              = rhs.shape()[1];
-    int num_groups = rhs.shape()[0];
+    m              = lhs_kernel.size(1);
+    k              = lhs_kernel.size(2);
+    n              = rhs_kernel.size(1);
+    int num_groups = rhs_kernel.size(0);
     RTP_LLM_CHECK_WITH_INFO(n % 64 == 0 && k % 128 == 0, "n(%ld) % 64 or k(%ld) % 128 != 0", n, k);
 
-    auto lhs_scales = getColMajorTmaAlignedTensor(reinterpret_cast<const QBuffer&>(lhs).scales());
-    int  num_sms    = getNumSms(user_deep_gemm_num_sm);
+    auto lhs_scales_aligned = getColMajorTmaAlignedTensor(lhs_scales);
+    int  num_sms            = getNumSms(user_deep_gemm_num_sm);
 
     auto best_config = getBestConfig(m, n, k, num_groups, num_sms, DeepGemmType::GroupedMasked, expected_m);
 
-    runDeepGemm(output.data<__nv_bfloat16>(),
-                reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(),
-                (float*)lhs_scales.data_ptr(),
-                reinterpret_cast<const QBuffer&>(rhs).kernel().data<__nv_fp8_e4m3>(),
-                reinterpret_cast<const QBuffer&>(rhs).scalesData<float>(),
-                masked_m.data<int>(),  // grouped_layout
+    runDeepGemm((__nv_bfloat16*)output.data_ptr(),
+                (__nv_fp8_e4m3*)lhs_kernel.data_ptr(),
+                (float*)lhs_scales_aligned.data_ptr(),
+                (__nv_fp8_e4m3*)rhs_kernel.data_ptr(),
+                (float*)rhs_scales.data_ptr(),
+                masked_m.data_ptr<int>(),  // grouped_layout
                 m,
                 n,
                 k,

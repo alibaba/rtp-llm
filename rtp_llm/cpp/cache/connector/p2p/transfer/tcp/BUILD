@@ -6,7 +6,6 @@ cc_library(
     srcs = ["CudaCopyUtil.cc"],
     deps = [
         "//:rtp_compute_ops",
-        "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
@@ -23,7 +22,6 @@ cc_library(
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp/proto:tcp_service_cc_proto",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
-        "//rtp_llm/cpp/core:buffer",
     ],
     visibility = ["//visibility:public"],
 )

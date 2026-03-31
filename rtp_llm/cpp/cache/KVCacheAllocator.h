@@ -6,7 +6,6 @@
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
@@ -17,12 +16,10 @@ namespace rtp_llm {
 class KVCacheAllocator {
 public:
     KVCacheAllocator(const CacheConfig&                 config,
-                     rtp_llm::DeviceBase*               device,
                      AllocationType                     allocation_type     = AllocationType::DEVICE,
                      const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
                      int64_t                            reserve_block_ratio = 0):
         config_(config),
-        device_(device),
         allocation_type_(allocation_type),
         metrics_reporter_(metrics_reporter),
         reserve_block_ratio_(reserve_block_ratio) {}
@@ -50,12 +47,11 @@ public:
                                                    int                            seq_len,
                                                    int                            reserve_step) const                 = 0;
 
-    virtual std::vector<std::pair<BufferPtr, size_t>> getAllBuffers() const;
-    MallocResult                                      malloc(const MallocInfo& malloc_info);
-    void                                              blockCopy(int src_block_index, int dest_block_index);
-    void                                              blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
-    void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
-    void blockBatchCopy(const rtp_llm::Buffer& copy_mapping);
+    MallocResult malloc(const MallocInfo& malloc_info);
+    void         blockCopy(int src_block_index, int dest_block_index);
+    void         blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
+    void         blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
+    void         blockBatchCopy(const torch::Tensor& copy_mapping);
 
     BlockPoolPtr getBlockPool() const {
         return block_pool_;
@@ -70,7 +66,7 @@ public:
         return reserve_block_num_;
     }
 
-    void                    regUserMr(size_t model_id);
+    void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     int64_t                 getMrCostTimeMs() const;
     size_t                  freeBlocksNum() const;
     size_t                  availableBlocksNum() const;
@@ -95,7 +91,6 @@ protected:
     virtual void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
 
     CacheConfig                        config_;
-    rtp_llm::DeviceBase*               device_;
     AllocationType                     allocation_type_;
     BlockPoolPtr                       block_pool_;
     const kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;

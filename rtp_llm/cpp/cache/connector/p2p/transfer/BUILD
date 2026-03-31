@@ -53,7 +53,6 @@ cc_library(
         "TransferTask.cc",
     ],
     deps = [
-        "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/utils:time_util",

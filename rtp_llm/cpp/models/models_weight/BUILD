@@ -5,6 +5,9 @@ cc_library(
     name = "weights_define",
     hdrs = [
         "W.h",
+        "Weights.h",
+    ],
+    deps = [
     ],
     visibility = ["//visibility:public"],
 )

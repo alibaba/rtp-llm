@@ -97,16 +97,6 @@ public:
         return local_server_->getEngineScheduleInfo(latest_finised_version);
     }
 
-    void addLora(const std::string&                        adapter_name,
-                 const rtp_llm::lora::loraLayerWeightsMap& lora_a_weights,
-                 const rtp_llm::lora::loraLayerWeightsMap& lora_b_weights) {
-        local_server_->addLora(adapter_name, lora_a_weights, lora_b_weights);
-    }
-
-    void removeLora(const std::string& adapter_name) {
-        local_server_->removeLora(adapter_name);
-    }
-
     std::shared_ptr<EngineBase> getEngine() const {
         return local_server_->getEngine();
     };

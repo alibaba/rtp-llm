@@ -82,7 +82,10 @@ class FlashInferDecodeImpl(FMHAImplBase):
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         # Create implementations
-        self.fmha_impl = FlashInferDecodeOp(attn_configs)
+        enable_cuda_graph = getattr(attn_inputs, "is_cuda_graph", False)
+        self.fmha_impl = FlashInferDecodeOp(
+            attn_configs, enable_cuda_graph=enable_cuda_graph
+        )
         self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
         self.attn_configs = attn_configs
 

@@ -15,9 +15,10 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/test/DeviceReserveForTest.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/proto/tcp_service.pb.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <torch/torch.h>
+#include <c10/cuda/CUDAStream.h>
 
 namespace rtp_llm {
 namespace transfer {
@@ -128,22 +129,22 @@ public:
         ModelSpecificConfig         model_specific_config;
 
         tcp_test_internal::apply_device_reserve_from_env(device_resource_config);
-        DeviceFactory::initDevices(parallelism_config,
-                                   model_config,
-                                   eplb_config,
-                                   fmha_config,
-                                   device_resource_config,
-                                   moe_config,
-                                   sp_config,
-                                   misc_config,
-                                   profiling_debug_logging_config,
-                                   hw_kernel_config,
-                                   concurrency_config,
-                                   ffn_disaggregate_config,
-                                   runtime_config,
-                                   model_specific_config,
-                                   NcclCommConfig{});
-        device_ = DeviceFactory::getDefaultDevice();
+        initExecCtx(parallelism_config,
+                    model_config,
+                    eplb_config,
+                    fmha_config,
+                    device_resource_config,
+                    moe_config,
+                    sp_config,
+                    misc_config,
+                    profiling_debug_logging_config,
+                    hw_kernel_config,
+                    concurrency_config,
+                    ffn_disaggregate_config,
+                    runtime_config,
+                    model_specific_config,
+                    NcclCommConfig{});
+        device_initialized_ = isRuntimeInitialized();
     }
 
 protected:
@@ -157,21 +158,17 @@ protected:
         service_.reset();
     }
 
-    // Allocate a device buffer; returns nullptr when no GPU is available.
-    BufferPtr allocDevice(size_t size) {
-        if (!device_)
-            return nullptr;
-        return device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::DEVICE});
+    torch::Tensor allocDevice(size_t size) {
+        return torch::empty({static_cast<int64_t>(size)},
+                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     }
 
     bool verifyDevice(void* ptr, const std::string& expected) {
-        const size_t size    = expected.size();
-        auto         cpu_buf = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::HOST});
-        auto         src     = Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_UINT8, {size}, ptr);
-        auto         dst     = Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT8, {size}, cpu_buf->data());
-        device_->copy({dst, src});
-        device_->syncAndCheck();
-        return std::memcmp(cpu_buf->data(), expected.data(), size) == 0;
+        const size_t size       = expected.size();
+        auto         gpu_tensor = torch::from_blob(
+            ptr, {static_cast<int64_t>(size)}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        auto cpu_tensor = gpu_tensor.cpu();
+        return std::memcmp(cpu_tensor.data_ptr(), expected.data(), size) == 0;
     }
 
     // Issue one transfer RPC and return the closure for waiting.
@@ -182,13 +179,13 @@ protected:
         return closure;
     }
 
-    static DeviceBase*                  device_;
+    static bool                         device_initialized_;
     MockRpcController                   ctrl_;
     std::shared_ptr<TransferTaskStore>  task_store_;
     std::shared_ptr<TcpTransferService> service_;
 };
 
-DeviceBase* TcpTransferServiceTest::device_ = nullptr;
+bool TcpTransferServiceTest::device_initialized_ = false;
 
 static constexpr auto kWait = std::chrono::seconds(5);
 
@@ -198,7 +195,7 @@ static constexpr auto kWait = std::chrono::seconds(5);
 
 // A1: Receiver registers task first, then Sender transfer arrives.
 TEST_F(TcpTransferServiceTest, A1_NormalTransfer_RecvFirst_Success) {
-    if (!device_) {
+    if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device";
     }
 
@@ -206,7 +203,7 @@ TEST_F(TcpTransferServiceTest, A1_NormalTransfer_RecvFirst_Success) {
     const std::string content(size, 'A');
     auto              gpu_buf = allocDevice(size);
 
-    auto task = task_store_->addTask("k1", makeBlocks(1, gpu_buf->data(), size), currentTimeMs() + 5000);
+    auto task = task_store_->addTask("k1", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
     auto req = makeRequest("k1", currentTimeMs() + 5000);
@@ -218,12 +215,12 @@ TEST_F(TcpTransferServiceTest, A1_NormalTransfer_RecvFirst_Success) {
     ASSERT_TRUE(closure->waitFor(kWait));
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_NONE_ERROR);
     EXPECT_TRUE(task->success());
-    EXPECT_TRUE(verifyDevice(gpu_buf->data(), content));
+    EXPECT_TRUE(verifyDevice(gpu_buf.data_ptr(), content));
 }
 
 // A2: Sender transfer arrives first; Receiver registers task afterwards.
 TEST_F(TcpTransferServiceTest, A2_NormalTransfer_TransferFirst_RecvLater_Success) {
-    if (!device_) {
+    if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device";
     }
 
@@ -238,13 +235,13 @@ TEST_F(TcpTransferServiceTest, A2_NormalTransfer_TransferFirst_RecvLater_Success
     auto                                          closure = issueTransfer(&req, &resp);
 
     // Register task AFTER the RPC is already waiting.
-    auto task = task_store_->addTask("k2", makeBlocks(1, gpu_buf->data(), size), currentTimeMs() + 5000);
+    auto task = task_store_->addTask("k2", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
     ASSERT_TRUE(closure->waitFor(kWait));
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_NONE_ERROR);
     EXPECT_TRUE(task->success());
-    EXPECT_TRUE(verifyDevice(gpu_buf->data(), content));
+    EXPECT_TRUE(verifyDevice(gpu_buf.data_ptr(), content));
 }
 
 // ===========================================================================
@@ -379,7 +376,7 @@ TEST_F(TcpTransferServiceTest, E2_BufferMismatch_ReceiverKeyMissingInSender) {
 // E2b: Sender sends an extra cache_key not registered by receiver; it is
 //      silently ignored and the transfer succeeds.
 TEST_F(TcpTransferServiceTest, E2b_ExtraKeyInSender_IgnoredOnSuccess) {
-    if (!device_) {
+    if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device";
     }
 
@@ -387,7 +384,7 @@ TEST_F(TcpTransferServiceTest, E2b_ExtraKeyInSender_IgnoredOnSuccess) {
     const std::string content(size, 'V');
     auto              gpu_buf = allocDevice(size);
 
-    auto task = task_store_->addTask("k_e2b", makeBlocks(1, gpu_buf->data(), size), currentTimeMs() + 5000);
+    auto task = task_store_->addTask("k_e2b", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
     auto req = makeRequest("k_e2b", currentTimeMs() + 5000);
@@ -400,7 +397,7 @@ TEST_F(TcpTransferServiceTest, E2b_ExtraKeyInSender_IgnoredOnSuccess) {
     ASSERT_TRUE(closure->waitFor(kWait));
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_NONE_ERROR);
     EXPECT_TRUE(task->success());
-    EXPECT_TRUE(verifyDevice(gpu_buf->data(), content));
+    EXPECT_TRUE(verifyDevice(gpu_buf.data_ptr(), content));
 }
 
 // E3: Receiver task has more sub-blocks than the sender request provides → BUFFER_MISMATCH.
@@ -429,7 +426,7 @@ TEST_F(TcpTransferServiceTest, E3_BufferMismatch_SubBlockOutOfRange) {
 //     same task; startTransfer() has no exclusive lock, so both proceed.
 //     Both closures must fire and the task must end up in a consistent state.
 TEST_F(TcpTransferServiceTest, G3_ConcurrentTransfers_SameKey_BothComplete) {
-    if (!device_) {
+    if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device";
     }
 
@@ -437,7 +434,7 @@ TEST_F(TcpTransferServiceTest, G3_ConcurrentTransfers_SameKey_BothComplete) {
     const std::string content(size, 'G');
     auto              gpu_buf = allocDevice(size);
 
-    auto task = task_store_->addTask("k_g3", makeBlocks(1, gpu_buf->data(), size), currentTimeMs() + 5000);
+    auto task = task_store_->addTask("k_g3", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
     auto req1 = makeRequest("k_g3", currentTimeMs() + 5000);

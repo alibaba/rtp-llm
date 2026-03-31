@@ -4,7 +4,6 @@
 
 #include <pybind11/numpy.h>
 
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/api_server/Exception.h"
 
 namespace rtp_llm {
@@ -131,7 +130,7 @@ std::vector<std::string> TokenProcessorPerStream::decodeTokens(GenerateOutputs& 
 
     for (size_t i = 0; i < responses.generate_outputs.size(); i++) {
         auto&            response = responses.generate_outputs[i];
-        py::array_t<int> token_ids(response.output_ids->size(), response.output_ids->data<int>());
+        py::array_t<int> token_ids(response.output_ids.numel(), response.output_ids.data_ptr<int>());
         batch_token_ids.append(token_ids);
         batch_finished_flags.append(response.finished);
     }

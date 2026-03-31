@@ -2,27 +2,27 @@
 
 #include <vector>
 
+#include <torch/extension.h>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
-#include "rtp_llm/cpp/core/Buffer.h"
 
 namespace rtp_llm {
 
 struct BlockBufferPtrInfo {
-    BufferPtr kv_addr       = nullptr;
-    BufferPtr kv_scale_addr = nullptr;
+    torch::Tensor kv_addr;
+    torch::Tensor kv_scale_addr;
 };
 
 struct CacheLayerLayout {
     std::vector<int>            layer_to_groups;
     std::vector<CacheGroupType> group_types;
     std::vector<CacheGroupType> layer_attn_types;
-    std::vector<BufferPtr>      layers_to_kv_buffer_ptrs;
-    std::vector<BufferPtr>      layers_to_scale_buffer_ptrs;
+    std::vector<torch::Tensor>  layers_to_kv_buffer_ptrs;
+    std::vector<torch::Tensor>  layers_to_scale_buffer_ptrs;
 };
 
 struct KVCacheBuffer {
-    rtp_llm::BufferPtr kv_blocks       = nullptr;
-    rtp_llm::BufferPtr kv_scale_blocks = nullptr;
+    torch::Tensor kv_blocks;
+    torch::Tensor kv_scale_blocks;
 };
 
 }  // namespace rtp_llm

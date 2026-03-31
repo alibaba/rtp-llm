@@ -14,9 +14,10 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/test/DeviceReserveForTest.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/proto/tcp_service.pb.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <torch/torch.h>
+#include <c10/cuda/CUDAStream.h>
 
 namespace rtp_llm {
 namespace transfer {
@@ -101,22 +102,22 @@ public:
         ModelSpecificConfig         model_specific_config;
 
         tcp_test_internal::apply_device_reserve_from_env(device_resource_config);
-        DeviceFactory::initDevices(parallelism_config,
-                                   model_config,
-                                   eplb_config,
-                                   fmha_config,
-                                   device_resource_config,
-                                   moe_config,
-                                   sp_config,
-                                   misc_config,
-                                   profiling_debug_logging_config,
-                                   hw_kernel_config,
-                                   concurrency_config,
-                                   ffn_disaggregate_config,
-                                   runtime_config,
-                                   model_specific_config,
-                                   NcclCommConfig{});
-        device_ = DeviceFactory::getDefaultDevice();
+        initExecCtx(parallelism_config,
+                    model_config,
+                    eplb_config,
+                    fmha_config,
+                    device_resource_config,
+                    moe_config,
+                    sp_config,
+                    misc_config,
+                    profiling_debug_logging_config,
+                    hw_kernel_config,
+                    concurrency_config,
+                    ffn_disaggregate_config,
+                    runtime_config,
+                    model_specific_config,
+                    NcclCommConfig{});
+        device_initialized_ = isRuntimeInitialized();
     }
 
 protected:
@@ -166,30 +167,23 @@ protected:
 
     // ----- GPU helpers -----
 
-    /// Allocates a device buffer of @p size bytes.
-    /// Returns nullptr if device_ is null.
-    BufferPtr allocDeviceBuffer(size_t size) {
-        if (!device_) {
-            return nullptr;
-        }
-        return device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::DEVICE});
+    torch::Tensor allocDeviceBuffer(size_t size) {
+        return torch::empty({static_cast<int64_t>(size)},
+                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     }
 
-    /// Copies @p size bytes from @p device_ptr back to host and compares against @p expected.
     bool verifyDeviceData(void* device_ptr, const std::string& expected, size_t size) {
-        auto cpu_buf = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::HOST});
-        auto src     = Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_UINT8, {size}, device_ptr);
-        auto dst     = Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT8, {size}, cpu_buf->data());
-        device_->copy({dst, src});
-        device_->syncAndCheck();
-        return std::memcmp(cpu_buf->data(), expected.data(), size) == 0;
+        auto gpu_tensor = torch::from_blob(
+            device_ptr, {static_cast<int64_t>(size)}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        auto cpu_tensor = gpu_tensor.cpu();
+        return std::memcmp(cpu_tensor.data_ptr(), expected.data(), size) == 0;
     }
 
-    static DeviceBase* device_;
-    MockRpcController  controller_;
+    static bool       device_initialized_;
+    MockRpcController controller_;
 };
 
-DeviceBase* TcpTaskContextTest::device_ = nullptr;
+bool TcpTaskContextTest::device_initialized_ = false;
 
 // ===========================================================================
 // Group 1: startTransfer()
@@ -329,7 +323,7 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_AllBlocksEmpty_ReturnsFalse) {
 // ===========================================================================
 
 TEST_F(TcpTaskContextTest, ExecuteCopy_ValidData_DataCopiedToDevice) {
-    if (!device_) {
+    if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device available";
     }
 
@@ -343,15 +337,15 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_ValidData_DataCopiedToDevice) {
     ::tcp_transfer::TcpLayerBlockTransferResponse resp;
     MockClosure                                   closure;
     auto                                          ctx = makeContext(&req, &resp, &closure);
-    ctx->setTask(makeTask(key, gpu_buf->data(), data_size));
+    ctx->setTask(makeTask(key, gpu_buf.data_ptr(), data_size));
 
     CudaCopyUtil copy_util;
     ASSERT_TRUE(ctx->executeCopy(copy_util));
-    EXPECT_TRUE(verifyDeviceData(gpu_buf->data(), content, data_size));
+    EXPECT_TRUE(verifyDeviceData(gpu_buf.data_ptr(), content, data_size));
 }
 
 TEST_F(TcpTaskContextTest, ExecuteCopy_MixedBlocks_SkipsNullAddrBlocks) {
-    if (!device_) {
+    if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device available";
     }
 
@@ -376,7 +370,7 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_MixedBlocks_SkipsNullAddrBlocks) {
     // Task: sub_block[0] has addr==nullptr (skipped), sub_block[1] is valid.
     auto kbi = std::make_shared<KeyBlockInfo>();
     kbi->blocks.push_back(BlockInfo{false, 0, 0, nullptr, 0});  // skipped
-    kbi->blocks.push_back(BlockInfo{false, 0, 0, gpu_buf->data(), data_size});
+    kbi->blocks.push_back(BlockInfo{false, 0, 0, gpu_buf.data_ptr(), data_size});
     KeyBlockInfoMap block_infos;
     block_infos[key] = kbi;
     auto task        = std::make_shared<TransferTask>(std::move(block_infos), currentTimeMs() + 5000);
@@ -384,7 +378,7 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_MixedBlocks_SkipsNullAddrBlocks) {
 
     CudaCopyUtil copy_util;
     ASSERT_TRUE(ctx->executeCopy(copy_util));
-    EXPECT_TRUE(verifyDeviceData(gpu_buf->data(), content, data_size));
+    EXPECT_TRUE(verifyDeviceData(gpu_buf.data_ptr(), content, data_size));
 }
 
 // ===========================================================================

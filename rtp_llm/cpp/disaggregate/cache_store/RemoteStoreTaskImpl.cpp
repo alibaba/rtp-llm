@@ -1,14 +1,15 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTaskImpl.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
-RemoteStoreTaskImpl::RemoteStoreTaskImpl(const std::shared_ptr<RemoteStoreRequest>& request,
+RemoteStoreTaskImpl::RemoteStoreTaskImpl(const std::shared_ptr<RemoteStoreRequest>&                    request,
                                          const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
-                                         CheckCancelFunc                            check_cancel_func):
+                                         CheckCancelFunc check_cancel_func):
     RemoteStoreTask(request, check_cancel_func) {
     to_load_buffers_          = request_->buffer_pairs;
     expect_done_buffer_count_ = to_load_buffers_.size();
-    collector_ = collector;
+    collector_                = collector;
     collector_->markStart();
 }
 
@@ -102,7 +103,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::shared_ptr<RequestBlockBuff
         };
 
     RTP_LLM_LOG_DEBUG("remote store task make available request success, request id is %s",
-                     request_block_buffer->getRequestId().c_str());
+                      request_block_buffer->getRequestId().c_str());
     return transfer_request;
 }
 
@@ -117,7 +118,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<Bloc
         }
 
         if (!blocks.empty()) {
-            int block_size  = 0;
+            int block_size = 0;
             for (auto block : blocks) {
                 block_size = block->len;
                 break;
@@ -137,7 +138,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<Bloc
             if (to_load_buffers_.size() == expect_done_buffer_count_) {
                 // first block ready
                 collector_->markFirstBlockReady();
-            } 
+            }
             if (to_load_buffers_.size() == 1) {
                 // all blocks ready
                 collector_->markAllBlocksReady();
@@ -165,7 +166,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<Bloc
         };
 
     RTP_LLM_LOG_DEBUG("remote store task make available request success, request id is %s",
-                     request_->request_id.c_str());
+                      request_->request_id.c_str());
     return transfer_request;
 }
 

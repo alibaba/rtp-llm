@@ -32,18 +32,13 @@ namespace rtp_llm {
 
 class cublasFP8MMWrapper: public cublasMMWrapper {
 public:
-    cublasFP8MMWrapper(cublasLtHandle_t cublaslt_handle_,
-                       cudaStream_t     stream,
-                       cublasAlgoMap*   map,
-                       std::mutex*      mu,
-                       IAllocator*      allocator);
+    cublasFP8MMWrapper(cublasLtHandle_t cublaslt_handle_, cudaStream_t stream, cublasAlgoMap* map, std::mutex* mu);
 
     cublasFP8MMWrapper(cublasHandle_t   cublas_handle,
                        cublasLtHandle_t cublaslt_handle,
                        cudaStream_t     stream,
                        cublasAlgoMap*   map,
-                       std::mutex*      mu,
-                       IAllocator*      allocator);
+                       std::mutex*      mu);
 
     override ~cublasFP8MMWrapper();
 
@@ -171,6 +166,7 @@ public:
 private:
     int                       version_major_, version_minor_, version_patch_;
     rtp_llm::qgmma1x1Launcher qgmmaLauncher;
+    torch::Tensor             cublas_workspace_qgemm_tensor_;
     void*                     cublas_workspace_qgemm_ = nullptr;
 };
 

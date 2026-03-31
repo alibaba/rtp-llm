@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImplContext.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 

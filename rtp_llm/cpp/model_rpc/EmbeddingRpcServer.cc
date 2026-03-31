@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/EmbeddingRpcServer.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/DebugUtils.h"
 namespace py = pybind11;
 namespace th = torch;
 

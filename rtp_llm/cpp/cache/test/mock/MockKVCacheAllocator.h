@@ -8,10 +8,8 @@ namespace rtp_llm {
 
 class MockKVCacheAllocator: public KVCacheAllocator {
 public:
-    explicit MockKVCacheAllocator(const CacheConfig&   config,
-                                  rtp_llm::DeviceBase* device,
-                                  AllocationType       atype = AllocationType::DEVICE):
-        KVCacheAllocator(config, device, atype) {}
+    explicit MockKVCacheAllocator(const CacheConfig& config, AllocationType atype = AllocationType::DEVICE):
+        KVCacheAllocator(config, atype) {}
     ~MockKVCacheAllocator() override = default;
 
 public:
@@ -37,7 +35,6 @@ public:
                  std::vector<BlockIdPair>&      block_update_mapping),
                 (override));
     MOCK_METHOD(int, seqSizePerBlock, (), (const, override));
-    MOCK_METHOD((std::vector<std::pair<BufferPtr, size_t>>), getAllBuffers, (), (const, override));
     MOCK_METHOD(int,
                 singleBatchNeedBlocks,
                 (const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step),

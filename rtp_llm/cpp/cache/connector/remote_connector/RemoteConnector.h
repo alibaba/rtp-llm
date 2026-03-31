@@ -22,7 +22,6 @@
 namespace rtp_llm {
 
 class KVCacheAllocator;
-class DeviceBase;
 class RemoteAsyncMatchContext;
 class RemoteConnectorAsyncContext;
 
@@ -33,7 +32,6 @@ public:
                     const RuntimeConfig&               runtime_config,
                     const ParallelismConfig&           parallelism_config,
                     const SpeculativeExecutionConfig&  sp_config,
-                    DeviceBase*                        device,
                     void*                              register_buffer_addr,
                     size_t                             register_buffer_size,
                     std::shared_ptr<KVCacheAllocator>  allocator,
@@ -42,9 +40,9 @@ public:
                     const std::vector<int32_t>&        other_group_ids                 = {},
                     const kmonitor::MetricsReporterPtr metrics_reporter                = nullptr,
                     uint32_t                           linear_attention_write_interval = 1,  // for linear attention
-                    size_t                             sink_size            = 0,  // for slide window attention
-                    size_t                             sw_size              = 0,  // for slide window attention
-                    const std::map<std::string, std::string>& lora_info_map = {});
+                    size_t                             sink_size = 0,  // for slide window attention
+                    size_t                             sw_size   = 0   // for slide window attention
+    );
     ~RemoteConnector() override;
 
     bool init();
@@ -116,16 +114,14 @@ private:
 
 private:
     struct InitParams {
-        const CacheConfig&                 cache_config;
-        const KVCacheConfig&               kv_cache_config;
-        const RuntimeConfig&               runtime_config;
-        const ParallelismConfig&           parallelism_config;
-        const SpeculativeExecutionConfig&  sp_config;
-        DeviceBase*                        device;
-        void*                              register_buffer_addr;
-        size_t                             register_buffer_size;
-        std::map<std::string, std::string> lora_info_map;
-        std::vector<std::string>           tp_addrs;
+        const CacheConfig&                cache_config;
+        const KVCacheConfig&              kv_cache_config;
+        const RuntimeConfig&              runtime_config;
+        const ParallelismConfig&          parallelism_config;
+        const SpeculativeExecutionConfig& sp_config;
+        void*                             register_buffer_addr;
+        size_t                            register_buffer_size;
+        std::vector<std::string>          tp_addrs;
     };
 
     // use thread_pool to simulate async operation

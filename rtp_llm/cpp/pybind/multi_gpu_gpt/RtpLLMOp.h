@@ -24,11 +24,8 @@ public:
               py::object propose_model,
               py::object token_processor);
     void stop();
-    void startHttpServer(py::object model_weights_loader,
-                         py::object lora_infos,
-                         py::object world_info,
-                         py::object tokenizer,
-                         py::object render);
+    void
+    startHttpServer(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);
     void pause();
     void restart();
 

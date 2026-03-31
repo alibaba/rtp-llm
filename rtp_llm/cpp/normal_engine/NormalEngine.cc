@@ -60,7 +60,17 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+#if !USING_CUDA
+    // On ROCm, this constructor runs on a gRPC handler thread that defaults to
+    // GPU 0. Set the correct device so all GPU allocations (KV cache, etc.) go
+    // to the right device.  The guard is scoped to the constructor body.
+    c10::DeviceGuard ctor_device_guard(
+        c10::Device(c10::kCUDA, static_cast<c10::DeviceIndex>(parallelism_config.local_rank)));
+    RTP_LLM_LOG_INFO("ROCm NormalEngine ctor: set device to %d", parallelism_config.local_rank);
+#endif
+
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
+#if USING_CUDA
     if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)
         && !ffn_disaggregate_config.enable_ffn_disaggregate) {
         // warm up
@@ -78,6 +88,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     } else {
         RTP_LLM_LOG_INFO("skip warm up.");
     }
+#else
+    RTP_LLM_LOG_INFO("skip warm up on non-CUDA platform.");
+#endif
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
@@ -101,17 +114,17 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
     if (propose_params_) {
-        executor_.reset(
-            new MtpExecutor(params, propose_params, resource_context_.cache_manager, device_, getLoraManager()));
+        executor_.reset(new MtpExecutor(params, propose_params, resource_context_.cache_manager, exec_init_params_));
     } else {
-        executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager()));
+        executor_.reset(
+            new NormalExecutor(params, resource_context_.cache_manager, false, false, 0, exec_init_params_));
     }
 }
 
 void NormalEngine::initScheduler() {
     if (runtime_config.use_batch_decode_scheduler) {
-        scheduler_.reset(
-            new BatchDecodeScheduler(runtime_config, resource_context_.cache_manager, metrics_reporter_, device_));
+        scheduler_.reset(new BatchDecodeScheduler(
+            runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else if (runtime_config.use_gather_batch_scheduler) {
         scheduler_.reset(new GatherBatchScheduler(runtime_config,
@@ -186,41 +199,44 @@ WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
 std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
     std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
     fake_input->generate_config               = make_shared<GenerateConfig>();
-    fake_input->input_ids =
-        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {seq_len}, rtp_llm::AllocationType::HOST});
+    size_t token_size                         = model_config_.embedding_size ?
+                                                    std::min(model_config_.embedding_size, model_config_.vocab_size) :
+                                                    model_config_.vocab_size;
+    fake_input->input_ids              = torch::randint(0, (int64_t)token_size, {(int64_t)seq_len}, torch::kInt32);
     fake_input->begin_time_us          = autil::TimeUtility::currentTimeInMicroSeconds();
     fake_input->generate_config->top_k = 1;
-    std::default_random_engine         generator;
-    size_t                             token_size = model_config_.embedding_size ?
-                                                        std::min(model_config_.embedding_size, model_config_.vocab_size) :
-                                                        model_config_.vocab_size;
-    std::uniform_int_distribution<int> distribution(0, token_size - 1);
-    for (size_t i = 0; i < fake_input->input_ids->size(); ++i) {
-        *fake_input->input_ids->dataWithOffset<int32_t>(i) = distribution(generator);
-    }
 
     return fake_input;
 }
 
 WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
+#if !USING_CUDA
+    RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
+    return {};
+#else
     auto fake_input                                   = makeFakeInput((size_t)model_config_.max_seq_len - 1);
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    device_->setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
+    rtp_llm::setTraceMemory(true);
+    executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, exec_init_params_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
-    const auto device_status = device_->getDeviceStatus();
-    device_->setTraceMemory(false);
+    const auto device_status = getGpuExecStatus();
+    rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     return WarmUpResult(
-        {device_status.device_memory_status.preserved_bytes, device_status.device_memory_status.max_consumed_bytes});
+        {device_status.device_memory_status.available_bytes, device_status.device_memory_status.max_consumed_bytes});
+#endif
 }
 
 WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
+#if !USING_CUDA
+    RTP_LLM_FAIL("decodeWarmUp is not supported on non-CUDA platforms");
+    return {};
+#else
     auto fake_input                                   = makeFakeInput((size_t)model_config_.max_seq_len - 1);
     fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    device_->setTraceMemory(true);
+    rtp_llm::setTraceMemory(true);
 
     auto cache_config               = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config);
     cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
@@ -228,17 +244,18 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(
-        cache_config, device_, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
+        cache_config, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    executor_.reset(new NormalExecutor(params, cache_manager, device_, nullptr, true));
+    executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, exec_init_params_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
-    const auto device_status = device_->getDeviceStatus();
-    device_->setTraceMemory(false);
+    const auto device_status = getGpuExecStatus();
+    rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     return WarmUpResult(
-        {device_status.device_memory_status.preserved_bytes, device_status.device_memory_status.max_consumed_bytes});
+        {device_status.device_memory_status.available_bytes, device_status.device_memory_status.max_consumed_bytes});
+#endif
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_new_tokens) {
@@ -251,12 +268,19 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
     if (pd_sep_config.role_type == RoleType::PDFUSION || pd_sep_config.role_type == RoleType::DECODE) {
-        BufferPtr new_tokens =
-            device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, 1}, rtp_llm::AllocationType::HOST});
-        *new_tokens->dataWithOffset<int32_t>(0) = 0;
+        auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
-        StreamUpdateInfo update_info{
-            new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false};
+        StreamUpdateInfo update_info{new_tokens,
+                                     1,
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     false};
         stream->update(update_info);
     }
     return stream;
@@ -275,16 +299,15 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                          isEagle());
 
         resource_context_.cache_manager = make_shared<KVCacheManager>(
-            config, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config, sp_config);
+            config, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config, sp_config);
         resource_context_.role_type = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
 
-        const auto& cache_cfg          = resource_context_.cache_manager->cacheConfig();
-        auto&       init_p             = device_->initParamsRef();
-        init_p.kv_cache_group_num      = resource_context_.cache_manager->cacheConfig().groupNums();
-        init_p.kv_cache_layer_to_group = cache_cfg.layer_to_group_id;
+        const auto& cache_cfg                     = resource_context_.cache_manager->cacheConfig();
+        exec_init_params_.kv_cache_group_num      = cache_cfg.groupNums();
+        exec_init_params_.kv_cache_layer_to_group = cache_cfg.layer_to_group_id;
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
@@ -294,15 +317,14 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                          result.block_size_bytes / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
         resource_context_.cache_manager = make_shared<KVCacheManager>(
-            result, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+            result, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
         resource_context_.role_type = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
-        const auto& cache_cfg          = resource_context_.cache_manager->cacheConfig();
-        auto&       init_p             = device_->initParamsRef();
-        init_p.kv_cache_group_num      = resource_context_.cache_manager->cacheConfig().groupNums();
-        init_p.kv_cache_layer_to_group = cache_cfg.layer_to_group_id;
+        const auto& cache_cfg                     = resource_context_.cache_manager->cacheConfig();
+        exec_init_params_.kv_cache_group_num      = cache_cfg.groupNums();
+        exec_init_params_.kv_cache_layer_to_group = cache_cfg.layer_to_group_id;
     }
 }
 
@@ -311,11 +333,10 @@ absl::Status NormalEngine::initSystemPrompt() {
 
     if (!kv_cache_config.multi_task_prompt_tokens.empty()) {
         resource_context_.reuse_cache = true;
-        CHECK_AND_RETURN_REF(system_prompt_param,
-                             SystemPromptConstructor::construct(kv_cache_config,
-                                                                this,
-                                                                resource_context_.cache_manager.get(),
-                                                                device_->getDeviceProperties().tp_rank == 0));
+        CHECK_AND_RETURN_REF(
+            system_prompt_param,
+            SystemPromptConstructor::construct(
+                kv_cache_config, this, resource_context_.cache_manager.get(), parallelism_config.tp_rank == 0));
         resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
     }
 
@@ -327,7 +348,7 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 }
 
 absl::Status NormalEngine::startLoop() {
-    if (device_->getDeviceProperties().tp_rank == 0) {
+    if (parallelism_config.tp_rank == 0) {
         RTP_LLM_LOG_INFO("start init system prompt");
         THROW_IF_STATUS_ERROR(initSystemPrompt());
         RTP_LLM_LOG_INFO("init system prompt done");
@@ -349,7 +370,7 @@ absl::Status NormalEngine::stop() {
 void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
-    device_->preRun();
+    cudaPreRun(exec_init_params_.device_id);
     while (running_) {
         auto status = step();
         if (!status.ok()) {
@@ -403,7 +424,7 @@ absl::Status NormalEngine::step() {
     step_profiler_.tick();
 
     list<GenerateStreamPtr> streams;
-    if (device_->getDeviceProperties().tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
+    if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step_));
@@ -412,7 +433,10 @@ absl::Status NormalEngine::step() {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
         }
-        if (streams.empty()) {
+        // When TP > 1, all ranks must enter process() together so that
+        // tpSyncModelInputs (collective broadcast) does not deadlock.
+        // The skip_run flag inside process() handles the "no work" case.
+        if (streams.empty() && parallelism_config.tp_size <= 1) {
             return absl::OkStatus();
         }
     }
@@ -425,10 +449,10 @@ absl::Status NormalEngine::step() {
     }
 
     // report step metrics
-    if (device_->getDeviceProperties().tp_rank == 0) {
+    if (parallelism_config.tp_rank == 0) {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
-        reportMetrics({false, false, step_latency});
+        reportMetrics({step_latency});
     }
 
     return status;
@@ -469,14 +493,14 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {
-                    streams.emplace_back(MtpExecutor::createMinFakePrefillStream(
-                        1, model_config_, runtime_config, resource_context_, device_));
+                    streams.emplace_back(
+                        MtpExecutor::createMinFakePrefillStream(1, model_config_, runtime_config, resource_context_));
                 }
                 break;
             case RoleType::DECODE:
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, device_));
+                        propose_step, model_config_, runtime_config, resource_context_));
                 }
                 break;
             case RoleType::PDFUSION: {
@@ -490,12 +514,12 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                     }
                 }
                 if (!has_prefill) {
-                    streams.emplace_back(MtpExecutor::createMinFakePrefillStream(
-                        1, model_config_, runtime_config, resource_context_, device_));
+                    streams.emplace_back(
+                        MtpExecutor::createMinFakePrefillStream(1, model_config_, runtime_config, resource_context_));
                 }
                 if (!has_decode) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, device_));
+                        propose_step, model_config_, runtime_config, resource_context_));
                 }
                 break;
             }

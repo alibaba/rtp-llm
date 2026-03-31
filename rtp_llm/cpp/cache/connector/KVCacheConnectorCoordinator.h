@@ -17,7 +17,6 @@
 
 namespace rtp_llm {
 
-class DeviceBase;
 class KVCacheAllocator;
 class KVCacheMemoryConnector;
 class RemoteConnector;
@@ -31,7 +30,6 @@ public:
                                 const ParallelismConfig&                 parallelism_config,
                                 const SpeculativeExecutionConfig&        sp_config,
                                 const std::shared_ptr<KVCacheAllocator>& allocator,
-                                rtp_llm::DeviceBase*                     device,
                                 const kmonitor::MetricsReporterPtr&      metrics_reporter   = nullptr,
                                 const PDSepConfig&                       pd_sep_config      = PDSepConfig{},
                                 const CacheStoreConfig&                  cache_store_config = CacheStoreConfig{});
@@ -74,7 +72,6 @@ private:
     const ParallelismConfig           parallelism_config_;
     const SpeculativeExecutionConfig  sp_config_;
     std::shared_ptr<KVCacheAllocator> allocator_;
-    rtp_llm::DeviceBase*              device_{nullptr};
     kmonitor::MetricsReporterPtr      metrics_reporter_;
     PDSepConfig                       pd_sep_config_;
     CacheStoreConfig                  cache_store_config_;

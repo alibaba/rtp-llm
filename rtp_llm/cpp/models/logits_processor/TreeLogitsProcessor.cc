@@ -1,14 +1,10 @@
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 using namespace std;
 
 namespace rtp_llm {
 
-TreeLogitsProcessor::TreeLogitsProcessor(rtp_llm::DeviceBase* device): BaseLogitsProcessor(device) {};
-
-TreeLogitsProcessor::TreeLogitsProcessor(rtp_llm::DeviceBase* device, std::vector<StreamTreeInfo> tree_infos):
-    BaseLogitsProcessor(device), tree_infos_(tree_infos) {}
+TreeLogitsProcessor::TreeLogitsProcessor(std::vector<StreamTreeInfo> tree_infos): tree_infos_(tree_infos) {}
 
 void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     auto batch_size = size();
@@ -32,8 +28,8 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
         return;
     }
 
-    auto   batch_logits     = inputs.logits->slice(start_idx, batch_size);
-    size_t vocab_size       = batch_logits->shape()[1];
+    auto   batch_logits     = inputs.logits.narrow(0, start_idx, batch_size);
+    size_t vocab_size       = batch_logits.size(1);
     auto   batch_vocab_mask = generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
     maskLogits(batch_logits, batch_vocab_mask);
 }
@@ -46,9 +42,9 @@ void TreeLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch
     tree_infos_ = std::move(new_tree_infos);
 }
 
-void TreeLogitsProcessor::updateStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) {
-    RTP_LLM_CHECK(2 == new_tokens->shape().size());
-    RTP_LLM_CHECK(size() == new_tokens->shape()[0]);
+void TreeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
+    RTP_LLM_CHECK(2 == new_tokens.dim());
+    RTP_LLM_CHECK(size() == (size_t)new_tokens.size(0));
 
     for (size_t i = 0; i < size(); i++) {
         auto& info = tree_infos_[i];
@@ -58,11 +54,11 @@ void TreeLogitsProcessor::updateStatus(const rtp_llm::BufferPtr& new_tokens, int
         auto offset = info.is_beam_search ? (info.current_output_length + info.input_length) : 0;
 
         if (!info.is_beam_search) {
-            RTP_LLM_CHECK(num_new_tokens == new_tokens->shape()[1]);
+            RTP_LLM_CHECK(num_new_tokens == new_tokens.size(1));
         }
 
         for (size_t j = 0; j < num_new_tokens; ++j) {
-            auto current_token_id = *(*new_tokens)[i].dataWithOffset<int>(j + offset);
+            auto current_token_id = new_tokens.data_ptr<int>()[i * new_tokens.size(1) + j + offset];
             info.dfa_ptr->next(current_token_id);
         }
 
@@ -70,14 +66,13 @@ void TreeLogitsProcessor::updateStatus(const rtp_llm::BufferPtr& new_tokens, int
     }
 }
 
-TreeLogitsProcessorPtr TreeLogitsProcessor::fromGenerateInput(rtp_llm::DeviceBase*           device,
-                                                              std::shared_ptr<GenerateInput> generate_input,
+TreeLogitsProcessorPtr TreeLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
                                                               int32_t                        num) {
     if (!PrefixToCandidateTokens::instance()->initSuccess()) {
         return nullptr;
     }
 
-    auto processor_ptr = std::make_shared<TreeLogitsProcessor>(rtp_llm::DeviceFactory::getDefaultDevice());
+    auto processor_ptr = std::make_shared<TreeLogitsProcessor>();
     for (size_t i = 0; i < num; i++) {
         StreamTreeInfo              tree_info(PrefixToCandidateTokens::instance()->initSuccess(),
                                  generate_input->inputLength(),
@@ -86,7 +81,7 @@ TreeLogitsProcessorPtr TreeLogitsProcessor::fromGenerateInput(rtp_llm::DeviceBas
                                      || generate_input->generate_config->num_return_sequences > 1,
                                  std::make_shared<TreeDFA<std::string, int>>(PrefixToCandidateTokens::instance()));
         std::vector<StreamTreeInfo> tree_infos       = {tree_info};
-        auto                        single_processor = std::make_shared<TreeLogitsProcessor>(device, tree_infos);
+        auto                        single_processor = std::make_shared<TreeLogitsProcessor>(tree_infos);
 
         processor_ptr->insert(single_processor, 1);
     }

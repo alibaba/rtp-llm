@@ -17,10 +17,11 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheSender.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/test/DeviceReserveForTest.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "autil/NetUtil.h"
+#include <torch/torch.h>
+#include <c10/cuda/CUDAStream.h>
 
 namespace rtp_llm {
 namespace transfer {
@@ -80,22 +81,22 @@ public:
         ModelSpecificConfig         model_specific_config;
 
         tcp_test_internal::apply_device_reserve_from_env(device_resource_config);
-        DeviceFactory::initDevices(parallelism_config,
-                                   model_config,
-                                   eplb_config,
-                                   fmha_config,
-                                   device_resource_config,
-                                   moe_config,
-                                   sp_config,
-                                   misc_config,
-                                   profiling_debug_logging_config,
-                                   hw_kernel_config,
-                                   concurrency_config,
-                                   ffn_disaggregate_config,
-                                   runtime_config,
-                                   model_specific_config,
-                                   NcclCommConfig{});
-        device_ = DeviceFactory::getDefaultDevice();
+        initExecCtx(parallelism_config,
+                    model_config,
+                    eplb_config,
+                    fmha_config,
+                    device_resource_config,
+                    moe_config,
+                    sp_config,
+                    misc_config,
+                    profiling_debug_logging_config,
+                    hw_kernel_config,
+                    concurrency_config,
+                    ffn_disaggregate_config,
+                    runtime_config,
+                    model_specific_config,
+                    NcclCommConfig{});
+        device_initialized_ = isRuntimeInitialized();
     }
 
 protected:
@@ -105,12 +106,12 @@ protected:
         ASSERT_TRUE(sender_->init(2));
     }
 
-    static DeviceBase*                device_;
+    static bool                       device_initialized_;
     std::unique_ptr<TcpKVCacheSender> sender_;
     uint32_t                          unused_port_ = 0;
 };
 
-DeviceBase* TcpSenderOnlyTest::device_ = nullptr;
+bool TcpSenderOnlyTest::device_initialized_ = false;
 
 // ---------------------------------------------------------------------------
 // Fixture: Sender + Receiver on localhost
@@ -135,22 +136,22 @@ public:
         ModelSpecificConfig         model_specific_config;
 
         tcp_test_internal::apply_device_reserve_from_env(device_resource_config);
-        DeviceFactory::initDevices(parallelism_config,
-                                   model_config,
-                                   eplb_config,
-                                   fmha_config,
-                                   device_resource_config,
-                                   moe_config,
-                                   sp_config,
-                                   misc_config,
-                                   profiling_debug_logging_config,
-                                   hw_kernel_config,
-                                   concurrency_config,
-                                   ffn_disaggregate_config,
-                                   runtime_config,
-                                   model_specific_config,
-                                   NcclCommConfig{});
-        device_ = DeviceFactory::getDefaultDevice();
+        initExecCtx(parallelism_config,
+                    model_config,
+                    eplb_config,
+                    fmha_config,
+                    device_resource_config,
+                    moe_config,
+                    sp_config,
+                    misc_config,
+                    profiling_debug_logging_config,
+                    hw_kernel_config,
+                    concurrency_config,
+                    ffn_disaggregate_config,
+                    runtime_config,
+                    model_specific_config,
+                    NcclCommConfig{});
+        device_initialized_ = isRuntimeInitialized();
     }
 
 protected:
@@ -167,29 +168,27 @@ protected:
         sender_.reset();
     }
 
-    BufferPtr allocDevice(size_t size) {
-        if (!device_)
-            return nullptr;
-        return device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::DEVICE});
+    torch::Tensor allocDevice(size_t size) {
+        return torch::empty({static_cast<int64_t>(size)},
+                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     }
 
     bool verifyDevice(void* ptr, const std::string& expected) {
-        const size_t size    = expected.size();
-        auto         cpu_buf = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::HOST});
-        auto         src     = Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_UINT8, {size}, ptr);
-        auto         dst     = Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT8, {size}, cpu_buf->data());
-        device_->copy({dst, src});
-        device_->syncAndCheck();
-        return std::memcmp(cpu_buf->data(), expected.data(), size) == 0;
+        const size_t size       = expected.size();
+        auto         gpu_tensor = torch::from_blob(
+            ptr, {static_cast<int64_t>(size)}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        auto cpu_tensor = gpu_tensor.cpu();
+        at::cuda::getCurrentCUDAStream().synchronize();
+        return std::memcmp(cpu_tensor.data_ptr(), expected.data(), size) == 0;
     }
 
-    static DeviceBase*                  device_;
+    static bool                         device_initialized_;
     std::unique_ptr<TcpKVCacheSender>   sender_;
     std::unique_ptr<TcpKVCacheReceiver> receiver_;
     uint32_t                            test_port_ = 0;
 };
 
-DeviceBase* TcpSenderReceiverTest::device_ = nullptr;
+bool TcpSenderReceiverTest::device_initialized_ = false;
 
 // ===========================================================================
 // F. Build request failures (Sender only, no network)
@@ -215,12 +214,15 @@ TEST_F(TcpSenderOnlyTest, F1_EmptyBlockInfo_ImmediateBuildFailed) {
 // D1/D3: Receiver is not running; arpc returns a channel object regardless, so
 //        the RPC is sent but times out → RPC_FAILED (controller->Failed()=true).
 TEST_F(TcpSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
-    char        dummy[64]{};
+    if (!device_initialized_) {
+        GTEST_SKIP() << "No GPU device";
+    }
+    auto        gpu_buf = torch::empty({64}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     SendRequest req;
     req.ip          = "127.0.0.1";
     req.port        = unused_port_;
     req.unique_key  = "k_d1";
-    req.block_info  = makeBlocks(1, dummy, 64);
+    req.block_info  = makeBlocks(1, gpu_buf.data_ptr(), 64);
     req.deadline_ms = currentTimeMs() + 1000;  // 1s deadline to keep the test fast
 
     auto code = syncSend(*sender_, req, std::chrono::seconds(5));
@@ -236,12 +238,15 @@ TEST_F(TcpSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
 // B1: Receiver is running but has not called recv(); the RPC enters wait_tasks_
 //     and times out after the deadline.
 TEST_F(TcpSenderReceiverTest, B1_SenderTimeout_ReceiverHasNoMatchingTask) {
-    char        dummy[64]{};
+    if (!device_initialized_) {
+        GTEST_SKIP() << "No GPU device";
+    }
+    auto        gpu_buf = allocDevice(64);
     SendRequest req;
     req.ip          = "127.0.0.1";
     req.port        = test_port_;
     req.unique_key  = "k_b1_integ";
-    req.block_info  = makeBlocks(1, dummy, 64);
+    req.block_info  = makeBlocks(1, gpu_buf.data_ptr(), 64);
     req.deadline_ms = currentTimeMs() + 500;  // short deadline
 
     auto code = syncSend(*sender_, req, std::chrono::seconds(5));
@@ -255,11 +260,15 @@ TEST_F(TcpSenderReceiverTest, B1_SenderTimeout_ReceiverHasNoMatchingTask) {
 // C1: Receiver registers a task then immediately cancels it; the RPC arrives,
 //     waitCheckProc finds the already-done task and responds CANCELLED.
 TEST_F(TcpSenderReceiverTest, C1_RecvCancelledBeforeRpcArrives_Integration) {
-    char dummy[64]{};
+    if (!device_initialized_) {
+        GTEST_SKIP() << "No GPU device";
+    }
+    auto gpu_buf_recv = allocDevice(64);
+    auto gpu_buf_send = allocDevice(64);
 
     RecvRequest recv_req;
     recv_req.unique_key  = "k_c1_integ";
-    recv_req.block_info  = makeBlocks(1, dummy, 64);
+    recv_req.block_info  = makeBlocks(1, gpu_buf_recv.data_ptr(), 64);
     recv_req.deadline_ms = currentTimeMs() + 5000;
 
     auto task = receiver_->recv(recv_req);
@@ -270,7 +279,7 @@ TEST_F(TcpSenderReceiverTest, C1_RecvCancelledBeforeRpcArrives_Integration) {
     send_req.ip          = "127.0.0.1";
     send_req.port        = test_port_;
     send_req.unique_key  = "k_c1_integ";
-    send_req.block_info  = makeBlocks(1, dummy, 64);
+    send_req.block_info  = makeBlocks(1, gpu_buf_send.data_ptr(), 64);
     send_req.deadline_ms = currentTimeMs() + 5000;
 
     auto code = syncSend(*sender_, send_req, std::chrono::seconds(5));
@@ -285,7 +294,7 @@ TEST_F(TcpSenderReceiverTest, C1_RecvCancelledBeforeRpcArrives_Integration) {
 // A1: Full end-to-end transfer: Receiver registers GPU buffer, Sender copies
 //     data over TCP, GPU content is verified.
 TEST_F(TcpSenderReceiverTest, A1_NormalTransfer_EndToEnd_Success) {
-    if (!device_) {
+    if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device";
     }
 
@@ -295,37 +304,31 @@ TEST_F(TcpSenderReceiverTest, A1_NormalTransfer_EndToEnd_Success) {
 
     RecvRequest recv_req;
     recv_req.unique_key  = "k_a1_integ";
-    recv_req.block_info  = makeBlocks(1, gpu_buf->data(), size);
+    recv_req.block_info  = makeBlocks(1, gpu_buf.data_ptr(), size);
     recv_req.deadline_ms = currentTimeMs() + 5000;
 
     auto task = receiver_->recv(recv_req);
     ASSERT_NE(task, nullptr);
 
-    // Sender packs the host copy of the content and ships it.
-    // We use a host buffer as the "GPU source" for CudaCopyUtil in tests;
-    // the send-side copy path works with any device-visible pointer.
-    auto host_buf = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::HOST});
-    std::memcpy(host_buf->data(), content.data(), size);
-    // Flush so the GPU can read it.
-    auto gpu_src = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::DEVICE});
+    auto gpu_src = allocDevice(size);
     {
-        auto src = Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT8, {size}, host_buf->data());
-        auto dst = Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_UINT8, {size}, gpu_src->data());
-        device_->copy({dst, src});
-        device_->syncAndCheck();
+        auto host_tensor =
+            torch::from_blob(const_cast<char*>(content.data()), {static_cast<int64_t>(size)}, torch::kUInt8);
+        gpu_src.copy_(host_tensor);
+        at::cuda::getCurrentCUDAStream().synchronize();
     }
 
     SendRequest send_req;
     send_req.ip          = "127.0.0.1";
     send_req.port        = test_port_;
     send_req.unique_key  = "k_a1_integ";
-    send_req.block_info  = makeBlocks(1, gpu_src->data(), size);
+    send_req.block_info  = makeBlocks(1, gpu_src.data_ptr(), size);
     send_req.deadline_ms = currentTimeMs() + 5000;
 
     auto code = syncSend(*sender_, send_req, std::chrono::seconds(10));
     EXPECT_EQ(code, TransferErrorCode::OK);
     EXPECT_TRUE(task->success());
-    EXPECT_TRUE(verifyDevice(gpu_buf->data(), content));
+    EXPECT_TRUE(verifyDevice(gpu_buf.data_ptr(), content));
 }
 
 // ===========================================================================
@@ -337,14 +340,14 @@ TEST_F(TcpSenderReceiverTest, A1_NormalTransfer_EndToEnd_Success) {
 //     Sends are issued sequentially to avoid concurrent GPU-copy races,
 //     while still exercising the multi-key routing path in TcpTransferService.
 TEST_F(TcpSenderReceiverTest, G2_MultipleSenders_ConcurrentKeys) {
-    if (!device_) {
+    if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device";
     }
 
     constexpr int    N    = 3;
     constexpr size_t size = 64;
 
-    std::vector<BufferPtr>           src_bufs(N), dst_bufs(N);
+    std::vector<torch::Tensor>       src_bufs(N), dst_bufs(N);
     std::vector<IKVCacheRecvTaskPtr> tasks(N);
     std::vector<std::string>         contents(N);
 
@@ -353,41 +356,34 @@ TEST_F(TcpSenderReceiverTest, G2_MultipleSenders_ConcurrentKeys) {
         dst_bufs[i] = allocDevice(size);
         src_bufs[i] = allocDevice(size);
 
-        auto host_src = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::HOST});
-        std::memcpy(host_src->data(), contents[i].data(), size);
         {
-            auto src = Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT8, {size}, host_src->data());
-            auto dst = Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_UINT8, {size}, src_bufs[i]->data());
-            device_->copy({dst, src});
-            // Sync before host_src goes out of scope to avoid use-after-free in async copy.
-            device_->syncAndCheck();
+            auto host_tensor =
+                torch::from_blob(const_cast<char*>(contents[i].data()), {static_cast<int64_t>(size)}, torch::kUInt8);
+            src_bufs[i].copy_(host_tensor);
+            at::cuda::getCurrentCUDAStream().synchronize();
         }
 
         RecvRequest recv_req;
         recv_req.unique_key  = "k_g2_" + std::to_string(i);
-        recv_req.block_info  = makeBlocks(1, dst_bufs[i]->data(), size);
+        recv_req.block_info  = makeBlocks(1, dst_bufs[i].data_ptr(), size);
         recv_req.deadline_ms = currentTimeMs() + 5000;
         tasks[i]             = receiver_->recv(recv_req);
         ASSERT_NE(tasks[i], nullptr);
     }
 
-    // Issue N sends sequentially; each completes before the next starts to avoid
-    // concurrent GPU-copy on shared CudaCopyUtil state.
     for (int i = 0; i < N; ++i) {
         SendRequest send_req;
         send_req.ip          = "127.0.0.1";
         send_req.port        = test_port_;
         send_req.unique_key  = "k_g2_" + std::to_string(i);
-        send_req.block_info  = makeBlocks(1, src_bufs[i]->data(), size);
+        send_req.block_info  = makeBlocks(1, src_bufs[i].data_ptr(), size);
         send_req.deadline_ms = currentTimeMs() + 5000;
 
         auto code = syncSend(*sender_, send_req, std::chrono::seconds(10));
         EXPECT_EQ(code, TransferErrorCode::OK) << "key index " << i;
         EXPECT_TRUE(tasks[i]->success()) << "key index " << i;
-        // batchCopyToDevice on the worker thread is non-blocking; sync all streams
-        // before the D→H verification copy to avoid reading stale GPU data.
-        device_->syncAndCheck();
-        EXPECT_TRUE(verifyDevice(dst_bufs[i]->data(), contents[i])) << "key index " << i;
+        at::cuda::getCurrentCUDAStream().synchronize();
+        EXPECT_TRUE(verifyDevice(dst_bufs[i].data_ptr(), contents[i])) << "key index " << i;
     }
 }
 

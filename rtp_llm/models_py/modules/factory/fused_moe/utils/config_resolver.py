@@ -9,7 +9,7 @@ import torch
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.ops.compute_ops import DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
 from rtp_llm.utils.util import to_torch_dtype
 
 
@@ -23,7 +23,7 @@ class MoeConfigResolver:
         Returns:
             Device type
         """
-        return get_device().get_device_type()
+        return get_exec_ctx().get_device_type()
 
     @staticmethod
     def has_quantization(config: MoEConfigAdapter) -> bool:

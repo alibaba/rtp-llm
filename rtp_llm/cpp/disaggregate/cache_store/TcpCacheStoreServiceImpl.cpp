@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImpl.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+#include <torch/torch.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImplContext.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheTransferServiceImplContext.h"
 
@@ -13,8 +16,7 @@ TcpCacheStoreServiceImpl::TcpCacheStoreServiceImpl(
     const std::shared_ptr<TcpClient>&                tcp_client):
     CacheStoreServiceImpl(
         memory_util, request_block_buffer_store, metrics_reporter, timer_manager, locked_block_buffer_manager),
-    tcp_client_(tcp_client),
-    device_(rtp_llm::DeviceFactory::getDefaultDevice()) {}
+    tcp_client_(tcp_client) {}
 
 void TcpCacheStoreServiceImpl::loadImpl(::google::protobuf::RpcController* controller,
                                         const ::CacheLoadRequest*          request,
@@ -22,7 +24,7 @@ void TcpCacheStoreServiceImpl::loadImpl(::google::protobuf::RpcController* contr
                                         ::google::protobuf::Closure*       done) {
     // int64_t start_time_us        = currentTimeUs();
     // int64_t request_send_cost_us = start_time_us - request->request_send_start_time_us();
-    auto    collector            = std::make_shared<CacheStoreServerLoadMetricsCollector>(
+    auto collector = std::make_shared<CacheStoreServerLoadMetricsCollector>(
         metrics_reporter_,
         request->blocks_size(),
         request->blocks_size() ? request->blocks(0).len() * request->blocks_size() : 0,
@@ -110,16 +112,16 @@ void TcpCacheStoreServiceImpl::blockReadImpl(::google::protobuf::RpcController* 
             resp_block_info->set_addr(block_info.addr());
             resp_block_info->set_len(block_info.len());
 
-            auto src_buffer = rtp_llm::Buffer(rtp_llm::MemoryType::MEMORY_GPU,
-                                              rtp_llm::DataType::TYPE_UINT8,
-                                              {block_info.len()},
-                                              (void*)block_info.addr());
+            auto src_tensor = torch::from_blob((void*)block_info.addr(),
+                                               {(int64_t)block_info.len()},
+                                               torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
 
             auto tmp_buffer = static_cast<char*>(malloc(block_info.len()));
-            auto dst_buffer = rtp_llm::Buffer(
-                rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_UINT8, {block_info.len()}, tmp_buffer);
+            auto dst_tensor = torch::from_blob(tmp_buffer,
+                                               {(int64_t)block_info.len()},
+                                               torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
 
-            device_->noBlockCopy({dst_buffer, src_buffer});
+            execNoBlockCopy({dst_tensor, src_tensor});
             resp_block_info->set_content(tmp_buffer, block_info.len());
             free(tmp_buffer);
         }

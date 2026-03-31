@@ -19,6 +19,7 @@ cc_library(
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/models:context_parallel",
+        "//rtp_llm/cpp/cuda/CudaGraph:graph_base",
         "//rtp_llm/cpp/utils:profiling_scope",
     ],
     visibility = ["//visibility:public"]

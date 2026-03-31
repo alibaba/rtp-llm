@@ -16,8 +16,8 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = torch_deps() + [
-        "//rtp_llm/cpp/devices/testing:device_test_utils",
-        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/cpp/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/models:position_ids_generator",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/engine_base/stream:stream",

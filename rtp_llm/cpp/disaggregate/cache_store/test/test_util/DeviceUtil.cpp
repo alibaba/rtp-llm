@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/test/test_util/DeviceUtil.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include <cuda_runtime.h>
 
 using namespace std;
 
@@ -22,31 +24,31 @@ DeviceUtil::DeviceUtil(const DeviceResourceConfig device_resource_config) {
     rtp_llm::RuntimeConfig               runtime_config;
     rtp_llm::ModelSpecificConfig         model_specific_config;
 
-    rtp_llm::DeviceFactory::initDevices(parallelism_config,
-                                        model_config,
-                                        eplb_config,
-                                        fmha_config,
-                                        device_resource_config_copy,
-                                        moe_config,
-                                        sp_config,
-                                        misc_config,
-                                        profiling_debug_logging_config,
-                                        hw_kernel_config,
-                                        concurrency_config,
-                                        ffn_disaggregate_config,
-                                        runtime_config,
-                                        model_specific_config,
-                                        rtp_llm::NcclCommConfig{});
-    device_ = DeviceFactory::getDefaultDevice();
+    rtp_llm::initExecCtx(parallelism_config,
+                         model_config,
+                         eplb_config,
+                         fmha_config,
+                         device_resource_config_copy,
+                         moe_config,
+                         sp_config,
+                         misc_config,
+                         profiling_debug_logging_config,
+                         hw_kernel_config,
+                         concurrency_config,
+                         ffn_disaggregate_config,
+                         runtime_config,
+                         model_specific_config,
+                         rtp_llm::NcclCommConfig{});
 }
 
 DeviceUtil::~DeviceUtil() {}
 
 void* DeviceUtil::mallocCPU(size_t size) {
     std::unique_lock<std::mutex> lock(mutex_);
-    auto                         buffer = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::HOST});
-    buffer_map_.insert({buffer->data(), buffer});
-    return buffer->data();
+    auto  tensor = torch::empty({(int64_t)size}, torch::TensorOptions().dtype(torch::kUInt8)).pin_memory();
+    void* ptr    = tensor.data_ptr();
+    buffer_map_.insert({ptr, tensor});
+    return ptr;
 }
 
 void DeviceUtil::freeCPU(void* ptr) {
@@ -61,9 +63,10 @@ void DeviceUtil::freeCPU(void* ptr) {
 
 void* DeviceUtil::mallocGPU(size_t size) {
     std::unique_lock<std::mutex> lock(mutex_);
-    auto buffer = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::DEVICE});
-    buffer_map_.insert({buffer->data(), buffer});
-    return buffer->data();
+    auto  tensor = torch::empty({(int64_t)size}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    void* ptr    = tensor.data_ptr();
+    buffer_map_.insert({ptr, tensor});
+    return ptr;
 }
 
 void DeviceUtil::freeGPU(void* ptr) {
@@ -81,18 +84,18 @@ void DeviceUtil::memsetCPU(void* ptr, int value, size_t len) {
 }
 
 bool DeviceUtil::memsetGPU(void* ptr, int value, size_t len) {
-    auto buffer = rtp_llm::Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_UINT8, {len}, ptr);
-    device_->bufMemset(buffer, value);
+    cudaMemset(ptr, value, len);
     return true;
 }
 
 bool DeviceUtil::memcopy(void* dst, bool dst_gpu, const void* src, bool src_gpu, size_t size) {
-    const auto dst_memory_type = dst_gpu ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
-    const auto src_memory_type = src_gpu ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
-    auto       dst_buffer      = rtp_llm::Buffer(dst_memory_type, DataType::TYPE_UINT8, {size}, dst);
-    auto       src_buffer      = rtp_llm::Buffer(src_memory_type, DataType::TYPE_UINT8, {size}, src);
-    device_->copy({dst_buffer, src_buffer});
-    device_->syncAndCheck();
+    auto dst_device = dst_gpu ? torch::kCUDA : torch::kCPU;
+    auto src_device = src_gpu ? torch::kCUDA : torch::kCPU;
+    auto dst_t = torch::from_blob(dst, {(int64_t)size}, torch::TensorOptions().dtype(torch::kUInt8).device(dst_device));
+    auto src_t = torch::from_blob(
+        const_cast<void*>(src), {(int64_t)size}, torch::TensorOptions().dtype(torch::kUInt8).device(src_device));
+    dst_t.copy_(src_t);
+    runtimeSyncAndCheck();
     return true;
 }
 

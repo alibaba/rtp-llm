@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/utils/Exception.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -59,31 +59,23 @@ protected:
         model_config.attn_config.rope_head_dim    = 0;
         model_config.attn_config.v_head_dim       = 0;
 
-        // Keep tests stable on shared GPUs with low free memory:
-        // - device_reserve_memory_bytes=1 => avoid DeviceFactory default (-512MB), i.e. avoid reserving (free - 512MB)
-        // - host_reserve_memory_bytes=0   => don't reserve pinned host memory
-        device_resource_config.device_reserve_memory_bytes = 2048000000;
-        device_resource_config.host_reserve_memory_bytes   = 2048000000;
-
         rtp_llm::ModelSpecificConfig model_specific_config;
-        rtp_llm::DeviceFactory::initDevices(parallelism_config,
-                                            model_config,
-                                            eplb_config,
-                                            fmha_config,
-                                            device_resource_config,
-                                            moe_config,
-                                            sp_config,
-                                            misc_config,
-                                            profiling_debug_logging_config,
-                                            hw_kernel_config,
-                                            concurrency_config,
-                                            ffn_disaggregate_config,
-                                            runtime_config,
-                                            model_specific_config,
-                                            rtp_llm::NcclCommConfig{});
-        device_ = rtp_llm::DeviceFactory::getDefaultDevice();
-
-        ASSERT_NE(device_, nullptr);
+        rtp_llm::initExecCtx(parallelism_config,
+                             model_config,
+                             eplb_config,
+                             fmha_config,
+                             device_resource_config,
+                             moe_config,
+                             sp_config,
+                             misc_config,
+                             profiling_debug_logging_config,
+                             hw_kernel_config,
+                             concurrency_config,
+                             ffn_disaggregate_config,
+                             runtime_config,
+                             model_specific_config,
+                             rtp_llm::NcclCommConfig{});
+        ASSERT_TRUE(rtp_llm::isRuntimeInitialized());
     }
 
     void TearDown() override {}
@@ -213,8 +205,6 @@ protected:
                                          BufferInitMode       init_mode     = BufferInitMode::Zeros) {
         return createTestContext(createTestConfig(k_block_bytes, v_block_bytes), device, init_mode);
     }
-
-    rtp_llm::DeviceBase* device_;
 };
 
 TEST_F(MemoryLayoutStrategyTest, Initialization) {

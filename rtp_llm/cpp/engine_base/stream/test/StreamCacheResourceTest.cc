@@ -19,7 +19,7 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 
@@ -73,8 +73,7 @@ protected:
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
                                         RoleType                role_type) {
-        cache_manager_ =
-            std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/false, /*metrics_reporter=*/nullptr);
+        cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr);
         ASSERT_TRUE(cache_manager_->init());
         ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
         ResourceContext resource_context;
@@ -85,10 +84,8 @@ protected:
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         generate_config->num_return_sequences = 2;
-        auto                vec               = input_tokens;  // keep alive until stream is constructed
-        std::vector<size_t> shape             = {vec.size()};
         generate_input->input_ids =
-            std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
+            torch::tensor(std::vector<int32_t>(input_tokens.begin(), input_tokens.end()), torch::kInt32);
         generate_input->generate_config = generate_config;
         ModelConfig model_config;
         model_config.attn_config.tokens_per_block = 2;
@@ -269,8 +266,8 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
         std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_,
-                                                                             device_);
+                                                                             cache_manager_->allocator_);
+
     cache_manager_->coordinator_ = mock_coord;
 
     // Build a FusedAsyncReadContext that is immediately done/success and has reuse blocks set.
@@ -322,15 +319,15 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
     stream_->generate_input_->generate_config->enable_memory_cache = true;
     resource.resource_context_.enable_memory_cache                 = true;
 
-    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_, device_);
+    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
     cache_manager_->allocator_ = allocator;
 
     auto mock_coord =
         std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_,
-                                                                             device_);
+                                                                             cache_manager_->allocator_);
+
     cache_manager_->coordinator_ = mock_coord;
     EXPECT_CALL(*mock_coord, asyncRead(testing::_)).WillOnce(testing::Return(nullptr));
 
@@ -381,8 +378,8 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_Wh
         std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_,
-                                                                             device_);
+                                                                             cache_manager_->allocator_);
+
     cache_manager_->coordinator_ = mock_coord;
 
     std::shared_ptr<KVCacheConnectorReadWriteContext> captured_ctx;
@@ -417,8 +414,8 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_DoesNotStoreCacheAsync_Whe
         std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_,
-                                                                             device_);
+                                                                             cache_manager_->allocator_);
+
     cache_manager_->coordinator_ = mock_coord;
 
     EXPECT_CALL(*mock_coord, asyncWrite(testing::_)).Times(0);
@@ -447,8 +444,8 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TieredMemoryCache_EvictsDe
         std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_,
-                                                                             device_);
+                                                                             cache_manager_->allocator_);
+
     cache_manager_->coordinator_ = mock_coord;
 
     std::vector<std::shared_ptr<KVCacheConnectorReadWriteContext>> captured_ctxs;
@@ -493,8 +490,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
         std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_,
-                                                                             device_);
+                                                                             cache_manager_->allocator_);
     cache_manager_->coordinator_ = mock_coord;
 
     // First call: loadCacheSync returns reuse blocks (memory=1, device=2)

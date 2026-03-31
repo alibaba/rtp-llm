@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
-#include "rtp_llm/cpp/core/Buffer.h"
+#include <torch/python.h>
 
 namespace rtp_llm {
 
@@ -22,10 +22,9 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         generate_config->max_new_tokens = 1;
-        std::vector<size_t> shape       = {tokens_id.size()};
         generate_input->request_id      = 0;
-        generate_input->input_ids       = std::make_unique<rtp_llm::Buffer>(
-            rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(tokens_id.data()));
+        generate_input->input_ids =
+            torch::from_blob(const_cast<int*>(tokens_id.data()), {(int64_t)tokens_id.size()}, torch::kInt32).clone();
         generate_input->generate_config = generate_config;
         // TODO(chanyin): last partial block will be wasted when need_release_resource is false
         generate_input->need_release_resource = false;

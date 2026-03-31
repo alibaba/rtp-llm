@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
-#include "rtp_llm/cpp/devices/OpData.h"
+#include "rtp_llm/cpp/core/OpData.h"
 
 namespace rtp_llm {
 

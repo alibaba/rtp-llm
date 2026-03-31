@@ -7,15 +7,17 @@
 #include "c10/core/DeviceType.h"
 #include "c10/core/ScalarType.h"
 #include "rtp_llm/cpp/models/Sampler.h"
-#include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/TensorDebugUtils.h"
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda/ops/StandaloneOps.h"
+#include "ATen/cuda/CUDAContext.h"
+#endif
 
 using namespace std;
 
@@ -40,42 +42,45 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     const bool need_cal_position_id = (mm_position_ids_style_ != PositionIdsStyle::DEFAULT) || has_positional_encoding_;
 
     size_t num_layers = 0;
-    if (model_input.kv_cache_layer_to_group) {
-        num_layers = model_input.kv_cache_layer_to_group->size();
+    if (model_input.kv_cache_layer_to_group.defined()) {
+        num_layers = model_input.kv_cache_layer_to_group.numel();
     } else {
         num_layers = layer_to_kv_cache_group_id_.size();
     }
 
-    model_input.combo_tokens = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
+    // Use pinned_memory(true) in TensorOptions to leverage PyTorch's CachingHostAllocator,
+    // which reuses pinned memory blocks across calls instead of cudaHostAlloc/Free each time.
+    static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+    static const auto pinned_i64  = torch::TensorOptions(torch::kInt64).pinned_memory(true);
+    static const auto pinned_bool = torch::TensorOptions(torch::kBool).pinned_memory(true);
+
+    model_input.combo_tokens = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
     if (max_blocks_num) {
-        // kv_cache_kernel_block_id shape : [group, batch, kernel_blocks]
-        model_input.kv_cache_kernel_block_id = CACHED_HOST_BUF(TYPE_INT32,
-                                                               {static_cast<size_t>(kv_cache_group_nums_),
-                                                                total_batch_size,
-                                                                max_blocks_num * kernel_blocks_per_kv_block_});
-        // kv_cache_block_id shape : [group, batch, physical_blocks]
-        model_input.kv_cache_block_id =
-            CACHED_HOST_BUF(TYPE_INT32, {static_cast<size_t>(kv_cache_group_nums_), total_batch_size, max_blocks_num});
-        model_input.kv_cache_layer_to_group = CACHED_HOST_BUF(TYPE_INT32, {num_layers_});
-        model_input.kv_cache_group_types    = CACHED_HOST_BUF(TYPE_INT32, {static_cast<size_t>(kv_cache_group_nums_)});
-        model_input.kv_cache_update_mapping = CACHED_HOST_BUF(TYPE_INT32, {total_block_copy_num, 2});
-        model_input.cache_keys              = CACHED_HOST_BUF(TYPE_INT64, {total_context_batch_size, max_blocks_num});
+        model_input.kv_cache_kernel_block_id = torch::zeros({(int64_t)kv_cache_group_nums_,
+                                                             (int64_t)total_batch_size,
+                                                             (int64_t)(max_blocks_num * kernel_blocks_per_kv_block_)},
+                                                            pinned_i32);
+        model_input.kv_cache_block_id        = torch::zeros(
+            {(int64_t)kv_cache_group_nums_, (int64_t)total_batch_size, (int64_t)max_blocks_num}, pinned_i32);
+        model_input.kv_cache_layer_to_group = torch::empty({(int64_t)num_layers_}, pinned_i32);
+        model_input.kv_cache_group_types    = torch::empty({(int64_t)kv_cache_group_nums_}, pinned_i32);
+        model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 2}, pinned_i32);
+        model_input.cache_keys = torch::empty({(int64_t)total_context_batch_size, (int64_t)max_blocks_num}, pinned_i64);
     }
-    model_input.request_id            = CACHED_HOST_BUF(TYPE_INT64, {total_context_batch_size});
-    model_input.request_pd_separation = CACHED_HOST_BUF(TYPE_BOOL, {total_context_batch_size});
-    model_input.input_lengths         = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
-    model_input.lora_ids              = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
-    model_input.lora_input_lengths    = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
-    model_input.sequence_lengths      = CACHED_HOST_BUF(TYPE_INT32, {total_decode_batch_size});
-    model_input.lm_output_indexes     = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
-    model_input.lm_output_lengths     = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
-    model_input.prefix_lengths        = CACHED_HOST_BUF(TYPE_INT32, {total_context_batch_size});
+    model_input.request_id            = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
+    model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
+    model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
+    model_input.sequence_lengths      = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
+    model_input.lm_output_indexes     = torch::empty({(int64_t)total_batch_size}, pinned_i32);
+    model_input.lm_output_lengths     = torch::empty({(int64_t)total_batch_size}, pinned_i32);
+    model_input.prefix_lengths        = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
     if (need_cal_position_id) {
-        model_input.combo_position_ids = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size * position_id_len_factor_});
+        model_input.combo_position_ids =
+            torch::empty({(int64_t)(current_tokens_size * position_id_len_factor_)}, pinned_i32);
     }
     if (has_multimodal_input) {
-        model_input.text_tokens_mask = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
-        model_input.mm_features_locs = CACHED_HOST_BUF(TYPE_INT32, {multimodal_features_len});
+        model_input.text_tokens_mask = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
+        model_input.mm_features_locs = torch::empty({(int64_t)multimodal_features_len}, pinned_i32);
     }
     model_input.kv_block_stride_bytes     = block_stride_bytes_;
     model_input.kv_scale_stride_bytes     = scale_stride_bytes_;
@@ -86,36 +91,35 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     model_input.decode_entrance           = decode_entrance_;
     model_input.is_fake_stream            = stream_groups.isFakeStream();
 
-    int* merged_tokens      = (int*)model_input.combo_tokens->data();
-    int* input_lengths      = (int*)model_input.input_lengths->data();
-    int* lora_ids           = (int*)model_input.lora_ids->data();
-    int* lora_input_lengths = (int*)model_input.lora_input_lengths->data();
-    int* sequence_lengths   = (int*)model_input.sequence_lengths->data();
-    int* lm_output_indexes  = (int*)model_input.lm_output_indexes->data();
-    int* lm_output_lengths  = (int*)model_input.lm_output_lengths->data();
-    int* prefix_lengths     = (int*)model_input.prefix_lengths->data();
-    int* combo_position_ids = need_cal_position_id ? (int*)model_input.combo_position_ids->data() : nullptr;
-    int* merged_text_mask   = has_multimodal_input ? (int*)model_input.text_tokens_mask->data() : nullptr;
-    int* mm_features_locs   = has_multimodal_input ? (int*)model_input.mm_features_locs->data() : nullptr;
+    int* merged_tokens      = model_input.combo_tokens.data_ptr<int32_t>();
+    int* input_lengths      = model_input.input_lengths.data_ptr<int32_t>();
+    int* sequence_lengths   = model_input.sequence_lengths.data_ptr<int32_t>();
+    int* lm_output_indexes  = model_input.lm_output_indexes.data_ptr<int32_t>();
+    int* lm_output_lengths  = model_input.lm_output_lengths.data_ptr<int32_t>();
+    int* prefix_lengths     = model_input.prefix_lengths.data_ptr<int32_t>();
+    int* combo_position_ids = need_cal_position_id ? model_input.combo_position_ids.data_ptr<int32_t>() : nullptr;
+    int* merged_text_mask   = has_multimodal_input ? model_input.text_tokens_mask.data_ptr<int32_t>() : nullptr;
+    int* mm_features_locs   = has_multimodal_input ? model_input.mm_features_locs.data_ptr<int32_t>() : nullptr;
     int  batch_idx          = 0;
     int  input_vocab_size   = input_vocab_size_ ? input_vocab_size_ : vocab_size_;
 
-    if (model_input.kv_cache_layer_to_group) {
-        std::memcpy(model_input.kv_cache_layer_to_group->data(),
+    if (model_input.kv_cache_layer_to_group.defined()) {
+        std::memcpy(model_input.kv_cache_layer_to_group.data_ptr(),
                     layer_to_kv_cache_group_id_.data(),
                     static_cast<size_t>(num_layers) * sizeof(int32_t));
     }
 
-    if (model_input.kv_cache_group_types) {
-        auto* dst = model_input.kv_cache_group_types->data<int32_t>();
+    if (model_input.kv_cache_group_types.defined()) {
+        auto* dst = model_input.kv_cache_group_types.data_ptr<int32_t>();
         for (size_t g = 0; g < kv_cache_group_nums_; ++g) {
             dst[g] = static_cast<int32_t>(kv_cache_group_types_[g]);
         }
     }
 
-    auto* kv_cache_update_mapping =
-        model_input.kv_cache_update_mapping ? (BlockIdPair*)model_input.kv_cache_update_mapping->data() : nullptr;
-    const auto add_cache_update_copy = [&](const auto& update_mapping) {
+    auto*      kv_cache_update_mapping = model_input.kv_cache_update_mapping.defined() ?
+                                             (BlockIdPair*)model_input.kv_cache_update_mapping.data_ptr() :
+                                             nullptr;
+    const auto add_cache_update_copy   = [&](const auto& update_mapping) {
         size_t update_copy_num = update_mapping.size();
         std::memcpy(kv_cache_update_mapping, update_mapping.data(), update_copy_num * sizeof(BlockIdPair));
         kv_cache_update_mapping += update_copy_num;
@@ -147,20 +151,18 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             input_lengths[batch_idx]    = stream->inputLength();
             sequence_lengths[batch_idx] = stream->seqLength() - 1;  // need remove
             if (need_cal_position_id) {
-                stream->generateNextPositionId(combo_position_ids + batch_idx * position_id_len_factor_, device_);
+                stream->generateNextPositionId(combo_position_ids + batch_idx * position_id_len_factor_);
             }
-            lora_ids[batch_idx]           = stream->loraId();
-            lora_input_lengths[batch_idx] = 1;
-            lm_output_indexes[batch_idx]  = batch_idx;
-            lm_output_lengths[batch_idx]  = 1;
+            lm_output_indexes[batch_idx] = batch_idx;
+            lm_output_lengths[batch_idx] = 1;
             if (max_blocks_num) {
-                RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_kernel_block_id->shape().size() == 3,
+                RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_kernel_block_id.dim() == 3,
                                         "hybrid kv_cache_kernel_block_id must be 3-D");
-                RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id->shape().size() == 3,
+                RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id.dim() == 3,
                                         "hybrid kv_cache_block_id must be 3-D");
-                const size_t batch           = model_input.kv_cache_kernel_block_id->shape()[1];
-                int32_t*     kernel_dst_base = model_input.kv_cache_kernel_block_id->data<int32_t>();
-                int32_t*     store_dst_base  = model_input.kv_cache_block_id->data<int32_t>();
+                const size_t batch           = model_input.kv_cache_kernel_block_id.size(1);
+                int32_t*     kernel_dst_base = model_input.kv_cache_kernel_block_id.data_ptr<int32_t>();
+                int32_t*     store_dst_base  = model_input.kv_cache_block_id.data_ptr<int32_t>();
                 for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
                     auto&    kernel_blocks = kv_cache.kernelBlocks(i, gid);
                     int32_t* kernel_dst    = kernel_dst_base
@@ -185,10 +187,10 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         stream->step();
     }
 
-    std::vector<rtp_llm::BufferPtr> gathered_mm_features;
-    int                             token_idx          = batch_idx;
-    int                             cum_output_seq_len = batch_idx;
-    int                             mm_feature_index   = 0;
+    std::vector<torch::Tensor> gathered_mm_features;
+    int                        token_idx          = batch_idx;
+    int                        cum_output_seq_len = batch_idx;
+    int                        mm_feature_index   = 0;
 
     for (const auto& stream : context_streams) {
         // context stream也需要batch运行是为了perf test的场景
@@ -229,19 +231,18 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
             if (has_multimodal_input) {
                 std::vector<torch::Tensor> mm_features = stream->multimodalFeatures();
-                rtp_llm::BufferPtr         mm_locs     = stream->multimodalLocations();
-                if (mm_locs != nullptr) {
-                    for (int i = 0; i < mm_locs->size(); ++i) {
-                        mm_features_locs[mm_feature_index] =
-                            *mm_locs->dataWithOffset<int>(i) + token_idx - stream->reuseLength();
+                torch::Tensor              mm_locs     = stream->multimodalLocations();
+                if (mm_locs.defined()) {
+                    auto* mm_locs_data = mm_locs.data_ptr<int>();
+                    for (int i = 0; i < mm_locs.numel(); ++i) {
+                        mm_features_locs[mm_feature_index] = mm_locs_data[i] + token_idx - stream->reuseLength();
                         mm_feature_index++;
                     }
                     for (auto& mm_feature : mm_features) {
-                        auto feature_buffer = torchTensor2Buffer(mm_feature);
-                        if (feature_buffer->where() != rtp_llm::MemoryType::MEMORY_GPU) {
-                            gathered_mm_features.emplace_back(device_->clone({*feature_buffer}));
+                        if (!mm_feature.is_cuda()) {
+                            gathered_mm_features.emplace_back(mm_feature.to(torch::kCUDA));
                         } else {
-                            gathered_mm_features.emplace_back(feature_buffer);
+                            gathered_mm_features.emplace_back(mm_feature);
                         }
                     }
                     auto text_token_mask = stream->textTokensMask();
@@ -250,22 +251,20 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             }
 
             if (need_cal_position_id) {
-                auto context_pos_ids = stream->generateContextPositionIds(device_);
+                auto context_pos_ids = stream->generateContextPositionIds();
+                int  reuse_offset    = stream->reuseLength() * position_id_len_factor_;
                 memcpy(combo_position_ids + token_idx * position_id_len_factor_,
-                       context_pos_ids->dataWithOffset<int>(stream->reuseLength() * position_id_len_factor_),
-                       (context_pos_ids->size() - stream->reuseLength() * position_id_len_factor_)
-                           * context_pos_ids->typeSize());
+                       context_pos_ids.data_ptr<int>() + reuse_offset,
+                       (context_pos_ids.numel() - reuse_offset) * sizeof(int));
             }
-            lora_ids[batch_idx]           = stream->loraId();
-            lora_input_lengths[batch_idx] = input_lengths[batch_idx];
             if (max_blocks_num) {
-                RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_kernel_block_id->shape().size() == 3,
+                RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_kernel_block_id.dim() == 3,
                                         "hybrid kv_cache_kernel_block_id must be 3-D");
-                RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id->shape().size() == 3,
+                RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id.dim() == 3,
                                         "hybrid kv_cache_block_id must be 3-D");
-                const size_t batch           = model_input.kv_cache_kernel_block_id->shape()[1];
-                int32_t*     kernel_dst_base = model_input.kv_cache_kernel_block_id->data<int32_t>();
-                int32_t*     store_dst_base  = model_input.kv_cache_block_id->data<int32_t>();
+                const size_t batch           = model_input.kv_cache_kernel_block_id.size(1);
+                int32_t*     kernel_dst_base = model_input.kv_cache_kernel_block_id.data_ptr<int32_t>();
+                int32_t*     store_dst_base  = model_input.kv_cache_block_id.data_ptr<int32_t>();
                 for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
                     auto&    kernel_blocks = kv_cache.kernelBlocks(i, gid);
                     int32_t* kernel_dst    = kernel_dst_base
@@ -280,15 +279,15 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                     std::memcpy(store_dst, physical_blocks.data(), physical_blocks.size() * sizeof(int32_t));
                 }
                 if (role_type_ == RoleType::PREFILL && stream->hasCacheKeys()) {
-                    std::memcpy((*model_input.cache_keys)[batch_idx - total_decode_batch_size].data(),
+                    std::memcpy(model_input.cache_keys.data_ptr<int64_t>()
+                                    + (batch_idx - total_decode_batch_size) * model_input.cache_keys.size(1),
                                 stream->cacheKeys(i).data(),
                                 stream->cacheKeys(i).size() * sizeof(int64_t));
                 }
             }
-            *(model_input.request_id->dataWithOffset<int64_t>(batch_idx - total_decode_batch_size)) =
-                stream->streamId();
-            *(model_input.request_pd_separation->dataWithOffset<bool>(batch_idx - total_decode_batch_size)) =
-                stream->queryPdSep();
+            *(model_input.request_id.data_ptr<int64_t>() + (batch_idx - total_decode_batch_size)) = stream->streamId();
+            *(reinterpret_cast<bool*>(model_input.request_pd_separation.data_ptr())
+              + (batch_idx - total_decode_batch_size)) = stream->queryPdSep();
             batch_idx += 1;
             token_idx += input_tokens.size();
         }
@@ -327,19 +326,19 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
     bool   calculate_softmax_probs    = false;
     bool   need_tiling                = false;
     for (auto& stream : all_streams) {
-        const auto& complete_token_ids = stream->completeTokenIds();
-        auto        complete_seq_len   = complete_token_ids->shape()[1];
-        auto        seq_len            = stream->seqLength();
-        auto        current_batch_size = stream->currentBatchSize();
-        auto        sampler_batch_size =
+        auto complete_token_ids = stream->completeTokenIds();
+        auto complete_seq_len   = complete_token_ids.size(1);
+        auto seq_len            = stream->seqLength();
+        auto current_batch_size = stream->currentBatchSize();
+        auto sampler_batch_size =
             stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
 
         for (int i = 0; i < sampler_batch_size; ++i) {
             int cur_batch = std::min(i, current_batch_size - 1);
-            memcpy(sampler_inputs.token_ids->dataWithOffset<int32_t>((batch_idx) * (sampler_inputs.step + 1)),
-                   complete_token_ids->dataWithOffset<int32_t>(cur_batch * complete_seq_len),
+            memcpy(sampler_inputs.token_ids.data_ptr<int32_t>() + ((batch_idx) * (sampler_inputs.step + 1)),
+                   complete_token_ids.data_ptr<int32_t>() + cur_batch * complete_seq_len,
                    seq_len * sizeof(int));
-            sampler_inputs.finished_mask->data<bool>()[batch_idx] = stream->isDoneWithoutLock(i);
+            reinterpret_cast<bool*>(sampler_inputs.finished_mask.data_ptr())[batch_idx] = stream->isDoneWithoutLock(i);
             batch_idx += 1;
         }
         need_tiling |= stream->needTilingForSampling();
@@ -348,85 +347,88 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
         }
         return_logits |= stream->returnLogits();
         calculate_softmax_probs |= stream->calculateSoftmaxProbs();
-        RTP_LLM_LOG_DEBUG("stream [%ld], complete token ids = [%s]",
-                          stream->streamId(),
-                          complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
         RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
                           stream->streamId(),
-                          sampler_inputs.token_ids->debugStringWithData<int32_t>().c_str());
+                          tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 
-    auto vocab_size           = model_output.logits->shape()[1];
+    auto vocab_size           = (size_t)model_output.logits.size(1);
     sampler_inputs.vocab_size = vocab_size;
     if (return_all_probs) {
-        sampler_inputs.all_probs = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {total_batch_size_in, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
-        device_->bufMemset(*sampler_inputs.all_probs, 0);
+        sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size_in, (int64_t)vocab_size},
+                                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     }
 
     // copy logits when needs tiling or returning logits
+    torch::Tensor logits_tensor;
     if (need_tiling) {
-        sampler_inputs.logits = device_->allocateBuffer(
-            {model_output.logits->type(), {total_batch_size_in, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
-        device_->copy({sampler_inputs.logits->view(0, total_decode_batch_size_in),
-                       model_output.logits->view(0, total_decode_batch_size_in)});
-        size_t input_offset = 0, logits_offset = 0;
+        logits_tensor =
+            torch::empty({(int64_t)total_batch_size_in, (int64_t)vocab_size}, model_output.logits.options());
+        // copy decode batch logits
+        if (total_decode_batch_size_in > 0) {
+            logits_tensor.narrow(0, 0, total_decode_batch_size_in)
+                .copy_(model_output.logits.narrow(0, 0, total_decode_batch_size_in));
+        }
+        // tile context batch logits
+        size_t input_offset = total_decode_batch_size_in, logits_offset = total_decode_batch_size_in;
         for (auto& stream : stream_groups.contextStreams()) {
             auto sampler_batch_size =
                 stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
             for (int i = 0; i < sampler_batch_size; ++i) {
-                device_->copy(
-                    {sampler_inputs.logits->view(input_offset, 1), model_output.logits->view(logits_offset, 1)});
+                logits_tensor[input_offset].copy_(model_output.logits[logits_offset]);
                 input_offset += 1;
             }
             logits_offset += 1;
         }
     } else if (return_logits || calculate_softmax_probs) {
-        sampler_inputs.logits = device_->clone({*model_output.logits, rtp_llm::AllocationType::DEVICE});
+        logits_tensor = model_output.logits.clone();
     } else {
-        sampler_inputs.logits = model_output.logits;
+        logits_tensor = model_output.logits;
     }
+    sampler_inputs.logits = logits_tensor;
 
     RTP_LLM_LOG_DEBUG("sampler inputs logits [%s]",
-                      device_->clone({*sampler_inputs.logits, rtp_llm::AllocationType::HOST})
-                          ->debugStringWithData<float>(10)
-                          .c_str());
+                      tensorDebugStringWithData<float>(sampler_inputs.logits.cpu(), 10).c_str());
 
     RTP_LLM_LOG_DEBUG("gatherSamplerInput done");
     return std::move(sampler_inputs);
 }
 
-SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups&       stream_groups,
-                                                                size_t                    total_batch_size_in,
-                                                                size_t                    total_batch_size_out,
-                                                                const rtp_llm::BufferPtr& sequence_lengths,
-                                                                size_t                    propose_step) const {
+SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups&  stream_groups,
+                                                                size_t               total_batch_size_in,
+                                                                size_t               total_batch_size_out,
+                                                                const torch::Tensor& sequence_lengths,
+                                                                size_t               propose_step) const {
     // TODO(xinfei.sxf) don't sample for chunk stream
     SamplerInputs sampler_inputs;
     sampler_inputs.step             = stream_groups.maxSeqLen() + propose_step;
     sampler_inputs.batch_size       = total_batch_size_in;
     sampler_inputs.batch_size_out   = total_batch_size_out;
-    sampler_inputs.sequence_lengths = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
+    auto bs                         = (int64_t)total_batch_size_in;
+    sampler_inputs.sequence_lengths = torch::empty({bs}, torch::kInt32);
     sampler_inputs.logits_processor_states_ptr.reset();
-    sampler_inputs.input_lengths        = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
-    sampler_inputs.num_beams_in         = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size_in});
-    sampler_inputs.num_beams_out        = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size_in});
-    sampler_inputs.top_k                = CACHED_HOST_BUF(TYPE_UINT32, {total_batch_size_in});
-    sampler_inputs.top_p                = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
-    sampler_inputs.temperature          = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
-    sampler_inputs.repetition_penalty   = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
-    sampler_inputs.presence_penalty     = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
-    sampler_inputs.frequency_penalty    = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
-    sampler_inputs.no_repeat_ngram_size = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
-    sampler_inputs.do_sample            = CACHED_HOST_BUF(TYPE_BOOL, {total_batch_size_in});
-    sampler_inputs.finished_mask        = CACHED_HOST_BUF(TYPE_BOOL, {total_batch_size_in});
+    sampler_inputs.input_lengths  = torch::empty({bs}, torch::kInt32);
+    sampler_inputs.num_beams_in   = torch::empty({bs}, torch::kLong);
+    sampler_inputs.num_beams_out  = torch::empty({bs}, torch::kLong);
+    static const auto pinned_int  = torch::TensorOptions(torch::kInt).pinned_memory(true);
+    static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+    static const auto pinned_f32  = torch::TensorOptions(torch::kFloat32).pinned_memory(true);
+    static const auto pinned_bool = torch::TensorOptions(torch::kBool).pinned_memory(true);
+
+    sampler_inputs.top_k                = torch::empty({bs}, pinned_int);
+    sampler_inputs.top_p                = torch::empty({bs}, pinned_f32);
+    sampler_inputs.temperature          = torch::empty({bs}, pinned_f32);
+    sampler_inputs.repetition_penalty   = torch::empty({bs}, pinned_f32);
+    sampler_inputs.presence_penalty     = torch::empty({bs}, pinned_f32);
+    sampler_inputs.frequency_penalty    = torch::empty({bs}, pinned_f32);
+    sampler_inputs.no_repeat_ngram_size = torch::empty({bs}, pinned_i32);
+    sampler_inputs.do_sample            = torch::empty({bs}, pinned_bool);
+    sampler_inputs.finished_mask        = torch::empty({bs}, torch::kBool);
     if (stream_groups.needReturnCumLogProbs()) {
-        sampler_inputs.cum_log_probs = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {total_batch_size_in}, rtp_llm::AllocationType::HOST}, {});
+        sampler_inputs.cum_log_probs = torch::empty({(int64_t)total_batch_size_in}, torch::kFloat32);
     }
-    sampler_inputs.token_ids = device_->allocateBuffer(
-        {rtp_llm::DataType::TYPE_INT32, {total_batch_size_in, sampler_inputs.step + 1}, rtp_llm::AllocationType::HOST},
-        {});
+    sampler_inputs.token_ids =
+        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, torch::kInt32);
     sampler_inputs.generator.resize(total_batch_size_in);
     return sampler_inputs;
 }
@@ -435,18 +437,18 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                                                         std::list<GenerateStreamPtr>& all_streams,
                                                         bool                          score_batch,
                                                         size_t                        propose_step) const {
-    int*      input_lengths        = sampler_inputs.input_lengths->data<int32_t>();
-    int*      sequence_lengths     = sampler_inputs.sequence_lengths->data<int32_t>();
-    uint64_t* num_beams_in         = sampler_inputs.num_beams_in->data<uint64_t>();
-    uint64_t* num_beams_out        = sampler_inputs.num_beams_out->data<uint64_t>();
-    uint32_t* top_k                = sampler_inputs.top_k->data<uint32_t>();
-    float*    top_p                = sampler_inputs.top_p->data<float>();
-    float*    temperature          = sampler_inputs.temperature->data<float>();
-    float*    repetition_penalty   = sampler_inputs.repetition_penalty->data<float>();
-    float*    presence_penalty     = sampler_inputs.presence_penalty->data<float>();
-    float*    frequency_penalty    = sampler_inputs.frequency_penalty->data<float>();
-    int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
-    bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
+    int*      input_lengths        = sampler_inputs.input_lengths.data_ptr<int32_t>();
+    int*      sequence_lengths     = sampler_inputs.sequence_lengths.data_ptr<int32_t>();
+    uint64_t* num_beams_in         = reinterpret_cast<uint64_t*>(sampler_inputs.num_beams_in.data_ptr<int64_t>());
+    uint64_t* num_beams_out        = reinterpret_cast<uint64_t*>(sampler_inputs.num_beams_out.data_ptr<int64_t>());
+    uint32_t* top_k                = reinterpret_cast<uint32_t*>(sampler_inputs.top_k.data_ptr<int32_t>());
+    float*    top_p                = sampler_inputs.top_p.data_ptr<float>();
+    float*    temperature          = sampler_inputs.temperature.data_ptr<float>();
+    float*    repetition_penalty   = sampler_inputs.repetition_penalty.data_ptr<float>();
+    float*    presence_penalty     = sampler_inputs.presence_penalty.data_ptr<float>();
+    float*    frequency_penalty    = sampler_inputs.frequency_penalty.data_ptr<float>();
+    int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size.data_ptr<int32_t>();
+    bool*     do_sample            = reinterpret_cast<bool*>(sampler_inputs.do_sample.data_ptr());
 
     int batch_idx = 0;
     for (auto& stream : all_streams) {
@@ -458,11 +460,11 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
         } else {
             sampler_batch_size = stream->currentBatchSize();
         }
-        if (sampler_inputs.cum_log_probs) {
+        if (sampler_inputs.cum_log_probs.defined()) {
             const auto& cum_log_probs = stream->cumLogProbs();
-            memcpy(sampler_inputs.cum_log_probs->dataWithOffset<float>(batch_idx),
-                   cum_log_probs->data(),
-                   cum_log_probs->sizeBytes());
+            memcpy(sampler_inputs.cum_log_probs.data_ptr<float>() + batch_idx,
+                   cum_log_probs.data_ptr<float>(),
+                   cum_log_probs.numel() * sizeof(float));
         }
         for (int i = 0; i < sampler_batch_size; ++i) {
             input_lengths[batch_idx]      = stream->inputLength();
@@ -506,14 +508,14 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     const auto& sampler_output    = merge_outputs.sampler_output;
     const auto& new_all_token_ids = sampler_output.token_ids;
-    RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", new_all_token_ids->debugStringWithData<int32_t>().c_str());
+    RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(new_all_token_ids).c_str());
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
-    RTP_LLM_CHECK(total_batch_size_out == new_all_token_ids->shape()[0]);
+    RTP_LLM_CHECK(total_batch_size_out == (size_t)new_all_token_ids.size(0));
     int  batch_idx_in     = 0;
     int  batch_idx_out    = 0;
     int  token_offset     = 0;
     bool return_all_probs = stream_groups.needReturnAllProbs();
-    auto new_tokens_all   = CACHED_HOST_BUF(TYPE_INT32, {(size_t)total_batch_size_out, (size_t)1});
+    auto new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
 
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
@@ -532,107 +534,107 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     return absl::OkStatus();
 }
 
-void NormalBatchStreamProcessor::dispatchSingleStream(GenerateStreamPtr   stream,
-                                                      const MergedOutput& merge_outputs,
-                                                      int                 batch_idx_in,
-                                                      int                 batch_idx_out,
-                                                      int                 token_offset,
-                                                      bool                return_all_probs,
-                                                      const BufferPtr&    new_tokens_all) const {
+void NormalBatchStreamProcessor::dispatchSingleStream(GenerateStreamPtr    stream,
+                                                      const MergedOutput&  merge_outputs,
+                                                      int                  batch_idx_in,
+                                                      int                  batch_idx_out,
+                                                      int                  token_offset,
+                                                      bool                 return_all_probs,
+                                                      const torch::Tensor& new_tokens_all) const {
 
     const auto&  model_output      = merge_outputs.model_output;
     const auto&  sampler_output    = merge_outputs.sampler_output;
     const auto&  new_all_token_ids = sampler_output.token_ids;
-    const size_t token_stride      = new_all_token_ids->shape()[1];
+    const size_t token_stride      = new_all_token_ids.size(1);
 
     auto cur_batch_size  = stream->currentBatchSize();
     auto next_batch_size = stream->nextBatchSize();
     auto token_size      = stream->currentExecuteTokenSize();
 
-    auto batch_new_all_token_ids = new_all_token_ids->slice(batch_idx_out, next_batch_size);
+    auto batch_new_all_token_ids = new_all_token_ids.narrow(0, batch_idx_out, next_batch_size);
 
     bool has_beam_search = stream->currentNumBeams() > 1 || stream->nextNumBeams() > 1;
     bool has_var_batch   = stream->currentBatchSize() != stream->nextBatchSize();
 
     // construct mapping from output batches to input batches
-    BufferPtr src_batch_indices;
+    torch::Tensor src_batch_indices;
     if (has_beam_search) {
         // beam search
-        src_batch_indices = sampler_output.beam_index->slice(batch_idx_out, next_batch_size);
+        src_batch_indices = sampler_output.beam_index.narrow(0, batch_idx_out, next_batch_size);
     } else if (has_var_batch) {
         // from context stream to decode straem, there might be other cases in future
-        src_batch_indices = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT32, {(size_t)next_batch_size}, rtp_llm::AllocationType::HOST}, {});
-        device_->bufMemset(*src_batch_indices, 0);
+        src_batch_indices = torch::zeros({(int64_t)next_batch_size}, torch::kInt32);
     }
     const auto get_src_idx = [&](int32_t dst_idx) {
-        return src_batch_indices ? src_batch_indices->data<int32_t>()[dst_idx] : dst_idx;
+        return src_batch_indices.defined() ? src_batch_indices.data_ptr<int32_t>()[dst_idx] : dst_idx;
     };
 
     // construct update info
-    BufferPtr batch_hidden_states = nullptr;
+    torch::Tensor batch_hidden_states;
     if (stream->generateConfig()->return_hidden_states) {
-        batch_hidden_states = model_output.hidden_states->slice(batch_idx_in, cur_batch_size);
+        batch_hidden_states = model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size);
     }
 
-    BufferPtr batch_logits = nullptr;
+    torch::Tensor batch_logits;
     if (stream->returnLogits() || stream->calculateSoftmaxProbs() || has_beam_search) {
-        batch_logits = model_output.logits->slice(batch_idx_in, cur_batch_size);
+        batch_logits = model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
     }
 
-    BufferPtr all_probs = nullptr;
+    torch::Tensor all_probs;
     if (return_all_probs) {
-        all_probs = sampler_output.all_probs->slice(batch_idx_out, next_batch_size, false);
-        all_probs->updateParent(sampler_output.all_probs);
+        all_probs = sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size);
     };
 
-    BufferPtr batch_cum_log_probs;
-    if (sampler_output.cum_log_probs) {
-        batch_cum_log_probs = sampler_output.cum_log_probs->slice(batch_idx_out, next_batch_size);
+    torch::Tensor batch_cum_log_probs;
+    if (sampler_output.cum_log_probs.defined()) {
+        batch_cum_log_probs = sampler_output.cum_log_probs.narrow(0, batch_idx_out, next_batch_size);
     }
 
-    BufferPtr loss;
+    torch::Tensor loss;
     if (stream->calculateLoss()) {
-        auto               all_logits = model_output.all_logits->view(token_offset, token_size - 1);
-        auto               tokens     = stream->currentExecuteTokens(0);
-        rtp_llm::BufferPtr label      = device_->clone(
-            {{rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, {tokens.size() - 1}, tokens.data() + 1}});
-        loss = device_->loss({all_logits, *label});
+        auto all_logits_tensor = model_output.all_logits.narrow(0, token_offset, token_size - 1);
+        auto tokens            = stream->currentExecuteTokens(0);
+        auto label_tensor =
+            torch::from_blob(const_cast<int*>(tokens.data() + 1), {(int64_t)(tokens.size() - 1)}, torch::kInt32)
+                .to(torch::kCUDA);
+        auto labels_int64 = label_tensor.toType(torch::kInt64);
+        loss = torch::cross_entropy_loss(all_logits_tensor, labels_int64, torch::nullopt, at::Reduction::None)
+                   .to(torch::kFloat32);
     }
 
-    BufferPtr all_hidden_states = nullptr;
+    torch::Tensor all_hidden_states;
     if (stream->needReturnHiddenStates()) {
-        all_hidden_states = model_output.all_hidden_states->slice(token_offset, token_size, false);
-        all_hidden_states->updateParent(model_output.all_hidden_states);
+        all_hidden_states = model_output.all_hidden_states.narrow(0, token_offset, token_size);
     }
 
-    BufferPtr new_tokens = new_tokens_all->slice(batch_idx_out, next_batch_size);
+    auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
     for (size_t i = 0; i < next_batch_size; ++i) {
-        new_tokens->data<int32_t>()[i] =
-            new_all_token_ids->data<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
+        new_tokens.data_ptr<int32_t>()[i] =
+            new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
     }
 
-    BufferPtr batch_softmax_result;
-    BufferPtr current_softmax_result;
+    torch::Tensor current_softmax_result;
     if (stream->calculateSoftmaxProbs()) {
-        current_softmax_result = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {(size_t)next_batch_size, (size_t)1}, rtp_llm::AllocationType::HOST}, {});
-        batch_softmax_result =
-            device_->softmax({batch_logits, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_FP32, std::nullopt});
+        auto batch_softmax_input = batch_logits.to(torch::kFloat32).contiguous();
+#if USING_CUDA
+        cudaSoftmaxInplace(batch_softmax_input, at::cuda::getCurrentCUDAStream().stream());
+#else
+        batch_softmax_input = torch::softmax(batch_softmax_input, -1);
+#endif
+        auto batch_softmax_tensor = batch_softmax_input.cpu();
+        current_softmax_result    = torch::empty({(int64_t)next_batch_size, 1}, torch::kFloat32);
         for (int i = 0; i < next_batch_size; ++i) {
-            device_->copy({(*current_softmax_result)[i],
-                           (*batch_softmax_result)[get_src_idx(i)].view(new_tokens->data<int32_t>()[i], 1)});
+            current_softmax_result[i][0] = batch_softmax_tensor[get_src_idx(i)][new_tokens.data_ptr<int32_t>()[i]];
         }
     }
 
     for (int i = 0; i < cur_batch_size; ++i) {
-        if (sampler_output.success && !(*(sampler_output.success->dataWithOffset<bool>(batch_idx_in + i)))) {
+        if (sampler_output.success.defined() && !(sampler_output.success.data_ptr<bool>()[batch_idx_in + i])) {
             stream->setStop(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
         }
     }
 
-    RTP_LLM_LOG_DEBUG(
-        "stream [%ld], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
+    RTP_LLM_LOG_DEBUG("stream [%ld], new_tokens size = [%ld]", stream->streamId(), new_tokens.numel());
 
     stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
                     1,

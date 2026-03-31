@@ -1,6 +1,6 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
-load("//rtp_llm/cpp/devices:device_defs.bzl",
+load("//bazel:device_defs.bzl",
     "device_impl_target", "device_test_envs")
 
 cc_test = cc_test_wrapper
@@ -24,7 +24,7 @@ py_test (
 )
 
 test_deps = [
-    "//rtp_llm/cpp/devices/testing:device_test_utils",
+    "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/cpp/models:models",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",

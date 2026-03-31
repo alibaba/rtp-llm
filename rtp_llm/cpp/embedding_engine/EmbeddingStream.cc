@@ -12,7 +12,6 @@ EmbeddingStream::EmbeddingStream(const shared_ptr<rtp_llm::EmbeddingInput>& quer
         return;
     }
     begin_time_       = autil::TimeUtility::currentTimeInMilliSeconds();
-    device_           = rtp_llm::DeviceFactory::getDefaultDevice();
     embedding_output_ = make_shared<EmbeddingOutput>();
     stream_state_     = StreamState::WAITING;
     begin_time_us_    = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -27,7 +26,7 @@ const std::optional<MultimodalFeature>& EmbeddingStream::multimodalFeature() con
 }
 
 int64_t EmbeddingStream::batchSize() const {
-    return embedding_input_->input_lengths->shape()[0];
+    return embedding_input_->input_lengths.size(0);
 }
 
 void EmbeddingStream::setMetricReporter(const kmonitor::MetricsReporterPtr& metric_reporter) {

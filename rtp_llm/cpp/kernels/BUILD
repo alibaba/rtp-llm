@@ -196,28 +196,11 @@ cc_library(
 )
 
 cc_library(
-    name = "cuda_comm",
-    srcs = [
-        "comm_buffer.cu",
-    ],
-    hdrs = [
-        "comm_buffer.h",
-    ],
-    deps = [
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
-        ":cuda_utils_common",
-        "//rtp_llm/cpp/utils:core_utils",
-    ],
-    copts = cuda_copts(),
-)
-
-cc_library(
     name = "cuda_cu",
     deps = [
         ":cuda_no_aux_tc",
         ":cuda_quantization",
         ":cuda_moe",
-        ":cuda_comm",
         ":cuda_fused_qk_rmsnorm",
         ":mla_quant_kernel",
     ],
@@ -564,23 +547,6 @@ cc_library(
 )
 
 cc_library(
-    name = "kernels_custom_ar",
-    srcs = [
-        "custom_ar_kernels.cu",
-    ],
-    hdrs = [
-        "custom_ar_kernels.h",
-    ],
-    deps = any_cuda_deps + [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
-    ],
-    copts = any_cuda_copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "kernels_quantization",
     srcs = [
         "quantization_tensor.cu",
@@ -681,7 +647,6 @@ cc_library(
         ":kernels_kv_cache",
         ":kernels_residual",
         ":kernels_copy",
-        ":kernels_custom_ar",
         ":kernels_quantization",
         ":kernels_moe",
         ":kernels_eplb",

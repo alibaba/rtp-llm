@@ -15,10 +15,10 @@ cc_library(
 )
 
 test_deps = [
-    "//rtp_llm/cpp/devices/testing:device_test_utils",
+    "//rtp_llm/cpp/testing:device_test_utils",
     "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
     "//3rdparty/contextFusedMultiHeadAttentionSm70:trt_sm70_fmha_impl",
-    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    "//rtp_llm/cpp/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/normal_engine:normal_engine",
     "//rtp_llm/cpp/engine_base/schedulers:schedulers",
     "//rtp_llm/cpp/test:test_utils",

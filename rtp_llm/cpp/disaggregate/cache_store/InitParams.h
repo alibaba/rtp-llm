@@ -2,7 +2,6 @@
 
 #include <stdint.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace rtp_llm {
@@ -43,7 +42,6 @@ public:
     uint32_t messager_io_thread_count     = 4;
     uint32_t messager_worker_thread_count = 32;
 
-    rtp_llm::DeviceBase*         device{nullptr};
     kmonitor::MetricsReporterPtr metrics_reporter;
 
     // for test

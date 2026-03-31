@@ -5,8 +5,9 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
@@ -14,13 +15,11 @@ namespace rtp_llm {
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                                                const KVCacheConfig&                     kv_cache_config,
                                                const std::shared_ptr<KVCacheAllocator>& allocator,
-                                               rtp_llm::DeviceBase*                     device,
                                                const std::vector<std::string>&          tp_addrs,
                                                const kmonitor::MetricsReporterPtr&      metrics_reporter):
     cache_config_(cache_config),
     kv_cache_config_(kv_cache_config),
     allocator_(allocator),
-    device_(device),
     tp_addrs_(tp_addrs),
     metrics_reporter_(metrics_reporter) {}
 
@@ -519,8 +518,8 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
     const auto         copy_direction =
         (request.copy_direction() == MemoryOperationRequestPB::H2D) ? CopyDirection::H2D : CopyDirection::D2H;
 
-    std::vector<BufferPtr> dst_buffers;
-    std::vector<BufferPtr> src_buffers;
+    std::vector<torch::Tensor> dst_buffers;
+    std::vector<torch::Tensor> src_buffers;
     for (int i = 0; i < request.copy_items_size(); ++i) {
         const auto&                     item      = request.copy_items(i);
         const auto                      mem_block = static_cast<BlockIdxType>(item.mem_block());
@@ -537,7 +536,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
     }
 
     if (!dst_buffers.empty()) {
-        device_->noBlockCopy(MultiCopyParams{dst_buffers, src_buffers});
+        execNoBlockCopy(MultiCopyParams{dst_buffers, src_buffers});
     }
 
     response.set_success(true);
@@ -548,8 +547,8 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
 bool KVCacheMemoryConnector::prepareCopyBuffers(BlockIdxType                     mem_block,
                                                 const std::vector<BlockIdxType>& gpu_blocks,
                                                 CopyDirection                    direction,
-                                                std::vector<BufferPtr>&          dst,
-                                                std::vector<BufferPtr>&          src) {
+                                                std::vector<torch::Tensor>&      dst,
+                                                std::vector<torch::Tensor>&      src) {
     RTP_LLM_CHECK_WITH_INFO(mem_block != NULL_BLOCK_IDX, "mem block is null");
     RTP_LLM_CHECK_WITH_INFO(block_pool_ != nullptr, "block pool is null");
     auto mem_buffers = block_pool_->convertIndexToBuffer(/*layer_id=*/0, mem_block);
@@ -608,12 +607,12 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(BlockIdxType                    
     return true;
 }
 
-bool KVCacheMemoryConnector::appendCopyBytesToBuffers(const BlockInfo&        mem_block,
-                                                      const BlockInfo&        gpu_block,
-                                                      size_t                  byte_off,
-                                                      CopyDirection           direction,
-                                                      std::vector<BufferPtr>& dst,
-                                                      std::vector<BufferPtr>& src) {
+bool KVCacheMemoryConnector::appendCopyBytesToBuffers(const BlockInfo&            mem_block,
+                                                      const BlockInfo&            gpu_block,
+                                                      size_t                      byte_off,
+                                                      CopyDirection               direction,
+                                                      std::vector<torch::Tensor>& dst,
+                                                      std::vector<torch::Tensor>& src) {
     if (!gpu_block.addr || gpu_block.size_bytes == 0) {
         return true;
     }
@@ -626,20 +625,20 @@ bool KVCacheMemoryConnector::appendCopyBytesToBuffers(const BlockInfo&        me
         return false;
     }
 
-    auto mem_slice = std::make_shared<Buffer>(mem_block.is_cuda ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU,
-                                              rtp_llm::DataType::TYPE_INT8,
-                                              std::vector<size_t>{gpu_block.size_bytes},
-                                              static_cast<void*>(static_cast<char*>(mem_block.addr) + byte_off));
-    auto gpu_slice = std::make_shared<Buffer>(gpu_block.is_cuda ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU,
-                                              rtp_llm::DataType::TYPE_INT8,
-                                              std::vector<size_t>{gpu_block.size_bytes},
-                                              gpu_block.addr);
+    auto mem_device = mem_block.is_cuda ? torch::kCUDA : torch::kCPU;
+    auto gpu_device = gpu_block.is_cuda ? torch::kCUDA : torch::kCPU;
+    auto mem_tensor = torch::from_blob(static_cast<void*>(static_cast<char*>(mem_block.addr) + byte_off),
+                                       {(int64_t)gpu_block.size_bytes},
+                                       torch::TensorOptions().dtype(torch::kUInt8).device(mem_device));
+    auto gpu_tensor = torch::from_blob(gpu_block.addr,
+                                       {(int64_t)gpu_block.size_bytes},
+                                       torch::TensorOptions().dtype(torch::kUInt8).device(gpu_device));
     if (direction == CopyDirection::H2D) {
-        src.push_back(mem_slice);
-        dst.push_back(gpu_slice);
+        src.push_back(mem_tensor);
+        dst.push_back(gpu_tensor);
     } else {
-        src.push_back(gpu_slice);
-        dst.push_back(mem_slice);
+        src.push_back(gpu_tensor);
+        dst.push_back(mem_tensor);
     }
     return true;
 }
@@ -748,7 +747,7 @@ std::shared_ptr<BlockPool> KVCacheMemoryConnector::createBlockPool(size_t block_
                      block_size);
     const auto pool_config = BlockPoolConfigHelper::createConfig(
         /*layer_num=*/1, static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_size), rtp_llm::TYPE_INT8);
-    auto pool = std::make_shared<BlockPool>(pool_config, device_, AllocationType::HOST);
+    auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
     RTP_LLM_CHECK_WITH_INFO(pool->init(), "memory block pool init failed, block size: %zu", block_size);
     return pool;
 }

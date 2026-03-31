@@ -2,7 +2,6 @@
 
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -10,8 +9,7 @@ namespace rtp_llm {
 CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
                                                     bool                     is_mtp) {
-    const auto device_prop = rtp_llm::DeviceFactory::getDefaultDevice()->getDeviceProperties();
-    auto       dtype       = MemoryEvaluationHelper::getDataTypeForCache(model_config, device_prop);
+    auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config, buildDeviceType());
 
     auto layer_num = model_config.num_layers;
 

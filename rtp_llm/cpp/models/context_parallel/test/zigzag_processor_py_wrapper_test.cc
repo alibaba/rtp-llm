@@ -12,6 +12,7 @@ namespace unittest {
 // Test-only wrapper class to expose protected methods for unit testing
 class ZigZagProcessorTestWrapper: public ZigZagProcessor {
 public:
+    ZigZagProcessorTestWrapper(): ZigZagProcessor(ParallelismConfig{}) {}
     using ZigZagProcessor::plan;
     using ZigZagProcessor::generateQKVRestoreIndices;
     using ZigZagProcessor::generateQKVPaddingMask;

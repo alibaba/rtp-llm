@@ -113,7 +113,6 @@ public:
                     bool               use_mla,
                     int32_t            tp_size,
                     int32_t            dp_size,
-                    const std::string& lora_name,
                     int32_t            pp_size,
                     const std::string& extra,
                     const std::string& user_data):
@@ -122,7 +121,6 @@ public:
         use_mla_(use_mla),
         tp_size_(tp_size),
         dp_size_(dp_size),
-        lora_name_(lora_name),
         pp_size_(pp_size),
         extra_(extra),
         user_data_(user_data) {}
@@ -134,7 +132,6 @@ private:
     bool        use_mla_ = false;
     int32_t     tp_size_ = 1;
     int32_t     dp_size_ = 1;
-    std::string lora_name_;
     int32_t     pp_size_ = 1;
     std::string extra_;
     std::string user_data_;

@@ -9,13 +9,13 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor import (
-    DeepGemmHybridExecutor,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor import (
+    DeepGemmHybridExecutor,
+)
 from rtp_llm.models_py.utils.arch import get_sm
 
 
@@ -57,4 +57,11 @@ class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ) -> CombineForwardPayload:
-        return self.execute_masked(payload, activation, expert_map, a2_scale, apply_router_weight_on_input, extra_expert_args)
+        return self.execute_masked(
+            payload,
+            activation,
+            expert_map,
+            a2_scale,
+            apply_router_weight_on_input,
+            extra_expert_args,
+        )

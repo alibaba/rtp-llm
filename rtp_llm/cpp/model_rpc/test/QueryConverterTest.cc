@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
 #include <memory>
 #include <optional>
 
@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 
 using namespace std;
 namespace rtp_llm {
@@ -41,10 +41,10 @@ TEST_F(QueryConverterTest, testTransInput) {
             stop_words->add_values(i * 3 + j);
         }
     }
-    auto generate_input = QueryConverter::transQuery(&input);
-    auto input_ids      = generate_input->input_ids.get();
-    ASSERT_EQ(input_ids->size(), 2);
-    ASSERT_EQ(*(int*)(input_ids->data()), 0);
+    auto  generate_input = QueryConverter::transQuery(&input);
+    auto& input_ids      = generate_input->input_ids;
+    ASSERT_EQ(input_ids.numel(), 2);
+    ASSERT_EQ(input_ids.data_ptr<int32_t>()[0], 0);
     auto generate_config = generate_input->generate_config;
     ASSERT_EQ(generate_config->min_new_tokens, 4);
     ASSERT_EQ(generate_config->max_new_tokens, 5);
@@ -69,28 +69,25 @@ TEST_F(QueryConverterTest, testTransInput) {
 }
 
 TEST_F(QueryConverterTest, testTransOutput) {
-    auto device = rtp_llm::DeviceFactory::getDefaultDevice();
-    auto output_token_ids =
-        device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, 3}, rtp_llm::AllocationType::HOST}, {});
-    auto data = (int*)output_token_ids->data();
+    auto output_token_ids = torch::empty({1, 3}, torch::kInt32);
+    auto data             = output_token_ids.data_ptr<int>();
     for (int i = 0; i < 3; ++i) {
         data[i] = i;
     }
     GenerateOutputs outputs;
     GenerateOutput  res;
-    res.output_ids            = std::move(output_token_ids);
+    res.output_ids            = output_token_ids;
     res.finished              = true;
     res.aux_info.cost_time_us = 1000;
     res.aux_info.iter_count   = 9;
     res.aux_info.input_len    = 8;
     res.aux_info.output_len   = 7;
-    auto hidden_states =
-        device->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {3, 2}, rtp_llm::AllocationType::HOST}, {});
-    auto hidden_states_data = (float*)hidden_states->data();
+    auto hidden_states_tensor = torch::empty({3, 2}, torch::kFloat32);
+    auto hidden_states_data   = hidden_states_tensor.data_ptr<float>();
     for (int i = 0; i < 6; ++i) {
         hidden_states_data[i] = i;
     }
-    res.hidden_states.emplace(std::move(hidden_states));
+    res.hidden_states.emplace(hidden_states_tensor);
     outputs.generate_outputs.push_back(res);
 
     GenerateOutputsPB outputs_pb;

@@ -2,7 +2,9 @@
 #include <cstdint>
 #include <limits>
 #include <unordered_set>
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/core/OpData.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
@@ -128,10 +130,10 @@ void KVCacheAllocator::blockBatchCopy(const std::vector<BlockIdPair>& copy_mappi
     blockBatchCopy(copy_mapping.data(), copy_mapping.data() + copy_mapping.size());
 }
 
-void KVCacheAllocator::blockBatchCopy(const Buffer& copy_mapping) {
-    RTP_LLM_CHECK(copy_mapping.dim() == 2 && copy_mapping.shape()[1] == 2);
-    const auto* begin_ptr = (const BlockIdPair*)copy_mapping.data();
-    size_t      copy_num  = copy_mapping.shape()[0];
+void KVCacheAllocator::blockBatchCopy(const torch::Tensor& copy_mapping) {
+    RTP_LLM_CHECK(copy_mapping.dim() == 2 && copy_mapping.size(1) == 2);
+    const auto* begin_ptr = reinterpret_cast<const BlockIdPair*>(copy_mapping.data_ptr());
+    size_t      copy_num  = copy_mapping.size(0);
     blockBatchCopy(begin_ptr, begin_ptr + copy_num);
 }
 
@@ -185,7 +187,7 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
         }
     }
 
-    device_->batchCopy(copy_params);
+    execBatchCopy(copy_params);
 }
 
 size_t KVCacheAllocator::freeBlocksNum() const {
@@ -291,35 +293,10 @@ size_t KVCacheAllocator::maxAvailableTokensNum() const {
     return block_pool_ ? (block_pool_->totalBlocksNum() * seqSizePerBlock()) : 0;
 }
 
-void KVCacheAllocator::regUserMr(size_t model_id) {
+void KVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
     if (block_pool_) {
-        block_pool_->regUserMr(model_id);
+        block_pool_->regUserMr(model_id, std::move(cache_store));
     }
-}
-
-std::vector<std::pair<BufferPtr, size_t>> KVCacheAllocator::getAllBuffers() const {
-    std::vector<std::pair<BufferPtr, size_t>> results;
-
-    CacheLayerLayout layout = allLayerCacheBase();
-    results.reserve(layout.layers_to_kv_buffer_ptrs.size());
-
-    for (const auto& buf : layout.layers_to_kv_buffer_ptrs) {
-        if (!buf || buf->sizeBytes() == 0) {
-            continue;
-        }
-        const size_t kv_block_stride_bytes = config_.kv_block_stride_bytes;
-        results.emplace_back(buf, kv_block_stride_bytes);
-    }
-
-    for (const auto& buf : layout.layers_to_scale_buffer_ptrs) {
-        if (!buf || buf->sizeBytes() == 0) {
-            continue;
-        }
-        const size_t kv_scale_stride_bytes = config_.kv_scale_stride_bytes;
-        results.emplace_back(buf, kv_scale_stride_bytes);
-    }
-
-    return results;
 }
 
 }  // namespace rtp_llm

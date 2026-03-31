@@ -34,7 +34,6 @@ class FakeModelLoader(object):
         data_type: str = WEIGHT_TYPE.AUTO.to_str(),
         kv_cache_type: str = WEIGHT_TYPE.AUTO.to_str(),
         load_py_model: bool = False,
-        device_reserve_memory_bytes: int = -1073741824,
         warm_up: bool = False,
         is_causal: bool = True,
     ) -> None:
@@ -44,7 +43,6 @@ class FakeModelLoader(object):
         self.max_seq_len: int = max_seq_len
         self.quantization = quantization
         self.load_py_model = load_py_model
-        self.device_reserve_memory_bytes = device_reserve_memory_bytes
         self.warm_up = warm_up
         self.data_type = data_type
         self.kv_cache_type = kv_cache_type

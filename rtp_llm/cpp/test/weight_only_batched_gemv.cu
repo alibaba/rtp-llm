@@ -7,6 +7,8 @@
 #include "rtp_llm/cpp/utils/memory_utils.h"
 #include "rtp_llm/cpp/cuda/cutlass/interface.h"
 
+using namespace rtp_llm;
+
 struct Dim2 {
     int k;
     int n;

@@ -10,14 +10,12 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
-#include "rtp_llm/cpp/models/GptModel.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
-#include "rtp_llm/cpp/models/lora/LoraManager.h"
-
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 
 namespace rtp_llm {
@@ -82,35 +80,25 @@ vector<int> createRandomVector(size_t size, int max_val) {
     return vec;
 }
 
-void checkBufferEqual(DeviceBase* device, const BufferPtr& buffer1, const BufferPtr& buffer2) {
-    bool buffer1_is_empty = !buffer1 || buffer1->size() == 0;
-    bool buffer2_is_empty = !buffer2 || buffer2->size() == 0;
-
-    if (buffer1_is_empty && buffer2_is_empty) {
+void checkTensorEqual(const torch::Tensor& t1, const torch::Tensor& t2) {
+    bool t1_empty = !t1.defined() || t1.numel() == 0;
+    bool t2_empty = !t2.defined() || t2.numel() == 0;
+    if (t1_empty && t2_empty)
         return;
+    if (t1_empty || t2_empty) {
+        string t1_info = t1_empty ? "t1 is empty" : "t1 size: " + to_string(t1.numel());
+        string t2_info = t2_empty ? "t2 is empty" : "t2 size: " + to_string(t2.numel());
+        throw std::runtime_error("[test] Tensor mismatch: " + t1_info + " " + t2_info);
     }
-    if (buffer1_is_empty || buffer2_is_empty) {
-        string buffer1_info = buffer1_is_empty ? "buffer1 is empty" : "buffer1 size: " + to_string(buffer1->size());
-        string buffer2_info = buffer2_is_empty ? "buffer2 is empty" : "buffer2 size: " + to_string(buffer2->size());
-        throw std::runtime_error("[test] Buffer is empty: " + buffer1_info + " " + buffer2_info);
-    }
+    auto a = t1.cpu().contiguous();
+    auto b = t2.cpu().contiguous();
+    EXPECT_TRUE(torch::equal(a, b)) << "Tensors are not equal:\n" << a << "\nvs\n" << b;
+}
 
-    auto buf1_h = device->clone({*buffer1, AllocationType::HOST});
-    auto buf2_h = device->clone({*buffer2, AllocationType::HOST});
-    EXPECT_EQ(buffer1->type(), buffer2->type());
-    switch (buffer1->type()) {
-        case DataType::TYPE_INT64:
-            EXPECT_EQ(buffer2vector<int64_t>(*buf1_h), buffer2vector<int64_t>(*buf2_h));
-            break;
-        case DataType::TYPE_INT32:
-            EXPECT_EQ(buffer2vector<int32_t>(*buf1_h), buffer2vector<int32_t>(*buf2_h));
-            break;
-        case DataType::TYPE_FP32:
-            EXPECT_EQ(buffer2vector<float>(*buf1_h), buffer2vector<float>(*buf2_h));
-            break;
-        default:
-            throw std::runtime_error("[test] Unsupported check buffer data type");
-    }
+template<typename T>
+vector<T> toVec(const torch::Tensor& t) {
+    auto c = t.cpu().contiguous();
+    return vector<T>(c.data_ptr<T>(), c.data_ptr<T>() + c.numel());
 }
 
 template<typename T>
@@ -122,29 +110,31 @@ vector<T> catVectors(const vector<vector<T>>& vectors) {
     return result;
 }
 
-class FakeModel: public GptModel {
+class FakeModel: public ModelBase {
 public:
-    FakeModel(const GptModelInitParams& params, DeviceBase* device): GptModel(params), device(device) {}
+    FakeModel(const GptModelInitParams& params) {
+        weights_  = params.weights;
+        model_id_ = params.model_id;
+    }
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
         checkInputs(inputs);
         return output_holder.get();
     }
 
+    void checkTensorField(const char* name, const torch::Tensor& actual, const torch::Tensor& expected) {
+        RTP_LLM_LOG_INFO("check %s", name);
+        checkTensorEqual(actual, expected);
+    }
+
     void checkInputs(const GptModelInputs& inputs) {
         GptModelInputs expected_inputs = input_holder.get();
-        RTP_LLM_LOG_INFO("check combo_tokens");
-        checkBufferEqual(device, inputs.combo_tokens, expected_inputs.combo_tokens);
-        RTP_LLM_LOG_INFO("check input_lengths");
-        checkBufferEqual(device, inputs.input_lengths, expected_inputs.input_lengths);
-        RTP_LLM_LOG_INFO("check sequence_lengths");
-        checkBufferEqual(device, inputs.sequence_lengths, expected_inputs.sequence_lengths);
-        RTP_LLM_LOG_INFO("check prefix_lengths");
-        checkBufferEqual(device, inputs.prefix_lengths, expected_inputs.prefix_lengths);
-        RTP_LLM_LOG_INFO("check lm_output_indexes");
-        checkBufferEqual(device, inputs.lm_output_indexes, expected_inputs.lm_output_indexes);
-        RTP_LLM_LOG_INFO("check last_hidden_states");
-        checkBufferEqual(device, inputs.last_hidden_states, expected_inputs.last_hidden_states);
+        checkTensorField("combo_tokens", inputs.combo_tokens, expected_inputs.combo_tokens);
+        checkTensorField("input_lengths", inputs.input_lengths, expected_inputs.input_lengths);
+        checkTensorField("sequence_lengths", inputs.sequence_lengths, expected_inputs.sequence_lengths);
+        checkTensorField("prefix_lengths", inputs.prefix_lengths, expected_inputs.prefix_lengths);
+        checkTensorField("lm_output_indexes", inputs.lm_output_indexes, expected_inputs.lm_output_indexes);
+        checkTensorField("last_hidden_states", inputs.last_hidden_states, expected_inputs.last_hidden_states);
     }
 
     void setOutputs(const vector<GptModelOutputs>& outputs) {
@@ -158,12 +148,11 @@ public:
 private:
     TestDataHolder<GptModelInputs>  input_holder;
     TestDataHolder<GptModelOutputs> output_holder;
-    DeviceBase*                     device;
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
 public:
-    FakeFastTopKSampler(DeviceBase* device): device(device) {}
+    FakeFastTopKSampler() {}
 
     spec::FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1) override {
         checkInputs(logits);
@@ -173,27 +162,25 @@ public:
     void checkInputs(const torch::Tensor& logits) {
         auto expected_logits = logits_holder.get();
         RTP_LLM_LOG_INFO("check fast_topk_sampler logits");
-        checkBufferEqual(device, torchTensor2Buffer(logits), expected_logits);
+        checkTensorEqual(logits, expected_logits);
     }
 
     void setOutputs(const vector<spec::FastTopKSamplerOutput>& outputs) {
         output_holder.push(outputs);
     }
 
-    void setInputs(const vector<BufferPtr>& inputs) {
+    void setInputs(const vector<torch::Tensor>& inputs) {
         logits_holder.push(inputs);
     }
 
 private:
-    TestDataHolder<BufferPtr>                   logits_holder;
+    TestDataHolder<torch::Tensor>               logits_holder;
     TestDataHolder<spec::FastTopKSamplerOutput> output_holder;
-    DeviceBase*                                 device;
 };
 
 class FakeSpeculativeSampler: public spec::SpeculativeSampler {
 public:
-    FakeSpeculativeSampler(rtp_llm::DeviceBase* device, size_t propose_step):
-        spec::SpeculativeSampler(device, propose_step), device(device) {}
+    FakeSpeculativeSampler(size_t propose_step): spec::SpeculativeSampler(propose_step) {}
 
     spec::SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                            SamplerOutput&                      draft_sampler_output,
@@ -206,11 +193,11 @@ public:
                      SamplerOutput&                      target_sampler_output) {
         auto [expected_draft_sampler_input, expected_target_sampler_input] = input_holder.get();
         RTP_LLM_LOG_INFO("check draft_sampler_output.token_ids");
-        checkBufferEqual(device, draft_sampler_output.token_ids, expected_draft_sampler_input.token_ids);
+        checkTensorEqual(draft_sampler_output.token_ids, expected_draft_sampler_input.token_ids);
         RTP_LLM_LOG_INFO("check draft_sampler_output.all_probs");
-        checkBufferEqual(device, draft_sampler_output.all_probs, expected_draft_sampler_input.all_probs);
+        checkTensorEqual(draft_sampler_output.all_probs, expected_draft_sampler_input.all_probs);
         RTP_LLM_LOG_INFO("check target_sampler_output.all_probs");
-        checkBufferEqual(device, target_sampler_output.all_probs, expected_target_sampler_input.all_probs);
+        checkTensorEqual(target_sampler_output.all_probs, expected_target_sampler_input.all_probs);
     }
 
     void setOutputs(const vector<spec::SpeculativeSamplerOutput>& outputs) {
@@ -224,12 +211,11 @@ public:
 private:
     TestDataHolder<pair<SamplerOutput, SamplerOutput>> input_holder;
     TestDataHolder<spec::SpeculativeSamplerOutput>     output_holder;
-    DeviceBase*                                        device;
 };
 
 class FakeSampler: public Sampler {
 public:
-    FakeSampler(const SamplerInitParams& params, DeviceBase* device): Sampler(params), device(device) {}
+    FakeSampler(const SamplerInitParams& params): Sampler(params) {}
 
     SamplerOutput forward(const SamplerInputs& inputs) override {
         checkInputs(inputs);
@@ -239,7 +225,7 @@ public:
     void checkInputs(const SamplerInputs& inputs) {
         auto expected_inputs = input_holder.get();
         RTP_LLM_LOG_INFO("check sampler logits");
-        checkBufferEqual(device, inputs.logits, expected_inputs.logits);
+        checkTensorEqual(inputs.logits, expected_inputs.logits);
     }
 
     void setInputs(const vector<SamplerInputs>& inputs) {
@@ -253,7 +239,6 @@ public:
 private:
     TestDataHolder<SamplerInputs> input_holder;
     TestDataHolder<SamplerOutput> output_holder;
-    DeviceBase*                   device;
 };
 
 struct MtpExecutorComponents {
@@ -275,7 +260,7 @@ public:
                                           const ResourceContext& resource_context,
                                           const vector<int>&     input_ids) {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids       = createBuffer<int32_t>({input_ids.size()}, input_ids, AllocationType::HOST);
+        query->input_ids       = torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
         query->generate_config = make_shared<GenerateConfig>();
         GenerateStreamPtr stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
@@ -289,9 +274,8 @@ public:
                                          const StreamSpecUpdateInfo& spec_update_info) {
         GenerateStreamPtr stream = createContextStream(model_config, runtime_config, resource_context, input_ids);
 
-        auto      sp_buffer   = std::make_shared<SpeculativeExecutorStreamOutput>();
-        BufferPtr spec_tokens = createBuffer<int>({1, 2}, {-1, -1}, AllocationType::HOST);
-        sp_buffer->tokens     = spec_tokens;
+        auto sp_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_buffer->tokens = torch::tensor({-1, -1}, torch::kInt32).reshape({1, 2});
 
         stream->setSPOutputBuffer(sp_buffer);
         stream->specUpdate(spec_update_info);
@@ -308,19 +292,19 @@ public:
 
         auto sp_output_buffer = stream->getSPOutputBuffer();
         auto tokens           = sp_output_buffer->tokens;
-        auto tokens_h         = device_->clone({*tokens, AllocationType::HOST});
-        EXPECT_EQ(expect_propose_tokens, buffer2vector<int>(*tokens_h));
+        auto tokens_h         = tokens.cpu().clone();
+        EXPECT_EQ(expect_propose_tokens, toVec<int>(tokens_h));
 
         auto all_probs   = sp_output_buffer->all_probs;
-        auto all_probs_h = device_->clone({*all_probs, AllocationType::HOST});
-        EXPECT_EQ(expect_all_probs, buffer2vector<float>(*all_probs_h));
+        auto all_probs_h = all_probs.is_cuda() ? all_probs.cpu() : all_probs;
+        EXPECT_EQ(expect_all_probs, toVec<float>(all_probs_h));
 
         if (expect_last_hidden_states.size() > 0) {
             auto last_hidden_states   = sp_output_buffer->hidden_states;
-            auto last_hidden_states_h = device_->clone({*last_hidden_states, AllocationType::HOST});
-            EXPECT_EQ(expect_last_hidden_states, buffer2vector<float>(*last_hidden_states_h));
+            auto last_hidden_states_h = last_hidden_states.is_cuda() ? last_hidden_states.cpu() : last_hidden_states;
+            EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states_h));
         } else {
-            EXPECT_TRUE(sp_output_buffer->hidden_states == nullptr);
+            EXPECT_TRUE(!sp_output_buffer->hidden_states.defined());
         }
     }
 
@@ -343,8 +327,7 @@ public:
                                                                             /*tokens_per_block=*/2,
                                                                             rtp_llm::TYPE_INT8,
                                                                             /*local_head_num_kv=*/128,
-                                                                            /*size_per_head=*/256),
-                                             device_);
+                                                                            /*size_per_head=*/256));
 
         auto cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
                                                            /*block_num=*/10,
@@ -361,9 +344,8 @@ public:
                                                          /*size_per_head=*/256);
         cache_config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(mtp_config));
 
-        EngineInitParams params =
-            createEngineInitParams(device_, config, model_config, runtime_config, kv_cache_config);
-        params.sp_config = sp_config;
+        EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+        params.sp_config        = sp_config;
         if (test_config.vocab_size_override > 0) {
             params.model_config_.vocab_size = test_config.vocab_size_override;
         }
@@ -379,38 +361,37 @@ public:
             SP_TYPE_MTP, sp_config.gen_num_per_cycle, std::move(mtp_model_params));
 
         // Create cache managers
-        auto cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+        auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
         cache_manager->init();
 
-        // Create lora manager (can be nullptr for simple test)
-        std::shared_ptr<lora::LoraManager> lora_manager = nullptr;
-
         // Create MtpExecutor
-        auto executor =
-            std::make_unique<MtpExecutor>(params, propose_params, cache_manager, device_, lora_manager, false);
+        auto executor = std::make_unique<MtpExecutor>(params, propose_params, cache_manager, ExecInitParams{}, false);
 
         // Create fake models
+        ExecInitParams     exec_init_params;
         GptModelInitParams target_model_params(
-            {device_,
-             params.gpt_weights,
+            {params.gpt_weights,
              Executor::genModelDescription(
                  params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
              std::nullopt,
-             params.model_id});
+             params.model_id,
+             params.parallelism_config,
+             exec_init_params});
 
         GptModelInitParams draft_model_params(
-            {device_,
-             params.gpt_weights,
+            {params.gpt_weights,
              Executor::genModelDescription(
                  params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
              std::nullopt,
-             params.model_id});
+             params.model_id,
+             params.parallelism_config,
+             exec_init_params});
 
-        auto fake_target_model        = std::make_unique<FakeModel>(target_model_params, device_);
-        auto fake_draft_model         = std::make_unique<FakeModel>(draft_model_params, device_);
-        auto fake_fast_topk_sampler   = std::make_unique<FakeFastTopKSampler>(device_);
-        auto fake_speculative_sampler = std::make_unique<FakeSpeculativeSampler>(device_, sp_config.gen_num_per_cycle);
-        auto fake_sampler             = std::make_unique<FakeSampler>(SamplerInitParams{device_}, device_);
+        auto fake_target_model        = std::make_unique<FakeModel>(target_model_params);
+        auto fake_draft_model         = std::make_unique<FakeModel>(draft_model_params);
+        auto fake_fast_topk_sampler   = std::make_unique<FakeFastTopKSampler>();
+        auto fake_speculative_sampler = std::make_unique<FakeSpeculativeSampler>(sp_config.gen_num_per_cycle);
+        auto fake_sampler             = std::make_unique<FakeSampler>(SamplerInitParams{});
 
         MtpExecutorComponents components;
         components.executor                 = std::move(executor);
@@ -440,12 +421,9 @@ public:
     }
 
     GptModelOutputs createRandomGptModelOutputs(size_t token_num, size_t vocab_size, size_t hidden_size) {
-        auto output            = GptModelOutputs{};
-        auto logits_vec        = createRandomVector<float>(token_num * vocab_size, 1.0);
-        auto hidden_states_vec = createRandomVector<float>(token_num * hidden_size, 1.0);
-        output.logits          = createBuffer<float>({token_num, vocab_size}, logits_vec, AllocationType::HOST);
-        output.all_hidden_states =
-            createBuffer<float>({token_num, hidden_size}, hidden_states_vec, AllocationType::HOST);
+        auto output              = GptModelOutputs{};
+        output.logits            = torch::rand({(int64_t)token_num, (int64_t)vocab_size}, torch::kFloat32);
+        output.all_hidden_states = torch::rand({(int64_t)token_num, (int64_t)hidden_size}, torch::kFloat32);
         return output;
     }
 };
@@ -466,45 +444,42 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     auto target_output = GptModelOutputs{};
 
     // set fake target model inputs
-    target_input.combo_tokens      = createBuffer<int>({4}, {0, 1, 2, 3}, AllocationType::HOST);
-    target_input.input_lengths     = createBuffer<int>({1}, {4}, AllocationType::HOST);
-    target_input.prefix_lengths    = createBuffer<int>({1}, {0}, AllocationType::HOST);
-    target_input.lm_output_indexes = createBuffer<int>({1}, {3}, AllocationType::HOST);
-    target_output.logits           = createBuffer<float>({batch_size, 4}, {0.1, 0.2, 0.3, 0.4}, AllocationType::HOST);
+    target_input.combo_tokens      = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({4}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({0}, torch::kInt32);
+    target_input.lm_output_indexes = torch::tensor({3}, torch::kInt32);
+    target_output.logits           = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({(int64_t)batch_size, 4});
     target_output.all_hidden_states =
-        createBuffer<float>({4, 2}, {0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08}, AllocationType::HOST);
+        torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
 
     // set fake draft model outputs
     auto draft_input               = GptModelInputs{};
     auto draft_output              = GptModelOutputs{};
-    draft_input.combo_tokens       = createBuffer<int>({4}, {1, 2, 3, 1}, AllocationType::HOST);
-    draft_input.input_lengths      = createBuffer<int>({1}, {4}, AllocationType::HOST);
-    draft_input.prefix_lengths     = createBuffer<int>({1}, {0}, AllocationType::HOST);
-    draft_input.lm_output_indexes  = createBuffer<int>({1}, {3}, AllocationType::HOST);
+    draft_input.combo_tokens       = torch::tensor({1, 2, 3, 1}, torch::kInt32);
+    draft_input.input_lengths      = torch::tensor({4}, torch::kInt32);
+    draft_input.prefix_lengths     = torch::tensor({0}, torch::kInt32);
+    draft_input.lm_output_indexes  = torch::tensor({3}, torch::kInt32);
     draft_input.last_hidden_states = target_output.all_hidden_states;
-    draft_output.logits            = createBuffer<float>({batch_size, 4}, {0.5, 0.6, 0.7, 0.8}, AllocationType::HOST);
+    draft_output.logits            = torch::tensor({0.5f, 0.6f, 0.7f, 0.8f}).reshape({(int64_t)batch_size, 4});
     draft_output.all_hidden_states =
-        createBuffer<float>({4, 2}, {0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18}, AllocationType::HOST);
+        torch::tensor({0.11f, 0.12f, 0.13f, 0.14f, 0.15f, 0.16f, 0.17f, 0.18f}).reshape({4, 2});
 
     components.fake_draft_model->setInputs({draft_input});
     components.fake_draft_model->setOutputs({draft_output});
 
     // set fake sampler outputs
-    BufferPtr target_token_ids = createBuffer<int>({batch_size, 1}, {1}, AllocationType::HOST);
-    auto      sampler_input    = SamplerInputs{target_output.logits};
-    auto      sampler_output   = SamplerOutput{target_token_ids};
+    auto sampler_input  = SamplerInputs{target_output.logits};
+    auto sampler_output = SamplerOutput{torch::tensor({1}, torch::kInt32).reshape({(int64_t)batch_size, 1})};
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({sampler_output});
 
     // set fake fast topk sampler outputs
-    BufferPtr fast_top_k_token_ids   = createBuffer<int>({batch_size, 1}, {2}, AllocationType::HOST);
-    BufferPtr fast_top_k_probs       = createBuffer<float>({batch_size, 4}, {0.0, 0.0, 1.0, 0.0}, AllocationType::HOST);
-    auto      fast_topk_sample_input = draft_output.logits;
-    auto      fast_topk_sampler_output = spec::FastTopKSamplerOutput{Buffer2torchTensor(fast_top_k_probs, false),
-                                                                Buffer2torchTensor(fast_top_k_token_ids, false)};
-    components.fake_fast_topk_sampler->setInputs({fast_topk_sample_input});
+    auto fast_topk_sampler_output =
+        spec::FastTopKSamplerOutput{torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({(int64_t)batch_size, 4}),
+                                    torch::tensor({2}, torch::kInt32).reshape({(int64_t)batch_size, 1})};
+    components.fake_fast_topk_sampler->setInputs({draft_output.logits});
     components.fake_fast_topk_sampler->setOutputs({fast_topk_sampler_output});
 
     // Replace models with fake models
@@ -540,14 +515,15 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
     auto target_input  = GptModelInputs{};
     auto target_output = GptModelOutputs{};
 
-    target_input.combo_tokens      = createBuffer<int>({6}, {0, 1, 2, 3, 2, 3}, AllocationType::HOST);
-    target_input.input_lengths     = createBuffer<int>({2}, {4, 2}, AllocationType::HOST);
-    target_input.prefix_lengths    = createBuffer<int>({2}, {0, 0}, AllocationType::HOST);
-    target_input.lm_output_indexes = createBuffer<int>({2}, {3, 5}, AllocationType::HOST);
+    target_input.combo_tokens      = torch::tensor({0, 1, 2, 3, 2, 3}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({4, 2}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({0, 0}, torch::kInt32);
+    target_input.lm_output_indexes = torch::tensor({3, 5}, torch::kInt32);
     target_output.logits =
-        createBuffer<float>({batch_size, 4}, {0.1, 0.2, 0.3, 0.4, 1.1, 1.2, 1.3, 1.4}, AllocationType::HOST);
-    target_output.all_hidden_states = createBuffer<float>(
-        {6, 2}, {0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 1.01, 1.02, 1.03, 1.04}, AllocationType::HOST);
+        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 1.1f, 1.2f, 1.3f, 1.4f}).reshape({(int64_t)batch_size, 4});
+    target_output.all_hidden_states =
+        torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f, 1.01f, 1.02f, 1.03f, 1.04f})
+            .reshape({6, 2});
 
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
@@ -556,36 +532,33 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
     auto draft_input  = GptModelInputs{};
     auto draft_output = GptModelOutputs{};
 
-    draft_input.combo_tokens       = createBuffer<int>({6}, {1, 2, 3, 1, 3, 0}, AllocationType::HOST);
-    draft_input.input_lengths      = createBuffer<int>({2}, {4, 2}, AllocationType::HOST);
-    draft_input.prefix_lengths     = createBuffer<int>({2}, {0, 0}, AllocationType::HOST);
-    draft_input.lm_output_indexes  = createBuffer<int>({2}, {3, 5}, AllocationType::HOST);
+    draft_input.combo_tokens       = torch::tensor({1, 2, 3, 1, 3, 0}, torch::kInt32);
+    draft_input.input_lengths      = torch::tensor({4, 2}, torch::kInt32);
+    draft_input.prefix_lengths     = torch::tensor({0, 0}, torch::kInt32);
+    draft_input.lm_output_indexes  = torch::tensor({3, 5}, torch::kInt32);
     draft_input.last_hidden_states = target_output.all_hidden_states;
     draft_output.logits =
-        createBuffer<float>({batch_size, 4}, {0.5, 0.6, 0.7, 0.8, 1.5, 1.6, 1.7, 1.8}, AllocationType::HOST);
-    draft_output.all_hidden_states = createBuffer<float>(
-        {6, 2}, {0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 1.11, 1.12, 1.13, 1.14}, AllocationType::HOST);
+        torch::tensor({0.5f, 0.6f, 0.7f, 0.8f, 1.5f, 1.6f, 1.7f, 1.8f}).reshape({(int64_t)batch_size, 4});
+    draft_output.all_hidden_states =
+        torch::tensor({0.11f, 0.12f, 0.13f, 0.14f, 0.15f, 0.16f, 0.17f, 0.18f, 1.11f, 1.12f, 1.13f, 1.14f})
+            .reshape({6, 2});
 
     components.fake_draft_model->setInputs({draft_input});
     components.fake_draft_model->setOutputs({draft_output});
 
     // set fake sampler outputs
-    BufferPtr target_token_ids = createBuffer<int>({batch_size, 1}, {1, 0}, AllocationType::HOST);
-    auto      sampler_input    = SamplerInputs{target_output.logits};
-    auto      sampler_output   = SamplerOutput{target_token_ids};
+    auto sampler_input  = SamplerInputs{target_output.logits};
+    auto sampler_output = SamplerOutput{torch::tensor({1, 0}, torch::kInt32).reshape({(int64_t)batch_size, 1})};
 
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({sampler_output});
 
     // set fake fast topk sampler inputs
-    BufferPtr fast_top_k_token_ids = createBuffer<int>({batch_size, 1}, {2, 1}, AllocationType::HOST);
-    BufferPtr fast_top_k_probs =
-        createBuffer<float>({batch_size, 4}, {0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0}, AllocationType::HOST);
-    auto fast_topk_sampler_output = spec::FastTopKSamplerOutput{Buffer2torchTensor(fast_top_k_probs, false),
-                                                                Buffer2torchTensor(fast_top_k_token_ids, false)};
-    auto fast_topk_sampler_input  = draft_output.logits;
+    auto fast_topk_sampler_output = spec::FastTopKSamplerOutput{
+        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f}).reshape({(int64_t)batch_size, 4}),
+        torch::tensor({2, 1}, torch::kInt32).reshape({(int64_t)batch_size, 1})};
 
-    components.fake_fast_topk_sampler->setInputs({fast_topk_sampler_input});
+    components.fake_fast_topk_sampler->setInputs({draft_output.logits});
     components.fake_fast_topk_sampler->setOutputs({fast_topk_sampler_output});
 
     // Replace models with fake models
@@ -622,9 +595,9 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
     size_t batch_size = 1;
 
-    BufferPtr stream1_new_tokens        = createBuffer<int>({1, 1}, {2}, AllocationType::HOST);
-    BufferPtr stream1_hidden_states     = createBuffer<float>({1, 2}, {0.03, 0.04}, AllocationType::HOST);
-    BufferPtr stream1_draft_token_probs = createBuffer<float>({1, 4}, {0.0, 0.0, 1.0, 0.0}, AllocationType::HOST);
+    auto stream1_new_tokens        = torch::tensor({{2}}, torch::kInt32);
+    auto stream1_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+    auto stream1_draft_token_probs = torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}});
 
     StreamSpecUpdateInfo spec_update_info1{stream1_new_tokens, 1, 3, stream1_hidden_states, stream1_draft_token_probs};
 
@@ -639,36 +612,34 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     auto draft_output_2 = createRandomGptModelOutputs(1, 4, 2);
     auto draft_output_3 = createRandomGptModelOutputs(1, 4, 2);
 
-    draft_input_1.combo_tokens       = createBuffer<int>({1}, {3}, AllocationType::HOST);
-    draft_input_1.input_lengths      = createBuffer<int>({1}, {2}, AllocationType::HOST);
-    draft_input_1.sequence_lengths   = createBuffer<int>({1}, {2}, AllocationType::HOST);
-    draft_input_1.lm_output_indexes  = createBuffer<int>({1}, {0}, AllocationType::HOST);
+    draft_input_1.combo_tokens       = torch::tensor({3}, torch::kInt32);
+    draft_input_1.input_lengths      = torch::tensor({2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({2}, torch::kInt32);
+    draft_input_1.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_1.last_hidden_states = stream1_hidden_states;
 
-    draft_input_2.combo_tokens       = createBuffer<int>({1}, {2}, AllocationType::HOST);
-    draft_input_2.input_lengths      = createBuffer<int>({1}, {2}, AllocationType::HOST);
-    draft_input_2.sequence_lengths   = createBuffer<int>({1}, {3}, AllocationType::HOST);
-    draft_input_2.lm_output_indexes  = createBuffer<int>({1}, {0}, AllocationType::HOST);
+    draft_input_2.combo_tokens       = torch::tensor({2}, torch::kInt32);
+    draft_input_2.input_lengths      = torch::tensor({2}, torch::kInt32);
+    draft_input_2.sequence_lengths   = torch::tensor({3}, torch::kInt32);
+    draft_input_2.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_2.last_hidden_states = draft_output_1.all_hidden_states;
 
-    draft_input_3.combo_tokens       = createBuffer<int>({1}, {1}, AllocationType::HOST);
-    draft_input_3.input_lengths      = createBuffer<int>({1}, {2}, AllocationType::HOST);
-    draft_input_3.sequence_lengths   = createBuffer<int>({1}, {4}, AllocationType::HOST);
-    draft_input_3.lm_output_indexes  = createBuffer<int>({1}, {0}, AllocationType::HOST);
+    draft_input_3.combo_tokens       = torch::tensor({1}, torch::kInt32);
+    draft_input_3.input_lengths      = torch::tensor({2}, torch::kInt32);
+    draft_input_3.sequence_lengths   = torch::tensor({4}, torch::kInt32);
+    draft_input_3.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_3.last_hidden_states = draft_output_2.all_hidden_states;
 
-    auto next_draft_input    = GptModelInputs{};
-    auto next_draft_output   = GptModelOutputs{};
-    next_draft_output.logits = createBuffer<float>({batch_size, 4}, {1.9, 1.10, 1.11, 1.12}, AllocationType::HOST);
-    next_draft_output.all_hidden_states =
-        createBuffer<float>({3, 2}, {0.1, 0.1, 0.2, 0.22, 0.3, 0.33}, AllocationType::HOST);
+    auto next_draft_input               = GptModelInputs{};
+    auto next_draft_output              = GptModelOutputs{};
+    next_draft_output.logits            = torch::tensor({1.9f, 1.10f, 1.11f, 1.12f}).reshape({(int64_t)batch_size, 4});
+    next_draft_output.all_hidden_states = torch::tensor({0.1f, 0.1f, 0.2f, 0.22f, 0.3f, 0.33f}).reshape({3, 2});
 
-    next_draft_input.combo_tokens      = createBuffer<int>({3}, {3, 2, 0}, AllocationType::HOST);
-    next_draft_input.input_lengths     = createBuffer<int>({1}, {3}, AllocationType::HOST);
-    next_draft_input.prefix_lengths    = createBuffer<int>({1}, {2}, AllocationType::HOST);
-    next_draft_input.lm_output_indexes = createBuffer<int>({1}, {2}, AllocationType::HOST);
-    next_draft_input.last_hidden_states =
-        createBuffer<float>({3, 2}, {0.01, 0.02, 0.03, 0.04, 0.05, 0.06}, AllocationType::HOST);
+    next_draft_input.combo_tokens       = torch::tensor({3, 2, 0}, torch::kInt32);
+    next_draft_input.input_lengths      = torch::tensor({3}, torch::kInt32);
+    next_draft_input.prefix_lengths     = torch::tensor({2}, torch::kInt32);
+    next_draft_input.lm_output_indexes  = torch::tensor({2}, torch::kInt32);
+    next_draft_input.last_hidden_states = torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f}).reshape({3, 2});
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
@@ -676,80 +647,64 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     // set fake model outputs
     auto target_input              = GptModelInputs{};
     auto target_output             = GptModelOutputs{};
-    target_input.combo_tokens      = createBuffer<int>({5}, {2, 3, 2, 1, 3}, AllocationType::HOST);
-    target_input.input_lengths     = createBuffer<int>({1}, {5}, AllocationType::HOST);
-    target_input.prefix_lengths    = createBuffer<int>({1}, {2}, AllocationType::HOST);
-    target_input.lm_output_indexes = createBuffer<int>({5}, {0, 1, 2, 3, 4}, AllocationType::HOST);
+    target_input.combo_tokens      = torch::tensor({2, 3, 2, 1, 3}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({5}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
+    target_input.lm_output_indexes = torch::tensor({0, 1, 2, 3, 4}, torch::kInt32);
 
-    target_output.logits = createBuffer<float>(
-        {batch_size * (propose_step + 1), 4},
-        {0.1, 0.2, 0.3, 0.4, 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 3.4, 4.1, 4.2, 4.3, 4.4},
-        AllocationType::HOST);
-    target_output.all_hidden_states = createBuffer<float>(
-        {propose_step + 1, 2}, {0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10}, AllocationType::HOST);
+    target_output.logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 1.1f, 1.2f, 1.3f, 1.4f, 2.1f, 2.2f,
+                                          2.3f, 2.4f, 3.1f, 3.2f, 3.3f, 3.4f, 4.1f, 4.2f, 4.3f, 4.4f})
+                               .reshape({(int64_t)(batch_size * (propose_step + 1)), 4});
+    target_output.all_hidden_states =
+        torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f, 0.09f, 0.10f})
+            .reshape({(int64_t)(propose_step + 1), 2});
 
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
 
     // set fake sampler outputs
-    BufferPtr target_token_ids = createBuffer<int>({batch_size, 5}, {3, 2, 0, 0, 0}, AllocationType::HOST);
-    BufferPtr target_sample_all_probs =
-        createBuffer<float>({batch_size, propose_step + 1, vocab_size},
-                            createRandomVector<float>(batch_size * (propose_step + 1) * vocab_size, 1),
-                            AllocationType::HOST);
-    auto sampler_input       = SamplerInputs{target_output.logits};
-    auto sampler_output      = SamplerOutput{target_token_ids};
-    sampler_output.all_probs = target_sample_all_probs;
+    auto target_sample_all_probs_data = createRandomVector<float>(batch_size * (propose_step + 1) * vocab_size, 1);
+    auto sampler_input                = SamplerInputs{target_output.logits};
+    auto sampler_output =
+        SamplerOutput{torch::tensor({3, 2, 0, 0, 0}, torch::kInt32).reshape({(int64_t)batch_size, 5})};
+    sampler_output.all_probs = torch::tensor(target_sample_all_probs_data)
+                                   .reshape({(int64_t)batch_size, (int64_t)(propose_step + 1), (int64_t)vocab_size});
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({sampler_output});
 
     // draft sampler output [2, 1, 3, 0]
-    auto draft_sampler_input_1     = draft_output_1.logits;
-    auto draft_sampler_input_2     = draft_output_2.logits;
-    auto draft_sampler_input_3     = draft_output_3.logits;
-    auto next_draft_sampler_input  = next_draft_output.logits;
     auto draft_sampler_output_1    = spec::FastTopKSamplerOutput{};
     auto draft_sampler_output_2    = spec::FastTopKSamplerOutput{};
     auto draft_sampler_output_3    = spec::FastTopKSamplerOutput{};
     auto next_draft_sampler_output = spec::FastTopKSamplerOutput{};
 
-    auto token_ids_1 = createBuffer<int>({batch_size, 1}, {2});
-    auto all_probs_1 = createBuffer<float>({batch_size, 4}, {0.0, 0.0, 1.0, 0.0}, AllocationType::HOST);
-    auto token_ids_2 = createBuffer<int>({batch_size, 1}, {1});
-    auto all_probs_2 = createBuffer<float>({batch_size, 4}, {0.0, 0.0, 0.0, 1.0}, AllocationType::HOST);
-    auto token_ids_3 = createBuffer<int>({batch_size, 1}, {3});
-    auto all_probs_3 = createBuffer<float>({batch_size, 4}, {1.0, 0.0, 0.0, 0.0}, AllocationType::HOST);
-    auto token_ids_4 = createBuffer<int>({batch_size, 1}, {1});
-    auto all_probs_4 = createBuffer<float>({batch_size, 4}, {0.0, 1.0, 0.0, 0.0}, AllocationType::HOST);
-
-    draft_sampler_output_1.token_ids    = Buffer2torchTensor(token_ids_1, false);
-    draft_sampler_output_1.all_probs    = Buffer2torchTensor(all_probs_1, false);
-    draft_sampler_output_2.token_ids    = Buffer2torchTensor(token_ids_2, false);
-    draft_sampler_output_2.all_probs    = Buffer2torchTensor(all_probs_2, false);
-    draft_sampler_output_3.token_ids    = Buffer2torchTensor(token_ids_3, false);
-    draft_sampler_output_3.all_probs    = Buffer2torchTensor(all_probs_3, false);
-    next_draft_sampler_output.token_ids = Buffer2torchTensor(token_ids_4, false);
-    next_draft_sampler_output.all_probs = Buffer2torchTensor(all_probs_4, false);
+    draft_sampler_output_1.token_ids    = torch::tensor({2}, torch::kInt32).reshape({(int64_t)batch_size, 1});
+    draft_sampler_output_1.all_probs    = torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
+    draft_sampler_output_2.token_ids    = torch::tensor({1}, torch::kInt32).reshape({(int64_t)batch_size, 1});
+    draft_sampler_output_2.all_probs    = torch::tensor({0.0f, 0.0f, 0.0f, 1.0f}).reshape({(int64_t)batch_size, 4});
+    draft_sampler_output_3.token_ids    = torch::tensor({3}, torch::kInt32).reshape({(int64_t)batch_size, 1});
+    draft_sampler_output_3.all_probs    = torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
+    next_draft_sampler_output.token_ids = torch::tensor({1}, torch::kInt32).reshape({(int64_t)batch_size, 1});
+    next_draft_sampler_output.all_probs = torch::tensor({0.0f, 1.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
 
     components.fake_fast_topk_sampler->setInputs(
-        {draft_sampler_input_1, draft_sampler_input_2, draft_sampler_input_3, next_draft_sampler_input});
+        {draft_output_1.logits, draft_output_2.logits, draft_output_3.logits, next_draft_output.logits});
     components.fake_fast_topk_sampler->setOutputs(
         {draft_sampler_output_1, draft_sampler_output_2, draft_sampler_output_3, next_draft_sampler_output});
 
     // set fake speculative sampler outputs
-    BufferPtr accept_tokens              = createBuffer<int>({1, 3}, {3, 2, 0}, AllocationType::HOST);
-    auto      speculative_sampler_output = spec::SpeculativeSamplerOutput{{accept_tokens}, {3}};
-    auto      draft_spec_sample_input    = SamplerOutput{};
-    auto      target_spec_sample_input   = SamplerOutput{};
+    auto accept_tokens              = torch::tensor({{3, 2, 0}}, torch::kInt32);
+    auto speculative_sampler_output = spec::SpeculativeSamplerOutput{{accept_tokens}, {3}};
+    auto draft_spec_sample_input    = SamplerOutput{};
+    auto target_spec_sample_input   = SamplerOutput{};
 
     vector<vector<float>> draft_all_probs_list;
-    draft_all_probs_list.push_back(buffer2vector<float>(*stream1_draft_token_probs));
-    draft_all_probs_list.push_back(buffer2vector<float>(*draft_output_1.logits));
-    draft_all_probs_list.push_back(buffer2vector<float>(*draft_output_2.logits));
-    draft_all_probs_list.push_back(buffer2vector<float>(*draft_output_3.logits));
-    draft_spec_sample_input.token_ids = createBuffer<int>({1, 4}, {3, 2, 1, 3}, AllocationType::HOST);
-    draft_spec_sample_input.all_probs =
-        createBuffer<float>({4, 4}, catVectors(draft_all_probs_list), AllocationType::HOST);
+    draft_all_probs_list.push_back(toVec<float>(stream1_draft_token_probs));
+    draft_all_probs_list.push_back(toVec<float>(draft_output_1.logits));
+    draft_all_probs_list.push_back(toVec<float>(draft_output_2.logits));
+    draft_all_probs_list.push_back(toVec<float>(draft_output_3.logits));
+    draft_spec_sample_input.token_ids  = torch::tensor({3, 2, 1, 3}, torch::kInt32).reshape({1, 4});
+    draft_spec_sample_input.all_probs  = torch::tensor(catVectors(draft_all_probs_list)).reshape({4, 4});
     target_spec_sample_input.all_probs = draft_spec_sample_input.all_probs;
 
     components.fake_speculative_sampler->setInputs({draft_spec_sample_input, target_spec_sample_input});
@@ -789,13 +744,13 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     auto components                 = createMtpExecutorComponents(test_config);
 
     // Create context stream
-    BufferPtr stream1_new_tokens        = createBuffer<int>({1, 1}, {3}, AllocationType::HOST);
-    BufferPtr stream1_hidden_states     = createBuffer<float>({1, 2}, {0.03, 0.04}, AllocationType::HOST);
-    BufferPtr stream1_draft_token_probs = createBuffer<float>({1, 4}, {0.0, 0.0, 1.0, 0.0}, AllocationType::HOST);
+    auto stream1_new_tokens        = torch::tensor({{3}}, torch::kInt32);
+    auto stream1_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+    auto stream1_draft_token_probs = torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}});
 
-    BufferPtr stream2_new_tokens        = createBuffer<int>({1, 1}, {1}, AllocationType::HOST);
-    BufferPtr stream2_hidden_states     = createBuffer<float>({1, 2}, {2.1, 2.12}, AllocationType::HOST);
-    BufferPtr stream2_draft_token_probs = createBuffer<float>({1, 4}, {0.0, 0.0, 0.0, 1.0}, AllocationType::HOST);
+    auto stream2_new_tokens        = torch::tensor({{1}}, torch::kInt32);
+    auto stream2_hidden_states     = torch::tensor({{2.1f, 2.12f}});
+    auto stream2_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
 
     StreamSpecUpdateInfo spec_update_info1{stream1_new_tokens, 1, 2, stream1_hidden_states, stream1_draft_token_probs};
     StreamSpecUpdateInfo spec_update_info2{stream2_new_tokens, 1, 3, stream2_hidden_states, stream2_draft_token_probs};
@@ -816,38 +771,39 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     auto draft_output_2 = createRandomGptModelOutputs(2, 4, 2);
     auto draft_output_3 = createRandomGptModelOutputs(2, 4, 2);
 
-    draft_input_1.combo_tokens       = createBuffer<int>({2}, {2, 3}, AllocationType::HOST);
-    draft_input_1.input_lengths      = createBuffer<int>({2}, {3, 2}, AllocationType::HOST);
-    draft_input_1.sequence_lengths   = createBuffer<int>({2}, {3, 2}, AllocationType::HOST);
-    draft_input_1.lm_output_indexes  = createBuffer<int>({2}, {0, 1}, AllocationType::HOST);
-    draft_input_1.last_hidden_states = createBuffer<float>({2, 2}, {0.03, 0.04, 2.1, 2.12}, AllocationType::HOST);
+    draft_input_1.combo_tokens       = torch::tensor({2, 3}, torch::kInt32);
+    draft_input_1.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({3, 2}, torch::kInt32);
+    draft_input_1.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
+    draft_input_1.last_hidden_states = torch::tensor({0.03f, 0.04f, 2.1f, 2.12f}).reshape({2, 2});
 
-    draft_input_2.combo_tokens       = createBuffer<int>({2}, {1, 0}, AllocationType::HOST);
-    draft_input_2.input_lengths      = createBuffer<int>({2}, {3, 2}, AllocationType::HOST);
-    draft_input_2.sequence_lengths   = createBuffer<int>({2}, {4, 3}, AllocationType::HOST);
-    draft_input_2.lm_output_indexes  = createBuffer<int>({2}, {0, 1}, AllocationType::HOST);
+    draft_input_2.combo_tokens       = torch::tensor({1, 0}, torch::kInt32);
+    draft_input_2.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
+    draft_input_2.sequence_lengths   = torch::tensor({4, 3}, torch::kInt32);
+    draft_input_2.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_2.last_hidden_states = draft_output_1.all_hidden_states;
 
-    draft_input_3.combo_tokens       = createBuffer<int>({2}, {2, 2}, AllocationType::HOST);
-    draft_input_3.input_lengths      = createBuffer<int>({2}, {3, 2}, AllocationType::HOST);
-    draft_input_3.sequence_lengths   = createBuffer<int>({2}, {5, 4}, AllocationType::HOST);
-    draft_input_3.lm_output_indexes  = createBuffer<int>({2}, {0, 1}, AllocationType::HOST);
+    draft_input_3.combo_tokens       = torch::tensor({2, 2}, torch::kInt32);
+    draft_input_3.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
+    draft_input_3.sequence_lengths   = torch::tensor({5, 4}, torch::kInt32);
+    draft_input_3.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_3.last_hidden_states = draft_output_2.all_hidden_states;
 
     // accept [3], [3, 0, 2, 2, 1]
     auto next_draft_input  = GptModelInputs{};
     auto next_draft_output = GptModelOutputs{};
     next_draft_output.logits =
-        createBuffer<float>({batch_size, 4}, {1.9, 1.10, 1.11, 1.12, 2.9, 2.10, 2.11, 2.12}, AllocationType::HOST);
-    next_draft_output.all_hidden_states = createBuffer<float>(
-        {6, 2}, {0.1, 0.11, 1.1, 1.11, 1.2, 1.22, 1.3, 1.33, 1.4, 1.44, 1.5, 1.55}, AllocationType::HOST);
+        torch::tensor({1.9f, 1.10f, 1.11f, 1.12f, 2.9f, 2.10f, 2.11f, 2.12f}).reshape({(int64_t)batch_size, 4});
+    next_draft_output.all_hidden_states =
+        torch::tensor({0.1f, 0.11f, 1.1f, 1.11f, 1.2f, 1.22f, 1.3f, 1.33f, 1.4f, 1.44f, 1.5f, 1.55f}).reshape({6, 2});
 
-    next_draft_input.combo_tokens       = createBuffer<int>({6}, {3, 3, 0, 2, 2, 1}, AllocationType::HOST);
-    next_draft_input.input_lengths      = createBuffer<int>({2}, {1, 5}, AllocationType::HOST);
-    next_draft_input.prefix_lengths     = createBuffer<int>({2}, {3, 2}, AllocationType::HOST);
-    next_draft_input.lm_output_indexes  = createBuffer<int>({2}, {0, 5}, AllocationType::HOST);
-    next_draft_input.last_hidden_states = createBuffer<float>(
-        {6, 2}, {0.01, 0.02, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.2}, AllocationType::HOST);
+    next_draft_input.combo_tokens      = torch::tensor({3, 3, 0, 2, 2, 1}, torch::kInt32);
+    next_draft_input.input_lengths     = torch::tensor({1, 5}, torch::kInt32);
+    next_draft_input.prefix_lengths    = torch::tensor({3, 2}, torch::kInt32);
+    next_draft_input.lm_output_indexes = torch::tensor({0, 5}, torch::kInt32);
+    next_draft_input.last_hidden_states =
+        torch::tensor({0.01f, 0.02f, 0.11f, 0.12f, 0.13f, 0.14f, 0.15f, 0.16f, 0.17f, 0.18f, 0.19f, 0.2f})
+            .reshape({6, 2});
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
@@ -856,21 +812,20 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     // verify [3, 2, 0, 0, 0], [3, 0, 2, 2, 1]
     auto target_input              = GptModelInputs{};
     auto target_output             = GptModelOutputs{};
-    target_input.combo_tokens      = createBuffer<int>({10}, {3, 2, 1, 2, 3, 1, 3, 0, 2, 2}, AllocationType::HOST);
-    target_input.input_lengths     = createBuffer<int>({2}, {5, 5}, AllocationType::HOST);
-    target_input.prefix_lengths    = createBuffer<int>({2}, {3, 2}, AllocationType::HOST);
-    target_input.lm_output_indexes = createBuffer<int>({10}, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, AllocationType::HOST);
+    target_input.combo_tokens      = torch::tensor({3, 2, 1, 2, 3, 1, 3, 0, 2, 2}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({5, 5}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({3, 2}, torch::kInt32);
+    target_input.lm_output_indexes = torch::tensor({0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, torch::kInt32);
 
     target_output.logits =
-        createBuffer<float>({batch_size * (propose_step + 1), 4},
-                            {0.1,  0.2,  0.3,  0.4,  1.1,  1.2,  1.3,  1.4,  2.1,  2.2,  2.3,  2.4,  3.1,  3.2,
-                             3.3,  3.4,  4.1,  4.2,  4.3,  4.4,  -0.1, -0.2, -0.3, -0.4, -1.1, -1.2, -1.3, -1.4,
-                             -2.1, -2.2, -2.3, -2.4, -3.1, -3.2, -3.3, -3.4, -4.1, -4.2, -4.3, -4.4},
-                            AllocationType::HOST);
-    target_output.all_hidden_states = createBuffer<float>({batch_size * (propose_step + 1), 2},
-                                                          {0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10,
-                                                           0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20},
-                                                          AllocationType::HOST);
+        torch::tensor({0.1f,  0.2f,  0.3f,  0.4f,  1.1f,  1.2f,  1.3f,  1.4f,  2.1f,  2.2f,  2.3f,  2.4f,  3.1f,  3.2f,
+                       3.3f,  3.4f,  4.1f,  4.2f,  4.3f,  4.4f,  -0.1f, -0.2f, -0.3f, -0.4f, -1.1f, -1.2f, -1.3f, -1.4f,
+                       -2.1f, -2.2f, -2.3f, -2.4f, -3.1f, -3.2f, -3.3f, -3.4f, -4.1f, -4.2f, -4.3f, -4.4f})
+            .reshape({(int64_t)(batch_size * (propose_step + 1)), 4});
+    target_output.all_hidden_states =
+        torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f, 0.09f, 0.10f,
+                       0.11f, 0.12f, 0.13f, 0.14f, 0.15f, 0.16f, 0.17f, 0.18f, 0.19f, 0.20f})
+            .reshape({(int64_t)(batch_size * (propose_step + 1)), 2});
 
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
@@ -878,71 +833,56 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     // set draft sampler outputs
     // darft s1:[2]+[1,2,3] s2:[3]+[0,2,2]
     // next draft [1], [2]
-    auto draft_sampler_input_1     = draft_output_1.logits;
-    auto draft_sampler_input_2     = draft_output_2.logits;
-    auto draft_sampler_input_3     = draft_output_3.logits;
-    auto next_draft_sampler_input  = next_draft_output.logits;
     auto draft_sampler_output_1    = spec::FastTopKSamplerOutput{};
     auto draft_sampler_output_2    = spec::FastTopKSamplerOutput{};
     auto draft_sampler_output_3    = spec::FastTopKSamplerOutput{};
     auto next_draft_sampler_output = spec::FastTopKSamplerOutput{};
 
-    auto token_ids_1 = createBuffer<int>({batch_size, 1}, {1, 0});
-    auto all_probs_1 =
-        createBuffer<float>({batch_size, 4}, {0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0}, AllocationType::HOST);
-    auto token_ids_2 = createBuffer<int>({batch_size, 1}, {2, 2});
-    auto all_probs_2 =
-        createBuffer<float>({batch_size, 4}, {0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, AllocationType::HOST);
-    auto token_ids_3 = createBuffer<int>({batch_size, 1}, {3, 2});
-    auto all_probs_3 =
-        createBuffer<float>({batch_size, 4}, {1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0}, AllocationType::HOST);
-    auto token_ids_4 = createBuffer<int>({batch_size, 1}, {1, 2});
-    auto all_probs_4 =
-        createBuffer<float>({batch_size, 4}, {0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0}, AllocationType::HOST);
-
-    draft_sampler_output_1.token_ids    = Buffer2torchTensor(token_ids_1, false);
-    draft_sampler_output_1.all_probs    = Buffer2torchTensor(all_probs_1, false);
-    draft_sampler_output_2.token_ids    = Buffer2torchTensor(token_ids_2, false);
-    draft_sampler_output_2.all_probs    = Buffer2torchTensor(all_probs_2, false);
-    draft_sampler_output_3.token_ids    = Buffer2torchTensor(token_ids_3, false);
-    draft_sampler_output_3.all_probs    = Buffer2torchTensor(all_probs_3, false);
-    next_draft_sampler_output.token_ids = Buffer2torchTensor(token_ids_4, false);
-    next_draft_sampler_output.all_probs = Buffer2torchTensor(all_probs_4, false);
+    draft_sampler_output_1.token_ids = torch::tensor({1, 0}, torch::kInt32).reshape({(int64_t)batch_size, 1});
+    draft_sampler_output_1.all_probs =
+        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}).reshape({(int64_t)batch_size, 4});
+    draft_sampler_output_2.token_ids = torch::tensor({2, 2}, torch::kInt32).reshape({(int64_t)batch_size, 1});
+    draft_sampler_output_2.all_probs =
+        torch::tensor({0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f}).reshape({(int64_t)batch_size, 4});
+    draft_sampler_output_3.token_ids = torch::tensor({3, 2}, torch::kInt32).reshape({(int64_t)batch_size, 1});
+    draft_sampler_output_3.all_probs =
+        torch::tensor({1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
+    next_draft_sampler_output.token_ids = torch::tensor({1, 2}, torch::kInt32).reshape({(int64_t)batch_size, 1});
+    next_draft_sampler_output.all_probs =
+        torch::tensor({0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
 
     components.fake_fast_topk_sampler->setInputs(
-        {draft_sampler_input_1, draft_sampler_input_2, draft_sampler_input_3, next_draft_sampler_input});
+        {draft_output_1.logits, draft_output_2.logits, draft_output_3.logits, next_draft_output.logits});
     components.fake_fast_topk_sampler->setOutputs(
         {draft_sampler_output_1, draft_sampler_output_2, draft_sampler_output_3, next_draft_sampler_output});
 
     // set fake sampler outputs
-    BufferPtr target_token_ids =
-        createBuffer<int>({batch_size, 5}, {3, 2, 0, 0, 0, 3, 0, 2, 2, 1}, AllocationType::HOST);
-    BufferPtr target_sample_all_probs =
-        createBuffer<float>({batch_size, propose_step + 1, vocab_size},
-                            createRandomVector<float>(batch_size * (propose_step + 1) * vocab_size, 1),
-                            AllocationType::HOST);
-    auto sampler_input       = SamplerInputs{target_output.logits};
-    auto sampler_output      = SamplerOutput{target_token_ids};
-    sampler_output.all_probs = target_sample_all_probs;
+    auto target_sample_all_probs_data = createRandomVector<float>(batch_size * (propose_step + 1) * vocab_size, 1);
+    auto sampler_input                = SamplerInputs{target_output.logits};
+    auto sampler_output =
+        SamplerOutput{torch::tensor({3, 2, 0, 0, 0, 3, 0, 2, 2, 1}, torch::kInt32).reshape({(int64_t)batch_size, 5})};
+    sampler_output.all_probs = torch::tensor(target_sample_all_probs_data)
+                                   .reshape({(int64_t)batch_size, (int64_t)(propose_step + 1), (int64_t)vocab_size});
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({sampler_output});
 
     // set fake speculative sampler outputs
-    BufferPtr accept_tokens1             = createBuffer<int>({1, 1}, {3}, AllocationType::HOST);
-    BufferPtr accept_tokens2             = createBuffer<int>({1, 5}, {3, 0, 2, 2, 1}, AllocationType::HOST);
-    auto      speculative_sampler_output = spec::SpeculativeSamplerOutput{{accept_tokens1, accept_tokens2}, {1, 5}};
-    auto      draft_spec_sample_input    = SamplerOutput{};
-    auto      target_spec_sample_input   = SamplerOutput{};
+    auto accept_tokens1             = torch::tensor({{3}}, torch::kInt32);
+    auto accept_tokens2             = torch::tensor({{3, 0, 2, 2, 1}}, torch::kInt32);
+    auto speculative_sampler_output = spec::SpeculativeSamplerOutput{{accept_tokens1, accept_tokens2}, {1, 5}};
+    auto draft_spec_sample_input    = SamplerOutput{};
+    auto target_spec_sample_input   = SamplerOutput{};
 
     vector<vector<float>> draft_all_probs_list;
     draft_all_probs_list.push_back({0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0});
-    draft_all_probs_list.push_back(buffer2vector<float>(*draft_output_1.logits));
-    draft_all_probs_list.push_back(buffer2vector<float>(*draft_output_2.logits));
-    draft_all_probs_list.push_back(buffer2vector<float>(*draft_output_3.logits));
-    draft_spec_sample_input.token_ids = createBuffer<int>({2, 4}, {2, 1, 2, 3, 3, 0, 2, 2}, AllocationType::HOST);
-    draft_spec_sample_input.all_probs =
-        createBuffer<float>({4, 8}, catVectors(draft_all_probs_list), AllocationType::HOST);
-    target_spec_sample_input.all_probs = target_sample_all_probs;
+    draft_all_probs_list.push_back(toVec<float>(draft_output_1.logits));
+    draft_all_probs_list.push_back(toVec<float>(draft_output_2.logits));
+    draft_all_probs_list.push_back(toVec<float>(draft_output_3.logits));
+    draft_spec_sample_input.token_ids = torch::tensor({2, 1, 2, 3, 3, 0, 2, 2}, torch::kInt32).reshape({2, 4});
+    draft_spec_sample_input.all_probs = torch::tensor(catVectors(draft_all_probs_list)).reshape({4, 8});
+    target_spec_sample_input.all_probs =
+        torch::tensor(target_sample_all_probs_data)
+            .reshape({(int64_t)batch_size, (int64_t)(propose_step + 1), (int64_t)vocab_size});
 
     components.fake_speculative_sampler->setInputs({draft_spec_sample_input, target_spec_sample_input});
     components.fake_speculative_sampler->setOutputs({speculative_sampler_output});

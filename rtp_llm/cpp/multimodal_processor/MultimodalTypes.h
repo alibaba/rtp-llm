@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 #include <torch/python.h>
-#include "rtp_llm/cpp/core/Buffer.h"
+#include <torch/python.h>
 
 namespace rtp_llm {
 
@@ -65,17 +65,18 @@ class MultimodalFeature {
 public:
     std::vector<torch::Tensor>   features;
     std::vector<MultimodalInput> inputs;
-    rtp_llm::BufferPtr           text_tokens_mask;  // text part for 1 and multimodal part for 0
-    rtp_llm::BufferPtr           locs;              // multimodal input locations
-    rtp_llm::BufferPtr           expanded_ids;
+    torch::Tensor                text_tokens_mask;  // text part for 1 and multimodal part for 0
+    torch::Tensor                locs;              // multimodal input locations
+    torch::Tensor                expanded_ids;
     MultimodalFeature() {}
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "MultimodalFeature {"
                      << "features: " << features.size() << ", inputs: " << inputs.size()
-                     << ", text_tokens_mask: " << text_tokens_mask->debugStringWithData<int32_t>()
-                     << ", locs: " << locs->debugStringWithData<int32_t>()
-                     << ", expanded_ids: " << expanded_ids->debugStringWithData<int32_t>() << "}";
+                     << ", text_tokens_mask: tensor[" << text_tokens_mask.numel() << "]"
+                     << ", locs: tensor[" << locs.numel() << "]"
+                     << ", expanded_ids: tensor[" << expanded_ids.numel() << "]"
+                     << "}";
         return debug_string.str();
     }
 };

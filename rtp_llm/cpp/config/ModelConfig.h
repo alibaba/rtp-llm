@@ -80,6 +80,7 @@ public:
     bool use_norm_attn_out_residual = false;
 
     int64_t max_seq_len                = 0;
+    int64_t gen_num_per_cycle          = 0;  // speculative decoding: tokens per cycle
     int64_t vocab_size                 = 0;
     int64_t input_vocab_size           = 0;  // 0 if not set
     int64_t type_vocab_size            = 0;
@@ -110,11 +111,10 @@ public:
     bool reverse_e_h_norm = false;
 
     // Model loading and quantization
-    std::string                        tokenizer_path = "";
-    std::string                        ckpt_path      = "";
-    std::map<std::string, std::string> lora_infos     = {};  // Map of lora name to path
-    SpecialTokens                      special_tokens;
-    QuantAlgo                          quant_algo;
+    std::string   tokenizer_path = "";
+    std::string   ckpt_path      = "";
+    SpecialTokens special_tokens;
+    QuantAlgo     quant_algo;
 
     // EPLB configuration
     EPLBConfig eplb_config;

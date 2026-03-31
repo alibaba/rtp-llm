@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreMetricsCollector.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "aios/network/arpc/arpc/CommonMacros.h"
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 
@@ -26,8 +25,7 @@ public:
         request_(request),
         response_(response),
         callback_(callback),
-        collector_(collector),
-        device_(rtp_llm::DeviceFactory::getDefaultDevice()) {}
+        collector_(collector) {}
 
     ~TcpCacheStoreLoadServiceClosure();
 
@@ -45,7 +43,6 @@ private:
     CacheLoadResponse*                                    response_{nullptr};
     CacheStoreLoadDoneCallback                            callback_{nullptr};
     std::shared_ptr<CacheStoreClientLoadMetricsCollector> collector_;
-    rtp_llm::DeviceBase*                                  device_{nullptr};
 };
 
 }  // namespace rtp_llm

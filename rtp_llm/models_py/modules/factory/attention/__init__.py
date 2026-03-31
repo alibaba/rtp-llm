@@ -8,7 +8,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
     MlaImplBase,
 )
-from rtp_llm.ops.compute_ops import DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
 
 __all__ = [
     "FMHAImplBase",
@@ -26,7 +26,7 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     PREFILL_MLA_IMPS,
 )
 
-device_type = get_device().get_device_type()
+device_type = get_exec_ctx().get_device_type()
 try:
     if device_type == DeviceType.ROCm:
         # Import to register ROCm FMHA implementations
@@ -115,12 +115,14 @@ try:
             PyFlashinferDecodeImpl,
             PyFlashinferPrefillImpl,
         )
+
         PREFILL_MHA_IMPS.append(PyFlashinferPrefillImpl)
         DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
-        
+
         from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer import (
             CPFlashInferImpl,
         )
+
         PREFILL_MHA_IMPS.append(CPFlashInferImpl)
 except Exception as e:
     logging.warning(f"Failed to import Attention implementation: {e}")

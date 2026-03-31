@@ -18,13 +18,13 @@
 
 namespace rtp_llm {
 
+class CacheStore;
 class KVCacheConnectorCoordinator;
 class KVCacheConnectorReadWriteContext;
 
 class KVCacheManager {
 public:
     KVCacheManager(const CacheConfig&                 config,
-                   rtp_llm::DeviceBase*               device,
                    bool                               warmup             = false,
                    const kmonitor::MetricsReporterPtr metrics_reporter   = nullptr,
                    const KVCacheConfig&               kv_cache_config    = KVCacheConfig{},
@@ -52,7 +52,7 @@ public:
     // 块操作相关
     void blockCopy(int src_block_index, int dest_block_index);
     void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
-    void blockBatchCopy(const rtp_llm::Buffer& copy_mapping);
+    void blockBatchCopy(const torch::Tensor& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
 
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -60,9 +60,10 @@ public:
                        bool                           copy_last_block,
                        std::vector<BlockIdPair>&      block_update_mapping);
 
-    // Write one KV block (optionally per-layer) from host/device buffers for test
-    virtual bool setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
-    virtual bool setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
+    // Write one KV block (optionally per-layer) from host/device tensors for test
+    virtual bool
+    setKVBlockValue(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
+    virtual bool setKVBlockValue(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
 
     // 地址转换和缓冲区访问
     BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
@@ -89,7 +90,11 @@ public:
     KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
     // 系统资源管理
-    void regUserMr(size_t model_id);
+    void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+
+    // CacheStore ownership (set by RemoteRpcServer, read during model forward)
+    void                        setCacheStore(std::shared_ptr<CacheStore> cache_store);
+    std::shared_ptr<CacheStore> getCacheStore() const;
 
     // 异步连接器操作
     // async load cache from connector to gpu, for all rank
@@ -120,9 +125,8 @@ private:
     void reportMetricsLoop();
 
     // 成员变量
-    CacheConfig          config_;
-    rtp_llm::DeviceBase* device_;
-    KVCacheAllocatorPtr  allocator_;
+    CacheConfig         config_;
+    KVCacheAllocatorPtr allocator_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;
@@ -136,6 +140,9 @@ private:
     std::thread       metrics_reporter_thread_;
 
     std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
+
+    mutable std::mutex          cache_store_mutex_;
+    std::shared_ptr<CacheStore> cache_store_;
 };
 
 }  // namespace rtp_llm

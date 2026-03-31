@@ -8,7 +8,7 @@
 
 namespace rtp_llm {
 
-/** NCCL communication config (ip + ports). When set, DeviceFactory::initDevices uses this
+/** NCCL communication config (ip + ports). When set, initExecCtx uses this
  * instead of ParallelismConfig for master_ip and tp/dp_tp/ffn_tp ports. Aligns with Python NcclCommConfig. */
 struct NcclCommConfig {
     std::string master_ip   = "";
@@ -229,13 +229,11 @@ struct HWKernelConfig {
 };
 
 struct DeviceResourceConfig {
-    int64_t     device_reserve_memory_bytes = -1073741824;
-    int64_t     host_reserve_memory_bytes   = 4LL * 1024 * 1024 * 1024;
-    int         overlap_math_sm_count       = 0;
-    int         overlap_comm_type           = 0;
-    int         m_split                     = 0;
-    bool        enable_comm_overlap         = true;
-    int         enable_layer_micro_batch    = 0;
+    int         overlap_math_sm_count    = 0;
+    int         overlap_comm_type        = 0;
+    int         m_split                  = 0;
+    bool        enable_comm_overlap      = true;
+    int         enable_layer_micro_batch = 0;
     std::string to_string() const;
 };
 
@@ -256,8 +254,7 @@ struct MoeConfig {
 };
 
 struct ModelSpecificConfig {
-    int64_t     max_lora_model_size = -1;
-    bool        load_python_model   = false;
+    bool        load_python_model = false;
     std::string to_string() const;
 };
 

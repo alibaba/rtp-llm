@@ -147,7 +147,6 @@ void ModelDeployment::Jsonize(Jsonizable::JsonWrapper& json) {
     json.Jsonize("use_mla", use_mla_, use_mla_);
     json.Jsonize("tp_size", tp_size_);
     json.Jsonize("dp_size", dp_size_, dp_size_);
-    json.Jsonize("lora_name", lora_name_, lora_name_);
     json.Jsonize("pp_size", pp_size_, pp_size_);
     json.Jsonize("extra", extra_, extra_);
     json.Jsonize("user_data", user_data_, user_data_);

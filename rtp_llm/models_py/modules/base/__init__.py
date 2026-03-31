@@ -13,10 +13,10 @@ from rtp_llm.models_py.modules.base.common.norm import (
     RMSNormTorch,
     RMSResNormTorch,
 )
-from rtp_llm.ops.compute_ops import DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
 
 # Determine device type and import architecture-specific modules
-device_type = get_device().get_device_type()
+device_type = get_exec_ctx().get_device_type()
 
 if device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.base.rocm.activation import FusedSiluAndMul

@@ -1,7 +1,8 @@
 #pragma once
 #include <memory>
 #include <vector>
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include <torch/extension.h>
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace torch_ext {
 struct PyContextParallelParams;
@@ -9,7 +10,6 @@ struct PyContextParallelParams;
 
 namespace rtp_llm {
 
-class DeviceBase;
 struct GptModelInputs;
 
 enum class ProcessorType {
@@ -19,14 +19,15 @@ enum class ProcessorType {
 
 class IContextParallelProcessor {
 public:
+    explicit IContextParallelProcessor(const ParallelismConfig& parallelism_config):
+        parallelism_config_(parallelism_config) {}
     virtual ~IContextParallelProcessor() = default;
 
     /// @brief Prepare context parallel inputs: split and shuffle tokens, compute restore indices and masks.
-    void handleInputs(DeviceBase* device, GptModelInputs& model_input, torch_ext::PyContextParallelParams& cp_params);
+    void handleInputs(GptModelInputs& model_input, torch_ext::PyContextParallelParams& cp_params);
 
     /// @brief Gather outputs from all CP ranks and restore original token order.
-    virtual size_t handleOutputs(DeviceBase*                               device,
-                                 BufferPtr&                                hidden_states,
+    virtual size_t handleOutputs(torch::Tensor&                            hidden_states,
                                  const GptModelInputs&                     inputs,
                                  const torch_ext::PyContextParallelParams& cp_params) = 0;
 
@@ -50,11 +51,14 @@ protected:
     virtual torch::Tensor generateQKVPaddingMask(const torch::Tensor& prefill_cp_chunk_lengths,
                                                  const torch::Tensor& prefill_cp_padding_lengths,
                                                  int                  cp_size) = 0;
+
+    ParallelismConfig parallelism_config_;
 };
 
 class ContextParallelProcessorFactory {
 public:
-    static std::unique_ptr<IContextParallelProcessor> create(ProcessorType type);
+    static std::unique_ptr<IContextParallelProcessor> create(ProcessorType            type,
+                                                             const ParallelismConfig& parallelism_config);
 };
 
 }  // namespace rtp_llm

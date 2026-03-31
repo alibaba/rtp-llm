@@ -5,7 +5,7 @@ Uses strategy pattern for creating Linear layers.
 
 import logging
 
-from rtp_llm.ops.compute_ops import DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
 
 from .factory import LinearFactory
 from .linear_base import LinearBase
@@ -16,7 +16,7 @@ __all__ = ["LinearFactory", "LinearBase"]
 # Device-specific Linear implementation registration
 # ============================================================================
 
-device_type = get_device().get_device_type()
+device_type = get_exec_ctx().get_device_type()
 try:
     if device_type == DeviceType.ROCm:
         # Import to trigger ROCm Linear strategy registration

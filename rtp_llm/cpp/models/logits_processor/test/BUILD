@@ -8,8 +8,8 @@ test_copts = [
 ] + copts()
 
 test_deps = [
-    "//rtp_llm/cpp/devices/testing:device_test_utils",
-    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    "//rtp_llm/cpp/testing:device_test_utils",
+    "//rtp_llm/cpp/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/models:logits_processor",
     "//rtp_llm/cpp/config:config_modules",
     "@com_google_googletest//:gtest",

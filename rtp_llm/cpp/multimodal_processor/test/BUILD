@@ -12,12 +12,13 @@ cc_test(
     name = "multimodal_processor_test",
     srcs = glob([
         "MultimodalProcessorTest.cc",
+        "FakeMultimodalProcessor.h",
     ]),
     copts = test_copts,
     deps = torch_deps() + [
-        "//rtp_llm/cpp/devices/testing:device_test_utils",
-        "//rtp_llm/cpp/core:buffer",
-        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/testing:device_test_utils",
+
+        "//rtp_llm/cpp/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/config:config_modules",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

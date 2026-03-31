@@ -50,8 +50,8 @@ private:
     bool                 enable_memory_cache_{false};
     bool                 enable_remote_cache_{false};
     std::string          trace_id_;
-    std::string          unique_id_ = "";  // TODO : support lora (remote connector)
-    std::vector<int64_t> tokens_;          // TODO : get tokens (remote connector)
+    std::string          unique_id_ = "";
+    std::vector<int64_t> tokens_;  // TODO : get tokens (remote connector)
 };
 
 class RemoteConnectorMockOnlyFullTest: public RemoteConnectorMockTestBase {
@@ -76,7 +76,7 @@ private:
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
-            auto allocator = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_, device_);
+            auto allocator = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_);
             ASSERT_TRUE(allocator->init());
             remote_connectors_.push_back(
                 std::make_shared<RemoteConnector>(cache_config_,
@@ -84,7 +84,6 @@ private:
                                                   runtime_config_,
                                                   parallelism_config_,
                                                   sp_config_,
-                                                  device_,
                                                   nullptr,
                                                   0,
                                                   allocator,

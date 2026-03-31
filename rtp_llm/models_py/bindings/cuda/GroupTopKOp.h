@@ -1,10 +1,9 @@
 #pragma once
 
 #include <torch/torch.h>
+#include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 #include "rtp_llm/cpp/kernels/no_aux_tc_kernels.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 
 namespace rtp_llm {
 

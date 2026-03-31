@@ -128,13 +128,11 @@ static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig() {
                                               /*is_eagle=*/false);
 }
 
-static CompleteTokenIdsPtr
-makeCompleteTokenIds(rtp_llm::DeviceBase* device, int batch_size, int seq_length, int seq_size_per_block) {
+static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block) {
     auto complete_token_ids =
-        std::make_shared<CompleteTokenIds>(device, batch_size, batch_size, seq_length + 64, seq_size_per_block);
-    auto input_ids = device->allocateBuffer(
-        {rtp_llm::DataType::TYPE_INT32, {(size_t)seq_length}, rtp_llm::AllocationType::HOST}, {});
-    auto* token_data = input_ids->data<int32_t>();
+        std::make_shared<CompleteTokenIds>(batch_size, batch_size, seq_length + 64, seq_size_per_block);
+    auto  input_ids  = torch::empty({(int64_t)seq_length}, torch::kInt32);
+    auto* token_data = input_ids.data_ptr<int32_t>();
     for (int i = 0; i < seq_length; ++i) {
         token_data[i] = i + 1;
     }
@@ -215,16 +213,13 @@ class HybridTypeKVCacheAllocatorTest: public ::testing::Test {
 protected:
     void SetUp() override {
         rtp_llm::initLogger();
-        device_ = createDevice();
-        ASSERT_NE(device_, nullptr);
+        createDevice();
     }
-
-    rtp_llm::DeviceBase* device_ = nullptr;
 };
 
 TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     EXPECT_EQ(allocator->seqSizePerBlock(), 4);
@@ -240,7 +235,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
 
 TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridNoMtp) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
 
     EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/0), 0u);
     EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/3), 3u);
@@ -254,7 +249,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridNoMtp) {
 
 TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridWithMtpSubConfigs) {
     auto config    = makeTinyHybridMtpConfigByCreateSpConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
 
     EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/2), 2u);
     EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0), 4u);
@@ -267,11 +262,11 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridWithMtpSubCon
 
 TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReuseFlag) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     // batch=2, seq_len=12 (3 slots), reserve_step=2
-    auto token_ids = makeCompleteTokenIds(device_, /*batch_size=*/2, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/12, /*seq_size_per_block=*/4);
     token_ids->setReserveStep(2);
 
     // Reuse disabled: linear group keeps only tail for common blocks; reserve_step contributes extra blocks.
@@ -312,7 +307,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReu
 
 TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto block_pool  = allocator->getBlockPool();
@@ -342,7 +337,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     // Enable device cache reuse for joint match.
 
     // seq_len=12 => 3 slots (4 tokens per block).
-    auto token_ids = makeCompleteTokenIds(device_, /*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
     info.enable_device_cache = true;
@@ -366,7 +361,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
 
 TEST_F(HybridTypeKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMalloc) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto batch_res = makeBatchResource(/*batch_size=*/1,
@@ -376,7 +371,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMall
                                        CacheKeysType{100, 101, 102, 103});
     // Disable device cache reuse.
 
-    auto token_ids = makeCompleteTokenIds(device_, /*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
     info.enable_device_cache = false;
@@ -394,7 +389,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMall
 
 TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAllocatesOnlyLinearTail) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto block_pool  = allocator->getBlockPool();
@@ -419,8 +414,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAlloc
                                        CacheKeysType{100, 101, 102, 103});
     // Disable device cache reuse: allocator should skip reuse match even if cache exists.
 
-    auto token_ids =
-        makeCompleteTokenIds(device_, /*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);  // 3 slots
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);  // 3 slots
 
     MallocInfo info{batch_res, token_ids};
     info.enable_device_cache = false;
@@ -452,7 +446,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAlloc
 
 TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedValidBlocksAcrossGroups) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::HOST);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     auto block_pool = allocator->getBlockPool();
@@ -489,7 +483,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
 
 TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto block_pool  = allocator->getBlockPool();
@@ -509,7 +503,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     // Disable device cache reuse.
 
     // seq_len=10 => 3 slots, full_blocks_num = floor(10/4)=2 -> only first 2 keys inserted.
-    auto token_ids = makeCompleteTokenIds(device_, /*batch_size=*/1, /*seq_length=*/10, /*seq_size_per_block=*/4);
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/10, /*seq_size_per_block=*/4);
 
     MallocInfo malloc_info{batch_res, token_ids};
     malloc_info.enable_device_cache = false;
@@ -534,7 +528,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
 
 TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     KVCacheAllocator* base = allocator.get();
@@ -545,14 +539,14 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseS
     auto layout = allocator->allLayerCacheBase();
     EXPECT_EQ(layout.layers_to_kv_buffer_ptrs.size(), static_cast<size_t>(config.layer_num));
     for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
-        EXPECT_NE(layout.layers_to_kv_buffer_ptrs[i], nullptr);
+        EXPECT_TRUE(layout.layers_to_kv_buffer_ptrs[i].defined());
     }
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocatedBlocks) {
     auto config      = makeTinyHybridConfig();
     config.block_num = 6;  // free=5
-    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, device_, AllocationType::DEVICE);
+    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto block_pool = allocator->getBlockPool();
@@ -566,7 +560,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     // Disable device cache reuse (makes linear group allocate only tail for new slots).
 
     // Initial small allocation: seq_len=4 => 1 slot per group.
-    auto       token_ids = makeCompleteTokenIds(device_, /*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
     MallocInfo init_info{batch_res, token_ids};
     init_info.enable_device_cache = false;
     auto init_result              = allocator->malloc(init_info);

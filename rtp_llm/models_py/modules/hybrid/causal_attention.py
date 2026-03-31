@@ -7,11 +7,11 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import DeviceType, LayerKVCache, get_device
+from rtp_llm.ops.compute_ops import DeviceType, LayerKVCache, get_exec_ctx
 from rtp_llm.utils.model_weight import W
 
 # Import device-specific FusedQKRMSNorm
-device_type = get_device().get_device_type()
+device_type = get_exec_ctx().get_device_type()
 if device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.base.rocm.norm import FusedQKRMSNorm
 else:

@@ -267,9 +267,7 @@ private:
 
 class RtpLLMEngineMetricsCollector final {
 public:
-    bool    update_lora_qps       = false;
-    bool    error_update_lora_qps = false;
-    int64_t step_latency_us       = 0;
+    int64_t step_latency_us = 0;
 };
 
 class RtpLLMEngineMetrics: public kmonitor::MetricsGroup {
@@ -278,9 +276,7 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMEngineMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* step_latency_us_metric       = nullptr;
-    kmonitor::MutableMetric* update_lora_qps_metric       = nullptr;
-    kmonitor::MutableMetric* error_update_lora_qps_metric = nullptr;
+    kmonitor::MutableMetric* step_latency_us_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

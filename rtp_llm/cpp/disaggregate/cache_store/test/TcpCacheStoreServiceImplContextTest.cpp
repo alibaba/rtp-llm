@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreLoadServiceClosure.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpMessager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 
 namespace rtp_llm {
 class MockCacheLoadServiceClosure: public RPCClosure {
@@ -74,7 +74,6 @@ bool TcpCacheStoreServiceImplContextTest::initCacheStores() {
     params1.rdma_listen_port = rdma_port1_;
     params1.enable_metric    = false;
     params1.memory_util      = memory_util_;
-    params1.device           = device_util_->device_;
 
     cache_store1_ = NormalCacheStore::createNormalCacheStore(params1);
     if (!cache_store1_) {
@@ -86,7 +85,6 @@ bool TcpCacheStoreServiceImplContextTest::initCacheStores() {
     params2.rdma_listen_port = rdma_port2_;
     params2.enable_metric    = false;
     params2.memory_util      = memory_util_;
-    params2.device           = device_util_->device_;
 
     cache_store2_ = NormalCacheStore::createNormalCacheStore(params2);
     return cache_store2_ != nullptr;

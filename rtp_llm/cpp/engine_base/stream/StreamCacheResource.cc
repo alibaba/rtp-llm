@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
-#include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
@@ -61,8 +60,8 @@ private:
     bool                 enable_memory_cache_{false};
     bool                 enable_remote_cache_{false};
     std::string          trace_id_;
-    std::string          unique_id_ = "";  // TODO : support lora (remote connector)
-    std::vector<int64_t> tokens_;          // TODO : get tokens (remote connector)
+    std::string          unique_id_ = "";
+    std::vector<int64_t> tokens_;  // TODO : get tokens (remote connector)
 };
 
 // ----------------------------- StreamCacheResource -----------------------------

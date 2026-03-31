@@ -2,8 +2,18 @@
 
 #include <numeric>
 
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#if USING_CUDA
+#include <cuda_runtime.h>
+#elif USING_ROCM
+#include <hip/hip_runtime.h>
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
+#endif
+
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#endif
 
 namespace rtp_llm {
 
@@ -19,16 +29,14 @@ void MemoryEvaluationHelper::updateMemoryIfNeeded(size_t& current_size, size_t m
     }
 }
 
-// Helper function to determine data type based on model configuration and device properties
-rtp_llm::DataType MemoryEvaluationHelper::getDataTypeForCache(const ModelConfig&               model_config,
-                                                              const rtp_llm::DeviceProperties& device_prop) {
+rtp_llm::DataType MemoryEvaluationHelper::getDataTypeForCache(const ModelConfig&  model_config,
+                                                              rtp_llm::DeviceType device_type) {
     auto dtype =
         model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ?
             rtp_llm::DataType::TYPE_INT8 :
             (model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8 ? rtp_llm::DataType::TYPE_FP8_E4M3 :
                                                                                model_config.data_type);
-    if (device_prop.type == rtp_llm::DeviceType::ArmCpu) {
-        // Arm attention operator support FP32 data type only
+    if (device_type == rtp_llm::DeviceType::ArmCpu) {
         dtype =
             model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::TYPE_INT8 : rtp_llm::TYPE_FP32;
     }
@@ -42,9 +50,19 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
     size_t reserve_runtime_mem_bytes = runtime_config.reserve_runtime_mem_mb * 1024 * 1024;
     RTP_LLM_LOG_INFO("RuntimeConfig has reserve_runtime_mem_mb=%ld", runtime_config.reserve_runtime_mem_mb);
 
-    const auto minimal_runtime_bytes = 256L * 1024 * 1024 * std::max(4, 8 / (int)parallelism_config.get_attn_tp_size());
+    // Reserve at least 5% of total GPU memory for runtime (forward pass intermediates, cublas workspace, etc.)
+    // with a minimum floor of 2048 MiB. This is needed because KV cache is pre-allocated as a fixed block,
+    // and the remaining GPU memory must be sufficient for model forward passes.
+    size_t total_gpu_bytes = 0;
+    size_t free_gpu_bytes  = 0;
+#if USING_CUDA
+    check_cuda_value(cudaMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
+#elif USING_ROCM
+    ROCM_CHECK(hipMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
+#endif
+    const auto minimal_runtime_bytes = std::max(2048L * 1024 * 1024, (long)(total_gpu_bytes * 0.05));
     if (reserve_runtime_mem_bytes < minimal_runtime_bytes) {
-        RTP_LLM_LOG_INFO("tp_size %d needs at least %d MiB memory for runtime by default, "
+        RTP_LLM_LOG_INFO("tp_size %d needs at least %ld MiB memory for runtime by default, "
                          "but only %ld MiB reserved memory set by config. adjust to minimal value.",
                          parallelism_config.get_attn_tp_size(),
                          minimal_runtime_bytes / 1024 / 1024,
@@ -71,9 +89,8 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
                                                     const ParallelismConfig&                         parallelism_config,
                                                     const std::optional<WarmUpResult>&               warm_up_result,
                                                     const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    const auto device                       = rtp_llm::DeviceFactory::getDefaultDevice();
-    size_t     device_reserved_memory_bytes = device->getDeviceStatus().device_memory_status.preserved_bytes;
-    size_t     runtime_required_bytes       = 0;
+    size_t device_reserved_memory_bytes = getGpuExecStatus().device_memory_status.available_bytes;
+    size_t runtime_required_bytes       = 0;
 
     if (kv_cache_config.kv_cache_mem_mb > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache memory size %ld MiB",

@@ -150,8 +150,6 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     }
     CHECK_ERROR_STATUS(generate_context);
 
-    input->lora_id  = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
-    auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
     {
         RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
@@ -309,15 +307,6 @@ KVCacheInfo LocalRpcServer::getCacheStatusInfo(int64_t latest_version, bool need
     const auto& cache_info            = engine_->getCacheStatusInfo(latest_version, need_cache_keys);
     reportCacheStatusTime(request_begin_time_us);
     return cache_info;
-}
-
-void LocalRpcServer::addLora(const std::string&                        adapter_name,
-                             const rtp_llm::lora::loraLayerWeightsMap& lora_a_weights,
-                             const rtp_llm::lora::loraLayerWeightsMap& lora_b_weights) {
-    engine_->addLora(adapter_name, lora_a_weights, lora_b_weights);
-}
-void LocalRpcServer::removeLora(const std::string& adapter_name) {
-    engine_->removeLora(adapter_name);
 }
 
 size_t LocalRpcServer::onflightRequestNum() {

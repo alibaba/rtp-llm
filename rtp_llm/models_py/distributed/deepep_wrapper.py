@@ -25,7 +25,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.ops import SpeculativeType
-from rtp_llm.ops.compute_ops import DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
 
 __all__ = [
     "DeepepWrapperConfig",
@@ -41,7 +41,7 @@ __all__ = [
 
 def use_accl_ep() -> bool:
     """Check if ACCL EP should be used based on device type."""
-    device_type = get_device().get_device_type()
+    device_type = get_exec_ctx().get_device_type()
     return not device_type == DeviceType.ROCm
 
 

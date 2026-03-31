@@ -6,7 +6,8 @@ test_copts = [
 ] + copts()
 
 test_deps = [
-    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    "//rtp_llm/cpp/cuda/ops:cuda_impl",
+    "//rtp_llm/cpp/core:exec_ops_test_lib",
     "//rtp_llm/cpp/config:config_modules",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",

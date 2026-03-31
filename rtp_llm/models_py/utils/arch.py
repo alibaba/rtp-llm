@@ -2,11 +2,11 @@ from typing import Tuple
 
 import torch
 
-from rtp_llm.ops.compute_ops import DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
 
 
 def is_cuda():
-    device_type = get_device().get_device_type()
+    device_type = get_exec_ctx().get_device_type()
     if device_type == DeviceType.Cuda:
         return True
     else:
@@ -14,7 +14,7 @@ def is_cuda():
 
 
 def is_hip():
-    device_type = get_device().get_device_type()
+    device_type = get_exec_ctx().get_device_type()
     if device_type == DeviceType.ROCm:
         return True
     else:

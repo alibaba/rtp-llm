@@ -16,15 +16,11 @@ std::shared_ptr<MockGenerateStream> CreateMockGenerateStream() {
     auto input             = std::make_shared<GenerateInput>();
     input->generate_config = std::make_shared<GenerateConfig>();
 
-    auto                fake_token_ids = std::vector<int>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape          = {fake_token_ids.size()};
-    // 由于 Buffer 内部不负责管理传入的地址数据(只是使用), 所以数据必须具有较久的生命周期
-    input->input_ids = std::make_shared<rtp_llm::Buffer>(
-        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, fake_token_ids.data());
+    input->input_ids = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
 
-    ModelConfig model_config;
+    ModelConfig   model_config;
     RuntimeConfig runtime_config;
-    model_config.max_seq_len = fake_token_ids.size();
+    model_config.max_seq_len = 5;
 
     auto mock_stream = std::make_shared<MockGenerateStream>(input, model_config, runtime_config);
     return mock_stream;
@@ -60,23 +56,19 @@ TEST_F(GenerateStreamWrapperTest, generateResponse) {
         EXPECT_TRUE(val >= 0);
     }));
 
-    auto input                         = std::make_shared<GenerateInput>();
-    input->generate_config             = std::make_shared<GenerateConfig>();
-    auto                fake_token_ids = std::vector<int>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape          = {fake_token_ids.size()};
-    // 由于 Buffer 内部不负责管理传入的地址数据(只是使用), 所以数据必须具有较久的生命周期
-    input->input_ids = std::make_shared<rtp_llm::Buffer>(
-        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, fake_token_ids.data());
+    auto input             = std::make_shared<GenerateInput>();
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids       = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
 
     GenerateStreamWrapper stream_wrapper(metric_reporter, token_processor);
     stream_wrapper.init(input, engine);
     EXPECT_TRUE(stream_wrapper.generate_config_ != nullptr);
-    EXPECT_EQ(stream_wrapper.input_ids_->type(), rtp_llm::DataType::TYPE_INT32);
-    EXPECT_EQ(stream_wrapper.input_ids_->size(), fake_token_ids.size());
-    EXPECT_EQ(stream_wrapper.input_ids_->sizeBytes(), fake_token_ids.size() * sizeof(int));
-    EXPECT_TRUE(
-        std::memcmp(stream_wrapper.input_ids_->data(), fake_token_ids.data(), stream_wrapper.input_ids_->sizeBytes())
-        == 0);
+    EXPECT_EQ(stream_wrapper.input_ids_.scalar_type(), torch::kInt32);
+    EXPECT_EQ(stream_wrapper.input_ids_.numel(), 5);
+    EXPECT_EQ(stream_wrapper.input_ids_.nbytes(), 5 * sizeof(int));
+    auto expected = std::vector<int>{1, 2, 3, 4, 5};
+    EXPECT_TRUE(std::memcmp(stream_wrapper.input_ids_.data_ptr(), expected.data(), stream_wrapper.input_ids_.nbytes())
+                == 0);
     {
         auto [response, finished] = stream_wrapper.generateResponse();
         ASSERT_EQ(finished, false);
@@ -85,9 +77,6 @@ TEST_F(GenerateStreamWrapperTest, generateResponse) {
         auto [response, finished] = stream_wrapper.generateResponse();
         ASSERT_EQ(finished, true);
     }
-    // EXPECT_CALL(*mock_stream, finished()).WillOnce(Return(false));
-    // EXPECT_CALL(*mock_stream, stopped()).WillOnce(Return(false));
-    // EXPECT_CALL(*mock_stream, cancel()).Times(1);
 }
 
 TEST_F(GenerateStreamWrapperTest, formatResponse_NumBeams) {
@@ -95,8 +84,8 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_NumBeams) {
     generate_texts.push_back("fake response");
     GenerateOutputs generate_outputs;
     generate_outputs.generate_outputs.push_back(GenerateOutput());
-    auto               generate_config = std::make_shared<GenerateConfig>();
-    rtp_llm::BufferPtr input_ids;
+    auto          generate_config = std::make_shared<GenerateConfig>();
+    torch::Tensor input_ids;
 
     generate_config->num_beams = 2;
     auto res = GenerateStreamWrapper::formatResponse(generate_texts, generate_outputs, generate_config, input_ids);
@@ -106,16 +95,15 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_NumBeams) {
 }
 
 TEST_F(GenerateStreamWrapperTest, formatResponse_Logits) {
-    rtp_llm::BufferPtr input_ids;
+    torch::Tensor input_ids;
 
     std::vector<std::string> generate_texts;
     generate_texts.push_back("fake response");
 
-    GenerateOutput      generate_output;
-    auto                fake_token_ids = std::vector<float>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape          = {fake_token_ids.size()};
-    generate_output.logits             = std::make_shared<rtp_llm::Buffer>(
-        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_FP32, shape, fake_token_ids.data());
+    GenerateOutput generate_output;
+    auto           fake_token_ids = std::vector<float>{1, 2, 3, 4, 5};
+    generate_output.logits =
+        torch::from_blob(fake_token_ids.data(), {(int64_t)fake_token_ids.size()}, torch::kFloat32).clone();
     GenerateOutputs generate_outputs;
     generate_outputs.generate_outputs.push_back(generate_output);
 
@@ -135,16 +123,15 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_Logits) {
 }
 
 TEST_F(GenerateStreamWrapperTest, formatResponse_Loss) {
-    rtp_llm::BufferPtr input_ids;
+    torch::Tensor input_ids;
 
     std::vector<std::string> generate_texts;
     generate_texts.push_back("fake response");
 
-    GenerateOutput      generate_output;
-    auto                fake_token_ids = std::vector<float>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape          = {fake_token_ids.size()};
-    generate_output.loss               = std::make_shared<rtp_llm::Buffer>(
-        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_FP32, shape, fake_token_ids.data());
+    GenerateOutput generate_output;
+    auto           fake_token_ids = std::vector<float>{1, 2, 3, 4, 5};
+    generate_output.loss =
+        torch::from_blob(fake_token_ids.data(), {(int64_t)fake_token_ids.size()}, torch::kFloat32).clone();
     GenerateOutputs generate_outputs;
     generate_outputs.generate_outputs.push_back(generate_output);
 
@@ -164,16 +151,15 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_Loss) {
 }
 
 TEST_F(GenerateStreamWrapperTest, formatResponse_HiddenStates) {
-    rtp_llm::BufferPtr input_ids;
+    torch::Tensor input_ids;
 
     std::vector<std::string> generate_texts;
     generate_texts.push_back("fake response");
 
-    GenerateOutput      generate_output;
-    auto                fake_token_ids = std::vector<float>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape          = {fake_token_ids.size()};
-    generate_output.hidden_states      = std::make_shared<rtp_llm::Buffer>(
-        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_FP32, shape, fake_token_ids.data());
+    GenerateOutput generate_output;
+    auto           fake_token_ids = std::vector<float>{1, 2, 3, 4, 5};
+    generate_output.hidden_states =
+        torch::from_blob(fake_token_ids.data(), {(int64_t)fake_token_ids.size()}, torch::kFloat32).clone();
     GenerateOutputs generate_outputs;
     generate_outputs.generate_outputs.push_back(generate_output);
 
@@ -193,16 +179,14 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_HiddenStates) {
 }
 
 TEST_F(GenerateStreamWrapperTest, formatResponse_OutputIds) {
-    rtp_llm::BufferPtr input_ids;
+    torch::Tensor input_ids;
 
     std::vector<std::string> generate_texts;
     generate_texts.push_back("fake response");
 
-    GenerateOutput      generate_output;
-    auto                fake_token_ids = std::vector<int>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape          = {fake_token_ids.size()};
-    generate_output.output_ids         = std::make_shared<rtp_llm::Buffer>(
-        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, fake_token_ids.data());
+    GenerateOutput generate_output;
+    auto           fake_token_ids = std::vector<int>{1, 2, 3, 4, 5};
+    generate_output.output_ids    = torch::tensor(fake_token_ids, torch::kInt32);
     GenerateOutputs generate_outputs;
     generate_outputs.generate_outputs.push_back(generate_output);
 
@@ -225,10 +209,8 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_InputIds) {
     std::vector<std::string> generate_texts;
     generate_texts.push_back("fake response");
 
-    auto                fake_token_ids = std::vector<int>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape          = {fake_token_ids.size()};
-    rtp_llm::BufferPtr  input_ids      = std::make_shared<rtp_llm::Buffer>(
-        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, fake_token_ids.data());
+    auto            fake_token_ids = std::vector<int>{1, 2, 3, 4, 5};
+    torch::Tensor   input_ids      = torch::tensor(fake_token_ids, torch::kInt32);
     GenerateOutput  generate_output;
     GenerateOutputs generate_outputs;
     generate_outputs.generate_outputs.push_back(generate_output);

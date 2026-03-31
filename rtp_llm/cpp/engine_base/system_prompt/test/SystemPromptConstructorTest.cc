@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
-#include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cuda_runtime.h>
 
@@ -27,7 +27,7 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     vector<int>             prompt_2         = {4, 5, 6, 7};
     kv_cache_config.multi_task_prompt_tokens = {{"1", prompt_1}, {"2", prompt_2}};
     CustomConfig config;
-    auto         engine = createMockEngine(device_, config);
+    auto         engine = createMockEngine(config);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlocksNum(), 99);
     const_cast<ResourceContext*>(&engine->resourceContext())->reuse_cache = true;
     auto result_status =

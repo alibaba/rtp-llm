@@ -8,22 +8,21 @@
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 HybridTypeKVCacheAllocator::HybridTypeKVCacheAllocator(const CacheConfig&                 config,
-                                                       rtp_llm::DeviceBase*               device,
                                                        AllocationType                     allocation_type,
                                                        const kmonitor::MetricsReporterPtr metrics_reporter,
                                                        int64_t                            reserve_block_ratio):
-    KVCacheAllocator(config, device, allocation_type, metrics_reporter, reserve_block_ratio) {}
+    KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
 
 bool HybridTypeKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "no cache_specs found in CacheConfig");
 
     auto pool_config = BlockPoolConfigHelper::createConfig(config_);
-    block_pool_      = std::make_shared<BlockPool>(pool_config, device_, allocation_type_);
+    block_pool_      = std::make_shared<BlockPool>(pool_config, allocation_type_);
     RTP_LLM_CHECK_WITH_INFO(block_pool_->init(), "Failed to initialize block pool for HybridTypeKVCacheAllocator");
 
     const auto& layer_groups = config_.global_layer_ids;
@@ -339,8 +338,8 @@ CacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
     const auto       scale_tensors = block_pool_->allLayerScaleCacheBase();
 
     layout.layer_to_groups = layer_to_group_id_;
-    layout.layers_to_kv_buffer_ptrs.assign(config_.layer_all_num, nullptr);
-    layout.layers_to_scale_buffer_ptrs.assign(config_.layer_all_num, nullptr);
+    layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
+    layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
 
     for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_all_num); ++layer_id) {
         int32_t      local     = global_layer_to_local_id_[layer_id];
@@ -348,12 +347,12 @@ CacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
 
         if (local_idx < layer_tensors.size() && layer_tensors[local_idx].defined()
             && layer_tensors[local_idx].numel() > 0) {
-            layout.layers_to_kv_buffer_ptrs[layer_id] = torchTensor2Buffer(layer_tensors[local_idx]);
+            layout.layers_to_kv_buffer_ptrs[layer_id] = layer_tensors[local_idx];
         }
 
         if (!scale_tensors.empty() && local_idx < scale_tensors.size() && scale_tensors[local_idx].defined()
             && scale_tensors[local_idx].numel() > 0) {
-            layout.layers_to_scale_buffer_ptrs[layer_id] = torchTensor2Buffer(scale_tensors[local_idx]);
+            layout.layers_to_scale_buffer_ptrs[layer_id] = scale_tensors[local_idx];
         }
     }
     return layout;

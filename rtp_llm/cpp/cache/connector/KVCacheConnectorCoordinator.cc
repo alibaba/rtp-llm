@@ -17,7 +17,6 @@ KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&     
                                                          const ParallelismConfig&                 parallelism_config,
                                                          const SpeculativeExecutionConfig&        sp_config,
                                                          const std::shared_ptr<KVCacheAllocator>& allocator,
-                                                         rtp_llm::DeviceBase*                     device,
                                                          const kmonitor::MetricsReporterPtr&      metrics_reporter,
                                                          const PDSepConfig&                       pd_sep_config,
                                                          const CacheStoreConfig&                  cache_store_config):
@@ -27,7 +26,6 @@ KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&     
     parallelism_config_(parallelism_config),
     sp_config_(sp_config),
     allocator_(allocator),
-    device_(device),
     metrics_reporter_(metrics_reporter),
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config) {}
@@ -168,21 +166,19 @@ std::shared_ptr<AsyncContext> KVCacheConnectorCoordinator::asyncWriteByLayer(
 
 std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
     auto memory_connector = std::make_shared<KVCacheMemoryConnector>(
-        cache_config_, kv_cache_config_, allocator_, device_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
+        cache_config_, kv_cache_config_, allocator_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
     RTP_LLM_CHECK_WITH_INFO(memory_connector->init(), "memory connector init failed");
     return memory_connector;
 }
 
 std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnector() {
 #ifdef USE_REMOTE_KV_CACHE
-    // TODO : get lora info map
     // TODO : support different group mode
     auto remote_connector_ = std::make_shared<RemoteConnector>(cache_config_,
                                                                kv_cache_config_,
                                                                runtime_config_,
                                                                parallelism_config_,
                                                                sp_config_,
-                                                               device_,
                                                                allocator_->getBlockPool()->getBaseAddress(),
                                                                allocator_->getBlockPool()->getTotalSizeBytes(),
                                                                allocator_,

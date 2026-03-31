@@ -35,7 +35,9 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
             attn_config.kernel_tokens_per_block,
             is_neox_style=False,
             rope_config=attn_config.rope_config,
-            max_position_embeddings=attn_config.max_seq_len,
+            max_position_embeddings=attn_config.max_seq_len
+            + attn_config.gen_num_per_cycle
+            + 1,
         )
         self.num_heads = attn_config.head_num
         self.num_kv_heads = attn_config.kv_head_num

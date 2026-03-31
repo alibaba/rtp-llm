@@ -1,9 +1,7 @@
 #include "rtp_llm/models_py/bindings/cuda/TRTAttnOp.h"
 #include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include <vector>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -20,12 +18,11 @@ bool TRTPrefillOpBase::support(torch_ext::PyAttentionInputs attn_inputs) {
 }
 
 ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
-    static_scale_        = torch::ones({1}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
-    int       batch_size = attn_inputs.input_lengths.size(0);
-    BufferPtr kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
+    static_scale_            = torch::ones({1}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    int           batch_size = attn_inputs.input_lengths.size(0);
+    torch::Tensor kv_cache_kernel_block_id_device;
     if (attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0) {
-        kv_cache_kernel_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_host);
-        kv_cache_kernel_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_device);
+        kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
 
     TRTAttnPtr attn_params;
@@ -166,7 +163,6 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&                  
     const int            size_per_head  = attn_configs_.size_per_head;
     const int            token_num      = input.size(0);
     const int            batch_size     = params->input_lengths.size(0);
-    auto*                device         = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
     torch::TensorOptions options        = torch::TensorOptions(input.dtype()).device(input.device());
 
     torch::Tensor output        = torch::empty({token_num, local_head_num * size_per_head}, options);

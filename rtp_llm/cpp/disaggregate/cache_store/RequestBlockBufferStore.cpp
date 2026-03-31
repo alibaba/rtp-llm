@@ -1,11 +1,13 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <torch/torch.h>
 
 namespace rtp_llm {
 
-RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util,
-                                                 rtp_llm::DeviceBase*               device):
-    memory_util_(memory_util), device_(device) {}
+RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util):
+    memory_util_(memory_util) {}
 
 void RequestBlockBufferStore::stop() {
     std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
@@ -138,19 +140,19 @@ bool RequestBlockBufferStore::isValidBlock(const std::shared_ptr<BlockBuffer>& b
 }
 
 std::shared_ptr<BlockBuffer> RequestBlockBufferStore::makeValidBlock(const std::shared_ptr<BlockBuffer>& block) {
-    if (!device_) {
+    if (!isRuntimeInitialized()) {
         RTP_LLM_LOG_WARNING("make valid block failed, device is null, block %s", block->key.c_str());
         return nullptr;
     }
 
-    auto buffer = device_->allocateBuffer({rtp_llm::DataType::TYPE_UINT8, {block->len}, rtp_llm::AllocationType::HOST});
-    if (!buffer) {
+    auto tensor = torch::empty({(int64_t)block->len}, torch::TensorOptions().dtype(torch::kUInt8)).pin_memory();
+    if (!tensor.defined()) {
         RTP_LLM_LOG_WARNING("make valid block failed, alloc buffer failed, block %s", block->key.c_str());
         return nullptr;
     }
 
-    auto malloc_ptr = buffer->data();
-    auto addr = std::shared_ptr<void>(malloc_ptr, [buffer = std::move(buffer)](void* p) mutable { buffer.reset(); });
+    auto malloc_ptr = tensor.data_ptr();
+    auto addr       = std::shared_ptr<void>(malloc_ptr, [tensor](void* p) { /* tensor destructor handles cleanup */ });
 
     if (!memory_util_->isMemoryMr(addr.get(), block->len, false, false)) {
         const auto reg_success = memory_util_->regUserMr(addr.get(), block->len, false);
@@ -177,7 +179,15 @@ bool RequestBlockBufferStore::copyBlock(const std::shared_ptr<BlockBuffer>& dst_
 
     RTP_LLM_INTERVAL_LOG(120, INFO, "copy block cache once, may affect performance");
 
-    device_->noBlockCopy({dst_block->toDeviceBuffer(), src_block->toDeviceBuffer()});
+    execNoBlockCopy(
+        {torch::from_blob(
+             dst_block->addr.get(),
+             {(int64_t)dst_block->len},
+             torch::TensorOptions().dtype(torch::kUInt8).device(dst_block->gpu_mem ? torch::kCUDA : torch::kCPU)),
+         torch::from_blob(
+             src_block->addr.get(),
+             {(int64_t)src_block->len},
+             torch::TensorOptions().dtype(torch::kUInt8).device(src_block->gpu_mem ? torch::kCUDA : torch::kCPU))});
     return true;
 }
 

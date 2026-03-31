@@ -50,18 +50,17 @@ private:
     bool                 enable_memory_cache_{false};
     bool                 enable_remote_cache_{false};
     std::string          trace_id_;
-    std::string          unique_id_ = "";  // TODO : support lora (remote connector)
-    std::vector<int64_t> tokens_;          // TODO : get tokens (remote connector)
+    std::string          unique_id_ = "";
+    std::vector<int64_t> tokens_;  // TODO : get tokens (remote connector)
 };
 
 // TODO : remove this, use ture HybridLayerKVCacheAllocator
 class FakeHybridLayerKVCacheAllocator: public KVCacheAllocator {
 public:
     FakeHybridLayerKVCacheAllocator(const CacheConfig&          config,
-                                    rtp_llm::DeviceBase*        device,
                                     const std::vector<int32_t>& full_group_ids,
                                     const std::vector<int32_t>& other_group_ids):
-        KVCacheAllocator(config, device) {
+        KVCacheAllocator(config) {
         for (int32_t full_group_id : full_group_ids) {
             for (int i = 0; i < kFakeLayerNum; i++) {
                 fake_layout_.layer_to_groups.push_back(full_group_id);
@@ -156,8 +155,8 @@ private:
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
-            auto allocator = std::make_shared<FakeHybridLayerKVCacheAllocator>(
-                cache_config_, device_, full_group_ids_, other_group_ids_);
+            auto allocator =
+                std::make_shared<FakeHybridLayerKVCacheAllocator>(cache_config_, full_group_ids_, other_group_ids_);
             ASSERT_TRUE(allocator->init());
             remote_connectors_.push_back(
                 std::make_shared<RemoteConnector>(cache_config_,
@@ -165,7 +164,6 @@ private:
                                                   runtime_config_,
                                                   parallelism_config_,
                                                   sp_config_,
-                                                  device_,
                                                   nullptr,
                                                   0,
                                                   allocator,

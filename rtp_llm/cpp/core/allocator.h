@@ -34,11 +34,6 @@ public:
     virtual void  free(void** ptr)        = 0;
     // TODO: remove reMalloc
     virtual void* reMalloc(void* ptr, size_t size) = 0;
-
-    // mallocPrivate is used for cuda graph,
-    // the allocated memories are freezed
-    // and can not be allocated for non-private allocation.
-    virtual void* mallocPrivate(size_t size);
 };
 
 template<AllocatorType AllocType_>

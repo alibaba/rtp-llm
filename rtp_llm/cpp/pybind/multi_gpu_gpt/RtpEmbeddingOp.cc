@@ -1,7 +1,6 @@
 #include <optional>
 #include <pybind11/pytypes.h>
 
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpEmbeddingOp.h"
 
 #include "rtp_llm/cpp/utils/StatusUtil.h"

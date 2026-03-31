@@ -177,7 +177,7 @@ def cuda_register():
     native.alias(
         name = "cuda_register",
         actual = select({
-            "//conditions:default": "//rtp_llm/cpp/devices/cuda_impl:gpu_register",
+            "//conditions:default": "//rtp_llm/cpp/cuda/ops:gpu_register",
         }),
         visibility = ["//visibility:public"],
     )
@@ -204,12 +204,7 @@ def select_py_bindings():
         "//:using_rocm": [
             "//rtp_llm/models_py/bindings/rocm:rocm_bindings_register"
         ],
-        "@//:using_arm": [
-            "//rtp_llm/cpp/devices/arm_impl:arm_cpu_impl",
-            "//rtp_llm/models_py/bindings:dummy_register",
-        ],
         "//conditions:default": [
-            "//rtp_llm/cpp/devices/cpu_impl:cpu_impl",
             "//rtp_llm/models_py/bindings:dummy_register",
         ],
     })

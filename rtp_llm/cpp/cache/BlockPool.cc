@@ -1,18 +1,19 @@
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
-BlockPool::BlockPool(const BlockPoolConfig& config, rtp_llm::DeviceBase* device, AllocationType allocation_type):
-    config_(config), device_(device), allocation_type_(allocation_type) {}
+BlockPool::BlockPool(const BlockPoolConfig& config, AllocationType allocation_type):
+    config_(config), allocation_type_(allocation_type) {}
 
 BlockPool::~BlockPool() {
-    cache_aligned_buffer_.reset();
+    cache_aligned_buffer_ = torch::Tensor();
 }
 
 void BlockPool::validateConfig() const {
@@ -36,14 +37,20 @@ void BlockPool::validateConfig() const {
 }
 
 void BlockPool::initializeCacheBuffer() {
-    cache_aligned_buffer_ = device_->allocateBuffer({rtp_llm::TYPE_INT8, {config_.total_size_bytes}, allocation_type_});
-    cache_base_ptr_       = cache_aligned_buffer_->data();
-    RTP_LLM_CHECK_WITH_INFO(cache_aligned_buffer_ != nullptr && cache_base_ptr_ != nullptr,
-                            "block pool allocate cache aligned buffer is null");
+    if (allocation_type_ == AllocationType::HOST) {
+        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU))
+                                    .pin_memory();
+    } else {
+        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    }
+    cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
+    RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
 }
 
 void BlockPool::initializeLayerMappings() {
-    torch::Tensor full_tensor = Buffer2torchTensor(cache_aligned_buffer_, false);
+    torch::Tensor full_tensor = cache_aligned_buffer_;
 
     size_t total_layers = 0;
     for (const auto& layout_cfg : config_.memory_layouts) {
@@ -56,7 +63,7 @@ void BlockPool::initializeLayerMappings() {
 
 void BlockPool::initializeLayoutStrategies() {
     layout_strategies_.resize(config_.memory_layouts.size());
-    torch::Tensor full_tensor = Buffer2torchTensor(cache_aligned_buffer_, false);
+    torch::Tensor full_tensor = cache_aligned_buffer_;
 
     size_t global_layer_begin = 0;
     for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
@@ -329,10 +336,13 @@ void BlockPool::blockCacheReference(const BlockIndicesType& block_ids) {
     }
 }
 
-void BlockPool::regUserMr(size_t model_id) {
-    if (device_->cacheStore() && !kvcache_reg_mr_) {
+void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
+    if (cache_store) {
+        cache_store_ = std::move(cache_store);
+    }
+    if (cache_store_ && !kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to register user mr");
-        auto memory_util = std::static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
+        auto memory_util = std::static_pointer_cast<NormalCacheStore>(cache_store_)->getMemoryUtil();
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
@@ -361,9 +371,9 @@ void BlockPool::regUserMr(size_t model_id) {
 }
 
 void BlockPool::deregUserMr() {
-    if (kvcache_reg_mr_) {
+    if (kvcache_reg_mr_ && cache_store_) {
         RTP_LLM_LOG_INFO("start to deregister user mr");
-        auto memory_util = std::static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
+        auto memory_util = std::static_pointer_cast<NormalCacheStore>(cache_store_)->getMemoryUtil();
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
@@ -490,7 +500,7 @@ BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count,
 }
 
 MemoryType BlockPool::where() const {
-    return cache_aligned_buffer_->where();
+    return cache_aligned_buffer_.is_cuda() ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
 }
 
 void BlockPool::checkLayoutValidity(int layout_id) const {

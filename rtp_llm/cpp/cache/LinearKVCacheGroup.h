@@ -5,7 +5,6 @@
 #include <cstdint>
 
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
-#include "rtp_llm/cpp/core/Buffer.h"
 
 namespace rtp_llm {
 

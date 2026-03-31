@@ -1,10 +1,8 @@
 #include "rtp_llm/models_py/bindings/cuda/FlashInferOp.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
 #include "3rdparty/flashinfer/flashinfer.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
-#include "rtp_llm/cpp/devices/OpData.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/cuda/ops/CudaFlashInfer.h"
+#include "rtp_llm/cpp/core/OpData.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 
@@ -12,8 +10,10 @@ using namespace torch_ext;
 
 namespace rtp_llm {
 
-FlashInferPrefillOp::FlashInferPrefillOp(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs), device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
+FlashInferPrefillOp::FlashInferPrefillOp(const AttentionConfigs& attn_configs,
+                                         MlaOpsType              mla_ops_type,
+                                         bool                    enable_cuda_graph):
+    attn_configs_(attn_configs), mla_ops_type_(mla_ops_type), enable_cuda_graph_(enable_cuda_graph) {}
 
 bool FlashInferPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     // TODO: if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8
@@ -22,38 +22,33 @@ bool FlashInferPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     if (attn_configs_.kv_cache_dtype != KvCacheDataType::BASE) {
         return false;
     }
-    auto     prefix_lengths_host   = torchTensor2Buffer(attn_inputs.prefix_lengths);
-    auto     sequence_lengths_host = torchTensor2Buffer(attn_inputs.sequence_lengths);
-    auto     input_lengths_host    = torchTensor2Buffer(attn_inputs.input_lengths);
-    DataType dtype                 = torchDTypeToDataType(attn_inputs.dtype);
+    DataType dtype = torchDTypeToDataType(attn_inputs.dtype);
     if (attn_configs_.kv_cache_dtype == KvCacheDataType::FP8) {
         dtype = DataType::TYPE_FP8_E4M3;
     }
     return FlashInferAttnParams::checkPrefill(
-        device_, attn_configs_, prefix_lengths_host, input_lengths_host, dtype, false);
+        attn_configs_, attn_inputs.prefix_lengths, attn_inputs.input_lengths, dtype, false);
 }
 
 ParamsBasePtr FlashInferPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
-    auto      prefix_lengths_host   = torchTensor2Buffer(attn_inputs.prefix_lengths);
-    auto      sequence_lengths_host = torchTensor2Buffer(attn_inputs.sequence_lengths);
-    auto      input_lengths_host    = torchTensor2Buffer(attn_inputs.input_lengths);
-    BufferPtr kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
+    torch::Tensor kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
     if (attn_inputs.kv_cache_kernel_block_id_host.size(0)) {
-        kv_cache_kernel_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_host);
-        kv_cache_kernel_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_device);
+        kv_cache_kernel_block_id_host   = attn_inputs.kv_cache_kernel_block_id_host;
+        kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
     DataType dtype = torchDTypeToDataType(attn_inputs.dtype);
     if (attn_configs_.kv_cache_dtype == KvCacheDataType::FP8) {
         dtype = DataType::TYPE_FP8_E4M3;
     }
-    auto                    params = FlashInferAttnParams::prepare(device_,
-                                                attn_configs_,
-                                                prefix_lengths_host,
-                                                sequence_lengths_host,
-                                                input_lengths_host,
+    auto                    params = FlashInferAttnParams::prepare(attn_configs_,
+                                                attn_inputs.prefix_lengths,
+                                                attn_inputs.sequence_lengths,
+                                                attn_inputs.input_lengths,
                                                 kv_cache_kernel_block_id_host,
                                                 kv_cache_kernel_block_id_device,
-                                                dtype,  // torchDTypeToDataType(attn_inputs.dtype),
+                                                dtype,
+                                                mla_ops_type_,
+                                                enable_cuda_graph_,
                                                 false);
     FlashInferAttnParamsPtr attn_params(params, (FlashInferAttnParams*)params.get());
     RTP_LLM_CHECK_WITH_INFO(!attn_params->decode_plan, "flash infer params should gen prefill plan");
@@ -104,8 +99,10 @@ torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&                 
     return output;
 }
 
-FlashInferDecodeOp::FlashInferDecodeOp(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs), device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
+FlashInferDecodeOp::FlashInferDecodeOp(const AttentionConfigs& attn_configs,
+                                       MlaOpsType              mla_ops_type,
+                                       bool                    enable_cuda_graph):
+    attn_configs_(attn_configs), mla_ops_type_(mla_ops_type), enable_cuda_graph_(enable_cuda_graph) {}
 
 bool FlashInferDecodeOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     if (attn_configs_.kv_cache_dtype != KvCacheDataType::BASE) {
@@ -115,25 +112,24 @@ bool FlashInferDecodeOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     if (attn_configs_.head_num / attn_configs_.kv_head_num == 12) {
         return false;
     }
-    return FlashInferAttnParams::checkDecode(device_, attn_configs_, torchDTypeToDataType(attn_inputs.dtype));
+    return FlashInferAttnParams::checkDecode(attn_configs_, torchDTypeToDataType(attn_inputs.dtype));
 }
 
 ParamsBasePtr FlashInferDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
-    auto      sequence_lengths_host = torchTensor2Buffer(attn_inputs.sequence_lengths);
-    auto      input_lengths_host    = torchTensor2Buffer(attn_inputs.input_lengths);
-    BufferPtr kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
+    torch::Tensor kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
     if (attn_inputs.kv_cache_kernel_block_id_host.size(0)) {
-        kv_cache_kernel_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_host);
-        kv_cache_kernel_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_device);
+        kv_cache_kernel_block_id_host   = attn_inputs.kv_cache_kernel_block_id_host;
+        kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
-    auto                    params = FlashInferAttnParams::prepare(device_,
-                                                attn_configs_,
-                                                nullptr,
-                                                sequence_lengths_host,
-                                                input_lengths_host,
+    auto                    params = FlashInferAttnParams::prepare(attn_configs_,
+                                                torch::Tensor(),
+                                                attn_inputs.sequence_lengths,
+                                                attn_inputs.input_lengths,
                                                 kv_cache_kernel_block_id_host,
                                                 kv_cache_kernel_block_id_device,
                                                 torchDTypeToDataType(attn_inputs.dtype),
+                                                mla_ops_type_,
+                                                enable_cuda_graph_,
                                                 false);
     FlashInferAttnParamsPtr attn_params(params, (FlashInferAttnParams*)params.get());
     RTP_LLM_CHECK_WITH_INFO(attn_params->decode_plan, "flash infer params should gen decode plan");
@@ -184,12 +180,18 @@ void registerFlashInferOp(const py::module& m) {
         m, "FlashInferAttnParams")
         .def(pybind11::init<>());
     pybind11::class_<FlashInferPrefillOp>(m, "FlashInferPrefillOp")
-        .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
+        .def(pybind11::init<const AttentionConfigs&, MlaOpsType, bool>(),
+             py::arg("attn_configs"),
+             py::arg("mla_ops_type")      = MlaOpsType::AUTO,
+             py::arg("enable_cuda_graph") = false)
         .def("support", &FlashInferPrefillOp::support, py::arg("attn_inputs"))
         .def("prepare", &FlashInferPrefillOp::prepare, py::arg("attn_inputs"))
         .def("forward", &FlashInferPrefillOp::forward, py::arg("q"), py::arg("kv_cache"), py::arg("params"));
     pybind11::class_<FlashInferDecodeOp>(m, "FlashInferDecodeOp")
-        .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
+        .def(pybind11::init<const AttentionConfigs&, MlaOpsType, bool>(),
+             py::arg("attn_configs"),
+             py::arg("mla_ops_type")      = MlaOpsType::AUTO,
+             py::arg("enable_cuda_graph") = false)
         .def("support", &FlashInferDecodeOp::support, py::arg("attn_inputs"))
         .def("prepare", &FlashInferDecodeOp::prepare, py::arg("attn_inputs"))
         .def("forward", &FlashInferDecodeOp::forward, py::arg("q"), py::arg("kv_cache"), py::arg("params"));

@@ -17,8 +17,8 @@
 #pragma once
 
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
-#include "rtp_llm/cpp/core/allocator.h"
 #include "cublasAlgoMap.h"
+#include <torch/torch.h>
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -60,9 +60,10 @@ protected:
     cublasAlgoMap* cublas_algo_map_;
     std::mutex*    mutex_;
 
-    IAllocator*                        allocator_        = nullptr;
-    void*                              cublas_workspace_ = nullptr;
+    void*                              cublas_workspace_   = nullptr;
     bool                               deterministic_gemm_ = false;
+    torch::Tensor                      cublas_workspace_tensor_;
+    std::vector<torch::Tensor>         additional_workspace_tensors_;
     std::vector<void*>                 additional_cublas_workspaces_;
     std::unordered_map<void*, int32_t> cublas_workspces_map_;
 
@@ -112,8 +113,7 @@ public:
                     cublasLtHandle_t cublaslt_handle_,
                     cudaStream_t     stream,
                     cublasAlgoMap*   map,
-                    std::mutex*      mu,
-                    IAllocator*      allocator);
+                    std::mutex*      mu);
 
     virtual ~cublasMMWrapper();
 
@@ -160,11 +160,11 @@ public:
     // Selects the first heuristic candidate with splitK<=1 to guarantee deterministic
     // results. Aborts if no such candidate exists among the top-64 candidates.
     std::pair<bool, cublasLtMatmulAlgo_t> findDeterministicAlgo(cublasLtHandle_t       lightHandle,
-                                                                 cublasLtMatmulDesc_t   computeDesc,
-                                                                 cublasLtMatrixLayout_t Adesc,
-                                                                 cublasLtMatrixLayout_t Bdesc,
-                                                                 cublasLtMatrixLayout_t Cdesc,
-                                                                 cublasLtMatrixLayout_t Ddesc);
+                                                                cublasLtMatmulDesc_t   computeDesc,
+                                                                cublasLtMatrixLayout_t Adesc,
+                                                                cublasLtMatrixLayout_t Bdesc,
+                                                                cublasLtMatrixLayout_t Cdesc,
+                                                                cublasLtMatrixLayout_t Ddesc);
 
     std::pair<bool, cublasLtMatmulAlgo_t> findBestAlgo(cublasLtHandle_t       lightHandle,
                                                        cublasLtMatmulDesc_t   computeDesc,

@@ -11,10 +11,9 @@ public:
     MockKVCacheMemoryConnector(const CacheConfig&                       cache_config,
                                const KVCacheConfig&                     kv_cache_config,
                                const std::shared_ptr<KVCacheAllocator>& allocator,
-                               rtp_llm::DeviceBase*                     device,
                                const std::vector<std::string>&          worker_addrs,
                                const kmonitor::MetricsReporterPtr&      metrics_reporter):
-        KVCacheMemoryConnector(cache_config, kv_cache_config, allocator, device, worker_addrs, metrics_reporter) {}
+        KVCacheMemoryConnector(cache_config, kv_cache_config, allocator, worker_addrs, metrics_reporter) {}
     ~MockKVCacheMemoryConnector() override = default;
 
 public:

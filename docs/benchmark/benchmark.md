@@ -80,7 +80,6 @@ common_config:
   decode_test_length: 2048
   max_context_batch_size: 1
   reserver_runtime_mem_mb: 0
-  device_reserve_memory_bytes: 0
 ```
 
 The sixth part describes the benchmark configuration structure. Each benchmark consists of four main components:

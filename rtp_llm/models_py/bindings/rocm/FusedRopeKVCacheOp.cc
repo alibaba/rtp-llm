@@ -1,18 +1,22 @@
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
 #include "rtp_llm/cpp/core/Dispatch.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
 #include <stdexcept>
 #include <string>
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
-#include "rtp_llm/cpp/devices/utils/RopeCache.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/model_utils/RopeCache.h"
+#include "rtp_llm/cpp/utils/DebugUtils.h"
 
 namespace rtp_llm {
 
-static at::ScalarType get_fp8_dtype(ROCmDevice* device) {
-    std::string arch(device->getRocmDeviceProperties()->gcnArchName);
+static at::ScalarType get_fp8_dtype() {
+    hipDeviceProp_t prop;
+    int             device_id = 0;
+    hipGetDevice(&device_id);
+    hipGetDeviceProperties(&prop, device_id);
+    std::string arch(prop.gcnArchName);
     if (arch.find("gfx950") != std::string::npos) {
         return torch::kFloat8_e4m3fn;
     }
@@ -20,7 +24,7 @@ static at::ScalarType get_fp8_dtype(ROCmDevice* device) {
 }
 
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs), device_(dynamic_cast<ROCmDevice*>(DeviceFactory::getDefaultDevice())) {}
+    attn_configs_(attn_configs) {}
 
 FusedRopeKVCachePrefillOpAsm::FusedRopeKVCachePrefillOpAsm(const AttentionConfigs& attn_configs):
     FusedRopeKVCachePrefillOpBase(attn_configs) {}
@@ -29,11 +33,10 @@ FusedRopeKVCachePrefillOpNonAsm::FusedRopeKVCachePrefillOpNonAsm(const Attention
     FusedRopeKVCachePrefillOpBase(attn_configs) {}
 
 CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
-    int       batch_size = attn_inputs.input_lengths.size(0);
-    BufferPtr kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
+    int           batch_size = attn_inputs.input_lengths.size(0);
+    torch::Tensor kv_cache_kernel_block_id_device;
     if (attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0) {
-        kv_cache_kernel_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_host);
-        kv_cache_kernel_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_device);
+        kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
 
     bool has_prefix = attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
@@ -41,8 +44,8 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     bool use_fmha_fp8 = false;
     use_fmha_fp8      = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     CKAttnPtr attn_params;
-    auto      params = device_->PrepareCKAttn(
-        attn_configs_, kv_cache_kernel_block_id_device, attn_inputs.input_lengths.size(0), use_fmha_fp8);
+    auto      params =
+        PrepareCKAttn(attn_configs_, kv_cache_kernel_block_id_device, attn_inputs.input_lengths.size(0), use_fmha_fp8);
     if (params) {
         attn_params = CKAttnPtr(params, (CKAttn*)params.get());
     } else {
@@ -90,7 +93,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     torch::Tensor q_fp8_buf;
     if (paged_fp8) {
         q_fp8_buf = torch::empty({q_output_token_num, local_head_num, size_per_head},
-                                 torch::TensorOptions(get_fp8_dtype(device_)).device(qkv.device()));
+                                 torch::TensorOptions(get_fp8_dtype()).device(qkv.device()));
     }
     torch::Tensor k_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head},
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
@@ -154,7 +157,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     // 添加 FP8 缓冲区支持
     torch::Tensor qkv_buf_fp8;
     if (use_fmha_fp8) {
-        qkv_buf_fp8 = torch::empty(qkv.sizes(), torch::TensorOptions(get_fp8_dtype(device_)).device(qkv.device()));
+        qkv_buf_fp8 = torch::empty(qkv.sizes(), torch::TensorOptions(get_fp8_dtype()).device(qkv.device()));
     }
 
     if (use_asm()) {
@@ -236,7 +239,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 }
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs), device_(dynamic_cast<ROCmDevice*>(DeviceFactory::getDefaultDevice())) {}
+    attn_configs_(attn_configs) {}
 
 FusedRopeKVCacheDecodeOpAsm::FusedRopeKVCacheDecodeOpAsm(const AttentionConfigs& attn_configs):
     FusedRopeKVCacheDecodeOpBase(attn_configs) {}
@@ -245,19 +248,17 @@ FusedRopeKVCacheDecodeOpNonAsm::FusedRopeKVCacheDecodeOpNonAsm(const AttentionCo
     FusedRopeKVCacheDecodeOpBase(attn_configs) {}
 
 CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
-    int       batch_size = attn_inputs.sequence_lengths.size(0);
-    BufferPtr kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
+    int           batch_size = attn_inputs.sequence_lengths.size(0);
+    torch::Tensor kv_cache_kernel_block_id_device;
     if (attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0) {
-
-        kv_cache_kernel_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_host);
-        kv_cache_kernel_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_device);
+        kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
 
     CKAttnPtr attn_params;
     bool      use_fmha_fp8 = false;
     use_fmha_fp8           = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
 
-    auto params = device_->PrepareCKAttn(
+    auto params = PrepareCKAttn(
         attn_configs_, kv_cache_kernel_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
     if (!params) {
         throw std::runtime_error("FusedRopeKVCacheDecodeOp::prepare: PrepareCKAttn failed. "

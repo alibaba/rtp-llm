@@ -269,24 +269,39 @@ class PrepareCudaGraphKernelTest(TestCase):
         grid, _, _, total_bm, BLOCK_SIZE = _compute_cg_grid(N, M)
         if mode == 0:
             _prepare_cg_decode_kernel[grid](
-                src1, seq_lens_out,
-                block_id, kv_offset_out,
-                N, M, total_bm,
+                src1,
+                seq_lens_out,
+                block_id,
+                kv_offset_out,
+                N,
+                M,
+                total_bm,
                 BLOCK_SIZE=BLOCK_SIZE,
             )
         elif mode == 1:
             _prepare_cg_spec_decode_kernel[grid](
-                src1, src2, seq_lens_out,
-                block_id, kv_offset_out,
-                N, M, total_bm,
+                src1,
+                src2,
+                seq_lens_out,
+                block_id,
+                kv_offset_out,
+                N,
+                M,
+                total_bm,
                 BLOCK_SIZE=BLOCK_SIZE,
             )
         else:
             _prepare_cg_prefill_kernel[grid](
-                src1, src2,
-                seq_lens_out, cu_kv_seqlens_out,
-                block_id, kv_offset_out,
-                page_size, N, M, total_bm,
+                src1,
+                src2,
+                seq_lens_out,
+                cu_kv_seqlens_out,
+                block_id,
+                kv_offset_out,
+                page_size,
+                N,
+                M,
+                total_bm,
                 BLOCK_SIZE=BLOCK_SIZE,
             )
         torch.cuda.synchronize()

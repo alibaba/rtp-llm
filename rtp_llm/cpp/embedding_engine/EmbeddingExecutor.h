@@ -35,22 +35,20 @@ using Flag = std::bitset<NUM_INPUT_TYPES>;
 
 class EmbeddingExecutor {
 public:
-    explicit EmbeddingExecutor(const EngineInitParams& params, rtp_llm::DeviceBase* device, py::object handler);
+    explicit EmbeddingExecutor(const EngineInitParams& params, py::object handler);
 
     absl::Status process(const std::list<EmbeddingStreamPtr>& streams);
 
-    rtp_llm::DeviceBase*            device_;
-
 private:
-    std::unique_ptr<GptModel>       model_;
-    py::object                      handler_;
-    HandlerArgs::Flag               handler_args_;
-    py::handle                      torch_type_;
-    rtp_llm::BufferPtr              max_position_ids_buf_;
-    kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
-    ModelConfig                     model_config_;
-    ParallelismConfig               parallelism_config;
-    EPLBConfig                      eplb_config;
+    std::unique_ptr<ModelBase>   model_;
+    py::object                   handler_;
+    HandlerArgs::Flag            handler_args_;
+    py::handle                   torch_type_;
+    torch::Tensor                max_position_ids_tensor_;
+    kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
+    ModelConfig                  model_config_;
+    ParallelismConfig            parallelism_config;
+    EPLBConfig                   eplb_config;
 
     ModelRequest                     generateOldModelRequest(GptModelInputs& model_input);
     absl::StatusOr<GptModelInputs>   gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const;

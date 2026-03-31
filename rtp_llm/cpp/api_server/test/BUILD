@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
-load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
+load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_copts = [
     "-fno-access-control",
@@ -14,7 +14,6 @@ cc_library(
 )
 
 test_deps = [
-    "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp/models:models",
     "//rtp_llm/cpp/config:config_modules",
     ":test_headers",
@@ -63,6 +62,7 @@ cc_binary(
         ":api_server_unittest_lib",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ],
+    data = ["//:rtp_compute_ops"],
     linkshared = 1,
 )
 
@@ -79,7 +79,6 @@ cc_library(
         "mock/MockChatRender.h",
         "mock/MockTokenizer.h",
         "mock/MockOpenaiEndpoint.h",
-        "mock/MockLoraManager.h",
         "mock/MockWeightsLoader.h",
         "ErrorResponseTest.cc",
         "HealthServiceTest.cc",

@@ -185,7 +185,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
 
         result = self.prefill_wrapper.run(q, kv_cache.kv_cache_base)
 
-
         return result
 
 

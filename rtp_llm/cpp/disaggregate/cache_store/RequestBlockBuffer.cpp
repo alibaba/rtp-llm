@@ -5,15 +5,10 @@
 
 namespace rtp_llm {
 
-rtp_llm::Buffer BlockBuffer::toDeviceBuffer() {
-    const auto device_type = gpu_mem ? rtp_llm::MemoryType::MEMORY_GPU : rtp_llm::MemoryType::MEMORY_CPU;
-    return rtp_llm::Buffer(device_type, rtp_llm::DataType::TYPE_UINT8, {len}, addr.get());
-}
-
 RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, const std::string& request_key):
     requestid_(requestid), request_key_(request_key) {}
 
-RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, rtp_llm::DeviceEventPtr event):
+RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, rtp_llm::AsyncEventPtr event):
     requestid_(requestid), event_(std::move(event)) {}
 
 RequestBlockBuffer::~RequestBlockBuffer() {}
@@ -31,7 +26,7 @@ const std::string& RequestBlockBuffer::getRequestKey() const {
     return request_key_.empty() ? requestid_ : request_key_;
 }
 
-const rtp_llm::DeviceEvent* RequestBlockBuffer::getEvent() const {
+const rtp_llm::AsyncEvent* RequestBlockBuffer::getEvent() const {
     return event_.get();
 }
 

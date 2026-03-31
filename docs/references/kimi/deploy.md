@@ -61,7 +61,6 @@ ENABLE_MERGE_W13=1 \
 --seq_size_per_block 64 \
 --log_level INFO \
 --reserver_runtime_mem_mb 76800 \
---device_reserve_memory_bytes -12800000000 \
 --start_port 8090 \
 --warm_up 0
 ```
@@ -125,7 +124,6 @@ REDUNDANT_EXPERT=48 \
 --seq_size_per_block 64 \
 --log_level INFO \
 --reserver_runtime_mem_mb 6144 \
---device_reserve_memory_bytes -6144000000 \
 --start_port 8090 \
 --warm_up 0
 ```

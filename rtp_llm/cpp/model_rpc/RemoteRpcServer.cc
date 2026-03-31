@@ -64,7 +64,6 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
         && init_params.pd_sep_config.role_type != RoleType::DECODE) {
         RTP_LLM_FAIL("role_type must be prefill or decode, but it is %d", init_params.pd_sep_config.role_type);
     }
-    auto device        = engine_->getDevice();
     auto cache_manager = engine_->resourceContext().cache_manager;
 
     CacheStoreInitParams params;
@@ -79,7 +78,6 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
     params.rdma_worker_thread_count     = init_params.cache_store_config.rdma_worker_thread_count;
     params.messager_io_thread_count     = init_params.cache_store_config.messager_io_thread_count;
     params.messager_worker_thread_count = init_params.cache_store_config.messager_worker_thread_count;
-    params.device                       = device;
     params.metrics_reporter             = metrics_reporter_;
     RTP_LLM_LOG_INFO("cache store listen port is [%ld], rdma listen port is [%ld] rdma_mode is [%d]",
                      params.listen_port,
@@ -89,8 +87,8 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
     RTP_LLM_CHECK_WITH_INFO(cache_store_ != nullptr, "cache store init failed");
     RTP_LLM_LOG_INFO("cache store init success");
 
-    device->setCacheStore(cache_store_);
-    cache_manager->regUserMr(maga_init_params_.model_id);
+    cache_manager->setCacheStore(cache_store_);
+    cache_manager->regUserMr(maga_init_params_.model_id, cache_store_);
 
     resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(cache_store_);
 }

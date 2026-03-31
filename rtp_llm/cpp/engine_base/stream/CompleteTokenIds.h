@@ -2,14 +2,13 @@
 
 #include <memory>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "torch/all.h"
 
 namespace rtp_llm {
 
 class CompleteTokenIds {
 public:
-    CompleteTokenIds(
-        rtp_llm::DeviceBase* device, int batch_size, int max_batch_size, int max_seq_len, int seq_size_per_block);
+    CompleteTokenIds(int batch_size, int max_batch_size, int max_seq_len, int seq_size_per_block);
     CompleteTokenIds(const CompleteTokenIds& other, bool share = false, int shift_token_num = 0);
 
 public:
@@ -27,17 +26,16 @@ public:
     bool matchEosToken(int batch_id, int token_id);
     bool matchStopWordsList(int batch_id, const std::vector<int>& stop_words);
 
-    bool update(const rtp_llm::BufferPtr& new_tokens,
-                int64_t                   begin_time_us,
-                int                       num_new_tokens,
-                int                       input_length,
-                int                       max_token_num,
-                int                       vocab_size,
-                bool                      is_beam_search,
-                int64_t                   stream_id,
-                int&                      error_token_id);
+    bool update(const torch::Tensor& new_tokens,
+                int64_t              begin_time_us,
+                int                  num_new_tokens,
+                int                  input_length,
+                int                  max_token_num,
+                int                  vocab_size,
+                bool                 is_beam_search,
+                int64_t              stream_id,
+                int&                 error_token_id);
     void copyTokensTo(int batch_id, void* dst, int offset, size_t token_num);
-    void appendTokens(int batch_id, size_t token_num, const rtp_llm::Buffer& src);
 
     int  seqLength() const;
     int  totalSeqLength() const;
@@ -46,7 +44,7 @@ public:
     void setReserveStep(int reserve_step);
     int  getReserveStep() const;
 
-    const rtp_llm::BufferPtr& completeTokenIds();
+    torch::Tensor completeTokenIds();
 
     int64_t firstTokenTimeUs() const;
     int64_t firstTokenLatencyUs() const;
@@ -55,11 +53,14 @@ public:
 
     int32_t* data(int batch_id);
 
+    // Number of columns (max token capacity per batch row)
+    int64_t tokenDim() const {
+        return complete_token_ids_.size(1);
+    }
+
     std::string showStatus(int batch_id);
 
 private:
-    rtp_llm::DeviceBase* device_;
-
     int batch_size_;
     int max_batch_size_;
     int max_seq_len_;
@@ -72,7 +73,7 @@ private:
     int64_t first_token_time_us_    = 0;
     int64_t first_token_latency_us_ = 0;
 
-    rtp_llm::BufferPtr complete_token_ids_;
+    torch::Tensor complete_token_ids_;
 };
 
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;

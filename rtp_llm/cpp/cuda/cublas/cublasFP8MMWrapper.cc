@@ -24,48 +24,38 @@ static constexpr uint64_t CUBLAS_WORKSPACE_SIZE = 134217728;  // 128 MB
 cublasFP8MMWrapper::cublasFP8MMWrapper(cublasLtHandle_t cublaslt_handle,
                                        cudaStream_t     stream,
                                        cublasAlgoMap*   cublas_algo_map,
-                                       std::mutex*      mu,
-                                       IAllocator*      allocator):
-    cublasMMWrapper(nullptr, cublaslt_handle, stream, cublas_algo_map, mu, allocator) {
+                                       std::mutex*      mu):
+    cublasMMWrapper(nullptr, cublaslt_handle, stream, cublas_algo_map, mu) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    RTP_LLM_CHECK_WITH_INFO(allocator != nullptr, "must pass allocator to cublasFP8MMWrapper");
     cublasVersionCheck();
-
-    if (allocator_ != nullptr) {
-        cublas_workspace_qgemm_ = allocator_->reMalloc(cublas_workspace_qgemm_, CUBLAS_WORKSPACE_1MB);
-    }
+    cublas_workspace_qgemm_tensor_ = torch::empty({static_cast<int64_t>(CUBLAS_WORKSPACE_1MB)},
+                                                  torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    cublas_workspace_qgemm_        = cublas_workspace_qgemm_tensor_.data_ptr();
 }
 
 cublasFP8MMWrapper::cublasFP8MMWrapper(cublasHandle_t   cublas_handle,
                                        cublasLtHandle_t cublaslt_handle,
                                        cudaStream_t     stream,
                                        cublasAlgoMap*   cublas_algo_map,
-                                       std::mutex*      mu,
-                                       IAllocator*      allocator):
-    cublasMMWrapper(cublas_handle, cublaslt_handle, stream, cublas_algo_map, mu, allocator) {
+                                       std::mutex*      mu):
+    cublasMMWrapper(cublas_handle, cublaslt_handle, stream, cublas_algo_map, mu) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    RTP_LLM_CHECK_WITH_INFO(allocator != nullptr, "must pass allocator to cublasFP8MMWrapper");
     cublasVersionCheck();
-    if (allocator_ != nullptr) {
-        cublas_workspace_qgemm_ = allocator_->reMalloc(cublas_workspace_qgemm_, CUBLAS_WORKSPACE_1MB);
-    }
+    cublas_workspace_qgemm_tensor_ = torch::empty({static_cast<int64_t>(CUBLAS_WORKSPACE_1MB)},
+                                                  torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    cublas_workspace_qgemm_        = cublas_workspace_qgemm_tensor_.data_ptr();
 }
 
 cublasFP8MMWrapper::~cublasFP8MMWrapper() {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    mu_ = nullptr;
-    if (allocator_ != nullptr) {
-        allocator_->free((void**)(&cublas_workspace_qgemm_));
-    }
+    mutex_                         = nullptr;
+    cublas_workspace_qgemm_        = nullptr;
+    cublas_workspace_qgemm_tensor_ = torch::Tensor();
 }
 
 cublasFP8MMWrapper::cublasFP8MMWrapper(const cublasFP8MMWrapper& wrapper):
-    cublasMMWrapper(wrapper.cublas_handle_,
-                    wrapper.cublaslt_handle_,
-                    wrapper.stream_,
-                    wrapper.cublas_algo_map_,
-                    wrapper.mu_,
-                    wrapper.allocator_) {
+    cublasMMWrapper(
+        wrapper.cublas_handle_, wrapper.cublaslt_handle_, wrapper.stream_, wrapper.cublas_algo_map_, wrapper.mutex_) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     cublasVersionCheck();
 }
@@ -131,7 +121,7 @@ void cublasFP8MMWrapper::Gemm(__nv_bfloat16*       res,
                               cudaStream_t         stream,
                               bool                 fastAccum) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    mu_->lock();
+    mutex_->lock();
 
     const void*  devAscalePtr = (const void*)kernel_scale;
     const void*  devBscalePtr = (const void*)input_scale;
@@ -284,7 +274,7 @@ void cublasFP8MMWrapper::Gemm(__nv_bfloat16*       res,
         check_cuda_value(cublasLtMatmulDescDestroy(matmulDesc));
     }
 
-    mu_->unlock();
+    mutex_->unlock();
 }
 
 void cublasFP8MMWrapper::Gemm(__nv_fp8_e4m3*       res,
@@ -338,7 +328,7 @@ void cublasFP8MMWrapper::Gemm(__nv_fp8_e4m3*       res,
                               cudaStream_t         stream,
                               bool                 fastAccum) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    mu_->lock();
+    mutex_->lock();
 
     const void* devAscalePtr = (const void*)kernel_scale;
     const void* devBscalePtr = (const void*)input_scale;
@@ -509,7 +499,7 @@ void cublasFP8MMWrapper::Gemm(__nv_fp8_e4m3*       res,
         check_cuda_value(cublasLtMatmulDescDestroy(matmulDesc));
     }
 
-    mu_->unlock();
+    mutex_->unlock();
 }
 
 template<bool RELU, bool GELU>
@@ -525,7 +515,7 @@ void cublasFP8MMWrapper::Conv1x1Gemm(__nv_fp8_e4m3*       res,
                                      const float          output_scale,
                                      cudaStream_t         stream) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    mu_->lock();
+    mutex_->lock();
     size_t workspace_size = 0;
     // get workspace size
     qgmmaLauncher.getWorkSpaceSize<RELU, GELU>(n, workspace_size);
@@ -538,7 +528,7 @@ void cublasFP8MMWrapper::Conv1x1Gemm(__nv_fp8_e4m3*       res,
     qgmmaLauncher.invokeQgmma1x1<RELU, GELU>(
         res, m, n, k, input, kernel, bias, input_scale, kernel_scale, output_scale, cublas_workspace_qgemm_, stream);
     check_cuda_error();
-    mu_->unlock();
+    mutex_->unlock();
 }
 
 template void cublasFP8MMWrapper::Conv1x1Gemm<true, false>(__nv_fp8_e4m3*       res,
@@ -605,7 +595,7 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_bfloat16*       res,
                                        const float*         output_scale,
                                        cudaStream_t         stream) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    mu_->lock();
+    mutex_->lock();
 
     const void*  devAscalePtr = (const void*)kernel_scale;
     const void*  devBscalePtr = (const void*)input_scale;
@@ -743,7 +733,7 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_bfloat16*       res,
         check_cuda_value(cublasLtMatmulDescDestroy(matmulDesc));
     }
 
-    mu_->unlock();
+    mutex_->unlock();
 }
 
 template<bool RELU, bool GELU>
@@ -765,7 +755,7 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_fp8_e4m3*       res,
                                        const float*         output_scale,
                                        cudaStream_t         stream) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    mu_->lock();
+    mutex_->lock();
 
     const void*  devAscalePtr = (const void*)kernel_scale;
     const void*  devBscalePtr = (const void*)input_scale;
@@ -916,7 +906,7 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_fp8_e4m3*       res,
         check_cuda_value(cublasLtMatmulDescDestroy(matmulDesc));
     }
 
-    mu_->unlock();
+    mutex_->unlock();
 }
 
 template void cublasFP8MMWrapper::Gemm_Bias_Act<false, true>(__nv_bfloat16*       res,

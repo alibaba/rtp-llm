@@ -4,7 +4,8 @@ load("//bazel:arch_select.bzl", "torch_deps")
 cc_test = cc_test_wrapper
 
 test_deps = [
-    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    "//rtp_llm/cpp/cuda/ops:cuda_impl",
+    "//rtp_llm/cpp/core:exec_ops_test_lib",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/utils:core_utils",

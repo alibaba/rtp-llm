@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/api_server/GenerateStreamWrapper.h"
 
 #include "rtp_llm/cpp/api_server/Exception.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 
@@ -13,20 +12,14 @@ void GenerateStreamWrapper::init(const std::shared_ptr<GenerateInput>& input,
                                  const std::shared_ptr<EngineBase>&    engine) {
     input_ids_       = input->input_ids;
     generate_config_ = input->generate_config;
-    // align life cycle with stream
-    lora_guard_ =
-        std::make_shared<lora::LoraResourceGuard>(engine->getLoraManager(), input->generate_config->adapter_name);
-    stream_ = engine->enqueue(input);
+    stream_          = engine->enqueue(input);
 }
 
 void GenerateStreamWrapper::init(GenerateStreamPtr stream, const std::shared_ptr<EngineBase>& engine) {
     auto input       = stream->generateInput();
     input_ids_       = input->input_ids;
     generate_config_ = input->generate_config;
-    // align life cycle with stream
-    lora_guard_ =
-        std::make_shared<lora::LoraResourceGuard>(engine->getLoraManager(), input->generate_config->adapter_name);
-    stream_ = stream;
+    stream_          = stream;
 }
 
 std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
@@ -78,7 +71,7 @@ std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
 MultiSeqsResponse GenerateStreamWrapper::formatResponse(const std::vector<std::string>&        generate_texts,
                                                         const GenerateOutputs&                 generate_outputs,
                                                         const std::shared_ptr<GenerateConfig>& generate_config,
-                                                        rtp_llm::BufferPtr                     input_ids) {
+                                                        const torch::Tensor&                   input_ids) {
     if (generate_texts.size() == 0) {
         RTP_LLM_LOG_WARNING("generate_texts is empty!");
         return MultiSeqsResponse();
@@ -122,28 +115,30 @@ MultiSeqsResponse GenerateStreamWrapper::formatResponse(const std::vector<std::s
         auto output_ids    = generate_output.output_ids;
 
         if (generate_config->return_logits && logits.has_value()) {
-            auto buffer = logits.value();
-            res.logits.value().push_back(rtp_llm::buffer2vector<float>(*buffer));
+            auto tensor = logits.value().to(torch::kFloat).contiguous();
+            res.logits.value().push_back(
+                std::vector<float>(tensor.data_ptr<float>(), tensor.data_ptr<float>() + tensor.numel()));
         }
         if (generate_config->calculate_loss && loss.has_value()) {
-            auto buffer = loss.value();
-            res.loss.value().push_back(rtp_llm::buffer2vector<float>(*buffer));
+            auto tensor = loss.value().to(torch::kFloat).contiguous();
+            res.loss.value().push_back(
+                std::vector<float>(tensor.data_ptr<float>(), tensor.data_ptr<float>() + tensor.numel()));
         }
         if (generate_config->return_hidden_states && hidden_states.has_value()) {
-            auto buffer                          = hidden_states.value();
-            auto hidden_states_tensor            = Buffer2torchTensor(buffer);
-            hidden_states_tensor                 = hidden_states_tensor.to(torch::kFloat).to(torch::kCPU);
-            std::vector<float> hidden_states_vec = std::vector<float>(hidden_states_tensor.numel());
-            memcpy(hidden_states_vec.data(),
-                   hidden_states_tensor.data_ptr<float>(),
-                   hidden_states_tensor.numel() * sizeof(float));
+            auto hidden_states_tensor = hidden_states.value().to(torch::kFloat).to(torch::kCPU).contiguous();
+            std::vector<float> hidden_states_vec(hidden_states_tensor.data_ptr<float>(),
+                                                 hidden_states_tensor.data_ptr<float>() + hidden_states_tensor.numel());
             res.hidden_states.value().push_back(hidden_states_vec);
         }
         if (generate_config->return_output_ids) {
-            res.output_ids.value().push_back(rtp_llm::buffer2vector<int32_t>(*output_ids));
+            auto ids_contig = output_ids.contiguous();
+            res.output_ids.value().push_back(std::vector<int32_t>(ids_contig.data_ptr<int32_t>(),
+                                                                  ids_contig.data_ptr<int32_t>() + ids_contig.numel()));
         }
         if (generate_config->return_input_ids) {
-            res.input_ids.value().push_back(rtp_llm::buffer2vector<int32_t>(*input_ids));
+            auto ids_cpu = input_ids.contiguous();
+            res.input_ids.value().push_back(
+                std::vector<int32_t>(ids_cpu.data_ptr<int32_t>(), ids_cpu.data_ptr<int32_t>() + ids_cpu.numel()));
         }
     }
 

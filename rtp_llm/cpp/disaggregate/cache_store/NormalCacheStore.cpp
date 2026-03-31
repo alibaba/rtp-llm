@@ -38,7 +38,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
         memory_util_ = createMemoryUtilImpl(params_.rdma_mode);
     }
 
-    request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_, params.device);
+    request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_);
 
     // always has metric
     metrics_reporter_ = params.metrics_reporter;

@@ -4,12 +4,11 @@
 #include <limits.h>
 #include <condition_variable>
 
-#include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
 
@@ -153,25 +152,25 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     generate_stream->setIsContextStream(false);
     generate_stream->step();
 
-    auto new_tokens = engine_->getDevice()->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                            {(size_t)generate_stream->nextBatchSize(), (size_t)1},
-                                                            rtp_llm::AllocationType::HOST},
-                                                           {});
+    auto new_tokens = torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);
 
-    auto data           = new_tokens->data<int32_t>();
-    auto first_token_id = generate_request.first_generate_token_id();
-    *data               = first_token_id;
+    new_tokens.data_ptr<int32_t>()[0] = generate_request.first_generate_token_id();
     generate_stream->incLastOutputPos();
-    generate_stream->update({new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr});
+    generate_stream->update({new_tokens,
+                             1,
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor()});
     if (generate_request.position_ids_size() > 0) {
-        auto context_position_ids =
-            engine_->getDevice()->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                  {(size_t)generate_request.position_ids_size()},
-                                                  rtp_llm::AllocationType::HOST},
-                                                 {});
-        memcpy(context_position_ids->data<int32_t>(),
-               generate_request.position_ids().data(),
-               generate_request.position_ids_size() * sizeof(int32_t));
+        auto context_position_ids = torch::from_blob(const_cast<int32_t*>(generate_request.position_ids().data()),
+                                                     {(int64_t)generate_request.position_ids_size()},
+                                                     torch::kInt32)
+                                        .clone();
         generate_stream->setContextPositionIds(context_position_ids);
     }
     if (propose_maga_init_params_) {
@@ -183,12 +182,9 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
         generate_stream->setProposeToken(propose_tokens);
 
-        auto device           = engine_->getDevice();
-        auto sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
-        auto propose_token =
-            device->allocateBuffer({DataType::TYPE_INT32, {1, propose_tokens.size()}, AllocationType::HOST});
-        memcpy(propose_token->data<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
-        sp_output_buffer->tokens = propose_token;
+        auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_output_buffer->tokens = torch::zeros({1, (int64_t)propose_tokens.size()}, torch::kInt32);
+        memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
         auto propose_probs_t  = QueryConverter::transTensor(generate_request.propose_probs());
         auto propose_hidden_t = QueryConverter::transTensor(generate_request.propose_hidden());

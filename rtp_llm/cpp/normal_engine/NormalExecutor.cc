@@ -1,11 +1,12 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include <cstdlib>
 #include <memory>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include "rtp_llm/cpp/models/GptModel.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
-#include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
@@ -14,34 +15,38 @@ using namespace std;
 
 namespace rtp_llm {
 
-NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
-                               const std::shared_ptr<KVCacheManager>&    cache_manager,
-                               rtp_llm::DeviceBase*                      device,
-                               const std::shared_ptr<lora::LoraManager>& lora_manager,
-                               bool                                      warm_up,
-                               bool                                      is_propose,
-                               int                                       propose_model_index):
-    Executor(device),
+NormalExecutor::ModelFactory NormalExecutor::test_model_factory = nullptr;
+
+NormalExecutor::~NormalExecutor() {
+    cudaProfilerEnd();
+}
+
+NormalExecutor::NormalExecutor(const EngineInitParams&                params,
+                               const std::shared_ptr<KVCacheManager>& cache_manager,
+                               bool                                   warm_up,
+                               bool                                   is_propose,
+                               int                                    propose_model_index,
+                               const ExecInitParams&                  exec_init_params):
+    Executor(),
     cache_manager_(cache_manager),
-    lora_manager_(lora_manager),
     warm_up_(warm_up),
     use_all_gather_(params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)),
     is_propose_(is_propose),
     propose_model_index_(propose_model_index) {
-    enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
-    RTP_LLM_LOG_INFO("enable_detail_log_ = %d", enable_detail_log_);
+    enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
+    tp_rank_            = params.parallelism_config.tp_rank;
+    parallelism_config_ = params.parallelism_config;
+    RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
 
     if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
         // use first moe layer weight as moe weight type
-        int  first_moe_layer = params.model_config_.moe_layer_index.front();
-        auto moe_weight_type = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
-        bool is_gated_activation = params.model_config_.isGatedActivation();
-        auto moe_inter_size =
-            is_gated_activation ?
-                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
-                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
+        int         first_moe_layer = params.model_config_.moe_layer_index.front();
+        const auto& moe_kernel      = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
+        auto        moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
+        bool        is_gated_activation = params.model_config_.isGatedActivation();
+        auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
 
         expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
                                                        params.eplb_config.phy_exp_num(params.model_config_.expert_num),
@@ -52,23 +57,24 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
                                                        params.parallelism_config.ep_size,
                                                        params.py_eplb,
                                                        moe_weight_type,
-                                                       device_,
                                                        params.model_config_.quant_algo,
                                                        metrics_reporter_,
                                                        params.eplb_config);
     }
 
-    sampler_.reset(new Sampler(SamplerInitParams{device_}));
+    sampler_.reset(new Sampler(SamplerInitParams{}));
 
     GptModelInitParams model_init_params(
-        {device_,
-         params.gpt_weights,
+        {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
          cache_manager ?
              std::make_optional(is_propose_ ? cache_manager->getMTPModuleCacheLayerLayout(propose_model_index_) :
                                               cache_manager->getMainModelCacheLayerLayout()) :
              std::nullopt,
-         params.model_id});
+         params.model_id,
+         params.parallelism_config,
+         exec_init_params,
+         cache_manager});  // Pass cache_manager for cache_store access
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -77,12 +83,11 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(model_init_params, params.py_model));
-    } else if (device_->initParams().hw_kernel_config.enable_native_cuda_graph) {
-        RTP_LLM_LOG_INFO("init legacy c++ gpt model with native cuda graph");
-        model_.reset(new NativeDeviceGraphModel(model_init_params));
+    } else if (test_model_factory) {
+        RTP_LLM_LOG_INFO("init executor with test model factory");
+        model_ = test_model_factory(model_init_params);
     } else {
-        RTP_LLM_LOG_INFO("init legacy c++ gpt model");
-        model_.reset(new GptModel(model_init_params));
+        RTP_LLM_LOG_WARNING("py_model is None — model will not be initialized (test mode)");
     }
 
     // when warmup, cache manager maybe nullptr
@@ -94,7 +99,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
     LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
-    device_->profileStart();
+    cudaProfilerBegin();
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
@@ -117,7 +122,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
-        tpSyncModelInputs(model_input, device_);
+        tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
             return absl::OkStatus();
         }
@@ -129,18 +134,13 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
     {
         // update kv cache
-        if (model_input.kv_cache_update_mapping) {
+        if (model_input.kv_cache_update_mapping.defined()) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
-            cache_manager_->blockBatchCopy(*model_input.kv_cache_update_mapping);
+            cache_manager_->blockBatchCopy(model_input.kv_cache_update_mapping);
         }
     }
-    // get lora input
-    if (lora_manager_) {
-        model_input.lora_model_input =
-            lora_manager_->makeLoraModelInput(model_input.lora_ids, model_input.lora_input_lengths);
-    }
     {
-        bool force = device_->getDeviceProperties().tp_rank == 0 && enable_detail_log_;
+        bool force = tp_rank_ == 0 && enable_detail_log_;
         if (force) {
             RTP_LLM_LOG_INFO("model_input: %s", model_input.debugString(force).c_str());
         } else {
@@ -154,7 +154,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        RTP_LLM_LOG_DEBUG("model forward done");
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -162,8 +161,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (device_->getDeviceProperties().tp_rank > 0 || warm_up_ || streams.size() == 0) {
-        device_->syncAndCheck();
+    if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
+        cudaSyncAndCheck();
         model_->releaseBuffers();
         return absl::OkStatus();
     }
@@ -193,7 +192,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups,
                                    RtpLLMExecutorMetricsCollector& executor_collector,
                                    RtpLLMTokenPSMetricsCollector&  tps_collector) {
-    if (device_->getDeviceProperties().tp_rank > 0) {
+    if (tp_rank_ > 0) {
         return;
     }
     if (metrics_reporter_) {

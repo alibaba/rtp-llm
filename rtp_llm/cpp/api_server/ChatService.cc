@@ -22,11 +22,8 @@ std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t           
     metric_reporter_->reportFTInputTokenLengthMetric(input->generate_config->select_tokens_id.size());
     metric_reporter_->reportFTNumBeansMetric(input->generate_config->maxNumBeams());
 
-    const auto& vec    = rendered_input.input_ids;
-    auto        device = rtp_llm::DeviceFactory::getDefaultDevice();
-    input->input_ids =
-        device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {vec.size()}, rtp_llm::AllocationType::HOST}, {});
-    memcpy(input->input_ids->data(), vec.data(), input->input_ids->sizeBytes());
+    const auto& vec  = rendered_input.input_ids;
+    input->input_ids = torch::from_blob(const_cast<int*>(vec.data()), {(int64_t)vec.size()}, torch::kInt32).clone();
 
     input->multimodal_inputs = std::move(rendered_input.multimodal_inputs);
     if (mm_processor_ != nullptr && input->multimodal_inputs) {

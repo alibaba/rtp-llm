@@ -17,8 +17,8 @@ cc_library(
     ],
     copts = test_copts,
     deps =  [
-        "//rtp_llm/cpp/devices/testing:device_test_utils",
-        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/cpp/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/config:config_modules",
@@ -40,8 +40,8 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/devices/testing:device_test_utils",
-        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/cpp/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/models:models",
         "@com_google_googletest//:gtest",

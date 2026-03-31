@@ -197,9 +197,7 @@ std::string HWKernelConfig::to_string() const {
 // DeviceResourceConfig
 std::string DeviceResourceConfig::to_string() const {
     std::ostringstream oss;
-    oss << "device_reserve_memory_bytes: " << device_reserve_memory_bytes << "\n"
-        << "host_reserve_memory_bytes: " << host_reserve_memory_bytes << "\n"
-        << "overlap_math_sm_count: " << overlap_math_sm_count << "\n"
+    oss << "overlap_math_sm_count: " << overlap_math_sm_count << "\n"
         << "overlap_comm_type: " << overlap_comm_type << "\n"
         << "m_split: " << m_split << "\n"
         << "enable_comm_overlap: " << enable_comm_overlap << "\n"
@@ -228,7 +226,6 @@ std::string MoeConfig::to_string() const {
 // ModelSpecificConfig
 std::string ModelSpecificConfig::to_string() const {
     std::ostringstream oss;
-    oss << "max_lora_model_size: " << max_lora_model_size << "\n";
     oss << "load_python_model:" << load_python_model << "\n";
     return oss.str();
 }

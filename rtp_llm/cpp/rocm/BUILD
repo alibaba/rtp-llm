@@ -11,32 +11,6 @@ cc_library(
 )
 
 cc_library(
-    name = "rocm_custom_ar",
-    srcs = [
-        "custom_ar/custom_ar_comm.cc",
-        "custom_ar/quick_ar_comm.cc",
-    ],
-    hdrs = [
-        "custom_ar/custom_ar_comm.h",
-        "custom_ar/quick_ar_comm.h",
-    ],
-    deps = [
-        "//rtp_llm/cpp/cuda:nccl_util",
-        "//rtp_llm/cpp/core:types",
-        "@local_config_rocm//rocm:rocm_headers",
-    ] + torch_deps() + select({
-        "@//:using_aiter_src": [
-            "@aiter_src//:module_custom_all_reduce",
-            "@aiter_src//:module_quick_all_reduce",
-        ],
-        "//conditions:default": ["@aiter//:module_custom_all_reduce", "@aiter//:module_quick_all_reduce"],
-    }),
-    copts = rocm_copts() + ["-DUSE_ROCM=1"],
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "rocm_host_utils",
     srcs = glob([
         "*.cc",
@@ -52,7 +26,8 @@ cc_library(
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:rocblas",
         "@local_config_rocm//rocm:hipblaslt",
-        "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/core:devices_base",
+        "//rtp_llm/cpp/core:op_data",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/core:allocator",
         "//rtp_llm/cpp/core:types",

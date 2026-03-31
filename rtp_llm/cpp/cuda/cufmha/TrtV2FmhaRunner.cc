@@ -213,12 +213,12 @@ void TrtV2FmhaRunner::runTrtV2FmhaPaged(void*        input,
 }
 
 std::shared_ptr<TRTAttn> prepareTrtAttnParams(const AttentionConfigs& configs,
-                                              const BufferPtr&        kv_cache_block_id,
+                                              const torch::Tensor&    kv_cache_block_id,
                                               int                     batch_size,
                                               bool                    use_fp8_fmha,
                                               cudaStream_t            stream,
                                               bool                    enable_paged_trt_v2) {
-    if (!kv_cache_block_id || 0 == batch_size) {
+    if (!kv_cache_block_id.defined() || 0 == batch_size) {
         return nullptr;
     }
 
@@ -240,31 +240,32 @@ std::shared_ptr<TRTAttn> prepareTrtAttnParams(const AttentionConfigs& configs,
         ele_size   = 1;
     }
 
-    RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id->shape()[0] == batch_size,
-                            "context attention kv blocks batch size expected [%d] but buffer size is [%d]",
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id.size(0) == batch_size,
+                            "context attention kv blocks batch size expected [%d] but got [%d]",
                             (int)batch_size,
-                            (int)kv_cache_block_id->shape()[0]);
+                            (int)kv_cache_block_id.size(0));
 
-    const size_t max_blocks_per_batch = kv_cache_block_id->shape()[1];
+    const size_t max_blocks_per_batch = kv_cache_block_id.size(1);
 
     // Create torch::Tensor for kv_cache_offset
     trt_attn->kv_cache_offset = torch::empty({int64_t(batch_size), 1, 2, int64_t(max_blocks_per_batch)},
                                              torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
-    trt_attn->kv_block_array                     = KVBlockArray(batch_size,
+    trt_attn->kv_block_array            = KVBlockArray(batch_size,
                                             max_blocks_per_batch,
-                                            configs.tokens_per_block,
+                                            configs.kernel_tokens_per_block,
                                             configs.kv_head_num * configs.size_per_head * ele_size,
                                             0,
                                             0,
                                             nullptr,
                                             nullptr,
                                             (rtp_llm::KVCacheIndex*)trt_attn->kv_cache_offset.data_ptr<int>());
-    trt_attn->kv_block_array.cache_type          = cache_type;
-    trt_attn->kv_block_array.mScaleBytesPerBlock = configs.tokens_per_block * configs.kv_head_num * sizeof(float);
+    trt_attn->kv_block_array.cache_type = cache_type;
+    trt_attn->kv_block_array.mScaleBytesPerBlock =
+        configs.kernel_tokens_per_block * configs.kv_head_num * sizeof(float);
 
     invokeConvertOffsetToBlockArrayData(trt_attn->kv_cache_offset.data_ptr<int>(),
-                                        kv_cache_block_id->data<int>(),
+                                        kv_cache_block_id.data_ptr<int>(),
                                         batch_size,
                                         max_blocks_per_batch,
                                         stream);

@@ -62,19 +62,19 @@ void GroupTopKOp::forward(torch::Tensor&       topk_values,
     return;
 }
 
-void registerGroupTopKOp(const py::module& m) {
+void registerGroupTopKOp(const pybind11::module& m) {
     pybind11::class_<GroupTopKOp>(m, "GroupTopKOp")
         .def(pybind11::init<>())
         .def("forward",
              &GroupTopKOp::forward,
-             py::arg("topk_values"),
-             py::arg("topk_indices"),
-             py::arg("scores"),
-             py::arg("scores_with_bias"),
-             py::arg("n_group"),
-             py::arg("topk_group"),
-             py::arg("topk"),
-             py::arg("renormalize"),
-             py::arg("routed_scaling_factor"));
+             pybind11::arg("topk_values"),
+             pybind11::arg("topk_indices"),
+             pybind11::arg("scores"),
+             pybind11::arg("scores_with_bias"),
+             pybind11::arg("n_group"),
+             pybind11::arg("topk_group"),
+             pybind11::arg("topk"),
+             pybind11::arg("renormalize"),
+             pybind11::arg("routed_scaling_factor"));
 }
 }  // namespace rtp_llm

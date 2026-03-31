@@ -1,7 +1,6 @@
 #pragma once
 
 #include <memory>
-#include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -37,8 +36,7 @@ public:
         layer_to_kv_cache_group_id_(cache_config.layer_to_group_id),
         kv_cache_group_types_(cache_config.group_types),
         warm_up_(warm_up),
-        enable_detail_log_(profiling_debug_logging_config.enable_detail_log),
-        device_(rtp_llm::DeviceFactory::getDefaultDevice()) {}
+        enable_detail_log_(profiling_debug_logging_config.enable_detail_log) {}
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const;
@@ -47,11 +45,11 @@ public:
                                                               const GptModelOutputs& model_output) const;
 
 protected:
-    SamplerInputs allocateSamplerInputs(const StreamGroups&       stream_groups,
-                                        size_t                    total_batch_size_in,
-                                        size_t                    total_batch_size_out,
-                                        const rtp_llm::BufferPtr& sequence_length,
-                                        size_t                    propose_step = 0) const;
+    SamplerInputs allocateSamplerInputs(const StreamGroups&  stream_groups,
+                                        size_t               total_batch_size_in,
+                                        size_t               total_batch_size_out,
+                                        const torch::Tensor& sequence_length,
+                                        size_t               propose_step = 0) const;
     void          setCommonSamplerInputs(SamplerInputs&                sampler_inputs,
                                          std::list<GenerateStreamPtr>& all_streams,
                                          bool                          score_batch  = false,
@@ -60,13 +58,13 @@ protected:
                                            std::list<GenerateStreamPtr>& all_streams,
                                            bool                          score_batch = false) const;
 
-    void dispatchSingleStream(GenerateStreamPtr   stream,
-                              const MergedOutput& merge_outputs,
-                              int                 batch_idx_in,
-                              int                 batch_idx_out,
-                              int                 token_offset,
-                              bool                return_all_probs,
-                              const BufferPtr&    new_tokens_all) const;
+    void dispatchSingleStream(GenerateStreamPtr    stream,
+                              const MergedOutput&  merge_outputs,
+                              int                  batch_idx_in,
+                              int                  batch_idx_out,
+                              int                  token_offset,
+                              bool                 return_all_probs,
+                              const torch::Tensor& new_tokens_all) const;
 
     void setKVCacheGroupTypes(std::vector<CacheGroupType> kv_cache_group_types) {
         kv_cache_group_types_ = kv_cache_group_types;
@@ -93,8 +91,6 @@ protected:
     std::vector<CacheGroupType>  kv_cache_group_types_;
     bool                         warm_up_;
     bool                         enable_detail_log_;
-
-    rtp_llm::DeviceBase* device_;
 };
 
 }  // namespace rtp_llm

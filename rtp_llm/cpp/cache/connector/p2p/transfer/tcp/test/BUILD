@@ -1,6 +1,7 @@
 load("//:def.bzl", "copts")
 
-load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
+load("//bazel:arch_select.bzl", "torch_deps")
+load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_copts = [
     "-fno-access-control",
@@ -18,14 +19,14 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_task_context",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/core:devices_base",
+        "//rtp_llm/cpp/core:exec_ops_test_lib",
         "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/cpp/metrics:metrics",
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
-    ] + device_impl_target(),
+    ] + device_impl_target() + torch_deps(),
 )
 
 cc_test(
@@ -44,14 +45,14 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_transfer_service",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/core:devices_base",
+        "//rtp_llm/cpp/core:exec_ops_test_lib",
         "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/cpp/metrics:metrics",
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
-    ] + device_impl_target(),
+    ] + device_impl_target() + torch_deps(),
 )
 
 cc_test(
@@ -69,12 +70,12 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/core:devices_base",
+        "//rtp_llm/cpp/core:exec_ops_test_lib",
         "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/cpp/metrics:metrics",
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
-    ] + device_impl_target(),
+    ] + device_impl_target() + torch_deps(),
 )

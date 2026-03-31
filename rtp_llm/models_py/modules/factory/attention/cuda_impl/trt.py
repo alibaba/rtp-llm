@@ -5,7 +5,6 @@ import torch
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
-
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQKVOut,
     FusedRopeKVCachePrefillOpQOut,

@@ -41,7 +41,6 @@ cc_library(
         ":cache_group_type",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/core:types",
     ] + torch_deps(),
 )
@@ -66,7 +65,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_types",
-        "//rtp_llm/cpp/core:buffer_torch",
+        "//rtp_llm/cpp/core:exec_ops_hdr",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/utils:kv_cache_utils",
@@ -110,6 +109,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":kv_cache_group",
+        "//rtp_llm/cpp/core:exec_ops_hdr",
     ],
 )
 
@@ -151,8 +151,8 @@ cc_library(
         ":cache_types",
         ":kv_cache_allocator",
         "//rtp_llm/cpp/config:model_config",
-        "//rtp_llm/cpp/core:buffer",
-        "//rtp_llm/cpp/core:buffer_torch",
+        "//rtp_llm/cpp/core:exec_ops_hdr",
+        "//rtp_llm/cpp/core:type_convert",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
@@ -162,6 +162,14 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ] + torch_deps() + select({
+        "@//:using_cuda": [
+            "//rtp_llm/cpp/cuda:cuda_host_utils",
+        ],
+        "@//:using_rocm": [
+            "//rtp_llm/cpp/rocm:rocm_host_utils",
+        ],
+        "//conditions:default": [],
+    }) + select({
         "//:using_remote_kv_cache": [
             ":storage_3fs",
         ],
@@ -194,6 +202,7 @@ cc_library(
     deps = [
         ":cache_core",
         "//rtp_llm/cpp/cache/connector",
+        "//rtp_llm/cpp/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),
 )

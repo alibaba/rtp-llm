@@ -10,8 +10,6 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/BlockRefCounter.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/BlockCache.h"
@@ -21,11 +19,11 @@
 
 namespace rtp_llm {
 
+class CacheStore;
+
 class BlockPool {
 public:
-    BlockPool(const BlockPoolConfig& config,
-              rtp_llm::DeviceBase*   device,
-              AllocationType         allocation_type = AllocationType::DEVICE);
+    BlockPool(const BlockPoolConfig& config, AllocationType allocation_type = AllocationType::DEVICE);
     ~BlockPool();
 
     bool init();
@@ -60,7 +58,7 @@ public:
     void   connectorReference(BlockIdxType block_idx);
     void   connectorReference(const BlockIndicesType& block_indices);
 
-    void    regUserMr(size_t model_id);
+    void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     void    deregUserMr();
     int64_t getMrCostTimeMs() const {
         return mr_cost_time_ms_;
@@ -127,15 +125,15 @@ private:
     BlockRefCounter        block_cache_ref_counter_;
     BlockRefCounter        req_cache_ref_counter_;
 
-    rtp_llm::DeviceBase* device_;
-    AllocationType       allocation_type_;
+    AllocationType allocation_type_;
 
     BlockCachePtr block_cache_;
 
-    rtp_llm::BufferPtr cache_aligned_buffer_;
-    void*              cache_base_ptr_  = nullptr;
-    bool               kvcache_reg_mr_  = false;
-    int64_t            mr_cost_time_ms_ = 0;
+    torch::Tensor               cache_aligned_buffer_;
+    void*                       cache_base_ptr_  = nullptr;
+    bool                        kvcache_reg_mr_  = false;
+    int64_t                     mr_cost_time_ms_ = 0;
+    std::shared_ptr<CacheStore> cache_store_;
 
     std::vector<std::unique_ptr<MemoryLayoutStrategy>> layout_strategies_;
     std::vector<std::pair<int, int>>                   global_layer_to_local_;

@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace std;
@@ -19,7 +19,7 @@ public:
 
 TEST_F(FIFOSchedulerTest, testSimple) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
     ResourceContext resource_context;
@@ -36,7 +36,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-    query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query->input_ids                     = torch::tensor({1}, torch::kInt32);
     query->generate_config               = make_shared<GenerateConfig>();
     shared_ptr<GenerateStream> stream =
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
@@ -61,7 +61,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
 
 TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 2, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
     ResourceContext resource_context;
@@ -77,7 +77,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-    query->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
+    query->input_ids                     = torch::tensor({1, 2, 3}, torch::kInt32);
     query->generate_config               = make_shared<GenerateConfig>();
     shared_ptr<GenerateStream> stream =
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
@@ -94,7 +94,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
 
 TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 3, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
     ResourceContext resource_context;
@@ -110,7 +110,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-    query->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
+    query->input_ids                     = torch::tensor({1, 2, 3, 4}, torch::kInt32);
     query->generate_config               = make_shared<GenerateConfig>();
     shared_ptr<GenerateStream> stream =
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
@@ -143,7 +143,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
     kv_cache_config.reserve_block_ratio = 50;  // reserve = 50% * available(10) = 5 blocks
 
     std::shared_ptr<KVCacheManager> cache_manager =
-        std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/false, nullptr, kv_cache_config);
+        std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
 
@@ -164,7 +164,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
 
     // Need 6 blocks. With reserve=5 blocks and available=10 blocks, init malloc should be rejected.
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-    query->input_ids                     = createBuffer<int32_t>({6}, {1, 2, 3, 4, 5, 6}, AllocationType::HOST);
+    query->input_ids                     = torch::tensor({1, 2, 3, 4, 5, 6}, torch::kInt32);
     query->generate_config               = make_shared<GenerateConfig>();
 
     shared_ptr<GenerateStream> stream =
@@ -192,7 +192,7 @@ TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
     kv_cache_config.reserve_block_ratio = 50;  // reserve = 5 blocks
 
     std::shared_ptr<KVCacheManager> cache_manager =
-        std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/false, nullptr, kv_cache_config);
+        std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
 
@@ -213,7 +213,7 @@ TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
 
     // Init need 4 blocks, should pass: 10 >= 4 + 5.
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-    query->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
+    query->input_ids                     = torch::tensor({1, 2, 3, 4}, torch::kInt32);
     query->generate_config               = make_shared<GenerateConfig>();
 
     shared_ptr<GenerateStream> stream =
@@ -234,7 +234,7 @@ TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
 
 TEST_F(FIFOSchedulerTest, testReuseCache) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
     ResourceContext resource_context;
@@ -253,7 +253,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-    query->input_ids                     = createBuffer<int32_t>({5}, {1, 2, 3, 4, 5}, AllocationType::HOST);
+    query->input_ids                     = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
     query->generate_config               = make_shared<GenerateConfig>();
     shared_ptr<GenerateStream> stream1 =
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
@@ -272,7 +272,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     ASSERT_EQ(cache_manager->freeBlocksNum(), 8);
 
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
-    query2->input_ids                     = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
+    query2->input_ids                     = torch::tensor({1, 2, 3, 4, 5, 6, 7}, torch::kInt32);
     query2->generate_config               = make_shared<GenerateConfig>();
     shared_ptr<GenerateStream> stream2 =
         make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
@@ -292,7 +292,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
 
 TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
     ResourceContext resource_context;
@@ -314,7 +314,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     {
         // test normalcase
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = createBuffer<int32_t>({5}, {1, 2, 3, 4, 5}, AllocationType::HOST);
+        query->input_ids                     = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
         query->generate_config               = make_shared<GenerateConfig>();
         shared_ptr<GenerateStream> stream1 =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
@@ -335,7 +335,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     {
         // test normal case with tile num
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = createBuffer<int32_t>({5}, {1, 2, 3, 4, 5}, AllocationType::HOST);
+        query->input_ids                     = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
         query->generate_config               = make_shared<GenerateConfig>();
         query->generate_config->num_beams    = 2;
         shared_ptr<GenerateStream> stream1 =
@@ -358,9 +358,9 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
         // test abnormal case with tile num
         autil::EnvGuard perf_scope("PERF_TEST", "1");
 
-        std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
-        query2->input_ids                     = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
-        query2->generate_config               = make_shared<GenerateConfig>();
+        std::shared_ptr<GenerateInput> query2         = make_shared<GenerateInput>();
+        query2->input_ids                             = torch::tensor({1, 2, 3, 4, 5, 6, 7}, torch::kInt32);
+        query2->generate_config                       = make_shared<GenerateConfig>();
         query2->generate_config->num_return_sequences = 20;
         shared_ptr<GenerateStream> stream2 =
             make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
@@ -378,7 +378,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
 
 TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
     ResourceContext resource_context;
@@ -397,7 +397,7 @@ TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
     vector<GenerateStreamPtr> streams;
     {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->input_ids                     = torch::tensor({1}, torch::kInt32);
         query->generate_config               = make_shared<GenerateConfig>();
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
@@ -405,7 +405,7 @@ TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
     }
     {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->input_ids                     = torch::tensor({1}, torch::kInt32);
         query->generate_config               = make_shared<GenerateConfig>();
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);

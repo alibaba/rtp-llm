@@ -5,7 +5,6 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutConfig.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"

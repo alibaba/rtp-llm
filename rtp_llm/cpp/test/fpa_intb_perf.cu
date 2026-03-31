@@ -7,6 +7,8 @@
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/memory_utils.h"
 
+using namespace rtp_llm;
+
 struct Dim2 {
     int k;
     int n;

@@ -26,7 +26,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.trt_te
     print_q_tensor_info,
 )
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
-from rtp_llm.ops.compute_ops import PyAttentionInputs, get_typemeta, init_device
+from rtp_llm.ops.compute_ops import PyAttentionInputs, get_typemeta, init_exec_ctx
 
 
 def compute_attention_per_head(
@@ -106,13 +106,12 @@ class TRTAttnTestBase(BaseAttentionTest):
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size = (
                 64
             )
-            py_env_configs.device_resource_config.host_reserve_memory_bytes = 0
 
             engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
             model_config = ModelConfig()
             model_config.max_seq_len = 512
 
-            init_device(
+            init_exec_ctx(
                 parallelism_config=engine_config.parallelism_config,
                 model_config=model_config,
                 eplb_config=model_config.eplb_config,

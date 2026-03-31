@@ -237,17 +237,11 @@ void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSch
 }
 
 bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_QPS_MUTABLE_METRIC(update_lora_qps_metric, "rtp_llm_update_lora_qps");
-    REGISTER_QPS_MUTABLE_METRIC(error_update_lora_qps_metric, "rtp_llm_error_update_lora_qps");
-
     REGISTER_GAUGE_MUTABLE_METRIC(step_latency_us_metric, "rtp_llm_step_latency_us");
     return true;
 }
 
 void RtpLLMEngineMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMEngineMetricsCollector* collector) {
-    REPORT_QPS(update_lora_qps);
-    REPORT_QPS(error_update_lora_qps);
-
     REPORT_GAUGE(step_latency_us);
 }
 

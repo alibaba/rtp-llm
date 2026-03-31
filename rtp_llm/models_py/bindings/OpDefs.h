@@ -8,6 +8,12 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+
+// Forward declare CacheStore for opaque pointer in PyCacheStoreInputs
+namespace rtp_llm {
+class CacheStore;
+}
+
 namespace torch_ext {
 
 // Per-layer KV cache view. Returned by KVCache::getLayerCache().
@@ -127,6 +133,9 @@ struct PyCacheStoreInputs {
     bool                     decode_entrance = false;
     bool                     warmup          = false;
     bool                     mla_kvcache     = false;
+
+    // Opaque cache_store reference (C++ only; passes through Python without inspection)
+    std::shared_ptr<rtp_llm::CacheStore> cache_store;
 };
 
 // for cuda grpah capture

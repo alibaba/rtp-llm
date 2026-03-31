@@ -7,28 +7,28 @@
 #include "3rdparty/trt_fused_multihead_attention/qkvToContext.h"
 #include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/devices/DeviceData.h"
+#include "rtp_llm/cpp/core/DeviceData.h"
 
 namespace rtp_llm {
 
 class cufmha {
 
 public:
-    cufmha(DataType dtype,
-           bool     is_causal,
-           size_t   head_num,
-           size_t            kv_head_num,
-           size_t            size_per_head,
-           size_t            seq_size_per_block,
-           float             q_scaling,
-           bool              use_linear_bias_slopes,
-           bool              can_use_trtv1_fmha,
-           bool              can_use_trtv2_fmha,
-           bool              can_use_trtv2_fmha_paged,
-           bool              can_use_open_source_fmha,
-           bool              can_use_open_source_fmha_paged,
-           bool              is_s_padded,
-           cudaStream_t      stream);
+    cufmha(DataType     dtype,
+           bool         is_causal,
+           size_t       head_num,
+           size_t       kv_head_num,
+           size_t       size_per_head,
+           size_t       seq_size_per_block,
+           float        q_scaling,
+           bool         use_linear_bias_slopes,
+           bool         can_use_trtv1_fmha,
+           bool         can_use_trtv2_fmha,
+           bool         can_use_trtv2_fmha_paged,
+           bool         can_use_open_source_fmha,
+           bool         can_use_open_source_fmha_paged,
+           bool         is_s_padded,
+           cudaStream_t stream);
 
     ~cufmha() = default;
 
@@ -81,33 +81,33 @@ public:
                            KVBlockArray kv_block_array,
                            void*        custom_mask = nullptr);
 
-    void runOpenSourceFmha(void*            q,
-                           void*            k,
-                           void*            v,
-                           void*            output,
-                           int*             cu_seqlens,
-                           size_t           batch_size,
-                           size_t           seq_len,
-                           void*            workspace,
-                           DeviceInitParams device_params,
-                           float*           linear_bias_slopes  = nullptr,
-                           float            softmax_extra_scale = 1.0f);
+    void runOpenSourceFmha(void*          q,
+                           void*          k,
+                           void*          v,
+                           void*          output,
+                           int*           cu_seqlens,
+                           size_t         batch_size,
+                           size_t         seq_len,
+                           void*          workspace,
+                           ExecInitParams device_params,
+                           float*         linear_bias_slopes  = nullptr,
+                           float          softmax_extra_scale = 1.0f);
 
-    void runOpenSourceFmhaPaged(void*            q,
-                                void*            k,
-                                void*            v,
-                                void*            output,
-                                int*             cu_seqlens,
-                                int*             cu_kv_seqlens,
-                                int*             block_table,
-                                size_t           batch_size,
-                                size_t           block_table_batch_stride,
-                                size_t           seq_size_per_block,
-                                size_t           seq_len,
-                                void*            workspace,
-                                DeviceInitParams device_params,
-                                float*           linear_bias_slopes  = nullptr,
-                                float            softmax_extra_scale = 1.0f);
+    void runOpenSourceFmhaPaged(void*          q,
+                                void*          k,
+                                void*          v,
+                                void*          output,
+                                int*           cu_seqlens,
+                                int*           cu_kv_seqlens,
+                                int*           block_table,
+                                size_t         batch_size,
+                                size_t         block_table_batch_stride,
+                                size_t         seq_size_per_block,
+                                size_t         seq_len,
+                                void*          workspace,
+                                ExecInitParams device_params,
+                                float*         linear_bias_slopes  = nullptr,
+                                float          softmax_extra_scale = 1.0f);
 
     size_t
     getOpenSourceWorkSpaceSize(size_t batch_size, size_t seq_len_q, size_t max_seq_len_kv = 0, bool paged = false);
@@ -115,10 +115,10 @@ public:
     bool checkSignature(DataType dtype,
                         bool     is_causal,
                         size_t   head_num,
-                        size_t            kv_head_num,
-                        size_t            size_per_head,
-                        float             q_scaling,
-                        bool              use_linear_bias_slopes);
+                        size_t   kv_head_num,
+                        size_t   size_per_head,
+                        float    q_scaling,
+                        bool     use_linear_bias_slopes);
 
 private:
     cudaStream_t getStream();

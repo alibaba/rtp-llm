@@ -37,13 +37,12 @@ public:
         return tokens_;
     }
 
-
 private:
     bool                 enable_memory_cache_{false};
     bool                 enable_remote_cache_{false};
     std::string          trace_id_;
-    std::string          unique_id_ = "";  // TODO : support lora (remote connector)
-    std::vector<int64_t> tokens_;          // TODO : get tokens (remote connector)
+    std::string          unique_id_ = "";
+    std::vector<int64_t> tokens_;  // TODO : get tokens (remote connector)
 };
 
 class BlockingAsyncContext final: public AsyncContext {

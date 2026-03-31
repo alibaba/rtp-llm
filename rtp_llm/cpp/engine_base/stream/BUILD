@@ -8,6 +8,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/config:special_tokens",
+        "@havenask//aios/autil:json",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
@@ -33,6 +34,7 @@ cc_library(
     deps = [
         ":generate_types",
         ":generate_config",
+        "//rtp_llm/cpp/utils:error_code",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],

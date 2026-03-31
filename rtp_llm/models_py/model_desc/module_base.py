@@ -13,7 +13,7 @@ from rtp_llm.ops.compute_ops import (
     PyModelInitResources,
     PyModelInputs,
     PyModelOutputs,
-    get_device,
+    get_exec_ctx,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -47,7 +47,7 @@ class GptModelBase(nn.Module):
         self.vocab_size: int = config.vocab_size
 
         self.kv_cache: Optional[KVCache] = None
-        self.device_type: DeviceType = get_device().get_device_type()
+        self.device_type: DeviceType = get_exec_ctx().get_device_type()
 
         ## (batch_size -> fmha_params)
         self.params_dict: dict[int, Any] = {}

@@ -11,24 +11,23 @@ void LogitsProcessorFactory::init(const std::string& ckpt_path, const std::strin
 }
 
 std::vector<BaseLogitsProcessorPtr>
-LogitsProcessorFactory::createLogitsProcessors(rtp_llm::DeviceBase*           device,
-                                               std::shared_ptr<GenerateInput> generate_input,
+LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                                                int32_t                        init_batch_size,
                                                int32_t                        max_batch_size,
                                                int64_t                        eos_token_id) {
     std::vector<BaseLogitsProcessorPtr> result;
 
-    auto think_processor = ThinkModeLogitsProcessor::fromGenerateInput(device, generate_input, max_batch_size);
+    auto think_processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, max_batch_size);
     if (think_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(think_processor));
     }
 
-    auto tree_processor = TreeLogitsProcessor::fromGenerateInput(device, generate_input, init_batch_size);
+    auto tree_processor = TreeLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);
     if (tree_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(tree_processor));
     }
 
-    auto multi_seq_processor = MultiSeqLogitsProcessor::fromGenerateInput(device, generate_input, eos_token_id);
+    auto multi_seq_processor = MultiSeqLogitsProcessor::fromGenerateInput(generate_input, eos_token_id);
     if (multi_seq_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(multi_seq_processor));
     }

@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/devices/OpData.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/cpp/core/OpData.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <numeric>
@@ -124,26 +124,27 @@ torch::Tensor ZigZagProcessor::generateQKVPaddingMask(const torch::Tensor& prefi
     return padding_mask;
 }
 
-size_t ZigZagProcessor::handleOutputs(DeviceBase*                               device,
-                                      BufferPtr&                                hidden_states,
+size_t ZigZagProcessor::handleOutputs(torch::Tensor&                            hidden_states,
                                       const GptModelInputs&                     inputs,
                                       const torch_ext::PyContextParallelParams& cp_params) {
-    int prefill_cp_size = device->getDeviceProperties().tp_size;
+#if !USING_CUDA
+    RTP_LLM_FAIL("Context parallel not supported on ROCm");
+    return 0;
+#else
+    int prefill_cp_size = parallelism_config_.tp_size;
 
-    BufferPtr all_hidden_states = device->allocateBuffer(
-        {hidden_states->type(), {hidden_states->shape()[0] * prefill_cp_size, hidden_states->shape()[1]}},
-        {"allgather_hidden_states"});
-    device->allGather({{all_hidden_states}, ParallelMode::TP, {hidden_states}, false});
+    auto all_hidden_t =
+        torch::empty({hidden_states.size(0) * prefill_cp_size, hidden_states.size(1)}, hidden_states.options());
+    execAllGather({{all_hidden_t}, ParallelMode::TP, {hidden_states}, false});
 
-    auto          all_hidden_states_tensor   = Buffer2torchTensor(all_hidden_states, false);
     auto          prefill_qkv_restore_indice = cp_params.prefill_qkv_restore_indice;
     auto          prefill_qkv_padding_mask   = cp_params.prefill_qkv_padding_mask;
     torch::Tensor valid_indices              = torch::nonzero(prefill_qkv_padding_mask).squeeze(-1);
     int64_t       num_valid_tokens           = valid_indices.size(0);
     torch::Tensor combined_indices           = prefill_qkv_restore_indice.index_select(0, valid_indices);
-    torch::Tensor valid_hidden_states        = all_hidden_states_tensor.index_select(0, combined_indices);
-    hidden_states                            = torchTensor2Buffer(valid_hidden_states);
+    hidden_states                            = all_hidden_t.index_select(0, combined_indices);
     return num_valid_tokens;
+#endif
 }
 
 }  // namespace rtp_llm

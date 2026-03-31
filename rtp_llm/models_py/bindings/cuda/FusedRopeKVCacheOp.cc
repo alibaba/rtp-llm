@@ -1,25 +1,23 @@
 #include "rtp_llm/models_py/bindings/cuda/FusedRopeKVCacheOp.h"
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
 #include "rtp_llm/cpp/core/Dispatch.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
-#include "rtp_llm/cpp/devices/utils/RopeCache.h"
-#include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
+#include "rtp_llm/cpp/cuda/ops/CudaFlashInfer.h"
+#include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
+#include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 
 #include <iostream>
 
 namespace rtp_llm {
 namespace {
-// Helper function to prepare prefix prompt param and padding offset, then invoke the kernel
+
 void invokeFusedQKVBiasTransposeHelper(const torch::Tensor&                   qkv,
                                        std::optional<torch_ext::LayerKVCache> kv_cache,
                                        const TRTAttnPtr&                      params,
                                        const AttentionConfigs&                attn_configs,
-                                       CudaDevice*                            device,
+                                       size_t                                 max_seq_len,
                                        void*                                  q_no_transpose_output,
                                        void*                                  q_output,
                                        void*                                  qkv_fp8_output,
@@ -53,7 +51,7 @@ void invokeFusedQKVBiasTransposeHelper(const torch::Tensor&                   qk
     if (params->padding_offset.defined()) {
         padding_offset = params->padding_offset.data_ptr<int>();
     }
-    auto       rope_cache = getRopeCacheOnce(attn_configs.rope_config, device->initParams().max_seq_len);
+    auto       rope_cache = getRopeCacheOnce(attn_configs.rope_config, attn_configs.max_seq_len);
     StreamType stream     = GET_CURRENT_STREAM();
 
     int* position_ids = nullptr;
@@ -98,20 +96,21 @@ void invokeFusedQKVBiasTransposeHelper(const torch::Tensor&                   qk
 }
 }  // namespace
 
-FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs), device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
+FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs,
+                                                             size_t                  max_seq_len,
+                                                             bool                    use_fp8_fmha):
+    attn_configs_(attn_configs), max_seq_len_(max_seq_len), use_fp8_fmha_(use_fp8_fmha) {}
 
 TRTAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
-    int       batch_size = attn_inputs.input_lengths.size(0);
-    BufferPtr kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
+    int           batch_size = attn_inputs.input_lengths.size(0);
+    torch::Tensor kv_cache_kernel_block_id_device;
     if (attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0) {
-        kv_cache_kernel_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_host);
-        kv_cache_kernel_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_device);
+        kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
 
     TRTAttnPtr attn_params;
-    // TODO: should not use device to do that, we will change it later
-    auto params = device_->prepareTrtAttn(attn_configs_, kv_cache_kernel_block_id_device, batch_size);
+    auto       params = prepareTrtAttnParams(
+        attn_configs_, kv_cache_kernel_block_id_device, batch_size, use_fp8_fmha_, GET_CURRENT_STREAM());
     if (params) {
         attn_params = TRTAttnPtr(params, (TRTAttn*)params.get());
     } else {
@@ -133,8 +132,10 @@ TRTAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs a
     return attn_params;
 }
 
-FusedRopeKVCachePrefillOpQOut::FusedRopeKVCachePrefillOpQOut(const AttentionConfigs& attn_configs):
-    FusedRopeKVCachePrefillOpBase(attn_configs) {}
+FusedRopeKVCachePrefillOpQOut::FusedRopeKVCachePrefillOpQOut(const AttentionConfigs& attn_configs,
+                                                             size_t                  max_seq_len,
+                                                             bool                    use_fp8_fmha):
+    FusedRopeKVCachePrefillOpBase(attn_configs, max_seq_len, use_fp8_fmha) {}
 
 torch::Tensor FusedRopeKVCachePrefillOpQOut::forward(const torch::Tensor&                   qkv,
                                                      std::optional<torch_ext::LayerKVCache> kv_cache,
@@ -153,7 +154,7 @@ torch::Tensor FusedRopeKVCachePrefillOpQOut::forward(const torch::Tensor&       
                                       kv_cache,
                                       params,
                                       attn_configs_,
-                                      device_,
+                                      max_seq_len_,
                                       q_output.data_ptr(),  // q_no_transpose_output
                                       nullptr,              // q_output
                                       nullptr,              // qkv_fp8_output
@@ -172,8 +173,10 @@ torch::Tensor FusedRopeKVCachePrefillOpQOut::forward(const torch::Tensor&       
     return q_output;
 }
 
-FusedRopeKVCachePrefillOpQKVOut::FusedRopeKVCachePrefillOpQKVOut(const AttentionConfigs& attn_configs):
-    FusedRopeKVCachePrefillOpBase(attn_configs) {}
+FusedRopeKVCachePrefillOpQKVOut::FusedRopeKVCachePrefillOpQKVOut(const AttentionConfigs& attn_configs,
+                                                                 size_t                  max_seq_len,
+                                                                 bool                    use_fp8_fmha):
+    FusedRopeKVCachePrefillOpBase(attn_configs, max_seq_len, use_fp8_fmha) {}
 
 torch::Tensor FusedRopeKVCachePrefillOpQKVOut::forward(const torch::Tensor&                   qkv,
                                                        std::optional<torch_ext::LayerKVCache> kv_cache,
@@ -188,7 +191,7 @@ torch::Tensor FusedRopeKVCachePrefillOpQKVOut::forward(const torch::Tensor&     
                                       kv_cache,
                                       params,
                                       attn_configs_,
-                                      device_,
+                                      max_seq_len_,
                                       nullptr,  // q_no_transpose_output
                                       nullptr,  // q_output
                                       nullptr,  // qkv_fp8_output
@@ -206,21 +209,21 @@ torch::Tensor FusedRopeKVCachePrefillOpQKVOut::forward(const torch::Tensor&     
     return qkv;
 }
 
-FusedRopeKVCacheDecodeOp::FusedRopeKVCacheDecodeOp(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs), device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
+FusedRopeKVCacheDecodeOp::FusedRopeKVCacheDecodeOp(const AttentionConfigs& attn_configs,
+                                                   size_t                  max_seq_len,
+                                                   bool                    use_fp8_fmha):
+    attn_configs_(attn_configs), max_seq_len_(max_seq_len), use_fp8_fmha_(use_fp8_fmha) {}
 
 TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
-    int       batch_size = attn_inputs.sequence_lengths.size(0);
-    BufferPtr kv_cache_kernel_block_id_host, kv_cache_kernel_block_id_device;
+    int           batch_size = attn_inputs.sequence_lengths.size(0);
+    torch::Tensor kv_cache_kernel_block_id_device;
     if (attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0) {
-        kv_cache_kernel_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_host);
-        kv_cache_kernel_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_kernel_block_id_device);
+        kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
-    // not support has_alibi_slopes
 
     TRTAttnPtr attn_params;
-    auto       params =
-        device_->prepareTrtAttn(attn_configs_, kv_cache_kernel_block_id_device, attn_inputs.sequence_lengths.size(0));
+    auto       params = prepareTrtAttnParams(
+        attn_configs_, kv_cache_kernel_block_id_device, batch_size, use_fp8_fmha_, GET_CURRENT_STREAM());
     RTP_LLM_CHECK_WITH_INFO(params != nullptr, "TRTAttnPtr Build Failed");
     attn_params                            = TRTAttnPtr(params, (TRTAttn*)params.get());
     attn_params->decode_plan               = true;
@@ -251,7 +254,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
     torch::Tensor q_output          = torch::empty({token_num, local_head_num, size_per_head},
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
 
-    auto rope_cache = getRopeCacheOnce(attn_configs_.rope_config, device_->initParams().max_seq_len);
+    auto rope_cache = getRopeCacheOnce(attn_configs_.rope_config, attn_configs_.max_seq_len);
 
     RTP_LLM_CHECK_WITH_INFO(params->sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory");
     StreamType stream = GET_CURRENT_STREAM();
@@ -296,7 +299,10 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
             [](TRTAttn& self) { return reinterpret_cast<uintptr_t>(&self); },
             "Get C++ object pointer address");
     pybind11::class_<FusedRopeKVCachePrefillOpQKVOut>(m, "FusedRopeKVCachePrefillOpQKVOut")
-        .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
+        .def(pybind11::init<const AttentionConfigs&, size_t, bool>(),
+             py::arg("attn_configs"),
+             py::arg("max_seq_len")  = 0,
+             py::arg("use_fp8_fmha") = false)
         .def("prepare", &FusedRopeKVCachePrefillOpQKVOut::prepare, py::arg("attn_inputs"))
         .def("forward",
              &FusedRopeKVCachePrefillOpQKVOut::forward,
@@ -305,13 +311,19 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
              py::arg("params"));
 
     pybind11::class_<FusedRopeKVCachePrefillOpQOut>(m, "FusedRopeKVCachePrefillOpQOut")
-        .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
+        .def(pybind11::init<const AttentionConfigs&, size_t, bool>(),
+             py::arg("attn_configs"),
+             py::arg("max_seq_len")  = 0,
+             py::arg("use_fp8_fmha") = false)
         .def("prepare", &FusedRopeKVCachePrefillOpQOut::prepare, py::arg("attn_inputs"))
         .def(
             "forward", &FusedRopeKVCachePrefillOpQOut::forward, py::arg("qkv"), py::arg("kv_cache"), py::arg("params"));
 
     pybind11::class_<FusedRopeKVCacheDecodeOp>(m, "FusedRopeKVCacheDecodeOp")
-        .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
+        .def(pybind11::init<const AttentionConfigs&, size_t, bool>(),
+             py::arg("attn_configs"),
+             py::arg("max_seq_len")  = 0,
+             py::arg("use_fp8_fmha") = false)
         .def("prepare", &FusedRopeKVCacheDecodeOp::prepare, py::arg("attn_inputs"))
         .def("forward", &FusedRopeKVCacheDecodeOp::forward, py::arg("qkv"), py::arg("kv_cache"), py::arg("params"));
 }

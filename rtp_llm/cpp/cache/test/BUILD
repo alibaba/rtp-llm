@@ -8,7 +8,8 @@ test_copts = [
 ] + copts()
 
 test_deps = [
-    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    "//rtp_llm/cpp/cuda/ops:cuda_impl",
+    "//rtp_llm/cpp/core:exec_ops_test_lib",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/cache",
@@ -21,8 +22,8 @@ test_deps = [
 ] + torch_deps()
 
 block_cache_test_deps = [
-    "//rtp_llm/cpp/devices/testing:device_test_utils",
-    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    "//rtp_llm/cpp/testing:device_test_utils",
+    "//rtp_llm/cpp/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/cache",

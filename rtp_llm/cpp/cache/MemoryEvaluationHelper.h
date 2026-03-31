@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/WarmUpResult.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/core/DeviceData.h"
 
 namespace rtp_llm {
 
@@ -27,8 +28,7 @@ public:
     static void updateMemoryIfNeeded(size_t& current_size, size_t min_required, const char* scenario);
 
     // Helper function to determine data type based on model configuration and device properties
-    static rtp_llm::DataType getDataTypeForCache(const ModelConfig&               model_config,
-                                                 const rtp_llm::DeviceProperties& device_prop);
+    static rtp_llm::DataType getDataTypeForCache(const ModelConfig& model_config, rtp_llm::DeviceType device_type);
 };
 
 }  // namespace rtp_llm

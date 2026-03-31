@@ -5,8 +5,6 @@
 #include <torch/python.h>
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 
 namespace py = pybind11;
@@ -34,9 +32,9 @@ ErrorInfo MultimodalProcessor::getStrHash(int32_t* token_ids, std::string& url, 
 }
 
 ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vector<torch::Tensor>& mm_embedding,
-                                                                rtp_llm::BufferPtr                token_ids,
+                                                                const torch::Tensor&              token_ids,
                                                                 const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                                rtp_llm::BufferPtr token_type_ids) {
+                                                                torch::Tensor token_type_ids) {
     if (mm_embedding.size() == 0) {
         return ExpandedOutput(token_ids, token_type_ids);
     }
@@ -45,12 +43,12 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
         urls.push_back(mm_input.url);
     }
 
-    assert(token_ids->shape().size() == 1);
-    int              expanded_len = token_ids->shape()[0];
+    assert(token_ids.dim() == 1);
+    int              expanded_len = token_ids.size(0);
     std::vector<int> embed_len    = {};
     CHECK_AND_RETURN_REF(locs, getMultimodalTags(token_ids));
-    BufferPtr expanded_token_type_ids = nullptr;
-    int       mm_num                  = mm_embedding.size();
+    torch::Tensor expanded_token_type_ids;
+    int           mm_num = mm_embedding.size();
     if (locs.size() != mm_num) {
         std::stringstream exception_str;
         exception_str << "number of multimodal tags and multimodal input not matched, expect " << locs.size()
@@ -58,24 +56,18 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
         return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, exception_str.str());
     }
     for (int i = 0; i < mm_num; i++) {
-        // mm embedding is supposed to be a tensor of [expand_len, hidden_dim]
         expanded_len += mm_embedding[i].sizes()[0] - locs[i].second + locs[i].first;
     }
 
-    auto               device = rtp_llm::DeviceFactory::getDefaultDevice();
-    rtp_llm::BufferPtr expanded_ids =
-        device->allocateBuffer({token_ids->type(), {(size_t)expanded_len}, rtp_llm::AllocationType::HOST}, {});
-    rtp_llm::BufferPtr token_masks =
-        device->allocateBuffer({token_ids->type(), {(size_t)expanded_len}, rtp_llm::AllocationType::HOST}, {});
-    rtp_llm::BufferPtr new_locs =
-        device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)mm_num}, rtp_llm::AllocationType::HOST}, {});
-    memset(expanded_ids->data(), -1, expanded_ids->sizeBytes());
-    std::fill(token_masks->data<int32_t>(), token_masks->dataWithOffset<int32_t>(token_masks->size()), 1);
-    if (token_type_ids != nullptr) {
-        expanded_token_type_ids =
-            device->allocateBuffer({token_type_ids->type(), {(size_t)expanded_len}, rtp_llm::AllocationType::HOST}, {});
-        std::fill(expanded_token_type_ids->data<int32_t>(),
-                  expanded_token_type_ids->dataWithOffset<int32_t>(token_masks->size()),
+    auto expanded_ids = torch::empty({(int64_t)expanded_len}, torch::kInt32);
+    auto token_masks  = torch::empty({(int64_t)expanded_len}, torch::kInt32);
+    auto new_locs     = torch::empty({(int64_t)mm_num}, torch::kInt32);
+    memset(expanded_ids.data_ptr(), -1, expanded_ids.nbytes());
+    std::fill(token_masks.data_ptr<int32_t>(), token_masks.data_ptr<int32_t>() + token_masks.numel(), 1);
+    if (token_type_ids.defined()) {
+        expanded_token_type_ids = torch::empty({(int64_t)expanded_len}, torch::kInt32);
+        std::fill(expanded_token_type_ids.data_ptr<int32_t>(),
+                  expanded_token_type_ids.data_ptr<int32_t>() + expanded_token_type_ids.numel(),
                   0);
     }
     int  new_loc_idx = 0, old_loc_idx = 0;
@@ -83,22 +75,21 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
     for (int i = 0; i < mm_num; i++) {
         auto& loc      = locs[i];
         int   copy_len = loc.first - old_loc_idx;
-        memcpy(expanded_ids->dataWithOffset<int32_t>(new_loc_idx),
-               token_ids->dataWithOffset<int32_t>(old_loc_idx),
-               token_ids->typeSize() * copy_len);
-        memset(token_masks->dataWithOffset<int32_t>(new_loc_idx + copy_len),
-               0,
-               mm_embedding[i].sizes()[0] * token_masks->typeSize());
-        if (token_type_ids != nullptr) {
-            memcpy(expanded_token_type_ids->dataWithOffset<int32_t>(new_loc_idx),
-                   token_type_ids->dataWithOffset<int32_t>(old_loc_idx),
-                   token_type_ids->typeSize() * copy_len);
+        memcpy(expanded_ids.data_ptr<int32_t>() + new_loc_idx,
+               token_ids.data_ptr<int32_t>() + old_loc_idx,
+               sizeof(int32_t) * copy_len);
+        memset(
+            token_masks.data_ptr<int32_t>() + new_loc_idx + copy_len, 0, mm_embedding[i].sizes()[0] * sizeof(int32_t));
+        if (token_type_ids.defined()) {
+            memcpy(expanded_token_type_ids.data_ptr<int32_t>() + new_loc_idx,
+                   token_type_ids.data_ptr<int32_t>() + old_loc_idx,
+                   sizeof(int32_t) * copy_len);
         }
-        *(new_locs->dataWithOffset<int32_t>(i)) = copy_len + new_loc_idx;
+        *(new_locs.data_ptr<int32_t>() + i) = copy_len + new_loc_idx;
 
         if (hash_urls) {
             auto hash_status = getStrHash(
-                expanded_ids->dataWithOffset<int32_t>(new_loc_idx + copy_len), urls[i], mm_embedding[i].sizes()[0]);
+                expanded_ids.data_ptr<int32_t>() + new_loc_idx + copy_len, urls[i], mm_embedding[i].sizes()[0]);
             if (!hash_status.ok()) {
                 return hash_status;
             }
@@ -107,41 +98,38 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
         new_loc_idx += copy_len + mm_embedding[i].sizes()[0];
         old_loc_idx = loc.second;
     }
-    if (expanded_ids->shape()[0] - new_loc_idx != token_ids->shape()[0] - old_loc_idx) {
+    if (expanded_ids.size(0) - new_loc_idx != token_ids.size(0) - old_loc_idx) {
         return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "expanded length calculate error");
     }
-    memcpy(expanded_ids->dataWithOffset<int32_t>(new_loc_idx),
-           token_ids->dataWithOffset<int32_t>(old_loc_idx),
-           token_ids->typeSize() * (expanded_ids->shape()[0] - new_loc_idx));
-    if (token_type_ids != nullptr) {
-        memcpy(expanded_token_type_ids->dataWithOffset<int32_t>(new_loc_idx),
-               token_type_ids->dataWithOffset<int32_t>(old_loc_idx),
-               token_type_ids->typeSize() * (expanded_ids->shape()[0] - new_loc_idx));
+    memcpy(expanded_ids.data_ptr<int32_t>() + new_loc_idx,
+           token_ids.data_ptr<int32_t>() + old_loc_idx,
+           sizeof(int32_t) * (expanded_ids.size(0) - new_loc_idx));
+    if (token_type_ids.defined()) {
+        memcpy(expanded_token_type_ids.data_ptr<int32_t>() + new_loc_idx,
+               token_type_ids.data_ptr<int32_t>() + old_loc_idx,
+               sizeof(int32_t) * (expanded_ids.size(0) - new_loc_idx));
     }
     return ExpandedOutput(
         std::move(expanded_ids), std::move(expanded_token_type_ids), std::move(token_masks), std::move(new_locs));
 }
 
 ErrorResult<std::vector<std::pair<int32_t, int32_t>>>
-MultimodalProcessor::getMultimodalTags(rtp_llm::BufferPtr token_ids) {
-    // sep_tokens will split input tokens to text part and multimodal part
-    int32_t*                                 data = token_ids->data<int32_t>();
+MultimodalProcessor::getMultimodalTags(const torch::Tensor& token_ids) {
+    int32_t*                                 data = token_ids.data_ptr<int32_t>();
     std::vector<std::pair<int32_t, int32_t>> locs;
+    auto                                     num_tokens = token_ids.numel();
     for (const auto& sep_token_id : sep_token_ids_) {
-        // when sep token size == 1, just simply split
         if (sep_token_id.size() == 1) {
-            for (int i = 0; i < token_ids->size(); i++) {
+            for (int i = 0; i < num_tokens; i++) {
                 auto now_id = *(data + i);
                 if (now_id == sep_token_id[0]) {
                     locs.emplace_back(i, i + 1);
                 }
             }
-        }
-        // when sep token size == 2, multimodal part is between but not include them
-        else if (sep_token_id.size() == 2) {
+        } else if (sep_token_id.size() == 2) {
             std::vector<int32_t> left, right;
 
-            for (int i = 0; i < token_ids->size(); i++) {
+            for (int i = 0; i < num_tokens; i++) {
                 auto now_id = *(data + i);
                 if (now_id == sep_token_id[0]) {
                     if (right.size() != left.size()) {
@@ -179,9 +167,9 @@ MultimodalProcessor::getMultimodalTags(rtp_llm::BufferPtr token_ids) {
 }
 
 ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_output) {
-    if (expand_output.expanded_ids->size() >= max_seq_len_) {
+    if (expand_output.expanded_ids.numel() >= max_seq_len_) {
         std::stringstream exception_str;
-        exception_str << "input after multimodal process is " << expand_output.expanded_ids->size() << " > max_seq_len("
+        exception_str << "input after multimodal process is " << expand_output.expanded_ids.numel() << " > max_seq_len("
                       << max_seq_len_ << ")";
         return ErrorInfo(ErrorCode::MM_LONG_PROMPT_ERROR, exception_str.str());
     }
@@ -228,17 +216,16 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     input->multimodal_features.emplace(mm_features);
     input->token_ids      = expanded_ids.expanded_ids;
     input->token_type_ids = expanded_ids.token_type_ids;
-    if (input->input_lengths->shape().size() == 1 && input->input_lengths->shape()[0] == 1
-        && expanded_ids.expanded_ids->shape().size() == 1) {
-        input->input_lengths->data<int32_t>()[0] = expanded_ids.expanded_ids->shape()[0];
-        input->total_length                      = expanded_ids.expanded_ids->shape()[0];
+    if (input->input_lengths.numel() == 1 && expanded_ids.expanded_ids.defined()) {
+        input->input_lengths.data_ptr<int32_t>()[0] = expanded_ids.expanded_ids.size(0);
+        input->total_length                         = expanded_ids.expanded_ids.size(0);
     }
     return ErrorInfo::OkStatus();
 }
 
 ErrorResult<MultimodalFeature>
-MultimodalProcessor::getMultimodalFeatures(const rtp_llm::BufferPtr&           input_ids,
-                                           const std::vector<MultimodalInput>& mm_inputs) {
+MultimodalProcessor::getMultimodalFeatures(const torch::Tensor&                         input_ids,
+                                           const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
     MultimodalFeature mm_features;
     CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs));
     mm_features.features = std::move(mm_embedding_res.mm_features);

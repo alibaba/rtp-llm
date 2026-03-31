@@ -68,7 +68,7 @@ cc_library(
         ":deep_gemm_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-        "//rtp_llm/cpp/core:buffer_torch",
+
         "@bazel_tools//tools/cpp/runfiles",
     ],
     visibility = ["//visibility:public"],
@@ -82,7 +82,6 @@ cc_library(
     deps = [
         ":deep_gemm_utils",
         ":JIT",
-        "//rtp_llm/cpp/core:buffer_torch",
         "//rtp_llm/cpp/utils:math_utils",
         "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/cuda:cuda_host_utils",
@@ -101,9 +100,8 @@ cc_test(
     deps = [
         ":deep_gemm_plugins_impl",
         "@com_google_googletest//:gtest",
-        "//rtp_llm/cpp/core:buffer_torch",
-        "//rtp_llm/cpp/devices/testing:device_test_utils",
-        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/cpp/cuda/ops:cuda_impl",
     ] + torch_deps(),
     timeout = "long",
     tags = ["open_skip", "H20"],
@@ -119,9 +117,8 @@ cc_test(
     deps = [
         ":deep_gemm_plugins_impl",
         "@com_google_googletest//:gtest",
-        "//rtp_llm/cpp/core:buffer_torch",
-        "//rtp_llm/cpp/devices/testing:device_test_utils",
-        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/cpp/cuda/ops:cuda_impl",
     ] + torch_deps(),
     timeout = "long",
     tags = ["open_skip", "H20"],

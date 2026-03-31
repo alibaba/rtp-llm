@@ -1,8 +1,7 @@
 #include <gtest/gtest.h>
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
 #include <nvtx3/nvToolsExt.h>
 
 using namespace std;
@@ -47,17 +46,17 @@ public:
                         /*ep_size=*/ep_size,
                         /*ep_rank=*/0);
 
-        const auto ws_size    = moe_plugin.getWorkspaceSize(token_num);
-        const auto worksapce  = device_->allocateBuffer({DataType::TYPE_BYTES, {ws_size}});
-        const auto fc2_result = device_->allocateBuffer({DataType::TYPE_FP16, {token_num, top_k, hidden_dim}});
-        const auto expert_scales =
-            device_->allocateBuffer({DataType::TYPE_FP32, {rtp_llm::pad_to_multiple_of_16(token_num * top_k)}});
+        const auto ws_size   = moe_plugin.getWorkspaceSize(token_num);
+        const auto padded_tk = (int64_t)rtp_llm::pad_to_multiple_of_16(token_num * top_k);
 
-        const auto expanded_source_row_to_dest =
-            device_->allocateBuffer({DataType::TYPE_INT32, {rtp_llm::pad_to_multiple_of_16(token_num * top_k)}});
-        const auto expert_for_source_row =
-            device_->allocateBuffer({DataType::TYPE_INT32, {rtp_llm::pad_to_multiple_of_16(token_num * top_k)}});
-        auto output = device_->allocateBuffer({DataType::TYPE_FP16, {token_num, hidden_dim}});
+        auto workspace     = torch::empty({(int64_t)ws_size}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
+        auto fc2_result    = torch::empty({(int64_t)token_num, (int64_t)top_k, (int64_t)hidden_dim},
+                                       torch::dtype(torch::kFloat16).device(torch::kCUDA));
+        auto expert_scales = torch::empty({padded_tk}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+        auto expanded_source_row_to_dest = torch::empty({padded_tk}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+        auto expert_for_source_row       = torch::empty({padded_tk}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+        auto output =
+            torch::empty({(int64_t)token_num, (int64_t)hidden_dim}, torch::dtype(torch::kFloat16).device(torch::kCUDA));
 
         auto input = torch::randn({(int)token_num, (int)hidden_dim}, torch::device(torch::kCUDA)).to(torch::kFloat16);
         auto gate  = torch::randn({(int)token_num, (int)num_expert}, torch::device(torch::kCUDA)).to(torch::kFloat32);
@@ -85,21 +84,21 @@ public:
                                nullptr,
                                nullptr,
                                token_num,
-                               worksapce->data<char>(),
+                               workspace.data_ptr<char>(),
                                // output
-                               output->data(),
-                               fc2_result->data(),
+                               output.data_ptr(),
+                               fc2_result.data_ptr(),
                                nullptr,  // finished
-                               expert_scales->data(),
-                               expanded_source_row_to_dest->data<int>(),
-                               expert_for_source_row->data<int>(),
+                               expert_scales.data_ptr(),
+                               expanded_source_row_to_dest.data_ptr<int>(),
+                               expert_for_source_row.data_ptr<int>(),
                                0);
 
             if (i == 0) {
-                printBufferData(*rtp_llm::torchTensor2Buffer(input), "input");
-                printBufferData(*rtp_llm::torchTensor2Buffer(gate), "gate");
-                printBufferData(*expert_for_source_row, "expert_for_source_row");
-                printBufferData(*output, "output");
+                printBufferData(input, "input");
+                printBufferData(gate, "gate");
+                printBufferData(expert_for_source_row, "expert_for_source_row");
+                printBufferData(output, "output");
             }
 
             if (i != 0)

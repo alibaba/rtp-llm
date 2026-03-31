@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/core/Buffer.h"
+#include <torch/extension.h>
 
 namespace rtp_llm {
 
@@ -18,8 +18,8 @@ struct ExpertStatsParams {
 };
 
 struct ExpertStatsBuffer {
-    BufferPtr log_stats_buf;  // [layer, log_exp_num]
-    BufferPtr gpu_loads_buf;  // [layer, ep_size]
+    torch::Tensor log_stats_buf;  // [layer, log_exp_num], INT32, GPU
+    torch::Tensor gpu_loads_buf;  // [layer, ep_size], INT32, GPU
 };
 
 struct OverallExpertStats {
@@ -38,15 +38,15 @@ struct ExpertStats {
     size_t log_exp_num;
     size_t phy_exp_num;
 
-    // note: need to access the buffer with offset
+    // note: need to access the tensor with offset
     ExpertStatsBuffer stats_buf;
 
     int* getLayerLogStats() const {
-        return reinterpret_cast<int*>(stats_buf.log_stats_buf->dataWithOffset(layer_id * log_exp_num));
+        return stats_buf.log_stats_buf.data_ptr<int>() + layer_id * log_exp_num;
     }
 
     int* getLayerGpuLoads() const {
-        return reinterpret_cast<int*>(stats_buf.gpu_loads_buf->dataWithOffset(layer_id * ep_size));
+        return stats_buf.gpu_loads_buf.data_ptr<int>() + layer_id * ep_size;
     }
 };
 

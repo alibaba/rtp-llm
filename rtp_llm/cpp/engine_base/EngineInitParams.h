@@ -2,23 +2,21 @@
 #include <cstddef>
 #include <tuple>
 
-#include "rtp_llm/cpp/devices/OpData.h"
+#include "rtp_llm/cpp/core/OpData.h"
+#include "rtp_llm/cpp/core/DeviceData.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
-#include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/devices/Weights.h"
+#include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace th = torch;
 
 namespace rtp_llm {
 
-using TensorMap          = std::unordered_map<std::string, th::Tensor>;
-using TensorMaps         = std::vector<TensorMap>;
-using ConstBufferPtrMap  = std::unordered_map<std::string, rtp_llm::ConstBufferPtr>;
-using ConstBufferPtrMaps = std::vector<ConstBufferPtrMap>;
+using TensorMap  = std::unordered_map<std::string, th::Tensor>;
+using TensorMaps = std::vector<TensorMap>;
 
 struct EngineInitParams {
     EngineInitParams() {};
@@ -91,7 +89,7 @@ struct EngineInitParams {
     size_t                       model_id;
     ModelConfig                  model_config_;
     ParallelismConfig            parallelism_config;
-    NcclCommConfig               nccl_comm_config;  // initDevices uses this for NCCL ip/ports
+    NcclCommConfig               nccl_comm_config;  // initExecCtx uses this for NCCL ip/ports
     py::object                   server_config;     // Python ServerConfig; RPC/HTTP ports read from it
     RuntimeConfig                runtime_config;
     EPLBConfig                   eplb_config;
@@ -117,6 +115,7 @@ struct EngineInitParams {
     py::object                   py_sp_model;
     py::object                   weight_manager;
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
+    ExecInitParams               exec_init_params;
 
 public:
     void showDebugInfo() const {

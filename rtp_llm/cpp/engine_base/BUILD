@@ -13,6 +13,7 @@ cc_library(
     ],
     deps = [
         "//:rtp_compute_ops",
+        "//rtp_llm/cpp/core:exec_ops_hdr",
         "//rtp_llm/cpp/pybind:py_utils",
     ],
     visibility = ["//visibility:public"],
@@ -79,7 +80,6 @@ cc_library(
         ":worker_status_info",
         "//rtp_llm/cpp/engine_base/stream:stream",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
-        "//rtp_llm/cpp/models:lora",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/utils:hash_util",

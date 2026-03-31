@@ -18,6 +18,16 @@ enum class AllocationType {
     DEVICE = 1,
 };
 
+enum QScheme : size_t {
+    NoQuantize = 0,
+    Qint8WeightOnly,
+    Qint8PerToken,
+    Qint8PerTensor,
+    Qfp8PerTensor,
+    Qfp8PerTokenBlock,
+    Qfp8PerToken
+};
+
 enum DataType : std::uint8_t {
     TYPE_INVALID   = 0,
     TYPE_BOOL      = 1,

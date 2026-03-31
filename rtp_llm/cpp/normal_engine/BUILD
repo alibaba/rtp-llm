@@ -22,7 +22,12 @@ cc_library(
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt_constructor",
         "//rtp_llm/cpp/models:eplb",
+        "//rtp_llm/cpp/cuda/CudaGraph:graph_base",
+        "//rtp_llm/cpp/utils:tensor_debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
-    ],
+    ] + select({
+        "//:using_cuda": ["//rtp_llm/cpp/cuda/ops:standalone_ops"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )

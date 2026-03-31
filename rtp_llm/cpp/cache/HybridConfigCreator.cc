@@ -4,7 +4,6 @@
 
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
 
 namespace rtp_llm {
 
@@ -172,8 +171,7 @@ void HybridConfigCreator::setupLayerToGroupMapping(CacheConfig& config) {
 CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
                                                     bool                     is_mtp) {
-    const auto device_prop = rtp_llm::DeviceFactory::getDefaultDevice()->getDeviceProperties();
-    auto       dtype       = MemoryEvaluationHelper::getDataTypeForCache(model_config, device_prop);
+    auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config, buildDeviceType());
 
     // Split layers by attention type
     auto [linear_layers, full_layers] = HybridConfigCreator::splitLayersByAttentionType(model_config);

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "autil/LockFreeThreadPool.h"
+#include <torch/torch.h>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
@@ -20,7 +21,6 @@ namespace rtp_llm {
 
 class BlockPool;
 class BroadcastManager;
-class DeviceBase;
 class KVCacheAllocator;
 class MemoryAsyncContext;
 
@@ -29,7 +29,6 @@ public:
     KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                            const KVCacheConfig&                     kv_cache_config,
                            const std::shared_ptr<KVCacheAllocator>& allocator,
-                           rtp_llm::DeviceBase*                     device,
                            const std::vector<std::string>&          tp_addrs,
                            const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
     ~KVCacheMemoryConnector() override;
@@ -91,14 +90,14 @@ private:
     bool prepareCopyBuffers(BlockIdxType                     mem_block,
                             const std::vector<BlockIdxType>& gpu_blocks,
                             CopyDirection                    direction,
-                            std::vector<BufferPtr>&          dst,
-                            std::vector<BufferPtr>&          src);
-    bool appendCopyBytesToBuffers(const BlockInfo&        mem_block,
-                                  const BlockInfo&        gpu_block,
-                                  size_t                  byte_off,
-                                  CopyDirection           direction,
-                                  std::vector<BufferPtr>& dst,
-                                  std::vector<BufferPtr>& src);
+                            std::vector<torch::Tensor>&      dst,
+                            std::vector<torch::Tensor>&      src);
+    bool appendCopyBytesToBuffers(const BlockInfo&            mem_block,
+                                  const BlockInfo&            gpu_block,
+                                  size_t                      byte_off,
+                                  CopyDirection               direction,
+                                  std::vector<torch::Tensor>& dst,
+                                  std::vector<torch::Tensor>& src);
 
     void checkLayerBlockStrideBytes() const;
     bool checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
@@ -124,7 +123,6 @@ private:
     const CacheConfig&                cache_config_;
     const KVCacheConfig&              kv_cache_config_;
     std::shared_ptr<KVCacheAllocator> allocator_;
-    rtp_llm::DeviceBase*              device_{nullptr};
     const std::vector<std::string>    tp_addrs_;
 
     std::shared_ptr<BlockPool>                 block_pool_;

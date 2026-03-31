@@ -57,7 +57,6 @@ cc_library(
         "//rtp_llm/cpp/utils:time_util",
         # "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/metrics:metrics",
-        "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/core:event",
     ],
     visibility=['//visibility:public'],
@@ -69,7 +68,9 @@ cc_library(
     srcs = glob(["*.cpp"], exclude = ["Impl.cpp"] + interface_sources),
     hdrs = glob(["*.h"], exclude = interface_includes),
     deps = [
+        ":cache_store_interface",
         "//rtp_llm/cpp/disaggregate/cache_store/proto:cache_store_service_cc_proto",
+        "//rtp_llm/cpp/utils:time_util",
         "//:rtp_compute_ops",
         ":arpc_dep",
         "//rtp_llm/cpp/utils:profiling_scope",

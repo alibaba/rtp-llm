@@ -366,10 +366,8 @@ class DataType:
 
 
 class DeviceResourceConfig:
-    device_reserve_memory_bytes: int
     enable_comm_overlap: bool
     enable_layer_micro_batch: int
-    host_reserve_memory_bytes: int
     m_split: int
     overlap_comm_type: int
     overlap_math_sm_count: int

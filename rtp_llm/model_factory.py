@@ -145,6 +145,7 @@ class ModelFactory:
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
             # propose model's max seq len must be equal to score model's max seq len
             propose_model_config.max_seq_len = model_config.max_seq_len
+            propose_model_config.gen_num_per_cycle = model_config.gen_num_per_cycle
 
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
@@ -197,6 +198,10 @@ class ModelFactory:
         Returns:
             BaseEngine instance (RPCEngine or EmbeddingCppEngine)
         """
+        # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
+        # for RoPE cache sizing in speculative decoding
+        model_config.gen_num_per_cycle = engine_config.sp_config.gen_num_per_cycle
+
         model = ModelFactory._create_model(
             model_config=model_config,
             engine_config=engine_config,

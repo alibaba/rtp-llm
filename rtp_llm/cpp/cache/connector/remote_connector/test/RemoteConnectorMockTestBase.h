@@ -3,8 +3,7 @@
 #include "MockKVCMClient.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "autil/EnvUtil.h"
 
@@ -120,9 +119,7 @@ public:
     void TearDown() override {}
 
 protected:
-    constexpr static int    tp_size_                    = 1;
-    constexpr static size_t device_reserve_memory_size_ = 1024L * 1024 * 1024;  // 1GB;
-    constexpr static size_t host_reserve_memory_size_   = 1024L * 1024 * 1024;  // 1GB;
+    constexpr static int tp_size_ = 1;
 
     std::string genLocationSpecName(int tp_rank, const std::string& group_name) const {
         static std::string location_spec_name("tp");
@@ -130,13 +127,11 @@ protected:
     }
 
     void initDevice() {
-        ParallelismConfig    parallelism_config;
-        ModelConfig          model_config;
-        EPLBConfig           eplb_config;
-        FMHAConfig           fmha_config;
-        DeviceResourceConfig device_resource_config;
-        device_resource_config.device_reserve_memory_bytes = device_reserve_memory_size_;
-        device_resource_config.host_reserve_memory_bytes   = host_reserve_memory_size_;
+        ParallelismConfig           parallelism_config;
+        ModelConfig                 model_config;
+        EPLBConfig                  eplb_config;
+        FMHAConfig                  fmha_config;
+        DeviceResourceConfig        device_resource_config;
         MoeConfig                   moe_config;
         SpeculativeExecutionConfig  sp_config;
         MiscellaneousConfig         misc_config;
@@ -148,22 +143,21 @@ protected:
         ModelSpecificConfig         model_specific_config;
         NcclCommConfig              nccl_comm_config;
 
-        DeviceFactory::initDevices(parallelism_config,
-                                   model_config,
-                                   eplb_config,
-                                   fmha_config,
-                                   device_resource_config,
-                                   moe_config,
-                                   sp_config,
-                                   misc_config,
-                                   profiling_debug_logging_config,
-                                   hw_kernel_config,
-                                   concurrency_config,
-                                   ffn_disaggregate_config,
-                                   runtime_config,
-                                   model_specific_config,
-                                   nccl_comm_config);
-        device_ = rtp_llm::DeviceFactory::getDefaultDevice();
+        initExecCtx(parallelism_config,
+                    model_config,
+                    eplb_config,
+                    fmha_config,
+                    device_resource_config,
+                    moe_config,
+                    sp_config,
+                    misc_config,
+                    profiling_debug_logging_config,
+                    hw_kernel_config,
+                    concurrency_config,
+                    ffn_disaggregate_config,
+                    runtime_config,
+                    model_specific_config,
+                    nccl_comm_config);
     }
     void initServer() {
         for (int i = 0; i < tp_size_; i++) {
@@ -243,12 +237,12 @@ protected:
         return result;
     }
 
-    CacheConfig                                         cache_config_;
-    KVCacheConfig                                       kv_cache_config_;
-    RuntimeConfig                                       runtime_config_;
-    ParallelismConfig                                   parallelism_config_;
-    SpeculativeExecutionConfig                          sp_config_;
-    DeviceBase*                                         device_ = nullptr;
+    CacheConfig                cache_config_;
+    KVCacheConfig              kv_cache_config_;
+    RuntimeConfig              runtime_config_;
+    ParallelismConfig          parallelism_config_;
+    SpeculativeExecutionConfig sp_config_;
+
     std::vector<std::shared_ptr<RemoteConnector>>       remote_connectors_;
     std::vector<std::unique_ptr<FakeRpcServer>>         servers_;
     std::vector<std::string>                            server_addrs_;

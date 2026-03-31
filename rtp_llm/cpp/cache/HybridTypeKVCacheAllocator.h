@@ -15,7 +15,6 @@ class HybridTypeKVCacheAllocator:
     public std::enable_shared_from_this<HybridTypeKVCacheAllocator> {
 public:
     HybridTypeKVCacheAllocator(const CacheConfig&                 config,
-                               rtp_llm::DeviceBase*               device,
                                AllocationType                     allocation_type     = AllocationType::DEVICE,
                                const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
                                int64_t                            reserve_block_ratio = 0);

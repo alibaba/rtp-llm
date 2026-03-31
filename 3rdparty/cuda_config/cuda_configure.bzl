@@ -805,6 +805,7 @@ filegroup(name="cudnn-include")
     repository_ctx.file("cuda/cuda/lib/%s" % lib_name("cufft", cpu_value))
     repository_ctx.file("cuda/cuda/lib/%s" % lib_name("cupti", cpu_value))
     repository_ctx.file("cuda/cuda/lib/%s" % lib_name("cusparse", cpu_value))
+    repository_ctx.file("cuda/cuda/lib/%s" % lib_name("nvml", cpu_value))
 
     # Set up cuda_config.h, which is used by
     # tensorflow/stream_executor/dso_loader.cc.

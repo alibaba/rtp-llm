@@ -30,7 +30,7 @@ public:
                          const std::vector<int32_t>& full_group_ids,
                          const std::vector<int32_t>& other_group_ids,
                          size_t                      per_group_layer_num):
-        KVCacheAllocator(config, nullptr) {
+        KVCacheAllocator(config) {
         for (int32_t full_group_id : full_group_ids) {
             for (int i = 0; i < per_group_layer_num; i++) {
                 fake_layout_.layer_to_groups.push_back(full_group_id);

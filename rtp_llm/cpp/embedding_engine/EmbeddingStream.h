@@ -5,10 +5,9 @@
 #include <optional>
 #include <queue>
 #include <condition_variable>
-#include "rtp_llm/cpp/core/Buffer.h"
 #include "autil/TimeUtility.h"
+#include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingQuery.h"
-#include "rtp_llm/cpp/core/BufferHelper.h"
 #include "absl/status/statusor.h"
 
 namespace rtp_llm {
@@ -56,17 +55,16 @@ public:
     }
 
 protected:
-    rtp_llm::DeviceBase*              device_;
-    std::shared_ptr<EmbeddingInput>   embedding_input_;
-    std::shared_ptr<EmbeddingOutput>  embedding_output_;
-    int64_t                           begin_time_;
-    std::condition_variable           cond_;
-    std::mutex                        lock_;
-    StreamState                       stream_state_;
-    size_t                            begin_time_us_    = 0;
-    size_t                            wait_time_us_     = 0;
-    kmonitor::MetricsReporterPtr      metrics_reporter_ = nullptr;
-    std::optional<rtp_llm::BufferPtr> context_position_ids_;
+    std::shared_ptr<EmbeddingInput>  embedding_input_;
+    std::shared_ptr<EmbeddingOutput> embedding_output_;
+    int64_t                          begin_time_;
+    std::condition_variable          cond_;
+    std::mutex                       lock_;
+    StreamState                      stream_state_;
+    size_t                           begin_time_us_    = 0;
+    size_t                           wait_time_us_     = 0;
+    kmonitor::MetricsReporterPtr     metrics_reporter_ = nullptr;
+    std::optional<torch::Tensor>     context_position_ids_;
 
     void reportMetrics();
 };

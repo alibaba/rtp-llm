@@ -25,36 +25,28 @@ class KVCacheManagerTest: public ::testing::Test {
 protected:
     void SetUp() override {
         rtp_llm::initLogger();
-        device_ = createDevice();
-        ASSERT_NE(device_, nullptr);
+        createDevice();
     }
 
 protected:
-    rtp_llm::DeviceBase* device_ = nullptr;
 };
 
-static void assertBlockBytesEq(rtp_llm::DeviceBase*                            device,
-                               const std::shared_ptr<rtp_llm::KVCacheManager>& cache_manager,
+static void assertBlockBytesEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_manager,
                                int                                             layer_id,
                                int                                             block_id,
                                const std::vector<int8_t>&                      expected) {
     auto addr_info = cache_manager->convertIndexToAddr(block_id, layer_id);
     ASSERT_NE(addr_info.kv_addr, nullptr);
-    rtp_llm::Buffer dev_view(rtp_llm::MemoryType::MEMORY_GPU,
-                             rtp_llm::DataType::TYPE_INT8,
-                             {expected.size()},
-                             static_cast<int8_t*>(addr_info.kv_addr));
-    auto            host_buf = device->clone({dev_view, rtp_llm::AllocationType::HOST});
-    ASSERT_NE(host_buf, nullptr);
-    ASSERT_EQ(host_buf->sizeBytes(), expected.size());
-    const auto* ptr = host_buf->data<int8_t>();
+    auto dev_t = torch::from_blob(
+        addr_info.kv_addr, {(int64_t)expected.size()}, torch::TensorOptions(torch::kInt8).device(torch::kCUDA));
+    auto        host_t = dev_t.cpu();
+    const auto* ptr    = host_t.data_ptr<int8_t>();
     for (size_t i = 0; i < expected.size(); ++i) {
         ASSERT_EQ(ptr[i], expected[i]) << "mismatch at byte " << i << " layer=" << layer_id << " block=" << block_id;
     }
 }
 
-static void assertScaleEq(rtp_llm::DeviceBase*                            device,
-                          const std::shared_ptr<rtp_llm::KVCacheManager>& cache_manager,
+static void assertScaleEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_manager,
                           int                                             layer_id,
                           int                                             block_id,
                           const std::vector<float>&                       expected_k,
@@ -63,24 +55,22 @@ static void assertScaleEq(rtp_llm::DeviceBase*                            device
     ASSERT_NE(addr_info.kv_scale_addr, nullptr);
     ASSERT_EQ(expected_k.size(), expected_v.size());
 
-    // kv_scale_addr points to K-scale, and V-scale follows by kv_scale_block_bytes (= kv_scale_stride_bytes / 2).
     const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kv_scale_stride_bytes;
     ASSERT_GT(kv_scale_stride_bytes, 0u);
     const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
     void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr_info.kv_scale_addr) + kv_scale_block_bytes);
 
-    rtp_llm::Buffer dev_k(
-        rtp_llm::MemoryType::MEMORY_GPU, rtp_llm::DataType::TYPE_FP32, {expected_k.size()}, addr_info.kv_scale_addr);
-    rtp_llm::Buffer dev_v(
-        rtp_llm::MemoryType::MEMORY_GPU, rtp_llm::DataType::TYPE_FP32, {expected_v.size()}, v_scale_addr);
+    auto dev_k_t = torch::from_blob(addr_info.kv_scale_addr,
+                                    {(int64_t)expected_k.size()},
+                                    torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    auto dev_v_t = torch::from_blob(
+        v_scale_addr, {(int64_t)expected_v.size()}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
 
-    auto host_k = device->clone({dev_k, rtp_llm::AllocationType::HOST});
-    auto host_v = device->clone({dev_v, rtp_llm::AllocationType::HOST});
-    ASSERT_NE(host_k, nullptr);
-    ASSERT_NE(host_v, nullptr);
+    auto host_k_t = dev_k_t.cpu();
+    auto host_v_t = dev_v_t.cpu();
 
-    const float* k_ptr = host_k->data<float>();
-    const float* v_ptr = host_v->data<float>();
+    const float* k_ptr = host_k_t.data_ptr<float>();
+    const float* v_ptr = host_v_t.data_ptr<float>();
     for (size_t i = 0; i < expected_k.size(); ++i) {
         ASSERT_FLOAT_EQ(k_ptr[i], expected_k[i])
             << "k scale mismatch i=" << i << " layer=" << layer_id << " block=" << block_id;
@@ -93,7 +83,7 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
 
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/true);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
     ASSERT_TRUE(cache_manager->init());
 
     EXPECT_EQ(cache_manager->cacheConfig().block_num, 1);
@@ -109,7 +99,7 @@ TEST_F(KVCacheManagerTest, MetricsThreadSmoke) {
     auto kmon_tags = kmonitor::MetricsTags();
     auto reporter  = std::make_shared<kmonitor::MetricsReporter>("", "", kmon_tags);
 
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/true, reporter);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true, reporter);
 
     ASSERT_TRUE(cache_manager->init());
     EXPECT_TRUE(cache_manager->metrics_reporter_thread_.joinable());
@@ -122,7 +112,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     // Use non-warmup config so we have usable blocks (block 0 is reserved in BlockPool).
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/false);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
     auto&        spec    = cache_manager->cacheConfig().cache_specs[0];
@@ -136,42 +126,42 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
 
     std::vector<int8_t> k_vec(k_bytes, 7);
     std::vector<int8_t> v_vec(v_bytes, 9);
-    auto                k_buf = rtp_llm::vector2Buffer(k_vec);
-    auto                v_buf = rtp_llm::vector2Buffer(v_vec);
+    auto                k_t = torch::from_blob(k_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
+    auto                v_t = torch::from_blob(v_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
 
-    ASSERT_TRUE(cache_manager->setKVBlockValue(block_src, *k_buf, *v_buf));
+    ASSERT_TRUE(cache_manager->setKVBlockValue(block_src, k_t, v_t));
 
     std::vector<int8_t> expected_block(k_bytes + v_bytes, 0);
     std::fill(expected_block.begin(), expected_block.begin() + k_bytes, 7);
     std::fill(expected_block.begin() + k_bytes, expected_block.end(), 9);
 
     // Check both layers in source block
-    assertBlockBytesEq(device_, cache_manager, /*layer_id=*/0, block_src, expected_block);
-    assertBlockBytesEq(device_, cache_manager, /*layer_id=*/1, block_src, expected_block);
+    assertBlockBytesEq(cache_manager, /*layer_id=*/0, block_src, expected_block);
+    assertBlockBytesEq(cache_manager, /*layer_id=*/1, block_src, expected_block);
 
     // Copy src -> dst and validate
     cache_manager->blockCopy(block_src, block_dst);
-    assertBlockBytesEq(device_, cache_manager, /*layer_id=*/0, block_dst, expected_block);
-    assertBlockBytesEq(device_, cache_manager, /*layer_id=*/1, block_dst, expected_block);
+    assertBlockBytesEq(cache_manager, /*layer_id=*/0, block_dst, expected_block);
+    assertBlockBytesEq(cache_manager, /*layer_id=*/1, block_dst, expected_block);
 
     // Now overwrite only layer 0 on dst block; layer 1 should remain unchanged.
     std::vector<int8_t> k2_vec(k_bytes, 1);
     std::vector<int8_t> v2_vec(v_bytes, 2);
-    auto                k2_buf = rtp_llm::vector2Buffer(k2_vec);
-    auto                v2_buf = rtp_llm::vector2Buffer(v2_vec);
-    ASSERT_TRUE(cache_manager->setKVBlockValue(block_dst, /*layer_id=*/0, *k2_buf, *v2_buf));
+    auto                k2_t = torch::from_blob(k2_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
+    auto                v2_t = torch::from_blob(v2_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
+    ASSERT_TRUE(cache_manager->setKVBlockValue(block_dst, /*layer_id=*/0, k2_t, v2_t));
 
     std::vector<int8_t> expected_layer0(k_bytes + v_bytes, 0);
     std::fill(expected_layer0.begin(), expected_layer0.begin() + k_bytes, 1);
     std::fill(expected_layer0.begin() + k_bytes, expected_layer0.end(), 2);
-    assertBlockBytesEq(device_, cache_manager, /*layer_id=*/0, block_dst, expected_layer0);
-    assertBlockBytesEq(device_, cache_manager, /*layer_id=*/1, block_dst, expected_block);
+    assertBlockBytesEq(cache_manager, /*layer_id=*/0, block_dst, expected_layer0);
+    assertBlockBytesEq(cache_manager, /*layer_id=*/1, block_dst, expected_block);
 }
 
 TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/false);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
     const int    block_src   = 1;
@@ -187,40 +177,39 @@ TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {
         auto addr = cache_manager->convertIndexToAddr(block_src, layer_id);
         ASSERT_NE(addr.kv_scale_addr, nullptr);
 
-        auto host_k = rtp_llm::vector2Buffer(src_k);
-        auto host_v = rtp_llm::vector2Buffer(src_v);
+        auto host_k_t = torch::tensor(src_k, torch::kFloat32);
+        auto host_v_t = torch::tensor(src_v, torch::kFloat32);
 
         const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kv_scale_stride_bytes;
         ASSERT_GT(kv_scale_stride_bytes, 0u);
         const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
         void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr.kv_scale_addr) + kv_scale_block_bytes);
 
-        rtp_llm::Buffer dst_k(
-            rtp_llm::MemoryType::MEMORY_GPU, rtp_llm::DataType::TYPE_FP32, {scale_elems}, addr.kv_scale_addr);
-        rtp_llm::Buffer dst_v(
-            rtp_llm::MemoryType::MEMORY_GPU, rtp_llm::DataType::TYPE_FP32, {scale_elems}, v_scale_addr);
+        auto dst_k_t = torch::from_blob(
+            addr.kv_scale_addr, {(int64_t)scale_elems}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+        auto dst_v_t = torch::from_blob(
+            v_scale_addr, {(int64_t)scale_elems}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
 
-        rtp_llm::Buffer src_k_view(host_k->where(), host_k->type(), {scale_elems}, host_k->data());
-        rtp_llm::Buffer src_v_view(host_v->where(), host_v->type(), {scale_elems}, host_v->data());
-
-        device_->copy({dst_k, src_k_view});
-        device_->copy({dst_v, src_v_view});
+        CopyParams cp_k{dst_k_t, host_k_t};
+        CopyParams cp_v{dst_v_t, host_v_t};
+        runtimeCopy(cp_k);
+        runtimeCopy(cp_v);
     }
-    device_->syncAndCheck();
+    runtimeSyncAndCheck();
 
     // Copy should include both K/V scales.
     cache_manager->blockCopy(block_src, block_dst);
-    device_->syncAndCheck();
+    runtimeSyncAndCheck();
 
     for (int layer_id = 0; layer_id < 2; ++layer_id) {
-        assertScaleEq(device_, cache_manager, layer_id, block_dst, src_k, src_v);
+        assertScaleEq(cache_manager, layer_id, block_dst, src_k, src_v);
     }
 }
 
 TEST_F(KVCacheManagerTest, BlockBatchCopy) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/10, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/false);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
     auto&        spec    = cache_manager->cacheConfig().cache_specs[0];
@@ -235,9 +224,9 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
         const int           block_id = 1 + i;
         std::vector<int8_t> k_vec(k_bytes, static_cast<int8_t>(block_id));
         std::vector<int8_t> v_vec(v_bytes, static_cast<int8_t>(block_id + 10));
-        auto                k_buf = rtp_llm::vector2Buffer(k_vec);
-        auto                v_buf = rtp_llm::vector2Buffer(v_vec);
-        ASSERT_TRUE(cache_manager->setKVBlockValue(block_id, *k_buf, *v_buf));
+        auto                k_t = torch::from_blob(k_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
+        auto                v_t = torch::from_blob(v_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
+        ASSERT_TRUE(cache_manager->setKVBlockValue(block_id, k_t, v_t));
     }
 
     std::vector<BlockIdPair> mapping;
@@ -259,8 +248,8 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
         std::fill(expected.begin(), expected.begin() + k_bytes, static_cast<int8_t>(src_block));
         std::fill(expected.begin() + k_bytes, expected.end(), static_cast<int8_t>(src_block + 10));
 
-        assertBlockBytesEq(device_, cache_manager, /*layer_id=*/0, dst_block, expected);
-        assertBlockBytesEq(device_, cache_manager, /*layer_id=*/1, dst_block, expected);
+        assertBlockBytesEq(cache_manager, /*layer_id=*/0, dst_block, expected);
+        assertBlockBytesEq(cache_manager, /*layer_id=*/1, dst_block, expected);
     }
 }
 
@@ -269,7 +258,7 @@ TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheDisabled) {
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache = false;
 
-    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     EXPECT_TRUE(kv_cache_manager->init());
     ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
     ASSERT_NE(kv_cache_manager->coordinator_->update_thread_, nullptr);
@@ -283,7 +272,7 @@ TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSizeMissing) {
     kv_cache_config.memory_cache_size_mb         = 0;
     kv_cache_config.memory_cache_sync_timeout_ms = 1;
 
-    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     EXPECT_THROW(kv_cache_manager->init(), std::runtime_error);
     // KVCacheManager::initConnectorCoordinator assigns coordinator_ before RTP_LLM_CHECK throws.
     ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
@@ -298,7 +287,7 @@ TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSyncTimeoutInval
     kv_cache_config.memory_cache_size_mb         = 10;
     kv_cache_config.memory_cache_sync_timeout_ms = 0;  // mock coordinator init failed
 
-    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     EXPECT_THROW(kv_cache_manager->init(), std::runtime_error);
     ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
     EXPECT_EQ(kv_cache_manager->coordinator_->update_thread_, nullptr);
@@ -316,7 +305,7 @@ TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheEnabledAndConfigValid)
     runtime_config.worker_grpc_addrs             = {"127.0.0.1:12345"};
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(
-        cache_config, device_, false, nullptr, kv_cache_config, ParallelismConfig{}, runtime_config);
+        cache_config, false, nullptr, kv_cache_config, ParallelismConfig{}, runtime_config);
     EXPECT_TRUE(kv_cache_manager->init());
 
     auto coordinator = kv_cache_manager->coordinator_;
@@ -328,11 +317,11 @@ TEST_F(KVCacheManagerTest, AsyncLoadCache_ReturnFromCoordinator_Success) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    auto          allocator        = std::make_shared<MockKVCacheAllocator>(cache_config, device_);
-    auto          mock_coordinator = std::make_shared<MockKVCacheConnectorCoordinator>(
-        cache_config, kv_cache_config, runtime_config, allocator, device_);
+    auto          allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
+    auto          mock_coordinator =
+        std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
 
-    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config, device_);
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config);
     kv_cache_manager->coordinator_ = mock_coordinator;
 
     auto mock_context       = std::make_shared<MockKVCacheConnectorReadWriteContext>();
@@ -348,11 +337,11 @@ TEST_F(KVCacheManagerTest, AsyncStoreCache_ReturnFromCoordinator_Success) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    auto          allocator        = std::make_shared<MockKVCacheAllocator>(cache_config, device_);
-    auto          mock_coordinator = std::make_shared<MockKVCacheConnectorCoordinator>(
-        cache_config, kv_cache_config, runtime_config, allocator, device_);
+    auto          allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
+    auto          mock_coordinator =
+        std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
 
-    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config, device_);
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config);
     kv_cache_manager->coordinator_ = mock_coordinator;
 
     auto mock_context       = std::make_shared<MockKVCacheConnectorReadWriteContext>();
@@ -368,11 +357,11 @@ TEST_F(KVCacheManagerTest, ExecuteFunction_ReturnFalse_CoordinatorReturnFalse) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    auto          allocator        = std::make_shared<MockKVCacheAllocator>(cache_config, device_);
-    auto          mock_coordinator = std::make_shared<MockKVCacheConnectorCoordinator>(
-        cache_config, kv_cache_config, runtime_config, allocator, device_);
+    auto          allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
+    auto          mock_coordinator =
+        std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
 
-    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config, device_);
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config);
     kv_cache_manager->coordinator_ = mock_coordinator;
 
     FunctionRequestPB request;
@@ -388,11 +377,11 @@ TEST_F(KVCacheManagerTest, ExecuteFunction_ReturnTrue_Success) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    auto          allocator        = std::make_shared<MockKVCacheAllocator>(cache_config, device_);
-    auto          mock_coordinator = std::make_shared<MockKVCacheConnectorCoordinator>(
-        cache_config, kv_cache_config, runtime_config, allocator, device_);
+    auto          allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
+    auto          mock_coordinator =
+        std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
 
-    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config, device_);
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config);
     kv_cache_manager->coordinator_ = mock_coordinator;
 
     FunctionRequestPB request;
@@ -410,7 +399,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     kv_cache_config.enable_memory_cache = false;  // avoid starting real memory connector in coordinator->init()
     kv_cache_config.reuse_cache         = false;
 
-    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, false, nullptr, kv_cache_config);
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
     ASSERT_NE(kv_cache_manager->allocator_, nullptr);
     ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
@@ -436,7 +425,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     // Inject a lightweight memory connector with a MemoryBlockCache snapshot:
     // put 11 then 13 => MRU order: 13,11 (11 duplicates device key)
     auto mem_connector = std::make_shared<KVCacheMemoryConnector>(
-        cache_config, kv_cache_config, kv_cache_manager->allocator_, device_, std::vector<std::string>{});
+        cache_config, kv_cache_config, kv_cache_manager->allocator_, std::vector<std::string>{});
     mem_connector->block_cache_ = std::make_shared<MemoryBlockCache>();
     {
         MemoryBlockCache::CacheItem item;
@@ -475,7 +464,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailabl
     runtime_config.worker_grpc_addrs             = {"127.0.0.1:12345"};
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(
-        cache_config, device_, false, nullptr, kv_cache_config, ParallelismConfig{}, runtime_config);
+        cache_config, false, nullptr, kv_cache_config, ParallelismConfig{}, runtime_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
     // With memory cache enabled, getKVCacheInfo() should include memory block pool stats.

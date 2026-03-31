@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
-#include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace std;
@@ -15,7 +15,7 @@ namespace rtp_llm {
 
 class GenerateStreamBuilder {
 public:
-    GenerateStreamBuilder(): device_(rtp_llm::DeviceFactory::getDefaultDevice()) {
+    GenerateStreamBuilder() {
         model_config_.max_seq_len = 2048;
     }
 
@@ -29,7 +29,8 @@ public:
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         ResourceContext                 resource_context;
         generate_input->generate_config = generate_config;
-        generate_input->input_ids       = rtp_llm::vector2Buffer(input_ids);
+        generate_input->input_ids =
+            torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
         return std::make_shared<NormalGenerateStream>(
             generate_input, model_config_, runtime_config_, resource_context, nullptr);
     };
@@ -38,7 +39,7 @@ public:
         autil::EnvGuard perf_scope("PERF_TEST", "1");
 
         auto cache_config  = init_config();
-        auto cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+        auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
         cache_manager->init();
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
@@ -47,8 +48,9 @@ public:
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         generate_config->num_return_sequences = 2;
-        generate_input->input_ids             = rtp_llm::vector2Buffer(input_ids);
-        generate_input->generate_config       = generate_config;
+        generate_input->input_ids =
+            torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
+        generate_input->generate_config = generate_config;
         ModelConfig   model_config;
         RuntimeConfig runtime_config;
         model_config.max_seq_len = 2048;
@@ -63,22 +65,22 @@ public:
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         ResourceContext                 resource_context;
         generate_input->generate_config = generate_config;
-        generate_input->input_ids       = rtp_llm::vector2Buffer(input_ids);
-        auto stream_ptr                 = std::make_shared<NormalGenerateStream>(
+        generate_input->input_ids =
+            torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
+        auto stream_ptr = std::make_shared<NormalGenerateStream>(
             generate_input, model_config_, runtime_config_, resource_context, nullptr);
         stream_ptr->setIsContextStream(false);
-        auto new_tokens_ptr = rtp_llm::vector2Buffer(new_token_ids);
-        device_->copy(
-            {*(stream_ptr->completeTokenIds()->index(0)->slice(stream_ptr->seqLength(), new_token_ids.size())),
-             *new_tokens_ptr});
+        auto complete_ids = stream_ptr->completeTokenIds();
+        std::memcpy(complete_ids.data_ptr<int32_t>() + stream_ptr->seqLength(),
+                    new_token_ids.data(),
+                    new_token_ids.size() * sizeof(int));
         stream_ptr->setSeqLength(stream_ptr->seqLength() + new_token_ids.size());
         return stream_ptr;
     };
 
 private:
-    ModelConfig          model_config_;
-    RuntimeConfig        runtime_config_;
-    rtp_llm::DeviceBase* device_;
+    ModelConfig   model_config_;
+    RuntimeConfig runtime_config_;
 };
 
 class GenerateStreamTest: public DeviceTestBase {

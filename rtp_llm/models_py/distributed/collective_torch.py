@@ -16,6 +16,12 @@ from rtp_llm.models_py.distributed.symm_mem import (
 )
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
+# ParallelMode enum values matching C++ rtp_llm::ParallelMode in OpData.h
+_CPP_PARALLEL_MODE_TP = 0
+_CPP_PARALLEL_MODE_DP = 1
+_CPP_PARALLEL_MODE_DP_AND_TP = 2
+_CPP_PARALLEL_MODE_FFN_TP = 3
+
 
 class Group(Enum):
     """Process group types for collective operations"""
@@ -66,6 +72,7 @@ def init_distributed_environment(
             _create_process_groups(
                 parallelism_config, backend, timedelta(seconds=timeout)
             )
+            _register_process_groups_to_cpp(nccl_comm_config.nccl_ip)
         return
 
     assert backend in ["nccl"], "backend current only supports nccl"
@@ -84,6 +91,7 @@ def init_distributed_environment(
         _create_process_groups(parallelism_config, backend, timedelta(seconds=timeout))
         _parallelism_config = parallelism_config
         _initialized = True
+        _register_process_groups_to_cpp(ip)
         return
 
     logging.info(
@@ -115,6 +123,7 @@ def init_distributed_environment(
     _create_process_groups(parallelism_config, backend, timeout)
     _parallelism_config = parallelism_config
     _initialized = True
+    _register_process_groups_to_cpp(ip)
     init_user_buffers_environment(parallelism_config)
 
 
@@ -194,6 +203,110 @@ def _create_process_groups(
         init_symm_mem_communicator(torch.distributed.group.WORLD)
 
 
+def _get_free_port():
+    """Find a free TCP port."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def _register_process_groups_to_cpp(master_addr: str):
+    """Register ProcessGroups with C++ DistributedComm layer.
+
+    Since pybind11 cannot cast ProcessGroup across .so module boundaries,
+    we pass store connection info and let C++ create its own ProcessGroups
+    with independent NCCL communicators.
+
+    Args:
+        master_addr: The master node address (IP) for C++ TCPStore creation.
+    """
+    try:
+        import librtp_compute_ops
+
+        if not hasattr(librtp_compute_ops, "register_process_group_from_store"):
+            logging.debug(
+                "register_process_group_from_store not available, skipping C++ ProcessGroup registration"
+            )
+            return
+        _register = librtp_compute_ops.register_process_group_from_store
+    except ImportError:
+        logging.debug(
+            "librtp_compute_ops not available, skipping C++ ProcessGroup registration"
+        )
+        return
+
+    def _register_for_pg(cpp_mode, pg):
+        """Register a C++ ProcessGroup matching the given Python PG's ranks."""
+        ranks = list(range(pg.size()))
+        try:
+            ranks = torch.distributed.get_process_group_ranks(pg)
+        except Exception:
+            pass
+        pg_rank = torch.distributed.get_rank(pg)
+        pg_size = pg.size()
+
+        port_tensor = torch.zeros(1, dtype=torch.long, device="cuda")
+        if pg_rank == 0:
+            port_tensor[0] = _get_free_port()
+        torch.distributed.broadcast(port_tensor, src=ranks[0], group=pg)
+        cpp_store_port = int(port_tensor.cpu().item())
+
+        device_id = torch.cuda.current_device()
+        _register(cpp_mode, master_addr, cpp_store_port, pg_rank, pg_size, device_id)
+        logging.info(
+            f"Registered C++ ProcessGroup mode={cpp_mode} "
+            f"(rank={pg_rank}, size={pg_size}, device={device_id}, store={master_addr}:{cpp_store_port})"
+        )
+
+    registered_modes = set()
+
+    for group_key, pg in _group_map.items():
+        if group_key == Group.DP_AND_TP:
+            if _CPP_PARALLEL_MODE_DP_AND_TP not in registered_modes:
+                _register_for_pg(_CPP_PARALLEL_MODE_DP_AND_TP, pg)
+                registered_modes.add(_CPP_PARALLEL_MODE_DP_AND_TP)
+        elif isinstance(group_key, str):
+            if group_key.startswith(Group.TP.name):
+                if _parallelism_config is not None:
+                    dp_rank = (
+                        torch.distributed.get_rank() // _parallelism_config.tp_size
+                    )
+                    expected_key = Group.TP.name + str(dp_rank)
+                    if (
+                        group_key == expected_key
+                        and _CPP_PARALLEL_MODE_TP not in registered_modes
+                    ):
+                        _register_for_pg(_CPP_PARALLEL_MODE_TP, pg)
+                        registered_modes.add(_CPP_PARALLEL_MODE_TP)
+            elif group_key.startswith(Group.DP.name):
+                if _parallelism_config is not None:
+                    tp_rank = torch.distributed.get_rank() % _parallelism_config.tp_size
+                    expected_key = Group.DP.name + str(tp_rank)
+                    if (
+                        group_key == expected_key
+                        and _CPP_PARALLEL_MODE_DP not in registered_modes
+                    ):
+                        _register_for_pg(_CPP_PARALLEL_MODE_DP, pg)
+                        registered_modes.add(_CPP_PARALLEL_MODE_DP)
+
+    # If world_size == tp_size, DP_AND_TP is also the TP group
+    if (
+        _parallelism_config is not None
+        and _parallelism_config.tp_size > 1
+        and _parallelism_config.world_size == _parallelism_config.tp_size
+        and _CPP_PARALLEL_MODE_TP not in registered_modes
+    ):
+        pg_world = _group_map.get(Group.DP_AND_TP)
+        if pg_world is not None:
+            _register_for_pg(_CPP_PARALLEL_MODE_TP, pg_world)
+            registered_modes.add(_CPP_PARALLEL_MODE_TP)
+            logging.info(
+                "Registered WORLD as TP ProcessGroup to C++ (tp_size == world_size)"
+            )
+
+
 def distributed_environment_initialized() -> bool:
     """Check if distributed environment is initialized.
 
@@ -268,6 +381,14 @@ def destroy_distributed_environment():
         )
 
         destroy_user_buffers_communicator()
+
+    try:
+        import librtp_compute_ops
+
+        if hasattr(librtp_compute_ops, "clear_process_groups"):
+            librtp_compute_ops.clear_process_groups()
+    except ImportError:
+        pass
 
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()

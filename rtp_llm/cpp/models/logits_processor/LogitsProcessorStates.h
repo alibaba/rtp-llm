@@ -1,7 +1,5 @@
 #pragma once
 
-#include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"

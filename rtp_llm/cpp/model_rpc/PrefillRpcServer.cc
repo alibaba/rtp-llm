@@ -1,7 +1,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -175,8 +175,9 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
         auto mutable_request = const_cast<GenerateInputPB*>(prefill_context.rpc_context.request);
         mutable_request->clear_token_ids();
         // TODO(xinfei.sxf) optimize copy
-        for (size_t i = 0; i < input->input_ids->size(); i++) {
-            mutable_request->add_token_ids(*input->input_ids->dataWithOffset<int32_t>(i));
+        auto* ids_ptr = input->input_ids.data_ptr<int32_t>();
+        for (size_t i = 0; i < input->input_ids.numel(); i++) {
+            mutable_request->add_token_ids(ids_ptr[i]);
         }
     }
 }
@@ -217,8 +218,6 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
 void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(),
-                                              prefill_context.generate_input->generate_config->adapter_name);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
     auto stream = engine_->enqueue(prefill_context.generate_input);
     prefill_context.setStream(stream);
@@ -285,11 +284,11 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     generate_request.set_client_id(process_id_);
     generate_request.set_request_id(prefill_context.request_id);
     generate_request.set_first_generate_token_id(first_token);
-    if (stream->getContextPositionIds()) {
-        auto context_position_ids = stream->getContextPositionIds();
+    auto context_position_ids = stream->getContextPositionIds();
+    if (context_position_ids.defined()) {
         generate_request.mutable_position_ids()->CopyFrom(
-            {context_position_ids->data<int32_t>(),
-             context_position_ids->data<int32_t>() + context_position_ids->size()});
+            {context_position_ids.data_ptr<int32_t>(),
+             context_position_ids.data_ptr<int32_t>() + context_position_ids.numel()});
     }
     if (engine_->isMTPEagle()) {
         RTP_LLM_CHECK_WITH_INFO(stream->getProposeToken().size() > 0,
@@ -301,21 +300,18 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
     if (sp_output_buffer) {
-        if (sp_output_buffer->all_probs->where() == rtp_llm::MemoryType::MEMORY_GPU) {
-            sp_output_buffer->all_probs =
-                engine_->getDevice()->clone({*sp_output_buffer->all_probs, rtp_llm::AllocationType::HOST});
-        }
-        if (!sp_output_buffer->hidden_states) {
+        auto all_probs_cpu =
+            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        torch::Tensor hidden_states_cpu;
+        if (!sp_output_buffer->hidden_states.defined()) {
             // dummy hidden states, so datatype is not important
-            sp_output_buffer->hidden_states = engine_->getDevice()->allocateBuffer(
-                {rtp_llm::DataType::TYPE_FP16, {0}, rtp_llm::AllocationType::HOST});
+            hidden_states_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+        } else {
+            hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
+                                                                            sp_output_buffer->hidden_states;
         }
-        if (sp_output_buffer->hidden_states->where() == rtp_llm::MemoryType::MEMORY_GPU) {
-            sp_output_buffer->hidden_states =
-                engine_->getDevice()->clone({*sp_output_buffer->hidden_states, rtp_llm::AllocationType::HOST});
-        }
-        QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), sp_output_buffer->all_probs.get());
-        QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), sp_output_buffer->hidden_states.get());
+        QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
+        QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
     }
 
     generate_request.set_stage(RemoteStage::GENERATE);

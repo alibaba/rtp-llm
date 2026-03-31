@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 

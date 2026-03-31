@@ -69,7 +69,7 @@ protected:
     void preparePrefillSpecUpdateInfo(const StreamGroups&                stream_groups,
                                       const MergedOutput&                prefill_output,
                                       const MergedOutput&                propose_output,
-                                      const rtp_llm::BufferPtr&          new_tokens_all,
+                                      const torch::Tensor&               new_tokens_all,
                                       std::vector<StreamSpecUpdateInfo>& spec_update_infos) const;
 
     void prepareDecodeSpecUpdateInfo(const StreamGroups&                          stream_groups,

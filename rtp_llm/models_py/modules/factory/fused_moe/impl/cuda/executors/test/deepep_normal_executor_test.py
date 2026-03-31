@@ -197,7 +197,7 @@ class DeepGemmHybridExecutorTestBase:
         token_idx = 0
         for i, num_token in enumerate(expert_num_tokens):
             diff = calc_diff(
-                combine_payload.fused_expert_output[token_idx: token_idx + num_token],
+                combine_payload.fused_expert_output[token_idx : token_idx + num_token],
                 ref_output[i, :num_token],
             )
             # print('diff:', diff, combine_payload.fused_expert_output[token_idx : token_idx + num_token], ref_output[i, :num_token])
@@ -205,9 +205,7 @@ class DeepGemmHybridExecutorTestBase:
             assert diff < 0.003
 
 
-class DeepGemmHybridExecutorTestBase(
-    DeepGemmHybridExecutorTestBase, unittest.TestCase
-):
+class DeepGemmHybridExecutorTestBase(DeepGemmHybridExecutorTestBase, unittest.TestCase):
     pass
 
 

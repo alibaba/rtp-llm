@@ -19,7 +19,7 @@ Usage example:
 import torch
 
 from rtp_llm.models_py.utils.arch import get_sm, is_cuda
-from rtp_llm.ops.compute_ops import DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
 
 from .defs.fused_moe import FusedMoe
 from .factory import FusedMoeFactory
@@ -31,7 +31,7 @@ __all__ = ["FusedMoeFactory", "StrategyRegistry", "FusedMoe"]
 # Device-specific MoE strategy registration
 # ============================================================================
 
-device_type = get_device().get_device_type()
+device_type = get_exec_ctx().get_device_type()
 
 # Import common strategies
 from rtp_llm.models_py.modules.factory.fused_moe.impl.common.strategy.batched_triton_strategy import (

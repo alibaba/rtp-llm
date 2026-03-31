@@ -89,9 +89,15 @@ class FlashInferTRTLLMParams(object):
 # Triton kernels for CUDA-graph prepare
 # ---------------------------------------------------------------------------
 
+
 @triton.jit
 def _convert_block_id_to_kv_offset(
-    pid, block_id_ptr, kv_offset_ptr, M, total_bm, BLOCK_SIZE: tl.constexpr,
+    pid,
+    block_id_ptr,
+    kv_offset_ptr,
+    M,
+    total_bm,
+    BLOCK_SIZE: tl.constexpr,
 ):
     """block_id[B, M] -> kv_offset[B, 2, M] with K=id*2, V=id*2+1."""
     bm_offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -106,9 +112,13 @@ def _convert_block_id_to_kv_offset(
 
 @triton.jit
 def _prepare_cg_decode_kernel(
-    src_ptr, seq_lens_out_ptr,
-    block_id_ptr, kv_offset_ptr,
-    N, M, total_bm,
+    src_ptr,
+    seq_lens_out_ptr,
+    block_id_ptr,
+    kv_offset_ptr,
+    N,
+    M,
+    total_bm,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Decode: seq_lens_out = copy(src), block_id -> kv_offset."""
@@ -119,15 +129,25 @@ def _prepare_cg_decode_kernel(
         vals = tl.load(src_ptr + offsets_n, mask=mask_n)
         tl.store(seq_lens_out_ptr + offsets_n, vals, mask=mask_n)
     _convert_block_id_to_kv_offset(
-        pid, block_id_ptr, kv_offset_ptr, M, total_bm, BLOCK_SIZE,
+        pid,
+        block_id_ptr,
+        kv_offset_ptr,
+        M,
+        total_bm,
+        BLOCK_SIZE,
     )
 
 
 @triton.jit
 def _prepare_cg_spec_decode_kernel(
-    prefix_ptr, q_len_ptr, seq_lens_out_ptr,
-    block_id_ptr, kv_offset_ptr,
-    N, M, total_bm,
+    prefix_ptr,
+    q_len_ptr,
+    seq_lens_out_ptr,
+    block_id_ptr,
+    kv_offset_ptr,
+    N,
+    M,
+    total_bm,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Spec-decode: seq_lens_out = prefix + q_len[0], block_id -> kv_offset.
@@ -143,16 +163,27 @@ def _prepare_cg_spec_decode_kernel(
         prefix = tl.load(prefix_ptr + offsets_n, mask=mask_n)
         tl.store(seq_lens_out_ptr + offsets_n, prefix + q_len, mask=mask_n)
     _convert_block_id_to_kv_offset(
-        pid, block_id_ptr, kv_offset_ptr, M, total_bm, BLOCK_SIZE,
+        pid,
+        block_id_ptr,
+        kv_offset_ptr,
+        M,
+        total_bm,
+        BLOCK_SIZE,
     )
 
 
 @triton.jit
 def _prepare_cg_prefill_kernel(
-    input_lens_ptr, prefix_lens_ptr,
-    seq_lens_out_ptr, cu_kv_seqlens_out_ptr,
-    block_id_ptr, kv_offset_ptr,
-    page_size, N, M, total_bm,
+    input_lens_ptr,
+    prefix_lens_ptr,
+    seq_lens_out_ptr,
+    cu_kv_seqlens_out_ptr,
+    block_id_ptr,
+    kv_offset_ptr,
+    page_size,
+    N,
+    M,
+    total_bm,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Prefill: seq_lens_out = input_lens + prefix_lens,
@@ -177,7 +208,12 @@ def _prepare_cg_prefill_kernel(
             mask=first_mask,
         )
     _convert_block_id_to_kv_offset(
-        pid, block_id_ptr, kv_offset_ptr, M, total_bm, BLOCK_SIZE,
+        pid,
+        block_id_ptr,
+        kv_offset_ptr,
+        M,
+        total_bm,
+        BLOCK_SIZE,
     )
 
 
@@ -185,8 +221,10 @@ def _prepare_cg_prefill_kernel(
 # CUDA-graph launch parameter types
 # ---------------------------------------------------------------------------
 
+
 class _DecodeCGParams(NamedTuple):
     """Pre-computed CUDA graph launch parameters for decode / spec-decode."""
+
     grid: tuple
     seq_lens: torch.Tensor
     kv_cache_offset: torch.Tensor
@@ -198,6 +236,7 @@ class _DecodeCGParams(NamedTuple):
 
 class _PrefillCGParams(NamedTuple):
     """Pre-computed CUDA graph launch parameters for prefill."""
+
     grid: tuple
     seq_lens: torch.Tensor
     cu_kv_seqlens: torch.Tensor
@@ -220,36 +259,57 @@ def _compute_cg_grid(batch_size: int, num_blocks_per_seq: int):
 
 
 def _init_decode_cg_params(
-    batch_size, kv_cache_block_id_device, seq_lens, kv_cache_offset,
+    batch_size,
+    kv_cache_block_id_device,
+    seq_lens,
+    kv_cache_offset,
 ) -> _DecodeCGParams:
     """Pre-compute CUDA graph launch parameters for decode / spec-decode."""
     grid, N, M, total_bm, BS = _compute_cg_grid(
-        batch_size, kv_cache_block_id_device.shape[1],
+        batch_size,
+        kv_cache_block_id_device.shape[1],
     )
     return _DecodeCGParams(
-        grid=grid, seq_lens=seq_lens, kv_cache_offset=kv_cache_offset,
-        N=N, M=M, total_bm=total_bm, BLOCK_SIZE=BS,
+        grid=grid,
+        seq_lens=seq_lens,
+        kv_cache_offset=kv_cache_offset,
+        N=N,
+        M=M,
+        total_bm=total_bm,
+        BLOCK_SIZE=BS,
     )
 
 
 def _init_prefill_cg_params(
-    batch_size, kv_cache_block_id_device,
-    seq_lens, cu_kv_seqlens, kv_cache_offset, page_size,
+    batch_size,
+    kv_cache_block_id_device,
+    seq_lens,
+    cu_kv_seqlens,
+    kv_cache_offset,
+    page_size,
 ) -> _PrefillCGParams:
     """Pre-compute CUDA graph launch parameters for prefill."""
     grid, N, M, total_bm, BS = _compute_cg_grid(
-        batch_size, kv_cache_block_id_device.shape[1],
+        batch_size,
+        kv_cache_block_id_device.shape[1],
     )
     return _PrefillCGParams(
-        grid=grid, seq_lens=seq_lens, cu_kv_seqlens=cu_kv_seqlens,
-        kv_cache_offset=kv_cache_offset, page_size=page_size,
-        N=N, M=M, total_bm=total_bm, BLOCK_SIZE=BS,
+        grid=grid,
+        seq_lens=seq_lens,
+        cu_kv_seqlens=cu_kv_seqlens,
+        kv_cache_offset=kv_cache_offset,
+        page_size=page_size,
+        N=N,
+        M=M,
+        total_bm=total_bm,
+        BLOCK_SIZE=BS,
     )
 
 
 # ---------------------------------------------------------------------------
 # Op classes (low-level prepare + forward)
 # ---------------------------------------------------------------------------
+
 
 class FlashInferTRTLLMPrefillOp(object):
     def __init__(
@@ -476,6 +536,7 @@ class FlashInferTRTLLMDecodeOp(object):
 # Impl classes (CUDA-graph-aware wrappers)
 # ---------------------------------------------------------------------------
 
+
 class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
 
     def __init__(
@@ -528,9 +589,14 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
         _prepare_cg_prefill_kernel[p.grid](
             attn_inputs.input_lengths_d,
             attn_inputs.prefix_lengths_d,
-            p.seq_lens, p.cu_kv_seqlens,
+            p.seq_lens,
+            p.cu_kv_seqlens,
             attn_inputs.kv_cache_kernel_block_id_device,
-            p.kv_cache_offset, p.page_size, p.N, p.M, p.total_bm,
+            p.kv_cache_offset,
+            p.page_size,
+            p.N,
+            p.M,
+            p.total_bm,
             BLOCK_SIZE=p.BLOCK_SIZE,
         )
 
@@ -590,7 +656,10 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
                 attn_inputs.sequence_lengths_plus_1_d,
                 p.seq_lens,
                 attn_inputs.kv_cache_kernel_block_id_device,
-                p.kv_cache_offset, p.N, p.M, p.total_bm,
+                p.kv_cache_offset,
+                p.N,
+                p.M,
+                p.total_bm,
                 BLOCK_SIZE=p.BLOCK_SIZE,
             )
         else:
@@ -599,7 +668,10 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
                 attn_inputs.input_lengths_d,
                 p.seq_lens,
                 attn_inputs.kv_cache_kernel_block_id_device,
-                p.kv_cache_offset, p.N, p.M, p.total_bm,
+                p.kv_cache_offset,
+                p.N,
+                p.M,
+                p.total_bm,
                 BLOCK_SIZE=p.BLOCK_SIZE,
             )
 
@@ -658,6 +730,9 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
             attn_inputs.sequence_lengths_plus_1_d,
             p.seq_lens,
             attn_inputs.kv_cache_kernel_block_id_device,
-            p.kv_cache_offset, p.N, p.M, p.total_bm,
+            p.kv_cache_offset,
+            p.N,
+            p.M,
+            p.total_bm,
             BLOCK_SIZE=p.BLOCK_SIZE,
         )

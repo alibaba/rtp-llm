@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/test/test_util/BlockBufferUtil.h"
 
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include <atomic>
@@ -44,7 +45,7 @@ BlockBufferUtil::makeBlockBuffer(const std::string& key, uint32_t len, char val,
             return nullptr;
         }
         // memsetGPU sync
-        device_util_->device_->syncAndCheck();
+        runtimeSyncAndCheck();
     } else {
         device_util_->memsetCPU(buffer, val, len);
     }

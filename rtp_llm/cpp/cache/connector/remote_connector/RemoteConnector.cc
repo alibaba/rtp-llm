@@ -8,9 +8,9 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 
 namespace rtp_llm {
 namespace {
@@ -161,33 +161,29 @@ bool RemoteAsyncMatchContext::success() const {
     return state_.successImpl();
 }
 
-RemoteConnector::RemoteConnector(const CacheConfig&                        cache_config,
-                                 const KVCacheConfig&                      kv_cache_config,
-                                 const RuntimeConfig&                      runtime_config,
-                                 const ParallelismConfig&                  parallelism_config,
-                                 const SpeculativeExecutionConfig&         sp_config,
-                                 DeviceBase*                               device,
-                                 void*                                     register_buffer_addr,
-                                 size_t                                    register_buffer_size,
-                                 std::shared_ptr<KVCacheAllocator>         allocator,
-                                 RemoteConnectorGroupMode                  group_mode,
-                                 const std::vector<int32_t>&               full_group_ids,
-                                 const std::vector<int32_t>&               other_group_ids,
-                                 const kmonitor::MetricsReporterPtr        metrics_reporter,
-                                 uint32_t                                  linear_attention_write_interval,
-                                 size_t                                    sink_size,
-                                 size_t                                    sw_size,
-                                 const std::map<std::string, std::string>& lora_info_map):
+RemoteConnector::RemoteConnector(const CacheConfig&                 cache_config,
+                                 const KVCacheConfig&               kv_cache_config,
+                                 const RuntimeConfig&               runtime_config,
+                                 const ParallelismConfig&           parallelism_config,
+                                 const SpeculativeExecutionConfig&  sp_config,
+                                 void*                              register_buffer_addr,
+                                 size_t                             register_buffer_size,
+                                 std::shared_ptr<KVCacheAllocator>  allocator,
+                                 RemoteConnectorGroupMode           group_mode,
+                                 const std::vector<int32_t>&        full_group_ids,
+                                 const std::vector<int32_t>&        other_group_ids,
+                                 const kmonitor::MetricsReporterPtr metrics_reporter,
+                                 uint32_t                           linear_attention_write_interval,
+                                 size_t                             sink_size,
+                                 size_t                             sw_size):
     metrics_reporter_(metrics_reporter) {
     RemoteConnector::InitParams init_params{cache_config,
                                             kv_cache_config,
                                             runtime_config,
                                             parallelism_config,
                                             sp_config,
-                                            device,
                                             register_buffer_addr,
-                                            register_buffer_size,
-                                            lora_info_map};
+                                            register_buffer_size};
     init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
     switch (group_mode) {
         case RemoteConnectorGroupMode::RCGM_LAYER_DEFAULT: {
@@ -328,10 +324,6 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
 
     auto [location_spec_info_map, location_spec_groups] = genLocationSpecInfoMapAndGroups(tp_size);
 
-    if (init_params_->lora_info_map.empty()) {
-        init_params_->lora_info_map[""] = "";  // default : no lora
-    }
-
     std::string draft_model_info = "";
     if (init_params_->cache_config.mtp_sub_configs.size() != 0) {
         draft_model_info += '{' + init_params_->sp_config.to_string() + '}';
@@ -339,46 +331,38 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
 
     auto instance_id_salt = init_params_->kv_cache_config.reco_instance_id_salt;
 
-    remote_connector::ClientWrapper::ConfigMap result;
-    for (const auto& [lora_adapter_name, lora_path] : init_params_->lora_info_map) {
-        std::string lora_info_str;
-        if (!lora_adapter_name.empty()) {
-            lora_info_str = lora_adapter_name + '_' + std::to_string(hashString(lora_path));
-        }
-        std::stringstream instance_id_hash_ss;
-        instance_id_hash_ss << "instance_group: " << instance_group << ";block_size:" << block_size
-                            << ";model_name:" << model_name << ";dtype_str:" << dtype_str << ";use_mla:" << use_mla
-                            << ";fp8_kv_cache:" << fp8_kv_cache << ";tp_size:" << tp_size << ";dp_size:" << dp_size
-                            << ";extra_info:" << extra_info << ";lora_info:" << lora_info_str
-                            << ";location_spec_info:" << autil::legacy::ToJsonString(location_spec_info_map, true)
-                            << ";draft_model_info:" << draft_model_info;
-        std::string instace_id_hash_str = instance_id_hash_ss.str();
-        std::string instance_id_hash    = std::to_string(hashString(instace_id_hash_str));
-        std::string instance_id(instance_id_salt);
-        if (instance_id.empty()) {
-            instance_id = std::move(instance_id_hash);
-        } else {
-            instance_id += "_" + instance_id_hash;
-        }
-
-        RTP_LLM_LOG_INFO("lora_adapter_name[%s], instance_id[%s], instace_id_hash_str[%s]",
-                         lora_adapter_name.c_str(),
-                         instance_id.c_str(),
-                         instace_id_hash_str.c_str());
-        auto config = std::make_shared<RemoteConnectorConfig>(
-            enable_vipserver,
-            vipserver_domain,
-            block_size,
-            instance_group,
-            instance_id,
-            addresses,
-            location_spec_info_map,
-            meta_channel_config,
-            sdk_wrapper_config,
-            location_spec_groups,
-            ModelDeployment(model_name, dtype_str, use_mla, tp_size, dp_size, lora_info_str, 1, extra_info, user_data));
-        result[lora_adapter_name] = config;
+    std::stringstream instance_id_hash_ss;
+    instance_id_hash_ss << "instance_group: " << instance_group << ";block_size:" << block_size
+                        << ";model_name:" << model_name << ";dtype_str:" << dtype_str << ";use_mla:" << use_mla
+                        << ";fp8_kv_cache:" << fp8_kv_cache << ";tp_size:" << tp_size << ";dp_size:" << dp_size
+                        << ";extra_info:" << extra_info
+                        << ";location_spec_info:" << autil::legacy::ToJsonString(location_spec_info_map, true)
+                        << ";draft_model_info:" << draft_model_info;
+    std::string instace_id_hash_str = instance_id_hash_ss.str();
+    std::string instance_id_hash    = std::to_string(hashString(instace_id_hash_str));
+    std::string instance_id(instance_id_salt);
+    if (instance_id.empty()) {
+        instance_id = std::move(instance_id_hash);
+    } else {
+        instance_id += "_" + instance_id_hash;
     }
+
+    RTP_LLM_LOG_INFO("instance_id[%s], instace_id_hash_str[%s]", instance_id.c_str(), instace_id_hash_str.c_str());
+
+    remote_connector::ClientWrapper::ConfigMap result;
+    auto                                       config = std::make_shared<RemoteConnectorConfig>(
+        enable_vipserver,
+        vipserver_domain,
+        block_size,
+        instance_group,
+        instance_id,
+        addresses,
+        location_spec_info_map,
+        meta_channel_config,
+        sdk_wrapper_config,
+        location_spec_groups,
+        ModelDeployment(model_name, dtype_str, use_mla, tp_size, dp_size, 1, extra_info, user_data));
+    result[""] = config;
     return result;
 }
 
@@ -401,7 +385,7 @@ bool RemoteConnector::init() {
             "parse RECO_CLIENT_CONFIG [%s] fail.\n %s, exception: [%s]", client_config_map_str.c_str(), e.what());
         return false;
     }
-    auto tp_rank    = init_params_->device->getDeviceProperties().tp_rank;
+    auto tp_rank    = init_params_->parallelism_config.tp_rank;
     client_wrapper_ = std::make_shared<remote_connector::ClientWrapper>();
     kv_cache_manager::RegistSpan regist_span{init_params_->register_buffer_addr, init_params_->register_buffer_size};
     constexpr int32_t            full_group_idx = 0;  // TODO : transfer client not support diffent spec size
@@ -409,10 +393,9 @@ bool RemoteConnector::init() {
         tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID : kv_cache_manager::RoleType::WORKER,
         &regist_span,
         genLocationSpecName(tp_rank, group_policy_->groups().at(full_group_idx).group_name)};
-    auto device_id  = init_params_->device->getDeviceProperties().id;
-    int  cur_device = -1;
+    int cur_device = -1;
     check_cuda_value(cudaGetDevice(&cur_device));
-    RTP_LLM_LOG_INFO("cuda cur device, expect[%d], real[%d]", device_id, cur_device);
+    RTP_LLM_LOG_INFO("cuda cur device: %d", cur_device);
     if (!client_wrapper_->init(client_config_map, client_init_params)) {
         RTP_LLM_LOG_ERROR("create remote kv cache client failed");
         return false;
@@ -928,7 +911,7 @@ bool RemoteConnector::genWriteRequest(size_t                                  tp
 }
 
 int RemoteConnector::SetCudaDeviceOnce() const {
-    auto device_id     = init_params_->device->getDeviceProperties().id;
+    auto device_id     = static_cast<int>(init_params_->parallelism_config.local_rank);
     int  before_device = -1;
     int  after_device  = -1;
     check_cuda_value(cudaGetDevice(&before_device));

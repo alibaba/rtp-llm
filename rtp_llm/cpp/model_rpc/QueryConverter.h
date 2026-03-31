@@ -7,8 +7,6 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 class QueryConverter {
@@ -31,8 +29,6 @@ public:
 
     static torch::Tensor transTensor(const TensorPB& tensor_pb);
 
-    static void transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer);
-
     static void transTensorPB(TensorPB* tensor_pb, const torch::Tensor& tensor);
 
 private:
@@ -46,7 +42,7 @@ private:
 
     template<typename T>
     static void
-    mergeAndPadBuffersToTensorPB(TensorPB* target_pb, const std::vector<rtp_llm::ConstBufferPtr>& buffers, T pad_value);
+    mergeAndPadTensorsToTensorPB(TensorPB* target_pb, const std::vector<torch::Tensor>& tensors, T pad_value);
 };
 
 }  // namespace rtp_llm

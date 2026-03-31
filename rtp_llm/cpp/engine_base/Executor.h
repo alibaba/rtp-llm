@@ -2,10 +2,10 @@
 
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
-#include "rtp_llm/cpp/models/GptModel.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include <memory>
 #include <cstdlib>
 
@@ -13,7 +13,7 @@ namespace rtp_llm {
 
 class Executor {
 public:
-    Executor(rtp_llm::DeviceBase* device): device_(device) {};
+    Executor() {};
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams) = 0;
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
@@ -83,7 +83,6 @@ public:
     }
 
 public:
-    rtp_llm::DeviceBase* device_;
 };
 
 }  // namespace rtp_llm

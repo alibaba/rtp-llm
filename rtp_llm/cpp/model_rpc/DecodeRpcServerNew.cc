@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <cstring>
@@ -285,15 +285,20 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
     generate_stream->step();
 
     // append first token to generate stream
-    auto new_tokens     = engine_->getDevice()->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                                {(size_t)generate_stream->nextBatchSize(), (size_t)1},
-                                                                rtp_llm::AllocationType::HOST},
-                                                               {});
-    auto data           = new_tokens->data<int32_t>();
-    auto first_token_id = response.first_generate_token_id();
-    *data               = first_token_id;
+    auto new_tokens = torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);
+
+    new_tokens.data_ptr<int32_t>()[0] = response.first_generate_token_id();
     generate_stream->incLastOutputPos();
-    generate_stream->update({new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr});
+    generate_stream->update({new_tokens,
+                             1,
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor()});
     if (propose_maga_init_params_) {
         generate_stream->setReuseLength(generate_stream->seqLength() - 1);
         generate_stream->setSpEditRun(false);

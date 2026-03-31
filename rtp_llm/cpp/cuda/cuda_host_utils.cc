@@ -18,9 +18,11 @@
 #include "rtp_llm/cpp/utils/StackTrace.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#if USING_CUDA
 #include <cuda.h>
 #include <nvml.h>
 #include <cublas_v2.h>
+#endif
 #include <mutex>
 #include <unordered_map>
 #include <stdio.h>
@@ -35,6 +37,7 @@ static const char* _cudaGetErrorEnum(cudaError_t error) {
     return cudaGetErrorString(error);
 }
 
+#if USING_CUDA
 static const char* _cudaGetErrorEnum(cublasStatus_t error) {
     switch (error) {
         case CUBLAS_STATUS_SUCCESS:
@@ -79,6 +82,7 @@ static const char* _cudaGetErrorEnum(CUresult error) {
     }
     return error_name;
 }
+#endif
 
 template<typename T>
 void check(T result, const char* const file, int const line) {
@@ -94,8 +98,10 @@ void check(T result, const char* const file, int const line) {
 }
 
 template void check<cudaError_t>(cudaError_t result, const char* const file, int const line);
+#if USING_CUDA
 template void check<cublasStatus_t>(cublasStatus_t result, const char* const file, int const line);
 template void check<CUresult>(CUresult result, const char* const file, int const line);
+#endif
 
 void syncAndCheckInDebug(const char* const file, int const line) {
     if (rtp_llm::Logger::getEngineLogger().isDebugMode()) {
@@ -212,6 +218,7 @@ void priorityRange(int* low_priority, int* high_priority, int device_id) {
     *high_priority = cache[device_id].second;
 }
 
+#if USING_CUDA
 std::string getDriverVersion() {
     // Driver version is system-wide and doesn't change during program execution
     static std::string driver_version = []() {
@@ -375,6 +382,7 @@ bool checkOnSameNumaNodes(std::vector<size_t> device_ids) {
     RTP_LLM_LOG_INFO("All GPUs are on same numa node");
     return true;
 }
+#endif  // USING_CUDA
 
 int getVisibleDeviceNum() {
     return getDeviceCount();

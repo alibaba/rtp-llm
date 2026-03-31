@@ -30,7 +30,7 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         bind_to=(profiling_debug_config, "enable_device_perf"),
         type=str2bool,
         default=False,
-        help="控制是否在DeviceBase中启用设备性能指标的收集和报告。可选值: True (启用), False (禁用)。",
+        help="控制是否启用设备性能指标的收集和报告。可选值: True (启用), False (禁用)。",
     )
     profile_debug_logging_group.add_argument(
         "--ft_core_dump_on_exception",

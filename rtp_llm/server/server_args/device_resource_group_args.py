@@ -1,4 +1,19 @@
+import argparse
+import warnings
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _deprecated_noop(name):
+    class _DeprecatedAction(argparse.Action):
+        def __call__(self, parser, namespace, values, option_string=None):
+            warnings.warn(
+                f"{option_string} is deprecated and has no effect. It will be removed in a future release.",
+                FutureWarning,
+                stacklevel=2,
+            )
+
+    return _DeprecatedAction
 
 
 def init_device_resource_group_args(parser, device_resource_config, runtime_config):
@@ -6,24 +21,6 @@ def init_device_resource_group_args(parser, device_resource_config, runtime_conf
     # 设备和资源管理
     ##############################################################################################################
     device_resource_group = parser.add_argument_group("设备和资源管理")
-
-    device_resource_group.add_argument(
-        "--device_reserve_memory_bytes",
-        env_name="DEVICE_RESERVE_MEMORY_BYTES",
-        bind_to=(device_resource_config, "device_reserve_memory_bytes"),
-        type=int,
-        default=-1024 * 1024 * 1024,  # -1GB, prevent oom
-        help="指定在GPU设备上预留的内存量（单位：字节）。此内存不会被常规操作使用，可用于应对突发需求或特定驱动/内核开销。",
-    )
-
-    device_resource_group.add_argument(
-        "--host_reserve_memory_bytes",
-        env_name="HOST_RESERVE_MEMORY_BYTES",
-        bind_to=(device_resource_config, "host_reserve_memory_bytes"),
-        type=int,
-        default=4 * 1024 * 1024 * 1024,  # 4GB
-        help="指定在主机（CPU）上预留的内存量（单位：字节）。此内存不会被常规操作使用。默认为 4GB。",
-    )
 
     device_resource_group.add_argument(
         "--overlap_math_sm_count",
@@ -97,4 +94,22 @@ def init_device_resource_group_args(parser, device_resource_config, runtime_conf
         type=str,
         default="",
         help="ACEXT GEMM配置目录",
+    )
+
+    # Deprecated: kept for backward compatibility so existing scripts don't fail
+    device_resource_group.add_argument(
+        "--device_reserve_memory_bytes",
+        type=int,
+        default=None,
+        action=_deprecated_noop("device_reserve_memory_bytes"),
+        nargs="?",
+        help="[DEPRECATED] No longer used. Use --reserver_runtime_mem_mb instead.",
+    )
+    device_resource_group.add_argument(
+        "--host_reserve_memory_bytes",
+        type=int,
+        default=None,
+        action=_deprecated_noop("host_reserve_memory_bytes"),
+        nargs="?",
+        help="[DEPRECATED] No longer used.",
     )

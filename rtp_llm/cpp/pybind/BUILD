@@ -33,7 +33,6 @@ cc_library(
         "//rtp_llm/cpp/config:model_config",  # Add ModelConfig implementation
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/config:eplb_config",
-        "//rtp_llm/cpp/devices:rope_cache",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:hash_util",
     ],
@@ -46,15 +45,23 @@ cc_library(
     name = "th_compute_lib",
     srcs = [
         "ComputeInit.cc",
-    ],
+    ] + select({
+        "@//:using_cuda12": ["//rtp_llm/cpp/core:exec_ops_srcs"],
+        "//conditions:default": [],
+    }),
     hdrs = [],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/devices:devices_base",
-        "//rtp_llm/cpp/devices:device_utils",
+        "//rtp_llm/cpp/core:devices_base",
+        "//rtp_llm/cpp/utils:debug_utils",
+        "//rtp_llm/cpp/utils:device_perf_wrapper",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
-    ] + torch_deps() + select_py_bindings(),
+    ] + torch_deps() + select_py_bindings() + select({
+        "@//:using_cuda12": ["//rtp_llm/cpp/cuda/ops:gpu_base"],
+        "@//:using_rocm": ["//rtp_llm/cpp/core:exec_ctx_rocm"],
+        "//conditions:default": [],
+    }),
     copts = copts(),
     alwayslink = True,
     visibility = ["//visibility:public"],
@@ -79,8 +86,20 @@ cc_library(
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/utils:signal_utils",
         "//:rtp_compute_ops",
-    ] + torch_deps(),
+    ] + torch_deps() + select({
+        "@//:using_cuda12": ["//rtp_llm/cpp/cuda/ops:gpu_base"],
+        # libth_transformer.so does NOT contain its own copy of
+        # globalRuntime() / globalPgState().  Those symbols are
+        # resolved at load-time from librtp_compute_ops.so.
+        "@//:using_rocm": [
+            "//rtp_llm/cpp/core:exec_ctx_ops",
+            "//rtp_llm/cpp/core:exec_ops_hdr",
+            "//rtp_llm/cpp/core:distributed_comm_hdr",
+        ],
+        "//conditions:default": [],
+    }),
     copts = copts(),
     alwayslink = True,
     visibility = ["//visibility:public"],

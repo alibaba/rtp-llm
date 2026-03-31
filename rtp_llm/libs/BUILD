@@ -47,7 +47,7 @@ filegroup(
 copy_files(
     name = "copy_acclep_libs",
     srcs = select({
-        "//rtp_llm/cpp/devices/cuda_impl:use_accl_ep": ["//3rdparty/accl_ep:accl_ep_shared"],
+        "//rtp_llm/cpp/cuda/ops:use_accl_ep": ["//3rdparty/accl_ep:accl_ep_shared"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -57,12 +57,12 @@ copy_files(
 genrule(
     name = "deep_ep_rocm_copy",
     srcs = select({
-        "//rtp_llm/cpp/devices/rocm_impl:enable_deep_ep": ["@deep_ep_rocm//:cpp_libraries"],
+        "//rtp_llm/cpp/rocm_compat:enable_deep_ep": ["@deep_ep_rocm//:cpp_libraries"],
         "//conditions:default": [],
     }),
     outs = ["libdeep_ep_rocm.so"],
     cmd = select({
-        "//rtp_llm/cpp/devices/rocm_impl:enable_deep_ep": """
+        "//rtp_llm/cpp/rocm_compat:enable_deep_ep": """
             # Copy libdeep_ep_rocm.so from @deep_ep_rocm//:cpp_libraries
             # $(SRCS) contains all files from srcs, filter for .so file
             for f in $(SRCS); do

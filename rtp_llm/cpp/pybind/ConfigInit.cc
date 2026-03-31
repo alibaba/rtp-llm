@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
-#include "rtp_llm/cpp/devices/utils/RopeCache.h"
+#include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
 #include "pybind11/stl.h"
@@ -554,8 +554,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register DeviceResourceConfig
     py::class_<DeviceResourceConfig>(m, "DeviceResourceConfig")
         .def(py::init<>())
-        .def_readwrite("device_reserve_memory_bytes", &DeviceResourceConfig::device_reserve_memory_bytes)
-        .def_readwrite("host_reserve_memory_bytes", &DeviceResourceConfig::host_reserve_memory_bytes)
         .def_readwrite("overlap_math_sm_count", &DeviceResourceConfig::overlap_math_sm_count)
         .def_readwrite("overlap_comm_type", &DeviceResourceConfig::overlap_comm_type)
         .def_readwrite("m_split", &DeviceResourceConfig::m_split)
@@ -564,26 +562,22 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("to_string", &DeviceResourceConfig::to_string)
         .def(py::pickle(
             [](const DeviceResourceConfig& self) {
-                return py::make_tuple(self.device_reserve_memory_bytes,
-                                      self.host_reserve_memory_bytes,
-                                      self.overlap_math_sm_count,
+                return py::make_tuple(self.overlap_math_sm_count,
                                       self.overlap_comm_type,
                                       self.m_split,
                                       self.enable_comm_overlap,
                                       self.enable_layer_micro_batch);
             },
             [](py::tuple t) {
-                if (t.size() != 7)
+                if (t.size() != 5)
                     throw std::runtime_error("Invalid state!");
                 DeviceResourceConfig c;
                 try {
-                    c.device_reserve_memory_bytes = t[0].cast<int64_t>();
-                    c.host_reserve_memory_bytes   = t[1].cast<int64_t>();
-                    c.overlap_math_sm_count       = t[2].cast<int>();
-                    c.overlap_comm_type           = t[3].cast<int>();
-                    c.m_split                     = t[4].cast<int>();
-                    c.enable_comm_overlap         = t[5].cast<bool>();
-                    c.enable_layer_micro_batch    = t[6].cast<int>();
+                    c.overlap_math_sm_count    = t[0].cast<int>();
+                    c.overlap_comm_type        = t[1].cast<int>();
+                    c.m_split                  = t[2].cast<int>();
+                    c.enable_comm_overlap      = t[3].cast<bool>();
+                    c.enable_layer_micro_batch = t[4].cast<int>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("DeviceResourceConfig unpickle error: ") + e.what());
                 }
@@ -645,25 +639,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register ModelSpecificConfig
     py::class_<ModelSpecificConfig>(m, "ModelSpecificConfig")
         .def(py::init<>())
-        .def_readwrite("max_lora_model_size", &ModelSpecificConfig::max_lora_model_size)
         .def_readwrite("load_python_model", &ModelSpecificConfig::load_python_model)
         .def("to_string", &ModelSpecificConfig::to_string)
-        .def(py::pickle(
-            [](const ModelSpecificConfig& self) {
-                return py::make_tuple(self.max_lora_model_size, self.load_python_model);
-            },
-            [](py::tuple t) {
-                if (t.size() != 2)
-                    throw std::runtime_error("Invalid state!");
-                ModelSpecificConfig c;
-                try {
-                    c.max_lora_model_size = t[0].cast<int64_t>();
-                    c.load_python_model   = t[1].cast<bool>();
-                } catch (const std::exception& e) {
-                    throw std::runtime_error(std::string("ModelSpecificConfig unpickle error: ") + e.what());
-                }
-                return c;
-            }));
+        .def(py::pickle([](const ModelSpecificConfig& self) { return py::make_tuple(self.load_python_model); },
+                        [](py::tuple t) {
+                            if (t.size() != 1)
+                                throw std::runtime_error("Invalid state!");
+                            ModelSpecificConfig c;
+                            try {
+                                c.load_python_model = t[0].cast<bool>();
+                            } catch (const std::exception& e) {
+                                throw std::runtime_error(std::string("ModelSpecificConfig unpickle error: ")
+                                                         + e.what());
+                            }
+                            return c;
+                        }));
 
     // LinearAttentionConfig
     pybind11::class_<LinearAttentionConfig>(m, "LinearAttentionConfig")
@@ -925,7 +915,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("getActivationBits", &QuantAlgo::getActivationBits)
         .def("setQuantAlgo", &QuantAlgo::setQuantAlgo);
 
-    // Register NcclCommConfig (NCCL ip/ports for initDevices; Python attribute names)
+    // Register NcclCommConfig (NCCL ip/ports for initExecCtx; Python attribute names)
     py::class_<NcclCommConfig>(m, "NcclCommConfig")
         .def(py::init<>())
         .def(py::init([](const std::string& nccl_ip,
@@ -1281,7 +1271,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("indexer_head_num", &AttentionConfigs::indexer_head_num)
         .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
         .def_readwrite("dtype", &AttentionConfigs::dtype)
-        .def_readwrite("max_seq_len", &AttentionConfigs::max_seq_len);
+        .def_readwrite("max_seq_len", &AttentionConfigs::max_seq_len)
+        .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle);
 
     py::class_<EPLBConfig>(m, "EPLBConfig")
         .def(py::init<>())
@@ -1356,6 +1347,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("num_layers", &ModelConfig::num_layers)
         .def_readwrite("max_seq_len", &ModelConfig::max_seq_len)
+        .def_readwrite("gen_num_per_cycle", &ModelConfig::gen_num_per_cycle)
         .def_readwrite("vocab_size", &ModelConfig::vocab_size)
         .def_readwrite("hidden_size", &ModelConfig::hidden_size)
         .def_readwrite("attn_config", &ModelConfig::attn_config)
@@ -1367,7 +1359,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)
-        .def_readwrite("lora_infos", &ModelConfig::lora_infos)
         .def_readwrite("position_ids_style", &ModelConfig::position_ids_style)
         .def_readwrite("pre_seq_len", &ModelConfig::pre_seq_len)
         .def_readwrite("use_kvcache", &ModelConfig::use_kvcache)

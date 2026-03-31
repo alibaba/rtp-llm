@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "autil/EnvUtil.h"
 
 using namespace rtp_llm;
@@ -26,7 +26,7 @@ public:
                          const std::vector<int32_t>& full_group_ids,
                          const std::vector<int32_t>& other_group_ids,
                          size_t                      per_group_layer_num):
-        KVCacheAllocator(config, nullptr) {
+        KVCacheAllocator(config) {
         for (int32_t full_group_id : full_group_ids) {
             for (int i = 0; i < per_group_layer_num; i++) {
                 fake_layout_.layer_to_groups.push_back(full_group_id);
@@ -153,7 +153,6 @@ private:
                                                                     parallelism_config_,
                                                                     sp_config_,
                                                                     nullptr,
-                                                                    nullptr,
                                                                     0,
                                                                     allocator,
                                                                     RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
@@ -180,19 +179,6 @@ TEST_F(RemoteConnectorInternalTest, test_genClientConfig) {
         ASSERT_TRUE(connector->group_policy_->init());
         auto config_map = connector->genClientConfig();
         ASSERT_EQ(1, config_map.size());
-    }
-    {
-        auto connector = getFullLinearPolicyConnector();
-        ASSERT_TRUE(connector->group_policy_->init());
-
-        connector->init_params_->lora_info_map["lora1"] = "ckpt1";
-        connector->init_params_->lora_info_map["lora2"] = "ckpt2";
-
-        auto config_map = connector->genClientConfig();
-        ASSERT_EQ(2, config_map.size());
-        ASSERT_GT(config_map.count("lora1"), 0);
-        ASSERT_GT(config_map.count("lora2"), 0);
-        ASSERT_NE(config_map.at("lora1")->instance_id_, config_map.at("lora2")->instance_id_);
     }
     {
         auto connector = getFullLinearPolicyConnector();

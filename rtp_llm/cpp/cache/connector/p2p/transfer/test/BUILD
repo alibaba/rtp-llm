@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts")
 
-load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
+load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_copts = [
     "-fno-access-control",
@@ -16,6 +16,7 @@ cc_test(
     exec_properties = {'gpu':'A10'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/core:exec_ops_test_lib",
         "//rtp_llm/cpp/utils:time_util",
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),
@@ -31,6 +32,7 @@ cc_test(
     exec_properties = {'gpu':'A10'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/core:exec_ops_test_lib",
         "//rtp_llm/cpp/utils:time_util",
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),

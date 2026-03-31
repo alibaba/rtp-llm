@@ -12,10 +12,9 @@ public:
                                     const KVCacheConfig&                     kv_cache_config,
                                     const RuntimeConfig&                     runtime_config,
                                     const std::shared_ptr<KVCacheAllocator>& allocator,
-                                    rtp_llm::DeviceBase*                     device,
                                     const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr):
         KVCacheConnectorCoordinator(
-            cache_config, kv_cache_config, runtime_config, {}, {}, allocator, device, metrics_reporter) {}
+            cache_config, kv_cache_config, runtime_config, {}, {}, allocator, metrics_reporter) {}
     ~MockKVCacheConnectorCoordinator() override = default;
 
 public:

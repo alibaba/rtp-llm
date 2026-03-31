@@ -8,23 +8,23 @@ using namespace tensorrt_llm::kernels;
 
 namespace rtp_llm {
 
-cufmha::cufmha(DataType          dtype,
-               bool     is_causal,
-               size_t            head_num,
-               size_t            kv_head_num,
-               size_t            size_per_head,
-               size_t            seq_size_per_block,
-               float             q_scaling,
-               bool              use_linear_bias_slopes,
-               bool              can_use_trtv1_fmha,
-               bool              can_use_trtv2_fmha,
-               bool              can_use_trtv2_fmha_paged,
-               bool              can_use_open_source_fmha,
-               bool              can_use_open_source_fmha_paged,
-               bool              is_s_padded,
-               cudaStream_t      stream) {
-    dtype_      = dtype;
-    is_causal_  = is_causal;
+cufmha::cufmha(DataType     dtype,
+               bool         is_causal,
+               size_t       head_num,
+               size_t       kv_head_num,
+               size_t       size_per_head,
+               size_t       seq_size_per_block,
+               float        q_scaling,
+               bool         use_linear_bias_slopes,
+               bool         can_use_trtv1_fmha,
+               bool         can_use_trtv2_fmha,
+               bool         can_use_trtv2_fmha_paged,
+               bool         can_use_open_source_fmha,
+               bool         can_use_open_source_fmha_paged,
+               bool         is_s_padded,
+               cudaStream_t stream) {
+    dtype_         = dtype;
+    is_causal_     = is_causal;
     head_num_      = head_num;
     kv_head_num_   = kv_head_num;
     size_per_head_ = size_per_head;
@@ -177,21 +177,21 @@ void cufmha::runTrtV2Fmha(void*        input,
     check_cuda_error();
 }
 
-void cufmha::runOpenSourceFmhaPaged(void*            q,
-                                    void*            k,
-                                    void*            v,
-                                    void*            output,
-                                    int*             cu_seqlens,
-                                    int*             cu_kv_seqlens,
-                                    int*             block_table,
-                                    size_t           batch_size,
-                                    size_t           block_table_batch_stride,
-                                    size_t           seq_size_per_block,
-                                    size_t           seq_len,
-                                    void*            workspace,
-                                    DeviceInitParams device_params,
-                                    float*           linear_bias_slopes,
-                                    float            softmax_extra_scale) {
+void cufmha::runOpenSourceFmhaPaged(void*          q,
+                                    void*          k,
+                                    void*          v,
+                                    void*          output,
+                                    int*           cu_seqlens,
+                                    int*           cu_kv_seqlens,
+                                    int*           block_table,
+                                    size_t         batch_size,
+                                    size_t         block_table_batch_stride,
+                                    size_t         seq_size_per_block,
+                                    size_t         seq_len,
+                                    void*          workspace,
+                                    ExecInitParams device_params,
+                                    float*         linear_bias_slopes,
+                                    float          softmax_extra_scale) {
     RTP_LLM_CHECK_WITH_INFO(head_num_ % kv_head_num_ == 0,
                             "Number of heads in key/value must divide number of heads in query");
     RTP_LLM_CHECK_WITH_INFO(seq_size_per_block % 256 == 0,
@@ -268,17 +268,17 @@ void cufmha::runOpenSourceFmhaPaged(void*            q,
     check_cuda_error();
 }
 
-void cufmha::runOpenSourceFmha(void*            q,
-                               void*            k,
-                               void*            v,
-                               void*            output,
-                               int*             cu_seqlens,
-                               size_t           batch_size,
-                               size_t           seq_len,
-                               void*            workspace,
-                               DeviceInitParams device_params,
-                               float*           linear_bias_slopes,
-                               float            softmax_extra_scale) {
+void cufmha::runOpenSourceFmha(void*          q,
+                               void*          k,
+                               void*          v,
+                               void*          output,
+                               int*           cu_seqlens,
+                               size_t         batch_size,
+                               size_t         seq_len,
+                               void*          workspace,
+                               ExecInitParams device_params,
+                               float*         linear_bias_slopes,
+                               float          softmax_extra_scale) {
     auto             run_stream       = getStream();
     Flash_fwd_params flash_fwd_params = genFlashFwdParams(q,
                                                           k,

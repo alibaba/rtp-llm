@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cuda/allocator_cuda.h"
 #include "rtp_llm/cpp/cuda/cublas/cublas.h"
 
+using namespace rtp_llm;
 namespace tc  = tensorrt_llm::cutlass_extensions;
 namespace tkc = tensorrt_llm::kernels::cutlass_kernels;
 

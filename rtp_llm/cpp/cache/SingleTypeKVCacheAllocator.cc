@@ -4,10 +4,10 @@
 #include <unordered_map>
 
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 
@@ -28,11 +28,10 @@ int SingleTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) con
 }
 
 SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&                 config,
-                                                       rtp_llm::DeviceBase*               device,
                                                        AllocationType                     allocation_type,
                                                        const kmonitor::MetricsReporterPtr metrics_reporter,
                                                        int64_t                            reserve_block_ratio):
-    KVCacheAllocator(config, device, allocation_type, metrics_reporter, reserve_block_ratio) {}
+    KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
 
 bool SingleTypeKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "cache specs must not be empty");
@@ -45,7 +44,7 @@ bool SingleTypeKVCacheAllocator::doInit() {
     BlockPoolConfig pool_config;
 
     pool_config = BlockPoolConfigHelper::createConfig(config_);
-    block_pool_ = std::make_shared<BlockPool>(pool_config, device_, allocation_type_);
+    block_pool_ = std::make_shared<BlockPool>(pool_config, allocation_type_);
     if (!block_pool_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize block pool for SingleTypeKVCacheAllocator");
         return false;
@@ -221,14 +220,10 @@ CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
 
     for (int layer_id = 0; layer_id < config_.layer_all_num; ++layer_id) {
         if (layer_tensors[layer_id].defined() && layer_tensors[layer_id].numel() > 0) {
-            layout.layers_to_kv_buffer_ptrs[layer_id] = torchTensor2Buffer(layer_tensors[layer_id]);
-        } else {
-            layout.layers_to_kv_buffer_ptrs[layer_id] = nullptr;
+            layout.layers_to_kv_buffer_ptrs[layer_id] = layer_tensors[layer_id];
         }
         if (scale_tensors[layer_id].defined() && scale_tensors[layer_id].numel() > 0) {
-            layout.layers_to_scale_buffer_ptrs[layer_id] = torchTensor2Buffer(scale_tensors[layer_id]);
-        } else {
-            layout.layers_to_scale_buffer_ptrs[layer_id] = nullptr;
+            layout.layers_to_scale_buffer_ptrs[layer_id] = scale_tensors[layer_id];
         }
     }
     layout.layer_to_groups.reserve(config_.layer_all_num);

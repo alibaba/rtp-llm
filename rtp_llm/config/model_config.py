@@ -71,6 +71,7 @@ class ModelConfig(CppModelConfig):
         "generate_env_config",
         "render_config",
         "phy2log_path",
+        "lora_infos",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -86,7 +87,6 @@ class ModelConfig(CppModelConfig):
         "eplb_config",
         "ckpt_path",
         "tokenizer_path",
-        "lora_infos",
         "position_ids_style",
         "pre_seq_len",
         "use_kvcache",
@@ -120,6 +120,7 @@ class ModelConfig(CppModelConfig):
         "use_norm_attn_out_residual",
         "input_vocab_size",
         "type_vocab_size",
+        "gen_num_per_cycle",
         "embedding_size",
         "moe_normalize_expert_scale",
         "scoring_func",
@@ -493,6 +494,7 @@ class ModelConfig(CppModelConfig):
         self.model_name: str = (
             ""  # Model name (also set to engine_config.runtime_config.model_name)
         )
+        self.lora_infos: Dict[str, str] = {}  # Python-only (C++ lora code removed)
 
         # Model architecture fields
         self.inter_size: int = 0  # FFN intermediate size (for regular FFN layers)

@@ -1,10 +1,10 @@
 #pragma once
 
 #include <torch/torch.h>
+#include <torch/extension.h>
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/kernels/moe_kernels.h"
 
 namespace trt_plugins = tensorrt_llm::plugins;

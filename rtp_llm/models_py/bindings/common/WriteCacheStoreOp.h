@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/devices/OpData.h"
+#include "rtp_llm/cpp/core/OpData.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace rtp_llm {

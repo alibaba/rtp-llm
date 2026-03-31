@@ -37,6 +37,7 @@
 
 #include "cutlass/numeric_types.h"
 
+using namespace rtp_llm;
 // using torch::Tensor;
 using torch_ext::get_ptr;
 

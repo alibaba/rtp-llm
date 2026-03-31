@@ -65,6 +65,9 @@ struct AttentionConfigs {
     // maximum sequence length for RoPE cache generation
     size_t max_seq_len = 32768;
 
+    // speculative decoding: tokens generated per cycle (0 = no speculative decoding)
+    int64_t gen_num_per_cycle = 0;
+
 public:
     std::string DebugAttentionConfigStr() const;
 };

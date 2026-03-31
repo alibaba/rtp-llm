@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew.h"
 #include "autil/StringUtil.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
@@ -69,7 +69,7 @@ grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*        
 
     // TODO: notify remote store for hidden state
     // if (engine_->isMTPEagle() &&
-    //        engine_->getDevice()->getDeviceProperties().tp_rank == 0 &&
+    //        engine_->getExecCtx()->getExecProperties().tp_rank == 0 &&
     //        !request->mtp_hidden_states_key.empty()) {
     //}
 

@@ -18,7 +18,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -91,28 +91,27 @@ private:
     bool                 enable_memory_cache_{false};
     bool                 enable_remote_cache_{false};
     std::string          trace_id_;
-    std::string          unique_id_ = "";  // TODO : support lora (remote connector)
-    std::vector<int64_t> tokens_;          // TODO : get tokens (remote connector)
+    std::string          unique_id_ = "";
+    std::vector<int64_t> tokens_;  // TODO : get tokens (remote connector)
 };
 
 class KVCacheMemoryConnectorTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        device_ = createDevice();
+        createDevice();
 
         cache_config_ = createMockCacheConfig();
-        allocator_    = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_, device_, AllocationType::DEVICE);
+        allocator_    = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
         ASSERT_TRUE(allocator_->init());
 
         const int server_num = 4;
         startRpcServer(server_num);
 
-        connector_ = std::make_shared<KVCacheMemoryConnector>(
-            cache_config_, kv_cache_config_, allocator_, device_, server_addrs_);
+        connector_ =
+            std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
         ASSERT_TRUE(connector_->init());
     }
 
-    DeviceBase*                                 device_{nullptr};
     CacheConfig                                 cache_config_;
     KVCacheConfig                               kv_cache_config_;
     std::shared_ptr<KVCacheAllocator>           allocator_;
@@ -121,7 +120,7 @@ protected:
     std::vector<std::string>                    server_addrs_;
 
 private:
-    DeviceBase* createDevice() const {
+    void createDevice() const {
         ParallelismConfig           parallelism_config;
         ModelConfig                 model_config;
         EPLBConfig                  eplb_config;
@@ -137,25 +136,21 @@ private:
         RuntimeConfig               runtime_config;
         ModelSpecificConfig         model_specific_config;
 
-        device_resource_config.device_reserve_memory_bytes = 2ULL * 1024 * 1024 * 1024;  // 2 GiB
-        device_resource_config.host_reserve_memory_bytes   = 0;
-
-        DeviceFactory::initDevices(parallelism_config,
-                                   model_config,
-                                   eplb_config,
-                                   fmha_config,
-                                   device_resource_config,
-                                   moe_config,
-                                   sp_config,
-                                   misc_config,
-                                   profiling_debug_logging_config,
-                                   hw_kernel_config,
-                                   concurrency_config,
-                                   ffn_disaggregate_config,
-                                   runtime_config,
-                                   model_specific_config,
-                                   rtp_llm::NcclCommConfig{});
-        return DeviceFactory::getDefaultDevice();
+        initExecCtx(parallelism_config,
+                    model_config,
+                    eplb_config,
+                    fmha_config,
+                    device_resource_config,
+                    moe_config,
+                    sp_config,
+                    misc_config,
+                    profiling_debug_logging_config,
+                    hw_kernel_config,
+                    concurrency_config,
+                    ffn_disaggregate_config,
+                    runtime_config,
+                    model_specific_config,
+                    rtp_llm::NcclCommConfig{});
     }
     CacheConfig createMockCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
         constexpr int kTestMemoryCacheSizeMb      = 64;
@@ -213,78 +208,6 @@ private:
             servers_.push_back(std::move(server));
         }
     }
-    void setBufferContent(const BufferPtr& buffer, char c) const {
-        setBufferContent(buffer, 0, buffer->sizeBytes(), c);
-    }
-    void setBufferContent(const BufferPtr& buffer, size_t offset, size_t byte_len, char c) const {
-        auto addr = static_cast<char*>(buffer->dataWithOffset(offset));
-        if (buffer->where() == MemoryType::MEMORY_GPU) {
-            check_cuda_value(cudaMemset(addr, c, byte_len));
-        } else {
-            memset(addr, c, byte_len);
-        }
-    }
-
-    // Byte-accurate helpers (do NOT use dataWithOffset(), which is element-based).
-    // These are used to validate copyCache multi-layer offsets precisely.
-    void setBufferBytes(const BufferPtr& buffer, size_t byte_offset, size_t byte_len, char c) const {
-        auto base = static_cast<char*>(buffer->data());
-        ASSERT_NE(base, nullptr);
-        auto addr = base + byte_offset;
-        if (buffer->where() == MemoryType::MEMORY_GPU) {
-            check_cuda_value(cudaMemset(addr, c, byte_len));
-        } else {
-            memset(addr, c, byte_len);
-        }
-    }
-
-    void verifyBufferBytesEq(const BufferPtr& buffer, size_t byte_offset, size_t byte_len, char expected) const {
-        std::shared_ptr<void> data;
-        auto                  base = static_cast<char*>(buffer->data());
-        ASSERT_NE(base, nullptr);
-        auto addr = base + byte_offset;
-        if (buffer->where() == MemoryType::MEMORY_GPU) {
-            data = std::shared_ptr<void>(malloc(byte_len), ::free);
-            check_cuda_value(cudaMemcpy(data.get(), addr, byte_len, cudaMemcpyDeviceToHost));
-        } else {
-            data = std::shared_ptr<void>(addr, [](void*) {});
-        }
-        auto   ptr      = static_cast<const unsigned char*>(data.get());
-        size_t mismatch = 0;
-        for (; mismatch < byte_len; ++mismatch) {
-            if (ptr[mismatch] != static_cast<unsigned char>(expected)) {
-                break;
-            }
-        }
-        ASSERT_EQ(mismatch, byte_len) << "mismatch at byte offset " << mismatch << " expect '" << expected << "' got 0x"
-                                      << std::hex << static_cast<int>(ptr[mismatch]) << std::dec;
-    }
-    void verifyBufferContent(const BufferPtr& buffer, char c) const {
-        verifyBufferContent(buffer, 0, buffer->sizeBytes(), c);
-    }
-    void verifyBufferContent(const BufferPtr& buffer, size_t offset, size_t byte_len, char c) const {
-        std::shared_ptr<void> data;
-        if (buffer->where() == MemoryType::MEMORY_GPU) {
-            auto buffer_addr = static_cast<char*>(buffer->dataWithOffset(offset));
-            data             = std::shared_ptr<void>(malloc(byte_len), ::free);
-            check_cuda_value(cudaMemcpy(data.get(), buffer_addr, byte_len, cudaMemcpyDeviceToHost));
-        } else {
-            auto buffer_addr = static_cast<char*>(buffer->dataWithOffset(offset));
-            data             = std::shared_ptr<void>(buffer_addr, [](void*) {});
-        }
-        auto   data_ptr = static_cast<char*>(data.get());
-        size_t mismatch = 0;
-        bool   ok       = true;
-        for (; mismatch < byte_len; ++mismatch) {
-            if (data_ptr[mismatch] != c) {
-                ok = false;
-                break;
-            }
-        }
-        ASSERT_TRUE(ok) << "mismatch at byte offset " << mismatch << " expect '" << c << "' got 0x" << std::hex
-                        << static_cast<int>(static_cast<unsigned char>(data_ptr[mismatch])) << std::dec;
-    }
-
     // BlockInfo helpers: convertIndexToBuffer() now returns std::vector<BlockInfo>.
     size_t sumBlockInfosBytes(const std::vector<BlockInfo>& infos) const {
         size_t total = 0;
@@ -622,8 +545,7 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
     // 构造空的 worker 地址，BroadcastManager::init() 会失败；业务代码使用 RTP_LLM_CHECK，
     // 因此这里期望抛出 std::runtime_error。
     std::vector<std::string> empty_addrs;
-    auto                     conn =
-        std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, device_, empty_addrs);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, empty_addrs);
     EXPECT_THROW(conn->init(), std::runtime_error);
 }
 
@@ -632,7 +554,7 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSizeMbZero) {
     kv_cfg.memory_cache_size_mb         = 0;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, device_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, server_addrs_);
     EXPECT_THROW(conn->init(), std::runtime_error);
     // Init fails early, nothing should be created.
     EXPECT_EQ(conn->block_cache_, nullptr);
@@ -645,7 +567,7 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMs
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 0;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, device_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, server_addrs_);
     EXPECT_THROW(conn->init(), std::runtime_error);
     // Init fails early, nothing should be created.
     EXPECT_EQ(conn->block_cache_, nullptr);
@@ -663,7 +585,7 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenBlockSizeBytesZero) {
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, device_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
     EXPECT_THROW(conn->init(), std::runtime_error);
 }
 
@@ -676,15 +598,14 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenPoolTooSmallForBlockSize
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
     kv_cfg.memory_cache_sync_timeout_ms = 1000;  // valid
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, device_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
     EXPECT_THROW(conn->init(), std::runtime_error);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
     // 使用有效的 worker 地址，init 应成功并正确设置 manager
-    auto conn =
-        std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, device_, server_addrs_);
-    auto ok = conn->init();
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
+    auto ok   = conn->init();
     EXPECT_TRUE(ok);
     ASSERT_NE(conn->block_cache_, nullptr);
     ASSERT_NE(conn->broadcast_manager_, nullptr);
@@ -696,7 +617,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero
     kv_cfg.memory_cache_size_mb         = 0;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, device_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, server_addrs_);
     EXPECT_THROW(conn->initBlockPool(), std::runtime_error);
 }
 
@@ -710,7 +631,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenBlockSizeBytesZero) {
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, device_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
     EXPECT_THROW(conn->initBlockPool(), std::runtime_error);
 }
 
@@ -724,7 +645,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenCreateBlockPoolFails)
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
     kv_cfg.memory_cache_sync_timeout_ms = 1000;  // not used by initBlockPool but keep valid
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, device_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
     EXPECT_THROW(conn->initBlockPool(), std::runtime_error);
 }
 
@@ -733,7 +654,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_ReturnTrue_AndRegistersPool) {
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;  // not used by initBlockPool but keep valid
 
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, device_, server_addrs_);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, server_addrs_);
     EXPECT_NO_THROW(conn->initBlockPool());
     auto pool = conn->block_pool_;
     ASSERT_NE(pool, nullptr);

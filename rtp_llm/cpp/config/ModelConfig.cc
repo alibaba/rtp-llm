@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
 #include <sstream>
 #include <string>
 
@@ -171,6 +171,9 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
     // Set max_seq_len for RoPE cache generation
     config.max_seq_len = max_seq_len;
 
+    // Pass gen_num_per_cycle for RoPE cache sizing in speculative decoding
+    config.gen_num_per_cycle = gen_num_per_cycle;
+
     return config;
 }
 
@@ -233,15 +236,6 @@ std::string ModelConfig::to_string() const {
         << "reverse_e_h_norm: " << reverse_e_h_norm << "\n"
         << "tokenizer_path: " << tokenizer_path << "\n"
         << "ckpt_path: " << ckpt_path << "\n"
-        << "lora_infos: {";
-    bool first = true;
-    for (const auto& pair : lora_infos) {
-        if (!first)
-            oss << ", ";
-        oss << pair.first << ": " << pair.second;
-        first = false;
-    }
-    oss << "}\n"
         << "special_tokens: {\n"
         << "  bos_token_id: " << special_tokens.bos_token_id << "\n"
         << "  eos_token_id: " << special_tokens.eos_token_id << "\n"

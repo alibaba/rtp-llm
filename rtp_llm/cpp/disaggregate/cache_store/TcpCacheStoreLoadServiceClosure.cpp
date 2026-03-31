@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreLoadServiceClosure.h"
-
+#include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
+#include <torch/torch.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -52,10 +53,14 @@ void TcpCacheStoreLoadServiceClosure::Run() {
             return;
         }
 
-        auto dst_buffer = unload_block->toDeviceBuffer();
-        auto src_buffer = rtp_llm::Buffer(
-            rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_UINT8, {block.len()}, block.content().data());
-        device_->noBlockCopy({dst_buffer, src_buffer});
+        auto dst_tensor = torch::from_blob(
+            unload_block->addr.get(),
+            {(int64_t)unload_block->len},
+            torch::TensorOptions().dtype(torch::kUInt8).device(unload_block->gpu_mem ? torch::kCUDA : torch::kCPU));
+        auto src_tensor = torch::from_blob(const_cast<char*>(block.content().data()),
+                                           {(int64_t)block.len()},
+                                           torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+        execNoBlockCopy({dst_tensor, src_tensor});
     }
     end(true, CacheStoreErrorCode::None);
 }

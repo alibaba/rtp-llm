@@ -5,7 +5,6 @@
 
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/memory_utils.h"
-#include "rtp_llm/cpp/cuda/allocator_cuda.h"
 #include "rtp_llm/cpp/cuda/cublas/cublasMMWrapper.h"
 
 using namespace rtp_llm;
@@ -33,15 +32,8 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream) {
     deviceMalloc(&out_ptr1, m * n, false);
     check_cuda_value(cudaMemset(out_ptr1, 0xdc, m * n * sizeof(half)));
 
-    Allocator<AllocatorType::CUDA>* allocator_ = nullptr;
-    std::mutex*                     mutex_     = nullptr;
-    mutex_                                     = new std::mutex();  // mutex per process
-
-    cublasAlgoMap* cublas_algo_map_ = nullptr;
-    cublas_algo_map_                = new cublasAlgoMap(GEMM_CONFIG);
-
-    allocator_ = new Allocator<AllocatorType::CUDA>(getDevice());
-    allocator_->setStream(stream);
+    std::mutex*    mutex_           = new std::mutex();
+    cublasAlgoMap* cublas_algo_map_ = new cublasAlgoMap(GEMM_CONFIG);
 
     cublasHandle_t cublas_handle_;
     check_cuda_value(cublasCreate(&cublas_handle_));
@@ -50,7 +42,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream) {
     check_cuda_value(cublasSetStream(cublas_handle_, stream));
 
     cublasMMWrapper* cublas_wrapper_ =
-        new cublasMMWrapper(cublas_handle_, cublaslt_handle_, stream, cublas_algo_map_, mutex_, allocator_);
+        new cublasMMWrapper(cublas_handle_, cublaslt_handle_, stream, cublas_algo_map_, mutex_);
 
     cublas_wrapper_->setGemmConfig(CUDA_R_16BF, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_32F);
 
@@ -81,7 +73,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream) {
 
     delete cublas_algo_map_;
     delete cublas_wrapper_;
-    delete allocator_;
+    // allocator_ removed in exec_ctx cleanup
     delete mutex_;
 
     deviceFree(in_ptr1);

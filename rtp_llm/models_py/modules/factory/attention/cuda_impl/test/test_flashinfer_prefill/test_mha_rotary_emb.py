@@ -22,7 +22,7 @@ from rtp_llm.ops.compute_ops import (
     LayerKVCache,
     PyAttentionInputs,
     get_typemeta,
-    init_device,
+    init_exec_ctx,
 )
 
 
@@ -181,13 +181,12 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size = (
                 64
             )
-            py_env_configs.device_resource_config.host_reserve_memory_bytes = 0
 
             engine_config = EngineConfig.create(py_env_configs)
             model_config = ModelConfig()
             model_config.max_seq_len = 2048
 
-            init_device(
+            init_exec_ctx(
                 parallelism_config=engine_config.parallelism_config,
                 model_config=model_config,
                 eplb_config=model_config.eplb_config,

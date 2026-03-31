@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 

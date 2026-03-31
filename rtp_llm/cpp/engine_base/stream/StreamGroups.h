@@ -1,7 +1,6 @@
 #pragma once
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
-#include "rtp_llm/cpp/core/Buffer.h"
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>

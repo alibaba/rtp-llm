@@ -3,60 +3,63 @@
 #include <torch/extension.h>
 #include "rtp_llm/cpp/models/eplb/ExpertBalancerPythonWrapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/core/OpData.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/model_utils/QuantInfo.h"
+#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 
 namespace rtp_llm {
 
 // Forward declarations
-class GptModel;
+class ModelBase;
 
 struct EplbPlanBuffers {
-    int       layer_id = -1;
-    BufferPtr layer_id_buf;      // [1]
-    BufferPtr logic_expert_cnt;  // [log_exp_num]
-    BufferPtr logic_expert_cnt_host;
-    BufferPtr log2phy;  // [layer, log_exp_num, phy_exp_num - log_exp_num + 1]
-    BufferPtr log2phy_host;
-    BufferPtr phy2log;       // [layer, phy_exp_num]
-    BufferPtr moe_weight_1;  // w1 & w3
-    BufferPtr moe_weight_2;  // w2
+    int           layer_id = -1;
+    torch::Tensor layer_id_buf;           // [1], INT32, GPU
+    torch::Tensor logic_expert_cnt;       // [log_exp_num], INT32, GPU
+    torch::Tensor logic_expert_cnt_host;  // [log_exp_num], INT32, CPU pinned
+    torch::Tensor log2phy;                // [log_exp_num, phy-log+1], INT32, GPU
+    torch::Tensor log2phy_host;           // [log_exp_num, phy-log+1], INT32, CPU pinned
+    torch::Tensor phy2log;                // [phy_exp_num], INT32, GPU
 
-    void init(size_t      log_exp_num,
-              size_t      phy_exp_num,
-              size_t      hidden_size,
-              size_t      moe_size,
-              size_t      ep_size,
-              DataType    dtype,
-              QuantAlgo   quant_algo,
-              DeviceBase* device);
+    // MoE weight buffers (for quantized: kernel + scales stored separately)
+    torch::Tensor moe_weight_1;  // w1 & w3 kernel
+    torch::Tensor moe_scale_1;   // w1 & w3 scales (only for fp8)
+    torch::Tensor moe_weight_2;  // w2 kernel
+    torch::Tensor moe_scale_2;   // w2 scales (only for fp8)
+    bool          is_quantized = false;
+
+    void init(size_t    log_exp_num,
+              size_t    phy_exp_num,
+              size_t    hidden_size,
+              size_t    moe_size,
+              size_t    ep_size,
+              DataType  dtype,
+              QuantAlgo quant_algo);
 };
 
 struct BalanceStatsBuffers {
-    torch::Tensor log_stats;
-    torch::Tensor gpu_loads;
+    torch::Tensor log_stats;      // host [layer, log_exp_num]
+    torch::Tensor gpu_loads;      // host [layer, ep_size]
+    torch::Tensor log_stats_gpu;  // device [layer, log_exp_num]
+    torch::Tensor gpu_loads_gpu;  // device [layer, ep_size]
 
-    // gpu buffer
-    BufferPtr log_stats_buf;
-    BufferPtr gpu_loads_buf;
-
-    torch::Tensor log_stats_gpu;
-    torch::Tensor gpu_loads_gpu;
-
-    void init(int layer_num, int log_exp_num, int ep_size, DeviceBase* device);
+    void init(int layer_num, int log_exp_num, int ep_size);
     void reset();
 };
 
 struct LoadFlags {
-    BufferPtr flag_gpu;
-    BufferPtr flag_sync;
-    BufferPtr flag_host;
+    torch::Tensor flag_gpu;   // [1], INT32, GPU
+    torch::Tensor flag_sync;  // [1], INT32, GPU
+    torch::Tensor flag_host;  // [1], INT32, CPU pinned
 
-    void init(DeviceBase* device);
+    void init();
 
-    void setReady(bool ready, DeviceBase* device);
-    bool isReady(DeviceBase* device);
+    void setReady(bool ready);
+    bool isReady();
 };
 
 enum class EplbPlanStatus {
@@ -71,45 +74,43 @@ private:
     std::mutex eplb_control_mutex;
     EPLBConfig eplb_control_data;
 
-    BufferPtr eplb_control_data_buf_host;
-    BufferPtr eplb_control_data_buf_device;
+    torch::Tensor eplb_control_data_buf_host;    // INT32, CPU pinned
+    torch::Tensor eplb_control_data_buf_device;  // INT32, GPU
 
     int control_step = 100;
     int cur_step     = 0;
 
 public:
-    void       init(const EPLBConfig& eplb_control_data, DeviceBase* device, const EPLBConfig& eplb_config);
+    void       init(const EPLBConfig& eplb_control_data, const EPLBConfig& eplb_config);
     void       setData(const EPLBConfig& updated_control_data);
     bool       stepAndCheckSyncStep();
-    EPLBConfig getAndSyncData(DeviceBase* device);
+    EPLBConfig getAndSyncData();
 };
 
 class ExpertBalancer {
 public:
-    __attribute__((visibility("default")))
-    ExpertBalancer(size_t                       log_exp_num,
-                   size_t                       phy_exp_num,
-                   size_t                       num_layers,
-                   size_t                       moe_size,
-                   size_t                       hidden_size,
-                   size_t                       ep_rank,
-                   size_t                       ep_size,
-                   py::object                   py_eplb,
-                   DataType                     dtype,
-                   DeviceBase*                  device,
-                   QuantAlgo                    quant_algo,
-                   kmonitor::MetricsReporterPtr metrics_reporter,
-                   const EPLBConfig&             eplb_config);
+    __attribute__((visibility("default"))) ExpertBalancer(size_t                       log_exp_num,
+                                                          size_t                       phy_exp_num,
+                                                          size_t                       num_layers,
+                                                          size_t                       moe_size,
+                                                          size_t                       hidden_size,
+                                                          size_t                       ep_rank,
+                                                          size_t                       ep_size,
+                                                          py::object                   py_eplb,
+                                                          DataType                     dtype,
+                                                          QuantAlgo                    quant_algo,
+                                                          kmonitor::MetricsReporterPtr metrics_reporter,
+                                                          const EPLBConfig&            eplb_config);
     ~ExpertBalancer();
 
-    void stepForward(GptModel& model, RtpLLMExecutorMetricsCollector& executor_collector);
+    void stepForward(ModelBase& model, RtpLLMExecutorMetricsCollector& executor_collector);
 
     bool updateEplbConfig(const EPLBConfig& config);
 
 private:
     void syncController();
     void reportStats(OverallExpertStats& stats);
-    void excuteEplbPlan(OverallExpertStats& stats, GptModel& model);
+    void excuteEplbPlan(OverallExpertStats& stats, ModelBase& model);
 
     void           setPlanStatus(EplbPlanStatus status);
     EplbPlanStatus getPlanStatus() const;
@@ -120,15 +121,13 @@ private:
     void loadPlanWeights();
     bool syncPlanWeightsLoadStatus();
     void processPlanWeights();
-    void applyPlanWeights(GptModel& model);
+    void applyPlanWeights(ModelBase& model);
 
     // helpful functions
-    void copyFromTensor(torch::Tensor& tensor, BufferPtr& buffer);
-    void copyToTensor(BufferPtr& buffer, torch::Tensor& tensor);
+    void copyFromTensor(const torch::Tensor& src, torch::Tensor& dst);
+    void copyToTensor(const torch::Tensor& src, torch::Tensor& dst);
 
 private:
-    DeviceBase* device_;
-
     size_t num_logic_experts_;
     size_t num_physic_experts_;
 

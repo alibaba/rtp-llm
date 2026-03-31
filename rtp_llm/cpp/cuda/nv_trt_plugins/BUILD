@@ -49,10 +49,9 @@ cc_test(
     copts = copts(),
     deps = [
         "@com_google_googletest//:gtest",
-        "//rtp_llm/cpp/core:buffer_torch",
-        "//rtp_llm/cpp/devices/testing:device_test_utils",
-        "//rtp_llm/cpp/devices/cuda_impl:gpu_base",
-        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/cpp/cuda/ops:gpu_base",
+        "//rtp_llm/cpp/cuda/ops:cuda_impl",
         ":trt_plugins",
     ],
     tags = ["manual"],
