@@ -308,6 +308,23 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# ROCm TRT-LLM AllReduce Fusion kernels
+cc_library(
+    name = "rocm_trtllm_allreduce_fusion",
+    srcs = [
+        "rocm/trtllm_allreduce_fusion.cu",
+    ],
+    hdrs = [
+        "rocm/trtllm_allreduce_fusion.h",
+        "rocm/hip_float8_impl.h",
+    ],
+    deps = rocm_deps + [
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = rocm_copts(),
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "rocm_atrex_pa",
     srcs = [

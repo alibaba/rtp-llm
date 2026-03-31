@@ -5,6 +5,9 @@
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
+#include "rtp_llm/models_py/bindings/rocm/TrtllmAllReduceFusion.h"
+
+namespace py = pybind11;
 
 namespace rtp_llm {
 
@@ -93,6 +96,9 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
                   py::arg("input_lengths"),
                   py::arg("hidden_size"),
                   py::arg("cu_seq_len"));
+
+    // TRT-LLM AllReduce Fusion — registered as a pybind11 class
+    registerTrtllmArFusionHandle(rtp_ops_m);
 }
 
 void registerBaseRocmBindings(py::module& rtp_ops_m) {

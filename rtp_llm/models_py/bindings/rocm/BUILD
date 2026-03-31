@@ -19,6 +19,7 @@ cc_library(
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
+        "//rtp_llm/cpp/kernels:rocm_trtllm_allreduce_fusion",
     ],
 )
 
