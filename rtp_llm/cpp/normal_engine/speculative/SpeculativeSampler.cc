@@ -34,10 +34,6 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                      const std::list<GenerateStreamPtr>& streams,
                                      SamplerOutput&                      draft_sampler_output,
                                      SamplerOutput&                      target_sampler_output) const {
-#if !USING_CUDA
-    RTP_LLM_FAIL("SpeculativeSampler not supported on ROCm");
-    return;
-#else
     torch::Device target_device = getTorchCudaDevice();
     torch::Device host_device   = torch::Device(torch::kCPU);
 
@@ -112,7 +108,6 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         sample_output.accept_len.push_back(accept_len);
         stream_idx++;
     }
-#endif
 }
 
 void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample_output,

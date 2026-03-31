@@ -497,8 +497,32 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     return GreedyOutput{};
 }
 
-void chainSpeculativeSampling(const SpeculativeSamplingParams&) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}  // namespace rtp_llm
+
+// Forward-declare in global namespace (matches rtp_llm/cpp/rocm/speculative_sampling/sampling.cu)
+void chain_speculative_sampling(at::Tensor draft_probs,
+                                at::Tensor draft_token_ids,
+                                at::Tensor uniform_samples,
+                                at::Tensor target_probs,
+                                at::Tensor output_token_ids,
+                                at::Tensor output_accepted_token_num,
+                                at::Tensor output_emitted_draft_token_num,
+                                bool       deterministic,
+                                int64_t    hip_stream);
+
+namespace rtp_llm {
+
+void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
+    auto stream = at::hip::getCurrentHIPStream().stream();
+    ::chain_speculative_sampling(params.draft_probs_d,
+                                 params.draft_token_ids_d,
+                                 params.uniform_samples_d,
+                                 params.target_probs_d,
+                                 params.output_token_ids_d,
+                                 params.output_accepted_token_num_d,
+                                 params.output_emitted_token_num_d,
+                                 false,
+                                 int64_t(stream));
 }
 
 #endif  // USING_CUDA

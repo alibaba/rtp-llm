@@ -396,6 +396,7 @@ cc_library(
     ] + torch_deps() + select({
         "@//:using_rocm": [
             "//rtp_llm/cpp/kernels/rocm/sampling:sampling",
+            "//rtp_llm/cpp/rocm:speculative_sampling",
             "//rtp_llm/cpp/rocm:rocm_host_utils",
             "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:rocm",
