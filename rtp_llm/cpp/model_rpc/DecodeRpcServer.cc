@@ -5,6 +5,8 @@
 #include <limits.h>
 #include <condition_variable>
 
+#include <cuda_runtime.h>
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
@@ -419,7 +421,6 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             string error_msg = "get grpc connection for rank:" + std::to_string(i) + ", addr:" + worker + " failed";
             return ErrorInfo(ErrorCode::GET_CONNECTION_FAILED, error_msg);
         }
-        all_context.push_back(WorkerRpcContext());
         auto& rpc_context = all_context[i];
         rpc_context.stub  = connect_status.value().stub;
         BroadcastLoadRequestPB load_request;

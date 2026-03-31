@@ -294,20 +294,10 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
             int prefix_len   = param.prefix_lengths_host->data<int>()[batch_id];
             int input_len    = param.input_lengths_host->data<int>()[param.decoder_batch_size + batch_id];
             int local_blocks = param.cp_slot_mapper->localBlockCount(prefix_len + input_len);
-
-            std::cout << "[write_cache_store] CP sharded: batch_id=" << batch_id << " prefix=" << prefix_len
-                      << " input=" << input_len << " local_blk=" << local_blocks << " total_blk=" << total_blocks
-                      << " max_blk=" << max_blocks_per_batch << " rank=" << param.cp_slot_mapper->cpRank()
-                      << " cp=" << param.cp_slot_mapper->cpSize() << " vbs=" << param.cp_slot_mapper->virtualBlockSize()
-                      << " dec_bs=" << param.decoder_batch_size << std::endl;
-
             for (int i = 0; i < local_blocks; ++i) {
                 addBlock(i, group_type);
             }
         } else {
-            std::cout << "[write_cache_store] non-sharded: batch_id=" << batch_id << " total_blk=" << total_blocks
-                      << " max_blk=" << max_blocks_per_batch << " mapper=" << (void*)param.cp_slot_mapper.get()
-                      << " dec_bs=" << param.decoder_batch_size << std::endl;
             for (int index = 0; index < total_blocks; ++index) {
                 addBlock(index, group_type);
             }
