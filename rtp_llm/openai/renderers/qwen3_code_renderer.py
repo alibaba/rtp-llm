@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Optional
 
 from jinja2 import Environment
@@ -15,6 +16,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
 from rtp_llm.openai.renderers.sglang_helpers.function_call.qwen3_coder_detector import (
     Qwen3CoderDetector,
 )
+from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
 
 
 class Qwen3CoderRenderer(ReasoningToolBaseRenderer):
@@ -58,6 +60,21 @@ class Qwen3CoderRenderer(ReasoningToolBaseRenderer):
                 return []
 
         env.filters["items"] = smart_items
+
+    @override
+    def _create_reasoning_parser(
+        self, request: ChatCompletionRequest
+    ) -> Optional[ReasoningParser]:
+        if not self.in_think_mode(request):
+            return None
+
+        try:
+            rendered_result = self.render_chat(request)
+            if rendered_result.rendered_prompt.endswith(self.think_start_tag):
+                return ReasoningParser(model_type="qwen3-thinking")
+        except Exception as e:
+            logging.error(f"Failed to render chat in _create_reasoning_parser: {e}")
+        return ReasoningParser(model_type="qwen3")
 
 
 register_renderer("qwen3_coder_moe", Qwen3CoderRenderer)
