@@ -25,7 +25,7 @@ except (ImportError, AttributeError, ValueError) as e:
 
     logging.warning(f"flash_mla not available: {e}. Requires CUDA >= 12.9")
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, barrier
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_kv_indices,
@@ -305,7 +305,6 @@ class ZigZagSparseMlaFp8CPOp(SparseMlaFp8Op):
         if topk is None:
             return None
 
-        # Convert request-local topk0/topk1 to global indices for flash_mla_with_kvcache
         global_topk = self._convert_topk_indices_to_global(topk)
 
         kv_cache_flat = kv_cache.kv_cache_base.view(
@@ -371,13 +370,10 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
       This is the original path that avoids cross-rank communication during attention.
 
     With prefix cache (has_prefix_cache=True):
-      1. All-gather q and topk so every rank has ALL q tokens.
-      2. Filter the global topk indices to keep only positions this rank owns.
-      3. Map those positions to sharded cache addresses.
-      4. Run flash_mla_with_kvcache on the local sharded cache, getting (out, lse).
-      5. All-gather (out, lse) across CP ranks and merge via flashinfer merge_state.
-      This path naturally supports prefix cache since prefix blocks are already
-      present in the sharded cache via cache match.
+      Supports two selectable implementations:
+      - ag_q: all-gather q/topk, attend on local KV shard, then all-gather out/lse and merge.
+      - ag_kv: read local sharded KV rows, all-gather KV rows, restore a global workspace,
+        then reuse the no-prefix workspace attention path.
     """
 
     def __init__(
@@ -408,9 +404,12 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
 
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
+
         self.kv_cache_sharded = parallelism_config.prefill_cp_config.kv_cache_sharded
         self.virtual_block_size = self.token_per_block * self.prefill_cp_size
         self.device = torch.cuda.current_device()
+
+        self._scale_one = torch.tensor(1.0, dtype=torch.float32, device=self.device)
 
         self.kv_restore_unpad_indices = None
         # Round-robin has no q0/q1 split, but keep attrs for indexer compatibility
@@ -421,6 +420,14 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         self.kv_cache_write_op = None
         self.write_cache_store_impl = None
         self._ws_fp8 = None
+
+        self._local_req_ids = None
+        self._global_req_ids = None
+        self._local_kv_pack_dst_rows = None
+        self._local_kv_pack_src_slots = None
+        self._global_fp8_metadata = None
+        self._fp8_kernel_metadata_q0 = None
+        self._use_prefix_q_path = True
 
     def plan(
         self, mla_params: rtp_llm_ops.FlashInferMlaAttnParams, block_table: torch.Tensor
@@ -441,7 +448,6 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
 
         local_tokens = sum(chunk_lengths_list)
         C = self.prefill_cp_size
-
         _empty = torch.empty(0, device=self.device, dtype=torch.long)
         # Flat local indices 0..local_tokens-1 for this rank (same layout as all-gather
         # layout [rank0_chunk | rank1_chunk | ...]).
@@ -504,56 +510,50 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
 
         # Determine whether prefix cache is active
         self.has_prefix_cache = prefix_lengths.sum().item() > 0
+        self._use_prefix_q_path = self._should_use_prefix_q_path()
 
-        new_total_kv = self.kv_restore_unpad_indices.size(0)
-        self._ws_total_kv = new_total_kv
         page_size = self.token_per_block
 
-        # --- MLA workspace metadata (non-prefix path only) ---
+        # --- MLA workspace metadata ---
         # The workspace stores all-gathered KV in a contiguous paged tensor
-        # for the _forward_workspace attention path.
-        if not self.has_prefix_cache:
-            ws_cu = self.cu_kv_seqlens_global.cpu().int()
-            ws_lengths_t = ws_cu[1:] - ws_cu[:-1]
-            ws_pages_per_req = (ws_lengths_t + page_size - 1) // page_size
-            ws_aligned_sizes = ws_pages_per_req * page_size
-            ws_cu_aligned = torch.zeros(ws_aligned_sizes.size(0) + 1, dtype=torch.int32)
-            ws_cu_aligned[1:] = torch.cumsum(ws_aligned_sizes, dim=0)
-            ws_total_aligned = int(ws_cu_aligned[-1].item())
-            self._ws_total_pages = (ws_total_aligned + page_size - 1) // page_size
+        # for the workspace attention path used by both no-prefix and prefix-hit.
+        ws_cu = self.cu_kv_seqlens_global.cpu().int()
+        ws_lengths_t = ws_cu[1:] - ws_cu[:-1]
+        ws_pages_per_req = (ws_lengths_t + page_size - 1) // page_size
+        ws_aligned_sizes = ws_pages_per_req * page_size
+        ws_cu_aligned = torch.zeros(ws_aligned_sizes.size(0) + 1, dtype=torch.int32)
+        ws_cu_aligned[1:] = torch.cumsum(ws_aligned_sizes, dim=0)
+        ws_total_aligned = int(ws_cu_aligned[-1].item())
+        self._ws_total_pages = (ws_total_aligned + page_size - 1) // page_size
 
-            total_ws_tokens = int(ws_lengths_t.sum().item())
-            if total_ws_tokens > 0:
-                offsets = ws_cu_aligned[:-1].long()
-                lengths = ws_lengths_t.long()
-                req_ids = torch.cat(
-                    [
-                        torch.full((int(l),), i, dtype=torch.long)
-                        for i, l in enumerate(lengths.tolist())
-                    ]
-                )
-                within_req = torch.cat(
-                    [torch.arange(int(l), dtype=torch.long) for l in lengths.tolist()]
-                )
-                self._ws_slot_mapping = (offsets[req_ids] + within_req).to(self.device)
-            else:
-                self._ws_slot_mapping = torch.empty(
-                    0, dtype=torch.int64, device=self.device
-                )
-
-            self._ws_block_table = common.build_contiguous_block_table(
-                ws_cu_aligned.to(self.device),
-                page_size,
-                self.device,
+        total_ws_tokens = int(ws_lengths_t.sum().item())
+        if total_ws_tokens > 0:
+            offsets = ws_cu_aligned[:-1].long()
+            lengths = ws_lengths_t.long()
+            req_ids = torch.cat(
+                [
+                    torch.full((int(l),), i, dtype=torch.long)
+                    for i, l in enumerate(lengths.tolist())
+                ]
             )
+            within_req = torch.cat(
+                [torch.arange(int(l), dtype=torch.long) for l in lengths.tolist()]
+            )
+            self._ws_slot_mapping = (offsets[req_ids] + within_req).to(self.device)
         else:
-            self._ws_total_pages = None
-            self._ws_slot_mapping = None
-            self._ws_block_table = None
+            self._ws_slot_mapping = torch.empty(
+                0, dtype=torch.int64, device=self.device
+            )
 
-        # --- Sharded-cache metadata (always computed for indexer topk) ---
-        # Used by both indexer (gather-from-sharded-cache + all_gather FP8) and
-        # MLA prefix-cache path (all_gather Q/topk, local attention, merge).
+        self._ws_block_table = common.build_contiguous_block_table(
+            ws_cu_aligned.to(self.device),
+            page_size,
+            self.device,
+        )
+
+        # --- Sharded-cache metadata (always computed) ---
+        # Used by the indexer and by the prefix-hit AG-KV path that packs local shard
+        # rows, all-gathers them, and restores a global workspace KV cache.
         kv_lengths_t = kv_lengths.int()
         kv_lengths_list = kv_lengths_t.tolist()
         vbs = self.virtual_block_size
@@ -589,8 +589,51 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
                 0, dtype=torch.long, device=self.device
             )
 
-        # --- Global MLA metadata for prefix-cache attention path ---
+        # --- Precompute local slot mapping for direct cache write ---
+        # Both MLA and indexer use the same physical slot mapping (derived from
+        # mla_params.slot_mapping), so we compute it once and share.
+        local_slot_mapping = self._build_local_slot_mapping(
+            mla_params.slot_mapping, local_tokens, C
+        )
+        self._local_mla_slot_mapping = local_slot_mapping
+        self._local_indexer_slot_mapping = local_slot_mapping
+        self._local_req_ids = self.mla_params.batch_indice_d[self.total_global_ids]
         if self.has_prefix_cache:
+            self._global_req_ids = self.mla_params.batch_indice_d[
+                : self.kv_restore_unpad_indices.size(0)
+            ]
+        else:
+            self._global_req_ids = None
+
+        # Pack actual owned rows from the paged sharded cache into a contiguous local
+        # shard buffer so prefix-hit can reuse the same workspace attention path as
+        # no-prefix after all_gather + restore.
+        if total_kv > 0:
+            owned_mask = ranks == self.prefill_cp_rank
+            req_ids_d = req_ids.to(self.device)
+            # Sharded RR cache stores one local page per virtual block, not per
+            # global page. Map global token position to:
+            #   page id   = global_pos // virtual_block_size
+            #   page lane = (global_pos % virtual_block_size) // cp_size
+            block_offsets_d = (positions_flat // vbs).to(self.device)
+            token_offsets_d = ((positions_flat % vbs) // C).to(self.device)
+            physical_slots = (
+                self.block_table[req_ids_d, block_offsets_d].long() * page_size
+                + token_offsets_d
+            )
+            self._local_kv_pack_dst_rows = (cu_offsets + local_idx)[owned_mask].to(
+                self.device
+            )
+            self._local_kv_pack_src_slots = physical_slots[owned_mask].to(self.device)
+        else:
+            self._local_kv_pack_dst_rows = torch.empty(
+                0, dtype=torch.long, device=self.device
+            )
+            self._local_kv_pack_src_slots = torch.empty(
+                0, dtype=torch.long, device=self.device
+            )
+
+        if self.has_prefix_cache and self._use_prefix_q_path:
             global_total_q = self.kv_restore_unpad_indices.size(0)
             if global_total_q > 0:
                 tile_sched, num_splits = get_mla_metadata(
@@ -604,21 +647,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
                 self._global_fp8_metadata = SparseMlaFp8DecodeParams(
                     tile_sched, num_splits
                 )
-            else:
-                self._global_fp8_metadata = None
-        else:
-            self._global_fp8_metadata = None
 
-        # --- Precompute local slot mapping for direct cache write ---
-        # Both MLA and indexer use the same physical slot mapping (derived from
-        # mla_params.slot_mapping), so we compute it once and share.
-        local_slot_mapping = self._build_local_slot_mapping(
-            mla_params.slot_mapping, local_tokens, C
-        )
-        self._local_mla_slot_mapping = local_slot_mapping
-        self._local_indexer_slot_mapping = local_slot_mapping
-
-        # Local metadata for the indexer / non-prefix workspace path (valid q rows only)
         n_q = self.total_global_ids.size(0)
         if n_q > 0:
             tile_sched, num_splits = get_mla_metadata(
@@ -632,8 +661,6 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
             self._fp8_kernel_metadata_q0 = SparseMlaFp8DecodeParams(
                 tile_sched, num_splits
             )
-        else:
-            self._fp8_kernel_metadata_q0 = None
 
     def _build_local_slot_mapping(
         self,
@@ -666,26 +693,34 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
             result[self.total_local_ids] = global_slot[self.total_global_ids]
         return result
 
-    def _write_local_cache(
-        self,
-        compressed_kv: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: KVCache,
-    ) -> None:
-        """Write only this rank's owned tokens to the sharded MLA cache.
+    def _should_use_prefix_q_path(self) -> bool:
+        """Return whether prefix-hit should use the q-path.
 
-        Uses the precomputed _local_mla_slot_mapping which has -1 for non-owned tokens.
-        The underlying concat_and_cache_mla kernel skips slot_idx < 0.
+        Model-specific constants:
+        - all_gather KV: 656 B/token
+        - all_gather q/topk/out/lse: 104.25 KiB/token
+
+        Therefore q-side communication is cheaper only when:
+            global_q_len / total_kv_len <= 656 / (104.25 * 1024) ~= 0.00614
         """
-        scale = torch.tensor(1.0, dtype=torch.float32, device=compressed_kv.device)
-        compute_ops.concat_and_cache_mla(
-            compressed_kv,
-            k_pe,
-            kv_cache.kv_cache_base,
-            self._local_mla_slot_mapping,
-            self.kv_cache_write_op.kv_cache_type,
-            scale,
-        )
+        global_q_len = int(self.kv_restore_unpad_indices.size(0))
+        total_kv_len = int(self.total_kv_len)
+        if global_q_len <= 0 or total_kv_len <= 0:
+            return True
+        q_to_kv_ratio = global_q_len / total_kv_len
+        return q_to_kv_ratio <= 0.00614
+
+    def _alloc_workspace_kv_cache(self, kv_cache: KVCache) -> torch.Tensor:
+        """Lazily allocate the temporary KV cache workspace, reused across layers within one forward pass."""
+        kv_dim_bytes = kv_cache.kv_cache_base.size(-1)
+        expected_shape = (self._ws_total_pages, self.token_per_block, kv_dim_bytes)
+        if self._ws_fp8 is None or self._ws_fp8.shape != expected_shape:
+            self._ws_fp8 = torch.empty(
+                expected_shape,
+                dtype=kv_cache.kv_cache_base.dtype,
+                device=self.device,
+            )
+        return self._ws_fp8
 
     def _convert_topk_indices_to_workspace(
         self,
@@ -703,7 +738,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         assert topk == self.top_k
         assert self.mla_params is not None
 
-        req_id = self.mla_params.batch_indice_d[self.total_global_ids]
+        req_id = self._local_req_ids
         from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
             triton_convert_req_index_to_global_index,
         )
@@ -719,33 +754,61 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         )
         return global_indices_2d.unsqueeze(1).expand(num_tokens, h_kv, topk)
 
+    def _build_workspace_from_dense_kv(
+        self,
+        restored_ckv: torch.Tensor,
+        restored_k_pe: torch.Tensor,
+        kv_cache: KVCache,
+    ) -> torch.Tensor:
+        workspace_cache = self._alloc_workspace_kv_cache(kv_cache)
+        compute_ops.concat_and_cache_mla(
+            restored_ckv,
+            restored_k_pe,
+            workspace_cache,
+            self._ws_slot_mapping,
+            self.kv_cache_write_op.kv_cache_type,
+            self._scale_one,
+        )
+        return workspace_cache
+
+    def _build_workspace_from_sharded_cache(self, kv_cache: KVCache) -> torch.Tensor:
+        kv_dim_bytes = kv_cache.kv_cache_base.size(-1)
+        local_rows = torch.zeros(
+            self._total_local_kv,
+            kv_dim_bytes,
+            dtype=kv_cache.kv_cache_base.dtype,
+            device=self.device,
+        )
+        if self._local_kv_pack_dst_rows.numel() > 0:
+            kv_cache_rows = kv_cache.kv_cache_base.view(-1, kv_dim_bytes)
+            local_rows[self._local_kv_pack_dst_rows] = kv_cache_rows[
+                self._local_kv_pack_src_slots
+            ]
+        gathered_rows = all_gather(local_rows.contiguous(), group=Group.TP).reshape(
+            -1, kv_dim_bytes
+        )
+        restored_rows = torch.index_select(
+            gathered_rows, 0, self._kv_allgather_restore_indices
+        )
+        workspace_cache = self._alloc_workspace_kv_cache(kv_cache)
+        workspace_rows = workspace_cache.view(-1, kv_dim_bytes)
+        workspace_rows[self._ws_slot_mapping] = restored_rows
+        return workspace_cache
+
     def _filter_topk_to_sharded_cache(
         self,
         topk_indices: torch.Tensor,
         req_id: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Filter global topk indices to local rank and map to sharded cache addresses.
-
-        Args:
-            topk_indices: [num_tokens, topk] or [num_tokens, h_kv, topk],
-                request-local token positions from the indexer.
-            req_id: [num_tokens] int32, request id per q token. If None,
-                uses batch_indice_d[total_global_ids] (for local-only path).
-
-        Returns:
-            sharded_indices: [num_tokens, topk] — indices_in_kvcache format for
-                flash_mla_with_kvcache. Positions not owned by this rank are -1.
-        """
         if topk_indices.dim() == 2:
             topk_indices_2d = topk_indices
         else:
             topk_indices_2d = topk_indices[:, 0, :]
 
         if req_id is None:
-            assert self.mla_params is not None
-            req_id = self.mla_params.batch_indice_d[self.total_global_ids]
+            req_id = self._local_req_ids
 
-        sharded_indices = triton_filter_topk_for_sharded_cache(
+        return triton_filter_topk_for_sharded_cache(
             req_id=req_id,
             block_table=self.block_table,
             token_indices=topk_indices_2d,
@@ -754,41 +817,22 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
             block_size=self.token_per_block,
             BLOCK_N=min(128, self.top_k),
         )
-        return sharded_indices
 
     def _merge_attention_across_ranks(
         self,
         local_out: torch.Tensor,
         local_lse: torch.Tensor,
     ) -> torch.Tensor:
-        """All-gather (out, lse) from all CP ranks and merge via flashinfer merge_state.
+        C = self.prefill_cp_size
 
-        Each rank computes attention for ALL q tokens against its own KV shard.
-        The all-gather collects these partial results, and merge_state combines
-        them into the final output as if attention was computed over the full KV.
-
-        Args:
-            local_out: [total_q, num_heads, kv_lora_rank] — partial attention output
-                       from this rank's KV shard, computed over ALL q tokens.
-            local_lse: [total_q, num_heads] — partial log-sum-exp (float32).
-
-        Returns:
-            merged_out: [total_q, num_heads, kv_lora_rank] — merged attention output.
-        """
-        # all-gather across CP ranks: [cp_size * total_q, ...]
         all_out = all_gather(local_out.contiguous(), group=Group.TP)
         all_lse = all_gather(local_lse.contiguous(), group=Group.TP)
 
         n_q = local_out.shape[0]
-        C = self.prefill_cp_size
         head_dim = local_out.shape[-1]
 
-        # Reshape to [cp_size, total_q, ...]
         all_out = all_out.view(C, n_q, *local_out.shape[1:])
         all_lse = all_lse.view(C, n_q, *local_lse.shape[1:])
-
-        if C == 1:
-            return all_out[0]
 
         v = all_out.permute(1, 0, 2, 3).contiguous()
         s = all_lse.permute(1, 0, 2).contiguous()
@@ -819,7 +863,14 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         layer_id: int = 0,
     ) -> torch.Tensor:
         # Step 1: Write local KV to sharded cache (owned tokens only, no all_gather needed)
-        self._write_local_cache(compressed_kv, k_pe, kv_cache)
+        compute_ops.concat_and_cache_mla(
+            compressed_kv,
+            k_pe,
+            kv_cache.kv_cache_base,
+            self._local_mla_slot_mapping,
+            self.kv_cache_write_op.kv_cache_type,
+            self._scale_one,
+        )
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
@@ -828,75 +879,60 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
 
         if self.has_prefix_cache:
             if no_valid_tokens:
-                # Pad-only rank (input_tokens < cp_size): create a dummy topk so
-                # _forward_prefix_cache can participate in all_gathers without hanging.
-                # Shape (0, top_k) triggers the padding branch inside the function.
                 topk = torch.empty(0, self.top_k, dtype=torch.int32, device=q.device)
+                self._forward_prefix_cache(q, topk, kv_cache, layer_id)
+                return None
             return self._forward_prefix_cache(q, topk, kv_cache, layer_id)
         else:
             # Non-prefix: all ranks must participate in KV all_gather
-            gathered_ckv = all_gather(compressed_kv.contiguous(), group=Group.TP)
-            gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
-            gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP)
-            gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
+            gathered_ckv = all_gather(
+                compressed_kv.contiguous(), group=Group.TP
+            ).reshape(-1, compressed_kv.size(-1))
+            gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP).reshape(
+                -1, k_pe.size(-1)
+            )
 
             if no_valid_tokens:
-                # Pad-only rank: participated in all_gathers above; return dummy output.
-                return torch.empty(
-                    q.shape[0],
-                    self.num_heads,
-                    self.kv_lora_rank,
-                    dtype=q.dtype,
-                    device=q.device,
-                )
+                return None
 
-            restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
-            restored_k_pe = gathered_k_pe[self.kv_restore_unpad_indices]
+            restored_ckv = torch.index_select(
+                gathered_ckv, 0, self.kv_restore_unpad_indices
+            )
+            restored_k_pe = torch.index_select(
+                gathered_k_pe, 0, self.kv_restore_unpad_indices
+            )
             return self._forward_workspace(
                 q, restored_ckv, restored_k_pe, topk, kv_cache, layer_id
             )
 
-    def _forward_workspace(
+    def _forward_workspace_from_cache(
         self,
         q: torch.Tensor,
-        restored_ckv: torch.Tensor,
-        restored_k_pe: torch.Tensor,
-        topk: Optional[torch.Tensor],
-        kv_cache=None,
+        topk: torch.Tensor,
+        workspace_cache: torch.Tensor,
         layer_id: int = 0,
     ) -> torch.Tensor:
-        """No-prefix path: build temporary FP8 workspace from all-gathered KV, attend locally."""
-        # Step 3: Build temporary FP8 workspace from all-gathered KV
-        kv_dim_bytes = kv_cache.kv_cache_base.size(-1)
-        self._ws_fp8 = torch.empty(
-            self._ws_total_pages,
-            self.token_per_block,
-            kv_dim_bytes,
-            dtype=kv_cache.kv_cache_base.dtype,
-            device=self.device,
-        )
-        scale = torch.tensor(1.0, dtype=torch.float32, device=self.device)
-        compute_ops.concat_and_cache_mla(
-            restored_ckv,
-            restored_k_pe,
-            self._ws_fp8,
-            self._ws_slot_mapping,
-            self.kv_cache_write_op.kv_cache_type,
-            scale,
-        )
+        """Run local-q attention against a prebuilt global workspace KV cache."""
+        valid_local_tokens = self.total_local_ids.numel()
+        if valid_local_tokens == 0:
+            return torch.zeros(
+                q.shape[0],
+                self.num_heads,
+                self.kv_lora_rank,
+                dtype=q.dtype,
+                device=q.device,
+            )
 
-        # Step 4: Attention — valid local q rows attend to full global KV workspace
-        # (same row alignment as indexer topk: one row per total_local_ids entry).
         workspace_topk = self._convert_topk_indices_to_workspace(
             topk,
             self._ws_block_table,
         )
 
-        kv_cache_flat = self._ws_fp8.view(torch.uint8)
+        kv_cache_flat = workspace_cache.view(torch.uint8)
         if kv_cache_flat.ndim == 3:
             kv_cache_flat = kv_cache_flat.unsqueeze(-2)
 
-        q_part = q[self.total_local_ids].contiguous()
+        q_part = torch.index_select(q, 0, self.total_local_ids).contiguous()
         q_batched = q_part.unsqueeze(0)
         if workspace_topk.dim() == 3 and workspace_topk.shape[1] == 1:
             workspace_topk = workspace_topk.squeeze(1)
@@ -932,6 +968,28 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         out[self.total_local_ids] = attn_part
         return out
 
+    def _forward_workspace(
+        self,
+        q: torch.Tensor,
+        restored_ckv: torch.Tensor,
+        restored_k_pe: torch.Tensor,
+        topk: Optional[torch.Tensor],
+        kv_cache=None,
+        layer_id: int = 0,
+    ) -> torch.Tensor:
+        """No-prefix path: build global workspace from gathered dense KV, then attend."""
+        workspace_cache = self._build_workspace_from_dense_kv(
+            restored_ckv,
+            restored_k_pe,
+            kv_cache,
+        )
+        return self._forward_workspace_from_cache(
+            q,
+            topk,
+            workspace_cache,
+            layer_id,
+        )
+
     def _forward_prefix_cache(
         self,
         q: torch.Tensor,
@@ -939,43 +997,75 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         kv_cache=None,
         layer_id: int = 0,
     ) -> torch.Tensor:
-        """Prefix-cache path: all-gather q/topk, local attention on sharded cache, merge states."""
-        local_tokens = q.shape[0]
+        if self._use_prefix_q_path:
+            return self._forward_prefix_cache_ag_q(q, topk, kv_cache, layer_id)
+        return self._forward_prefix_cache_ag_kv(q, topk, kv_cache, layer_id)
 
-        # topk has len(total_local_ids) rows which can differ across ranks when
-        # seq_len % cp_size != 0 (padding tokens are filtered out by total_local_ids).
-        # Pad back to local_tokens so all ranks contribute equal-sized tensors to all_gather.
-        if topk.shape[0] < local_tokens:
+    def _forward_prefix_cache_ag_kv(
+        self,
+        q: torch.Tensor,
+        topk: Optional[torch.Tensor],
+        kv_cache=None,
+        layer_id: int = 0,
+    ) -> Optional[torch.Tensor]:
+        """Prefix-cache path: all-gather sharded KV into a workspace, then reuse workspace attention."""
+        workspace_cache = self._build_workspace_from_sharded_cache(kv_cache)
+        if topk.numel() == 0:
+            return None
+        return self._forward_workspace_from_cache(
+            q,
+            topk,
+            workspace_cache,
+            layer_id,
+        )
+
+    def _forward_prefix_cache_ag_q(
+        self,
+        q: torch.Tensor,
+        topk: Optional[torch.Tensor],
+        kv_cache=None,
+        layer_id: int = 0,
+    ) -> Optional[torch.Tensor]:
+        """Prefix-cache path: all-gather q/topk, attend on local shard, then merge states."""
+        local_tokens = q.shape[0]
+        valid_local_tokens = self.total_local_ids.numel()
+        no_valid = topk.numel() == 0
+
+        if not no_valid and topk.shape[0] not in (valid_local_tokens, local_tokens):
+            raise ValueError(
+                "[RoundRobin prefix] topk rows must be either valid local rows "
+                "(aligned with total_local_ids) or fully padded local rows "
+                "(aligned with q for collectives). "
+                f"Got topk.shape[0]={topk.shape[0]}, "
+                f"valid_local_tokens={valid_local_tokens}, local_tokens={local_tokens}."
+            )
+
+        if no_valid or topk.shape[0] < local_tokens:
             padded_topk = torch.full(
                 (local_tokens, *topk.shape[1:]),
-                fill_value=-1,
+                -1,
                 dtype=topk.dtype,
-                device=topk.device,
+                device=self.device,
             )
-            padded_topk[self.total_local_ids] = topk
+            if not no_valid:
+                padded_topk.index_copy_(0, self.total_local_ids, topk)
             topk_for_gather = padded_topk
         else:
             topk_for_gather = topk
 
-        # Step 3: All-gather q and topk so every rank has ALL q tokens.
         all_q = all_gather(q.contiguous(), group=Group.TP)
         all_q = all_q.reshape(-1, *q.shape[1:])
         all_topk = all_gather(topk_for_gather.contiguous(), group=Group.TP)
         all_topk = all_topk.reshape(-1, *topk_for_gather.shape[1:])
 
-        # Restore to global unpadded token order (undo CP interleaving/padding).
-        all_q = all_q[self.kv_restore_unpad_indices]
-        all_topk = all_topk[self.kv_restore_unpad_indices]
+        all_q = torch.index_select(all_q, 0, self.kv_restore_unpad_indices)
+        all_topk = torch.index_select(all_topk, 0, self.kv_restore_unpad_indices)
 
-        total_q = all_q.shape[0]
-
-        # Step 4: Filter topk to this rank's KV shard.
-        all_batch_indice = self.mla_params.batch_indice_d[:total_q]
+        all_batch_indice = self._global_req_ids
         sharded_indices = self._filter_topk_to_sharded_cache(
             all_topk, req_id=all_batch_indice
         )
 
-        # Step 5: Local attention — ALL q tokens attend to this rank's KV shard.
         kv_cache_flat = kv_cache.kv_cache_base.view(
             -1, 1, kv_cache.kv_cache_base.size(-1)
         ).view(torch.uint8)
@@ -995,9 +1085,6 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
             (1, *all_q.shape),
             (0, *all_q.stride()),
         )
-        # FlashMLA sparse decode checks strides with int32 bounds. For this path
-        # the external batch dim is always 1, so a zero batch stride is safe and
-        # avoids overflow when total_q * topk becomes very large.
         sharded_indices = sharded_indices.contiguous()
         indices_batched = torch.as_strided(
             sharded_indices,
@@ -1018,15 +1105,10 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
             softmax_scale=self.scale,
         )
         local_out = local_out.squeeze(0)
-        local_lse = (
-            local_lse.squeeze(0).float().transpose(0, 1)
-        )  # [num_heads, total_q] -> [total_q, num_heads]
-        # Step 6: Merge attention states across all CP ranks.
+        local_lse = local_lse.squeeze(0).float().transpose(0, 1)
         merged_out = self._merge_attention_across_ranks(local_out, local_lse)
 
-        # Step 7: Extract this rank's local q tokens from the merged global output,
-        # and scatter into a local_tokens-sized buffer (consistent with _forward_workspace).
-        local_result = merged_out[self.total_global_ids]
+        local_result = torch.index_select(merged_out, 0, self.total_global_ids)
         out = torch.zeros(
             local_tokens,
             *local_result.shape[1:],

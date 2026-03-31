@@ -244,9 +244,6 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             cache_store_inputs.cp_slot_mapper = std::make_shared<rtp_llm::CPSlotMapper>(
                 device_props_.tp_rank, device_props_.tp_size, inputs.seq_size_per_block);
         }
-        std::cout << "[prepareWriteCacheParams] kv_cache_sharded=" << device_props_.cp_kv_cache_sharded
-                  << " tp_size=" << device_props_.tp_size
-                  << " cp_slot_mapper=" << (void*)cache_store_inputs.cp_slot_mapper.get() << std::endl;
         params = cache_store_inputs;
     }
     return params;
@@ -347,13 +344,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor input_hiddens =
             inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
 
-        auto                   attention_inputs      = buildPyAttentionInputs(inputs);
-        auto                   bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        auto attention_inputs      = buildPyAttentionInputs(inputs);
+        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
 
         if (device_props_.enable_prefill_cp) {
             attention_inputs.context_parallel_info = cp_params;
         }
- 
+
         BufferPtr              kv_cache_block_id_device;
         std::vector<BufferPtr> kv_cache_block_id_device_by_group;
         if (!inputs.warmup && inputs.pd_separation) {

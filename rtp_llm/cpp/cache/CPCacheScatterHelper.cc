@@ -182,12 +182,12 @@ void CPCacheScatterHelper::scatterAndRelease(std::unique_ptr<StagingPlan> plan,
         }
 
         if (decode_blocks < staging_cnt) {
-            RTP_LLM_LOG_WARNING("[SCATTER] decode_blocks(%d) < staging_cnt(%d) at layer %zu; "
-                                "this can be valid when total_tokens(%d) is smaller than a full CP virtual block",
-                                decode_blocks,
-                                staging_cnt,
-                                layer_id,
-                                layer_total_tokens);
+            RTP_LLM_LOG_DEBUG("[SCATTER] decode_blocks(%d) < staging_cnt(%d) at layer %zu; "
+                              "this can be valid when total_tokens(%d) is smaller than a full CP virtual block",
+                              decode_blocks,
+                              staging_cnt,
+                              layer_id,
+                              layer_total_tokens);
         }
 
         auto   sample_parts = cache_manager_->convertIndexToBuffer(block_ids[0], layer_id, 1, 0);
