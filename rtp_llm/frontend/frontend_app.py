@@ -65,6 +65,7 @@ class FrontendApp(object):
             self.server_config.frontend_server_id,
             py_env_configs,
         )
+        self.bailian_grpc_config = py_env_configs.bailian_grpc_config
         self.separated_frontend = separated_frontend
 
         # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
@@ -115,8 +116,52 @@ class FrontendApp(object):
             "Backend health_check did not become ready within %ds" % timeout_s
         )
 
+    def _start_bailian_grpc_server(self) -> None:
+        """Prepare Bailian gRPC (predict_v2.proto wire); always enabled. Bind in FastAPI startup."""
+        self._bailian_grpc_port = self.server_config.bailian_grpc_server_port
+        self._bailian_grpc_backend_visitor = None
+        if getattr(self.frontend_server, "_frontend_worker", None) is not None:
+            self._bailian_grpc_backend_visitor = (
+                self.frontend_server._frontend_worker.backend_rpc_server_visitor
+            )
+        self._bailian_grpc_start_pending = True
+        logging.info(
+            "Bailian gRPC will start in app startup on port %s", self._bailian_grpc_port
+        )
+
+    def _run_bailian_grpc_server_startup(self) -> None:
+        if not getattr(self, "_bailian_grpc_start_pending", False):
+            return
+        self._bailian_grpc_start_pending = False
+        try:
+            from rtp_llm.bailian.bailian_grpc_server import (
+                set_bailian_grpc_enqueue_event_loop,
+                start_bailian_grpc_server_in_thread,
+            )
+
+            set_bailian_grpc_enqueue_event_loop(asyncio.get_running_loop())
+            # Blocks until grpc.Server.start() / bind succeeds; daemon thread then waits forever.
+            start_bailian_grpc_server_in_thread(
+                self._bailian_grpc_port,
+                backend_visitor=getattr(self, "_bailian_grpc_backend_visitor", None),
+                bailian_grpc_config=self.bailian_grpc_config,
+            )
+            logging.info(
+                "Started Bailian gRPC server on port %s (enqueue_event_loop=uvicorn)",
+                self._bailian_grpc_port,
+            )
+        except Exception as e:
+            logging.error(
+                "Failed to start Bailian gRPC server: %s. "
+                "Ensure grpcio-tools is installed and run: python -m rtp_llm.bailian.generate_proto_py",
+                e,
+                exc_info=True,
+            )
+            raise
+
     def start(self):
         self.frontend_server.start()
+        self._start_bailian_grpc_server()
         app = self.create_app()
 
         loop = "auto"
@@ -174,11 +219,24 @@ class FrontendApp(object):
             # PD 不分离时在 Uvicorn 的 loop 里等后端就绪，channel 在此 loop 创建并一直复用
             if not self.separated_frontend:
                 await self._wait_backend_health_ready_impl()
+            self._run_bailian_grpc_server_startup()
             RunVar("_default_thread_limiter").set(
                 CapacityLimiter(
                     self.frontend_server._global_controller.max_concurrency * 2
                 )
             )
+
+        @app.on_event("shutdown")
+        async def _shutdown_bailian_grpc():
+            # grpc.Server.stop can block up to ``grace``; avoid blocking the event loop.
+            to = self.server_config.shutdown_timeout
+            grace = None if to < 0 else float(to)
+            try:
+                from rtp_llm.bailian.bailian_grpc_server import stop_bailian_grpc_server
+
+                await asyncio.to_thread(stop_bailian_grpc_server, grace)
+            except Exception as e:
+                logging.warning("[BailianGrpc] shutdown failed: %s", e, exc_info=True)
 
         async def check_all_health():
             if not self.frontend_server.check_health():
@@ -194,6 +252,8 @@ class FrontendApp(object):
 
         @app.get("/health")
         @app.post("/health")
+        @app.get("/liveness")
+        @app.post("/liveness")
         @app.get("/GraphService/cm2_status")
         @app.post("/GraphService/cm2_status")
         @app.get("/SearchService/cm2_status")

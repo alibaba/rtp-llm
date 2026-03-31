@@ -6,6 +6,7 @@ This page lists server arguments used to configure the behavior and performance 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
+| `--worker_info_port_num` | Stride between port **bases** for each `rank_id`: `base = start_port + rank_id * worker_info_port_num`. Offsets under each base include RPC, HTTP, Bailian gRPC (`base + 8`), etc. **Breaking change:** default was **8**, now **9** — multi-rank deployments that relied on the old default must re-check ports or set `8` explicitly. See [breaking-changes.md](../release/breaking-changes.md). | 9 |
 | `--tp-size` | Specifies the tensor parallelism degree. | None |
 | `--ep-size` | Defines the number of model instances for expert parallelism. | None |
 | `--dp-size` | Sets the number of replicas or group size for data parallelism. | None |
