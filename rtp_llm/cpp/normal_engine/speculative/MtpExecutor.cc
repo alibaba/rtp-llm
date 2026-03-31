@@ -172,7 +172,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          cache_manager ? std::make_optional(target_cache_layer_layout) : std::nullopt,
          params.model_id,
          params.parallelism_config,
-         exec_init_params});
+         exec_init_params,
+         cache_manager});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -207,7 +208,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 cache_manager ? std::make_optional(draft_cache_layer_layout) : std::nullopt,
                                 mtp_params->model_id,
                                 mtp_params->parallelism_config,
-                                exec_init_params});
+                                exec_init_params,
+                                cache_manager});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             draft_model_.reset(new PyWrappedModel(
@@ -349,6 +351,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         maybePrintModelInput(model_input, "prefill post draft model");
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
         model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
+        model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         draft_model_output                  = std::move(draft_model_->forward(model_input));
     }
@@ -631,6 +634,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         maybePrintModelInput(model_input, "decode post draft model");
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
         model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
+        model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
     }
 

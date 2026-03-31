@@ -19,6 +19,10 @@
 #include <thread>
 #include <random>
 
+#if USING_CUDA
+#include "c10/cuda/CUDACachingAllocator.h"
+#endif
+
 #ifdef __linux__
 #include <malloc.h>
 #endif
@@ -220,11 +224,13 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     rtp_llm::setTraceMemory(true);
     executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, exec_init_params_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
-    const auto device_status = getGpuExecStatus();
+    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
-    return WarmUpResult(
-        {device_status.device_memory_status.available_bytes, device_status.device_memory_status.max_consumed_bytes});
+    cudaDeviceSynchronize();
+    c10::cuda::CUDACachingAllocator::emptyCache();
+    const auto device_status = getGpuExecStatus();
+    return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
 #endif
 }
 
@@ -250,11 +256,13 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     }
     executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, exec_init_params_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
-    const auto device_status = getGpuExecStatus();
+    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
-    return WarmUpResult(
-        {device_status.device_memory_status.available_bytes, device_status.device_memory_status.max_consumed_bytes});
+    cudaDeviceSynchronize();
+    c10::cuda::CUDACachingAllocator::emptyCache();
+    const auto device_status = getGpuExecStatus();
+    return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
 #endif
 }
 
