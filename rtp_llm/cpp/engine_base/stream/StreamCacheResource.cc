@@ -196,10 +196,10 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
-    int                         group_nums     = 1;
-    int                         layer_all_num  = 0;
-    std::vector<int>            layer_to_group = {};
-    std::vector<CacheGroupType> group_types    = {};
+    int                           group_nums            = 1;
+    int                           layer_all_num         = 0;
+    std::vector<int>              layer_to_group        = {};
+    std::vector<CacheGroupType>   group_types           = {};
     std::vector<std::vector<int>> layer_region_to_group = {};
 
     size_t kernel_blocks_per_kv_block = 1;
@@ -209,7 +209,7 @@ void StreamCacheResource::init(int batch_size) {
         layer_all_num            = static_cast<int>(cache_config.layer_all_num);
         layer_to_group           = cache_config.layer_to_group_id;
         group_types              = cache_config.group_types;
-        layer_region_to_group      = cache_config.layer_region_to_group_id;
+        layer_region_to_group    = cache_config.layer_region_to_group_id;
         if (cache_config.kernel_seq_size_per_block > 0 && cache_config.seq_size_per_block > 0) {
             kernel_blocks_per_kv_block = cache_config.seq_size_per_block / cache_config.kernel_seq_size_per_block;
         }
@@ -232,7 +232,7 @@ void StreamCacheResource::releaseResource() {
         RTP_LLM_LOG_ERROR("  stream alive (magic check):    %s",
                           stream_->isStreamAlive() ? "YES" : "NO (stream already destroyed!)");
         if (stream_->isStreamAlive()) {
-            RTP_LLM_LOG_ERROR("  stream id:                     %ld", stream_->streamId());
+            RTP_LLM_LOG_ERROR("  stream id:                     %s", stream_->streamLogTag().c_str());
             RTP_LLM_LOG_ERROR("  stream state:                  %s",
                               StreamStateToString(stream_->generate_status_->status).c_str());
             RTP_LLM_LOG_ERROR("  stream hasError:                %d", stream_->hasError());
@@ -263,7 +263,7 @@ void StreamCacheResource::releaseResource() {
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_PROFILE_FUNCTION();
-    RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
+    RTP_LLM_LOG_DEBUG("stream [%s] try release [%lu] blocks", stream_->streamLogTag().c_str(), nums);
 
     if (fake_inited_) {
         int max_blocks_num = curBlocksNum();
@@ -522,11 +522,11 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
-    int                         group_nums                 = 1;
-    int                         layer_all_num              = 0;
-    size_t                      kernel_blocks_per_kv_block = 1;
-    std::vector<int>            layer_to_group             = {};
-    std::vector<CacheGroupType> group_types                = {};
+    int                           group_nums                 = 1;
+    int                           layer_all_num              = 0;
+    size_t                        kernel_blocks_per_kv_block = 1;
+    std::vector<int>              layer_to_group             = {};
+    std::vector<CacheGroupType>   group_types                = {};
     std::vector<std::vector<int>> layer_region_to_group      = {};
 
     if (resource_context_.cache_manager) {
@@ -535,7 +535,7 @@ void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
         layer_all_num              = static_cast<int>(cache_config.layer_all_num);
         layer_to_group             = cache_config.layer_to_group_id;
         group_types                = cache_config.group_types;
-        layer_region_to_group        = cache_config.layer_region_to_group_id;
+        layer_region_to_group      = cache_config.layer_region_to_group_id;
         kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     }
     batch_kv_cache_resource_->initGroups(
@@ -607,8 +607,9 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
     load_context->waitDone();
     if (!(load_context->success())) {
         auto error = load_context->errorInfo();
-        RTP_LLM_LOG_WARNING(
-            "load cache done but not success, stream: [%ld], error: %s", stream_->streamId(), error.ToString().c_str());
+        RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%s], error: %s",
+                            stream_->streamLogTag().c_str(),
+                            error.ToString().c_str());
         if (error.hasError()) {
             stream_->reportError(error.code(), error.ToString());
         }
@@ -616,7 +617,8 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
     }
     auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context);
     if (!read_context) {
-        RTP_LLM_LOG_WARNING("load cache success but cast context failed, stream: [%ld]", stream_->streamId());
+        RTP_LLM_LOG_WARNING("load cache success but cast context failed, stream: [%s]",
+                            stream_->streamLogTag().c_str());
         return;
     }
     updateReuseLengthsFromContext(read_context);
@@ -673,8 +675,8 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
     auto       evicted_resource = resource_context_.cache_manager->popBlocksFromCache(need_blocks);
     if (!evicted_resource || !evicted_resource->hasCacheKeys()) {
         RTP_LLM_LOG_INFO(
-            "tiered memory cache skip eviction, stream[%ld], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
-            stream_->streamId(),
+            "tiered memory cache skip eviction, stream[%s], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
+            stream_->streamLogTag().c_str(),
             not_in_use_blocks,
             min_free_blocks,
             need_blocks);
@@ -682,8 +684,8 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
     }
 
     RTP_LLM_LOG_INFO(
-        "tiered memory cache evict, stream[%ld], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu, evict_keys=%zu",
-        stream_->streamId(),
+        "tiered memory cache evict, stream[%s], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu, evict_keys=%zu",
+        stream_->streamLogTag().c_str(),
         not_in_use_blocks,
         min_free_blocks,
         need_blocks,

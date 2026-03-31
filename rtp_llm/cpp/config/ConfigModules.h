@@ -510,19 +510,35 @@ struct ArpcConfig {
     std::string to_string() const;
 };
 
-struct GrpcConfig {
+/// Shared ``client_config`` / ``server_config`` maps for gRPC channel options (JSON root keys).
+struct GrpcMapsConfig {
     std::map<std::string, int> client_config;
     std::map<std::string, int> server_config;
-    GrpcConfig() {};
-    GrpcConfig(const std::string& json_str);
-    std::string                to_string() const;
-    void                       from_json(const std::string& json_str);
     std::map<std::string, int> get_client_config() const {
         return client_config;
     }
     std::map<std::string, int> get_server_config() const {
         return server_config;
     }
+};
+
+struct GrpcConfig: GrpcMapsConfig {
+    /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
+    int max_server_pollers = 0;
+    GrpcConfig() {};
+    GrpcConfig(const std::string& json_str);
+    std::string to_string() const;
+    void        from_json(const std::string& json_str);
+};
+
+/// Bailian gRPC (predict_v2.proto) Python client/server channel options + executor workers.
+struct BailianGrpcConfig: GrpcMapsConfig {
+    /// ``ThreadPoolExecutor(max_workers=...)`` for ``grpc.server``; must be >= 1 when used.
+    int max_server_workers = 4;
+    BailianGrpcConfig() {};
+    BailianGrpcConfig(const std::string& json_str);
+    std::string to_string() const;
+    void        from_json(const std::string& json_str);
 };
 
 struct LinearAttentionConfig {
