@@ -3,11 +3,17 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
-import aiter
 
 
 class SelectTopk(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(
+        self,
+        config: ModelConfig,
+        fake_balance_expert: bool,
+        dp_rank: int,
+        dp_size: int,
+        ep_size: int,
+    ):
         super().__init__()
         self.config = config
         self.top_k = config.moe_k
@@ -21,7 +27,6 @@ class SelectTopk(nn.Module):
         token_expert_indicies = torch.empty(
             topk_ids.shape[0], self.top_k, dtype=torch.int32, device=topk_ids.device
         )
-        topk_ids = topk_ids.int()
         aiter.topk_softmax(
             topk_weights,
             topk_ids,

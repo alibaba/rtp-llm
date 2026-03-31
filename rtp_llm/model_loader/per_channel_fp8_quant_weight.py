@@ -35,6 +35,8 @@ from rtp_llm.utils.model_weight import (
     sp_neg1,
     stack_,
     stack_moe_w1,
+    sp_moe_w1,
+    sp_moe_neg1
 )
 from rtp_llm.utils.util import check_with_info
 
@@ -84,6 +86,10 @@ def gemm_channel_fp8_gpt_style_tp_strategy():
         W.ffn_s2: sp_id,
         W.ffn_w13: sp_0_w13,
         W.ffn_s13: sp_0_w13,
+        W.moe_w1: sp_moe_w1,
+        W.moe_s1: sp_moe_w1,
+        W.moe_w2: sp_moe_neg1,
+        W.moe_s2: sp_id
     }
     tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
     tp_strategy.update(gemm_channel_fp8_weight_tp_strategy)

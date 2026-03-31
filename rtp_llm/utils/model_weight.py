@@ -288,9 +288,13 @@ def sp_moe_neg1(
     ep_rank: int,
     dp: int,
     dp_rank: int,
+    moe_pure_tp_mode: bool = False,
     **kwargs: Any,
 ) -> torch.Tensor:
-    return t
+    if moe_pure_tp_mode:
+        return t.split(t.shape[-1] // tp, dim=-1)[tp_rank]
+    else:
+        return t
 
 
 def sp_moe_w1(
@@ -301,9 +305,17 @@ def sp_moe_w1(
     ep_rank: int,
     dp: int,
     dp_rank: int,
+    moe_pure_tp_mode: bool = False,
     **kwargs: Any,
 ) -> torch.Tensor:
-    return t
+    # [expert_num, 2*n, k] where dim=1 is gate+up concatenated
+    if moe_pure_tp_mode:
+        t1 = t.reshape([t.shape[0], 2, -1, t.shape[-1]])
+        t2 = torch.split(t1, t1.shape[2] // tp, dim=2)[tp_rank]
+        t2 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
+        return t2
+    else:
+        return t
 
 
 def stack_(ts: List[torch.Tensor]):
