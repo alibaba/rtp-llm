@@ -172,7 +172,7 @@ TEST_F(CPCacheScatterHelperTest, ScatterAndReleaseProducesContiguousLayout) {
     GroupBlockIds block_ids_by_group = {block_ids_holder};
 
     // Run scatter
-    helper.scatterAndRelease(std::move(plan), block_ids_by_group, mgr->cacheConfig(), layer_num);
+    helper.scatterAndRelease(std::move(plan), block_ids_by_group, mgr->cacheConfig(), layer_num, total_tokens);
 
     // Verify: each decode block should contain contiguous tokens
     for (int t = 0; t < total_tokens; ++t) {
@@ -219,7 +219,7 @@ TEST_F(CPCacheScatterHelperTest, ScatterReleasesBlocksAfterCompletion) {
     block_ids_holder->blocks()       = decode_block_ids;
     GroupBlockIds block_ids_by_group = {block_ids_holder};
 
-    helper.scatterAndRelease(std::move(plan), block_ids_by_group, mgr->cacheConfig(), layer_num);
+    helper.scatterAndRelease(std::move(plan), block_ids_by_group, mgr->cacheConfig(), layer_num, 16);
 
     // After scatter, staging blocks should be freed
     // (decode blocks are still held, so subtract those)
@@ -227,6 +227,75 @@ TEST_F(CPCacheScatterHelperTest, ScatterReleasesBlocksAfterCompletion) {
     EXPECT_EQ(free_after, free_before - 4 /* staging */ - 4 /* decode */ + 4 /* staging freed */);
 
     block_pool->requestFree(decode_block_ids);
+}
+
+TEST_F(CPCacheScatterHelperTest, ScatterAndReleaseHandlesPartialLastBlock) {
+    const int layer_num    = 1;
+    const int block_num    = 30;
+    const int block_size   = 4;
+    const int cp_size      = 2;
+    const int vblock_count = 1;
+    const int total_tokens = 3;
+    auto      mgr          = createMlaCacheManager(layer_num, block_num, block_size);
+
+    CPCacheScatterHelper helper(mgr.get(), device_);
+    auto                 plan = helper.prepareStagingPlan(vblock_count, cp_size, layer_num);
+    ASSERT_NE(plan, nullptr);
+
+    auto sample_parts = mgr->convertIndexToBuffer(plan->staging_block_ids[0], 0, 1, 0);
+    int  elem_stride  = static_cast<int>(sample_parts[0].size_bytes / block_size);
+    ASSERT_GT(elem_stride, 0);
+    size_t block_bytes = static_cast<size_t>(block_size) * elem_stride;
+
+    for (int p = 0; p < cp_size; ++p) {
+        int  bid   = plan->staging_block_ids[p];
+        auto parts = mgr->convertIndexToBuffer(bid, 0, 1, 0);
+
+        std::vector<uint8_t> block_data(block_bytes, 0xEE);
+        for (int s = 0; s < block_size; ++s) {
+            int     global_token = s * cp_size + p;
+            uint8_t tag          = static_cast<uint8_t>(global_token & 0xFF);
+            std::memset(block_data.data() + s * elem_stride, tag, elem_stride);
+        }
+        device_->copy({Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, {block_bytes}, parts[0].addr),
+                       Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {block_bytes}, block_data.data())});
+    }
+    device_->syncAndCheck();
+
+    auto decode_block_ids = mgr->getBlockPool()->malloc(1);
+    ASSERT_EQ(static_cast<int>(decode_block_ids.size()), 1);
+    auto block_ids_holder            = std::make_shared<BlockIds>();
+    block_ids_holder->blocks()       = decode_block_ids;
+    GroupBlockIds block_ids_by_group = {block_ids_holder};
+
+    auto                 decode_parts = mgr->convertIndexToBuffer(decode_block_ids[0], 0, 1, 0);
+    std::vector<uint8_t> init_data(block_bytes, 0xAB);
+    device_->copy({Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, {block_bytes}, decode_parts[0].addr),
+                   Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {block_bytes}, init_data.data())});
+    device_->syncAndCheck();
+
+    helper.scatterAndRelease(std::move(plan), block_ids_by_group, mgr->cacheConfig(), layer_num, total_tokens);
+
+    std::vector<uint8_t> result(block_bytes);
+    device_->copy({Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {block_bytes}, result.data()),
+                   Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_BYTES, {block_bytes}, decode_parts[0].addr)});
+    device_->syncAndCheck();
+
+    for (int t = 0; t < total_tokens; ++t) {
+        const uint8_t  expected = static_cast<uint8_t>(t & 0xFF);
+        const uint8_t* ptr      = result.data() + t * elem_stride;
+        for (int b = 0; b < elem_stride; ++b) {
+            ASSERT_EQ(ptr[b], expected) << "token=" << t << " byte=" << b;
+        }
+    }
+    for (int t = total_tokens; t < block_size; ++t) {
+        const uint8_t* ptr = result.data() + t * elem_stride;
+        for (int b = 0; b < elem_stride; ++b) {
+            ASSERT_EQ(ptr[b], 0xAB) << "untouched token=" << t << " byte=" << b;
+        }
+    }
+
+    mgr->getBlockPool()->requestFree(decode_block_ids);
 }
 
 }  // namespace test

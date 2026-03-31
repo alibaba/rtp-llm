@@ -108,6 +108,10 @@ class ZigZagSparseMlaFp8CPOp(SparseMlaFp8Op):
         self.q1_idx_global = None
         self.kv0_idx = None
         self.kv1_idx = None
+        self._cu_local_kv_seqlens = None
+        self._total_local_kv = None
+        self._kv_allgather_restore_indices = None
+        self._local_indexer_slot_mapping = None
         self.kv_cache_write_op = None
         self.write_cache_store_impl = None
 
@@ -1121,11 +1125,15 @@ class SparseMlaCpImpl(SparseMlaImpl):
             kv_cache_sharded=impl.kv_cache_sharded,
             has_prefix_cache=getattr(impl, "has_prefix_cache", False),
             # Sharded-cache metadata (always available for indexer topk)
-            cu_local_kv_seqlens=impl._cu_local_kv_seqlens,
-            total_local_kv=impl._total_local_kv,
-            kv_allgather_restore_indices=impl._kv_allgather_restore_indices,
+            cu_local_kv_seqlens=getattr(impl, "_cu_local_kv_seqlens", None),
+            total_local_kv=getattr(impl, "_total_local_kv", None),
+            kv_allgather_restore_indices=getattr(
+                impl, "_kv_allgather_restore_indices", None
+            ),
             # Local slot mappings for direct cache write
-            local_indexer_slot_mapping=impl._local_indexer_slot_mapping,
+            local_indexer_slot_mapping=getattr(
+                impl, "_local_indexer_slot_mapping", None
+            ),
         )
 
     @classmethod

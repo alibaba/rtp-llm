@@ -79,6 +79,7 @@ void invokeCPCacheScatterPaged(void**       dst_block_addrs,
                                int          block_size,
                                int          total_tokens,
                                int          elem_stride_bytes,
+                               int          addr_table_size,
                                cudaStream_t stream);
 
 }  // namespace rtp_llm

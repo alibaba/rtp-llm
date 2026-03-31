@@ -116,8 +116,11 @@ __global__ void cpCacheScatterPagedKernel(void**     dst_block_addrs,
                                           int        cp_size,
                                           int        block_size,
                                           int        total_tokens,
-                                          int        elem_stride_bytes) {
-    const int vb             = blockIdx.x;
+                                          int        elem_stride_bytes,
+                                          int        addr_table_size) {
+    const int vb = blockIdx.x;
+    (void)addr_table_size;
+
     const int tokens_per_vb  = block_size * cp_size;
     const int vb_token_start = vb * tokens_per_vb;
 
@@ -153,6 +156,7 @@ void invokeCPCacheScatterPaged(void**       dst_block_addrs,
                                int          block_size,
                                int          total_tokens,
                                int          elem_stride_bytes,
+                               int          addr_table_size,
                                cudaStream_t stream) {
     if (virtual_block_count <= 0 || cp_size <= 1 || total_tokens <= 0) {
         return;
@@ -167,7 +171,8 @@ void invokeCPCacheScatterPaged(void**       dst_block_addrs,
                                                                                      cp_size,
                                                                                      block_size,
                                                                                      total_tokens,
-                                                                                     elem_stride_bytes);
+                                                                                     elem_stride_bytes,
+                                                                                     addr_table_size);
 }
 
 }  // namespace rtp_llm

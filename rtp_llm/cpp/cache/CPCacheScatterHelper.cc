@@ -82,23 +82,34 @@ CPCacheScatterHelper::prepareStagingPlan(int vblock_count, int cp_size, size_t l
 void CPCacheScatterHelper::scatterAndRelease(std::unique_ptr<StagingPlan> plan,
                                              const GroupBlockIds&         block_ids_by_group,
                                              const CacheConfig&           cache_config,
-                                             size_t                       layer_num) {
+                                             size_t                       layer_num,
+                                             int                          total_tokens) {
     RTP_LLM_CHECK_WITH_INFO(plan != nullptr, "StagingPlan is null");
 
+    device_->preRun();
     auto       stream_opaque = getOrCreateScatterStream();
     auto       stream        = reinterpret_cast<cudaStream_t>(stream_opaque);
     const bool use_hybrid    = cache_config.groupNums() > 1;
-    const int  block_size    = static_cast<int>(cache_config.seq_size_per_block);
-    const int  vblock_count  = plan->vblock_count;
-    const int  cp_size       = plan->cp_size;
-    const int  staging_cnt   = vblock_count * cp_size;
+    const int  block_size   = static_cast<int>(cache_config.seq_size_per_block);
+    const int  vblock_count = plan->vblock_count;
+    const int  cp_size      = plan->cp_size;
+    const int  staging_cnt  = vblock_count * cp_size;
+    const int  max_tokens   = vblock_count * cp_size * block_size;
 
-    RTP_LLM_LOG_DEBUG("[SCATTER-PAGED] begin: layers=%zu vblock_count=%d cp_size=%d block_size=%d staging_cnt=%d",
-                      layer_num,
-                      vblock_count,
-                      cp_size,
-                      block_size,
-                      staging_cnt);
+    RTP_LLM_CHECK_WITH_INFO(total_tokens >= 0, "[SCATTER-PAGED] invalid total_tokens=%d", total_tokens);
+    RTP_LLM_CHECK_WITH_INFO(total_tokens <= max_tokens,
+                            "[SCATTER-PAGED] total_tokens=%d exceeds staging capacity=%d",
+                            total_tokens,
+                            max_tokens);
+
+    RTP_LLM_LOG_DEBUG(
+        "[SCATTER-PAGED] begin: layers=%zu vblock_count=%d cp_size=%d block_size=%d staging_cnt=%d total_tokens=%d",
+        layer_num,
+        vblock_count,
+        cp_size,
+        block_size,
+        staging_cnt,
+        total_tokens);
 
     // Use cudaMalloc directly (not the device caching allocator) for temporary
     // GPU buffers.  The caching allocator is synchronized with the compute stream;
@@ -123,16 +134,34 @@ void CPCacheScatterHelper::scatterAndRelease(std::unique_ptr<StagingPlan> plan,
             if (mapped_gid >= 0)
                 gid = static_cast<size_t>(mapped_gid);
         }
-        const auto& block_ids     = block_ids_by_group[gid]->blocks();
-        const int   decode_blocks = static_cast<int>(block_ids.size());
-        const int   total_tokens  = decode_blocks * block_size;
+        const auto& block_ids             = block_ids_by_group[gid]->blocks();
+        const int   decode_blocks         = static_cast<int>(block_ids.size());
+        const int   layer_capacity_tokens = decode_blocks * block_size;
+        const int   layer_total_tokens    = std::min(total_tokens, layer_capacity_tokens);
+
+        if (layer_total_tokens <= 0 || decode_blocks <= 0) {
+            continue;
+        }
+
+        if (layer_capacity_tokens < total_tokens) {
+            // TODO(xinfei.sxf): support offset/window-based CP scatter for LINEAR
+            // groups or other partial-layer cache layouts instead of clamping to
+            // the visible decode block window.
+            RTP_LLM_LOG_WARNING("[SCATTER] layer %zu decode capacity (%d tokens, %d blocks) "
+                                "is smaller than total_tokens(%d); clamp scatter range to avoid OOB",
+                                layer_id,
+                                layer_capacity_tokens,
+                                decode_blocks,
+                                total_tokens);
+        }
 
         if (decode_blocks < staging_cnt) {
-            RTP_LLM_LOG_WARNING("[SCATTER] decode_blocks(%d) < staging_cnt(%d) at layer %zu, "
-                                "some staging tokens will not be scattered",
+            RTP_LLM_LOG_WARNING("[SCATTER] decode_blocks(%d) < staging_cnt(%d) at layer %zu; "
+                                "this can be valid when total_tokens(%d) is smaller than a full CP virtual block",
                                 decode_blocks,
                                 staging_cnt,
-                                layer_id);
+                                layer_id,
+                                layer_total_tokens);
         }
 
         auto   sample_parts = cache_manager_->convertIndexToBuffer(block_ids[0], layer_id, 1, 0);
@@ -186,16 +215,6 @@ void CPCacheScatterHelper::scatterAndRelease(std::unique_ptr<StagingPlan> plan,
         cudaMemcpyAsync(
             src_ids_gpu_ptr, plan->staging_block_ids.data(), staging_cnt * sizeof(int), cudaMemcpyHostToDevice, stream);
 
-        RTP_LLM_LOG_DEBUG("[SCATTER] layer=%zu gid=%zu decode_blocks=%d staging_cnt=%d "
-                          "elem_stride=%d kv_stride=%zu addr_table_size=%d",
-                          layer_id,
-                          gid,
-                          decode_blocks,
-                          staging_cnt,
-                          elem_stride,
-                          kv_stride,
-                          addr_table_size);
-
         invokeCPCacheScatterPaged(reinterpret_cast<void**>(addrs_gpu_ptr),
                                   reinterpret_cast<int*>(dst_ids_gpu_ptr),
                                   reinterpret_cast<void**>(src_addrs_gpu_ptr),
@@ -203,8 +222,9 @@ void CPCacheScatterHelper::scatterAndRelease(std::unique_ptr<StagingPlan> plan,
                                   vblock_count,
                                   cp_size,
                                   block_size,
-                                  total_tokens,
+                                  layer_total_tokens,
                                   elem_stride,
+                                  addr_table_size,
                                   stream);
 
         // Scale scatter (same pattern)
@@ -250,8 +270,9 @@ void CPCacheScatterHelper::scatterAndRelease(std::unique_ptr<StagingPlan> plan,
                                           vblock_count,
                                           cp_size,
                                           block_size,
-                                          total_tokens,
+                                          layer_total_tokens,
                                           sc_elem,
+                                          addr_table_size,
                                           stream);
             }
         }

@@ -385,6 +385,7 @@ protected:
                                   block_size,
                                   total_tokens,
                                   elem_stride_bytes,
+                                  addr_table_size,
                                   nullptr);
         device_->syncAndCheck();
 
@@ -449,15 +450,15 @@ TEST_F(CPCacheScatterPagedKernelTest, RealisticMLA_BS64_CP4_Stride576) {
 
 // Edge cases
 TEST_F(CPCacheScatterPagedKernelTest, CP1_NoOp) {
-    invokeCPCacheScatterPaged(nullptr, nullptr, nullptr, nullptr, 5, 1, 4, 20, 32, nullptr);
+    invokeCPCacheScatterPaged(nullptr, nullptr, nullptr, nullptr, 5, 1, 4, 20, 32, 0, nullptr);
 }
 
 TEST_F(CPCacheScatterPagedKernelTest, ZeroVB_NoOp) {
-    invokeCPCacheScatterPaged(nullptr, nullptr, nullptr, nullptr, 0, 2, 4, 0, 32, nullptr);
+    invokeCPCacheScatterPaged(nullptr, nullptr, nullptr, nullptr, 0, 2, 4, 0, 32, 0, nullptr);
 }
 
 TEST_F(CPCacheScatterPagedKernelTest, ZeroTokens_NoOp) {
-    invokeCPCacheScatterPaged(nullptr, nullptr, nullptr, nullptr, 1, 2, 4, 0, 32, nullptr);
+    invokeCPCacheScatterPaged(nullptr, nullptr, nullptr, nullptr, 1, 2, 4, 0, 32, 0, nullptr);
 }
 
 TEST_F(CPCacheScatterPagedKernelTest, MinAlignment_Stride16) {
@@ -573,6 +574,7 @@ TEST_F(CPCacheScatterPagedKernelTest, MatchesContiguousKernel) {
                               block_size,
                               total_tokens,
                               elem_stride_bytes,
+                              decode_blocks,
                               nullptr);
     device_->syncAndCheck();
 

@@ -4,7 +4,6 @@
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
-#include <cstdlib>
 
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -48,7 +47,6 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
     }
     return grpc::Status::OK;
 }
-
 
 void DecodeRpcServer::initThreadPool() {
     if (resource_.workers.size() > 0) {
@@ -228,6 +226,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_partition_count(1);
     request.set_partition_id(0);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
+    request.set_total_token_num(load_context.total_token_num);
 
     // When prefill uses CP sharding, each decode worker must load from ALL prefill peers
     // because each peer holds a different shard of the same virtual block.
@@ -268,6 +267,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
+    request.set_total_token_num(load_context.total_token_num);
 
     // When prefill uses CP sharding (per-request), each decode worker must load
     // from ALL prefill peers since each peer holds a different shard.
@@ -351,6 +351,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     decode_context.peer_addrs,
                                     *effective_cache_keys,
                                     block_ids_by_group,
+                                    generate_stream->seqLength(),
                                     generate_stream->reuseBlockSize(),
                                     min_timeout_ms,
                                     1,
@@ -611,7 +612,8 @@ std::vector<CacheKeyType> DecodeRpcServer::recomputeVirtualCacheKeys(GenerateStr
 
 ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     AtomicGuard request_guard(onflight_load_cache_requests_);
-    const auto& request_key   = load_context.request_key;
+    const auto& request_key = load_context.request_key;
+    engine_->getDevice()->preRun();
     auto        cache_manager = engine_->resourceContext().cache_manager;
     const auto& cache_config  = cache_manager->cacheConfig();
     auto        layer_num     = maga_init_params_.model_config_.num_layers;
@@ -641,6 +643,22 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     std::vector<std::shared_ptr<LoadContext>> load_contexts;
 
     const int32_t cp_size = load_context.prefill_cp_size;
+    RTP_LLM_CHECK_WITH_INFO(cp_size <= 1 || peer_cnt == cp_size,
+                            "CP scatter expects peer_cnt == cp_size, but got peer_cnt=%d cp_size=%d",
+                            peer_cnt,
+                            cp_size);
+    if (cp_size > 1 && use_mla) {
+        RTP_LLM_LOG_INFO("[CP-SCATTER] request=%s peer_cnt=%d cp_size=%d total_token_num=%d "
+                         "cache_keys=%zu group_num=%zu reuse_block_size=%ld layer_num=%zu",
+                         request_key.c_str(),
+                         peer_cnt,
+                         cp_size,
+                         load_context.total_token_num,
+                         load_context.cache_keys.size(),
+                         load_context.block_ids_by_group.size(),
+                         load_context.reuse_block_size,
+                         layer_num);
+    }
 
     // --- CP sharded: use CPCacheScatterHelper for staging + scatter ---
     const int vblock_count = (cp_size > 1 && use_mla) ? static_cast<int>(load_context.cache_keys.size()) : 0;
@@ -680,25 +698,28 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
             // CP sharded path: RDMA receives into staging blocks, scatter via helper later.
             if (cp_size > 1 && use_mla && staging_plan) {
-                const int virtual_block_count = staging_plan->vblock_count;
-                const auto& staging_layer = staging_plan->layer_infos[layer_id];
+                const int   virtual_block_count = staging_plan->vblock_count;
+                const auto& staging_layer       = staging_plan->layer_infos[layer_id];
                 for (int v = 0; v < virtual_block_count; ++v) {
                     auto cache_key = makeCacheKey(model_id, std::to_string(load_context.cache_keys[v]), layer_id);
 
-                    int staging_idx = v * cp_size + i;
-                    const auto& part = staging_layer.infos[staging_idx];
+                    int         staging_idx = v * cp_size + i;
+                    const auto& part        = staging_layer.infos[staging_idx];
 
                     std::shared_ptr<void> kv_ptr(part.addr, [](void*) {});
                     load_layer_cache->addBlock(
                         "kv_" + cache_key, kv_ptr, static_cast<uint32_t>(part.size_bytes), true, true);
 
                     // Scale: re-query from cache_manager (staging_layer only stores kv part)
-                    int  staging_bid   = staging_plan->staging_block_ids[staging_idx];
-                    auto scale_parts   = cache_manager->convertIndexToBuffer(staging_bid, layer_id, 1, 0);
+                    int  staging_bid = staging_plan->staging_block_ids[staging_idx];
+                    auto scale_parts = cache_manager->convertIndexToBuffer(staging_bid, layer_id, 1, 0);
                     if (scale_parts.size() == 2 && scale_parts[1].size_bytes > 0) {
                         std::shared_ptr<void> sc_ptr(scale_parts[1].addr, [](void*) {});
-                        load_layer_cache->addBlock(
-                            "kv_scale_" + cache_key, sc_ptr, static_cast<uint32_t>(scale_parts[1].size_bytes), true, true);
+                        load_layer_cache->addBlock("kv_scale_" + cache_key,
+                                                   sc_ptr,
+                                                   static_cast<uint32_t>(scale_parts[1].size_bytes),
+                                                   true,
+                                                   true);
                     }
                 }
             } else {
@@ -929,8 +950,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
     // After RDMA completes, scatter interleaved CP blocks to contiguous layout.
     if (staging_plan && scatter_helper_) {
-        scatter_helper_->scatterAndRelease(
-            std::move(staging_plan), load_context.block_ids_by_group, cache_config, layer_num);
+        scatter_helper_->scatterAndRelease(std::move(staging_plan),
+                                           load_context.block_ids_by_group,
+                                           cache_config,
+                                           layer_num,
+                                           load_context.total_token_num);
     }
 
     return ErrorInfo::OkStatus();
@@ -964,6 +988,7 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  peer_addrs,
                                  cache_keys,
                                  block_ids_by_group,
+                                 request->total_token_num(),
                                  request->reuse_block_size(),
                                  request->timeout_ms(),
                                  request->partition_count(),
