@@ -79,11 +79,11 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
 
     BlockCache::CacheItem item    = {101, 0, 1, false};
     auto                  result1 = block_cache->put(item);
-    EXPECT_TRUE(result1);
+    EXPECT_EQ(result1.action, BlockCache::PutResult::Action::INSERTED);
 
     BlockCache::CacheItem item2   = {102, 0, 2, false};
     auto                  result2 = block_cache->put(item2);
-    EXPECT_TRUE(result2);
+    EXPECT_EQ(result2.action, BlockCache::PutResult::Action::INSERTED);
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
@@ -109,11 +109,11 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
     // all match
     BlockCache::CacheItem item3   = {103, 0, 3, false};
     auto                  result3 = block_cache->put(item3);
-    EXPECT_TRUE(result3);
+    EXPECT_EQ(result3.action, BlockCache::PutResult::Action::INSERTED);
 
     BlockCache::CacheItem item4   = {104, 0, 4, false};
     auto                  result4 = block_cache->put(item4);
-    EXPECT_TRUE(result4);
+    EXPECT_EQ(result4.action, BlockCache::PutResult::Action::INSERTED);
 
     cache_keys         = {101, 102, 103, 104};
     auto match_result3 = group1.match(cache_keys);
@@ -231,6 +231,123 @@ TEST_F(FullKVCacheGroupTest, EnsureFreeBlocksTest) {
     ASSERT_EQ(block_cache->size(), 2);
     ASSERT_EQ(block_pool->freeBlocksNum(), total_blocks - 2);
     ASSERT_EQ(block_pool->availableBlocksNum(), total_blocks);
+}
+
+// ==================== Epoch-based cache isolation tests ====================
+
+TEST_F(FullKVCacheGroupTest, EpochMatchVisibilityTest) {
+    auto block_pool = createBlockPool();
+    block_pool->init();
+    auto block_cache = block_pool->blockCache();
+
+    // Insert item with epoch=0 (globally visible)
+    BlockCache::CacheItem global_item = {201, 0, 1, false, /*epoch=*/0};
+    EXPECT_EQ(block_cache->put(global_item).action, BlockCache::PutResult::Action::INSERTED);
+
+    // Insert item with epoch=42 (batch-specific)
+    BlockCache::CacheItem batch_item = {202, 0, 2, false, /*epoch=*/42};
+    EXPECT_EQ(block_cache->put(batch_item).action, BlockCache::PutResult::Action::INSERTED);
+
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 4;
+    FullKVCacheGroup group({}, spec, block_pool, 0);
+
+    // epoch=0 items visible to any batch
+    auto result1 = group.match({201}, /*current_batch_epoch=*/42);
+    EXPECT_EQ(result1.reuse_blocks, 1);
+
+    // epoch=42 items visible to same batch
+    auto result2 = group.match({202}, /*current_batch_epoch=*/42);
+    EXPECT_EQ(result2.reuse_blocks, 1);
+
+    // epoch=42 items invisible to different batch
+    auto result3 = group.match({202}, /*current_batch_epoch=*/99);
+    EXPECT_EQ(result3.reuse_blocks, 0);
+
+    // NO_EPOCH_FILTER (-1) matches all items (backward compat)
+    auto result4 = group.match({202}, BlockCache::NO_EPOCH_FILTER);
+    EXPECT_EQ(result4.reuse_blocks, 1);
+}
+
+TEST_F(FullKVCacheGroupTest, EpochPutSkipsOverwritingGlobalWithBatch) {
+    auto block_pool = createBlockPool();
+    block_pool->init();
+    auto block_cache = block_pool->blockCache();
+
+    // Insert global item (epoch=0)
+    BlockCache::CacheItem global_item = {301, 0, 1, false, /*epoch=*/0};
+    EXPECT_EQ(block_cache->put(global_item).action, BlockCache::PutResult::Action::INSERTED);
+
+    // Try to overwrite with batch-specific item (epoch=42) — should be SKIPPED
+    BlockCache::CacheItem batch_item = {301, 0, 2, false, /*epoch=*/42};
+    auto result = block_cache->put(batch_item);
+    EXPECT_EQ(result.action, BlockCache::PutResult::Action::SKIPPED);
+
+    // Original global item still there
+    auto match = block_cache->match(301, 0);
+    EXPECT_EQ(match.matched_index, 1);
+}
+
+TEST_F(FullKVCacheGroupTest, EpochPopPrefersStaleEpochEntries) {
+    auto block_pool = createBlockPool();
+    block_pool->init();
+    auto block_cache = block_pool->blockCache();
+
+    // Insert global item
+    BlockCache::CacheItem global_item = {401, 0, 1, false, /*epoch=*/0};
+    block_cache->put(global_item);
+
+    // Insert batch-specific item (stale epoch)
+    BlockCache::CacheItem batch_item = {402, 0, 2, false, /*epoch=*/42};
+    block_cache->put(batch_item);
+
+    EXPECT_EQ(block_cache->size(), 2);
+
+    // Pop 1 — should prefer epoch>0 (stale) entry first
+    auto popped = block_cache->pop(1);
+    ASSERT_EQ(popped.size(), 1);
+    EXPECT_EQ(popped[0], 2);  // batch item evicted first
+
+    // Global item still there
+    EXPECT_EQ(block_cache->size(), 1);
+    auto match = block_cache->match(401, 0);
+    EXPECT_EQ(match.matched_index, 1);
+}
+
+TEST_F(FullKVCacheGroupTest, EpochInsertAndPromoteTest) {
+    auto block_pool = createBlockPool();
+    block_pool->init();
+    auto block_cache = block_pool->blockCache();
+
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 4;
+    FullKVCacheGroup group({}, spec, block_pool, 0);
+
+    // Malloc blocks
+    BlockIds block_ids(1);
+    ASSERT_TRUE(group.malloc(block_ids, 8));
+    ASSERT_EQ(block_ids.blocks().size(), 2);
+
+    CacheKeysType keys = {501, 502};
+
+    // Insert with epoch=42 (batch-specific)
+    group.insertIntoCache(keys, block_ids.blocks(), false, /*epoch=*/42);
+    EXPECT_EQ(block_cache->size(), 2);
+
+    // Invisible to different batch
+    auto result1 = group.match(keys, /*current_batch_epoch=*/99);
+    EXPECT_EQ(result1.reuse_blocks, 0);
+
+    // Visible to same batch
+    auto result2 = group.match(keys, /*current_batch_epoch=*/42);
+    EXPECT_EQ(result2.reuse_blocks, 2);
+
+    // "Promote" by re-inserting with epoch=0
+    group.insertIntoCache(keys, block_ids.blocks(), false, /*epoch=*/0);
+
+    // Now visible to all batches
+    auto result3 = group.match(keys, /*current_batch_epoch=*/99);
+    EXPECT_EQ(result3.reuse_blocks, 2);
 }
 
 }  // namespace test

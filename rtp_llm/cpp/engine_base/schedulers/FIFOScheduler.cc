@@ -15,14 +15,16 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                              const ModelSpecificConfig&             model_specific_config,
                              const std::shared_ptr<KVCacheManager>& cache_manager,
                              const kmonitor::MetricsReporterPtr     metrics_reporter,
-                             const int                              max_score_len):
+                             const int                              max_score_len,
+                             bool                                   enable_batch_cache_reuse):
     FIFOSchedulerBase(runtime_config,
                       model_config,
                       pd_sep_config,
                       parallelism_config,
                       model_specific_config,
                       cache_manager,
-                      metrics_reporter) {
+                      metrics_reporter),
+    enable_batch_cache_reuse_(enable_batch_cache_reuse) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_);
@@ -76,6 +78,10 @@ bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
     return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
            || !running_streams_.empty();
+}
+
+int64_t FIFOScheduler::nextBatchEpoch() {
+    return enable_batch_cache_reuse_ ? ++batch_epoch_counter_ : 0;
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {

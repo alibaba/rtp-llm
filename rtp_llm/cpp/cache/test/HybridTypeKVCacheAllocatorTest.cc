@@ -168,7 +168,7 @@ static std::vector<BlockIdxType> allocateAndCache(BlockPoolPtr         block_poo
         item.group_id    = group_id;
         item.block_index = blocks[i];
         item.is_resident = is_resident;
-        EXPECT_TRUE(block_cache->put(item));
+        EXPECT_EQ(block_cache->put(item).action, BlockCache::PutResult::Action::INSERTED);
         block_pool->blockCacheReference(blocks[i]);
     }
 
@@ -191,7 +191,7 @@ static std::vector<BlockIdxType> allocateAndCacheKeepAllocated(BlockPoolPtr     
         item.group_id    = group_id;
         item.block_index = blocks[i];
         item.is_resident = is_resident;
-        EXPECT_TRUE(block_cache->put(item));
+        EXPECT_EQ(block_cache->put(item).action, BlockCache::PutResult::Action::INSERTED);
         block_pool->blockCacheReference(blocks[i]);
     }
 

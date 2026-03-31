@@ -139,6 +139,7 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
     }
 
     int64_t force_batch_group_id = -1;
+    int64_t batch_epoch          = nextBatchEpoch();
 
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
         auto& stream      = *it;
@@ -168,6 +169,7 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
 
         if (!stream->hasError() && !stream->hasEvent(StreamEvents::CanRun)
             && evaluateRunningMemory(new_streams, stream)) {
+            stream->setBatchEpoch(batch_epoch);
             stream->reportEvent(StreamEvents::CanRun);
             new_streams.push_back(stream);
             if (new_streams.size() == 1 && force_batch && stream->batchGroupId() != -1) {

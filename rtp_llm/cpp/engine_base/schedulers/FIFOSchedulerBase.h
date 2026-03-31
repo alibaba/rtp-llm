@@ -52,6 +52,9 @@ protected:
                                               const GenerateStreamPtr&            new_stream) const = 0;
     virtual bool        waitPredicate()                                                  = 0;
     virtual void        onRunningStream(const GenerateStreamPtr& stream) {}
+    virtual int64_t     nextBatchEpoch() {
+        return 0;
+    }
     virtual void        cancelExtraStreams() {}
     virtual bool        hasExtraStreams() const {
         return false;

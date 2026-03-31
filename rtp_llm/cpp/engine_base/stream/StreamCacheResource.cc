@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include <sstream>
 #include <thread>
 #include <torch/extension.h>
 
@@ -328,6 +329,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
     malloc_info.request_id              = stream_->streamId();
+    malloc_info.epoch                   = stream_->batchEpoch();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
     const bool is_hybrid       = resource_context_.cache_manager->cacheConfig().groupNums() > 1;
@@ -356,6 +358,16 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
     }
+    if (reuseCache() && resource_context_.enable_batch_cache_reuse) {
+        RTP_LLM_LOG_INFO("stream [%ld] early insertIntoCache (batch_cache_reuse=ON)", stream_->streamId());
+        insertIntoCache();
+    } else {
+        RTP_LLM_LOG_INFO("stream [%ld] skip early insert (reuse=%d, batch_reuse=%d)",
+                         stream_->streamId(), (int)reuseCache(), (int)resource_context_.enable_batch_cache_reuse);
+    }
+
+    // load cache from connector
+    loadCacheSync();
     return absl::OkStatus();
 }
 
@@ -370,6 +382,7 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     malloc_info.batch_kv_cache_resource      = batch_kv_cache_resource_;
     malloc_info.complete_token_ids           = stream_->completeTokenIdsPtr();
     malloc_info.request_id                   = stream_->streamId();
+    malloc_info.epoch                        = stream_->batchEpoch();
     malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache                  = reuseCache();
     malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
@@ -725,5 +738,44 @@ void StreamCacheResource::holdKVCacheForPDSep() {
 
 void StreamCacheResource::releaseKVCacheForPDSep() {
     pd_kvcache_ref_.reset();
+}
+
+void StreamCacheResource::insertIntoCache() {
+    if (!resource_context_.cache_manager) {
+        return;
+    }
+    if (batch_kv_cache_resource_->curBlocksNum() == 0) {
+        return;
+    }
+    auto       insert_resource = batch_kv_cache_resource_->copy();
+    InsertInfo insert_info{insert_resource, stream_->completeTokenIdsPtr(), false};
+    insert_info.epoch = stream_->batchEpoch();
+    resource_context_.cache_manager->insertIntoCache(insert_info);
+}
+
+std::string StreamCacheResource::debugString() const {
+    std::stringstream debug_string;
+    debug_string << "StreamCacheResource { stream_id: " << stream_->streamId()
+                 << ", need_release_resource: " << need_release_resource_ << ", batch_resource: [";
+
+    for (size_t i = 0; i < batch_kv_cache_resource_->batchSize(); i++) {
+        debug_string << " [";
+        const auto& blocks = batch_kv_cache_resource_->blocks(i);
+        for (size_t j = 0; j < blocks.size(); j++) {
+            debug_string << blocks[j] << ", ";
+        }
+        debug_string << "],";
+    }
+    debug_string << ", cache_keys: ";
+    for (size_t i = 0; i < batch_kv_cache_resource_->batchSize(); i++) {
+        debug_string << " [";
+        const auto& cache_keys = batch_kv_cache_resource_->cacheKeys(i);
+        for (size_t j = 0; j < cache_keys.size(); j++) {
+            debug_string << cache_keys[j] << ", ";
+        }
+        debug_string << "],";
+    }
+    debug_string << "}";
+    return debug_string.str();
 }
 }  // namespace rtp_llm

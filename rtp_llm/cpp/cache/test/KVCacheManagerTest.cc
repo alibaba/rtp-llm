@@ -413,13 +413,13 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
         item.is_resident = false;
         item.cache_key   = 10;
         item.block_index = 1;
-        ASSERT_TRUE(block_cache->put(item));
+        ASSERT_EQ(block_cache->put(item).action, BlockCache::PutResult::Action::INSERTED);
         item.cache_key   = 11;
         item.block_index = 2;
-        ASSERT_TRUE(block_cache->put(item));
+        ASSERT_EQ(block_cache->put(item).action, BlockCache::PutResult::Action::INSERTED);
         item.cache_key   = 12;
         item.block_index = 3;
-        ASSERT_TRUE(block_cache->put(item));
+        ASSERT_EQ(block_cache->put(item).action, BlockCache::PutResult::Action::INSERTED);
     }
 
     // Inject a lightweight memory connector with a MemoryBlockCache snapshot:

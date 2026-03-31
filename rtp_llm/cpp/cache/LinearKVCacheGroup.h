@@ -17,12 +17,14 @@ public:
                        int                          linear_step = 0):
         KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id), linear_step_(linear_step) {}
 
-    MatchResult match(const CacheKeysType& cache_keys) override;
+    MatchResult match(const CacheKeysType& cache_keys, int64_t current_batch_epoch = BlockCache::NO_EPOCH_FILTER) override;
     // Match a single cache key (used by Hybrid allocator to do right-to-left joint matching).
     MatchResult matchSingleKey(CacheKeyType cache_key) const;
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
-    void
-    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;
+    void        insertIntoCache(const CacheKeysType&    cache_keys,
+                                const BlockIndicesType& block_indices,
+                                bool                    is_resident,
+                                int64_t                 epoch = 0) override;
 
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     void free(const BlockIndicesType& block_indices) override;
