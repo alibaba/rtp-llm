@@ -166,6 +166,11 @@ bool GenerateStream::isStreaming() const {
 int64_t GenerateStream::streamId() const {
     return generate_input_->request_id;
 }
+
+std::string GenerateStream::streamLogTag() const {
+    return std::string("request_id=") + std::to_string(streamId()) + " trace_id=" + traceId();
+}
+
 std::string GenerateStream::adapterName() const {
     return generate_input_->generate_config->adapter_name;
 }
@@ -653,8 +658,8 @@ bool GenerateStream::waitForRemoteGenerate() {
     cv_->wait(lock, [this] { return generate_status_->hasEvent(StreamEvents::NeedRemoteGenerate); });
     // If stream status is abnormal, log the error info
     if (hasError()) {
-        RTP_LLM_LOG_WARNING("waitForRemoteGenerate exits due to stream [%ld] error: %s",
-                            streamId(),
+        RTP_LLM_LOG_WARNING("waitForRemoteGenerate exits due to stream [%s] error: %s",
+                            streamLogTag().c_str(),
                             generate_status_->error_info.ToString().c_str());
     }
 
@@ -696,7 +701,7 @@ void GenerateStream::matchStopWordsList(int batch_id) {
 void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
+    RTP_LLM_LOG_DEBUG("stream [%s] spec update", streamLogTag().c_str());
     *is_context_stream_ = false;
     if (hasError() && !update_info.force_update_info) {
         return;
@@ -754,8 +759,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
             getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
         stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
 
-        RTP_LLM_LOG_DEBUG("[stream %d (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
-                          streamId(),
+        RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
+                          streamLogTag().c_str(),
                           cur_cached_len + 1,
                           nxt_cached_len + 1,
                           cached_src_block_idx,
@@ -763,8 +768,10 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                           src_block_idx,
                           des_block_idx);
     } else {
-        RTP_LLM_LOG_DEBUG(
-            "[stream %d (%d -> %d)] no swap cache blocks", streamId(), cur_cached_len + 1, nxt_cached_len + 1);
+        RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] no swap cache blocks",
+                          streamLogTag().c_str(),
+                          cur_cached_len + 1,
+                          nxt_cached_len + 1);
     }
 
     // update normal output buffer
@@ -785,7 +792,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
+    RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
     *is_context_stream_ = false;
     if (hasError() && !update_info.force_update_info) {
         return;
@@ -943,7 +950,7 @@ void GenerateStream::reportStreamMetrics() {
             collector.total_latency_us       = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
             collector.first_token_latency_us = complete_token_ids_->firstTokenLatencyUs();
             RTP_LLM_LOG_DEBUG(
-                "stream [%ld] report first latency us = %ld", streamId(), collector.first_token_latency_us);
+                "stream [%s] report first latency us = %ld", streamLogTag().c_str(), collector.first_token_latency_us);
             collector.wait_latency_us          = wait_time_us_;
             collector.batch_with_prefill_times = batch_with_prefill_times_;
             collector.batch_with_prefill_len   = batch_with_prefill_len_;
