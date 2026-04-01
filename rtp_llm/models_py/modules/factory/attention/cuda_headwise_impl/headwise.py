@@ -35,33 +35,8 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplB
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 
 
-class ConfigManager:
-    _headwise_config = None
-
-    @classmethod
-    def set_headwise_config(cls, config):
-        if not hasattr(config, "headwise_config"):
-            logging.info("Model Not Support Headwise")
-            return
-
-        cls._headwise_config = config.headwise_config
-
-    @classmethod
-    def get_headwise_config(cls):
-        return cls._headwise_config
-
-    @classmethod
-    def is_config_set(cls):
-        return cls._headwise_config is not None
-
-    @classmethod
-    def reset(cls):
-        """Reset headwise config to allow re-initialization (e.g. multi-model scenarios)."""
-        cls._headwise_config = None
-
-
-def _headwise_prefill_bf16_runtime_ready() -> bool:
-    """Same gates as HeadWisePrefillAttnOp.support (FlashInfer + rtp_kernel + CUDA >= 12.8 + config)."""
+def _headwise_prefill_bf16_runtime_ready(attn_inputs) -> bool:
+    """Check FlashInfer + rtp_kernel + CUDA >= 12.8 + headwise_config on attn_inputs."""
     if not (_HAS_FLASHINFER and _HAS_RTP_KERNEL):
         return False
     if not torch.cuda.is_available():
@@ -70,7 +45,7 @@ def _headwise_prefill_bf16_runtime_ready() -> bool:
         major, minor = map(int, torch.version.cuda.split(".")[:2])
     except (AttributeError, TypeError, ValueError):
         return False
-    return (major, minor) >= (12, 8) and ConfigManager.is_config_set()
+    return (major, minor) >= (12, 8) and getattr(attn_inputs, 'headwise_config', None) is not None
 
 
 # ----------------------------
@@ -103,7 +78,8 @@ class HeadWisePrefillAttnOp:
     """
 
     def __init__(
-        self, attn_configs: AttentionConfigs, parallelism_config: ParallelismConfig
+        self, attn_configs: AttentionConfigs, parallelism_config: ParallelismConfig,
+        headwise_config: Optional[dict] = None,
     ) -> None:
         self.rank = parallelism_config.tp_rank
 
@@ -114,8 +90,8 @@ class HeadWisePrefillAttnOp:
 
         self.dtype = torch.bfloat16
 
-        if ConfigManager.is_config_set():
-            self.headwise_all_config = ConfigManager.get_headwise_config()
+        if headwise_config is not None:
+            self.headwise_all_config = headwise_config
 
             self.hw_cfg = HeadWiseRuntimeConfig(
                 sink_token_num=self.headwise_all_config.get("sink_token_num", 4),
@@ -149,7 +125,7 @@ class HeadWisePrefillAttnOp:
         if not (_HAS_FLASHINFER and _HAS_RTP_KERNEL):
             return False
         major, minor = map(int, torch.version.cuda.split(".")[:2])
-        return (major, minor) >= (12, 8) and ConfigManager.is_config_set()
+        return (major, minor) >= (12, 8) and getattr(attn_inputs, 'headwise_config', None) is not None
 
     def _get_paged_metadata(
         self, q_len: int, kv_len: int, kv_indices: torch.Tensor
@@ -403,7 +379,8 @@ class HeadWisePrefillImpl(FMHAImplBase):
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = HeadWisePrefillAttnOp(attn_configs, parallelism_config)
+        headwise_config = getattr(attn_inputs, 'headwise_config', None)
+        self.fmha_impl = HeadWisePrefillAttnOp(attn_configs, parallelism_config, headwise_config)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
         self.attn_configs = attn_configs
 
@@ -421,7 +398,7 @@ class HeadWisePrefillImpl(FMHAImplBase):
     ) -> bool:
         # Must match factory ordering: only take this path when headwise config + deps exist,
         # otherwise fall through to other prefill implementations (e.g. FlashInfer).
-        return not attn_configs.use_mla and _headwise_prefill_bf16_runtime_ready()
+        return not attn_configs.use_mla and _headwise_prefill_bf16_runtime_ready(attn_inputs)
 
     def forward(
         self,
