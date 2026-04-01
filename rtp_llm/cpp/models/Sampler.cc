@@ -9,10 +9,7 @@ using namespace std;
 
 namespace rtp_llm {
 
-Sampler::Sampler(const SamplerInitParams& params)
-  : device_(params.device)
-{
-}
+Sampler::Sampler(const SamplerInitParams& params): device_(params.device) {}
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -36,18 +33,13 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     bool variable_num_beams = inputs.batch_size != inputs.batch_size_out;
 
     // allocate output buffers
-    auto all_success = CACHED_HOST_BUF(TYPE_BOOL, {inputs.batch_size});
-    auto all_beam_indices =
-        has_num_beams ? device_->allocateBuffer({DataType::TYPE_INT32, {inputs.batch_size_out}, AllocationType::HOST}) :
-                        nullptr;
+    auto all_success      = CACHED_HOST_BUF(TYPE_BOOL, {inputs.batch_size});
+    auto all_beam_indices = has_num_beams ? CACHED_HOST_BUF(TYPE_INT32, {inputs.batch_size_out}) : nullptr;
     auto all_token_ids_out =
-        variable_num_beams ? device_->allocateBuffer(
-                                 {DataType::TYPE_INT32, {inputs.batch_size_out, max_seq_len}, AllocationType::HOST}) :
-                             inputs.token_ids;
-    auto all_cum_log_probs_out =
-        variable_num_beams && inputs.cum_log_probs ?
-            device_->allocateBuffer({DataType::TYPE_FP32, {inputs.batch_size_out}, AllocationType::HOST}) :
-            inputs.cum_log_probs;
+        variable_num_beams ? CACHED_HOST_BUF(TYPE_INT32, {inputs.batch_size_out, max_seq_len}) : inputs.token_ids;
+    auto all_cum_log_probs_out = variable_num_beams && inputs.cum_log_probs ?
+                                     CACHED_HOST_BUF(TYPE_FP32, {inputs.batch_size_out}) :
+                                     inputs.cum_log_probs;
 
     size_t from_batch_idx_in = 0, to_batch_idx_in = 0;
     size_t from_batch_idx_out = 0;
@@ -101,7 +93,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                                        Buffer::emptyBuffer());
             auto do_sample = MAY_GET_BUFFER_VIEW(inputs.do_sample, from_batch_idx_in, batch_size_in);
             auto generator = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
-                inputs.generator.begin() + from_batch_idx_in + batch_size_in};
+                                                        inputs.generator.begin() + from_batch_idx_in + batch_size_in};
             auto greedy_output =
                 device_->sampleGreedy({logits,
                                        input_lengths,
