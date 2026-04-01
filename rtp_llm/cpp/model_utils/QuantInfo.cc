@@ -42,6 +42,10 @@ void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int6
     } else if (quant_method == "fp8-perchannel-quark") {
         quant_method_ = FP8PTPC;
         weight_bits_  = 8;
+    } else if (quant_method == "fp4-pergroup-quark") {
+        quant_method_ = QuarkFP4;
+        weight_bits_  = 4;
+        group_size_   = group_size;
     } else if (quant_method == "modelopt_fp4") {
         quant_method_ = ModelOptFP4;
         weight_bits_ = 4;
