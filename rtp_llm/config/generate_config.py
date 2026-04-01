@@ -147,6 +147,8 @@ class GenerateConfig(BaseModel):
     force_batch: bool = False
     batch_group_timeout: Optional[int] = None  # ms
 
+    unique_key: str = ""
+
     def gen_hash_value(self):
         cp = copy.copy(self)
         cp.max_new_tokens = 0

@@ -321,7 +321,17 @@ std::string CacheStoreConfig::to_string() const {
         << "rdma_io_thread_count: " << rdma_io_thread_count << "\n"
         << "rdma_worker_thread_count: " << rdma_worker_thread_count << "\n"
         << "messager_io_thread_count: " << messager_io_thread_count << "\n"
-        << "messager_worker_thread_count: " << messager_worker_thread_count << "\n";
+        << "messager_worker_thread_count: " << messager_worker_thread_count << "\n"
+        << "rdma_max_block_pairs_per_connection: " << rdma_max_block_pairs_per_connection << "\n"
+        << "rdma_transfer_wait_timeout_ms: " << rdma_transfer_wait_timeout_ms << "\n"
+        << "p2p_read_steal_before_deadline_ms: " << p2p_read_steal_before_deadline_ms << "\n"
+        << "p2p_read_return_before_deadline_ms: " << p2p_read_return_before_deadline_ms << "\n"
+        << "p2p_transfer_not_done_resource_hold_ms: " << p2p_transfer_not_done_resource_hold_ms << "\n"
+        << "p2p_resource_store_timeout_check_interval_ms: " << p2p_resource_store_timeout_check_interval_ms << "\n"
+        << "p2p_layer_cache_buffer_store_timeout_ms: " << p2p_layer_cache_buffer_store_timeout_ms << "\n"
+        << "p2p_cancel_broadcast_timeout_ms: " << p2p_cancel_broadcast_timeout_ms << "\n"
+        << "cache_store_tcp_anet_rpc_thread_num: " << cache_store_tcp_anet_rpc_thread_num << "\n"
+        << "cache_store_tcp_anet_rpc_queue_num: " << cache_store_tcp_anet_rpc_queue_num << "\n";
     return oss.str();
 }
 
