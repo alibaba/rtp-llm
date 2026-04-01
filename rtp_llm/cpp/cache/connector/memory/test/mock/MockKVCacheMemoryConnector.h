@@ -35,7 +35,7 @@ public:
                 (override));
     MOCK_METHOD(std::shared_ptr<AsyncContext>,
                 asyncWriteByLayer,
-                (int layer_id, const std::shared_ptr<KVCacheResource>& resource, const std::shared_ptr<Meta>& meta),
+                (int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context),
                 (override));
     MOCK_METHOD(bool,
                 copyCache,

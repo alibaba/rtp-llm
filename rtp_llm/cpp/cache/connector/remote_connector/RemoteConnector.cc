@@ -511,9 +511,8 @@ std::shared_ptr<AsyncContext> RemoteConnector::asyncWrite(const std::shared_ptr<
     return async_context;
 }
 
-std::shared_ptr<AsyncContext> RemoteConnector::asyncWriteByLayer(int                                     layer_id,
-                                                                 const std::shared_ptr<KVCacheResource>& resource,
-                                                                 const std::shared_ptr<Meta>&            meta) {
+std::shared_ptr<AsyncContext>
+RemoteConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
     throw std::runtime_error("Not Implement");
     return nullptr;
 }

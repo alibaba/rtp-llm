@@ -46,9 +46,8 @@ public:
                                                  int                                       read_block_num) override;
     std::shared_ptr<AsyncContext>      asyncWrite(const std::shared_ptr<KVCacheResource>& resource,
                                                   const std::shared_ptr<Meta>&            meta) override;
-    std::shared_ptr<AsyncContext>      asyncWriteByLayer(int                                     layer_id,
-                                                         const std::shared_ptr<KVCacheResource>& resource,
-                                                         const std::shared_ptr<Meta>&            meta) override {
+    std::shared_ptr<AsyncContext>
+    asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) override {
         RTP_LLM_FAIL("KVCacheMemoryConnector asyncWriteByLayer is not implemented");
     }
 

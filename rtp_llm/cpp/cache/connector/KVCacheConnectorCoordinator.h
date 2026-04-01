@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -20,9 +21,10 @@ namespace rtp_llm {
 class KVCacheAllocator;
 class KVCacheMemoryConnector;
 class RemoteConnector;
+class P2PConnector;
 class KVCacheConnectorReadWriteContext;
 
-class KVCacheConnectorCoordinator {
+class KVCacheConnectorCoordinator: public IKVCacheConnectorCoordinator {
 public:
     KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
                                 const KVCacheConfig&                     kv_cache_config,
@@ -38,32 +40,39 @@ public:
 public:
     bool init();
 
+    bool hasActiveConnectors() const override;
+
     // virtual for test
     virtual std::shared_ptr<AsyncContext>
-    asyncRead(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
+    asyncRead(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) override;
     virtual std::shared_ptr<AsyncContext>
-    asyncWrite(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
+    asyncWrite(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) override;
     virtual std::shared_ptr<AsyncContext>
-    asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
+    asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) override;
 
     virtual bool              executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
     std::vector<CacheKeyType> memoryCacheKeys() const;
+
+    uint32_t convertToGlobalLayerId(int model_id, int layer_id) const override {
+        return allocator_->convertToGlobalLayerId(model_id, layer_id);
+    }
 
     /// Prefill-side StartLoad path; P2P connector wiring fills this in when enabled.
     virtual void handleRead(const P2PConnectorStartLoadRequestPB& request,
                             P2PConnectorStartLoadResponsePB&      response,
                             std::function<bool()>                 is_cancelled = nullptr);
 
-    bool hasActiveConnectors() const;
-
 private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();
     std::shared_ptr<RemoteConnector>        initRemoteConnector();
+    bool                                    initP2PConnectorInternal();
     void                                    initUpdateThread();
     void                                    updateOnce();
     void                                    processReadContexts();
     void                                    processWriteContexts();
     void asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context);
+
+    bool isPdInvertMode() const;
 
 private:
     const CacheConfig                 cache_config_;
@@ -79,6 +88,7 @@ private:
     std::vector<std::shared_ptr<KVCacheConnector>>    connectors_;
     std::shared_ptr<KVCacheMemoryConnector>           memory_connector_;
     std::shared_ptr<RemoteConnector>                  remote_connector_;
+    std::shared_ptr<P2PConnector>                     p2p_connector_;
     mutable std::mutex                                update_mutex_;
     std::list<std::shared_ptr<FusedAsyncReadContext>> fused_async_read_context_list_;
     std::list<std::shared_ptr<FusedAsyncContext>>     fused_async_write_context_list_;
