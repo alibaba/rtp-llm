@@ -6,6 +6,8 @@
 #include <mutex>
 #include <vector>
 
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+
 namespace rtp_llm {
 
 class Meta;
@@ -17,9 +19,12 @@ public:
     virtual ~AsyncContext() = default;
 
 public:
-    virtual void waitDone()      = 0;
-    virtual bool done() const    = 0;
-    virtual bool success() const = 0;
+    virtual void      waitDone()      = 0;
+    virtual bool      done() const    = 0;
+    virtual bool      success() const = 0;
+    virtual ErrorInfo errorInfo() const {
+        return ErrorInfo::OkStatus();
+    }
 };
 
 class AsyncMatchContext: public AsyncContext {
@@ -36,9 +41,10 @@ public:
     ~FusedAsyncContext() override = default;
 
 public:
-    void waitDone() override;
-    bool done() const override;
-    bool success() const override;
+    void      waitDone() override;
+    bool      done() const override;
+    bool      success() const override;
+    ErrorInfo errorInfo() const override;
 
     const std::vector<std::shared_ptr<AsyncContext>>& contexts() const {
         return contexts_;
@@ -56,10 +62,11 @@ public:
     ~FusedAsyncReadContext() override = default;
 
 public:
-    bool done() const override;
-    bool success() const override;
-    void waitDone() override;
-    void notifyDone();
+    bool      done() const override;
+    bool      success() const override;
+    ErrorInfo errorInfo() const override;
+    void      waitDone() override;
+    void      notifyDone();
     // NOTE: `setFusedReadContext()` must be called eventually to avoid blocking waitDone() on the read stage.
     void setFusedReadContext(const std::shared_ptr<FusedAsyncContext>& fused_read_context);
     const std::shared_ptr<FusedAsyncContext>  fusedReadContext() const;
