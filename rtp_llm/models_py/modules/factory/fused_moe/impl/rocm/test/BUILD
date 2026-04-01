@@ -36,3 +36,16 @@ py_test (
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
+# 依赖 mori；无 mori 时脚本 __main__ 会 exit 0
+# py_test (
+#     name = "moriep_intranode_router_test",
+#     srcs = ["moriep_intranode_router_test.py"],
+#     deps = py_test_deps + [
+#         "//rtp_llm/models_py:models",
+#     ],
+#     timeout = "eternal",
+#     env = test_envs,
+#     tags = ["rocm"],
+#     exec_properties = {'gpu':'MI308X'},
+# )
+

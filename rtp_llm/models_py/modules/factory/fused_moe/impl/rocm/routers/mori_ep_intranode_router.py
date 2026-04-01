@@ -69,6 +69,10 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         if a1_scale is not None or a2_scale is not None:
             raise ValueError("MoriEpIntranode a1_scale or a2_scale should be None")
 
+        # Mori expects int32 for topk_ids
+        if topk_ids.dtype != torch.int32:
+            topk_ids = topk_ids.to(torch.int32)
+
         (
             dispatch_a1,
             dispatch_weights,
@@ -96,5 +100,15 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
+        # Mori expects int32 for topk_ids
+        if topk_ids.dtype != torch.int32:
+            topk_ids = topk_ids.to(torch.int32)
         recv_x = self.mori_buffer_wrapper.op.combine(payload.fused_expert_output, None, topk_ids)[0]
+
+        # MoriEP returns fixed-size buffer (aligned to expert_alignment), need to slice to original size
+        if extra_finalize_args is not None and "original_num_tokens" in extra_finalize_args:
+            original_num_tokens = extra_finalize_args["original_num_tokens"]
+            if recv_x.shape[0] > original_num_tokens:
+                recv_x = recv_x[:original_num_tokens]
+
         return recv_x
