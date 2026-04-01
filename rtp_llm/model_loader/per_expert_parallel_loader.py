@@ -1,9 +1,12 @@
 import logging
 from typing import Dict, Generator, Tuple
 
+import fastsafetensors
 import torch
 from fastsafetensors import ParallelLoader
 from fastsafetensors.parallel_loader import TimingContext
+
+_REQUIRED_FST_VERSION = "0.1.19"
 
 
 class PerExpertParallelLoader(ParallelLoader):
@@ -21,10 +24,19 @@ class PerExpertParallelLoader(ParallelLoader):
     """
 
     def __init__(self, stacked_key_config: Dict[str, str], *args, **kwargs):
+        fst_ver = getattr(fastsafetensors, "__version__", "unknown")
+        if not fst_ver.startswith(_REQUIRED_FST_VERSION):
+            raise RuntimeError(
+                f"PerExpertParallelLoader is tested with fastsafetensors "
+                f"{_REQUIRED_FST_VERSION}*, current version: {fst_ver}. "
+                f"Internal API changes may cause breakage."
+            )
         super().__init__(*args, **kwargs)
         self.stacked_key_config = stacked_key_config or {}
 
     def _consume_single_batch(self):
+        # Mirrors ParallelLoader._consume_single_batch; only the key iteration
+        # loop below (marked CUSTOM) differs — stacked keys are split per-expert.
         with TimingContext("wait_queue", self._log_message) as timer:
             batch_item = self.batch_queue.get()
 
@@ -55,12 +67,14 @@ class PerExpertParallelLoader(ParallelLoader):
             with TimingContext(
                 "get_tensor", self._log_message, batch.batch_id
             ) as timer:
+                # --- BEGIN CUSTOM LOGIC (differs from ParallelLoader) ---
                 for key in batch.keys:
                     if key in self.stacked_key_config:
                         yield from self._broadcast_per_expert(batch, key)
                     else:
                         tensor = batch.fb.get_tensor(key)
                         yield key, tensor
+                # --- END CUSTOM LOGIC ---
             get_tensor_time = timer.elapsed_ms
 
         finally:
@@ -82,7 +96,13 @@ class PerExpertParallelLoader(ParallelLoader):
     def _broadcast_per_expert(
         self, batch, key: str
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
-        """Split a stacked tensor on source rank and broadcast per-expert slices."""
+        """Split a stacked tensor on source rank and broadcast per-expert slices.
+
+        Uses fastsafetensors internal APIs (version-sensitive):
+          fb._get_rank_lidx, fb.rank_loaders, fb.instantiated, fb.auto_mem_delete,
+          factory.metadata.tensors, factory.tensors, factory.framework,
+          factory.device, factory.free_dev_ptrs
+        """
         template = self.stacked_key_config[key]
         fb = batch.fb
         (rank, lidx) = fb._get_rank_lidx(key)
@@ -117,5 +137,3 @@ class PerExpertParallelLoader(ParallelLoader):
             fb.instantiated[rank][lidx][key] = True
             if len(fb.instantiated[rank][lidx]) == len(factory.metadata.tensors):
                 factory.free_dev_ptrs()
-
-        torch.cuda.empty_cache()

@@ -189,6 +189,8 @@ def store_ssm_state_to_block_map(
     chunk_size: int,
     block_v: int = 64,
 ):
+    # fp32 required: the Triton kernel accumulates SSM state directly at the
+    # loaded dtype; lower precision causes numerical drift across chunks.
     assert (
         h.dtype == torch.float32 and final_states.dtype == torch.float32
     ), "h and final_states must be float32"

@@ -34,6 +34,8 @@ class StackSplitTensorSource(TensorSource):
     ):
         self._base = base
         self._split_config = split_config
+        # Lifetime: each MoeAtomicWeight._load_raw_tensor call creates a fresh
+        # StackSplitTensorSource, so the cache is GC'd after that method returns.
         self._stacked_cache: Dict[str, torch.Tensor] = {}
 
     def load_tensor(
