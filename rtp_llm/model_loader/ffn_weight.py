@@ -316,23 +316,6 @@ class MoeAtomicWeight(AtomicWeight):
             for idx in range(len(self.weights))
         ]
 
-    def _postprocess(
-        self,
-        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
-        device: str,
-        load_config: LoadConfig,
-    ):
-        raw_tensor = tensor.get(self.name) if isinstance(tensor, dict) else tensor
-        if self.name in [W.moe_w1, W.moe_w2, W.moe_s1, W.moe_s2]:
-            raw_tensor = load_config.exported_device.shuffle_moe_weight(
-                raw_tensor, load_config.compute_dtype, self.name
-            )
-        return {
-            self.name: load_config.exported_device.maybe_rewrite_weight_by_key(
-                self.name, raw_tensor
-            )
-        }
-
     def _build_split_config(
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> Dict[str, Tuple[str, int, Callable]]:

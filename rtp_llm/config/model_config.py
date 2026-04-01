@@ -43,6 +43,8 @@ def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
     ssm_state_dtype = ssm_state_dtype.lower()
     if ssm_state_dtype == "bf16":
         return DataType.TYPE_BF16
+    if ssm_state_dtype == "fp16":
+        return DataType.TYPE_FP16
     if ssm_state_dtype == "fp32":
         return DataType.TYPE_FP32
     raise ValueError(f"Unsupported ssm_state_dtype: {ssm_state_dtype}")
