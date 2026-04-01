@@ -125,7 +125,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     }
 
     torch::Tensor batch_logits;
-    if (stream->returnLogits() || stream->calculateSoftmaxProbs() || has_beam_search) {
+    if (stream->returnLogits() || stream->calculateSoftmaxProbs()) {
         auto raw_logits = model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
         if (has_beam_search && src_batch_indices.defined()) {
             batch_logits = torch::empty_like(raw_logits.narrow(0, 0, next_batch_size));

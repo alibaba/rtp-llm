@@ -52,6 +52,11 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     start_check_seq_length_ = seq_length_;
 
     size_t max_token_num = max_seq_len_ + extra_reserve_token_num;
+    if (generate_input->generate_config->max_new_tokens > 0) {
+        size_t request_max_token_num =
+            (size_t)seq_length_ + generate_input->generate_config->max_new_tokens + extra_reserve_token_num;
+        max_token_num = std::min(max_token_num, request_max_token_num);
+    }
 
     complete_token_ids_ = torch::zeros({(int64_t)max_batch_size_, (int64_t)max_token_num}, torch::kInt32);
     for (int i = 0; i < max_batch_size_; ++i) {
@@ -185,9 +190,10 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
             }
         }
         if (is_beam_search) {
+            size_t copy_end = std::min((size_t)max_num_new_tokens, complete_token_ids_->shape()[1]);
             memcpy(data(i) + common_len_,
                    new_tokens_ptr + i * max_num_new_tokens + common_len_,
-                   sizeof(int) * (max_num_new_tokens - common_len_));
+                   sizeof(int) * (copy_end - common_len_));
         } else {
             memcpy(data(i) + seq_length_, new_tokens_ptr + i * num_new_tokens, sizeof(int) * num_new_tokens);
         }
