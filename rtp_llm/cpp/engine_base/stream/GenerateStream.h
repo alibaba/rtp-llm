@@ -518,6 +518,7 @@ protected:
     int64_t                              vocab_size_;
     std::shared_ptr<CompleteTokenIds>    complete_token_ids_;
     int64_t                              begin_time_us_;
+    int64_t                              end_time_us_   = 0;
     int64_t                              last_pause_us_ = 0;
     int64_t                              pause_time_us_ = 0;
     int64_t                              wait_time_us_  = 0;

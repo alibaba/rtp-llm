@@ -41,7 +41,7 @@ void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
     collector.error_qps          = hasError();
     collector.cancel_qps         = cancelled();
     collector.onflight_request   = onflight_requests;
-    collector.total_rt_us        = executeTimeMs() * 1000;
+    collector.total_rt_us        = currentTimeUs() - request_begin_time_us;
     collector.retry_times        = retry_times;
     collector.retry_cost_time_ms = retry_cost_time_ms;
 }

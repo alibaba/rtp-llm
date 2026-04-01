@@ -509,7 +509,8 @@ void GenerateStream::checkTimeout() {
 }
 
 void GenerateStream::setStopWithoutLock(ErrorCode error_code, const std::string& error_msg) {
-    auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
+    auto now          = autil::TimeUtility::currentTimeInMicroSeconds();
+    auto cost_time_ms = (now - begin_time_us_) / 1000;
     RTP_LLM_LOG_WARNING("stop stream [%ld], error msg: [%s], current state [%s], "
                         "input len [%d], seq len [%d], timeout [%ld] ms, running [%ld] ms",
                         streamId(),
@@ -521,6 +522,9 @@ void GenerateStream::setStopWithoutLock(ErrorCode error_code, const std::string&
                         cost_time_ms);
     generate_status_->status     = StreamState::STOPPED;
     generate_status_->error_info = ErrorInfo(error_code, error_msg);
+    if (end_time_us_ == 0) {
+        end_time_us_ = now;
+    }
     cv_->notify_one();
 }
 
@@ -567,6 +571,9 @@ bool GenerateStream::setRunning() {
 void GenerateStream::setFinishedWithoutLock() {
     generate_status_->status = StreamState::FINISHED;
     fillSubGenerateStatus(StreamState::FINISHED);
+    if (end_time_us_ == 0) {
+        end_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+    }
     cv_->notify_one();
 }
 
@@ -615,6 +622,9 @@ void GenerateStream::cancelIfNotRunning() {
                             cost_time_ms);
         generate_status_->status     = StreamState::STOPPED;
         generate_status_->error_info = ErrorInfo(ErrorCode::CANCELLED, "cancel stream in waiting or remote running");
+        if (end_time_us_ == 0) {
+            end_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+        }
     }
 }
 
@@ -966,12 +976,13 @@ void GenerateStream::reportStreamMetrics() {
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (finished() || cancelled || timeout) {
-            collector.reuse_length           = initial_reuse_length_;
-            collector.input_token_length     = inputLength();
-            collector.output_token_length    = outputTokenLen();
-            collector.iterate_count          = iter_count_;
-            collector.query_batch_size       = maxBatchSize();
-            collector.total_latency_us       = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+            collector.reuse_length        = initial_reuse_length_;
+            collector.input_token_length  = inputLength();
+            collector.output_token_length = outputTokenLen();
+            collector.iterate_count       = iter_count_;
+            collector.query_batch_size    = maxBatchSize();
+            collector.total_latency_us =
+                (end_time_us_ > 0 ? end_time_us_ : autil::TimeUtility::currentTimeInMicroSeconds()) - begin_time_us_;
             collector.first_token_latency_us = complete_token_ids_->firstTokenLatencyUs();
             RTP_LLM_LOG_DEBUG(
                 "stream [%ld] report first latency us = %ld", streamId(), collector.first_token_latency_us);
