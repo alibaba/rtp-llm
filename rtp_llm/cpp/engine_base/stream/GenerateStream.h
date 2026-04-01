@@ -13,8 +13,10 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStateMachine.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <iterator>
 #include <mutex>
+#include <optional>
 
 namespace rtp_llm {
 
@@ -81,9 +83,13 @@ class GenerateStream;
 
 using GenerateStreamPtr = std::shared_ptr<GenerateStream>;
 
-class GenerateStream {
+class GenerateStream: public std::enable_shared_from_this<GenerateStream> {
 public:
     static constexpr uint64_t STREAM_MAGIC = 0xA11CE5DEADBEEF01ULL;
+    GenerateStreamPtr         sharedThis() {
+        // stream construct happen with make_shared, and hold in scheduler
+        return shared_from_this();
+    }
 
     GenerateStream(const std::shared_ptr<GenerateInput>& query,
                    const ModelConfig&                    model_config,
@@ -175,22 +181,27 @@ public:
     int    seqLength() const;
     // NOTE: In generatestream, set seq len must use setSeqLength api, we need to save start_check_seq_length_
     // for checking EOS and stop words
-    void   setSeqLength(int seq_length);
-    int    seqSizePerBlock() const;
-    int    contextLength() const;
-    int    prefixLength() const;
-    int    reuseLength() const;
-    int    initialReuseLength() const;
-    size_t maxTokenNum() const;
-    void   setReuseLength(int reuse_length);
-    void   setLocalReuseLength(int length);
-    void   setRemoteReuseLength(int length);
-    int    localReuseLength() const;
-    int    remoteReuseLength() const;
-    void   setMemoryReuseLength(int length);
-    int    memoryReuseLength() const;
-    void   setInitialReuseLength(int initial_reuse_length);
-    void   incLastOutputPos();
+    void    setSeqLength(int seq_length);
+    int     seqSizePerBlock() const;
+    int     contextLength() const;
+    int     prefixLength() const;
+    int     reuseLength() const;
+    int     initialReuseLength() const;
+    size_t  maxTokenNum() const;
+    void    setReuseLength(int reuse_length);
+    void    setLocalReuseLength(int length);
+    void    setRemoteReuseLength(int length);
+    int     localReuseLength() const;
+    int     remoteReuseLength() const;
+    void    setMemoryReuseLength(int length);
+    int     memoryReuseLength() const;
+    void    setInitialReuseLength(int initial_reuse_length);
+    void    incLastOutputPos();
+    void    setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory);
+    int64_t prefillTotalReuseLen() const;
+    int64_t prefillLocalReuseLen() const;
+    int64_t prefillRemoteReuseLen() const;
+    int64_t prefillMemoryReuseLen() const;
 
     bool                 isContextStream() const;
     const torch::Tensor& cumLogProbs() const;
@@ -258,7 +269,10 @@ public:
     void        reportMetric();
     std::string debugString() const;
 
-    void resetBeginTime(int64_t begin_time_us);
+    void    resetBeginTime(int64_t begin_time_us);
+    int64_t beginTimeUs() const {
+        return begin_time_us_;
+    }
 
     // for test
     void          setIsContextStream(bool is_context_stream);
@@ -484,6 +498,23 @@ public:
         return generate_input_->generate_config->enable_remote_cache;
     }
 
+    int64_t deadlineMs() const {
+        auto deadline_ms = generate_input_->generate_config->timeout_ms + begin_time_us_ / 1000;
+        return deadline_ms;
+    }
+
+    std::pair<std::string, uint32_t> prefillAddr() const;
+    std::string                      uniqueKey() const {
+        return generate_input_->generate_config->unique_key;
+    }
+
+    int getPrefillTpSize() const {
+        return prefill_tp_size_;
+    }
+    void setPrefillTpSize(int prefill_tp_size) {
+        prefill_tp_size_ = prefill_tp_size;
+    }
+
 public:
     struct TimeInfo {
         int64_t begin_time_us;
@@ -504,27 +535,31 @@ protected:
     void reportCacheReuseMetrics() const;
 
 protected:
-    uint64_t                              stream_magic_ = STREAM_MAGIC;
-    std::shared_ptr<GenerateInput>        generate_input_;
-    std::shared_ptr<GenerateStateMachine> generate_status_;
-    std::vector<StreamState>              sub_generate_status_;
-    int                                   max_seq_len_;
-    int64_t                               vocab_size_;
-    std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
-    int64_t                               begin_time_us_;
-    int64_t                               wait_time_us_ = 0;
-    std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
-    std::shared_ptr<bool>                 is_context_stream_;
-    size_t                                iter_count_           = 0;
-    size_t                                sp_iter_count_        = 0;
-    size_t                                last_output_pos_      = 0;
-    int                                   initial_reuse_length_ = 0;
-    int                                   reuse_length_         = 0;
-    int                                   local_reuse_length_   = 0;
-    int                                   remote_reuse_length_  = 0;
-    int                                   memory_reuse_length_  = 0;
-    int                                   reuse_mm_length_      = 0;
-
+    uint64_t                             stream_magic_ = STREAM_MAGIC;
+    std::shared_ptr<GenerateInput>       generate_input_;
+    std::shared_ptr<GenerateStatus>      generate_status_;
+    std::vector<GenerateStatus>          sub_generate_status_;
+    int                                  max_seq_len_;
+    int64_t                              vocab_size_;
+    std::shared_ptr<CompleteTokenIds>    complete_token_ids_;
+    int64_t                              begin_time_us_;
+    int64_t                              wait_time_us_  = 0;
+    std::shared_ptr<StreamCacheResource> stream_cache_resource_;
+    std::shared_ptr<bool>                is_context_stream_;
+    size_t                               iter_count_           = 0;
+    size_t                               sp_iter_count_        = 0;
+    size_t                               last_output_pos_      = 0;
+    int                                  initial_reuse_length_ = 0;
+    int                                  reuse_length_         = 0;
+    int                                  local_reuse_length_   = 0;
+    int                                  remote_reuse_length_  = 0;
+    int                                  memory_reuse_length_  = 0;
+    int                                  reuse_mm_length_      = 0;
+    // prefill reuse info (PD-sep); read/write only under output_mutex_
+    int64_t prefill_total_reuse_len_  = 0;
+    int64_t prefill_local_reuse_len_  = 0;
+    int64_t prefill_remote_reuse_len_ = 0;
+    int64_t prefill_memory_reuse_len_ = 0;
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;
     bool released_              = false;
@@ -596,6 +631,9 @@ protected:
     bool perf_test_ = false;
     friend class StreamCacheResource;
     bool is_fake_stream_ = false;
+
+    // prefill TP size queried from prefill server (used for asymmetric TP)
+    int prefill_tp_size_ = -1;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;
