@@ -2,9 +2,6 @@ import logging
 from typing import Callable, Dict, List, Optional, Union
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
-    ConfigManager,
-)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
     MlaImplBase,
@@ -189,8 +186,7 @@ class AttnImplFactory(object):
         attn_configs = model_config.getAttentionConfigs(
             parallelism_config.get_attn_tp_size()
         )
-        ConfigManager.reset()
-        ConfigManager.set_headwise_config(model_config)
+        attn_inputs.headwise_config = getattr(model_config, 'headwise_config', None)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
         instance = fmha_impl_method(
