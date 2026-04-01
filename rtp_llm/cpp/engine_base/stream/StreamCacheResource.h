@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -144,6 +145,10 @@ private:
 
     // Connector reference counting for PD separation (RAII auto-release)
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
+    /// Async connector load is gated to once per cache lifecycle: duplicate `initKVBlock` must
+    /// not re-issue async read (see tests). Reset in `releaseResource()` when blocks are cleared
+    /// so any future reuse of this resource can load again. Concurrent callers use `exchange`.
+    std::atomic<bool> load_cache_once_{false};
 };
 
 }  // namespace rtp_llm
