@@ -90,7 +90,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("prefill_qkv_padding_mask", &PyContextParallelParams::prefill_qkv_padding_mask)
         .def_readwrite("prefill_actual_input_lengths_cpu", &PyContextParallelParams::prefill_actual_input_lengths_cpu);
 
-    pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
+    pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs", pybind11::dynamic_attr())
         .def(pybind11::init<>())
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)

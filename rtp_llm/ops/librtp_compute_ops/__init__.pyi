@@ -252,6 +252,7 @@ class PyAttentionInputs:
     sequence_lengths: torch.Tensor
     sequence_lengths_plus_1_d: torch.Tensor
     total_tokens: int
+    headwise_config: dict | None
     def __init__(self) -> None: ...
     def __repr__(self) -> str: ...
     @property
