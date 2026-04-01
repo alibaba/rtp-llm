@@ -8,7 +8,6 @@ from typing import List, Optional, Tuple
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
-from rtp_llm.models_py.modules.factory.attention.attn_factory import ConfigManager
 from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
     HeadWisePrefillAttnOp,
 )
@@ -40,10 +39,6 @@ class TestHeadwisePrefillOp(unittest.TestCase):
         def __init__(self, kv_cache_base: torch.Tensor):
             self.kv_cache_base = kv_cache_base
 
-    class headwise_config:
-        def __init__(self, config):
-            self.headwise_config = config
-
     # -----------------------------
     # setUp & tearDown (unittest的生命周期方法)
     # -----------------------------
@@ -65,20 +60,20 @@ class TestHeadwisePrefillOp(unittest.TestCase):
 
         self.compiled_flex_attention = torch.compile(flex_attention, dynamic=True)
 
+    def _build_headwise_config(self, case: Case) -> dict:
+        return {
+            "sink_token_num": self.sink_token_num,
+            "swa_token_num": self.swa_token_num,
+            "seqlen_threshold": self.seqlen_threshold,
+            "0": [0] * case.num_qo_heads,
+        }
+
     def _build_attention_config(self, case: Case) -> AttentionConfigs:
         cfg = AttentionConfigs()
         cfg.head_num = case.num_qo_heads
         cfg.kv_head_num = case.num_kv_heads
         cfg.size_per_head = case.head_dim
         cfg.tokens_per_block = case.page_size
-        config = {
-            "sink_token_num": self.sink_token_num,
-            "swa_token_num": self.swa_token_num,
-            "seqlen_threshold": self.seqlen_threshold,
-            "0": [0] * case.num_qo_heads,
-        }
-        hcg = self.headwise_config(config)
-        ConfigManager.set_headwise_config(hcg)
         return cfg
 
     @staticmethod
@@ -93,7 +88,8 @@ class TestHeadwisePrefillOp(unittest.TestCase):
             with self.subTest(msg=f"Rebuilding op for case: {case}"):
                 attn_cfg = self._build_attention_config(case)
                 par_cfg = self._build_parallelism_config()
-                self._op = HeadWisePrefillAttnOp(attn_cfg, par_cfg)
+                hw_cfg = self._build_headwise_config(case)
+                self._op = HeadWisePrefillAttnOp(attn_cfg, par_cfg, hw_cfg)
                 self._cached_op_key = key
         return self._op
 
@@ -112,6 +108,7 @@ class TestHeadwisePrefillOp(unittest.TestCase):
         attn_inputs.kv_cache_block_id_device = torch.arange(
             0, total_num_pages, device=self.device, dtype=self.index_dtype
         ).view(case.batch_size, num_pages_per_seq)
+        attn_inputs.headwise_config = self._build_headwise_config(case)
         return attn_inputs
 
     def _make_paged_kv_cache(

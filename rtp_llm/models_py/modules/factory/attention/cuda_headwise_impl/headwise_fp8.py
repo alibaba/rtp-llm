@@ -32,15 +32,14 @@ except ImportError as e:
     logging.warning(f"rtp_llm attention common/compute_ops not found: {e}")
 
 from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
-    ConfigManager,
     HeadWiseRuntimeConfig,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig
 
 
-def _headwise_prefill_fp8_runtime_ready() -> bool:
-    """Same gates as HeadWiseFP8PrefillAttnOp.support."""
+def _headwise_prefill_fp8_runtime_ready(attn_inputs) -> bool:
+    """Check flash_attn_3 + rtp_kernel_fp8 + CUDA >= 12.8 + headwise_config on attn_inputs."""
     if not (_HAS_FLASH_ATTN_3 and _HAS_RTP_KERNEL_FP8):
         return False
     if not torch.cuda.is_available():
@@ -49,7 +48,7 @@ def _headwise_prefill_fp8_runtime_ready() -> bool:
         major, minor = map(int, torch.version.cuda.split(".")[:2])
     except (AttributeError, TypeError, ValueError):
         return False
-    return (major, minor) >= (12, 8) and ConfigManager.is_config_set()
+    return (major, minor) >= (12, 8) and getattr(attn_inputs, 'headwise_config', None) is not None
 
 
 @dataclass
@@ -69,7 +68,8 @@ class HeadWiseFP8PrefillAttnOp:
     """
 
     def __init__(
-        self, attn_configs: AttentionConfigs, parallelism_config: ParallelismConfig
+        self, attn_configs: AttentionConfigs, parallelism_config: ParallelismConfig,
+        headwise_config: Optional[dict] = None,
     ) -> None:
         self.rank = parallelism_config.tp_rank
 
@@ -78,8 +78,8 @@ class HeadWiseFP8PrefillAttnOp:
         self.size_per_head = attn_configs.size_per_head
         self.paged_size = attn_configs.tokens_per_block
 
-        if ConfigManager.is_config_set():
-            self.headwise_all_config = ConfigManager.get_headwise_config()
+        if headwise_config is not None:
+            self.headwise_all_config = headwise_config
 
             self.hw_cfg = HeadWiseRuntimeConfig(
                 sink_token_num=self.headwise_all_config.get("sink_token_num", 4),
@@ -102,7 +102,7 @@ class HeadWiseFP8PrefillAttnOp:
         if not (_HAS_FLASH_ATTN_3 and _HAS_RTP_KERNEL_FP8):
             return False
         major, minor = map(int, torch.version.cuda.split(".")[:2])
-        return (major, minor) >= (12, 8) and ConfigManager.is_config_set()
+        return (major, minor) >= (12, 8) and getattr(attn_inputs, 'headwise_config', None) is not None
 
     def _get_headwise_config(self, layer_idx: int):
         layer_key = str(layer_idx)
@@ -341,7 +341,8 @@ class HeadWiseFP8PrefillImpl(FMHAImplBase):
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = HeadWiseFP8PrefillAttnOp(attn_configs, parallelism_config)
+        headwise_config = getattr(attn_inputs, 'headwise_config', None)
+        self.fmha_impl = HeadWiseFP8PrefillAttnOp(attn_configs, parallelism_config, headwise_config)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
         self.attn_configs = attn_configs
 
@@ -357,7 +358,7 @@ class HeadWiseFP8PrefillImpl(FMHAImplBase):
     ) -> bool:
         if attn_configs.use_mla or attn_configs.kv_cache_dtype != KvCacheDataType.FP8:
             return False
-        return _headwise_prefill_fp8_runtime_ready()
+        return _headwise_prefill_fp8_runtime_ready(attn_inputs)
 
     def forward(
         self,
