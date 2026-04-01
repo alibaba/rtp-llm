@@ -214,15 +214,25 @@ class CPRotateMethod:
 
 class CacheStoreConfig:
     cache_store_rdma_mode: bool
+    wrr_available_ratio: int
+    rank_factor: int
+    thread_count: int
+    rdma_connect_timeout_ms: int
+    rdma_qp_count_per_connection: int
+    rdma_io_thread_count: int
+    rdma_worker_thread_count: int
     messager_io_thread_count: int
     messager_worker_thread_count: int
-    rank_factor: int
-    rdma_connect_timeout_ms: int
-    rdma_io_thread_count: int
-    rdma_qp_count_per_connection: int
-    rdma_worker_thread_count: int
-    thread_count: int
-    wrr_available_ratio: int
+    rdma_transfer_wait_timeout_ms: int
+    rdma_max_block_pairs_per_connection: int
+    p2p_read_steal_before_deadline_ms: int
+    p2p_read_return_before_deadline_ms: int
+    p2p_transfer_not_done_resource_hold_ms: int
+    p2p_resource_store_timeout_check_interval_ms: int
+    p2p_layer_cache_buffer_store_timeout_ms: int
+    p2p_cancel_broadcast_timeout_ms: int
+    cache_store_tcp_anet_rpc_thread_num: int
+    cache_store_tcp_anet_rpc_queue_num: int
 
     def __getstate__(self) -> tuple:
         ...

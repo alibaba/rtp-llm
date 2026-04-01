@@ -759,6 +759,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("rdma_worker_thread_count", &CacheStoreConfig::rdma_worker_thread_count)
         .def_readwrite("messager_io_thread_count", &CacheStoreConfig::messager_io_thread_count)
         .def_readwrite("messager_worker_thread_count", &CacheStoreConfig::messager_worker_thread_count)
+        .def_readwrite("rdma_transfer_wait_timeout_ms", &CacheStoreConfig::rdma_transfer_wait_timeout_ms)
+        .def_readwrite("rdma_max_block_pairs_per_connection", &CacheStoreConfig::rdma_max_block_pairs_per_connection)
+        .def_readwrite("p2p_read_steal_before_deadline_ms", &CacheStoreConfig::p2p_read_steal_before_deadline_ms)
+        .def_readwrite("p2p_read_return_before_deadline_ms", &CacheStoreConfig::p2p_read_return_before_deadline_ms)
+        .def_readwrite("p2p_transfer_not_done_resource_hold_ms",
+                       &CacheStoreConfig::p2p_transfer_not_done_resource_hold_ms)
+        .def_readwrite("p2p_resource_store_timeout_check_interval_ms",
+                       &CacheStoreConfig::p2p_resource_store_timeout_check_interval_ms)
+        .def_readwrite("p2p_layer_cache_buffer_store_timeout_ms",
+                       &CacheStoreConfig::p2p_layer_cache_buffer_store_timeout_ms)
+        .def_readwrite("p2p_cancel_broadcast_timeout_ms", &CacheStoreConfig::p2p_cancel_broadcast_timeout_ms)
+        .def_readwrite("cache_store_tcp_anet_rpc_thread_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_thread_num)
+        .def_readwrite("cache_store_tcp_anet_rpc_queue_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_queue_num)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -771,23 +784,43 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.rdma_io_thread_count,
                                       self.rdma_worker_thread_count,
                                       self.messager_io_thread_count,
-                                      self.messager_worker_thread_count);
+                                      self.messager_worker_thread_count,
+                                      self.rdma_transfer_wait_timeout_ms,
+                                      self.rdma_max_block_pairs_per_connection,
+                                      self.p2p_read_steal_before_deadline_ms,
+                                      self.p2p_read_return_before_deadline_ms,
+                                      self.p2p_transfer_not_done_resource_hold_ms,
+                                      self.p2p_resource_store_timeout_check_interval_ms,
+                                      self.p2p_layer_cache_buffer_store_timeout_ms,
+                                      self.p2p_cancel_broadcast_timeout_ms,
+                                      self.cache_store_tcp_anet_rpc_thread_num,
+                                      self.cache_store_tcp_anet_rpc_queue_num);
             },
             [](py::tuple t) {
-                if (t.size() != 10)
+                if (t.size() != 20)
                     throw std::runtime_error("Invalid state!");
                 CacheStoreConfig c;
                 try {
-                    c.cache_store_rdma_mode        = t[0].cast<bool>();
-                    c.wrr_available_ratio          = t[1].cast<int>();
-                    c.rank_factor                  = t[2].cast<int>();
-                    c.thread_count                 = t[3].cast<int>();
-                    c.rdma_connect_timeout_ms      = t[4].cast<int>();
-                    c.rdma_qp_count_per_connection = t[5].cast<int>();
-                    c.rdma_io_thread_count         = t[6].cast<int>();
-                    c.rdma_worker_thread_count     = t[7].cast<int>();
-                    c.messager_io_thread_count     = t[8].cast<int>();
-                    c.messager_worker_thread_count = t[9].cast<int>();
+                    c.cache_store_rdma_mode                        = t[0].cast<bool>();
+                    c.wrr_available_ratio                          = t[1].cast<int>();
+                    c.rank_factor                                  = t[2].cast<int>();
+                    c.thread_count                                 = t[3].cast<int>();
+                    c.rdma_connect_timeout_ms                      = t[4].cast<int>();
+                    c.rdma_qp_count_per_connection                 = t[5].cast<int>();
+                    c.rdma_io_thread_count                         = t[6].cast<int>();
+                    c.rdma_worker_thread_count                     = t[7].cast<int>();
+                    c.messager_io_thread_count                     = t[8].cast<int>();
+                    c.messager_worker_thread_count                 = t[9].cast<int>();
+                    c.rdma_transfer_wait_timeout_ms                = t[10].cast<int64_t>();
+                    c.rdma_max_block_pairs_per_connection          = t[11].cast<int>();
+                    c.p2p_read_steal_before_deadline_ms            = t[12].cast<int64_t>();
+                    c.p2p_read_return_before_deadline_ms           = t[13].cast<int64_t>();
+                    c.p2p_transfer_not_done_resource_hold_ms       = t[14].cast<int64_t>();
+                    c.p2p_resource_store_timeout_check_interval_ms = t[15].cast<int>();
+                    c.p2p_layer_cache_buffer_store_timeout_ms      = t[16].cast<int64_t>();
+                    c.p2p_cancel_broadcast_timeout_ms              = t[17].cast<int64_t>();
+                    c.cache_store_tcp_anet_rpc_thread_num          = t[18].cast<int>();
+                    c.cache_store_tcp_anet_rpc_queue_num           = t[19].cast<int>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
                 }
