@@ -1,11 +1,22 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "embedding_arpc_deps", "requirement")
+load("//bazel:arch_select.bzl", "embedding_arpc_deps", "requirement", "torch_deps")
 
 requirement([
     "grpcio",
 ])
 
 embedding_arpc_deps()
+
+cc_library(
+    name = "tensor_pb_convert",
+    srcs = ["TensorPbConvert.cc"],
+    hdrs = ["TensorPbConvert.h"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "rpc_error_code",
@@ -33,7 +44,10 @@ cc_library(
 
 cc_library(
     name = "model_rpc_server",
-    srcs = glob(["*.cc"]),
+    srcs = glob(
+        ["*.cc"],
+        exclude = ["TensorPbConvert.cc"],
+    ),
     hdrs = glob(
         ["*.h"],
         exclude = ["RPCPool.h"],
@@ -43,6 +57,7 @@ cc_library(
         ":embedding_arpc_deps",
         ":model_rpc_pool",
         ":rpc_error_code",
+        ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/engine_base:profiler",
