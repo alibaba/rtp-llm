@@ -30,6 +30,7 @@ from rtp_llm.ops import (
     VitSeparation,
 )
 from rtp_llm.utils.database import CkptDatabase
+from rtp_llm.utils.startup_timeline import StartupPhase, startup_phase
 from rtp_llm.utils.time_util import timer_wrapper
 
 
@@ -258,9 +259,15 @@ class BaseModel(object):
             process = psutil.Process(os.getpid())
             return process.memory_info().rss / 1024 / 1024  # MB
 
+        phase = (
+            StartupPhase.MODEL_LOAD
+            if not model_config.is_sp_model
+            else StartupPhase.SP_MODEL_LOAD
+        )
         # 在加载前后分别记录内存使用
         logging.info(f"Before loading: {get_host_memory_usage():.2f} MB")
-        model.load()
+        with startup_phase(phase):
+            model.load()
         logging.info(f"After loading: {get_host_memory_usage():.2f} MB")
         return model
 

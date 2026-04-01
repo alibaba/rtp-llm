@@ -227,7 +227,7 @@ class CkptDatabase(BaseDatabase):
     def fastsafetensors_weights_iterator(
         self,
         device: str,
-        use_tqdm_on_load: bool,
+        use_gdr: bool,
         stacked_key_config: Optional[Dict[str, str]] = None,
     ):
         from fastsafetensors import ParallelLoader, SingleGroup
@@ -236,7 +236,7 @@ class CkptDatabase(BaseDatabase):
             PerExpertParallelLoader,
         )
 
-        def iterator(device: str, use_tqdm_on_load: bool):
+        def iterator(device: str, use_gdr: bool):
             if torch.distributed.is_initialized():
                 pg = torch.distributed.group.WORLD
             else:
@@ -248,14 +248,15 @@ class CkptDatabase(BaseDatabase):
             if device == "cuda":
                 device = f"cuda:{pg.rank()}"
                 logging.debug(f"origin device is cuda, set to {device}")
+            load_type = "gdr" if use_gdr else "shm"
 
             loader_kwargs: Dict[str, Any] = dict(
                 pg=pg,
                 hf_weights_files=hf_weights_files,
-                use_tqdm_on_load=use_tqdm_on_load,
+                use_tqdm_on_load=True,
                 device=device,
                 bbuf_size_kb=1024 * 1024 * 2,
-                use_shm=True,
+                copier_type=load_type,
             )
             if stacked_key_config:
                 loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
@@ -266,7 +267,7 @@ class CkptDatabase(BaseDatabase):
             finally:
                 loader.loader.close()
 
-        return iterator(device, use_tqdm_on_load)
+        return iterator(device, use_gdr)
 
     def get_lora_tensor_names(self, config_name: str) -> List[str]:
         return self.lora_ckpt.get_lora_tensor_names(config_name)

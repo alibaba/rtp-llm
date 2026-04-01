@@ -9,7 +9,7 @@ import sys
 import time
 import traceback
 from multiprocessing import Process
-from typing import List
+from typing import List, Optional
 
 import torch
 from setproctitle import setproctitle
@@ -28,6 +28,12 @@ from rtp_llm.utils.concurrency_controller import (
     set_global_controller,
 )
 from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.utils.startup_timeline import (
+    ProcessLaunchTimestamp,
+    StartupPhase,
+    StartupTimeline,
+    startup_phase,
+)
 
 setup_logging()
 
@@ -37,10 +43,11 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
     world_rank: int = 0,
     pipe_writer=None,
+    process_launch_time: Optional[ProcessLaunchTimestamp] = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
-    logging.info(f"[PROCESS_START]Start local rank process")
+    StartupTimeline.mark_rank_entry(process_launch_time)
     start_time = time.time()
     from rtp_llm.server.backend_manager import BackendManager
     from rtp_llm.utils.util import copy_gemm_config
@@ -77,8 +84,9 @@ def local_rank_start(
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
-        backend_manager = BackendManager(py_env_configs)
-        backend_manager.start()
+        with startup_phase(StartupPhase.BACKEND_MANAGER_START):
+            backend_manager = BackendManager(py_env_configs)
+            backend_manager.start()
         logging.info("Backend server initialized successfully, sending ready status")
 
         # Send startup success message
@@ -91,6 +99,7 @@ def local_rank_start(
                     }
                 )
                 pipe_writer.close()
+                StartupTimeline.report(f"rank-{world_rank}", py_env_configs)
             except Exception as e:
                 logging.warning(f"Failed to send success status via pipe: {e}")
 
@@ -163,6 +172,7 @@ def _create_rank_processes(
 
     processes = []
     rank_pipe_readers = []  # Store pipe readers for each rank
+    timestamp = StartupTimeline.get_startup_timestamp()
 
     for _, world_rank in enumerate(
         range(pc.world_rank, pc.world_rank + local_world_size)
@@ -173,7 +183,7 @@ def _create_rank_processes(
 
         proc = Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, world_rank, writer),
+            args=(global_controller, py_env_configs, world_rank, writer, timestamp),
             name=f"rank-{world_rank}",
         )
         proc.start()
@@ -282,6 +292,7 @@ def multi_rank_start(
         logging.warning(str(e))
 
     # Create processes and get pipe readers
+    StartupTimeline.mark_rank_spawn()
     processes, rank_pipe_readers = _create_rank_processes(
         global_controller, py_env_configs
     )
@@ -304,6 +315,7 @@ def multi_rank_start(
                     }
                 )
                 pipe_writer.close()
+                StartupTimeline.report(f"backend_server", py_env_configs)
             except Exception as e:
                 logging.warning(f"Failed to send status via pipe: {e}")
     except Exception as e:
@@ -417,9 +429,10 @@ def clear_jit_filelock():
 def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
+    process_launch_time: ProcessLaunchTimestamp,
     pipe_writer=None,
 ):
-    logging.info(f"[PROCESS_START]Start backend server process")
+    StartupTimeline.mark_backend_server_entry(process_launch_time)
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()

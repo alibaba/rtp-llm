@@ -83,6 +83,7 @@ class ModelConfig(CppModelConfig):
         "render_config",
         "phy2log_path",
         "lora_infos",
+        "is_sp_model",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -490,6 +491,7 @@ class ModelConfig(CppModelConfig):
         self.normalize_lm_head_weight: bool = False
         self.has_lm_head_bias: bool = False
         self.tie_word_embeddings: bool = False
+        self.is_sp_model: bool = False
         # Model loading related fields
         # ptuning_path is now in C++ ModelConfig (as std::string, default "")
         self.quantization: str = (

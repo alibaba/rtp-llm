@@ -20,6 +20,7 @@ from rtp_llm.ops import RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.utils.startup_timeline import StartupPhase, StartupTimeline
 
 setup_logging()
 
@@ -53,11 +54,12 @@ def start_backend_server_impl(
 
     # Create pipe for subprocess startup status communication
     pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
-    logging.info(f"[PROCESS_SPAWN]Start backend server process outer")
+    StartupTimeline.mark_backend_server_spawn()
+    timestamp = StartupTimeline.get_startup_timestamp()
 
     backend_process = multiprocessing.Process(
         target=start_backend_server,
-        args=(global_controller, py_env_configs, pipe_writer),
+        args=(global_controller, py_env_configs, timestamp, pipe_writer),
         name="backend_manager",
     )
     backend_process.start()
@@ -190,7 +192,7 @@ def main():
 
 
 def start_server(py_env_configs: PyEnvConfigs):
-    logging.info(f"[PROCESS_START]Start server")
+    StartupTimeline.mark_main_entry()
     start_time = time.time()
     try:
         multiprocessing.set_start_method("spawn")
@@ -237,6 +239,10 @@ def start_server(py_env_configs: PyEnvConfigs):
         )
         consume_s = time.time() - start_time
         logging.info(f"start server took {consume_s:.2f}s")
+
+        # Generate startup timeline report
+        StartupTimeline.mark_phase(StartupPhase.MAIN_TOTAL, start_time, consume_s)
+        StartupTimeline.report(f"main", py_env_configs)
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
         # Trigger graceful shutdown on any exception

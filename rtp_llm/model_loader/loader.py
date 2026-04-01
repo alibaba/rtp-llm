@@ -23,6 +23,7 @@ from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
 from rtp_llm.utils.model_weight import W, WeightStyle, identity
 from rtp_llm.utils.module_util import has_module
+from rtp_llm.utils.startup_timeline import StartupPhase, startup_phase
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import check_with_info
 
@@ -82,11 +83,24 @@ class ModelLoader:
     @timer_wrapper(description="load weights")
     @torch.inference_mode()
     def load_weights(self, device: str):
-        if self._load_config.is_ft_style_weight:
-            weights = self._load_from_ft_style(device)
-        else:
-            weights = self._load_weight(device)
-            self.force_clean_cuda_memory()
+        load_method = self._resolve_load_method(device)
+        phase = (
+            StartupPhase.WEIGHT_LOAD
+            if not self.model_config.is_sp_model
+            else StartupPhase.SP_WEIGHT_LOAD
+        )
+        with startup_phase(phase, tags={"load_method": load_method.value}):
+            if load_method == LoadMethod.SCRATCH:
+                weights = self._load_from_scratch(device)
+            elif load_method == LoadMethod.CONVERTED:
+                weights = self._load_from_ft_style(device)
+            elif load_method == LoadMethod.FASTSAFETENSORS:
+                weights = self._load_from_fastsafetensor(device)
+            elif load_method == LoadMethod.FASTSAFETENSORS_GDR:
+                weights = self._load_from_fastsafetensor(device, use_gdr=True)
+            else:
+                raise ValueError(f"Unknown load method: {load_method}")
+        self.force_clean_cuda_memory()
 
         # load dynamic weight
         self._load_dynamic_weights(weights, device)
@@ -223,8 +237,13 @@ class ModelLoader:
         model_weights.global_weights = global_weights
         return model_weights
 
-    def _load_weight(self, device: str):
+    def _resolve_load_method(self, device: str) -> LoadMethod:
         load_method = self._load_method
+        if self._load_config.is_ft_style_weight:
+            load_method = LoadMethod.CONVERTED
+        elif load_method == LoadMethod.CONVERTED:
+            load_method = LoadMethod.AUTO
+
         if load_method == LoadMethod.AUTO:
             is_safetensor = self._load_config.database.is_safetensor
             convert_device = self._choose_weight_convert_device(device)
@@ -242,15 +261,9 @@ class ModelLoader:
                 load_method = LoadMethod.SCRATCH
 
         logging.info(
-            f"load method: {load_method}, finally choose load method: {load_method}"
+            f"load method: {self._load_method}, finally choose load method: {load_method}"
         )
-
-        if load_method.lower() == LoadMethod.FASTSAFETENSORS:
-            return self._load_from_fastsafetensor(device)
-        elif load_method.lower() == LoadMethod.SCRATCH:
-            return self._load_from_scratch(device)
-        else:
-            raise ValueError(f"Unknown load method: {load_method}")
+        return load_method
 
     def _is_memory_enough_for_fastsafetensor(self):
         model_size = self._weights_info.model_config.eval_model_weight_size()
@@ -288,7 +301,7 @@ class ModelLoader:
                     stacked_key_config[stacked_key] = template
         return stacked_key_config
 
-    def _load_from_fastsafetensor(self, device: str):
+    def _load_from_fastsafetensor(self, device: str, use_gdr: bool = False):
         logging.info(f"load weight by device: {device}")
         model_weights = self._create_model_weights(device)
         tensor_to_weight_map, weight_info_list = self._generate_weight_info()
@@ -301,7 +314,7 @@ class ModelLoader:
 
         all_tensors = self._load_config.database.fastsafetensors_weights_iterator(
             device,
-            True,
+            use_gdr,
             stacked_key_config=stacked_key_config,
         )
 

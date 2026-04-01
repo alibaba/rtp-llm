@@ -24,6 +24,7 @@ from rtp_llm.config.py_config_modules import (
 )
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
+from rtp_llm.utils.startup_timeline import StartupPhase, StartupTimeline, startup_phase
 from rtp_llm.utils.util import check_with_info
 
 
@@ -232,14 +233,15 @@ class ModelFactory:
 
         from rtp_llm.async_decoder_engine.engine_creator import create_engine
 
-        engine = create_engine(
-            model=model,
-            engine_config=engine_config,
-            alog_conf_path=alog_conf_path,
-            world_info=world_info,
-            propose_model=propose_model,
-        )
-        engine.start()
+        with startup_phase(StartupPhase.ASYNC_ENGINE_START):
+            engine = create_engine(
+                model=model,
+                engine_config=engine_config,
+                alog_conf_path=alog_conf_path,
+                world_info=world_info,
+                propose_model=propose_model,
+            )
+            engine.start()
         if propose_model:
             logging.info("create propose model done")
         logging.info("create engine done")
@@ -390,6 +392,7 @@ class ModelFactory:
         propose_model_config = propose_model_cls._create_config(
             sp_config.checkpoint_path
         )
+        propose_model_config.is_sp_model = True
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
         propose_model_config.quantization = sp_config.quantization

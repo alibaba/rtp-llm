@@ -25,3 +25,7 @@ if has_internal_source():
 
 consume_s = time.time() - st
 print(f"import in __init__ took {consume_s:.2f}s")
+
+from .utils.startup_timeline import StartupPhase, StartupTimeline
+
+StartupTimeline.mark_phase(StartupPhase.MODULE_INIT, st, consume_s)

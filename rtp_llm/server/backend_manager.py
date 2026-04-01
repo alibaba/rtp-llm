@@ -19,6 +19,7 @@ from rtp_llm.utils.concurrency_controller import (
     get_global_controller,
 )
 from rtp_llm.utils.fuser import _nfs_manager
+from rtp_llm.utils.startup_timeline import StartupPhase, startup_phase
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
@@ -45,7 +46,8 @@ class BackendManager(object):
 
     def start(self):
         """Initialize backend server without entering service loop"""
-        self._distributed_server.start(self.py_env_configs)
+        with startup_phase(StartupPhase.DISTRIBUTED_SERVER_START):
+            self._distributed_server.start(self.py_env_configs)
         # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
         engine_config = EngineConfig.create(
             self.py_env_configs,
@@ -53,13 +55,14 @@ class BackendManager(object):
         )
 
         if engine_config.parallelism_config.world_size > 1:
-            init_distributed_environment(
-                engine_config.parallelism_config,
-                nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
-                nccl_init_port=self._distributed_server.get_nccl_init_port(),
-                backend="nccl",
-                timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
-            )
+            with startup_phase(StartupPhase.DISTRIBUTED_ENVIRONMENT_INIT):
+                init_distributed_environment(
+                    engine_config.parallelism_config,
+                    nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
+                    nccl_init_port=self._distributed_server.get_nccl_init_port(),
+                    backend="nccl",
+                    timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
+                )
         world_info = get_world_info(
             self.py_env_configs.server_config,
             self.py_env_configs.distribute_config,
@@ -99,7 +102,8 @@ class BackendManager(object):
         ):
             from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
 
-            init_deepep_wrapper(engine_config, model_config)
+            with startup_phase(StartupPhase.DEEPEP_INIT):
+                init_deepep_wrapper(engine_config, model_config)
 
         # Optional propose model config
         propose_model_config = ModelFactory.create_propose_model_config(
