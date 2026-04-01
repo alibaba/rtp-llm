@@ -146,7 +146,6 @@ class QuantizationConfig(ABC):
             quant_method = quant_config["quant_algo"].lower()
         if quant_config is None:
             return None
-
         group_size = quant_config["group_size"] if "group_size" in quant_config else 0
         bits = quant_config["bits"] if "bits" in quant_config else 0
         if quant_method == "fp8":
@@ -191,12 +190,20 @@ class QuantizationConfig(ABC):
             quark_weights_config = quant_config["global_quant_config"]["weight"]
             if quark_weights_config["dtype"] == "fp8_e4m3":
                 bits = 8
+            elif quark_weights_config["dtype"] == "fp4":
+                bits = 4
             if (
                 quark_weights_config["dtype"] == "fp8_e4m3"
                 and quark_weights_config["qscheme"] == "per_channel"
             ):
                 quant_method = Fp8PerChannelQuarkQuantConfig.get_method()
-
+            if (
+                quark_weights_config["dtype"] == "fp4" 
+                and quark_weights_config["qscheme"] == "per_group"
+            ):
+                quant_method = Fp4PerGroupQuarkQuantConfig.get_method()
+                group_size = quark_weights_config["group_size"]
+                
         if quant_method == "modelopt":
             config_groups = quant_config["config_groups"]
             weights_config = config_groups["group_0"]["weights"]
@@ -478,6 +485,31 @@ class Fp8PerChannelQuarkQuantConfig(QuarkQuantConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerChannelQuarkQuantConfig(**config)
+
+class Fp4PerGroupQuarkQuantConfig(QuarkQuantConfig):
+    def __init__(self, bits: int = 4, is_quanted: bool = False, **kwargs: Any):
+        super().__init__(bits=bits, is_quanted=is_quanted)
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "FP4_PER_GROUP_QUARK"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "fp4-pergroup-quark"
+
+    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float4_e2m1fn_x2]
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return Fp4PerGroupQuarkQuantConfig(**config)
 
 
 class SmoothQuantConfig(QuantizationConfig):
