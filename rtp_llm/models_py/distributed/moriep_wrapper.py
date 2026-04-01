@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.utils.util import to_torch_dtype
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -17,6 +18,7 @@ __all__ = [
     "MoriEPWrapperConfig",
     "MoriEPWrapper",
     "init_moriep_wrapper",
+    "init_moriep_wrapper_from_config",
 ]
 
 
@@ -60,9 +62,11 @@ class MoriEPWrapperConfig:
         model_config = config_adapter.model_config
         parallelism_config = config_adapter.parallelism_config
         moe_config = config_adapter.moe_config
-        max_num_tokens = (
-            moe_config.ll_num_max_token + parallelism_config.tp_size - 1
-        ) // parallelism_config.tp_size
+        # In EP+TP mode, TP splits the weight matrices (hidden dimension) but
+        # does NOT split the token dimension – every rank sees all tokens.
+        # Therefore max_num_inp_token_per_rank must equal the full
+        # ll_num_max_token so that MORI combine can return enough tokens.
+        max_num_tokens = moe_config.ll_num_max_token
         if parallelism_config.world_size > parallelism_config.local_world_size:
             mori_kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
             # on_gfx942():
@@ -86,7 +90,7 @@ class MoriEPWrapperConfig:
             hidden_dim=model_config.hidden_size,
             scale_dim=0,  # TODO: support scale_dim
             scale_type_size=0,  # sizeof(config.data_type)
-            max_token_type_size=torch.tensor([], dtype=model_config.data_type).element_size(),
+            max_token_type_size=torch.tensor([], dtype=to_torch_dtype(model_config.data_type)).element_size(),
             max_num_inp_token_per_rank=max_num_tokens,
             num_experts_per_rank=model_config.expert_num // parallelism_config.ep_size,
             num_experts_per_token=model_config.moe_k,
@@ -220,6 +224,30 @@ class MoriEPWrapper:
         self._op = mori.ops.EpDispatchCombineOp(mori_config)
 
 
+def init_moriep_wrapper_from_config(
+    moriep_config: MoriEPWrapperConfig,
+    shmem_group_name: str = "default",
+) -> None:
+    """初始化 MoriEP wrapper，直接接受 MoriEPWrapperConfig（无需 EngineConfig/ModelConfig）。
+
+    必须在 torch.distributed.init_process_group() 之后调用。
+    """
+    if not torch.distributed.is_initialized():
+        raise RuntimeError(
+            "Distributed environment is not initialized. "
+            "Call torch.distributed.init_process_group() first."
+        )
+
+    world_group = torch.distributed.group.WORLD
+    assert world_group is not None
+    torch._C._distributed_c10d._register_process_group(shmem_group_name, world_group)
+    mori.shmem.shmem_torch_process_group_init(shmem_group_name)
+
+    logging.info("Start initialize MoriEP wrapper (from_config)")
+    MoriEPWrapper._create(moriep_config, shmem_group_name=shmem_group_name)
+    logging.info("Finish initialize MoriEP wrapper (from_config)")
+
+
 def init_moriep_wrapper(
     engine_config: EngineConfig, model_config: ModelConfig,
     shmem_group_name: str = "default",
@@ -254,10 +282,7 @@ def init_moriep_wrapper(
         enable_cuda_graph=enable_cuda_graph,
     )
     mori_config = MoriEPWrapperConfig.from_config_adapter(mori_config_adapter)
-    try:
-        logging.info("Start initialize MoriEP wrapper")
-        MoriEPWrapper._create(mori_config, shmem_group_name=shmem_group_name)
-        logging.info("Finish initialize MoriEP wrapper")
-    except Exception as e:
-        logging.error(f"Failed to initialize MoriEP wrapper: {e}")
+    logging.info("Start initialize MoriEP wrapper")
+    MoriEPWrapper._create(mori_config, shmem_group_name=shmem_group_name)
+    logging.info("Finish initialize MoriEP wrapper")
 

@@ -120,6 +120,10 @@ class RocmExpertsBf16(FusedMoeExpertExecutor):
         assert self.w1.size(0) == self.local_num_experts
         assert self.w2.size(0) == self.local_num_experts
 
+        # When router has already remapped IDs to local indices (e.g. MoriEpIntranodeRouter),
+        # expert_mask (which is based on global IDs) must not be applied.
+        effective_expert_mask = None if payload.expert_ids_are_local else (expert_map if expert_map is not None else self.expert_mask)
+
         hidden_states = payload.expert_x
 
         if apply_router_weight_on_input:
@@ -140,7 +144,7 @@ class RocmExpertsBf16(FusedMoeExpertExecutor):
             topk_weights,
             topk_ids,
             activation=_moe_activation_type(activation),
-            expert_mask=expert_map if expert_map is not None else self.expert_mask,
+            expert_mask=effective_expert_mask,
         )
 
         return CombineForwardPayload(fused_expert_output=output)
@@ -231,6 +235,8 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         assert self.w1.size(0) == self.local_num_experts
         assert self.w2.size(0) == self.local_num_experts
 
+        effective_expert_mask = None if payload.expert_ids_are_local else (expert_map if expert_map is not None else self.expert_mask)
+
         hidden_states = payload.expert_x
         if apply_router_weight_on_input:
             assert (
@@ -253,7 +259,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),
-            expert_mask=expert_map if expert_map is not None else self.expert_mask,
+            expert_mask=effective_expert_mask,
         )
 
         return CombineForwardPayload(fused_expert_output=output)
@@ -334,6 +340,10 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
         assert self.w1.size(0) == self.local_num_experts
         assert self.w2.size(0) == self.local_num_experts
 
+        # When router has already remapped IDs to local indices (e.g. MoriEpIntranodeRouter),
+        # expert_mask (which is based on global IDs) must not be applied.
+        effective_expert_mask = None if payload.expert_ids_are_local else (expert_map if expert_map is not None else self.expert_mask)
+
         hidden_states = payload.expert_x
 
         if apply_router_weight_on_input:
@@ -357,7 +367,7 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),
-            expert_mask=expert_map if expert_map is not None else self.expert_mask,
+            expert_mask=effective_expert_mask,
         )
 
         return CombineForwardPayload(fused_expert_output=output)
@@ -466,7 +476,7 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
             ), "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
-        
+
         # view w1 and w2 to float4_e2m1fn_x2 if they are uint8
         w1 = self.w1
         w2 = self.w2
@@ -476,6 +486,13 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
         if w2.dtype == torch.uint8:
             w2 = w2.view(torch.float4_e2m1fn_x2)
             w2.is_shuffled = True
+
+        # When router has already remapped IDs to local indices (e.g. MoriEpIntranodeRouter),
+        # expert_mask (which is based on global IDs) must not be applied.
+        effective_expert_mask = None if payload.expert_ids_are_local else (expert_map if expert_map is not None else self.expert_mask)
+
+        # CK moe_sorting kernel requires int32 topk_ids
+        topk_ids = topk_ids.to(torch.int32)
 
         output = fused_moe(
             hidden_states,
@@ -487,7 +504,7 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),
-            expert_mask=expert_map if expert_map is not None else self.expert_mask,
+            expert_mask=effective_expert_mask,
             doweight_stage1=apply_router_weight_on_input,
         )
 

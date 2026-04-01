@@ -27,6 +27,9 @@ class SelectTopk(nn.Module):
         token_expert_indicies = torch.empty(
             topk_ids.shape[0], self.top_k, dtype=torch.int32, device=topk_ids.device
         )
+        # Ensure topk_ids is int32 for aiter.topk_softmax
+        if topk_ids.dtype != torch.int32:
+            topk_ids = topk_ids.to(torch.int32)
         aiter.topk_softmax(
             topk_weights,
             topk_ids,

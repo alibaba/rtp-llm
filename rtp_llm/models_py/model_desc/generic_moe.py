@@ -81,6 +81,7 @@ class GenericMoeLayer(nn.Module):
         self.num_local_experts = self.w1.shape[0]
         self.add_shared_expert = config.moe_style == 2
         self.tp_size = parallelism_config.tp_size
+        self.ep_size = parallelism_config.ep_size
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
                 config.activation_type, parallelism_config, weights, quant_config
@@ -156,18 +157,28 @@ class GenericMoeLayer(nn.Module):
             shared_expert_output = self.shared_expert(
                 hidden_states, skip_allreduce=use_unified_allreduce
             )
-            if self.shared_expert_gate is not None:
-                gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
-                # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
-                self.sigmoid_gate_scale_add(
-                    gate_output, shared_expert_output, experts_output
-                )
-            else:
+            if self.ep_size > 1 and use_unified_allreduce:
+                # EP mode: routed expert output is already complete
+                # (EP combine via all_to_all aggregated across ranks).
+                # Only the shared expert output is TP-partial and needs all_reduce.
+                if self.shared_expert_gate is not None:
+                    gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+                    shared_expert_output = torch.sigmoid(gate_output) * shared_expert_output
+                shared_expert_output = all_reduce(shared_expert_output, group=Group.TP)
                 experts_output = experts_output + shared_expert_output
-
-            # Unified allreduce after combining shared and routed expert outputs
-            if use_unified_allreduce:
-                experts_output = all_reduce(experts_output, group=Group.TP)
+            else:
+                # TP-only mode (ep_size <= 1): both routed and shared are TP-partial.
+                # Combine then do unified all_reduce.
+                if self.shared_expert_gate is not None:
+                    gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+                    # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
+                    self.sigmoid_gate_scale_add(
+                        gate_output, shared_expert_output, experts_output
+                    )
+                else:
+                    experts_output = experts_output + shared_expert_output
+                if use_unified_allreduce:
+                    experts_output = all_reduce(experts_output, group=Group.TP)
 
         return experts_output
 
