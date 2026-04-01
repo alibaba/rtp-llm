@@ -164,7 +164,7 @@ jobs:
     #       exit 1
     #     fi
 
-  sync-qwen35-0312:
+  sync-qwen35-0331:
     runs-on: cpu-only
     permissions:
       contents: write
@@ -187,37 +187,37 @@ jobs:
         git remote add upstream https://github.com/alibaba/rtp-llm.git || true
         git remote -v
 
-    - name: Check if origin has qwen35-0312 branch
+    - name: Check if origin has qwen35-0331 branch
       id: check_qwen35
       run: |
-        if git ls-remote --heads origin qwen35-0312 | grep -q 'refs/heads/qwen35-0312$'; then
+        if git ls-remote --heads origin qwen35-0331 | grep -q 'refs/heads/qwen35-0331$'; then
           echo "exists=true" >> $GITHUB_OUTPUT
         else
           echo "exists=false" >> $GITHUB_OUTPUT
         fi
 
-    - name: Fetch and checkout qwen35-0312 if exists
+    - name: Fetch and checkout qwen35-0331 if exists
       if: steps.check_qwen35.outputs.exists == 'true'
       run: |
-        git fetch origin qwen35-0312
-        git checkout qwen35-0312
-        git reset --hard origin/qwen35-0312
+        git fetch origin qwen35-0331
+        git checkout qwen35-0331
+        git reset --hard origin/qwen35-0331
 
-    - name: Create and checkout qwen35-0312 if not exists
+    - name: Create and checkout qwen35-0331 if not exists
       if: steps.check_qwen35.outputs.exists == 'false'
       run: |
-        git checkout -b qwen35-0312
+        git checkout -b qwen35-0331
 
-    - name: Check if sync is needed for qwen35-0312
+    - name: Check if sync is needed for qwen35-0331
       id: check_sync_qwen35
       run: |
-        git fetch upstream qwen35-0312
-        UPSTREAM_COMMIT=$(git rev-parse upstream/qwen35-0312)
+        git fetch upstream qwen35-0331
+        UPSTREAM_COMMIT=$(git rev-parse upstream/qwen35-0331)
         CURRENT_COMMIT=$(git rev-parse HEAD)
         echo "UPSTREAM_COMMIT: $UPSTREAM_COMMIT"
 
         if [ "$CURRENT_COMMIT" = "$UPSTREAM_COMMIT" ]; then
-          echo "Already synced with upstream/qwen35-0312"
+          echo "Already synced with upstream/qwen35-0331"
           echo "needs_sync=false" >> $GITHUB_OUTPUT
           exit 0
         fi
@@ -227,20 +227,20 @@ jobs:
         if [ "$PARENT_COMMIT" = "$UPSTREAM_COMMIT" ]; then
           COMMIT_MSG=$(git log -1 --pretty=%B)
           if echo "$COMMIT_MSG" | grep -q "\[CI\]\[AMD\] add workflows"; then
-            echo "Already synced with upstream/qwen35-0312 (has CI commit)"
+            echo "Already synced with upstream/qwen35-0331 (has CI commit)"
             echo "needs_sync=false" >> $GITHUB_OUTPUT
             exit 0
           fi
         fi
 
-        echo "Need to sync with upstream/qwen35-0312"
+        echo "Need to sync with upstream/qwen35-0331"
         echo "needs_sync=true" >> $GITHUB_OUTPUT
 
-    - name: Sync qwen35-0312 with upstream and add AMD workflows
+    - name: Sync qwen35-0331 with upstream and add AMD workflows
       if: steps.check_sync_qwen35.outputs.needs_sync == 'true'
       run: |
-        git fetch upstream qwen35-0312
-        git reset --hard upstream/qwen35-0312
+        git fetch upstream qwen35-0331
+        git reset --hard upstream/qwen35-0331
         # rm -rf .github/workflows/*.yaml
         # rm -rf .github/workflows/*.yml
         # git fetch origin yuzho/ci_workflows
