@@ -19,8 +19,12 @@ public:
         RTP_LLM_CHECK_WITH_INFO(!cache_config.cache_specs.empty(), "cache_specs must not be empty");
         BlockPoolConfig config;
         config.block_num      = cache_config.block_num;
-        const bool  is_hybrid = cache_config.groupNums() > 1;
-        auto        layer_num = is_hybrid ? cache_config.group_layer_num : cache_config.layer_num;
+        // Must match KVCacheManager allocator choice: a single LinearAttention group still uses hybrid layout
+        // (group_layer_num strides), not pure MHA partitioning.
+        const bool is_hybrid = cache_config.groupNums() > 1
+                               || (cache_config.cache_specs[0] != nullptr
+                                   && cache_config.cache_specs[0]->type == KVCacheSpecType::LinearAttention);
+        auto layer_num = is_hybrid ? cache_config.group_layer_num : cache_config.layer_num;
         const auto& main_spec = cache_config.cache_specs[0];
         // linear block size is same with full block block size
         MemoryLayoutConfig main_layout = createMemoryLayoutConfig(is_hybrid,

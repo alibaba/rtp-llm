@@ -113,6 +113,7 @@ genrule(
         "libmodule_rmsnorm.so",
         "libmodule_gemm_a8w8.so",
         "libmodule_moe_ck2stages.so",
+        "libmodule_mha_batch_prefill.so",
     ],
     cmd = """
        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_aiter_enum.so $(location libmodule_aiter_enum.so);
@@ -135,6 +136,7 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_rmsnorm.so $(lo
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8.so $(location libmodule_gemm_a8w8.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_ck2stages.so $(location libmodule_moe_ck2stages.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_deepgemm.so $(location libmodule_deepgemm.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_mha_batch_prefill.so $(location libmodule_mha_batch_prefill.so);
 """,
     tags = [
         "local",
@@ -165,6 +167,7 @@ genrule(
         "module_rmsnorm.so",
         "module_gemm_a8w8.so",
         "module_deepgemm.so",
+        "module_mha_batch_prefill.so",
     ],
     cmd = """
         cp external/aiter/aiter/jit/module_aiter_enum.so $(location module_aiter_enum.so);
@@ -186,6 +189,7 @@ genrule(
         cp external/aiter/aiter/jit/module_rmsnorm.so $(location module_rmsnorm.so);
         cp external/aiter/aiter/jit/module_gemm_a8w8.so $(location module_gemm_a8w8.so);
         cp external/aiter/aiter/jit/module_deepgemm.so $(location module_deepgemm.so);
+        cp external/aiter/aiter/jit/module_mha_batch_prefill.so $(location module_mha_batch_prefill.so);
 """,
     tags = [
         "local",
