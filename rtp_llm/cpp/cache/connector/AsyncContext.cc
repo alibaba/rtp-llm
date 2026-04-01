@@ -18,6 +18,7 @@ void FusedAsyncContext::waitDone() {
             contexts_[i]->waitDone();
         }
     }
+    RTP_LLM_LOG_DEBUG("fused async context wait done, success: %d", success());
 }
 
 bool FusedAsyncContext::done() const {
@@ -32,10 +33,21 @@ bool FusedAsyncContext::done() const {
 bool FusedAsyncContext::success() const {
     for (const auto& context : contexts_) {
         if (context && !context->success()) {
+            RTP_LLM_LOG_DEBUG("fused async context success is false, context error info: %s",
+                              context->errorInfo().ToString().c_str());
             return false;
         }
     }
     return true;
+}
+
+ErrorInfo FusedAsyncContext::errorInfo() const {
+    for (const auto& context : contexts_) {
+        if (context && !context->success()) {
+            return context->errorInfo();
+        }
+    }
+    return ErrorInfo::OkStatus();
 }
 
 // --------------------------------- FusedAsyncReadContext ---------------------------------
@@ -79,6 +91,17 @@ bool FusedAsyncReadContext::success() const {
         return !fused_read_context_ || fused_read_context_->success();
     }
     return false;
+}
+
+ErrorInfo FusedAsyncReadContext::errorInfo() const {
+    if (fused_match_context_ && !fused_match_context_->success()) {
+        return fused_match_context_->errorInfo();
+    }
+    std::lock_guard<std::mutex> lk(read_ctx_mutex_);
+    if (fused_read_context_ && !fused_read_context_->success()) {
+        return fused_read_context_->errorInfo();
+    }
+    return ErrorInfo::OkStatus();
 }
 
 void FusedAsyncReadContext::setFusedReadContext(const std::shared_ptr<FusedAsyncContext>& fused_read_context) {
