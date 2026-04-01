@@ -65,7 +65,11 @@ KVCacheManager::~KVCacheManager() {
 bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "cache specs must not be empty");
 
-    const bool is_hybrid = config_.groupNums() > 1;
+    // Multiple cache groups always use HybridTypeKVCacheAllocator. A single group still needs the hybrid
+    // allocator when it is LinearAttention-only: SingleTypeKVCacheAllocator only supports MHA/MLA.
+    const bool is_hybrid = config_.groupNums() > 1
+                           || (config_.cache_specs[0] != nullptr
+                               && config_.cache_specs[0]->type == KVCacheSpecType::LinearAttention);
     if (is_hybrid) {
         allocator_ = std::make_shared<rtp_llm::HybridTypeKVCacheAllocator>(
             config_, device_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);

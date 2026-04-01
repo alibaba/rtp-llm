@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.utils.util import to_torch_dtype
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -86,7 +87,7 @@ class MoriEPWrapperConfig:
             hidden_dim=model_config.hidden_size,
             scale_dim=0,  # TODO: support scale_dim
             scale_type_size=0,  # sizeof(config.data_type)
-            max_token_type_size=torch.tensor([], dtype=model_config.data_type).element_size(),
+            max_token_type_size=torch.tensor([], dtype=to_torch_dtype(model_config.data_type)).element_size(),
             max_num_inp_token_per_rank=max_num_tokens,
             num_experts_per_rank=model_config.expert_num // parallelism_config.ep_size,
             num_experts_per_token=model_config.moe_k,
@@ -254,10 +255,7 @@ def init_moriep_wrapper(
         enable_cuda_graph=enable_cuda_graph,
     )
     mori_config = MoriEPWrapperConfig.from_config_adapter(mori_config_adapter)
-    try:
-        logging.info("Start initialize MoriEP wrapper")
-        MoriEPWrapper._create(mori_config, shmem_group_name=shmem_group_name)
-        logging.info("Finish initialize MoriEP wrapper")
-    except Exception as e:
-        logging.error(f"Failed to initialize MoriEP wrapper: {e}")
+    logging.info("Start initialize MoriEP wrapper")
+    MoriEPWrapper._create(mori_config, shmem_group_name=shmem_group_name)
+    logging.info("Finish initialize MoriEP wrapper")
 
