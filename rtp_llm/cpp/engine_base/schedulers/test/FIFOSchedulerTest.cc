@@ -424,7 +424,7 @@ TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
 
 TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -446,7 +446,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
     // Enqueue only 2 of 3 — group incomplete, should not be scheduled
     {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = 10;
@@ -459,7 +459,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
     }
     {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = 10;
@@ -479,7 +479,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
     // Enqueue the 3rd — group complete, all 3 should be scheduled together
     {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = 10;
@@ -500,7 +500,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
 
 TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -524,7 +524,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
     // Enqueue only 2 of 3 with begin_time far in the past so timeout has expired
     {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = timeout_ms;
@@ -537,7 +537,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
     }
     {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = timeout_ms;
@@ -558,7 +558,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
 
 TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -581,7 +581,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
     shared_ptr<GenerateStream> normal_stream;
     {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->input_ids                     = torch::tensor({1}, torch::kInt32);
         query->generate_config               = make_shared<GenerateConfig>();
         query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
         normal_stream =
@@ -590,7 +590,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
     }
     {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = 10;
@@ -603,7 +603,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
     }
     {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = 10;
@@ -635,7 +635,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
 // Two different complete force batch groups: only one group per scheduling round
 TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -659,7 +659,7 @@ TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
     vector<shared_ptr<GenerateStream>> group_a_streams;
     for (int i = 0; i < group_size; i++) {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = 10;
@@ -672,7 +672,7 @@ TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
     }
     for (int i = 0; i < group_size; i++) {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
         query->generate_config->force_batch         = true;
         query->generate_config->batch_group_timeout = 10;
