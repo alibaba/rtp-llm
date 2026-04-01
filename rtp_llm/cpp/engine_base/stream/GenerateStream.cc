@@ -124,7 +124,11 @@ absl::Status GenerateStream::initKVBlock(size_t reserve_step) {
     } else if (generate_status_->status == StreamState::PAUSED) {
         pause_time_us_ += autil::TimeUtility::currentTimeInMicroSeconds() - last_pause_us_;
     }
-    return stream_cache_resource_->initKVBlock(reserve_step);
+    auto ret = stream_cache_resource_->initKVBlock(reserve_step);
+    if (!ret.ok()) {
+        RTP_LLM_LOG_WARNING("GenerateStream::initKVBlock: initKVBlock failed, stream_id: %lld", streamId());
+    }
+    return ret;
 }
 
 void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
@@ -360,6 +364,34 @@ int GenerateStream::memoryReuseLength() const {
 
 void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     initial_reuse_length_ = initial_reuse_length;
+}
+
+void GenerateStream::setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory) {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    prefill_total_reuse_len_  = total;
+    prefill_local_reuse_len_  = local;
+    prefill_remote_reuse_len_ = remote;
+    prefill_memory_reuse_len_ = memory;
+}
+
+int64_t GenerateStream::prefillTotalReuseLen() const {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    return prefill_total_reuse_len_;
+}
+
+int64_t GenerateStream::prefillLocalReuseLen() const {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    return prefill_local_reuse_len_;
+}
+
+int64_t GenerateStream::prefillRemoteReuseLen() const {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    return prefill_remote_reuse_len_;
+}
+
+int64_t GenerateStream::prefillMemoryReuseLen() const {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    return prefill_memory_reuse_len_;
 }
 
 void GenerateStream::incLastOutputPos() {
@@ -1111,6 +1143,16 @@ void GenerateStream::resizeSubGenerateStatus(size_t new_size) {
             sub_generate_status_[i].status = StreamState::RUNNING;
         }
     }
+}
+
+std::pair<std::string, uint32_t> GenerateStream::prefillAddr() const {
+    for (const auto& role_addr : generate_input_->generate_config->role_addrs) {
+        if (role_addr.role == RoleType::PREFILL) {
+            return std::make_pair(role_addr.ip, role_addr.grpc_port);
+        }
+    }
+
+    return std::make_pair("", 0);
 }
 
 }  // namespace rtp_llm

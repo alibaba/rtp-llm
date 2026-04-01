@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -133,6 +134,10 @@ private:
     int  malloc_failed_times_   = 0;
     bool fake_inited_           = false;
     bool resource_released_     = false;
+    /// Async connector load is gated to once per cache lifecycle: duplicate `initKVBlock` must
+    /// not re-issue async read (see tests). Reset in `releaseResource()` when blocks are cleared
+    /// so any future reuse of this resource can load again. Concurrent callers use `exchange`.
+    std::atomic<bool> load_cache_once_{false};
 };
 
 }  // namespace rtp_llm

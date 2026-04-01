@@ -17,6 +17,7 @@ struct ResourceContext {
     std::shared_ptr<SystemPrompt>   system_prompt;
 
     RoleType role_type{RoleType::PDFUSION};
+    bool     decode_entrance{false};  // PD反转模式：Decode侧作为请求入口
 
     bool    reuse_cache{false};
     bool    enable_memory_cache{false};
