@@ -166,14 +166,14 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const size_t group_num = is_hybrid ? param.kv_cache_group_types_host.size(0) : 1;
 
     int gid = 0;
+    if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
+        && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
+        gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
+
     if (param.host_kv_cache_offset.dim() == 3) {
-        gid = -1;
-        if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
-            && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
-            gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
-        }
-        RTP_LLM_CHECK_WITH_INFO(
-            gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
         const auto group_offset_view = param.host_kv_cache_offset[static_cast<int64_t>(gid)];
         max_blocks_per_batch         = group_offset_view.size(1);
         offset_addr                  = group_offset_view.data_ptr<int32_t>();
