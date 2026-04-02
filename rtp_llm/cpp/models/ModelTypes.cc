@@ -182,70 +182,138 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
     }
 
-    // NCCL requires pinned memory for CPU buffers. Rank 0's tensors may be
-    // regular (non-pinned) CPU memory from NormalBatchStreamProcessor, so we
-    // pin them here. pinned_holders keeps the pinned copies alive until after
-    // broadcast + syncAndCheck completes.
-    std::vector<torch::Tensor> pinned_holders;
-    auto                       ensurePinned = [&pinned_holders](const torch::Tensor& t) -> torch::Tensor {
-        if (!t.defined())
-            return t;
-        if (t.is_cpu() && !t.is_pinned()) {
-            auto pinned = t.pin_memory();
-            pinned_holders.push_back(pinned);
-            return pinned;
+    // Collect all tensors that participate in broadcast.
+    // The collect order must be deterministic and identical across all ranks.
+    std::vector<torch::Tensor*> tensor_ptrs;
+    auto                        collect = [&](torch::Tensor& t) {
+        if (t.defined() && t.numel() > 0) {
+            tensor_ptrs.push_back(&t);
         }
-        return t;
     };
 
-    std::vector<torch::Tensor> buffers;
-    buffers.emplace_back(ensurePinned(inputs.combo_tokens));
-    buffers.emplace_back(ensurePinned(inputs.input_lengths));
-    buffers.emplace_back(ensurePinned(inputs.sequence_lengths));
-    buffers.emplace_back(ensurePinned(inputs.prefix_lengths));
+    collect(inputs.combo_tokens);
+    collect(inputs.input_lengths);
+    collect(inputs.sequence_lengths);
+    collect(inputs.prefix_lengths);
     if (max_kernel_blocks || max_blocks) {
-        if (inputs.kv_cache_kernel_block_id.defined()) {
-            buffers.emplace_back(ensurePinned(inputs.kv_cache_kernel_block_id));
-        }
-        if (inputs.kv_cache_block_id.defined()) {
-            buffers.emplace_back(ensurePinned(inputs.kv_cache_block_id));
-        }
+        collect(inputs.kv_cache_kernel_block_id);
+        collect(inputs.kv_cache_block_id);
         if (layer_to_group_len) {
-            buffers.emplace_back(ensurePinned(inputs.kv_cache_layer_to_group));
+            collect(inputs.kv_cache_layer_to_group);
         }
         if (group_types_len) {
-            buffers.emplace_back(ensurePinned(inputs.kv_cache_group_types));
+            collect(inputs.kv_cache_group_types);
         }
         if (inputs.pd_separation) {
-            buffers.emplace_back(ensurePinned(inputs.cache_keys));
+            collect(inputs.cache_keys);
         }
-        if (inputs.kv_cache_update_mapping.defined()) {
-            buffers.emplace_back(ensurePinned(inputs.kv_cache_update_mapping));
-        }
+        collect(inputs.kv_cache_update_mapping);
     }
-    buffers.emplace_back(ensurePinned(inputs.request_id));
-    buffers.emplace_back(ensurePinned(inputs.request_pd_separation));
-    buffers.emplace_back(ensurePinned(inputs.lm_output_indexes));
-    buffers.emplace_back(ensurePinned(inputs.lm_output_lengths));
+    collect(inputs.request_id);
+    collect(inputs.request_pd_separation);
+    collect(inputs.lm_output_indexes);
+    collect(inputs.lm_output_lengths);
     if (combo_position_ids_size) {
-        buffers.emplace_back(ensurePinned(inputs.combo_position_ids));
+        collect(inputs.combo_position_ids);
     }
     if (text_tokens_mask_size) {
-        buffers.emplace_back(ensurePinned(inputs.text_tokens_mask));
+        collect(inputs.text_tokens_mask);
     }
     if (mm_features_locs_size) {
-        buffers.emplace_back(ensurePinned(inputs.mm_features_locs));
+        collect(inputs.mm_features_locs);
     }
     if (mm_features_num) {
-        for (auto& mm_feature : inputs.multimodal_features.value()) {
-            buffers.emplace_back(mm_feature);  // already on CUDA
+        for (auto& f : inputs.multimodal_features.value()) {
+            collect(f);
         }
     }
     if (hidden_states_size) {
-        buffers.emplace_back(ensurePinned(inputs.last_hidden_states));
+        collect(inputs.last_hidden_states);
     }
-    execBroadcast({buffers, 0});
+
+    // Classify tensors by device type (runtime check) and calculate packed sizes.
+    // Align each entry to 16 bytes so that typed access at any offset is safe
+    // and GPU memory coalescing / NCCL transfers stay on fast paths.
+    constexpr int64_t kPackAlignment = 16;
+    auto              align_up       = [](int64_t size, int64_t alignment) -> int64_t {
+        return (size + alignment - 1) & ~(alignment - 1);
+    };
+
+    struct PackEntry {
+        torch::Tensor* tensor;
+        int64_t        offset;
+        int64_t        nbytes;
+    };
+    std::vector<PackEntry> cpu_entries, gpu_entries;
+    int64_t                cpu_total_bytes = 0, gpu_total_bytes = 0;
+
+    for (auto* tp : tensor_ptrs) {
+        auto nb = static_cast<int64_t>(tp->nbytes());
+        if (tp->is_cuda()) {
+            gpu_entries.push_back({tp, gpu_total_bytes, nb});
+            gpu_total_bytes += align_up(nb, kPackAlignment);
+        } else {
+            cpu_entries.push_back({tp, cpu_total_bytes, nb});
+            cpu_total_bytes += align_up(nb, kPackAlignment);
+        }
+    }
+
+    bool is_root = parallelism_config.tp_rank == 0;
+
+    // Allocate one packed buffer per device type.
+    // CPU buffer uses pinned memory (required by NCCL for host-side broadcast).
+    torch::Tensor cpu_packed, gpu_packed;
+
+    if (cpu_total_bytes > 0) {
+        cpu_packed = torch::empty({cpu_total_bytes}, torch::kUInt8).pin_memory();
+        if (is_root) {
+            auto* base = static_cast<uint8_t*>(cpu_packed.data_ptr());
+            for (auto& e : cpu_entries) {
+                auto contig = e.tensor->contiguous();
+                std::memcpy(base + e.offset, contig.data_ptr(), e.nbytes);
+            }
+        }
+    }
+
+    if (gpu_total_bytes > 0) {
+        gpu_packed = torch::empty({gpu_total_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+        if (is_root) {
+            for (auto& e : gpu_entries) {
+                auto contig    = e.tensor->contiguous();
+                auto src_bytes = torch::from_blob(
+                    contig.data_ptr(), {e.nbytes}, torch::TensorOptions(torch::kUInt8).device(contig.device()));
+                gpu_packed.narrow(0, e.offset, e.nbytes).copy_(src_bytes);
+            }
+        }
+    }
+
+    // Broadcast at most 2 packed buffers instead of N individual tensors.
+    std::vector<torch::Tensor> packed_buffers;
+    if (cpu_packed.defined()) {
+        packed_buffers.push_back(cpu_packed);
+    }
+    if (gpu_packed.defined()) {
+        packed_buffers.push_back(gpu_packed);
+    }
+    execBroadcast({packed_buffers, 0});
     cudaSyncAndCheck();
+
+    // Unpack from packed buffers back to each tensor's original storage.
+    if (!is_root) {
+        if (cpu_total_bytes > 0) {
+            auto* base = static_cast<const uint8_t*>(cpu_packed.data_ptr());
+            for (auto& e : cpu_entries) {
+                std::memcpy(e.tensor->data_ptr(), base + e.offset, e.nbytes);
+            }
+        }
+        if (gpu_total_bytes > 0) {
+            for (auto& e : gpu_entries) {
+                auto dst_bytes = torch::from_blob(
+                    e.tensor->data_ptr(), {e.nbytes}, torch::TensorOptions(torch::kUInt8).device(e.tensor->device()));
+                dst_bytes.copy_(gpu_packed.narrow(0, e.offset, e.nbytes));
+            }
+        }
+    }
 }
 
 }  // namespace rtp_llm
