@@ -141,6 +141,7 @@ private:
     at::TensorOptions                      options_cuda_int32_;
     at::TensorOptions                      options_cpu_int32_;
     at::TensorOptions                      options_cuda_float_;
+    c10::cuda::MempoolId_t                 shared_graph_pool_{0, 0};
 
     std::vector<int32_t> kv_cache_layer_to_group_;
     int32_t              kv_cache_group_num_ = 0;

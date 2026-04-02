@@ -476,6 +476,7 @@ void CudaGraphRunner::logCudaGraphPoolMemory(const char* phase) {
 void CudaGraphRunner::initCapture() {
     if (enable_cuda_graph_) {
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
+        shared_graph_pool_ = at::cuda::graph_pool_handle();
         if (is_prefill_cuda_graph_mode_) {
             RTP_LLM_LOG_INFO("CUDA graph capture for embedding, num_tokens_per_bs_: %d", num_tokens_per_bs_);
         }
@@ -581,7 +582,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         RTP_LLM_LOG_INFO("Capture for %s %d begin.", key_type, key);
         PyModelOutputs outputs;
         {
-            graph.capture_begin();
+            graph.capture_begin(shared_graph_pool_);
             CudaGraphCaptureGuard capture_guard;
             auto                  py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
             outputs                              = py_outputs_obj.cast<PyModelOutputs>();
