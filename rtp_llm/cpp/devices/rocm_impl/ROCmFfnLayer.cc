@@ -502,6 +502,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
         /*dispatch_policy*/ 0);
 
     if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+#if 0
         RTP_LLM_CHECK_WITH_INFO(dtype == DataType::TYPE_BF16,
                                 "input hidden datatype should be bf16 when using Qfp8PerTokenBlock");
         const int block_scale_n                    = 128;
@@ -530,6 +531,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
             /*fc_scale_blkk*/ block_scale_k,
             /*fc2_smooth_scale=*/nullopt,
             /*activation*/ ::ActivationType::Silu);
+#endif
     } else {
         BufferPtr     a2        = allocateBuffer({dtype, {num_token, topk, (size_t)inter_dim}}, {"rocm_a2"});
         torch::Tensor a2_tensor = Buffer2torchTensor(*a2, false);
@@ -556,6 +558,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
         // invoke aiter two stage moe kernels
         if (params.qscheme == QScheme::NoQuantize) {
 #ifndef ROCM_GFX950
+#if 0
             ck_moe_stage1(
                 /*hidden_states*/ hidden_tensor,
                 /*w1*/ w1_tensor,
@@ -576,7 +579,9 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
                 /*nt*/ false,
                 /*dst_type*/ std::nullopt);
 #endif
+#endif
         } else {
+#if 0
             moe_stage1_g1u1(
                 /*input*/ hidden_tensor,
                 /*w1*/ w1_tensor,
@@ -594,6 +599,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
                 /*a1_scale*/ hidden_scale_tensor,
                 /*w1_scale*/ w1_scale_tensor,
                 /*sorted_weights*/ std::nullopt);
+#endif
         }
 
         if (params.qscheme != QScheme::NoQuantize) {
@@ -603,6 +609,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
             a2_scale_tensor = Buffer2torchTensor(a2_q->scales(), false);
         }
 #ifndef ROCM_GFX950
+#if 0
         ck_moe_stage2(
             /*inter_states*/ a2_tensor,
             /*w1*/ w1_tensor,
@@ -623,6 +630,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
             /*nt*/ false,
             /*dst_type*/ std::nullopt
         );
+#endif
 #endif
     }
     return {moe_out_final};
