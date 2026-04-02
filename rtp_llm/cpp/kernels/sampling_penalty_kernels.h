@@ -19,8 +19,6 @@
 #include <cuda_fp16.h>
 #endif
 
-#include "rtp_llm/cpp/kernels/penalty_types.h"
-
 #if USING_ROCM
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
@@ -43,15 +41,6 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
                                        cudaStream_t stream);
 
 template<typename T>
-void invokeApplyTemperaturePenalty(T*           logits,
-                                   const T*     bias,
-                                   const float  temperature,
-                                   const int    batch_size,
-                                   const int    vocab_size,
-                                   const int    vocab_size_padd,
-                                   cudaStream_t stream);
-
-template<typename T>
 void invokeBatchApplyTemperaturePenalty(T*           logits,
                                         const T*     bias,
                                         const float* temperatures,
@@ -59,15 +48,5 @@ void invokeBatchApplyTemperaturePenalty(T*           logits,
                                         const int    vocab_size,
                                         const int    vocab_size_padd,
                                         cudaStream_t stream);
-
-
-template<typename T>
-void invokeCopyLogits(float*       output_logits_buf,
-                      int*         logit_index_buf,
-                      T*           runtime_logits_buf,
-                      bool*        skip_decode_buf_,
-                      const int    local_batch_size,
-                      const int    vocab_size_padded_,
-                      cudaStream_t steam);
 
 }  // namespace rtp_llm

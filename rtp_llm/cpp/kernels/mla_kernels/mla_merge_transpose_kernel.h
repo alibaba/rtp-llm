@@ -13,32 +13,6 @@
 
 namespace rtp_llm {
 
-template<typename T>
-void invokeMlaMergeTranspose(T*           q,
-                             T*           k_nope,
-                             T*           k_rope,
-                             T*           v,
-                             T*           qkv,
-                             int          token_num,
-                             int          head_num,
-                             int          nope_head_dim,
-                             int          rope_head_dim,
-                             int          v_head_dim,
-                             cudaStream_t stream);
-
-template<typename T>
-void invokeMlaQKVMerge(T*           q,
-                       T*           k_nope,
-                       T*           k_rope,
-                       T*           v,
-                       T*           qkv,
-                       int          token_num,
-                       int          head_num,
-                       int          nope_head_dim,
-                       int          rope_head_dim,
-                       int          v_head_dim,
-                       cudaStream_t stream);
-
 #if USING_CUDA
 // Fused kernel to concatenate k_nope and k_pe in one operation
 template<typename T>

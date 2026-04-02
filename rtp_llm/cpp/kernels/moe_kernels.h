@@ -29,18 +29,6 @@
 
 namespace rtp_llm {
 
-// MoE (Mixture of Experts) operations
-
-// Scatter-add operation for expert routing
-template<typename T>
-void invokeScatterAdd(
-    T const* src, int N, int K, int32_t const* index, T* out, bool use_stable_scatter_add, cudaStream_t stream);
-
-// Slice and copy operation along dimension 1
-template<typename T>
-void invokeSliceDim1Copy(T const* src, int dim0, int dim1, int dim1_start, int dim1_size, T* out, cudaStream_t stream);
-
-// Fake expert load balancing for testing/debugging
 void fake_balance_expert(int*         expert,
                          float*       expert_scales,
                          int          dp_rank,
@@ -58,9 +46,5 @@ void fake_balance_expert(int64_t*     expert,
                          int          expert_num,
                          int          size,
                          cudaStream_t stream);
-
-// Expert indexing operations
-void genSourceRowRevert(
-    int64_t* expert_rows, int* expert_rows_dst, size_t token_num, size_t top_k, int start_expert, cudaStream_t stream);
 
 }  // namespace rtp_llm

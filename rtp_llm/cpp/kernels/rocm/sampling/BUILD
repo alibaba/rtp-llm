@@ -17,27 +17,3 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-cc_binary(
-    name = "bind.so",
-    srcs = [
-        "bind.cc",
-    ],
-    deps = [
-        ":sampling",
-        "//rtp_llm/cpp/pybind:py_utils",
-    ],
-    linkshared = True,
-    linkstatic = False,
-)
-
-# py_test(
-#     name = "test",
-#     srcs = ["test.py"],
-#     data = [
-#         ":bind.so",
-#     ],
-#     imports = ["."],
-#     python_version = "PY3",
-#     tags = ["rocm"],
-#     exec_properties = {'gpu':'MI308X'}
-# )

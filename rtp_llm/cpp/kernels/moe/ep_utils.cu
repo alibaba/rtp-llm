@@ -4,6 +4,18 @@
 namespace trt = tensorrt_llm::kernels;
 namespace rtp_llm {
 
+namespace {
+template<typename T>
+inline T* get_ptr(torch::Tensor& t) {
+    return reinterpret_cast<T*>(t.data_ptr());
+}
+
+template<typename T>
+inline const T* get_ptr(const torch::Tensor& t) {
+    return reinterpret_cast<const T*>(t.data_ptr());
+}
+}  // namespace
+
 #define MOE_SWITCH(TYPE, ...)                                                                                          \
     at::ScalarType _st = ::detail::scalar_type(TYPE);                                                                  \
     switch (_st) {                                                                                                     \

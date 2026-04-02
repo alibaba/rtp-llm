@@ -147,26 +147,6 @@ cc_library(
 )
 
 cc_library(
-    name = "cuggemm",
-    srcs = [
-        "cuggemm/cuggemm.cc",
-    ],
-    hdrs = [
-        "cuggemm/cuggemm.h",
-    ],
-    deps = [
-        ":cuda_host_utils",
-        "//rtp_llm/cpp/core:types",
-        "//rtp_llm/cpp/model_utils:model_utils",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-        ":trt_plugins",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "memory_utils",
     srcs = [
         "memory_utils.cu",
@@ -239,7 +219,6 @@ cc_library(
     deps = [
         ":cublas",
         ":cufmha",
-        ":cuggemm",
         ":cuda_host_utils",
         ":cuda_fmha_utils",
         "//rtp_llm/cpp/utils:core_utils",
@@ -267,17 +246,3 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-cc_library(
-    name = "allocator_torch",
-    srcs = [
-        "allocator_torch.cc"
-    ],
-    hdrs = [
-        "allocator_torch.h"
-    ],
-    copts = copts(),
-    deps = torch_deps() + [
-        ":allocator_cuda",
-    ],
-    visibility = ["//visibility:public"],
-)

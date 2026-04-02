@@ -262,11 +262,8 @@ cc_library(
     name = "rocm_fused_qk_rmsnorm",
     srcs = [
         "rocm/fused_qk_rmsnorm.cu",
-        "rocm/masked_silu_and_mul/mask_kernel.cu",
     ],
     hdrs = [
-        "rocm/masked_silu_and_mul/mask_kernel.h",
-        "rocm/masked_silu_and_mul/utils/array_utils.h",
         "rocm/fused_qk_rmsnorm.h",
     ],
     deps = rocm_deps + [
@@ -287,22 +284,9 @@ cc_library(
 )
 
 cc_library(
-    name = "rocm_mla",
-    srcs = glob([
-        "mla_kernels_rocm/*.cu",
-    ]),
-    hdrs = glob([
-        "mla_kernels_rocm/*.h",
-    ]),
-    deps = rocm_deps,
-    copts = rocm_copts(),
-)
-
-cc_library(
     name = "rocm_cu",
     deps = [
         ":rocm_basic",
-        ":rocm_mla",
         "//rtp_llm/cpp/kernels/rocm/sampling:sampling",
     ],
     visibility = ["//visibility:public"],
@@ -346,32 +330,6 @@ cc_library(
 )
 
 cc_library(
-    name = "kernels_layernorm",
-    srcs = [
-        "layernorm_kernels.cu",
-        "rmsnormKernels.cu",
-        #"fused_qk_rmsnorm.cu",
-    ],
-    hdrs = [
-        "layernorm_kernels.h",
-        "rmsnormKernels.h",
-        "fused_qk_rmsnorm.h",
-    ],
-    deps = any_cuda_deps + [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
-        "//rtp_llm/cpp/cuda:launch_utils",
-    ] + select({
-        "//:enable_triton": ["//rtp_llm/cpp/kernels/triton:triton_kernel"],
-        "//conditions:default": [],
-     }),
-    copts = any_cuda_copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "kernels_sampling",
     srcs = [
         "sampling_penalty_kernels.cu",
@@ -382,7 +340,6 @@ cc_library(
         "sampling_penalty_kernels.h",
         "banRepeatNgram.h",
         "mask_logits.h",
-        "penalty_types.h",
     ],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
@@ -413,6 +370,26 @@ cc_library(
 )
 
 cc_library(
+    name = "kernels_layernorm",
+    srcs = [
+        "layernorm_kernels.cu",
+    ],
+    hdrs = [
+        "layernorm_kernels.h",
+        "fused_qk_rmsnorm.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kernels_attention",
     srcs = [
         "unfused_attention_kernels.cu",
@@ -433,10 +410,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# =============================================================================
-# Refactored modular kernels (from original gpt_kernels)
-# =============================================================================
-
 cc_library(
     name = "kernels_embedding",
     srcs = [
@@ -453,6 +426,44 @@ cc_library(
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "kernels_moe",
+    srcs = [
+        "moe_kernels.cu",
+    ],
+    hdrs = [
+        "moe_kernels.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_mla",
+    srcs = glob([
+        "mla_kernels/*.cu",
+    ]),
+    hdrs = glob([
+        "mla_kernels/*.h",
+        "mla_kernels/*.cuh",
+    ]),
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+# =============================================================================
+# Refactored modular kernels (from original gpt_kernels)
+# =============================================================================
 
 cc_library(
     name = "kernels_tensor_ops",
@@ -512,23 +523,6 @@ cc_library(
 )
 
 cc_library(
-    name = "kernels_moe",
-    srcs = [
-        "moe_kernels.cu",
-    ],
-    hdrs = [
-        "moe_kernels.h",
-    ],
-    deps = any_cuda_deps + [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
-    ],
-    copts = any_cuda_copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "kernels_ep_util",
     srcs = glob([
         "moe/*.cu",
@@ -550,23 +544,6 @@ cc_library(
 )
 
 cc_library(
-    name = "kernels_mla",
-    srcs = glob([
-        "mla_kernels/*.cu",
-    ]),
-    hdrs = glob([
-        "mla_kernels/*.h",
-        "mla_kernels/*.cuh",
-    ]),
-    deps = any_cuda_deps + [
-        "//rtp_llm/cpp/utils:core_utils",
-    ],
-    copts = any_cuda_copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "kernels_cu",
     deps = [
         ":kernels_activation",
@@ -579,7 +556,6 @@ cc_library(
         ":kernels_copy",
         ":kernels_moe",
         ":kernels_mla",
-        "//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:mmha",
     ] + select({
         "@//:using_cuda": [
             ":cuda_cu",

@@ -19,26 +19,6 @@ __global__ void multiCopyKernel(const char** src_ptrs, char** dst_ptrs, const si
     }
 }
 
-void InvokeMultiCopyKernel(const std::vector<void*>&  h_src_ptrs,
-                           const std::vector<void*>&  h_dst_ptrs,
-                           const std::vector<size_t>& h_copy_sizes,
-                           cudaStream_t               stream) {
-    const int num_blocks = h_copy_sizes.size();
-
-    const int threads_per_block = 256;
-    dim3      grid(num_blocks);
-    dim3      block(threads_per_block);
-
-    thrust::device_vector<void*>  d_src_ptrs(h_src_ptrs.begin(), h_src_ptrs.end());
-    thrust::device_vector<void*>  d_dst_ptrs(h_dst_ptrs.begin(), h_dst_ptrs.end());
-    thrust::device_vector<size_t> d_copy_sizes(h_copy_sizes.begin(), h_copy_sizes.end());
-
-    multiCopyKernel<<<grid, block, 0, stream>>>((const char**)thrust::raw_pointer_cast(d_src_ptrs.data()),
-                                                (char**)thrust::raw_pointer_cast(d_dst_ptrs.data()),
-                                                thrust::raw_pointer_cast(d_copy_sizes.data()),
-                                                num_blocks);
-}
-
 void InvokeMultiMergeCopyKernel(const void*                h_dst_ptr,
                                 const std::vector<void*>&  h_src_ptrs,
                                 const std::vector<size_t>& h_copy_sizes,

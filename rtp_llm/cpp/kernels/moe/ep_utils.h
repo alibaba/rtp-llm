@@ -7,16 +7,6 @@
 
 namespace rtp_llm {
 
-template<typename T>
-inline T* get_ptr(torch::Tensor& t) {
-    return reinterpret_cast<T*>(t.data_ptr());
-}
-
-template<typename T>
-inline const T* get_ptr(const torch::Tensor& t) {
-    return reinterpret_cast<const T*>(t.data_ptr());
-}
-
 void moe_pre_reorder(const torch::Tensor&                input,                 // [n_token, hidden]
                      const torch::Tensor&                topk_ids,              // [n_token, topk]
                      const torch::Tensor&                token_expert_indices,  // [n_token, topk]

@@ -22,94 +22,6 @@
 
 namespace rtp_llm {
 
-// TODO Add half2 implementation
-template<typename T>
-__global__ void applyTemperaturePenalty(T*          logits,
-                                        const T*    bias,
-                                        const float temperature_inverse,
-                                        const int   m,
-                                        const int   vocab_size,
-                                        const int   vocab_size_padd) {
-    const bool IS_FP16   = std::is_same<T, half>::value;
-    const T    MAX_T_VAL = (IS_FP16) ? 65504.F : FLT_MAX;
-    for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < m * vocab_size_padd;
-         index += blockDim.x * gridDim.x) {
-        T bias_val = bias == nullptr ? (T)(0.0f) : bias[index % vocab_size_padd];
-        if (index % vocab_size_padd < vocab_size) {
-            logits[index] = (logits[index] + bias_val) * (T)temperature_inverse;
-        } else {
-            logits[index] = -MAX_T_VAL;
-        }
-    }
-}
-
-template<>
-__global__ void applyTemperaturePenalty(half2*       logits,
-                                        const half2* bias,
-                                        const float  temperature_inverse,
-                                        const int    batch_size,
-                                        const int    vocab_size,
-                                        const int    vocab_size_padded) {
-    assert(vocab_size % 2 == 0);
-    assert(vocab_size_padded % 2 == 0);
-    const half2 mask_val = __float2half2_rn(-65504.0f);
-    const half2 temp_inv = __float2half2_rn(temperature_inverse);
-
-    const int half_vocab_size        = vocab_size / 2;
-    const int half_vocab_size_padded = vocab_size_padded / 2;
-    for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < batch_size * half_vocab_size_padded;
-         index += blockDim.x * gridDim.x) {
-        int   vocab_idx = index % half_vocab_size_padded;
-        half2 logit     = vocab_idx < half_vocab_size ? __ldg(&logits[index]) : mask_val;
-        if (vocab_idx < half_vocab_size) {
-            if (bias != nullptr) {
-                logit = __hadd2(logit, bias[vocab_idx]);
-            }
-            logits[index] = __hmul2(logit, temp_inv);
-        }
-    }
-}
-
-template<typename T>
-void invokeApplyTemperaturePenalty(T*           logits,
-                                   const T*     bias,
-                                   const float  temperature,
-                                   const int    batch_size,
-                                   const int    vocab_size,
-                                   const int    vocab_size_padd,
-                                   cudaStream_t stream) {
-    dim3    block(min(vocab_size_padd, 1024));
-    dim3    grid(min(batch_size * vocab_size_padd / block.x, 65536));
-    const T temperature_inverse = (T)(1.f / (temperature + 1e-6f));
-    if (std::is_same<T, half>::value && vocab_size % 2 == 0 && vocab_size_padd % 2 == 0) {
-        applyTemperaturePenalty<<<grid, block, 0, stream>>>(reinterpret_cast<half2*>(logits),
-                                                            reinterpret_cast<const half2*>(bias),
-                                                            temperature_inverse,
-                                                            batch_size,
-                                                            vocab_size,
-                                                            vocab_size_padd);
-    } else {
-        applyTemperaturePenalty<T>
-            <<<grid, block, 0, stream>>>(logits, bias, temperature_inverse, batch_size, vocab_size, vocab_size_padd);
-    }
-}
-
-template void invokeApplyTemperaturePenalty(float*       logits,
-                                            const float* bias,
-                                            const float  temperature,
-                                            const int    batch_size,
-                                            const int    vocab_size,
-                                            const int    vocab_size_padd,
-                                            cudaStream_t stream);
-
-template void invokeApplyTemperaturePenalty(half*        logits,
-                                            const half*  bias,
-                                            const float  temperature,
-                                            const int    batch_size,
-                                            const int    vocab_size,
-                                            const int    vocab_size_padd,
-                                            cudaStream_t stream);
-
 template<typename T>
 __global__ void batchApplyTemperaturePenalty(T*           logits,
                                              const T*     bias,
@@ -310,48 +222,6 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
                                                             step);
 }
 
-template<typename T>
-__global__ void ApplyCopyLogits(float*    output_logits_buf,
-                                int*      logit_index_buf,
-                                T*        runtime_logits_buf,
-                                bool*     skip_decode_buf_,
-                                const int local_batch_size,
-                                const int vocab_size_padded_) {
-    int bid = blockIdx.x;
-    if (skip_decode_buf_[bid]) {
-        return;
-    }
-    for (int i = 0; i < local_batch_size; i++) {
-        output_logits_buf[bid] = logf((float)runtime_logits_buf[bid * vocab_size_padded_ + logit_index_buf[bid]]);
-    }
-}
-
-template<typename T>
-void invokeCopyLogits(float*       output_logits_buf,
-                      int*         logit_index_buf,
-                      T*           runtime_logits_buf,
-                      bool*        skip_decode_buf_,
-                      const int    local_batch_size,
-                      const int    vocab_size_padded_,
-                      cudaStream_t stream) {
-
-    dim3 block(1);
-    dim3 grid(local_batch_size);
-    ApplyCopyLogits<<<grid, block, 0, stream>>>(
-        output_logits_buf, logit_index_buf, runtime_logits_buf, skip_decode_buf_, local_batch_size, vocab_size_padded_);
-}
-
-#define INSTANTINVOKECOPYLOGITS(T)                                                                                     \
-    template void invokeCopyLogits(float*       output_logits_buf,                                                     \
-                                   int*         logit_index_buf,                                                       \
-                                   T*           runtime_logits_buf,                                                    \
-                                   bool*        skip_decode_buf_,                                                      \
-                                   const int    local_batch_size,                                                      \
-                                   const int    vocab_size_padded_,                                                    \
-                                   cudaStream_t stream);
-INSTANTINVOKECOPYLOGITS(float);
-INSTANTINVOKECOPYLOGITS(half);
-
 template void invokeBatchApplyRepetitionPenalty(float*       logits,
                                                 int*         penalty_ws,
                                                 const float* repetition_penalty,
@@ -379,6 +249,5 @@ template void invokeBatchApplyRepetitionPenalty(half*        logits,
                                                 const int    max_input_length,
                                                 const int    step,
                                                 cudaStream_t stream);
-
 
 }  // namespace rtp_llm

@@ -31,30 +31,30 @@ namespace rtp_llm {
 
 template<typename T>
 void invokeEmbeddingLookup(T*           from_tensor,
-                            const T*     embedding_table,
-                            double       input_embedding_scalar,
-                            const T*     pos_table,
-                            const T*     type_table,
-                            const int*   input_ids,
-                            const int*   input_pos,
-                            const int*   input_type,
-                            const int*   input_mask,
-                            const int    token_num,
-                            const int    hidden_units,
-                            cudaStream_t stream);
+                           const T*     embedding_table,
+                           double       input_embedding_scalar,
+                           const T*     pos_table,
+                           const T*     type_table,
+                           const int*   input_ids,
+                           const int*   input_pos,
+                           const int*   input_type,
+                           const int*   input_mask,
+                           const int    token_num,
+                           const int    hidden_units,
+                           cudaStream_t stream);
 
 template<typename T>
 void invokeEmbeddingLookupVec(T*           from_tensor,
-                               const T*     embedding_table,
-                               double       input_embedding_scalar,
-                               const T*     pos_table,
-                               const T*     type_table,
-                               const int*   input_ids,
-                               const int*   input_pos,
-                               const int*   input_type,
-                               const int*   input_mask,
-                               const int    token_num,
-                               const int    hidden_units,
-                               cudaStream_t stream);
+                              const T*     embedding_table,
+                              double       input_embedding_scalar,
+                              const T*     pos_table,
+                              const T*     type_table,
+                              const int*   input_ids,
+                              const int*   input_pos,
+                              const int*   input_type,
+                              const int*   input_mask,
+                              const int    token_num,
+                              const int    hidden_units,
+                              cudaStream_t stream);
 
 }  // namespace rtp_llm

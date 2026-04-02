@@ -70,27 +70,4 @@ void invokeGeneralLayerNorm(T*           out,
                             QUANT_OUT_T* out_quant            = nullptr,
                             bool         return_normed_output = false);
 
-template<typename T, bool IS_BIAS>
-void invokeQkLayerNorm(T* __restrict qkv,
-                       const T* __restrict gamma,
-                       const float  layernorm_eps,
-                       const int    tokens,
-                       const int    head_num,
-                       const int    head_num_kv,
-                       const int    size_per_head,
-                       cudaStream_t stream = 0);
-
-template<typename T>
-void invokeLayerNormWithStride(T* __restrict output,
-                               const int out_stride,
-                               const T* __restrict input,
-                               const int in_stride,
-                               const T* __restrict gamma,
-                               const T* __restrict beta,
-                               const float  layernorm_eps,
-                               const int    tokens,
-                               const int    hidden_size,
-                               const int    norm_size,
-                               cudaStream_t stream);
-
 }  // namespace rtp_llm
