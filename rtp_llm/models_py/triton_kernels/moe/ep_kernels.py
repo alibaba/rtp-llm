@@ -749,3 +749,103 @@ def post_reorder_triton_kernel(
                     in_data = tl.load(load_ptr + offset, mask=mask)
                     sum_vec += in_data * weigh_scale
         tl.store(store_ptr + offset, sum_vec, mask=mask)
+
+
+@triton.jit
+def _compute_problem_sizes_kernel(
+    topk_ids_ptr,
+    problem_sizes1_ptr,
+    problem_sizes2_ptr,
+    topk_length,
+    n,
+    k,
+    problem_1_swap_ab: tl.constexpr,
+    problem_2_swap_ab: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    expert_id = tl.program_id(0)
+
+    occurrences = 0
+    for start in range(0, topk_length, BLOCK_SIZE):
+        offsets = start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < topk_length
+        ids = tl.load(topk_ids_ptr + offsets, mask=mask, other=-1)
+        occurrences += tl.sum((ids == expert_id).to(tl.int32))
+
+    base = expert_id * 3
+    n2 = 2 * n
+    if problem_1_swap_ab:
+        tl.store(problem_sizes1_ptr + base, n2)
+        tl.store(problem_sizes1_ptr + base + 1, occurrences)
+        tl.store(problem_sizes1_ptr + base + 2, k)
+    else:
+        tl.store(problem_sizes1_ptr + base, occurrences)
+        tl.store(problem_sizes1_ptr + base + 1, n2)
+        tl.store(problem_sizes1_ptr + base + 2, k)
+
+    if problem_2_swap_ab:
+        tl.store(problem_sizes2_ptr + base, k)
+        tl.store(problem_sizes2_ptr + base + 1, occurrences)
+        tl.store(problem_sizes2_ptr + base + 2, n)
+    else:
+        tl.store(problem_sizes2_ptr + base, occurrences)
+        tl.store(problem_sizes2_ptr + base + 1, k)
+        tl.store(problem_sizes2_ptr + base + 2, n)
+
+
+@triton.jit
+def _compute_expert_offsets_kernel(
+    problem_sizes1_ptr,
+    expert_offsets_ptr,
+    num_experts,
+    swap_ab: tl.constexpr,
+    BLOCK_E: tl.constexpr,
+):
+    offsets = tl.arange(0, BLOCK_E)
+    mask = offsets < num_experts
+
+    if swap_ab:
+        sizes = tl.load(problem_sizes1_ptr + offsets * 3 + 1, mask=mask, other=0)
+    else:
+        sizes = tl.load(problem_sizes1_ptr + offsets * 3, mask=mask, other=0)
+
+    cum_sizes = tl.cumsum(sizes)
+    expert_starts = cum_sizes - sizes
+    tl.store(expert_offsets_ptr + offsets, expert_starts, mask=mask)
+
+
+@torch.no_grad()
+def get_cutlass_moe_mm_without_permute_info(
+    topk_ids: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    problem_sizes1: torch.Tensor,
+    problem_sizes2: torch.Tensor,
+    num_experts: int,
+    n: int,
+    k: int,
+    problem_1_swap_ab: bool,
+    problem_2_swap_ab: bool,
+):
+    topk_length = topk_ids.numel()
+    BLOCK_SIZE = min(1024, triton.next_power_of_2(topk_length))
+
+    _compute_problem_sizes_kernel[(num_experts,)](
+        topk_ids,
+        problem_sizes1,
+        problem_sizes2,
+        topk_length,
+        n,
+        k,
+        problem_1_swap_ab=problem_1_swap_ab,
+        problem_2_swap_ab=problem_2_swap_ab,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+    BLOCK_E = triton.next_power_of_2(num_experts)
+    _compute_expert_offsets_kernel[(1,)](
+        problem_sizes1,
+        expert_offsets,
+        num_experts,
+        swap_ab=problem_1_swap_ab,
+        BLOCK_E=BLOCK_E,
+    )
