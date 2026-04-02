@@ -382,6 +382,11 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
         return {moe_out_final};
     }
 
+#ifdef ROCM_GFX950
+    RTP_LLM_LOG_WARNING("ROCm moeFfn is temporarily disabled on gfx950 due to aiter moe interface mismatch.");
+    return {moe_out_final};
+#else
+
     torch::Tensor topk_ids_tensor     = Buffer2torchTensor(*(gate_outputs.expert_ids), false).to(torch::kInt32);
     torch::Tensor topk_weights_tensor = Buffer2torchTensor(*(gate_outputs.expert_scales), false);
 
@@ -621,6 +626,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
 #endif
     }
     return {moe_out_final};
+#endif
 }
 
 FfnLayerOutput ROCmDevice::ffnLayer(const FfnLayerParams& params) {

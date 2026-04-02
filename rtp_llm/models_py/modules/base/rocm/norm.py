@@ -3,7 +3,7 @@ from typing import Tuple, Union
 import torch
 import torch.nn.functional as F
 from aiter import layernorm2d_fwd as layernorm2d_fwd
-from aiter import rmsnorm2d_fwd as rms_norm
+from aiter import rms_norm
 from aiter import rmsnorm2d_fwd_with_add as fused_add_rmsnorm
 from torch import nn
 

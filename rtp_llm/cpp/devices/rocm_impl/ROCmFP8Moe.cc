@@ -10,10 +10,6 @@
 #include "deepgemm.h"
 #include "activation.h"
 
-// aiter kernels
-// ========= 修改头文件
-#include "ck_tile/host.hpp"
-
 namespace rtp_llm {
 
 #ifdef ENABLE_DEEP_EP
