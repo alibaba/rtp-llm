@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -113,10 +113,11 @@ class HeadWisePrefillAttnOp:
             if _HAS_FLASHINFER else None
         )
 
-        # runtime states
+        # runtime states (set per-layer by _get_headwise_config)
         self.retrieval_heads: Optional[torch.Tensor] = None
         self.non_retrieval_heads: Optional[torch.Tensor] = None
         self.num_retrieval_heads: int = 0
+        self._headwise_cache: Dict[int, Tuple[torch.Tensor, torch.Tensor, int]] = {}
         self.batch_wrappers: List[BatchWrapperItem] = []
         self.input_lengths: Optional[torch.Tensor] = None
         self.kv_lengths: Optional[torch.Tensor] = None
@@ -142,7 +143,12 @@ class HeadWisePrefillAttnOp:
     # Headwise config
     # ----------------------------
     def _get_headwise_config(self, layer_idx: int):
-        """根据层索引提取并分类当前 Rank 负责的头"""
+        """根据层索引提取并分类当前 Rank 负责的头（结果按 layer_idx 缓存）"""
+        cached = self._headwise_cache.get(layer_idx)
+        if cached is not None:
+            self.retrieval_heads, self.non_retrieval_heads, self.num_retrieval_heads = cached
+            return
+
         layer_key = str(layer_idx)
         if layer_key not in self.headwise_all_config:
             logging.warning(
@@ -152,19 +158,22 @@ class HeadWisePrefillAttnOp:
             self.retrieval_heads = torch.ones(self.head_num, dtype=torch.bool, device="cuda")
             self.non_retrieval_heads = torch.zeros(self.head_num, dtype=torch.bool, device="cuda")
             self.num_retrieval_heads = self.head_num
-            return
+        else:
+            start = self.head_num * self.rank
+            end = start + self.head_num
 
-        start = self.head_num * self.rank
-        end = start + self.head_num
+            layer_config = torch.tensor(
+                self.headwise_all_config[layer_key], device="cuda"
+            )
+            current_rank_weights = layer_config[start:end]
 
-        layer_config = torch.tensor(
-            self.headwise_all_config[layer_key], device="cuda"
+            self.non_retrieval_heads = current_rank_weights == 0
+            self.retrieval_heads = current_rank_weights == 1
+            self.num_retrieval_heads = int(self.retrieval_heads.sum().cpu())
+
+        self._headwise_cache[layer_idx] = (
+            self.retrieval_heads, self.non_retrieval_heads, self.num_retrieval_heads
         )
-        current_rank_weights = layer_config[start:end]
-
-        self.non_retrieval_heads = current_rank_weights == 0
-        self.retrieval_heads = current_rank_weights == 1
-        self.num_retrieval_heads = int(self.retrieval_heads.sum().cpu())
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> None:
         self.input_lengths = attn_inputs.input_lengths
@@ -416,6 +425,4 @@ class HeadWisePrefillImpl(FMHAImplBase):
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
         self.fmha_impl._get_headwise_config(layer_idx)
-
-       
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)

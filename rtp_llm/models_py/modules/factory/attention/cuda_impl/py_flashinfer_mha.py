@@ -367,7 +367,7 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
-        layer_idx: int
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         """Common forward implementation for all prefill implementations."""
         # Apply RoPE and KV Cache processing
@@ -599,7 +599,7 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
-        layer_idx: int,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
