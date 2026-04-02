@@ -127,5 +127,45 @@ class PureTpRouterFinalizeTest(TestCase):
         torch.testing.assert_close(result, reduced_output)
 
 
+class PureTpRouterCheckConditionsTest(TestCase):
+    """Regression tests for PureTpRouterBase.check_conditions strategy selection.
+
+    Ensures pure-TP router correctly matches/rejects parallelism configurations,
+    preventing the bug where ep_size == tp_size > 1 (EP scenario) was incorrectly
+    matched by the pure-TP router.
+    """
+
+    def _check_passes(self, config: MoEConfigAdapter) -> bool:
+        """Run PureTpRouterNoQuant.check_conditions and return whether all checks pass."""
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.pure_tp_router import (
+            PureTpRouterNoQuant,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.condition_checker import (
+            ConditionChecker,
+        )
+        checker = ConditionChecker("PureTpRouterNoQuant")
+        PureTpRouterNoQuant.check_conditions(checker, config)
+        return checker.all_passed()
+
+    def test_pure_tp_matches_tp4_dp1_ep1(self):
+        """tp=4, dp=1, ep=1 should match pure-TP (each rank holds all experts)."""
+        config = _make_config(tp_size=4, ep_size=1)
+        self.assertTrue(self._check_passes(config))
+
+    def test_pure_tp_rejects_tp4_dp1_ep4(self):
+        """tp=4, dp=1, ep=4 must NOT match pure-TP (weights split by EP)."""
+        config = _make_config(tp_size=4, ep_size=4)
+        self.assertFalse(self._check_passes(config))
+
+    def test_pure_tp_matches_single_gpu(self):
+        """tp=1, dp=1, ep=1 (single GPU) should match pure-TP."""
+        config = _make_config(tp_size=1, ep_size=1)
+        self.assertTrue(self._check_passes(config))
+
+    def test_pure_tp_rejects_ep2_tp2(self):
+        """tp=2, dp=1, ep=2 must NOT match pure-TP."""
+        config = _make_config(tp_size=2, ep_size=2)
+        self.assertFalse(self._check_passes(config))
+
 if __name__ == "__main__":
     main()
