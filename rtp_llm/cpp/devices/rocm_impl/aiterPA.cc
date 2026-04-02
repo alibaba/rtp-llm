@@ -513,6 +513,10 @@ inline torch::Tensor Buffer2torchTensorCustom(const Buffer& buf, std::vector<int
 }
 
 void runAiterAsmPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device, Buffer& q_tmp) {
+#if !RTP_LLM_HAS_AITER_ATTENTION_ASM
+    runAiterPA(params, device, q_tmp);
+    return;
+#else
     auto out   = Buffer2torchTensor(params.output, false);
     auto query = Buffer2torchTensor(q_tmp, false);
 
@@ -571,6 +575,7 @@ void runAiterAsmPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* dev
                V_QScale,
                out_opt);
     }
+#endif
 }
 
 void runAiterPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device, Buffer& q_tmp) {

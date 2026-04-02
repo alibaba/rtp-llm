@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 // #include "aiter_meta/csrc/include/attention.h"
 #include "attention.h"
-#include "attention_asm.h"
+// #include "attention_asm.h"
 #include <pybind11/pybind11.h>
 #include <Python.h>
 

@@ -13,6 +13,52 @@
 using namespace std;
 
 namespace rtp_llm {
+namespace {
+inline int64_t ptrToInt64(const void* ptr) {
+    return static_cast<int64_t>(reinterpret_cast<uintptr_t>(ptr));
+}
+
+inline AiterDtype toAiterDtype(const torch::ScalarType dtype) {
+    switch (dtype) {
+        case torch::kFloat16:
+            return AITER_DTYPE_fp16;
+        case torch::kBFloat16:
+            return AITER_DTYPE_bf16;
+        case torch::kFloat32:
+            return AITER_DTYPE_fp32;
+        case torch::kInt64:
+            return AITER_DTYPE_i64;
+        case torch::kInt32:
+            return AITER_DTYPE_i32;
+        case torch::kInt16:
+            return AITER_DTYPE_i16;
+        case torch::kInt8:
+            return AITER_DTYPE_i8;
+        case torch::kUInt8:
+            return AITER_DTYPE_u8;
+        case torch::kFloat8_e4m3fnuz:
+        case torch::kFloat8_e4m3fn:
+            return AITER_DTYPE_fp8;
+        default:
+            throw std::runtime_error("Unsupported dtype for aiter_tensor_t");
+    }
+}
+
+inline aiter_tensor_t toAiterTensor(const torch::Tensor& t) {
+    RTP_LLM_CHECK_WITH_INFO(t.dim() <= 8, "aiter tensor rank should <= 8, got %ld", t.dim());
+    aiter_tensor_t out {};
+    out.ptr     = t.data_ptr();
+    out.numel_  = static_cast<size_t>(t.numel());
+    out.ndim    = static_cast<int>(t.dim());
+    out.dtype_  = toAiterDtype(t.scalar_type());
+    out.device_id = t.is_cuda() ? static_cast<int>(t.get_device()) : -1;
+    for (int i = 0; i < out.ndim; ++i) {
+        out.shape[i]   = t.size(i);
+        out.strides[i] = t.stride(i);
+    }
+    return out;
+}
+}  // namespace
 
 CustomAllReduceComm::CustomAllReduceComm(const std::vector<size_t>& tp_ranks, size_t rank, size_t rank_index, const HWKernelConfig& hw_kernel_config):
     rank_(rank),
@@ -53,27 +99,40 @@ bool CustomAllReduceComm::checkAllGatherAvailable() {
 }
 
 void CustomAllReduceComm::allReduce(torch::Tensor& input_tensor, torch::Tensor& output_tensor) {
+    auto inp_aiter = toAiterTensor(input_tensor);
+    auto out_aiter = toAiterTensor(output_tensor);
+    const int64_t stream_i64 = ptrToInt64(reinterpret_cast<void*>(c10::hip::getCurrentHIPStream().stream()));
     if (at::hip::currentStreamCaptureStatusMayInitCtx() != at::hip::CaptureStatus::None) {
-        aiter::all_reduce(fa_, input_tensor, output_tensor, false, false, std::nullopt, std::nullopt);
+        aiter::all_reduce(fa_, inp_aiter, out_aiter, false, false, 0, 0, 0, 0, stream_i64);
     } else {
-         aiter::all_reduce(fa_, input_tensor, output_tensor, false, false, buffer_, buffer_);
+        const int64_t reg_ptr   = ptrToInt64(buffer_.data_ptr());
+        const int64_t reg_bytes = static_cast<int64_t>(buffer_.numel() * buffer_.element_size());
+        aiter::all_reduce(fa_, inp_aiter, out_aiter, false, false, reg_ptr, reg_bytes, reg_ptr, reg_bytes, stream_i64);
     }
 }
 
 void CustomAllReduceComm::allGather(torch::Tensor& input_tensor, torch::Tensor& output_tensor) {
-    int last_dim_size = output_tensor.size(-1);
-    int dim = 0;
+    auto inp_aiter = toAiterTensor(input_tensor);
+    auto out_aiter = toAiterTensor(output_tensor);
+    const int64_t gather_dim = 0;
+    const int64_t stream_i64 = ptrToInt64(reinterpret_cast<void*>(c10::hip::getCurrentHIPStream().stream()));
     if (at::hip::currentStreamCaptureStatusMayInitCtx() != at::hip::CaptureStatus::None) {
-        aiter::all_gather_reg(fa_, input_tensor, output_tensor, last_dim_size, dim);
+        aiter::all_gather_reg(fa_, inp_aiter, out_aiter, gather_dim, stream_i64);
     } else {
-        aiter::all_gather_unreg(fa_, input_tensor, buffer_, output_tensor, last_dim_size, dim);
+        const int64_t reg_ptr   = ptrToInt64(buffer_.data_ptr());
+        const int64_t reg_bytes = static_cast<int64_t>(buffer_.numel() * buffer_.element_size());
+        aiter::all_gather_unreg(fa_, inp_aiter, reg_ptr, out_aiter, reg_bytes, gather_dim, stream_i64);
     }
 }
 
 void CustomAllReduceComm::registerGraphBuffers() {
-    auto handle_and_offset = aiter::get_graph_buffer_ipc_meta(fa_); // tuple<tensor, vector<int64_t>> -> vector<tensor> size=2
-    auto handle = std::get<0>(handle_and_offset);
-    auto offset = std::get<1>(handle_and_offset);
+    const int64_t graph_buffer_count = aiter::get_graph_buffer_count(fa_);
+    if (graph_buffer_count <= 0) {
+        return;
+    }
+    auto handle = torch::empty({graph_buffer_count * HIP_IPC_HANDLE_SIZE}, torch::dtype(torch::kUInt8).device(torch::kCPU));
+    auto offset = torch::empty({graph_buffer_count}, torch::dtype(torch::kInt64).device(torch::kCPU));
+    aiter::get_graph_buffer_ipc_meta(fa_, ptrToInt64(handle.data_ptr()), ptrToInt64(offset.data_ptr()));
 
     auto _handles = all_gather(handle.data_ptr(), handle.element_size() * handle.numel(), at::hip::getCurrentHIPStream().stream());
     auto _offsets = all_gather(offset.data_ptr(), offset.element_size() * offset.numel(), at::hip::getCurrentHIPStream().stream());
@@ -81,9 +140,15 @@ void CustomAllReduceComm::registerGraphBuffers() {
     std::vector<torch::Tensor> offsets(world_size_); // vector<vector<int64_t>> -> vector<tensor>
     for (int i = 0; i < world_size_; ++i) {
         handles[i] = torch::from_blob(_handles[i].data(), handle.sizes(), handle.dtype());
-        offsets[i] = torch::from_blob(_offsets[i].data(), offset.sizes(), offset.dtype());
+        offsets[i] = torch::from_blob(_offsets[i].data(), offset.sizes(), offset.options());
     }
-    aiter::register_graph_buffers(fa_, handles, offsets);
+    std::vector<int64_t> handle_ptrs(world_size_);
+    std::vector<int64_t> offset_ptrs(world_size_);
+    for (int i = 0; i < world_size_; ++i) {
+        handle_ptrs[i] = ptrToInt64(handles[i].data_ptr());
+        offset_ptrs[i] = ptrToInt64(offsets[i].data_ptr());
+    }
+    aiter::register_graph_buffers(fa_, handle_ptrs, offset_ptrs);
 }
 
 std::vector<std::vector<char>> CustomAllReduceComm::all_gather(void* addr, size_t size, hipStream_t stream) {
@@ -106,7 +171,7 @@ void CustomAllReduceComm::init(const NcclParam& nccl_para, hipStream_t stream) {
     // prepare share buffer
 
     // meta data buffers need to be "uncached" for signal on MI200
-    meta_   = aiter::allocate_meta_buffer(aiter::meta_size() + comm_buf_threshold_);
+    meta_   = torch::empty({aiter::meta_size() + comm_buf_threshold_}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
     buffer_ = torch::empty(
         {
             comm_buf_threshold_,
@@ -120,10 +185,21 @@ void CustomAllReduceComm::init(const NcclParam& nccl_para, hipStream_t stream) {
     std::vector<int64_t> meta_offsets(world_size_, 0);
     std::vector<int64_t> buffer_offsets(world_size_, 0);
 
-    fa_ = aiter::init_custom_ar(meta_, rank_data_, meta_handles, meta_offsets, rank_index_, support_nv_link_);
+    std::vector<int64_t> meta_handle_ptrs(world_size_);
+    std::vector<int64_t> buffer_handle_ptrs(world_size_);
+    for (int i = 0; i < world_size_; ++i) {
+        meta_handle_ptrs[i]   = ptrToInt64(meta_handles[i].data_ptr());
+        buffer_handle_ptrs[i] = ptrToInt64(buffer_handles[i].data_ptr());
+    }
 
-    aiter::register_input_buffer(fa_, buffer_, buffer_handles, buffer_offsets);
-    aiter::register_output_buffer(fa_, buffer_, buffer_handles, buffer_offsets);
+    const int64_t meta_ptr      = ptrToInt64(meta_.data_ptr());
+    const int64_t rank_data_ptr = ptrToInt64(rank_data_.data_ptr());
+    const int64_t rank_data_sz  = static_cast<int64_t>(rank_data_.numel() * rank_data_.element_size());
+    fa_ = aiter::init_custom_ar(meta_ptr, rank_data_ptr, rank_data_sz, meta_handle_ptrs, meta_offsets, rank_index_, support_nv_link_);
+
+    const int64_t buffer_ptr = ptrToInt64(buffer_.data_ptr());
+    aiter::register_input_buffer(fa_, buffer_ptr, buffer_handle_ptrs, buffer_offsets);
+    aiter::register_output_buffer(fa_, buffer_ptr, buffer_handle_ptrs, buffer_offsets);
     nccl_para_ = nccl_para;
 }
 
@@ -134,12 +210,12 @@ CustomAllReduceComm::prepareP2PBuffer_(const NcclParam& nccl_para, torch::Tensor
     ROCM_CHECK(hipMalloc(&serial_handle_buffer_ptr, IPChandleBufSize(world_size_)));
 
     // open local hipIpcMemHandle
-    torch::Tensor     local_buffer_handle_tensor = aiter::get_meta_buffer_ipc_handle(local_buffer);
-    hipIpcMemHandle_t local_buffer_handle        = *(hipIpcMemHandle_t*)local_buffer_handle_tensor.data_ptr();
+    auto local_buffer_handle_tensor = torch::empty({HIP_IPC_HANDLE_SIZE}, torch::dtype(torch::kUInt8).device(torch::kCPU));
+    aiter::get_meta_buffer_ipc_handle(ptrToInt64(local_buffer.data_ptr()), ptrToInt64(local_buffer_handle_tensor.data_ptr()));
 
     // serialized hipIpcMemHandle
     ROCM_CHECK(hipMemcpyAsync(serial_handle_buffer_ptr + HIP_IPC_HANDLE_SIZE * rank_index_,
-                              local_buffer_handle.reserved,
+                              local_buffer_handle_tensor.data_ptr(),
                               HIP_IPC_HANDLE_SIZE,
                               hipMemcpyHostToDevice,
                               stream));
@@ -153,7 +229,6 @@ CustomAllReduceComm::prepareP2PBuffer_(const NcclParam& nccl_para, torch::Tensor
     std::vector<torch::Tensor> handles(world_size_);
     auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
     for (size_t i = 0; i < handles.size(); ++i) {
-        char tmp[HIP_IPC_HANDLE_SIZE];
         handles[i] = torch::empty({static_cast<int64_t>(HIP_IPC_HANDLE_SIZE)}, options);
         ROCM_CHECK(hipMemcpyAsync(handles[i].data_ptr(),
                                    serial_handle_buffer_ptr + HIP_IPC_HANDLE_SIZE * i,
@@ -161,6 +236,7 @@ CustomAllReduceComm::prepareP2PBuffer_(const NcclParam& nccl_para, torch::Tensor
                                    hipMemcpyDeviceToHost,
                                    stream));
     }
+    ROCM_CHECK(hipStreamSynchronize(stream));
 
     ROCM_CHECK(hipFreeAsync(serial_handle_buffer_ptr, stream));
     return handles;

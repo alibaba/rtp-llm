@@ -268,7 +268,7 @@ void ROCmDevice::InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output) 
 
     torch::Tensor output_tensor = Buffer2torchTensor(output, false);
 
-    gemm_a8w8_bpreshuffle(A_quant_tensor, W_kernel_tensor, A_quant_scale_tensor, W_scale_tensor, output_tensor);
+    gemm_a8w8_bpreshuffle(A_quant_tensor, W_kernel_tensor, A_quant_scale_tensor, W_scale_tensor, output_tensor, 1);
 }
 
 void ROCmDevice::HipblasltPTPCGemm(const GemmParams& params, BufferPtr output) {
