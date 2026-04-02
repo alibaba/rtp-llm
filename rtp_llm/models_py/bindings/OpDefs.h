@@ -205,6 +205,9 @@ struct PyAttentionInputs {
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
 
     std::optional<PyContextParallelParams> context_parallel_info;
+
+    // Headwise attention config (Python dict or None).
+    py::object headwise_config{py::none()};
 };
 
 struct BertEmbeddingInputs {
