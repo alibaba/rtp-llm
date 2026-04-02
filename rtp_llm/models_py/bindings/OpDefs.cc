@@ -90,7 +90,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("prefill_qkv_padding_mask", &PyContextParallelParams::prefill_qkv_padding_mask)
         .def_readwrite("prefill_actual_input_lengths_cpu", &PyContextParallelParams::prefill_actual_input_lengths_cpu);
 
-    pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs", pybind11::dynamic_attr())
+    pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
@@ -123,7 +123,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
         .def_readwrite("context_parallel_info", &PyAttentionInputs::context_parallel_info)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
-        .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params);
+        .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params)
+        .def_readwrite("headwise_config", &PyAttentionInputs::headwise_config);
 
     pybind11::class_<BertEmbeddingInputs>(m, "BertEmbeddingInputs")
         .def(pybind11::init<>())

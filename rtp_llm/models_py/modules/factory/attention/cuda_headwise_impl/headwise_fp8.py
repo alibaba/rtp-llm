@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -93,6 +93,7 @@ class HeadWiseFP8PrefillAttnOp:
 
         self.retrieval_heads: Optional[torch.Tensor] = None
         self.non_retrieval_heads: Optional[torch.Tensor] = None
+        self._headwise_cache: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         self.batch_items: List[FP8BatchItem] = []
         self.input_lengths: Optional[torch.Tensor] = None
         self.kv_lengths: Optional[torch.Tensor] = None
@@ -105,6 +106,11 @@ class HeadWiseFP8PrefillAttnOp:
         return (major, minor) >= (12, 8) and getattr(attn_inputs, 'headwise_config', None) is not None
 
     def _get_headwise_config(self, layer_idx: int):
+        cached = self._headwise_cache.get(layer_idx)
+        if cached is not None:
+            self.retrieval_heads, self.non_retrieval_heads = cached
+            return
+
         layer_key = str(layer_idx)
         if layer_key not in self.headwise_all_config:
             logging.warning(
@@ -113,18 +119,19 @@ class HeadWiseFP8PrefillAttnOp:
             )
             self.retrieval_heads = torch.ones(self.head_num, dtype=torch.bool, device="cuda")
             self.non_retrieval_heads = torch.zeros(self.head_num, dtype=torch.bool, device="cuda")
-            return
+        else:
+            start = self.head_num * self.rank
+            end = start + self.head_num
 
-        start = self.head_num * self.rank
-        end = start + self.head_num
+            layer_config = torch.tensor(
+                self.headwise_all_config[layer_key], device="cuda"
+            )
+            current_rank_weights = layer_config[start:end]
 
-        layer_config = torch.tensor(
-            self.headwise_all_config[layer_key], device="cuda"
-        )
-        current_rank_weights = layer_config[start:end]
+            self.non_retrieval_heads = current_rank_weights == 0
+            self.retrieval_heads = current_rank_weights == 1
 
-        self.non_retrieval_heads = current_rank_weights == 0
-        self.retrieval_heads = current_rank_weights == 1
+        self._headwise_cache[layer_idx] = (self.retrieval_heads, self.non_retrieval_heads)
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> None:
         self.input_lengths = attn_inputs.input_lengths

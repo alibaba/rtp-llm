@@ -353,7 +353,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
         model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
-        model_input.kv_scale_stride_bytes  = mtp_cache_cfg.kv_scale_stride_bytes;
         draft_model_output                  = std::move(draft_model_->forward(model_input));
     }
 
@@ -637,8 +636,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
         model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
-        model_input.kv_scale_stride_bytes  = mtp_cache_cfg.kv_scale_stride_bytes;
-
     }
 
     {
