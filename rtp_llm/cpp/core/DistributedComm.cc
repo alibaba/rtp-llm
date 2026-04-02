@@ -116,7 +116,7 @@ void c10dBroadcast(const BroadcastParams& params) {
     DeviceGuard guard(entry.device_id);
     for (auto& buffer : params.buffers) {
         bool                    on_cpu  = !buffer.is_cuda();
-        at::Tensor              gpu_buf = on_cpu ? buffer.to(at::Device(at::kCUDA, entry.device_id)) : buffer;
+        at::Tensor              gpu_buf = on_cpu ? buffer.to(at::Device(at::kCUDA, entry.device_id), true) : buffer;
         std::vector<at::Tensor> tensors = {gpu_buf};
         c10d::BroadcastOptions  opts;
         opts.rootRank = params.root;
