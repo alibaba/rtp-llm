@@ -206,7 +206,7 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             (E, 3), dtype=torch.int32, device=payload.expert_x.device
         )
         expert_offsets = torch.empty(
-            (E,), dtype=torch.int32, device=payload.expert_x.device
+            (E + 1,), dtype=torch.int32, device=payload.expert_x.device
         )
         src_2_dst = cutlass_moe_pre_reorder(
             input=expert_x,
@@ -239,7 +239,7 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             self.w1,
             a1q_scale_permute,
             self.w1_scale,
-            expert_offsets,
+            expert_offsets[:-1],
             problem_sizes1,
             self.ab_strides1,
             self.ab_strides1,
@@ -264,7 +264,7 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             self.w2,
             a2q_scale,
             self.w2_scale,
-            expert_offsets,
+            expert_offsets[:-1],
             problem_sizes2,
             self.ab_strides2,
             self.ab_strides2,

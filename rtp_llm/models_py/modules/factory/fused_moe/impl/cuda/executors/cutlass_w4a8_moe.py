@@ -209,7 +209,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             (self.E, 3), dtype=torch.int32, device=payload.expert_x.device
         )
         expert_offsets = torch.empty(
-            (self.E,), dtype=torch.int32, device=payload.expert_x.device
+            (self.E + 1,), dtype=torch.int32, device=payload.expert_x.device
         )
         src_2_dst = cutlass_moe_pre_reorder(
             input=expert_x,
@@ -242,7 +242,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             self.w1,
             self.w1_scale,
             a1q_scale_permute,
-            expert_offsets,
+            expert_offsets[:-1],
             problem_sizes1,
             self.ab_strides1,
             self.ab_strides1,
@@ -265,7 +265,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             self.w2,
             self.w2_scale,
             a2q_scale,
-            expert_offsets,
+            expert_offsets[:-1],
             problem_sizes2,
             self.ab_strides2,
             self.ab_strides2,
