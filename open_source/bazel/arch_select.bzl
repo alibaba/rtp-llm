@@ -4,7 +4,8 @@ load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
-load("//bazel:defs.bzl", "copy_so")
+load("//bazel:defs.bzl", "copy_so", "copy_so_inst")
+load("//rtp_llm/cpp/cuda/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm_so_num")
 
 def copy_all_so():
     copy_so("//:th_transformer")
@@ -25,6 +26,9 @@ def copy_all_so():
     copy_so("@flashinfer_cpp//:flashinfer_batch_paged_prefill_256")
     copy_so("@flashinfer_cpp//:flashinfer_batch_paged_decode_256")
     copy_so("@flashinfer_cpp//:flashinfer_batch_ragged_prefill_256")
+    # num of so
+    copy_so_inst("//rtp_llm/cpp/cuda/deep_gemm:deepgemm_dpsk", dpsk_gemm_so_num)
+    copy_so_inst("//rtp_llm/cpp/cuda/deep_gemm:deepgemm_qwen", qwen_gemm_so_num)
     copy_so("@flashinfer_cpp//:flashinfer_sm90")
     copy_so("@deep_ep//:deep_ep_cu")
 
@@ -75,7 +79,7 @@ def subscribe_deps():
 def whl_deps():
     return select({
         "@//:using_cuda12": ["torch==2.6.0+cu126"],
-        "@//:using_rocm": ["pyrsmi==0.2.0", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.11%2Bgit.30d10408.date.202603091645-cp310-cp310-linux_x86_64.whl"],
+        "@//:using_rocm": ["pyrsmi==0.2.0", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://amd-afde.top/home/anzhao/aiter_whls/aiter-0.1.13.dev14+gfa35072d0.d20260402-cp310-cp310-linux_x86_64.whl"],
         "//conditions:default": ["torch==2.1.2"],
     })
 
@@ -154,8 +158,8 @@ def deep_ep_py_deps():
 
 def kernel_so_deps():
     return select({
-        "@//:using_cuda": [":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libmoe_sm90_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libflashinfer_single_prefill_256_so", ":libflashinfer_single_decode_256_so", ":libflashinfer_batch_paged_prefill_256_so", ":libflashinfer_batch_paged_decode_256_so", ":libflashinfer_batch_ragged_prefill_256_so"],
-        "@//:using_rocm": [],
+        "@//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libmoe_sm90_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libdeepgemm_dpsk_inst_so", ":libdeepgemm_qwen_inst_so", ":libflashinfer_single_prefill_256_so", ":libflashinfer_single_decode_256_so", ":libflashinfer_batch_paged_prefill_256_so", ":libflashinfer_batch_paged_decode_256_so", ":libflashinfer_batch_ragged_prefill_256_so"],
+        "@//:using_rocm": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so"],
         "//conditions:default":[],
     })
 
