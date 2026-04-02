@@ -51,6 +51,15 @@ private:
                  int32_t                     detail_level),
                 (override));
 
+    MOCK_METHOD((std::pair<ClientErrorCode, int64_t>),
+                MatchLocationLen,
+                (const std::string&          trace_id,
+                 QueryType                   query_type,
+                 const std::vector<int64_t>& keys,
+                 const std::vector<int64_t>& tokens,
+                 int32_t                     sw_size),
+                (override));
+
     MOCK_METHOD(ClientErrorCode,
                 RemoveCache,
                 (const std::string&          trace_id,
