@@ -3,7 +3,6 @@ from typing import Any, Dict, Optional
 import torch
 from rtp_kernel.fp8_group_gemm import (
     get_cutlass_batched_moe_mm_data,
-    get_cutlass_moe_mm_without_permute_info,
 )
 from rtp_kernel.w4a8_group_gemm import w4a8_group_gemm_ptpc
 
@@ -26,6 +25,7 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     cutlass_moe_pre_reorder,
     post_reorder_triton_kernel,
+    get_cutlass_moe_mm_without_permute_info,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -209,7 +209,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             (self.E, 3), dtype=torch.int32, device=payload.expert_x.device
         )
         expert_offsets = torch.empty(
-            (self.E + 1,), dtype=torch.int32, device=payload.expert_x.device
+            (self.E,), dtype=torch.int32, device=payload.expert_x.device
         )
         src_2_dst = cutlass_moe_pre_reorder(
             input=expert_x,
@@ -242,7 +242,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             self.w1,
             self.w1_scale,
             a1q_scale_permute,
-            expert_offsets[:-1],
+            expert_offsets,
             problem_sizes1,
             self.ab_strides1,
             self.ab_strides1,
@@ -265,7 +265,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             self.w2,
             self.w2_scale,
             a2q_scale,
-            expert_offsets[:-1],
+            expert_offsets,
             problem_sizes2,
             self.ab_strides2,
             self.ab_strides2,
