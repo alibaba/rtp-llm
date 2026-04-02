@@ -1,4 +1,3 @@
-import logging
 from abc import abstractmethod
 from typing import Any, Optional, Tuple
 
@@ -43,9 +42,16 @@ class PureTpRouterBase(FusedMoeDataRouter):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        """Check if PureTpRouter can handle the configuration"""
+        """Check if PureTpRouter can handle the configuration.
+
+        Pure TP mode requires ep_size == 1 so that each rank holds all experts.
+        The previous condition (is_single_gpu or is_tp_equal_ep) was too loose:
+        when ep_size == tp_size > 1, is_tp_equal_ep returned True but weights
+        are split by EP, causing assertion failures in executors that assume
+        full expert ownership.
+        """
         resolver = MoeConfigResolver()
-        checker.check(resolver.is_single_gpu(config) or resolver.is_tp_equal_ep(config))
+        checker.check(resolver.is_pure_tp_mode(config))
         checker.check(resolver.use_all_gather(config))
 
     def __init__(

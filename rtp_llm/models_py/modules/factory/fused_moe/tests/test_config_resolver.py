@@ -18,6 +18,7 @@ from rtp_llm.ops.compute_ops import DeviceType
 def create_config_adapter(
     ep_size: int = 1,
     tp_size: int = 1,
+    dp_size: int = 1,
     quant_config=None,
     use_deepep_low_latency: bool = False,
     data_type: str = "fp16",
@@ -33,7 +34,7 @@ def create_config_adapter(
     parallelism_config = ParallelismConfig()
     parallelism_config.ep_size = ep_size
     parallelism_config.tp_size = tp_size
-    parallelism_config.dp_size = 1
+    parallelism_config.dp_size = dp_size
     parallelism_config.ep_rank = 0
     parallelism_config.tp_rank = 0
     parallelism_config.dp_rank = 0
@@ -125,6 +126,35 @@ class TestMoeConfigResolver(unittest.TestCase):
         config = create_config_adapter(ep_size=4, tp_size=4)
         self.assertTrue(self.resolver.is_tp_equal_ep(config))
 
+    def test_is_pure_tp_mode_single_gpu(self):
+        """Test pure TP mode with single GPU (tp=1, dp=1, ep=1)"""
+        config = create_config_adapter(tp_size=1, dp_size=1, ep_size=1)
+        self.assertTrue(self.resolver.is_pure_tp_mode(config))
+
+    def test_is_pure_tp_mode_multi_gpu_tp(self):
+        """Test pure TP mode with multi-GPU TP (tp=4, dp=1, ep=1)"""
+        config = create_config_adapter(tp_size=4, dp_size=1, ep_size=1)
+        self.assertTrue(self.resolver.is_pure_tp_mode(config))
+
+    def test_is_pure_tp_mode_rejects_ep_equals_tp(self):
+        """Test pure TP mode rejects EP=TP>1 scenario (tp=4, dp=1, ep=4).
+
+        This is the key regression test: previously is_tp_equal_ep would
+        return True here, causing pure-TP router to be selected even though
+        weights are split by EP.
+        """
+        config = create_config_adapter(tp_size=4, dp_size=1, ep_size=4)
+        self.assertFalse(self.resolver.is_pure_tp_mode(config))
+
+    def test_is_pure_tp_mode_rejects_dp_greater_than_one(self):
+        """Test pure TP mode rejects dp_size > 1"""
+        config = create_config_adapter(tp_size=4, dp_size=2, ep_size=1)
+        self.assertFalse(self.resolver.is_pure_tp_mode(config))
+
+    def test_is_pure_tp_mode_rejects_ep_greater_than_one(self):
+        """Test pure TP mode rejects ep_size > 1"""
+        config = create_config_adapter(tp_size=2, dp_size=1, ep_size=2)
+        self.assertFalse(self.resolver.is_pure_tp_mode(config))
 
 if __name__ == "__main__":
     unittest.main()
