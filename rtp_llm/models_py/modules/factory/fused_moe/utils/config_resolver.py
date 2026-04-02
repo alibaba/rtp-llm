@@ -112,6 +112,28 @@ class MoeConfigResolver:
         return config.parallelism_config.tp_size == config.parallelism_config.ep_size
 
     @staticmethod
+    def is_pure_tp_mode(config: MoEConfigAdapter) -> bool:
+        """Check if pure TP mode is applicable.
+
+        Pure TP mode requires ep_size == 1 and dp_size == 1, meaning each
+        rank holds all experts without EP/DP splitting. This covers both
+        single-GPU (tp=1) and multi-GPU pure-TP (tp>1) scenarios. This
+        aligns with the weight-splitting condition (moe_pure_tp_mode) in
+        model_weight_info.py.
+
+        Args:
+            config: MOE configuration adapter
+
+        Returns:
+            Whether pure TP mode can be used
+        """
+        return (
+            config.parallelism_config.ep_size == 1
+            and config.parallelism_config.dp_size == 1
+            and config.parallelism_config.tp_size >= 1
+        )
+
+    @staticmethod
     def use_all_gather(config: MoEConfigAdapter) -> bool:
         """Check if use_all_gather is enabled
 
