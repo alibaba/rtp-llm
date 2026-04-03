@@ -59,7 +59,6 @@ class SparseMlaOp(object):
         page_size: int,
         softmax_extra_scale: float,
         top_k: int,
-        attn_inputs: Optional[PyAttentionInputs] = None,
         parallelism_config: Optional[ParallelismConfig] = None,
     ):
         super().__init__()
@@ -78,7 +77,10 @@ class SparseMlaOp(object):
         self.mla_params = None
 
     def plan(
-        self, mla_params: rtp_llm_ops.FlashInferMlaAttnParams, block_table: torch.Tensor
+        self,
+        mla_params: rtp_llm_ops.FlashInferMlaAttnParams,
+        block_table: torch.Tensor,
+        attn_inputs: Optional[PyAttentionInputs] = None,
     ):
         self.block_table = block_table
         self.mla_params = mla_params
@@ -187,7 +189,6 @@ class SparseMlaFp8Op(SparseMlaOp):
         page_size: int,
         softmax_extra_scale: float,
         top_k: int,
-        attn_inputs: Optional[PyAttentionInputs] = None,
         parallelism_config: Optional[ParallelismConfig] = None,
     ):
         super().__init__(
@@ -202,7 +203,10 @@ class SparseMlaFp8Op(SparseMlaOp):
         self._fp8_kernel_metadata = None
 
     def plan(
-        self, mla_params: rtp_llm_ops.FlashInferMlaAttnParams, block_table: torch.Tensor
+        self,
+        mla_params: rtp_llm_ops.FlashInferMlaAttnParams,
+        block_table: torch.Tensor,
+        attn_inputs: Optional[PyAttentionInputs] = None,
     ):
         self.block_table = block_table
         self.mla_params = mla_params
@@ -364,7 +368,6 @@ class SparseMlaImpl(MlaImplBase):
             attn_configs.kernel_tokens_per_block,
             attn_configs.softmax_extra_scale,
             attn_configs.indexer_topk,
-            attn_inputs=attn_inputs,
             parallelism_config=parallelism_config,
         )
 
@@ -423,7 +426,9 @@ class SparseMlaImpl(MlaImplBase):
         )
         # Plan for processing
         self.fmha_impl.plan(
-            self.fmha_params, attn_inputs.kv_cache_kernel_block_id_device
+            self.fmha_params,
+            attn_inputs.kv_cache_kernel_block_id_device,
+            attn_inputs=attn_inputs,
         )
 
     def _apply_input_bmm(self, q: torch.Tensor, layer_id: int) -> torch.Tensor:
