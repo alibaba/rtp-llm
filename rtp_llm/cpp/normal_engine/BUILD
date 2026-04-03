@@ -26,7 +26,10 @@ cc_library(
         "//rtp_llm/cpp/utils:tensor_debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + select({
-        "//:using_cuda": ["//rtp_llm/cpp/cuda/ops:standalone_ops"],
+        "//:using_cuda": [
+            "//rtp_llm/cpp/cuda/ops:standalone_ops",
+            "//rtp_llm/models_py/bindings/cuda:split_kv_cache_copy",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

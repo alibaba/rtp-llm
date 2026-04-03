@@ -529,15 +529,6 @@ cc_library(
 )
 
 cc_library(
-    name = "sm_copy_kernel",
-    srcs = ["sm_utils/sm_copy_kernel.cu"],
-    hdrs = ["sm_utils/sm_copy_kernel.h"],
-    deps = any_cuda_deps,
-    copts = any_cuda_copts(),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "kernels_moe",
     srcs = [
         "moe_kernels.cu",
@@ -609,7 +600,6 @@ cc_library(
     ] + select({
         "@//:using_cuda": [
             ":cuda_cu",
-            ":sm_copy_kernel",
         ],
         "@//:using_rocm": [
             ":rocm_cu",

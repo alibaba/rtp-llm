@@ -16,8 +16,9 @@
 // Split KV: warmup_sm_copy_split_kernels in initExecCtx; launch_*_copy_split from execNoBlockCopy (split KV path).
 // Remaining entry points stay in the library for
 // standalone microbenchmarks (e.g. rtp_llm/cpp/devices/cuda_impl/tests/sm_copy_kernel_benchmark.cc via nvcc
-// build scripts): A/B split staging vs var-length device scatter, and possible future non-split layouts. Do not
-// add call sites without a real consumer; otherwise prefer YAGNI and drop or split into a benchmark-only target.
+// build scripts; kernel lives under models_py/bindings/kernels): A/B split staging vs var-length device scatter, and
+// possible future non-split layouts. Do not add call sites without a real consumer; otherwise prefer YAGNI and drop or
+// split into a benchmark-only target.
 
 namespace sDevMPS {
 /**
