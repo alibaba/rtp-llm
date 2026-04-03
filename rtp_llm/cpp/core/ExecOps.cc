@@ -825,12 +825,14 @@ void registerExecCtxOps(pybind11::module& m) {
         [](int mode, const std::string& host, int port, int rank, int world_size, int device_id) {
             DeviceGuard           guard(device_id);
             c10d::TCPStoreOptions opts;
-            opts.port       = static_cast<uint16_t>(port);
-            opts.isServer   = (rank == 0);
-            opts.numWorkers = world_size;
-            auto store      = c10::make_intrusive<c10d::TCPStore>(host, opts);
-            auto backend    = c10::make_intrusive<c10d::ProcessGroupNCCL>(store, rank, world_size);
-            auto pg         = c10::make_intrusive<c10d::ProcessGroup>(store, rank, world_size);
+            opts.port          = static_cast<uint16_t>(port);
+            opts.isServer      = (rank == 0);
+            opts.numWorkers    = world_size;
+            auto store         = c10::make_intrusive<c10d::TCPStore>(host, opts);
+            auto nccl_opts     = c10::make_intrusive<c10d::ProcessGroupNCCL::Options>();
+            nccl_opts->timeout = std::chrono::milliseconds::max();
+            auto backend = c10::make_intrusive<c10d::ProcessGroupNCCL>(store, rank, world_size, std::move(nccl_opts));
+            auto pg      = c10::make_intrusive<c10d::ProcessGroup>(store, rank, world_size);
             pg->setBackend(c10::DeviceType::CUDA, c10d::ProcessGroup::BackendType::NCCL, backend);
             registerProcessGroup(static_cast<ParallelMode>(mode), std::move(pg), device_id);
         },
