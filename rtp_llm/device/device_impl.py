@@ -859,6 +859,13 @@ class RocmImpl(GpuImpl):
         specify_gpu_arch = self.py_env_configs.runtime_config.specify_gpu_arch
         return "900" if specify_gpu_arch == "" else specify_gpu_arch
 
+    def _is_gfx950(self) -> bool:
+        try:
+            prop = torch.cuda.get_device_properties(torch.cuda.current_device())
+            return "gfx950" in getattr(prop, "gcnArchName", "")
+        except Exception:
+            return self.arch == "950"
+
     def shuffle_moe_weight(
         self, x: torch.Tensor, datatype: torch.dtype, name: str
     ) -> torch.Tensor:
@@ -880,14 +887,17 @@ class RocmImpl(GpuImpl):
     def maybe_rewrite_weight_by_key(
         self, key: str, weight: torch.Tensor
     ) -> torch.Tensor:
+        is_gfx950 = self._is_gfx950()
         if key == "weight":
             assert weight.dtype == torch.float8_e4m3fn
-            weight_as_int8 = weight.view(torch.int8)
-            ROCM_FP8_NAN_AS_INT = -128
-            weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
-            weight = weight_as_int8.view(torch.float8_e4m3fnuz)
+            if not is_gfx950:
+                weight_as_int8 = weight.view(torch.int8)
+                ROCM_FP8_NAN_AS_INT = -128
+                weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
+                weight = weight_as_int8.view(torch.float8_e4m3fnuz)
         elif key == "scale":
-            weight = weight * 2.0
+            if not is_gfx950:
+                weight = weight * 2.0
 
         if key in [
             W.attn_qkv_w,
@@ -951,6 +961,8 @@ class RocmImpl(GpuImpl):
         self, weight: torch.Tensor, weight_scale: torch.Tensor
     ):
         assert weight.dtype == torch.float8_e4m3fn
+        if self._is_gfx950():
+            return weight, weight_scale
         # The bits pattern 10000000(-128) represents zero in e4m3fn
         # but NaN in e4m3fnuz. So here we set it to 0.
         # https://onnx.ai/onnx/technical/float8.html

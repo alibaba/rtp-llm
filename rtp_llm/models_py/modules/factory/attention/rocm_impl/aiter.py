@@ -590,8 +590,8 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
         K_QScale = None
         V_QScale = None
         if (
-            key_cache.dtype == torch.float8_e4m3fnuz
-            and value_cache.dtype == torch.float8_e4m3fnuz
+            key_cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
+            and value_cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
         ):
             K_QScale = kv_cache.kv_scale_base.select(1, 0)
             V_QScale = kv_cache.kv_scale_base.select(1, 1)
@@ -635,8 +635,8 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         V_QScale = None
         using_fp8_kvcache = False
         if (
-            key_cache.dtype == torch.float8_e4m3fnuz
-            and value_cache.dtype == torch.float8_e4m3fnuz
+            key_cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
+            and value_cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
         ):
             K_QScale = kv_cache.kv_scale_base.select(1, 0)
             V_QScale = kv_cache.kv_scale_base.select(1, 1)
