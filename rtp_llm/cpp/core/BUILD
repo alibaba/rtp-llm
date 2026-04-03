@@ -238,7 +238,7 @@ cc_library(
         "@havenask//aios/autil:scope",
     ] + torch_deps() + select({
         "@//:using_cuda": [
-            "//rtp_llm/cpp/kernels:sm_copy_kernel",
+            "//rtp_llm/models_py/bindings/cuda:split_kv_cache_copy",
         ],
         "//conditions:default": [],
     }),
@@ -350,7 +350,7 @@ cc_library(
         "@havenask//aios/autil:scope",
     ] + torch_deps() + select({
         "@//:using_cuda": [
-            "//rtp_llm/cpp/kernels:sm_copy_kernel",
+            "//rtp_llm/models_py/bindings/cuda:split_kv_cache_copy",
         ],
         "//conditions:default": [],
     }) + select({

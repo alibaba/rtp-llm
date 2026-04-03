@@ -2,14 +2,29 @@ load("//:def.bzl", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "split_kv_cache_copy",
+    srcs = ["SplitKvCacheCopy.cc"],
+    hdrs = ["SplitKvCacheCopy.h"],
+    copts = copts(),
+    deps = torch_deps() + [
+        "//rtp_llm/models_py/bindings/kernels:sm_copy_kernel",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_bindings",
     srcs = glob([
         "*.cc",
     ], exclude = [
         "RegisterCudaOps.cc",
+        "SplitKvCacheCopy.cc",
     ]),
     hdrs = glob([
         "*.h",
+    ], exclude = [
+        "SplitKvCacheCopy.h",
     ]),
     copts = cuda_copts(),
     deps = torch_deps() + [

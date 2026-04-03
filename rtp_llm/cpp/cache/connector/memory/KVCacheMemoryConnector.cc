@@ -10,13 +10,13 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
-namespace {
+namespace rtp_llm {
 
-// When set on MultiCopyParams, execNoBlockCopy uses CUDA split scatter/gather (ExecOps + sm_copy_kernel).
-void applySplitKvMultiCopyFieldsIfEligible(const rtp_llm::CacheConfig& cfg,
-                                           int                         copy_items_count,
-                                           size_t                      dst_tensor_count,
-                                           rtp_llm::MultiCopyParams&   out) {
+// When set on MultiCopyParams, execNoBlockCopy may use CUDA split scatter/gather (SplitKvCacheCopy; not on PPU).
+static void applySplitKvMultiCopyFieldsIfEligible(const CacheConfig& cfg,
+                                                  int                copy_items_count,
+                                                  size_t             dst_tensor_count,
+                                                  MultiCopyParams&   out) {
     const int    layer_n          = static_cast<int>(cfg.layer_all_num);
     const size_t tensors_per_item = 2u * static_cast<size_t>(layer_n);
     const size_t expected_total   = tensors_per_item * static_cast<size_t>(copy_items_count);
@@ -35,10 +35,6 @@ void applySplitKvMultiCopyFieldsIfEligible(const rtp_llm::CacheConfig& cfg,
     out.split_kv_cache_stride_bytes = cfg.kv_block_stride_bytes;
     out.split_kv_scale_stride_bytes = cfg.kv_scale_stride_bytes;
 }
-
-}  // namespace
-
-namespace rtp_llm {
 
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                                                const KVCacheConfig&                     kv_cache_config,
@@ -565,8 +561,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
 
     if (!dst_buffers.empty()) {
         MultiCopyParams mc{dst_buffers, src_buffers};
-        applySplitKvMultiCopyFieldsIfEligible(
-            cache_config_, request.copy_items_size(), dst_buffers.size(), mc);
+        applySplitKvMultiCopyFieldsIfEligible(cache_config_, request.copy_items_size(), dst_buffers.size(), mc);
         execNoBlockCopy(mc);
     }
 
