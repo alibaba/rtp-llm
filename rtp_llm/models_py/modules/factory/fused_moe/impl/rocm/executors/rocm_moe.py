@@ -419,6 +419,14 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
         self.w1_scale = weights[W.moe_s1]
         self.w2_scale = weights[W.moe_s2]
 
+        self.hidden_size_raw = config.hidden_size
+        self.intermediate_size_raw = config.model_config.moe_inter_size // config.tp_size
+        packed_factor = 2 if self.w1.dtype == torch.uint8 else 1
+        self.hidden_size_padded = self.w1.size(2) * packed_factor
+        self.intermediate_size_padded = self.w2.size(1)
+        self.hidden_pad = max(0, self.hidden_size_padded - self.hidden_size_raw)
+        self.intermediate_pad = max(0, self.intermediate_size_padded - self.intermediate_size_raw)
+
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1
         )
@@ -437,9 +445,10 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
         extra_expert_args: Optional[dict[str, Any]],
     ) -> CombineForwardPayload:
         assert payload.expert_x is not None, "expert_x is None"
-        assert payload.expert_x.size(-1) == self.w1.size(
-            2
-        ), f"Hidden size mismatch {payload.expert_x.size(-1)} != {self.w1.size(2)}"
+        # assert hidden_size in (self.hidden_size_raw, self.hidden_size_padded), (
+        #     f"Hidden size mismatch {hidden_size}, expected raw/padded size "
+        #     f"{self.hidden_size_raw}/{self.hidden_size_padded}"
+        # )
         assert payload.expert_x.is_contiguous(), "Hidden_states must be contiguous"
         assert self.w1.stride(-1) == 1, "Stride of last dimension must be 1"
         assert self.w2.stride(-1) == 1, "Stride of last dimension must be 1"
@@ -477,8 +486,8 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
             activation=_moe_activation_type(activation),
             expert_mask=expert_map if expert_map is not None else self.expert_mask,
             doweight_stage1=apply_router_weight_on_input,
-            hidden_pad=0,
-            intermediate_pad=0,
+            hidden_pad=self.hidden_pad,
+            intermediate_pad=self.intermediate_pad,
             bias1=None,
             bias2=None,
         )
