@@ -7,6 +7,7 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.utils.debug import dump_tensor, dump_tensor_enabled
 from rtp_llm.models_py.modules import (
     CausalAttention,
     DenseMLP,
@@ -91,8 +92,12 @@ class GenericMoeLayer(nn.Module):
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        _li = getattr(self, '_dump_layer_idx', -1)
+        _dump = dump_tensor_enabled()
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
+        if _dump:
+            dump_tensor(router_logits, f"layer{_li}.moe.router_logits", _li)
         router_logits_fp32 = router_logits.float()
 
         topk_weights = torch.empty(
@@ -131,20 +136,33 @@ class GenericMoeLayer(nn.Module):
             # Top-K selection using C++ SelectTopkOp
             self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
+        if _dump:
+            dump_tensor(topk_weights, f"layer{_li}.moe.topk_weights", _li)
+            dump_tensor(topk_ids, f"layer{_li}.moe.topk_ids", _li)
+
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
+            extra_expert_args={"layer_idx": _li},
         )
+        if _dump:
+            dump_tensor(experts_output, f"layer{_li}.moe.experts_out", _li)
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(hidden_states)
+            if _dump:
+                dump_tensor(shared_expert_output, f"layer{_li}.moe.shared_expert_out", _li)
             if self.shared_expert_gate is not None:
                 shared_expert_output = (
                     F.sigmoid(self.shared_expert_gate(hidden_states))
                     * shared_expert_output
                 )
+                if _dump:
+                    dump_tensor(shared_expert_output, f"layer{_li}.moe.shared_expert_gated", _li)
             experts_output = experts_output + shared_expert_output
+        if _dump:
+            dump_tensor(experts_output, f"layer{_li}.moe.out", _li)
         return experts_output
 
 

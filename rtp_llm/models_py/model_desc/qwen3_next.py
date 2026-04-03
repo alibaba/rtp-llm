@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 import rtp_llm.ops.compute_ops as compute_ops
+from rtp_llm.models_py.utils.debug import dump_tensor, dump_tensor_enabled, dump_tensor_step_begin, dump_tensor_step_end
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
@@ -485,8 +486,13 @@ class Qwen3NextAttention(CausalAttention):
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
+        _li = getattr(self, '_dump_layer_idx', -1)
         gate = self.gate(hidden_states)
+        if dump_tensor_enabled():
+            dump_tensor(gate, f"layer{_li}.full_attn.gate", _li)
         attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
+        if dump_tensor_enabled():
+            dump_tensor(attn_out, f"layer{_li}.full_attn.out", _li)
         return attn_out
 
 
@@ -579,6 +585,13 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
+        # --- precision debug: linear attention (GDN) ---
+        _li = getattr(self, '_dump_layer_idx', -1)
+        if dump_tensor_enabled():
+            dump_tensor(mixed_qkv, f"layer{_li}.linear_attn.mixed_qkv", _li)
+            dump_tensor(z, f"layer{_li}.linear_attn.z", _li)
+            dump_tensor(b, f"layer{_li}.linear_attn.b", _li)
+            dump_tensor(a, f"layer{_li}.linear_attn.a", _li)
         if attention_inputs.is_prefill and not attn_meta.is_target_verify:
             attn_output = self.prefill_gdn(
                 mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
@@ -587,14 +600,22 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             attn_output = self.decode_gdn(
                 mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
             )
+        if dump_tensor_enabled():
+            dump_tensor(attn_output, f"layer{_li}.linear_attn.fla_out", _li)
         attn_output = self.norm(
             attn_output.reshape(-1, self.head_v_dim), z.reshape(-1, self.head_v_dim)
         )
+        if dump_tensor_enabled():
+            dump_tensor(attn_output, f"layer{_li}.linear_attn.norm_out", _li)
         # from [token * head, dim] -> [token, head * dim]
         attn_output = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
         attn_output = self.out_proj(attn_output)
+        if dump_tensor_enabled():
+            dump_tensor(attn_output, f"layer{_li}.linear_attn.out_proj", _li)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
+        if dump_tensor_enabled():
+            dump_tensor(attn_output, f"layer{_li}.linear_attn.all_reduce", _li)
         return attn_output
 
 
@@ -633,6 +654,8 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 config.quant_config,
             )
+        # propagate layer_idx for debug dump
+        self.self_attn._dump_layer_idx = layer_idx
 
         if config.moe_style == 2:
             self.mlp = GenericMoeLayer(
@@ -647,6 +670,7 @@ class Qwen3NextDecoderLayer(nn.Module):
             self.mlp = DenseMLP(
                 config.activation_type, parallelism_config, weights, config.quant_config
             )
+        self.mlp._dump_layer_idx = layer_idx
 
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
@@ -663,9 +687,14 @@ class Qwen3NextDecoderLayer(nn.Module):
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
+        _li = self.layer_idx
+        _dump = dump_tensor_enabled()
+        if _dump:
+            dump_tensor(hidden_states, f"layer{_li}.input", _li)
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        # Self Attention
+        if _dump:
+            dump_tensor(hidden_states, f"layer{_li}.input_layernorm_out", _li)
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
@@ -673,11 +702,16 @@ class Qwen3NextDecoderLayer(nn.Module):
             attention_inputs=attention_inputs,
             attn_meta=attn_meta,
         )
+        if _dump:
+            dump_tensor(hidden_states, f"layer{_li}.attn_out", _li)
         hidden_states = residual + hidden_states
-        # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        if _dump:
+            dump_tensor(hidden_states, f"layer{_li}.post_attn_layernorm_out", _li)
         hidden_states = self.mlp(hidden_states)
+        if _dump:
+            dump_tensor(hidden_states, f"layer{_li}.mlp_out", _li)
         hidden_states = residual + hidden_states
         return hidden_states
 
@@ -757,9 +791,12 @@ class Qwen3NextModel(GptModelBase):
         return gid
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        dump_tensor_step_begin()
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
+        if dump_tensor_enabled():
+            dump_tensor(hidden_states, "embedding_out")
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         prefill_conv1d_meta = None
@@ -799,4 +836,8 @@ class Qwen3NextModel(GptModelBase):
             )
 
         hidden_states = self.norm(hidden_states)
+        if dump_tensor_enabled():
+            dump_tensor(hidden_states, "final_norm_out")
+
+        dump_tensor_step_end()
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)

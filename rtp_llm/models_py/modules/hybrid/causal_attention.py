@@ -6,6 +6,7 @@ import torch.nn as nn
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.utils.debug import dump_tensor, dump_tensor_enabled
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import DeviceType, LayerKVCache, get_device
 from rtp_llm.utils.model_weight import W
@@ -78,15 +79,27 @@ class CausalAttention(nn.Module):
         kv_cache: Optional[LayerKVCache],
         gate: Optional[torch.Tensor] = None,  # for qwen3 next
     ) -> torch.Tensor:
+        _li = getattr(self, '_dump_layer_idx', -1)
+        _dump = dump_tensor_enabled()
         input_shape = hidden_states.shape[:-1]
         qkv = self.qkv_proj(hidden_states)
+        if _dump:
+            dump_tensor(qkv, f"layer{_li}.full_attn.qkv_proj_out", _li)
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
+            if _dump:
+                dump_tensor(qkv, f"layer{_li}.full_attn.qk_norm_out", _li)
         attn_output = fmha_impl.forward(qkv, kv_cache)
+        if _dump:
+            dump_tensor(attn_output, f"layer{_li}.full_attn.fmha_out", _li)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
         output = self.o_proj(attn_output)
+        if _dump:
+            dump_tensor(output, f"layer{_li}.full_attn.o_proj_out", _li)
         if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
+            if _dump:
+                dump_tensor(output, f"layer{_li}.full_attn.allreduce_out", _li)
         return output

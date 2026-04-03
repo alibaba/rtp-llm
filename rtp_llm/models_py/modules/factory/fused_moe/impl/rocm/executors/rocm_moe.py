@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional
 import aiter
 import torch
 from aiter.fused_moe import fused_moe
+from rtp_llm.models_py.utils.debug import dump_tensor, dump_tensor_enabled
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -474,6 +475,36 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
         
+
+
+        if dump_tensor_enabled():
+            _li = -1
+            if extra_expert_args is not None:
+                _li = int(extra_expert_args.get("layer_idx", -1))
+
+            def _safe_dump(t: torch.Tensor, name: str) -> None:
+                try:
+                    dump_tensor(t, name, _li)
+                except Exception:
+                    # Keep inference path robust: dump failure should not affect execution.
+                    pass
+
+            # Dump exact inputs right before fused_moe kernel launch.
+            _safe_dump(hidden_states, f"layer{_li}.moe.kernel_in.hidden_states")
+            _safe_dump(topk_weights, f"layer{_li}.moe.kernel_in.topk_weights")
+            _safe_dump(topk_ids, f"layer{_li}.moe.kernel_in.topk_ids")
+            _safe_dump(self.w1, f"layer{_li}.moe.kernel_in.w1")
+            _safe_dump(self.w2, f"layer{_li}.moe.kernel_in.w2")
+            _safe_dump(
+                self.w1_scale.contiguous().view(torch.uint8),
+                f"layer{_li}.moe.kernel_in.w1_scale",
+            )
+            _safe_dump(
+                self.w2_scale.contiguous().view(torch.uint8),
+                f"layer{_li}.moe.kernel_in.w2_scale",
+            )
+            if self.expert_mask is not None:
+                _safe_dump(self.expert_mask, f"layer{_li}.moe.kernel_in.expert_mask")
         # view w1 and w2 to float4_e2m1fn_x2 if they are uint8
         w1 = self.w1
         w2 = self.w2
@@ -499,5 +530,8 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
             bias1=None,
             bias2=None,
         )
+        
+        if dump_tensor_enabled():
+            _safe_dump(output, f"layer{_li}.moe.kernel_out.output")
 
         return CombineForwardPayload(fused_expert_output=output)
