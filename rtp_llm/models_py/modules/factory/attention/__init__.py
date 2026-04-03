@@ -101,16 +101,16 @@ else:
             if torch.version.cuda:
                 major, minor = map(int, torch.version.cuda.split(".")[:2])
                 if (major, minor) >= (12, 9):
-                        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
-                            SparseMlaCpImpl,
-                        )
+                    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
+                        SparseMlaCpImpl,
+                    )
                     from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
                         SparseMlaImpl,
                     )
 
                     DECODE_MLA_IMPS.append(SparseMlaImpl)
                     PREFILL_MLA_IMPS.append(SparseMlaImpl)
-                        PREFILL_MLA_IMPS.append(SparseMlaCpImpl)
+                    PREFILL_MLA_IMPS.append(SparseMlaCpImpl)
         except (ImportError, AttributeError, ValueError):
             pass  # Skip SparseMlaImpl if CUDA < 12.9 or flash_mla not available
 

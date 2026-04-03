@@ -57,7 +57,6 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         page_size: int,
         softmax_extra_scale: float,
         top_k: int,
-        attn_inputs: Optional[PyAttentionInputs] = None,
         parallelism_config: Optional[ParallelismConfig] = None,
     ):
         super().__init__(
@@ -70,11 +69,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             top_k=top_k,
         )
 
-        self.attn_inputs = attn_inputs
-        self.cp_info = attn_inputs.context_parallel_info
-        assert (
-            self.cp_info is not None
-        ), "Context parallel info is required for SparseMlaFp8CPOp"
+        self.attn_inputs = None
+        self.cp_info = None
 
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
@@ -91,10 +87,19 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.write_cache_store_impl = None
 
     def plan(
-        self, mla_params: rtp_llm_ops.FlashInferMlaAttnParams, block_table: torch.Tensor
+        self,
+        mla_params: rtp_llm_ops.FlashInferMlaAttnParams,
+        block_table: torch.Tensor,
+        attn_inputs: Optional[PyAttentionInputs] = None,
     ) -> None:
         self.block_table = block_table
         self.mla_params = mla_params
+
+        self.attn_inputs = attn_inputs
+        self.cp_info = attn_inputs.context_parallel_info
+        assert (
+            self.cp_info is not None
+        ), "Context parallel info is required for SparseMlaFp8CPOp"
 
         cp_info = self.cp_info
         padding_mask = cp_info.prefill_qkv_padding_mask
@@ -334,14 +339,12 @@ class SparseMlaCpImpl(SparseMlaImpl):
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
-        self.cp_info = attn_inputs.context_parallel_info
+        cp_info = attn_inputs.context_parallel_info
         # ContextParallelProcessor leaves per-chunk lengths on shared attn_inputs; sparse
         # fill_params / cache store need per-request actual lengths. Shallow-copy and set
         # input_lengths on the copy only (pattern 1.22: do not mutate shared attn_inputs).
         attn_inputs_for_init = copy.copy(attn_inputs)
-        attn_inputs_for_init.input_lengths = (
-            self.cp_info.prefill_actual_input_lengths_cpu
-        )
+        attn_inputs_for_init.input_lengths = cp_info.prefill_actual_input_lengths_cpu
         super().__init__(
             attn_configs=attn_configs,
             attn_inputs=attn_inputs_for_init,
