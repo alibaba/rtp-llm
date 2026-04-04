@@ -73,7 +73,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("FLASHINFER_MLA_DECODE", FMHAType::FLASHINFER_MLA_DECODE)
         .value("SPARSE_FLASHMLA", FMHAType::SPARSE_FLASHMLA)
         .value("CP_SPARSE_FLASHMLA", FMHAType::CP_SPARSE_FLASHMLA)
-        .value("HEADWISE", FMHAType::HEADWISE);
+        .value("HEADWISE", FMHAType::HEADWISE)
+        .value("FLASH_ATTENTION_3", FMHAType::FLASH_ATTENTION_3)
+        .value("FLASHINFER_FA3_PREFILL", FMHAType::FLASHINFER_FA3_PREFILL);
 
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
@@ -237,6 +239,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_aiter_pa", &FMHAConfig::use_aiter_pa)
         .def_readwrite("use_asm_pa", &FMHAConfig::use_asm_pa)
         .def_readwrite("use_triton_pa", &FMHAConfig::use_triton_pa)
+        .def_readwrite("enable_flash_attention_3", &FMHAConfig::enable_flash_attention_3)
+        .def_readwrite("enable_flashinfer_fa3", &FMHAConfig::enable_flashinfer_fa3)
         .def_readwrite("absorb_opt_len", &FMHAConfig::absorb_opt_len)
         .def("to_string", &FMHAConfig::to_string)
         .def(py::pickle(
@@ -252,10 +256,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_aiter_pa,
                                       self.use_asm_pa,
                                       self.use_triton_pa,
+                                      self.enable_flash_attention_3,
+                                      self.enable_flashinfer_fa3,
                                       self.absorb_opt_len);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 FMHAConfig c;
                 try {
@@ -270,7 +276,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_aiter_pa                  = t[8].cast<bool>();
                     c.use_asm_pa                    = t[9].cast<bool>();
                     c.use_triton_pa                 = t[10].cast<bool>();
-                    c.absorb_opt_len                = t[11].cast<int64_t>();
+                    c.enable_flash_attention_3      = t[11].cast<bool>();
+                    c.enable_flashinfer_fa3         = t[12].cast<bool>();
+                    c.absorb_opt_len                = t[13].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }

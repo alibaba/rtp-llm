@@ -120,6 +120,8 @@ enum class FMHAType {
     CP_FLASH_INFER,
     CP_SPARSE_FLASHMLA,
     HEADWISE,
+    FLASH_ATTENTION_3,
+    FLASHINFER_FA3_PREFILL,
 };
 
 struct FMHAConfig {
@@ -134,6 +136,8 @@ struct FMHAConfig {
     bool        use_aiter_pa                  = true;
     bool        use_asm_pa                    = true;
     bool        use_triton_pa                 = true;
+    bool        enable_flash_attention_3      = true;
+    bool        enable_flashinfer_fa3         = true;
     int64_t     absorb_opt_len                = 1024;
     std::string to_string() const;
 };

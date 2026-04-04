@@ -94,6 +94,8 @@ std::string FMHAConfig::to_string() const {
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
         << "use_triton_pa: " << use_triton_pa << "\n"
+        << "enable_flash_attention_3: " << enable_flash_attention_3 << "\n"
+        << "enable_flashinfer_fa3: " << enable_flashinfer_fa3 << "\n"
         << "absorb_opt_len: " << absorb_opt_len << "\n";
     return oss.str();
 }

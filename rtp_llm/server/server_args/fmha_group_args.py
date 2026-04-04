@@ -87,6 +87,22 @@ def init_fmha_group_args(parser, fmha_config):
         help="Rocm是否使用AITER ASM Attention",
     )
     fmha_group.add_argument(
+        "--enable_flash_attention_3",
+        env_name="ENABLE_FLASH_ATTENTION_3",
+        bind_to=(fmha_config, "enable_flash_attention_3"),
+        type=str2bool,
+        default=True,
+        help="控制是否启用Dao-AILab Flash Attention 3 prefill (SM90+ Hopper)。可选值: True (启用), False (禁用)。",
+    )
+    fmha_group.add_argument(
+        "--enable_flashinfer_fa3",
+        env_name="ENABLE_FLASHINFER_FA3",
+        bind_to=(fmha_config, "enable_flashinfer_fa3"),
+        type=str2bool,
+        default=True,
+        help="控制是否启用FlashInfer fa3 backend prefill (SM90+ Hopper)。可选值: True (启用), False (禁用)。",
+    )
+    fmha_group.add_argument(
         "--absorb_opt_len",
         env_name="RTP_LLM_ABSORB_OPT_LEN",
         bind_to=(fmha_config, "absorb_opt_len"),

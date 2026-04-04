@@ -97,8 +97,14 @@ def _is_fmha_impl_disabled(
     if fmha_config is None:
         return False
 
+    # Flash Attention 3 (Dao-AILab) implementations
+    if "FlashAttention3" in impl_class_name:
+        return not fmha_config.enable_flash_attention_3
+    # FlashInfer FA3 backend implementations
+    elif "FlashInferFA3" in impl_class_name:
+        return not fmha_config.enable_flashinfer_fa3
     # XQA implementations
-    if "XQA" in impl_class_name:
+    elif "XQA" in impl_class_name:
         return not fmha_config.enable_xqa
     # TRT implementations
     elif impl_class_name == "TRTMHAImpl":
@@ -203,7 +209,7 @@ class AttnImplFactory(object):
         attn_configs = model_config.getAttentionConfigs(
             parallelism_config.get_attn_tp_size()
         )
-        attn_inputs.headwise_config = getattr(model_config, 'headwise_config', None)
+        attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
         instance = fmha_impl_method(
