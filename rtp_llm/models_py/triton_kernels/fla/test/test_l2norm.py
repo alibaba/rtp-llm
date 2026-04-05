@@ -2,7 +2,10 @@
 # -*- coding: utf-8 -*-
 """测试 l2norm 两个 kernel 的差异"""
 
+import pytest
 import unittest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 import torch
 
@@ -101,7 +104,7 @@ class TestL2Norm(unittest.TestCase):
         batch_size, hidden_dim = 32, 512
 
         for dtype, rtol, atol in dtypes:
-            with self.subTest(dtype=dtype):
+            with self.subTest(dtype=str(dtype)):
                 torch.manual_seed(42)
 
                 # 生成随机输入数据

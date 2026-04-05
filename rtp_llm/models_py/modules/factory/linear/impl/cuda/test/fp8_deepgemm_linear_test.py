@@ -3,7 +3,10 @@ import os
 import shutil
 import unittest
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used

@@ -3,12 +3,23 @@ import os
 import signal
 import unittest
 
-import flashinfer
+import pytest
+
+try:
+    import flashinfer
+except ImportError as e:
+    pytest.skip(f"CUDA-only: {e}", allow_module_level=True)
+
 import torch
 from flashinfer.utils import get_compute_capability
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 from packaging import version
 
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
+try:
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
+except ImportError as e:
+    pytest.skip(f"CUDA-only XQA stack unavailable: {e}", allow_module_level=True)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -369,6 +380,10 @@ class TestXQABatchDecode(unittest.TestCase):
 
         if not VERSION_REQUIREMENTS_MET:
             self.skipTest(SKIP_MESSAGE)
+        if not self.xqa_supported:
+            self.skipTest(
+                f"XQA not supported on SM {self.compute_capability} (requires SM 9/10/12)"
+            )
 
         torch.manual_seed(0)
         num_qo_heads = num_kv_heads * head_grp_size
@@ -495,7 +510,9 @@ class TestXQABatchDecode(unittest.TestCase):
         ]
 
         for batch_size, q_len_per_req, num_kv_heads, kv_dtype in test_cases:
-            with self.subTest(bs=batch_size, q_len=q_len_per_req, kv_dtype=kv_dtype):
+            with self.subTest(
+                bs=batch_size, q_len=q_len_per_req, kv_dtype=str(kv_dtype)
+            ):
                 self._test_xqa_decode_impl(
                     batch_size=batch_size,
                     q_len_per_req=q_len_per_req,

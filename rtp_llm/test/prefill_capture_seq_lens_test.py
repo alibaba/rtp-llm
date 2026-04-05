@@ -3,10 +3,14 @@ import os
 import tempfile
 from unittest import TestCase, main
 
+import pytest
+
 from rtp_llm.server.server_args.hw_kernel_group_args import (
     _parse_decode_capture_config,
     _parse_prefill_capture_config,
 )
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 class PrefillCaptureSeqLensTest(TestCase):

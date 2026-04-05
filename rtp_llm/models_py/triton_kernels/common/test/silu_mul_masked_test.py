@@ -7,7 +7,10 @@ import unittest
 from typing import Callable, Optional
 
 import matplotlib.pyplot as plt
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_mul_bf16_deep_gemm_masked,

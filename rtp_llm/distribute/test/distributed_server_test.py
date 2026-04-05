@@ -5,9 +5,14 @@ import socket
 import threading
 import time
 import unittest
+import unittest.mock
 from multiprocessing import Process
 from unittest import TestCase
 from unittest.mock import patch
+
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10", count=2)]
 
 import torch
 
@@ -34,10 +39,6 @@ def fake_init(self, *args, **kwargs):
     self.model_cls = None
     self.pipeline = None
     self.backend_rpc_server_visitor = None
-
-
-FrontendWorker.__init__ = fake_init
-OpenaiEndpoint.__init__ = fake_init
 
 
 class FakeStore:
@@ -139,7 +140,7 @@ class TestGetWorldInfo(TestCase):
         clear=True,
     )
     def test_single_node(self):
-        py_env_configs: PyEnvConfigs = setup_args()
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
         from rtp_llm.config.server_config_setup import (
             fetch_model_files_to_local,
             setup_default_args,
@@ -165,6 +166,18 @@ class DistributedServerTest(unittest.TestCase):
     def __init__(self, *args, **kwargs):
         self.maxDiff = None
         super().__init__(*args, **kwargs)
+
+    def setUp(self):
+        self._patches = [
+            unittest.mock.patch.object(FrontendWorker, "__init__", fake_init),
+            unittest.mock.patch.object(OpenaiEndpoint, "__init__", fake_init),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self._patches):
+            p.stop()
 
         def test_get_master_from_json(self):
             gang_info_json: Dict[str, Any] = {
@@ -209,7 +222,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_use_distribute_config_file(self):
-            py_env_configs: PyEnvConfigs = setup_args()
+            py_env_configs: PyEnvConfigs = setup_args(args=[])
             setup_and_configure_server(py_env_configs)
 
             ip, port = ds.get_master(
@@ -233,7 +246,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_use_gang_config_string(self):
-            py_env_configs: PyEnvConfigs = setup_args()
+            py_env_configs: PyEnvConfigs = setup_args(args=[])
             setup_and_configure_server(py_env_configs)
             ip, port = ds.get_master(
                 py_env_configs.distribute_config,
@@ -256,7 +269,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_use_leader_address(self):
-            py_env_configs: PyEnvConfigs = setup_args()
+            py_env_configs: PyEnvConfigs = setup_args(args=[])
             setup_and_configure_server(py_env_configs)
 
             ip, port = ds.get_master(
@@ -280,7 +293,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_use_c2_file(self):
-            py_env_configs: PyEnvConfigs = setup_args()
+            py_env_configs: PyEnvConfigs = setup_args(args=[])
             setup_and_configure_server(py_env_configs)
             ip, port = ds.get_master(
                 py_env_configs.distribute_config,
@@ -302,7 +315,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_single_machine(self):
-            py_env_configs: PyEnvConfigs = setup_args()
+            py_env_configs: PyEnvConfigs = setup_args(args=[])
             setup_and_configure_server(py_env_configs)
 
             ip, port = ds.get_master(
@@ -321,7 +334,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_from_file(self):
-            py_env_configs: PyEnvConfigs = setup_args()
+            py_env_configs: PyEnvConfigs = setup_args(args=[])
             setup_and_configure_server(py_env_configs)
             ip, port = ds.get_master_from_file()
             assert ip == "11.161.48.116"
@@ -336,7 +349,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_get_master_from_c2(self):
-            py_env_configs: PyEnvConfigs = setup_args()
+            py_env_configs: PyEnvConfigs = setup_args(args=[])
             setup_and_configure_server(py_env_configs)
             ip, port = ds.get_master_from_c2()
             assert ip == "33.115.125.211"
@@ -357,7 +370,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_distributed_server_safe_store_set_get(self):
-            py_env_configs: PyEnvConfigs = setup_args()
+            py_env_configs: PyEnvConfigs = setup_args(args=[])
             setup_and_configure_server(py_env_configs)
             stop_event = threading.Event()
 
@@ -424,7 +437,7 @@ class DistributedServerTest(unittest.TestCase):
             clear=True,
         )
         def test_distributed_server_regist_and_bootstrap(self):
-            py_env_configs: PyEnvConfigs = setup_args()
+            py_env_configs: PyEnvConfigs = setup_args(args=[])
             setup_and_configure_server(py_env_configs)
             stop_event = threading.Event()
 
@@ -436,7 +449,7 @@ class DistributedServerTest(unittest.TestCase):
             t.start()
 
             # rank0
-            py_env_configs_0: PyEnvConfigs = setup_args()
+            py_env_configs_0: PyEnvConfigs = setup_args(args=[])
             setup_and_configure_server(py_env_configs_0)
             stop_event = threading.Event()
             py_env_configs_0.server_config.ip = socket.gethostbyname(

@@ -181,10 +181,15 @@ def _load_as_ft_style(
     kv_cache_config.int8_kv_cache = int(env_params.get("INT8_KV_CACHE", "0")) == 1
     kv_cache_config.fp8_kv_cache = int(env_params.get("FP8_KV_CACHE", "0")) == 1
 
+    profiling_debug_logging_config = ProfilingDebugLoggingConfig()
+    hack_layer_num = getattr(profiling_debug_logging_config, "hack_layer_num", 0)
+    if not isinstance(hack_layer_num, int):
+        profiling_debug_logging_config.hack_layer_num = 0
+
     build_model_config(config,
                        model_args=model_args,
                        kv_cache_config=kv_cache_config,
-                       profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
+                       profiling_debug_logging_config=profiling_debug_logging_config,
                        quantization_config=quantization_config)
 
     is_quant_weight = config.quant_algo.isQuant()

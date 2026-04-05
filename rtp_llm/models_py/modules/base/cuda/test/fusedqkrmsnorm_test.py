@@ -1,6 +1,10 @@
 import itertools
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 import torch
 from torch import dtype as _dtype
 
@@ -73,7 +77,7 @@ class FusedQKRMSNormTest(TestCase):
                 head_num=params[1],
                 kv_head_num=params[2],
                 size_per_head=params[3],
-                dtype=params[4],
+                dtype=str(params[4]),
             ):
                 self._run_fused_qk_rmsnorm_test(*params)
 

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import logging
 import math
 import os
@@ -62,6 +66,11 @@ def recurrent_gated_delta_rule_ref(
     return o, hs
 
 
+@pytest.mark.parametrize("B,S,H,HV,D,scale,gate_logit_normalizer,dtype", [
+    pytest.param(1, 1, 16, 32, 128, 1, 0.1, torch.bfloat16, id="bs1_seq1"),
+    pytest.param(4, 2, 16, 32, 128, 1, 0.1, torch.bfloat16, id="bs4_seq2"),
+    pytest.param(16, 4, 16, 32, 128, 1, 0.1, torch.bfloat16, id="bs16_seq4"),
+])
 def test_fused_recurrent_continuous_batching(
     B: int,
     S: int,

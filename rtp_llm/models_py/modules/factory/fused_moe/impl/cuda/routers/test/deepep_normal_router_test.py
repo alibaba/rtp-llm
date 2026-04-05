@@ -2,6 +2,7 @@ import multiprocessing as mp
 import random
 from typing import List
 
+import pytest
 import torch
 
 from rtp_llm.config.engine_config import EngineConfig
@@ -33,6 +34,8 @@ from rtp_llm.test.utils.numeric_util import per_token_cast_back
 from rtp_llm.test.utils.port_util import PortManager
 
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128  # isort:skip
+
+pytestmark = [pytest.mark.gpu(type="H20", count=2)]
 
 
 def init_router(
@@ -204,6 +207,9 @@ def worker_function(
         destroy_distributed_environment()
 
 
+@pytest.mark.parametrize("world_size,test_tp_size,use_fp8", [
+    pytest.param(2, 2, True, id="ws2_tp2_fp8"),
+])
 def test_single(world_size: int, test_tp_size: int, use_fp8: bool):
     port_manager = PortManager()
     ports, locks = port_manager.get_consecutive_ports(1)

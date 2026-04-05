@@ -6,6 +6,7 @@ import logging
 import multiprocessing
 import os
 import shutil
+import sys
 from typing import Dict, Optional
 
 import torch
@@ -79,9 +80,15 @@ class WeightConverter:
         ]
         logging.info(f"args : {args_list}")
         if pool_size > 1:
-            ctx = multiprocessing.get_context("spawn")
-            with ctx.Pool(processes=pool_size) as pool:
-                pool.starmap(self._convert, args_list)
+            original_argv = sys.argv[:]
+            try:
+                # Avoid pytest CLI args leaking into spawned workers.
+                sys.argv = [sys.argv[0]]
+                ctx = multiprocessing.get_context("spawn")
+                with ctx.Pool(processes=pool_size) as pool:
+                    pool.starmap(self._convert, args_list)
+            finally:
+                sys.argv = original_argv
         else:
             for tp_rank, dp_rank, world_rank, _ in args_list:
                 self._convert(tp_rank, dp_rank, world_rank, output_dir_base)
@@ -165,7 +172,10 @@ class WeightConverter:
             v = os.environ.get(key)
             return int(v) if v is not None else default
 
-        pc = ParallelismConfig()
+        # Resolve class at runtime to avoid any leaked test-time monkeypatch on
+        # module-level imported symbols.
+        from rtp_llm import ops as rtp_ops
+        pc = rtp_ops.ParallelismConfig()
         pc.tp_size = _env_int("TP_SIZE", 1)
         pc.dp_size = _env_int("DP_SIZE", 1)
         pc.pp_size = 1

@@ -1,21 +1,8 @@
 import asyncio
+import importlib
 import struct
 import sys
-from unittest.mock import MagicMock
-
-# Mock the ops module to avoid CUDA dependency in this unit test
-# This MUST be at the very top before any other imports, even before unittest
-mock_ops = MagicMock()
-mock_comm = MagicMock()
-mock_nccl_op = MagicMock()
-mock_compute_ops = MagicMock()
-mock_comm.nccl_op = mock_nccl_op
-mock_ops.comm = mock_comm
-mock_ops.compute_ops = mock_compute_ops
-sys.modules["rtp_llm.ops"] = mock_ops
-sys.modules["rtp_llm.ops.comm"] = mock_comm
-sys.modules["rtp_llm.ops.compute_ops"] = mock_compute_ops
-sys.modules["rtp_llm.ops.comm.nccl_op"] = mock_nccl_op
+from unittest.mock import MagicMock, patch
 
 import logging
 import os
@@ -27,12 +14,6 @@ import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.log_config import setup_logging
-from rtp_llm.cpp.model_rpc.model_rpc_client import (
-    ModelRpcClient,
-    StreamState,
-    trans_input,
-    trans_output,
-)
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateInputPB,
     GenerateOutputsPB,
@@ -82,26 +63,58 @@ class FakeStub:
         yield outputs_pb3
 
 
-class FakeModelRpcClient(ModelRpcClient):
+def _load_model_rpc_symbols():
+    mock_ops = MagicMock()
+    mock_comm = MagicMock()
+    mock_nccl_op = MagicMock()
+    mock_compute_ops = MagicMock()
+    mock_comm.nccl_op = mock_nccl_op
+    mock_ops.comm = mock_comm
+    mock_ops.compute_ops = mock_compute_ops
+    module_name = "rtp_llm.cpp.model_rpc.model_rpc_client"
+    with patch.dict(
+        sys.modules,
+        {
+            "rtp_llm.ops": mock_ops,
+            "rtp_llm.ops.comm": mock_comm,
+            "rtp_llm.ops.compute_ops": mock_compute_ops,
+            "rtp_llm.ops.comm.nccl_op": mock_nccl_op,
+        },
+    ):
+        module = importlib.import_module(module_name)
+        module = importlib.reload(module)
+    sys.modules.pop(module_name, None)
+    return module.ModelRpcClient, module.StreamState, module.trans_input, module.trans_output
+
+
+class FakeModelRpcClient:
 
     def __init__(self):
+        ModelRpcClient, StreamState, trans_input, trans_output = _load_model_rpc_symbols()
+        self._stream_state_cls = StreamState
+        self._trans_input = trans_input
+        self._trans_output = trans_output
+
+        class _LocalFakeModelRpcClient(ModelRpcClient):
+            pass
+
         # Call parent __init__ with minimal required parameters
-        super().__init__(
+        self._inner_client = _LocalFakeModelRpcClient(
             [],     # addresses: empty list for fake client
             {},     # client_config: empty dict for fake client
             0,      # max_rpc_timeout_ms
             False,  # decode_entrance
         )
-        self.stub = FakeStub()
+        self._inner_client.stub = FakeStub()
 
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
-        input_pb = trans_input(input_py)
-        stream_state = StreamState()
+        input_pb = self._trans_input(input_py)
+        stream_state = self._stream_state_cls()
 
-        async for response_pb in self.stub.GenerateStreamCall(input_pb):
-            yield trans_output(input_py, response_pb, stream_state)
+        async for response_pb in self._inner_client.stub.GenerateStreamCall(input_pb):
+            yield self._trans_output(input_py, response_pb, stream_state)
 
 
 class ModelRpcClientTest(TestCase):
