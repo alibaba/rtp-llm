@@ -340,6 +340,7 @@ class HeadWiseFP8PrefillAttnOp:
 
 
 class HeadWiseFP8PrefillImpl(FMHAImplBase):
+    NAME = "headwise_fp8"
 
     def __init__(
         self,

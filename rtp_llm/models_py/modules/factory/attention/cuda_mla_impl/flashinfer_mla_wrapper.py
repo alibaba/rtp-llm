@@ -125,6 +125,8 @@ class MlaFlashInferImplBase(MlaImplBase):
 
 
 class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
+    NAME = "flashinfer_mla"
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -278,6 +280,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
 
 
 class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
+    NAME = "flashinfer_mla"
 
     def __init__(
         self,

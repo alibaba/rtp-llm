@@ -50,31 +50,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("UNKNOWN", CPRotateMethod::UNKNOWN)
         .export_values();
 
-    py::enum_<FMHAType>(m, "FMHAType")
-        .value("FLASH_INFER", FMHAType::FLASH_INFER)
-        .value("NONE", FMHAType::NONE)
-        .value("OPEN_SOURCE", FMHAType::OPEN_SOURCE)
-        .value("PAGED_OPEN_SOURCE", FMHAType::PAGED_OPEN_SOURCE)
-        .value("PAGED_TRT_V2", FMHAType::PAGED_TRT_V2)
-        .value("TRT_V1", FMHAType::TRT_V1)
-        .value("TRT_V2", FMHAType::TRT_V2)
-        .value("XQA", FMHAType::XQA)
-        .value("AITER_PREFILL", FMHAType::AITER_PREFILL)
-        .value("AITER_ASM_PREFILL", FMHAType::AITER_ASM_PREFILL)
-        .value("AITER_PAGED_PREFILL", FMHAType::AITER_PAGED_PREFILL)
-        .value("AITER_DECODE", FMHAType::AITER_DECODE)
-        .value("AITER_ASM_DECODE", FMHAType::AITER_ASM_DECODE)
-        .value("AITER_TRITON_DECODE", FMHAType::AITER_TRITON_DECODE)
-        .value("PY_FLASHINFER_PREFILL_PAGED", FMHAType::PY_FLASHINFER_PREFILL_PAGED)
-        .value("PY_FLASHINFER_PREFILL_RAGGED", FMHAType::PY_FLASHINFER_PREFILL_RAGGED)
-        .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE)
-        .value("CP_FLASH_INFER", FMHAType::CP_FLASH_INFER)
-        .value("FLASHINFER_MLA_PREFILL", FMHAType::FLASHINFER_MLA_PREFILL)
-        .value("FLASHINFER_MLA_DECODE", FMHAType::FLASHINFER_MLA_DECODE)
-        .value("SPARSE_FLASHMLA", FMHAType::SPARSE_FLASHMLA)
-        .value("CP_SPARSE_FLASHMLA", FMHAType::CP_SPARSE_FLASHMLA)
-        .value("HEADWISE", FMHAType::HEADWISE);
-
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
         .value("MHA", MlaOpsType::MHA)
@@ -226,12 +201,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register FMHAConfig
     py::class_<FMHAConfig>(m, "FMHAConfig")
         .def(py::init<>())
+        .def_readwrite("attn_backend", &FMHAConfig::attn_backend)
+        .def_readwrite("prefill_attn_backend", &FMHAConfig::prefill_attn_backend)
+        .def_readwrite("decode_attn_backend", &FMHAConfig::decode_attn_backend)
+        .def_readwrite("disable_attn_backends", &FMHAConfig::disable_attn_backends)
         .def_readwrite("enable_fmha", &FMHAConfig::enable_fmha)
         .def_readwrite("enable_trt_fmha", &FMHAConfig::enable_trt_fmha)
         .def_readwrite("enable_paged_trt_fmha", &FMHAConfig::enable_paged_trt_fmha)
         .def_readwrite("enable_open_source_fmha", &FMHAConfig::enable_open_source_fmha)
-        .def_readwrite("enable_paged_open_source_fmha", &FMHAConfig::enable_paged_open_source_fmha)
-        .def_readwrite("enable_trtv1_fmha", &FMHAConfig::enable_trtv1_fmha)
         .def_readwrite("disable_flash_infer", &FMHAConfig::disable_flash_infer)
         .def_readwrite("enable_xqa", &FMHAConfig::enable_xqa)
         .def_readwrite("use_aiter_pa", &FMHAConfig::use_aiter_pa)
@@ -241,12 +218,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("to_string", &FMHAConfig::to_string)
         .def(py::pickle(
             [](const FMHAConfig& self) {
-                return py::make_tuple(self.enable_fmha,
+                return py::make_tuple(self.attn_backend,
+                                      self.prefill_attn_backend,
+                                      self.decode_attn_backend,
+                                      self.disable_attn_backends,
+                                      self.enable_fmha,
                                       self.enable_trt_fmha,
                                       self.enable_paged_trt_fmha,
                                       self.enable_open_source_fmha,
-                                      self.enable_paged_open_source_fmha,
-                                      self.enable_trtv1_fmha,
                                       self.disable_flash_infer,
                                       self.enable_xqa,
                                       self.use_aiter_pa,
@@ -255,22 +234,24 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.absorb_opt_len);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 FMHAConfig c;
                 try {
-                    c.enable_fmha                   = t[0].cast<bool>();
-                    c.enable_trt_fmha               = t[1].cast<bool>();
-                    c.enable_paged_trt_fmha         = t[2].cast<bool>();
-                    c.enable_open_source_fmha       = t[3].cast<bool>();
-                    c.enable_paged_open_source_fmha = t[4].cast<bool>();
-                    c.enable_trtv1_fmha             = t[5].cast<bool>();
-                    c.disable_flash_infer           = t[6].cast<bool>();
-                    c.enable_xqa                    = t[7].cast<bool>();
-                    c.use_aiter_pa                  = t[8].cast<bool>();
-                    c.use_asm_pa                    = t[9].cast<bool>();
-                    c.use_triton_pa                 = t[10].cast<bool>();
-                    c.absorb_opt_len                = t[11].cast<int64_t>();
+                    c.attn_backend                  = t[0].cast<std::string>();
+                    c.prefill_attn_backend          = t[1].cast<std::string>();
+                    c.decode_attn_backend           = t[2].cast<std::string>();
+                    c.disable_attn_backends         = t[3].cast<std::string>();
+                    c.enable_fmha                   = t[4].cast<bool>();
+                    c.enable_trt_fmha               = t[5].cast<bool>();
+                    c.enable_paged_trt_fmha         = t[6].cast<bool>();
+                    c.enable_open_source_fmha       = t[7].cast<bool>();
+                    c.disable_flash_infer           = t[8].cast<bool>();
+                    c.enable_xqa                    = t[9].cast<bool>();
+                    c.use_aiter_pa                  = t[10].cast<bool>();
+                    c.use_asm_pa                    = t[11].cast<bool>();
+                    c.use_triton_pa                 = t[12].cast<bool>();
+                    c.absorb_opt_len                = t[13].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }
@@ -300,7 +281,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
         .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
-        .def_readwrite("enable_memory_cache_sm_copy", &KVCacheConfig::enable_memory_cache_sm_copy)
         .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
         .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
@@ -347,7 +327,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_block_cache,
                                       self.enable_device_cache,
                                       self.enable_memory_cache,
-                                      self.enable_memory_cache_sm_copy,
                                       self.enable_remote_cache,
                                       self.write_cache_sync,
                                       self.enable_tiered_memory_cache,
@@ -375,7 +354,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ssm_state_dtype);
             },
             [](py::tuple t) {
-                if (t.size() != 44)
+                if (t.size() != 43)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -397,32 +376,31 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_block_cache                      = t[15].cast<int>();
                     c.enable_device_cache                  = t[16].cast<bool>();
                     c.enable_memory_cache                  = t[17].cast<bool>();
-                    c.enable_memory_cache_sm_copy          = t[18].cast<bool>();
-                    c.enable_remote_cache                  = t[19].cast<bool>();
-                    c.write_cache_sync                     = t[20].cast<bool>();
-                    c.enable_tiered_memory_cache           = t[21].cast<bool>();
-                    c.device_cache_min_free_blocks         = t[22].cast<int64_t>();
-                    c.reco_enable_vipserver                = t[23].cast<bool>();
-                    c.reco_vipserver_domain                = t[24].cast<std::string>();
-                    c.reco_server_address                  = t[25].cast<std::string>();
-                    c.reco_instance_group                  = t[26].cast<std::string>();
-                    c.reco_meta_channel_retry_time         = t[27].cast<uint32_t>();
-                    c.reco_meta_channel_connection_timeout = t[28].cast<uint32_t>();
-                    c.reco_meta_channel_call_timeout       = t[29].cast<uint32_t>();
-                    c.reco_storage_thread_num              = t[30].cast<uint32_t>();
-                    c.reco_storage_queue_size              = t[31].cast<uint32_t>();
-                    c.reco_put_timeout_ms                  = t[32].cast<int>();
-                    c.reco_get_timeout_ms                  = t[33].cast<int>();
-                    c.reco_model_sdk_config                = t[34].cast<std::string>();
-                    c.reco_model_user_data                 = t[35].cast<std::string>();
-                    c.reco_model_extra_info                = t[36].cast<std::string>();
-                    c.reco_instance_id_salt                = t[37].cast<std::string>();
-                    c.reco_asyncwrapper_thread_num         = t[38].cast<size_t>();
-                    c.reco_asyncwrapper_queue_size         = t[39].cast<size_t>();
-                    c.reco_get_broadcast_timeout           = t[40].cast<int>();
-                    c.reco_put_broadcast_timeout           = t[41].cast<int>();
-                    c.reco_client_config                   = t[42].cast<std::string>();
-                    c.ssm_state_dtype                      = t[43].cast<std::string>();
+                    c.enable_remote_cache                  = t[18].cast<bool>();
+                    c.write_cache_sync                     = t[19].cast<bool>();
+                    c.enable_tiered_memory_cache           = t[20].cast<bool>();
+                    c.device_cache_min_free_blocks         = t[21].cast<int64_t>();
+                    c.reco_enable_vipserver                = t[22].cast<bool>();
+                    c.reco_vipserver_domain                = t[23].cast<std::string>();
+                    c.reco_server_address                  = t[24].cast<std::string>();
+                    c.reco_instance_group                  = t[25].cast<std::string>();
+                    c.reco_meta_channel_retry_time         = t[26].cast<uint32_t>();
+                    c.reco_meta_channel_connection_timeout = t[27].cast<uint32_t>();
+                    c.reco_meta_channel_call_timeout       = t[28].cast<uint32_t>();
+                    c.reco_storage_thread_num              = t[29].cast<uint32_t>();
+                    c.reco_storage_queue_size              = t[30].cast<uint32_t>();
+                    c.reco_put_timeout_ms                  = t[31].cast<int>();
+                    c.reco_get_timeout_ms                  = t[32].cast<int>();
+                    c.reco_model_sdk_config                = t[33].cast<std::string>();
+                    c.reco_model_user_data                 = t[34].cast<std::string>();
+                    c.reco_model_extra_info                = t[35].cast<std::string>();
+                    c.reco_instance_id_salt                = t[36].cast<std::string>();
+                    c.reco_asyncwrapper_thread_num         = t[37].cast<size_t>();
+                    c.reco_asyncwrapper_queue_size         = t[38].cast<size_t>();
+                    c.reco_get_broadcast_timeout           = t[39].cast<int>();
+                    c.reco_put_broadcast_timeout           = t[40].cast<int>();
+                    c.reco_client_config                   = t[41].cast<std::string>();
+                    c.ssm_state_dtype                      = t[42].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }
@@ -950,7 +928,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ffn_tp_size", &ParallelismConfig::ffn_tp_size)
         .def_readwrite("ffn_tp_rank", &ParallelismConfig::ffn_tp_rank)
         .def_readwrite("enable_sp", &ParallelismConfig::enable_sp)
-        .def_readwrite("use_ub_comm", &ParallelismConfig::use_ub_comm)
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
         .def_readwrite("prefill_cp_config", &ParallelismConfig::prefill_cp_config)
         .def("to_string", &ParallelismConfig::to_string)
@@ -975,11 +952,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ffn_tp_rank,
                                       self.enable_sp,
                                       self.ffn_disaggregate_config,
-                                      self.prefill_cp_config,
-                                      self.use_ub_comm);
+                                      self.prefill_cp_config);
             },
             [](py::tuple t) {
-                if (t.size() != 17)
+                if (t.size() != 16)
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
@@ -999,7 +975,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.enable_sp               = t[13].cast<bool>();
                     c.ffn_disaggregate_config = t[14].cast<FfnDisAggregateConfig>();
                     c.prefill_cp_config       = t[15].cast<PrefillCPConfig>();
-                    c.use_ub_comm             = t[16].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }

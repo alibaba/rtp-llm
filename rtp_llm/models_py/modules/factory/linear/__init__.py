@@ -21,6 +21,10 @@ try:
     if device_type == DeviceType.ROCm:
         # Import to trigger ROCm Linear strategy registration
         import rtp_llm.models_py.modules.factory.linear.impl.rocm  # noqa: F401
+    elif device_type == DeviceType.Ppu:
+        # PPU uses CUDA-compatible API; register F16 Linear directly
+        from .impl.cuda.f16_linear import CudaF16Linear
+        LinearFactory.register(CudaF16Linear)
     else:
         import rtp_llm.models_py.modules.factory.linear.impl.cuda  # noqa: F401
 except Exception as e:

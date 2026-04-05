@@ -379,6 +379,7 @@ class HeadWisePrefillAttnOp:
 
 
 class HeadWisePrefillImpl(FMHAImplBase):
+    NAME = "headwise"
 
     def __init__(
         self,

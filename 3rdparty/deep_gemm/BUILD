@@ -1,14 +1,8 @@
-load("@rules_python//python:defs.bzl", "py_library")
 load("@//:def.bzl", "copts", "cuda_copts")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts")
-load("@//bazel:arch_select.bzl", "requirement", "torch_deps")
+load("@//bazel:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//visibility:public"])
-
-requirement([
-    "torch",
-    "setuptools",
-])
 
 # DeepGEMM headers
 cc_library(
@@ -94,10 +88,8 @@ cc_binary(
     linkopts = select({
         "@//:using_cuda": [
             "-lcuda",
-            # "-lcudart",
             "-lcublas",
             "-lnvrtc",
-            # "-lcupti",
         ],
         "//conditions:default": [],
     }),
@@ -116,24 +108,6 @@ genrule(
     srcs = [":deep_gemm_cpp.so"],
     outs = ["deep_gemm/deep_gemm_cpp.so"],
     cmd = "mkdir -p $(RULEDIR)/deep_gemm && cp $(location :deep_gemm_cpp.so) $@",
-    visibility = ["//visibility:public"],
-)
-
-py_library(
-    name = "deep_gemm_pkg",
-    srcs = glob(["deep_gemm/**/*.py", "deep_gemm/*.py"]),
-    data = [
-        ] + glob(["deep_gemm/include/**/*"]) + [
-        ":deep_gemm_so_in_pkg",
-        ":deep_gemm_cpp.so",
-    ],
-    imports = ["."],
-    visibility = ["//visibility:public"],
-)
-
-alias(
-    name = "deep_gemm",
-    actual = ":deep_gemm_pkg",
     visibility = ["//visibility:public"],
 )
 

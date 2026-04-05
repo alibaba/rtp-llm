@@ -586,8 +586,6 @@ ExecInitParams initExecCtx(const ParallelismConfig&           parallelism_config
                          params.enable_comm_overlap,
                          params.enable_layer_micro_batch);
         params.user_deep_gemm_num_sm  = hw_kernel_config.deep_gemm_num_sm;
-        params.use_aiter_pa           = fmha_config.use_aiter_pa;
-        params.use_asm_pa             = fmha_config.use_asm_pa;
         params.use_deepep_moe         = moe_config.use_deepep_moe;
         params.use_deepep_internode   = moe_config.use_deepep_internode;
         params.use_deepep_low_latency = moe_config.use_deepep_low_latency;
