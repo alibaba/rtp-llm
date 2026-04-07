@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "copts", "cc_test_wrapper")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 test_copts = [
@@ -31,4 +31,15 @@ cc_test(
     ] + torch_deps(),
     copts = test_copts,
     tags = ["manual"],
+)
+
+cc_test_wrapper(
+    name = "cache_store_async_writer_test",
+    srcs = ["CacheStoreAsyncWriterTest.cpp"],
+    deps = [
+        "//rtp_llm/cpp/core:cache_store_async_writer",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = copts(),
 )

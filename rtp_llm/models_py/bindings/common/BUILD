@@ -10,6 +10,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/cpp/core:op_data",
         "//rtp_llm/cpp/core:exec_ops_hdr",
+        "//rtp_llm/cpp/core:cache_store_async_writer",
     ] + torch_deps() + select({
         "//:using_cuda": [
             "//rtp_llm/cpp/kernels:kernels_cu",

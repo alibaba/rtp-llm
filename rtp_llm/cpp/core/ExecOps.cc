@@ -215,7 +215,8 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id] + seq_size_per_block - 1)
             / seq_size_per_block;
         auto request_id     = *(param.request_id.data_ptr<int64_t>() + batch_id);
-        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), runtimeCreateEvent());
+        auto event          = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
+        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         RTP_LLM_LOG_DEBUG(
             "write cache store, request id is %ld, blocks num is %ld", request_id, block_num + reuse_block_num);
 
