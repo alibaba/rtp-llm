@@ -5,7 +5,7 @@ from typing import List, NamedTuple
 
 import torch
 
-from rtp_llm.ops import AttentionConfigs, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, get_typemeta
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -72,6 +72,7 @@ class BaseAttentionTest(unittest.TestCase):
         seq_size_per_block: int = 64,
         tp_size: int = 1,
         data_type: str = "fp16",
+        kv_cache_dtype: KvCacheDataType = KvCacheDataType.BASE,
     ) -> TestConfig:
         """Helper to create a test config"""
         attn_configs = AttentionConfigs()
@@ -89,6 +90,7 @@ class BaseAttentionTest(unittest.TestCase):
             "bf16": torch.bfloat16,
         }
         attn_configs.dtype = dtype_map.get(data_type, torch.float16)
+        attn_configs.kv_cache_dtype = kv_cache_dtype
 
         parallelism_config = ParallelismConfig()
         parallelism_config.tp_size = tp_size
@@ -263,15 +265,24 @@ class BaseAttentionTest(unittest.TestCase):
 
         # Create combined KV cache with shape [total_blocks, 2, num_kv_heads, seq_size_per_block, head_dim]
         # where dim=1, index=0 is K and index=1 is V
+        sample_dtype = torch.bfloat16 if dtype == torch.float8_e4m3fn else dtype
         kv_cache_combined = torch.randn(
             total_blocks,
             2,  # K and V
             num_kv_heads,
             seq_size_per_block,
             head_dim,
-            dtype=dtype,
+            dtype=sample_dtype,
             device=self.device,
         )
+        if dtype == torch.float8_e4m3fn:
+            kv_cache_combined = kv_cache_combined.to(dtype)
+            kv_cache.kv_scale_base = torch.ones(
+                total_blocks,
+                num_kv_heads * seq_size_per_block,
+                dtype=torch.float32,
+                device=self.device,
+            )
 
         kv_cache.kv_cache_base = kv_cache_combined
 
