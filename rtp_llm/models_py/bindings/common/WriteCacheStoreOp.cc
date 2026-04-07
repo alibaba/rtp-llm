@@ -23,25 +23,25 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 torchTensor2Buffer(cache_store_inputs.kv_cache_group_types) :
                 nullptr;
 
-    CacheStoreInputs inputs{torchTensor2Buffer(input_lengths),
-                            torchTensor2Buffer(prefix_lengths),
-                            torchTensor2Buffer(kv_cache_block_id_host),
-                            layer_to_group_buf,
-                            group_types_buf,
-                            cache_store_inputs.context_batch_size,
-                            cache_store_inputs.decoder_batch_size,
-                            torchTensor2Buffer(cache_store_inputs.request_id),
-                            torchTensor2Buffer(cache_store_inputs.request_pd_separation),
-                            cache_store_inputs.cache_keys,
-                            cache_store_inputs.tokens_per_block,
-                            cache_store_inputs.kv_block_stride_bytes,
-                            cache_store_inputs.kv_scale_stride_bytes,
-                            cache_store_inputs.pd_separation,
-                            cache_store_inputs.model_id,
-                            cache_store_inputs.decode_entrance,
-                            cache_store_inputs.warmup,
-                            kv_cache.layer_id,
-                            cache_store_inputs.cp_slot_mapper};
+        CacheStoreInputs inputs{torchTensor2Buffer(input_lengths),
+                                torchTensor2Buffer(prefix_lengths),
+                                torchTensor2Buffer(kv_cache_block_id_host),
+                                layer_to_group_buf,
+                                group_types_buf,
+                                cache_store_inputs.context_batch_size,
+                                cache_store_inputs.decoder_batch_size,
+                                torchTensor2Buffer(cache_store_inputs.request_id),
+                                torchTensor2Buffer(cache_store_inputs.request_pd_separation),
+                                cache_store_inputs.cache_keys,
+                                cache_store_inputs.tokens_per_block,
+                                cache_store_inputs.kv_block_stride_bytes,
+                                cache_store_inputs.kv_scale_stride_bytes,
+                                cache_store_inputs.pd_separation,
+                                cache_store_inputs.model_id,
+                                cache_store_inputs.decode_entrance,
+                                cache_store_inputs.warmup,
+                                kv_cache.value().layer_id,
+                                cache_store_inputs.cp_slot_mapper};
 
         KvCacheInfo kv_cache_info;
         // kv_cache_buffer uses kv block base address (compatible with existing cache store writer which writes "k_").

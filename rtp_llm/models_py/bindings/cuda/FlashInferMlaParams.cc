@@ -214,10 +214,14 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
                                                  int&          input_token_num,
                                                  int&          page_num,
                                                  int&          reuse_page_num,
-                                                 int&          batch_reuse_info_size) {
+                                                 int&          batch_reuse_info_size,
+                                                 int           cp_size,
+                                                 bool          kv_cache_sharded) {
     const int max_batch_blocks = t_kv_cache_block_id_host.defined() && t_kv_cache_block_id_host.size(0) > 0 ?
                                      t_kv_cache_block_id_host.size(1) :
                                      -1;
+    const int virtual_block_size =
+        (kv_cache_sharded && cp_size > 1) ? seq_size_per_block * cp_size : seq_size_per_block;
 
     RTP_LLM_CHECK_WITH_INFO(
         batch_size <= max_batch_size_, "batch_size exceed reserved %d > %d", batch_size, max_batch_size_);
@@ -280,7 +284,7 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
             accu_q_len += input_length;
             accu_kv_len += seq_len;
 
-            int reuse_page_num = (prefix_length + seq_size_per_block - 1) / seq_size_per_block;
+            int reuse_page_num = (prefix_length + virtual_block_size - 1) / virtual_block_size;
             if (kv_cache_block_id) {
                 RTP_LLM_CHECK_WITH_INFO(reuse_page_idx + reuse_page_num <= max_reuse_page_num_,
                                         "reuse_page_num exceed reserved %d > %d",
@@ -325,7 +329,7 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
         kvlen_ptr[i]                  = seq_len;
         max_kv_len                    = std::max(seq_len, max_kv_len);
 
-        int current_page_num = (seq_len + seq_size_per_block - 1) / seq_size_per_block;
+        int current_page_num = (seq_len + virtual_block_size - 1) / virtual_block_size;
         RTP_LLM_CHECK_WITH_INFO(total_page_idx + current_page_num <= max_page_num_,
                                 "page_num exceed reserved %d > %d",
                                 total_page_idx + current_page_num,
@@ -424,6 +428,9 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     int reuse_page_num        = 0;
     int batch_reuse_info_size = batch_size * 4;  // 4 ints per batch entry
 
+    const int virtual_block_size =
+        (kv_cache_sharded && cp_size > 1) ? seq_size_per_block * cp_size : seq_size_per_block;
+
     for (int i = 0; i < batch_size; i++) {
         int seq_len = 0;
         if (prefix_lengths_ptr) {
@@ -431,12 +438,12 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
             int prefix_length = prefix_lengths_ptr[i];
             input_token_num += input_length;
             seq_len = input_length + prefix_length;
-            reuse_page_num += (prefix_length + seq_size_per_block - 1) / seq_size_per_block;
+            reuse_page_num += (prefix_length + virtual_block_size - 1) / virtual_block_size;
         } else {
             input_token_num += 1;
             seq_len = sequence_lengths_ptr[i] + 1;
         }
-        page_num += (seq_len + seq_size_per_block - 1) / seq_size_per_block;
+        page_num += (seq_len + virtual_block_size - 1) / virtual_block_size;
     }
 
     // Ensure tensors are allocated with sufficient size
@@ -452,7 +459,9 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
                        input_token_num,
                        page_num,
                        reuse_page_num,
-                       batch_reuse_info_size);
+                       batch_reuse_info_size,
+                       cp_size,
+                       kv_cache_sharded);
 
     // Refresh buffer (copy to DEVICE and update shapes)
     refreshBuffer(batch_size, input_token_num, page_num, reuse_page_num, batch_reuse_info_size);

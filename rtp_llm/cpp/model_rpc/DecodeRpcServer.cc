@@ -5,6 +5,8 @@
 #include <limits.h>
 #include <condition_variable>
 
+#include <cuda_runtime.h>
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
@@ -408,7 +410,6 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             string error_msg = "get grpc connection for rank:" + std::to_string(i) + ", addr:" + worker + " failed";
             return ErrorInfo(ErrorCode::GET_CONNECTION_FAILED, error_msg);
         }
-        all_context.push_back(WorkerRpcContext());
         auto& rpc_context = all_context[i];
         rpc_context.stub  = connect_status.value().stub;
         BroadcastLoadRequestPB load_request;
@@ -945,6 +946,20 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 layer_cache_load_context->getErrorInfoString().c_str(),
                                 (load_done_time_us - start_load_time_us) / 1000);
             return layer_cache_load_context->getErrorInfo();
+        }
+    }
+
+    // RDMA NIC write completion does not guarantee GPU-side visibility for
+    // subsequent CUDA kernels. A device-wide sync ensures all PCIe/NVLink
+    // writes from the NIC are visible before any kernel reads the data.
+    // Controlled by env var so it can be toggled without recompilation.
+    static bool rdma_sync_enabled = autil::EnvUtil::getEnv("LOAD_CACHE_RDMA_CUDA_SYNC", false);
+    if (rdma_sync_enabled) {
+        auto sync_err = cudaDeviceSynchronize();
+        if (sync_err != cudaSuccess) {
+            RTP_LLM_LOG_WARNING("request [%s] cudaDeviceSynchronize after RDMA load failed: %s",
+                                request_key.c_str(),
+                                cudaGetErrorString(sync_err));
         }
     }
 

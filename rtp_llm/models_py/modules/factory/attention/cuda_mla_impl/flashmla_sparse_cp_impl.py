@@ -419,7 +419,6 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         self.q1_idx_global = None
         self.kv_cache_write_op = None
         self.write_cache_store_impl = None
-        self._ws_fp8 = None
 
         self._local_req_ids = None
         self._global_req_ids = None
@@ -711,16 +710,13 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         return q_to_kv_ratio <= 0.00614
 
     def _alloc_workspace_kv_cache(self, kv_cache: KVCache) -> torch.Tensor:
-        """Lazily allocate the temporary KV cache workspace, reused across layers within one forward pass."""
+        """Allocate a fresh temporary KV cache workspace for this forward pass."""
         kv_dim_bytes = kv_cache.kv_cache_base.size(-1)
-        expected_shape = (self._ws_total_pages, self.token_per_block, kv_dim_bytes)
-        if self._ws_fp8 is None or self._ws_fp8.shape != expected_shape:
-            self._ws_fp8 = torch.empty(
-                expected_shape,
-                dtype=kv_cache.kv_cache_base.dtype,
-                device=self.device,
-            )
-        return self._ws_fp8
+        return torch.empty(
+            (self._ws_total_pages, self.token_per_block, kv_dim_bytes),
+            dtype=kv_cache.kv_cache_base.dtype,
+            device=self.device,
+        )
 
     def _convert_topk_indices_to_workspace(
         self,

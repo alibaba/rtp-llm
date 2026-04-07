@@ -45,7 +45,9 @@ private:
                             int&          input_token_num,
                             int&          page_num,
                             int&          reuse_page_num,
-                            int&          batch_reuse_info_size);
+                            int&          batch_reuse_info_size,
+                            int           cp_size          = 1,
+                            bool          kv_cache_sharded = false);
 
     // Ensure tensors are allocated with sufficient size.
     // forbid_realloc: when true (replay path only), throw if realloc would be needed.
