@@ -1,19 +1,36 @@
 #pragma once
 
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
-#include "rtp_llm/cpp/cache/connector/IGenerateStream.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <grpc++/grpc++.h>
 #include <memory>
 #include <string>
 #include <vector>
+#include <optional>
 
 namespace rtp_llm {
+
+class GenerateStream;
+
+// Side-channel payload for P2P bypass (carries first token, reuse, SP info, position_ids)
+struct P2PSideChannelPayload {
+    int64_t              first_token_id   = 0;
+    int32_t              total_reuse_len  = 0;
+    int32_t              local_reuse_len  = 0;
+    int32_t              remote_reuse_len = 0;
+    int32_t              memory_reuse_len = 0;
+    std::vector<int>     propose_tokens;
+    TensorPB             propose_probs;
+    TensorPB             propose_hidden;
+    std::vector<int32_t> position_ids;
+    bool                 has_data = false;
+};
 
 class PrefillLoadCaller {
 public:
@@ -61,9 +78,12 @@ public:
         int64_t                                                                           request_id;
         int64_t                                                                           start_time_us;
         int64_t                                                                           total_cost_time_us;
-        IGenerateStreamPtr                                                                generate_stream;
+        GenerateStream*                                                                   generate_stream = nullptr;
         ErrorCode   error_code = ErrorCode::NONE_ERROR;
         std::string error_message;
+
+        // P2P bypass: parsed side-channel payload (instead of writing to generate_stream directly)
+        P2PSideChannelPayload side_channel_payload;
 
         bool completion_queue_shutdown_drained_{false};
     };
@@ -74,7 +94,7 @@ public:
                                  uint32_t                  prefill_port,
                                  const std::string&        unique_key,
                                  int64_t                   deadline_ms,
-                                 const IGenerateStreamPtr& generate_stream);
+                                 GenerateStream*           generate_stream);
 
 private:
     bool buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,

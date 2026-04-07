@@ -67,7 +67,8 @@ namespace rtp_llm {
     // 设置响应
     if (start_load_response_success_) {
         response->set_error_code(ErrorCodePB::NONE_ERROR);
-        response->set_first_generate_token_id(first_generate_token_id_);
+        auto* payload = response->mutable_payload();
+        payload->set_first_generate_token_id(first_generate_token_id_);
     } else {
         response->set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
         response->set_error_message("test start load response failed");
