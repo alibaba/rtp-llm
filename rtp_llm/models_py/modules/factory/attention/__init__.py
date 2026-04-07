@@ -69,6 +69,7 @@ else:
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import (
             get_xqa_impl,
+            XQASpecImpl,
         )
 
         PREFILL_MHA_IMPS.extend(
@@ -77,6 +78,7 @@ else:
                 HeadWisePrefillImpl,
                 FlashInferTRTLLMSpecDecodeImpl,
                 FlashInferTRTLLMPrefillImpl,
+                XQASpecImpl,
                 TRTMHAImpl,
                 PyFlashinferPrefillImpl,
                 PyFlashinferPagedPrefillImpl,

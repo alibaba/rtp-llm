@@ -15,9 +15,11 @@ from rtp_llm.ops import (
 )
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
+    FusedRopeKVCachePrefillOpQOut,
     LayerKVCache,
     PyAttentionInputs,
     XQAAttnOp,
+    XQASpecAttnOp,
 )
 
 # Constants
@@ -78,6 +80,9 @@ class XQAImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        if attn_inputs.is_target_verify:
+            return False
+        # Create temporary instance to check support
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
@@ -97,6 +102,59 @@ class XQAImpl(FMHAImplBase):
         )
 
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        common.update_trt_params(
+            self.fmha_impl,
+            self.rope_kvcache_impl,
+            self.fmha_params,
+            self.rope_params,
+            attn_inputs,
+        )
+
+
+class XQASpecImpl(FMHAImplBase):
+
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
+    ) -> None:
+        self.attn_configs = attn_configs
+        self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
+        self.fmha_impl = XQASpecAttnOp(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
+
+        self.attn_inputs = attn_inputs
+
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        if not attn_inputs.is_target_verify:
+            return False
+        if attn_configs.kv_cache_dtype != KvCacheDataType.FP8:
+            return False
+        fmha_impl = XQASpecAttnOp(attn_configs)
+        return fmha_impl.support(attn_inputs)
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+    ) -> torch.Tensor:
+        if self.need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        else:
+            fmha_input = qkv
+        output = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+
+        return output.reshape(output.shape[0] * output.shape[1], -1)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         common.update_trt_params(
