@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
 cc_library(
     name = "memory_connector",
@@ -20,7 +20,7 @@ cc_library(
         "//rtp_llm/cpp/utils:profiling_scope",
         "@havenask//aios/autil:json",
         "@havenask//aios/autil:lock_free",
-    ] + torch_deps(),
+    ] + torch_deps() + no_block_copy_link_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],
 )

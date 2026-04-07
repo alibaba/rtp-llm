@@ -28,7 +28,6 @@ cc_library(
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/cpp/cuda/ops:standalone_ops",
-            "//rtp_llm/models_py/bindings/cuda:split_kv_cache_copy",
         ],
         "//conditions:default": [],
     }),

@@ -21,6 +21,7 @@ cc_library(
         "//rtp_llm/cpp/models:context_parallel",
         "//rtp_llm/cpp/cuda/CudaGraph:graph_base",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/models_py/bindings:no_block_copy_hdr",
     ],
     visibility = ["//visibility:public"]
 )

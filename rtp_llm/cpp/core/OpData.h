@@ -176,17 +176,6 @@ struct MultiMergeCopyParams {
     std::vector<size_t> dst_offsets;
 };
 
-struct MultiCopyParams {
-    std::vector<torch::Tensor> multi_dst;
-    std::vector<torch::Tensor> multi_src;
-
-    // CUDA split KV + scale path (sm_copy scatter/gather). When split_kv_layer_num > 0, execNoBlockCopy may
-    // fuse copies per logical block; strides must match per-tensor nbytes.
-    int    split_kv_layer_num          = 0;
-    size_t split_kv_cache_stride_bytes = 0;
-    size_t split_kv_scale_stride_bytes = 0;
-};
-
 struct BatchCopyParams {
     enum CopyType : uint32_t {
         D2H = 0,
