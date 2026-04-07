@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
@@ -10,9 +11,11 @@ namespace rtp_llm {
 FusedAsyncContext::FusedAsyncContext(const std::vector<std::shared_ptr<AsyncContext>>& contexts): contexts_(contexts) {}
 
 void FusedAsyncContext::waitDone() {
-    for (const auto& context : contexts_) {
-        if (context) {
-            context->waitDone();
+    RTP_LLM_PROFILE_FUNCTION();
+    for (size_t i = 0; i < contexts_.size(); i++) {
+        if (contexts_[i]) {
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC("wait_sub_context[%zu]", i);
+            contexts_[i]->waitDone();
         }
     }
 }
@@ -43,6 +46,7 @@ FusedAsyncReadContext::FusedAsyncReadContext(const std::shared_ptr<FusedAsyncCon
     fused_match_context_(fused_match_context), resource_(resource), meta_(meta) {}
 
 void FusedAsyncReadContext::waitDone() {
+    RTP_LLM_PROFILE_FUNCTION();
     std::unique_lock<std::mutex> lock(done_mutex_);
     done_cv_.wait(lock, [&] { return done(); });
 }

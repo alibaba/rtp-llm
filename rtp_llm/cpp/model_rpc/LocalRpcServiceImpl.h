@@ -66,6 +66,12 @@ public:
         return local_server_->StartProfile(context, request, response);
     }
 
+    ::grpc::Status StartProfileInternal(::grpc::ServerContext*               context,
+                                        const StartProfileInternalRequestPB* request,
+                                        EmptyPB*                             response) override {
+        return local_server_->StartProfileInternal(context, request, response);
+    }
+
     ::grpc::Status
     CheckHealth(::grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) override {
         return local_server_->CheckHealth(context, request, response);

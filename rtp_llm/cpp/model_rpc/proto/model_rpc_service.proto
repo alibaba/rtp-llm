@@ -353,6 +353,13 @@ message StartProfileRequestPB {
     string trace_name = 1;
     int32 start_step = 2;
     int32 num_steps = 3;
+    bool enable_all_rank = 4;
+}
+
+message StartProfileInternalRequestPB {
+    string trace_name = 1;
+    int32 start_step = 2;
+    int32 num_steps = 3;
 }
 
 message CheckHealthResponsePB {
@@ -566,6 +573,7 @@ service RpcService {
     rpc SetRestart(EmptyPB) returns (EmptyPB);
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
     rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
+    rpc StartProfileInternal(StartProfileInternalRequestPB) returns (EmptyPB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);

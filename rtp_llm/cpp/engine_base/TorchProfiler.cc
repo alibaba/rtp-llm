@@ -152,12 +152,12 @@ void StepWindowProfiler::tick() {
         // Build trace prefix
         std::string prefix = trace_name_;
         if (prefix.empty()) {
-            prefix = "profiler_wr" + std::to_string(world_rank_) + "_ts"
-                     + std::to_string(autil::TimeUtility::currentTimeInMicroSeconds());
+            prefix = "profiler_ts" + std::to_string(autil::TimeUtility::currentTimeInMicroSeconds());
         }
         if (prefix.back() != '_') {
             prefix += "_";
         }
+        prefix += "wr" + std::to_string(world_rank_) + "_";
         profiler_ = std::make_shared<TorchProfile>(prefix, default_output_dir_);
         has_profiler_.store(true, std::memory_order_relaxed);
         profiler_->start();

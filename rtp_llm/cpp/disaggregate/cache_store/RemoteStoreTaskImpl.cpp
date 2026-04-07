@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTaskImpl.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
@@ -47,6 +48,7 @@ bool RemoteStoreTaskImpl::success() const {
 
 std::shared_ptr<TransferRequest>
 RemoteStoreTaskImpl::makeAvailableRequest(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer) {
+    RTP_LLM_PROFILE_FUNCTION();
     if (request_block_buffer == nullptr) {
         return nullptr;
     }
@@ -64,6 +66,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::shared_ptr<RequestBlockBuff
     }
     auto transfer_request = std::make_shared<TransferRequest>(request_);
     {
+        RTP_LLM_PROFILE_SCOPE("transfer_request_lock");
         std::unique_lock<std::shared_mutex> lock(buffers_mutex_);
         if (done_) {
             // 已经完成过了或是已经失败, 不需要继续或是重复发送
@@ -71,6 +74,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::shared_ptr<RequestBlockBuff
         }
 
         auto blocks = request_block_buffer->getBlocks();
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("transfer_request_lock_[%lu]", blocks.size());
 
         for (auto [key, block] : blocks) {
             auto iter = to_load_buffers_.find(key);
@@ -109,8 +113,10 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::shared_ptr<RequestBlockBuff
 
 std::shared_ptr<TransferRequest>
 RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto transfer_request = std::make_shared<TransferRequest>(request_);
     {
+        RTP_LLM_PROFILE_SCOPE("transfer_request_lock");
         std::unique_lock<std::shared_mutex> lock(buffers_mutex_);
         if (done_) {
             // 已经完成过了或是已经失败, 不需要继续或是重复发送
@@ -126,6 +132,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<Bloc
             collector_->setBlockSize(block_size * expect_done_buffer_count_);
         }
 
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("transfer_request_lock_[%lu]", blocks.size());
         for (auto block : blocks) {
             auto key  = block->key;
             auto iter = to_load_buffers_.find(key);
@@ -171,6 +178,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<Bloc
 }
 
 void RemoteStoreTaskImpl::notifyRequestDone(const std::map<std::string, std::string>& block_keys, bool success) {
+    RTP_LLM_PROFILE_FUNCTION();
     {
         std::lock_guard<std::shared_mutex> lock(buffers_mutex_);
         if (done_) {
