@@ -41,14 +41,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-filegroup(
-    name = "py_testdata",
-    srcs = glob([
-        "python/*",
-        "python/**/*",
-    ]),
-)
-
 cc_test(
     name = "sampler_test",
     srcs = [

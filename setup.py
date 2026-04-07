@@ -579,7 +579,7 @@ def get_pip_extras() -> str:
     Returns extras name like: cuda12_9, cuda12, cuda12_arm, rocm, ppu
     Install: uv pip install -e ".[dev]" --no-build-isolation-package rtp-llm
     """
-    return CONFIG_TO_EXTRAS[detect_build_config(verbose=False)]
+    return CONFIG_TO_EXTRAS[detect_build_config(verbose=True)]
 
 
 def should_skip_bazel_build() -> bool:
@@ -636,8 +636,8 @@ def _get_bazel_cmd_prefix(build_config: str) -> tuple:
 
     cmd = ["bazelisk"]
     if not has_output_root:
-        home_dir = os.path.expanduser("~")
-        cache_dir = os.path.join(home_dir, ".cache", f"bazel_{build_config}_cache")
+        cache_base = os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache"))
+        cache_dir = os.path.join(cache_base, f"bazel_{build_config}_cache")
         cmd.append(f"--output_user_root={cache_dir}")
         print(f"Using platform-specific cache: {cache_dir}")
 
@@ -859,15 +859,16 @@ def build_bazel_extensions(build_config: str) -> None:
                     bufsize=1,
                 )
 
-                # Stream output to both file and stdout
-                for line in process.stdout:
-                    f.write(line)
-                    f.flush()
-                    # Print progress indicators to terminal
-                    if any(
-                        x in line for x in ["[", "INFO:", "ERROR:", "WARNING:", "FAILED"]
-                    ):
-                        print(line.rstrip())
+                # Stream output to both file and stdout in real-time
+                while True:
+                    line = process.stdout.readline()
+                    if not line and process.poll() is not None:
+                        break
+                    if line:
+                        f.write(line)
+                        f.flush()
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
 
                 process.wait()
 
