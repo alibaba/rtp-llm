@@ -135,6 +135,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="内存 KVCache 开关. 当开启时, 需要显示通过 MEMORY_CACHE_SIZE_MB 设置内存大小",
     )
     kv_cache_group.add_argument(
+        "--enable_memory_cache_sm_copy",
+        env_name="ENABLE_MEMORY_CACHE_SM_COPY",
+        bind_to=(kv_cache_config, "enable_memory_cache_sm_copy"),
+        type=str2bool,
+        default=False,
+        help="内存 Cache 拷贝是否启用 split-KV SM scatter/gather（CUDA 上满足布局条件时）。默认 False；True 时满足条件可走 SM copy。",
+    )
+    kv_cache_group.add_argument(
         "--memory_cache_size_mb",
         env_name="MEMORY_CACHE_SIZE_MB",
         bind_to=(kv_cache_config, "memory_cache_size_mb"),

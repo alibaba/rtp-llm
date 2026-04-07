@@ -786,6 +786,7 @@ class HybridAttentionType:
 class KVCacheConfig:
     enable_device_cache: bool
     enable_memory_cache: bool
+    enable_memory_cache_sm_copy: bool
     enable_remote_cache: bool
     fp8_kv_cache: int
     int8_kv_cache: int

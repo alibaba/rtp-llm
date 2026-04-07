@@ -236,12 +236,7 @@ cc_library(
         "@havenask//aios/autil:stack_tracer",
         "@havenask//aios/autil:string_helper",
         "@havenask//aios/autil:scope",
-    ] + torch_deps() + select({
-        "@//:using_cuda": [
-            "//rtp_llm/models_py/bindings/cuda:split_kv_cache_copy",
-        ],
-        "//conditions:default": [],
-    }),
+    ] + torch_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],
     alwayslink = 1,
@@ -349,11 +344,6 @@ cc_library(
         "@havenask//aios/autil:string_helper",
         "@havenask//aios/autil:scope",
     ] + torch_deps() + select({
-        "@//:using_cuda": [
-            "//rtp_llm/models_py/bindings/cuda:split_kv_cache_copy",
-        ],
-        "//conditions:default": [],
-    }) + select({
         "@//:using_rocm": [
             "//rtp_llm/cpp/kernels/rocm/sampling:sampling",
             "//rtp_llm/cpp/rocm:rocm_host_utils",

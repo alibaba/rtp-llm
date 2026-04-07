@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "autil/EnvUtil.h"
 #include <stdexcept>
 
@@ -41,6 +42,7 @@ void EngineBase::initExecCtx(const EngineInitParams& params) {
                                              params.runtime_config,
                                              params.model_specific_config,
                                              params.nccl_comm_config);
+    warmupNoBlockCopy();
 }
 
 std::shared_ptr<KVCacheManager> EngineBase::getCacheManager() const {

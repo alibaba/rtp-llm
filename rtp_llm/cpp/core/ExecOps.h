@@ -89,7 +89,6 @@ void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask);
 
 void execCopy(const CopyParams& params);
 void execNoBlockCopy(const CopyParams& params);
-void execNoBlockCopy(const MultiCopyParams& params);
 void execBatchCopy(const BatchCopyParams& params);
 void execMultiMergeCopy(const MultiMergeCopyParams& params);
 

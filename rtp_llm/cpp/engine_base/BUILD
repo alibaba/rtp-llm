@@ -83,6 +83,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/utils:hash_util",
+        "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],

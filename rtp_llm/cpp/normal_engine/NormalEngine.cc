@@ -21,9 +21,6 @@
 
 #if USING_CUDA
 #include "c10/cuda/CUDACachingAllocator.h"
-#if !defined(USE_PPU)
-#include "rtp_llm/models_py/bindings/cuda/SplitKvCacheCopy.h"
-#endif
 #endif
 
 #ifdef __linux__
@@ -389,9 +386,6 @@ void NormalEngine::loop() {
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
     }
-#if USING_CUDA && !defined(USE_PPU)
-    releaseSplitKvCopyState();
-#endif
 }
 
 absl::Status NormalEngine::trySaveStepError() const {

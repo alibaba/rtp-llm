@@ -20,7 +20,6 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/core/ExecOps.h"
-#include "rtp_llm/models_py/bindings/cuda/SplitKvCacheCopy.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -114,9 +113,7 @@ protected:
         ASSERT_TRUE(connector_->init());
     }
 
-    void TearDown() override {
-        releaseSplitKvCopyState();
-    }
+    void TearDown() override {}
 
     CacheConfig                                 cache_config_;
     KVCacheConfig                               kv_cache_config_;

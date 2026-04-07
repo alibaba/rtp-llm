@@ -13,20 +13,15 @@ namespace rtp_llm {
 //   H2D: src[i] host-pinned, dst[i] device
 //   D2H: src[i] device,      dst[i] host-pinned
 //
+// All staging buffers are allocated and freed per-call (stream-ordered).
 // Returns true on success, false if preconditions not met (caller falls back to plain memcpy).
-bool trySplitKvMultiCopy(const std::vector<torch::Tensor>& src,
-                         const std::vector<torch::Tensor>& dst,
-                         int                               layer_num,
-                         int64_t                           kv_cache_stride_bytes,
-                         int64_t                           kv_scale_stride_bytes,
-                         cudaStream_t                      stream);
+bool splitKvMultiCopy(const std::vector<torch::Tensor>& src,
+                      const std::vector<torch::Tensor>& dst,
+                      int                               layer_num,
+                      int64_t                           kv_cache_stride_bytes,
+                      int64_t                           kv_scale_stride_bytes,
+                      cudaStream_t                      stream);
 
-// JIT-warm the split-KV scatter/gather kernels on the given stream.
 bool warmupSplitKvCopyKernels(cudaStream_t stream);
-
-// Free thread-local device buffers used by trySplitKvMultiCopy.
-// Must be called on the same thread that calls trySplitKvMultiCopy,
-// before that thread exits (e.g. end of NormalEngine::loop).
-void releaseSplitKvCopyState();
 
 }  // namespace rtp_llm

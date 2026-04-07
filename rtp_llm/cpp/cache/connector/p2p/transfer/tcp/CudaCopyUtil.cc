@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/CudaCopyUtil.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <torch/torch.h>
 

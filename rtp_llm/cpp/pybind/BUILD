@@ -1,5 +1,10 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps", "select_py_bindings")
+load(
+    "//bazel:arch_select.bzl",
+    "no_block_copy_link_deps",
+    "select_py_bindings",
+    "torch_deps",
+)
 
 package(default_visibility = ["//:__subpackages__"])
 
@@ -58,13 +63,10 @@ cc_library(
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
     ] + torch_deps() + select_py_bindings() + select({
-        "@//:using_cuda12": [
-            "//rtp_llm/cpp/cuda/ops:gpu_base",
-            "//rtp_llm/models_py/bindings/cuda:split_kv_cache_copy",
-        ],
+        "@//:using_cuda12": ["//rtp_llm/cpp/cuda/ops:gpu_base"],
         "@//:using_rocm": ["//rtp_llm/cpp/core:exec_ctx_rocm"],
         "//conditions:default": [],
-    }),
+    }) + no_block_copy_link_deps(),
     copts = copts(),
     alwayslink = True,
     visibility = ["//visibility:public"],

@@ -13,7 +13,7 @@
 //
 // Var-length *_var_nooffset* (gather_copy_var_nooffset_kernel / scatter_copy_var_nooffset_kernel, their
 // launch_* and warmup_sm_copy_var_nooffset_kernels): not referenced by production inference here.
-// Split KV: warmup_sm_copy_split_kernels in initExecCtx; launch_*_copy_split from execNoBlockCopy (split KV path).
+// Split KV: warmup_sm_copy_split_kernels on first use; launch_*_copy_split from SplitKvCacheCopy (split KV path).
 // Remaining entry points stay in the library for
 // standalone microbenchmarks (e.g. rtp_llm/cpp/devices/cuda_impl/tests/sm_copy_kernel_benchmark.cc via nvcc
 // build scripts; kernel lives under models_py/bindings/kernels): A/B split staging vs var-length device scatter, and
