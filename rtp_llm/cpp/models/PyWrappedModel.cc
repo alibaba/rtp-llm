@@ -249,7 +249,8 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                               inputs.warmup,
                                               description_.attention_conf.use_mla
                                                   && mla_ops_type_ != rtp_llm::MlaOpsType::MHA,
-                                              cache_manager_ ? cache_manager_->getCacheStore() : nullptr};
+                                              cache_manager_ ? cache_manager_->getCacheStore() : nullptr,
+                                              cache_store_async_writer_.get()};
         params = cache_store_inputs;
     }
     return params;
@@ -273,6 +274,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
             split_inputs[i].kv_cache_kernel_block_id.defined() ? split_inputs[i] : split_inputs[0];
         auto py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
         auto bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
+        if (!inputs.warmup && inputs.pd_separation) {
+            py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+        }
         setupKVCacheForAttentionInputs(py_attn_inputs, micro_inputs);
 
         calculatePaddingOffset(py_attn_inputs);
@@ -284,12 +288,19 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         input_list.emplace_back(PyModelInputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs});
     }
 
+    if (!inputs.warmup && inputs.pd_separation) {
+        cache_store_async_writer_->init();
+    }
+
     py::object py_outputs_obj   = py_forward_method(input_list);
     auto       py_model_outputs = py_outputs_obj.cast<std::vector<PyModelOutputs>>();
     RTP_LLM_CHECK_WITH_INFO(py_model_outputs.size() == input_list.size(),
                             "py_model_outputs.size:%d != micro_batch_inputs.size:%d",
                             py_model_outputs.size(),
                             input_list.size());
+    if (!inputs.warmup && inputs.pd_separation) {
+        cache_store_async_writer_->waitAllDone();
+    }
 
     // TODO: merge hidden states in one tensor
     torch::Tensor hidden_states;
@@ -358,6 +369,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         if (!inputs.warmup && inputs.pd_separation) {
             attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+            cache_store_async_writer_->init();
         }
         setupKVCacheForAttentionInputs(attention_inputs, inputs);
 
@@ -393,6 +405,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
             py_model_outputs      = outputs.cast<PyModelOutputs>();
             hidden_states         = py_model_outputs.hidden_states.clone();
+        }
+
+        if (!inputs.warmup && inputs.pd_separation) {
+            cache_store_async_writer_->waitAllDone();
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");

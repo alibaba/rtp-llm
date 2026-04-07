@@ -9,10 +9,11 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-// Forward declare CacheStore for opaque pointer in PyCacheStoreInputs
+// Forward declare for opaque pointers in PyCacheStoreInputs
 namespace rtp_llm {
 class CacheStore;
-}
+class CacheStoreAsyncWriter;
+}  // namespace rtp_llm
 
 namespace torch_ext {
 
@@ -136,6 +137,7 @@ struct PyCacheStoreInputs {
 
     // Opaque cache_store reference (C++ only; passes through Python without inspection)
     std::shared_ptr<rtp_llm::CacheStore> cache_store;
+    rtp_llm::CacheStoreAsyncWriter*      cache_store_async_writer = nullptr;
 };
 
 // for cuda grpah capture

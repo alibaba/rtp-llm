@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
 #include "rtp_llm/cpp/core/DeviceData.h"
 #include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/cpp/core/CacheStoreAsyncWriter.h"
 
 namespace py = pybind11;
 
@@ -91,6 +92,7 @@ private:
     bool       enable_device_perf_{false};
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
+    std::unique_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
@@ -229,6 +231,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (!py_init_success) {
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
+
+    cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>();
 
     if (device_props_.enable_prefill_cp) {
         context_parallel_processor_ =
