@@ -37,6 +37,11 @@ public:
 public:
     bool init();
 
+    // Expose stream_store_ for testing
+    std::shared_ptr<P2PConnectorResourceStore> streamStore() const {
+        return stream_store_;
+    }
+
 public:
     std::shared_ptr<AsyncMatchContext> asyncMatch(const KVCacheResourcePtr&    resource,
                                                   const std::shared_ptr<Meta>& meta) override;
@@ -67,7 +72,8 @@ private:
                                       std::shared_ptr<P2PConnectorResourceEntry>& resource_entry);
 
     void waitAndFillResponse(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
-                             P2PConnectorStartLoadResponsePB&                  response);
+                             P2PConnectorStartLoadResponsePB&                  response,
+                             std::function<bool()>                             is_cancelled = nullptr);
 
     grpc::Status fillResponseWithStreamInfo(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
                                             P2PConnectorStartLoadResponsePB&                  response);

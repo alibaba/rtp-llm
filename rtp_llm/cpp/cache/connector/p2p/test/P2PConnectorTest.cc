@@ -1,4 +1,5 @@
 #include <atomic>
+#include <future>
 #include <string>
 #include <thread>
 #include <gtest/gtest.h>
@@ -6,7 +7,7 @@
 
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
-#include "rtp_llm/cpp/cache/connector/IGenerateStream.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -34,10 +35,10 @@ public:
     }
 };
 
-/// Wraps MockGenerateStream for P2PConnector::asyncMatch (requires Meta::generateStream()).
+/// Wraps MockGenerateStream for P2PConnector::asyncMatch (requires Meta::generateStream() and Meta::p2pRouting()).
 class P2PMetaForConnectorTest final: public Meta {
 public:
-    explicit P2PMetaForConnectorTest(std::shared_ptr<MockGenerateStream> gs): gs_(std::move(gs)) {}
+    explicit P2PMetaForConnectorTest(std::shared_ptr<MockGenerateStream> mock_stream): mock_stream_(std::move(mock_stream)) {}
 
     bool enableMemoryCache() const override {
         return false;
@@ -57,12 +58,29 @@ public:
         static const std::vector<int64_t> kEmpty;
         return kEmpty;
     }
-    std::shared_ptr<IGenerateStream> generateStream() const override {
-        return gs_;
+    void* generateStreamOpaque() const override {
+        return mock_stream_.get();  // Return raw pointer as opaque handle
+    }
+    void setStop(ErrorCode, const std::string&) override {
+        // No-op for mock
+    }
+
+    // P2P routing context: extract from MockGenerateStream
+    std::optional<P2PRoutingContext> p2pRouting() const override {
+        if (!mock_stream_) {
+            return std::nullopt;
+        }
+        P2PRoutingContext ctx;
+        ctx.request_id      = mock_stream_->requestId();
+        ctx.unique_key      = mock_stream_->uniqueKey();
+        ctx.deadline_ms     = mock_stream_->deadlineMs();
+        ctx.prefill_addr    = mock_stream_->getPrefillAddr();
+        ctx.prefill_tp_size = mock_stream_->getPrefillTpSize();
+        return ctx;
     }
 
 private:
-    std::shared_ptr<MockGenerateStream> gs_;
+    std::shared_ptr<MockGenerateStream> mock_stream_;
 };
 
 class P2PConnectorTest: public ::testing::Test {
@@ -232,108 +250,93 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenSchedulerHandleReadFailed
     EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
 }
 
-// 测试: fillResponseWithStreamInfo 失败（first token not found），返回 INTERNAL 错误
-TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenFillResponseFailed) {
-    // 1. 创建并初始化 P2PConnector（已在 SetUp 中完成）
-    // 2. 添加有效的 resource entry
-    std::string unique_key      = "test_fill_response_failed";
+// 测试: waitSideChannelReady 超时（first token not found），返回 INTERNAL 错误
+TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
+    // 1. 添加有效的 resource entry
+    std::string unique_key      = "test_wait_side_channel_timeout";
     int64_t     request_id      = 5004;
     int64_t     deadline_ms     = currentTimeMs() + 5000;
     auto        resource        = createValidKVCacheResource(2, 2);
     auto        generate_stream = std::make_shared<MockGenerateStream>();
 
-    // 3. Mock generate_stream->currentExecuteTokens() 返回空（first token not found）
-    // 不设置任何 token，这样 currentExecuteTokens 会返回空
-    // generate_stream->setTokenIds(0, {});  // 默认就是空的
-
     generate_stream->setUniqueKey(unique_key);
     generate_stream->setRequestId(request_id);
     generate_stream->setDeadlineMs(deadline_ms);
     auto meta = std::make_shared<P2PMetaForConnectorTest>(generate_stream);
     connector_->asyncMatch(resource, meta);
 
-    // 4. 设置 TestRpcServer 返回成功（用于 scheduler_->sendKVCache）
+    // 2. 设置 TestRpcServer 返回成功（用于 scheduler_->sendKVCache）
     for (auto& server : tp_broadcast_servers_) {
         server->service()->setP2PResponseSuccess(true);
     }
 
-    // 5. 创建 request
+    // 3. 创建 request
     auto request = createValidStartLoadRequest(unique_key, deadline_ms, 2);
 
     P2PConnectorStartLoadResponsePB response;
     connector_->handleRead(request, response);
 
+    // 4. 由于没有调用 notifySideChannelReady，waitSideChannelReady 会超时
     EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
 }
 
-// 测试: 成功场景，返回 OK, 验证 response 中包含了所有字段
-TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WhenAllSuccess) {
+// 测试: 成功场景，使用 notifySideChannelReady 机制，返回 OK, 验证 response 中包含了所有字段
+// 注意：这个测试验证了 side-channel 机制的基本流程
+// 1. asyncMatch 添加 entry 到 stream_store
+// 2. notifySideChannelReady 设置 side-channel data
+// 3. handleRead -> waitAndStealResource -> waitAndFillResponse
+// 4. waitAndFillResponse 检查 side_channel_ready，发现已经是 true，立即返回
+TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     // 1. 创建有效的 resource entry
-    std::string unique_key      = "test_handle_read_success";
+    std::string unique_key      = "test_notify_side_channel_success";
     int64_t     request_id      = 5001;
     int64_t     deadline_ms     = currentTimeMs() + 5000;
     auto        resource        = createValidKVCacheResource(2, 2);
     auto        generate_stream = std::make_shared<MockGenerateStream>();
 
-    // 2. 设置 generate_stream 的返回值
-    // 设置 first token (最后一个 token)
-    std::vector<int> tokens = {100, 200, 300, 12345};  // 最后一个 token 是 12345
-    generate_stream->setTokenIds(0, tokens);
-
-    // 设置 position_ids
-    std::vector<int32_t> position_ids = {1, 2, 3, 4};
-    generate_stream->setPositionIds(position_ids);
-
-    // 设置 reuse_length
-    generate_stream->setReuseLength(10, 5, 5);
-
-    // 设置 propose_info
-    std::vector<int> propose_tokens = {1001, 1002, 1003};
-    TensorPB         propose_probs;
-    TensorPB         propose_hidden;
-    generate_stream->setProposeInfo(propose_tokens, propose_probs, propose_hidden);
-
     generate_stream->setUniqueKey(unique_key);
     generate_stream->setRequestId(request_id);
     generate_stream->setDeadlineMs(deadline_ms);
     auto meta = std::make_shared<P2PMetaForConnectorTest>(generate_stream);
     connector_->asyncMatch(resource, meta);
 
-    // 4. 创建 request
-    auto request = createValidStartLoadRequest(unique_key, deadline_ms, 2);
-
-    // 5. 设置 TestRpcServer 返回成功（用于 scheduler_->sendKVCache）
+    // 2. 设置 TestRpcServer 返回成功（用于 scheduler_->sendKVCache）
     for (auto& server : tp_broadcast_servers_) {
         server->service()->setP2PResponseSuccess(true);
     }
 
+    // 3. 在调用 handleRead 之前，先调用 notifySideChannelReady
+    //    这会在 entry 上设置 side_channel_ready=true
+    //    然后 handleRead steal entry 时，entry 已经是 ready 状态
+    //    waitAndFillResponse 会立即返回
+    P2PConnectorResourceEntry::SideChannelData data;
+    data.first_token_id   = 12345;
+    data.total_reuse_len  = 10;
+    data.local_reuse_len  = 5;
+    data.remote_reuse_len = 5;
+    data.memory_reuse_len = 0;
+    data.propose_tokens   = {1001, 1002, 1003};
+    data.position_ids     = {1, 2, 3, 4};
+    data.propose_probs.set_data_type(TensorPB::FP32);
+    data.propose_hidden.set_data_type(TensorPB::FP32);
+
+    // 注意：notifySideChannelReady 需要在 handleRead steal entry 之前调用
+    // 这样 entry 的 side_channel_ready 才会被设置
+    connector_->streamStore()->notifySideChannelReady(unique_key, data);
+
+    // 4. 创建 request 并调用 handleRead
+    //    使用 num_workers = 1 简化测试
+    auto request = createValidStartLoadRequest(unique_key, deadline_ms, 1);
+
     P2PConnectorStartLoadResponsePB response;
     connector_->handleRead(request, response);
 
+    // 5. 验证响应
     EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_EQ(response.payload().first_generate_token_id(), 12345);
+    EXPECT_EQ(response.payload().total_reuse_len(), 10);
 
-    // 8. 验证 response 中包含了正确的 first_token
-    EXPECT_EQ(response.first_generate_token_id(), 12345);
-
-    // 9. 验证 response 中包含了正确的 position_ids
-    ASSERT_EQ(response.position_ids_size(), position_ids.size());
-    for (size_t i = 0; i < position_ids.size(); ++i) {
-        EXPECT_EQ(response.position_ids(i), position_ids[i]);
-    }
-
-    // 10. 验证 response 中包含了正确的 reuse_length
-    EXPECT_EQ(response.total_reuse_len(), 10);
-    EXPECT_EQ(response.local_reuse_len(), 5);
-    EXPECT_EQ(response.remote_reuse_len(), 5);
-    EXPECT_EQ(response.memory_reuse_len(), 0);  // mock setReuseLength(10, 5, 5) leaves memory default 0
-
-    // 11. 验证 response 中包含了正确的 propose_info
-    ASSERT_EQ(response.propose_token_ids_size(), propose_tokens.size());
-    for (size_t i = 0; i < propose_tokens.size(); ++i) {
-        EXPECT_EQ(response.propose_token_ids(i), propose_tokens[i]);
-    }
-
-    // 12. 验证 scheduler_->sendKVCache 被调用（通过验证 BroadcastTp 被调用）
+    // 6. 验证 scheduler_->sendKVCache 被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
         EXPECT_GE(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
     }

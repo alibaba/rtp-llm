@@ -27,13 +27,15 @@ protected:
         return currentTimeMs() + offset_ms;
     }
 
-    /// Stream 的 unique_key / request_id / deadline_ms 由 addResource 从 stream 读取，须先配置
-    IGenerateStreamPtr createMockStream(const std::string& unique_key, int64_t request_id, int64_t deadline_ms) {
-        auto s = std::make_shared<MockGenerateStream>();
-        s->setUniqueKey(unique_key);
-        s->setRequestId(request_id);
-        s->setDeadlineMs(deadline_ms);
-        return s;
+    /// Create a MockMeta with routing context configured
+    std::shared_ptr<MockMeta> createMockMeta(const std::string& unique_key, int64_t request_id, int64_t deadline_ms) {
+        auto meta = std::make_shared<MockMeta>();
+        meta->setUniqueKey(unique_key);
+        meta->setRequestId(request_id);
+        meta->setDeadlineMs(deadline_ms);
+        meta->setPrefillAddr("127.0.0.1", 12345);
+        meta->setPrefillTpSize(1);
+        return meta;
     }
 
     // Create a mock KV cache resource
@@ -50,18 +52,17 @@ protected:
 TEST_F(P2PConnectorResourceStoreTest, AddAndStealResource_Success) {
     std::string unique_key  = "test_key_1";
     int64_t     request_id  = 1001;
-    auto        stream      = createMockStream(unique_key, request_id, getDeadlineMs());
+    int64_t     deadline_ms = getDeadlineMs();
+    auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto        resource    = createMockKVCacheResource();
-    int64_t     deadline_ms = stream->deadlineMs();
 
-    stream_store_->addResource(stream, resource);
+    stream_store_->addResource(meta, resource);
 
     // Steal resource (use waitAndStealResource with current time as deadline for immediate return)
     auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 100);
 
     ASSERT_NE(entry, nullptr);
     EXPECT_EQ(entry->request_id, request_id);
-    EXPECT_EQ(entry->generate_stream, stream);
     EXPECT_EQ(entry->kv_cache_resource, resource);
     EXPECT_EQ(entry->deadline_ms, deadline_ms);
 }
@@ -76,10 +77,11 @@ TEST_F(P2PConnectorResourceStoreTest, StealResource_NotFound) {
 TEST_F(P2PConnectorResourceStoreTest, StealResource_CanOnlyStealOnce) {
     std::string unique_key = "test_key_2";
     int64_t     request_id = 1002;
-    auto        stream     = createMockStream(unique_key, request_id, getDeadlineMs());
+    int64_t     deadline_ms = getDeadlineMs();
+    auto        meta       = createMockMeta(unique_key, request_id, deadline_ms);
     auto        resource   = createMockKVCacheResource();
 
-    stream_store_->addResource(stream, resource);
+    stream_store_->addResource(meta, resource);
 
     // First steal should succeed
     auto entry1 = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 100);
@@ -95,11 +97,11 @@ TEST_F(P2PConnectorResourceStoreTest, StealResource_CanOnlyStealOnce) {
 TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_ImmediateReturn) {
     std::string unique_key  = "test_key_3";
     int64_t     request_id  = 1003;
-    auto        stream      = createMockStream(unique_key, request_id, getDeadlineMs());
+    int64_t     deadline_ms = getDeadlineMs();
+    auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto        resource    = createMockKVCacheResource();
-    int64_t     deadline_ms = stream->deadlineMs();
 
-    stream_store_->addResource(stream, resource);
+    stream_store_->addResource(meta, resource);
 
     // waitAndStealResource should return immediately since resource exists
     auto start_time = currentTimeMs();
@@ -114,15 +116,15 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_ImmediateReturn) {
 TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_WaitForResource) {
     std::string unique_key  = "test_key_4";
     int64_t     request_id  = 1004;
-    auto        stream      = createMockStream(unique_key, request_id, getDeadlineMs(5000));
+    int64_t     deadline_ms = getDeadlineMs(5000);
+    auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto        resource    = createMockKVCacheResource();
-    int64_t     deadline_ms = stream->deadlineMs();
 
     std::atomic<bool> resource_added{false};
 
     std::thread add_thread([&]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        stream_store_->addResource(stream, resource);
+        stream_store_->addResource(meta, resource);
         resource_added.store(true);
     });
 
@@ -190,9 +192,9 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_CancelledWhileWaiting
 
     // Store 仍可用：补资源后应能正常 steal
     const int64_t request_id = 2001;
-    auto          stream     = createMockStream(unique_key, request_id, getDeadlineMs(5000));
+    auto          meta       = createMockMeta(unique_key, request_id, getDeadlineMs(5000));
     auto          resource   = createMockKVCacheResource();
-    ASSERT_TRUE(stream_store_->addResource(stream, resource));
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
     auto entry_after = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 500);
     ASSERT_NE(entry_after, nullptr);
     EXPECT_EQ(entry_after->request_id, request_id);
@@ -201,9 +203,9 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_CancelledWhileWaiting
 TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_CancelledBeforeResourceAppears) {
     const std::string unique_key  = "test_key_cancel_before_add";
     const int64_t     request_id  = 2002;
-    auto              stream      = createMockStream(unique_key, request_id, getDeadlineMs(5000));
+    const int64_t     deadline_ms = getDeadlineMs(5000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto              resource    = createMockKVCacheResource();
-    const int64_t     deadline_ms = stream->deadlineMs();
 
     std::atomic<bool>     cancel{false};
     std::function<bool()> is_cancelled = [&cancel]() { return cancel.load(); };
@@ -215,7 +217,7 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_CancelledBeforeResour
 
     std::thread late_add([&]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        stream_store_->addResource(stream, resource);
+        stream_store_->addResource(meta, resource);
     });
 
     const auto start_time = currentTimeMs();
@@ -239,10 +241,10 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_OnlyWakeUpCorrectWait
     std::string unique_key_2 = "test_key_6_b";
     int64_t     request_id_1 = 1006;
     int64_t     request_id_2 = 1007;
-    auto        stream1      = createMockStream(unique_key_1, request_id_1, getDeadlineMs(5000));
-    auto        stream2      = createMockStream(unique_key_2, request_id_2, getDeadlineMs(5000));
+    int64_t     deadline_ms  = getDeadlineMs(5000);
+    auto        meta1        = createMockMeta(unique_key_1, request_id_1, deadline_ms);
+    auto        meta2        = createMockMeta(unique_key_2, request_id_2, deadline_ms);
     auto        resource     = createMockKVCacheResource();
-    int64_t     deadline_ms  = stream1->deadlineMs();
 
     std::atomic<bool>                          waiter1_done{false};
     std::atomic<bool>                          waiter2_done{false};
@@ -263,7 +265,7 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_OnlyWakeUpCorrectWait
     // Wait for both threads to start waiting
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    stream_store_->addResource(stream1, resource);
+    stream_store_->addResource(meta1, resource);
 
     // Wait for waiter1 to complete
     waiter1.join();
@@ -275,7 +277,7 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_OnlyWakeUpCorrectWait
     // waiter2 should still be waiting (or we add resource for it)
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    stream_store_->addResource(stream2, resource);
+    stream_store_->addResource(meta2, resource);
 
     waiter2.join();
 
@@ -287,9 +289,9 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_OnlyWakeUpCorrectWait
 TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_MultipleWaitersForSameKey) {
     std::string unique_key  = "test_key_7";
     int64_t     request_id  = 1008;
-    auto        stream      = createMockStream(unique_key, request_id, getDeadlineMs(5000));
+    int64_t     deadline_ms = getDeadlineMs(5000);
+    auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto        resource    = createMockKVCacheResource();
-    int64_t     deadline_ms = stream->deadlineMs();
 
     std::atomic<int>                           success_count{0};
     std::shared_ptr<P2PConnectorResourceEntry> entry1;
@@ -313,7 +315,7 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_MultipleWaitersForSam
     // Wait for both threads to start waiting
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    stream_store_->addResource(stream, resource);
+    stream_store_->addResource(meta, resource);
 
     waiter1.join();
     waiter2.join();
@@ -328,10 +330,10 @@ TEST_F(P2PConnectorResourceStoreTest, ResourceTimeout_AutoRemoval) {
     std::string unique_key  = "test_key_8";
     int64_t     request_id  = 1009;
     int64_t     deadline_ms = currentTimeMs() + 50;
-    auto        stream      = createMockStream(unique_key, request_id, deadline_ms);
+    auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto        resource    = createMockKVCacheResource();
 
-    stream_store_->addResource(stream, resource);
+    stream_store_->addResource(meta, resource);
 
     // Wait for the timeout check to run (check interval is 100ms)
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
