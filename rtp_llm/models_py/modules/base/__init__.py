@@ -31,6 +31,7 @@ if device_type == DeviceType.ROCm:
 
     # Import NotImplementedOp placeholders for ROCm
     from rtp_llm.models_py.modules.base.rocm.not_implemented_ops import (
+        FakeBalanceExpert,
         GroupTopK,
         IndexerOp,
     )
@@ -46,7 +47,11 @@ else:
         RMSNorm,
         RMSResNorm,
     )
-    from rtp_llm.models_py.modules.base.cuda.select_topk import GroupTopK, SelectTopk
+    from rtp_llm.models_py.modules.base.cuda.select_topk import (
+        FakeBalanceExpert,
+        GroupTopK,
+        SelectTopk,
+    )
 
     __all__ = [
         "Embedding",
@@ -64,6 +69,7 @@ else:
         "RMSResNorm",
         "SelectTopk",
         "GroupTopK",
+        "FakeBalanceExpert",
         "FusedSiluAndMul",
         "IndexerOp",
         "SigmoidGateScaleAdd",
