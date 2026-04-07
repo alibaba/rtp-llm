@@ -1,93 +1,78 @@
+import ctypes
+import glob
 import logging
 import os
-import pathlib
+import site
 import sys
 import traceback
 from typing import List
 
 import torch
 
+
+def _preload_nvidia_deps():
+    """Preload nvidia wheel libraries that torch doesn't cover.
+
+    For regular uv/pip install, RPATH in our .so resolves to
+    site-packages/nvidia/*/lib/ automatically.  For editable install
+    the .so stays in the repo dir so RPATH can't resolve.
+
+    Same pattern as torch._preload_cuda_deps / torch._load_global_deps.
+    Harmless if libs are already loaded or not installed.
+    """
+    _NVIDIA_DEPS = {
+        "nvtx": "libnvtx*.so*",
+        "cuda_cupti": "libcupti.so*",
+        "cudnn": "libcudnn.so.*[0-9]",
+        "nccl": "libnccl.so*",
+        "cusparselt": "libcusparseLt.so*",
+        "cufile": "libcufile.so*",
+    }
+    search_paths = []
+    try:
+        usp = site.getusersitepackages()
+        if isinstance(usp, str):
+            search_paths.append(usp)
+    except Exception:
+        pass
+    try:
+        search_paths.extend(site.getsitepackages())
+    except Exception:
+        pass
+
+    for folder, pattern in _NVIDIA_DEPS.items():
+        for sp in search_paths:
+            lib_dir = os.path.join(sp, "nvidia", folder, "lib")
+            if not os.path.isdir(lib_dir):
+                continue
+            matches = glob.glob(os.path.join(lib_dir, pattern))
+            if matches:
+                try:
+                    ctypes.CDLL(matches[0], mode=ctypes.RTLD_GLOBAL)
+                except OSError:
+                    pass
+                break
+
+
+_preload_nvidia_deps()
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 libs_path = os.path.join(parent_dir, "libs")
 SO_NAME = "libth_transformer_config.so"
 
-
-# for py test
-def find_upper_so(current_dir: str):
-    logging.info(f"find_upper_so: {current_dir}")
-    p = pathlib.Path(current_dir).resolve()
-    while p != p.parent:
-        if p.exists():
-            for root, _, files in os.walk(p):
-                logging.info(f"find_upper_so: {root}, {files}")
-                if SO_NAME in files:
-                    return root
-        p = p.parent
-    raise Exception(f"failed to find {SO_NAME} in {current_dir}")
-
-
-def find_th_transformer(current_dir: str):
-    logging.info(f"find_th_transformer: {current_dir}")
-    if not os.path.exists(current_dir):
-        return None
-    dir_path = pathlib.Path(current_dir)
-    for file in dir_path.iterdir():
-        if file.is_file() and file.name == SO_NAME:
-            return os.path.join(current_dir)
-
-    # 检查下一级目录中的文件
-    for subdir in dir_path.iterdir():
-        if subdir.is_dir():  # 确保是目录
-            for file in subdir.iterdir():
-                if file.is_file() and file.name == SO_NAME:
-                    return os.path.join(current_dir, subdir.name)
-
-    # 检查更下一级目录中的文件
-    for subdir in dir_path.iterdir():
-        if subdir.is_dir():  # 确保是目录
-            for subsubdir in subdir.iterdir():
-                if subsubdir.is_dir():
-                    for file in subsubdir.iterdir():
-                        if file.is_file() and file.name == SO_NAME:
-                            return os.path.join(
-                                os.path.join(current_dir, subdir.name), subsubdir.name
-                            )
-    return None
-
-
-so_path = os.path.join(libs_path)
-if not os.path.exists(os.path.join(so_path, SO_NAME)):
-    logging.info(
-        f"failed to load libth_transformer_config.so from libs, try use another path"
+# All .so files are in rtp_llm/libs/ (copied by setup.py during uv/pip install)
+so_path = libs_path
+_so_available = os.path.exists(os.path.join(so_path, SO_NAME))
+if not _so_available:
+    logging.warning(
+        f"{SO_NAME} not found in {libs_path}. "
+        f"C++ extensions not available (collection-only mode)."
     )
-    # for debug useage, read in bazel-bin and bazel-bin's subdir
-    bazel_bin_dir = os.path.join(parent_dir, "../bazel-bin")
-    so_path = find_th_transformer(bazel_bin_dir)
-    logging.info(f"failed to find {SO_NAME} in {bazel_bin_dir}")
-    if not so_path:
-        so_path = find_upper_so(current_dir)
+else:
+    logging.info(f"so path: {so_path}")
+    sys.path.append(so_path)
 
-logging.info(f"so path: {so_path}")
-sys.path.append(so_path)
-
-# load intel xft lib
-xft_loaded = False
-# for path in sys.path:
-#     try:
-#         if "xfastertransformer-devel" in os.listdir(path):
-#             xft_lib_path = f"{path}/xfastertransformer-devel/lib"
-#             from ctypes import cdll
-#             cdll.LoadLibrary(f"{xft_lib_path}/libxfastertransformer.so")
-#             xft_loaded = True
-#             logging.info(f"loaded libxfastertransformer.so from {xft_lib_path}")
-#             break
-#         else:
-#             logging.debug(f"checked path [{path}] for xft, not found.")
-#     except:
-#         pass
-# if not xft_loaded:
-#     logging.info("xfastertransformer-devel package not loaded, this won't affect run.")
 
 # hack for amd rocm 6.3.0.2 test, libcaffe2_nvrtc.so should have been automatically loaded via torch
 try:
@@ -101,11 +86,16 @@ try:
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
-# frontend cannot load libpython3.10.so, so we need to load it manually
+# frontend cannot load libpython, so we need to load it manually
+import sys
 import sysconfig
 from ctypes import cdll
 
-cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
+try:
+    _pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
+    cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + f"/libpython{_pyver}.so")
+except OSError:
+    pass
 
 try:
     from libth_transformer_config import (
@@ -171,7 +161,6 @@ except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
     raise e
 
-
 def get_block_cache_keys(token_ids: List[int], block_size: int) -> List[int]:
     try:
         # split token_ids into chunks of size block_size, dropping the last chunk if it is smaller than block_size
@@ -215,6 +204,7 @@ except BaseException as e:
     )
     RtpEmbeddingOp = RtpLLMOp = EmptyClass
 
+    logging.warning(f"libth_transformer import failed: {type(e).__name__}: {e}")
     logging.info(
         "libth_transformer not imported, you may under python standalone mode or frontend mode now."
     )
