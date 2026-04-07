@@ -6,14 +6,7 @@ from rtp_llm.config.model_config import ModelConfig
 
 
 class SelectTopk(nn.Module):
-    def __init__(
-        self,
-        config: ModelConfig,
-        fake_balance_expert: bool,
-        dp_rank: int,
-        dp_size: int,
-        ep_size: int,
-    ):
+    def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
         self.top_k = config.moe_k
