@@ -12,6 +12,7 @@ from rtp_llm.models_py.modules import (
     CausalAttention,
     DenseMLP,
     Embedding,
+    FakeBalanceExpert,
     FMHAImplBase,
     FusedMoeFactory,
     GroupTopK,
@@ -57,13 +58,17 @@ class GenericMoeLayer(nn.Module):
         self.gate = LinearFactory.create_linear_from_weights(
             weights, W.moe_gate, None, None, quant_config, hw_kernel_config
         )
-        self.select_topk = SelectTopk(
-            config=config,
-            fake_balance_expert=moe_config.fake_balance_expert,
-            dp_rank=parallelism_config.dp_rank,
-            dp_size=parallelism_config.dp_size,
-            ep_size=parallelism_config.ep_size,
-        )
+        self.select_topk = SelectTopk(config=config)
+        if moe_config.fake_balance_expert:
+            self.fake_balance_expert = FakeBalanceExpert(
+                expert_num=config.expert_num,
+                moe_k=config.moe_k,
+                dp_rank=parallelism_config.dp_rank,
+                dp_size=parallelism_config.dp_size,
+                ep_size=parallelism_config.ep_size,
+            )
+        else:
+            self.fake_balance_expert = None
         config_adapter = MoEConfigAdapter(
             model_config=config,
             parallelism_config=parallelism_config,
@@ -138,6 +143,9 @@ class GenericMoeLayer(nn.Module):
         else:
             # Top-K selection using C++ SelectTopkOp
             self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+
+        if self.fake_balance_expert is not None:
+            self.fake_balance_expert(topk_ids, topk_weights)
 
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
@@ -222,6 +230,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 moe_config,
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
+                hw_kernel_config=hw_kernel_config,
             )
 
         # 使用 RMSResNorm 来 fuse residual add 和 layernorm

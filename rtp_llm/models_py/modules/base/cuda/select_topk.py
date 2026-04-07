@@ -6,19 +6,10 @@ from rtp_llm.config.model_config import ModelConfig
 
 
 class SelectTopk(nn.Module):
-    def __init__(
-        self,
-        config: ModelConfig,
-        fake_balance_expert: bool,
-        dp_rank: int,
-        dp_size: int,
-        ep_size: int,
-    ):
+    def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.select_topk_op = compute_ops.SelectTopkOp(
-            self.config, fake_balance_expert, dp_rank, dp_size, ep_size
-        )
+        self.select_topk_op = compute_ops.SelectTopkOp(self.config)
 
     def forward(
         self,
@@ -59,3 +50,25 @@ class GroupTopK(nn.Module):
             renormalize,
             routed_scaling_factor,
         )
+
+
+class FakeBalanceExpert(nn.Module):
+    def __init__(
+        self,
+        expert_num: int,
+        moe_k: int,
+        dp_rank: int,
+        dp_size: int,
+        ep_size: int,
+    ):
+        super().__init__()
+        self.fake_balance_expert_op = compute_ops.FakeBalanceExpertOp(
+            expert_num, moe_k, dp_rank, dp_size, ep_size
+        )
+
+    def forward(
+        self,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
+        self.fake_balance_expert_op.forward(topk_ids, topk_weights)

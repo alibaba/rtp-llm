@@ -1,20 +1,14 @@
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
 #include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/kernels/moe_kernels.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 
 namespace rtp_llm {
 
-SelectTopkOp::SelectTopkOp(
-    const ModelConfig& model_config, bool fake_balance_expert, int64_t dp_rank, int64_t dp_size, int64_t ep_size):
+SelectTopkOp::SelectTopkOp(const ModelConfig& model_config):
     expert_num_(model_config.expert_num),
     moe_k_(model_config.moe_k),
     has_moe_norm_(model_config.has_moe_norm),
-    fake_balance_expert_(fake_balance_expert),
-    dp_rank_(dp_rank),
-    dp_size_(dp_size),
-    ep_size_(ep_size),
     moe_plugin_(std::make_unique<trt_plugins::MixtureOfExpertsPlugin>()) {}
 
 void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids, torch::Tensor expert_scales) {
@@ -64,38 +58,11 @@ void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids
     } else {
         throw std::runtime_error("Unimplemented dtype for SelectTopkOp: " + std::string(topk_t.name()));
     }
-
-    if (fake_balance_expert_) {
-        if (expert_ids.dtype() == torch::kInt64) {
-            fake_balance_expert(expert_ids.data_ptr<int64_t>(),
-                                expert_scales.data_ptr<float>(),
-                                dp_rank_,
-                                dp_size_,
-                                ep_size_,
-                                num_expert,
-                                token_num * top_k,
-                                current_stream);
-        } else if (expert_ids.dtype() == torch::kInt32) {
-            fake_balance_expert(expert_ids.data_ptr<int32_t>(),
-                                expert_scales.data_ptr<float>(),
-                                dp_rank_,
-                                dp_size_,
-                                ep_size_,
-                                num_expert,
-                                token_num * top_k,
-                                current_stream);
-        }
-    }
 }
 
 void registerSelectTopkOp(const py::module& m) {
     pybind11::class_<SelectTopkOp>(m, "SelectTopkOp")
-        .def(pybind11::init<const ModelConfig&, bool, int64_t, int64_t, int64_t>(),
-             py::arg("model_config"),
-             py::arg("fake_balance_expert"),
-             py::arg("dp_rank"),
-             py::arg("dp_size"),
-             py::arg("ep_size"))
+        .def(pybind11::init<const ModelConfig&>(), py::arg("model_config"))
         .def("forward",
              &SelectTopkOp::forward,
              py::arg("router_logits"),
