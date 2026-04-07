@@ -46,9 +46,6 @@ void             multiMergeCopy(const MultiMergeCopyParams& params);
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/ops/CudaFlashInfer.h"
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
-#if !defined(USE_PPU)
-#include "rtp_llm/models_py/bindings/cuda/SplitKvCacheCopy.h"
-#endif
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
 #include <ATen/hip/HIPContext.h>
@@ -429,43 +426,6 @@ void execNoBlockCopy(const CopyParams& params) {
 #endif
 }
 
-void execNoBlockCopy(const MultiCopyParams& params) {
-    RUNTIME_ASSERT_OP_ARG(params.multi_src.size() == params.multi_dst.size(),
-                          "multi_src and multi_dst must have the same size");
-#if USING_CUDA
-    auto stream = getNoBlockCopyStream().stream();
-#if !defined(USE_PPU)
-    if (params.split_kv_layer_num > 0
-        && trySplitKvMultiCopy(params.multi_src,
-                               params.multi_dst,
-                               params.split_kv_layer_num,
-                               static_cast<int64_t>(params.split_kv_cache_stride_bytes),
-                               static_cast<int64_t>(params.split_kv_scale_stride_bytes),
-                               stream)) {
-        check_cuda_error();
-        return;
-    }
-#endif
-    for (size_t i = 0; i < params.multi_src.size(); i++) {
-        cudaMemcpyAsync(params.multi_dst[i].data_ptr(),
-                        params.multi_src[i].data_ptr(),
-                        params.multi_src[i].nbytes(),
-                        cudaMemcpyDefault,
-                        stream);
-    }
-    cudaStreamSynchronize(stream);
-    check_cuda_error();
-#elif USING_ROCM
-    for (size_t i = 0; i < params.multi_src.size(); i++) {
-        params.multi_dst[i].copy_(params.multi_src[i]);
-    }
-#else
-    for (size_t i = 0; i < params.multi_src.size(); i++) {
-        params.multi_dst[i].copy_(params.multi_src[i]);
-    }
-#endif
-}
-
 void execBatchCopy(const BatchCopyParams& params) {
     runtimeBatchCopy(params);
 }
@@ -665,12 +625,6 @@ ExecInitParams initExecCtx(const ParallelismConfig&           parallelism_config
         RTP_LLM_LOG_INFO("Initialize runtime. device_id=%d", device_id);
         check_cuda_value(cudaSetDevice(device_id));
         at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream());
-
-#if !defined(USE_PPU)
-        if (!warmupSplitKvCopyKernels(at::cuda::getCurrentCUDAStream().stream())) {
-            RTP_LLM_LOG_WARNING("warmupSplitKvCopyKernels failed (split KV copy may JIT on first use)");
-        }
-#endif
 
         if (params.mla_ops_type == MlaOpsType::AUTO) {
             auto* prop          = at::cuda::getCurrentDeviceProperties();

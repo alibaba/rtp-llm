@@ -32,6 +32,26 @@ cc_library(
 )
 
 cc_library(
+    name = "no_block_copy_hdr",
+    hdrs = ["NoBlockCopy.h"],
+    deps = torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "no_block_copy_default",
+    srcs = ["NoBlockCopyDefault.cc"],
+    copts = copts(),
+    deps = [
+        ":no_block_copy_hdr",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+    alwayslink = 1,
+)
+
+cc_library(
     name = "dummy_register",
     srcs = [
         "DummyRegister.cc",

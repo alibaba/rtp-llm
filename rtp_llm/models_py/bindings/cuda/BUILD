@@ -14,12 +14,27 @@ cc_library(
 )
 
 cc_library(
+    name = "no_block_copy",
+    srcs = ["NoBlockCopy.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings:no_block_copy_hdr",
+        "//rtp_llm/cpp/utils:core_utils",
+        ":split_kv_cache_copy",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+    alwayslink = 1,
+)
+
+cc_library(
     name = "cuda_bindings",
     srcs = glob([
         "*.cc",
     ], exclude = [
         "RegisterCudaOps.cc",
         "SplitKvCacheCopy.cc",
+        "NoBlockCopy.cc",
     ]),
     hdrs = glob([
         "*.h",
