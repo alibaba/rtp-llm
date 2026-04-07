@@ -18,10 +18,6 @@
 #include "rtp_llm/cpp/kernels/rocm/layernorm_kernels.h"
 #include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
 
-#if ENABLE_TRITON
-#include "rtp_llm/cpp/kernels/triton/layernorm_kernels.h"
-#endif
-
 #if USING_ROCM
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
@@ -915,29 +911,6 @@ void invokeGeneralLayerNorm(T*           out,
                             float*       dynamic_scale,
                             QUANT_OUT_T* out_quant,
                             bool         return_normed_output) {
-#if ENABLE_TRITON && !defined(ENABLE_FP8)
-    if (hidden_dim <= 4096 && dynamic_scale == nullptr && scale == nullptr && beta != nullptr
-        && (out == nullptr || return_normed_output == true)) {
-        invokeTritonLayerNorm<T, QUANT_OUT_T, false>(out,
-                                                     normed_output,
-                                                     input,
-                                                     (const T*)nullptr,
-                                                     (const T*)nullptr,
-                                                     gamma,
-                                                     beta,
-                                                     eps,
-                                                     tokens,
-                                                     hidden_dim,
-                                                     stream,
-                                                     use_diff_of_squares,
-                                                     scale,
-                                                     dynamic_scale,
-                                                     out_quant,
-                                                     return_normed_output);
-        return;
-    }
-#endif
-
     dim3 grid(tokens);
     dim3 block(min(hidden_dim, 1024));
     // Make sure block.x is multiple of 32 for warp shuffle to work
@@ -1015,29 +988,6 @@ void invokeGeneralAddBiasResidualLayerNorm(T*           out,
                                            float*       dynamic_scale,
                                            QUANT_OUT_T* out_quant,
                                            bool         return_normed_output) {
-#if ENABLE_TRITON && !defined(ENABLE_FP8)
-    if (hidden_dim <= 4096 && dynamic_scale == nullptr && scale == nullptr && beta != nullptr
-        && (out == nullptr || return_normed_output == true)) {
-        invokeTritonLayerNorm<T, QUANT_OUT_T, true>(out,
-                                                    norm_output,
-                                                    input,
-                                                    bias,
-                                                    residual,
-                                                    gamma,
-                                                    beta,
-                                                    eps,
-                                                    tokens,
-                                                    hidden_dim,
-                                                    stream,
-                                                    use_diff_of_squares,
-                                                    scale,
-                                                    dynamic_scale,
-                                                    out_quant,
-                                                    return_normed_output);
-        return;
-    }
-#endif
-
     dim3 grid(tokens);
     dim3 block(min(hidden_dim, 1024));
     // Make sure block.x is multiple of 32 for warp shuffle to work

@@ -10,14 +10,14 @@ RUN wget --no-check-certificate https://github.com/jgm/pandoc/releases/download/
     cp pandoc-3.7.0.2/bin/pandoc /usr/local/bin/ && \
     rm -rf pandoc-3.7.0.2*
 
-RUN /opt/conda310/bin/pip install uv -i https://artlab.alibaba-inc.com/1/PYPI/simple/
+RUN wget -qO- https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/opt/conda310/bin sh
 
 RUN /opt/conda310/bin/uv pip install sphinx myst-nb jupyter nbconvert sphinx-autobuild \
      -i https://artlab.alibaba-inc.com/1/PYPI/simple/ \
      --extra-index-url=https://artlab.alibaba-inc.com/1/pypi/huiwa_rtp_internal \
      --extra-index-url=http://artlab.alibaba-inc.com/1/pypi/rtp_diffusion \
      --extra-index-url=https://artlab.alibaba-inc.com/1/PYPI/pytorch/whl \
-     --trusted-host=artlab.alibaba-inc.com \
+     --allow-insecure-host=artlab.alibaba-inc.com \
      --index-strategy unsafe-best-match \
      --cache-dir=/root/.cache/uv/ \
      --python=/opt/conda310/bin/python \

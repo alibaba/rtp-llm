@@ -98,6 +98,14 @@ class MagaServerManager(object):
         for k, v in self._env_args.items():
             current_env[k] = v
 
+        # Ensure LD_LIBRARY_PATH includes torch libs and rtp_llm libs
+        import torch
+        torch_lib = os.path.join(os.path.dirname(torch.__file__), "lib")
+        rtp_llm_libs = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "libs")
+        extra_ld_paths = [torch_lib, rtp_llm_libs, "/usr/local/cuda/lib64", "/usr/local/cuda/extras/CUPTI/lib64"]
+        existing_ld = current_env.get("LD_LIBRARY_PATH", "")
+        current_env["LD_LIBRARY_PATH"] = ":".join(extra_ld_paths + ([existing_ld] if existing_ld else []))
+
         current_env[MODEL_TYPE] = model_type
         current_env[CHECKPOINT_PATH] = model_path
         current_env[LOG_PATH] = role_log_name
@@ -110,6 +118,11 @@ class MagaServerManager(object):
             current_env[LORA_INFO] = json.dumps(lora_infos)
         if ptuning_path is not None:
             current_env[PTUNING_PATH] = ptuning_path
+
+        # Remove PYTEST_CURRENT_TEST so the server subprocess's setup_args()
+        # parses its own CLI arguments (--task_type, --port, etc.) instead of
+        # discarding them via the "running under pytest" guard.
+        current_env.pop("PYTEST_CURRENT_TEST", None)
 
         current_env["START_PORT"] = str(self._port)
         if self._device_ids:
@@ -125,7 +138,10 @@ class MagaServerManager(object):
             current_env["DG_JIT_CACHE_DIR"] = os.path.join(home_dir, ".deep_gemm")
 
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
-        cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)
+        # Use MAGA_SERVER_WORK_DIR if set; otherwise default to CWD (not
+        # bazel_outputs_dir which may point to _rtp_test_outputs/ — a
+        # subdirectory that does not contain the rtp_llm package).
+        cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", os.getcwd())
         # 创建一个文件来存储子进程的日志
         self._log_file = (
             f"{bazel_outputs_dir}/{role_log_name}/{self._process_file_name}"
@@ -153,7 +169,7 @@ class MagaServerManager(object):
                 break
 
         p = subprocess.Popen(
-            ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
+            [sys.executable, "-m", "rtp_llm.start_server"] + parsed_args,
             env=current_env,
             stdout=self._file_stream,
             stderr=self._file_stream,

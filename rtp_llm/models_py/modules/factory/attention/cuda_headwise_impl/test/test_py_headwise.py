@@ -5,8 +5,11 @@ import unittest
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+import pytest
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
     HeadWisePrefillAttnOp,
@@ -167,7 +170,9 @@ class TestHeadwisePrefillOp(unittest.TestCase):
     ) -> torch.Tensor:
         op = self._get_or_create_op(case)
         if not op.support(attn_inputs):
-            self.skipTest("HeadWisePrefillAttnOp not supported (missing flashinfer/rtp_kernel)")
+            self.skipTest(
+                "HeadWisePrefillAttnOp not supported (missing flashinfer/rtp_kernel)"
+            )
         op.prepare(attn_inputs)
         op._get_headwise_config(0)
         return op.forward(qkv, cache, None)

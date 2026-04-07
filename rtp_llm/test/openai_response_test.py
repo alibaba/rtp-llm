@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, Callable, List
 from unittest import IsolatedAsyncioTestCase, main
 
+import pytest
 import torch
 from typing_extensions import override
 
@@ -59,6 +60,8 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
 )
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 async def fake_output_generator(

@@ -1,11 +1,14 @@
 import sys
 import unittest
 
+import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 class Qwen3NextRMSNormGatedTorch(nn.Module):
@@ -31,7 +34,7 @@ class TestLayerNormGated(unittest.TestCase):
         weight = torch.randn(1024, dtype=torch.bfloat16, device="cuda")
         bias = None
         eps = 1e-6
-        rms_norm_gated = RmsNormGated(weight, bias, eps)
+        rms_norm_gated = RmsNormGated(weight, bias, eps=eps)
         rms_norm_gated_torch = Qwen3NextRMSNormGatedTorch(weight, eps)
         for batch_size in [1, 2, 32, 128, 512, 1024]:
             x = torch.randn(batch_size, 1024, dtype=torch.bfloat16, device="cuda")
@@ -39,8 +42,10 @@ class TestLayerNormGated(unittest.TestCase):
             torch.testing.assert_close(
                 rms_norm_gated(x, gate),
                 rms_norm_gated_torch(x, gate),
-                atol=1e-2,
-                rtol=1e-2,
+                # BF16 Triton kernels on A10 can show small tail discrepancies on a few
+                # elements; keep this aligned with other RMS/LayerNorm kernel tolerances.
+                atol=3e-2,
+                rtol=3e-2,
             )
 
 

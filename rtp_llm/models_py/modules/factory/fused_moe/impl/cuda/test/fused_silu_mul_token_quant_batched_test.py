@@ -3,8 +3,11 @@ import random
 from typing import Optional, Tuple
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 from torch import dtype as _dtype
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.util import (
     moe_kernel_quantize_input,
@@ -15,7 +18,10 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 )
 
 import rtp_llm.ops  # isort:skip
-from rtp_llm.ops.compute_ops import per_token_quant_fp8  # isort:skip
+try:
+    from rtp_llm.ops.compute_ops import per_token_quant_fp8  # isort:skip
+except ImportError as e:
+    pytest.skip(f"CUDA-only compute_ops unavailable: {e}", allow_module_level=True)
 
 
 class FusedSiluMulPerTokenQuantBatchedTest(TestCase):

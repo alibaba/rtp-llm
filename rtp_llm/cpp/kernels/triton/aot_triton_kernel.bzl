@@ -1,11 +1,9 @@
 load("@bazel_skylib//lib:paths.bzl", "paths")
-load("//bazel:arch_select.bzl", get_triton_deps = "triton_deps")
 load("//:def.bzl", "copts")
 
 
 def _get_python_interpreter_path(ctx):
-    python_interpreter = ctx.attr._python[PyRuntimeInfo].interpreter_path
-    return python_interpreter
+    return "/opt/conda310/bin/python"
 
 def _get_output_dir(ctx):
     output_dir = paths.join(ctx.bin_dir.path, ctx.label.package)
@@ -209,10 +207,6 @@ aot_triton_kernel = rule(
         "output_name": attr.string(),
         "num_warps": attr.int_list(),
         "var_map": attr.string_list_dict(),
-        "_python": attr.label(
-            # TODO: get value from --python_top=//:python310
-            default = Label("//:python310")
-        ),
         "_compiler": attr.label(
             default = Label(":aot_triton_kernel_compiler.py"),
             allow_single_file = True
@@ -254,7 +248,7 @@ def aot_triton_kernel_library(
             tags = ["manual"],
             deps = [
                 "@local_config_cuda//cuda:cuda_headers"
-            ] + get_triton_deps(["triton", "torch", "numpy"])
+            ] + []
         )
         srcs_list.append(":" + name+"_"+groupby_value)
     native.filegroup(

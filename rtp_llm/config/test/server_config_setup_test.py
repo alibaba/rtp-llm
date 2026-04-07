@@ -2,6 +2,10 @@ import unittest
 from unittest import TestCase
 from unittest.mock import patch
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
@@ -35,7 +39,7 @@ class GenerateConfigTest(TestCase):
             setup_default_args,
         )
 
-        py_env_configs: PyEnvConfigs = setup_args()
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
         setup_and_configure_server(py_env_configs)
         pc = py_env_configs.parallelism_config
         self.assertEqual(pc.tp_size, 4)
@@ -68,7 +72,7 @@ class GenerateConfigTest(TestCase):
         clear=True,
     )
     def test_sp_deepep_low_latency(self):
-        py_env_configs: PyEnvConfigs = setup_args()
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
         setup_and_configure_server(py_env_configs)
 
         self.assertEqual(py_env_configs.moe_config.use_deepep_moe, True)
@@ -93,7 +97,7 @@ class GenerateConfigTest(TestCase):
     )
     def test_world_rank_consistent_with_env_after_setup_args(self):
         """After setup_args(), set_parallelism_config(parallelism_config) keeps world_rank from env and it is not None."""
-        py_env_configs: PyEnvConfigs = setup_args()
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
         set_parallelism_config(py_env_configs.parallelism_config)
         pc = py_env_configs.parallelism_config
         self.assertIsNotNone(pc.world_rank)
@@ -119,7 +123,7 @@ class GenerateConfigTest(TestCase):
         self,
     ):
         """After setup_and_configure_server(), set_parallelism_config(..., world_rank=5) assigns world_rank and derived ranks correctly."""
-        py_env_configs: PyEnvConfigs = setup_args()
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
         setup_and_configure_server(py_env_configs)
         set_parallelism_config(py_env_configs.parallelism_config, world_rank=5)
         pc = py_env_configs.parallelism_config

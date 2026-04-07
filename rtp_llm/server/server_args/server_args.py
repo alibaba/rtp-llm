@@ -481,19 +481,25 @@ def init_all_group_args(
     init_grpc_group_args(parser, py_env_configs.grpc_config)
 
 
-def setup_args() -> PyEnvConfigs:
+def setup_args(args: Optional[List[str]] = None) -> PyEnvConfigs:
+    """Parse server arguments into PyEnvConfigs.
+
+    Args:
+        args: Explicit argument list. ``None`` (default) reads ``sys.argv`` as
+              usual.  Pass ``[]`` to skip command-line parsing and rely solely
+              on environment variables — useful in tests run under pytest where
+              ``sys.argv`` contains pytest's own flags.
+    """
+    if args is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        # Under pytest, sys.argv belongs to pytest itself.
+        # Use env/defaults unless callers explicitly pass server args.
+        args = []
+
     parser = EnvArgumentParser(description="RTP LLM")
 
-    # 先创建配置对象
     py_env_configs = PyEnvConfigs()
-
-    # 设置根配置对象，用于解析字符串路径形式的 bind_to
     parser.set_root_config(py_env_configs)
-
-    # 使用统一的函数初始化所有参数组，并绑定到配置对象
     init_all_group_args(parser, py_env_configs)
-
-    # 解析参数（会自动应用所有配置绑定）
-    parsed_args = parser.parse_args()
+    parsed_args = parser.parse_args(args=args)
 
     return py_env_configs

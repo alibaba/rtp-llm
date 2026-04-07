@@ -2,6 +2,7 @@
 import logging
 import os
 
+import pytest
 import torch
 import torch.distributed
 import torch.multiprocessing as mp
@@ -32,6 +33,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_la
 from rtp_llm.ops import MoeConfig, NcclCommConfig, ParallelismConfig, RuntimeConfig
 from rtp_llm.test.utils.numeric_util import per_token_cast_back
 from rtp_llm.test.utils.port_util import PortManager, PortsContext
+
+pytestmark = [pytest.mark.gpu(type="H20", count=2)]
 
 NUM_TOKEN_PER_RANK = 64
 HIDDEN_SIZE = 7168

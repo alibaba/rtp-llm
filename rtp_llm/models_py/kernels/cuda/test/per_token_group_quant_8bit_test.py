@@ -2,6 +2,10 @@ import itertools
 from typing import Tuple
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 import triton
 import triton.language as tl
@@ -9,10 +13,14 @@ from torch import dtype as _dtype
 from torch.profiler import ProfilerActivity, profile, record_function
 
 from rtp_llm.models_py.utils.arch import is_hip
-from rtp_llm.ops.compute_ops import (
-    per_token_group_quant_fp8,
-    per_token_group_quant_int8,
-)
+
+try:
+    from rtp_llm.ops.compute_ops import (
+        per_token_group_quant_fp8,
+        per_token_group_quant_int8,
+    )
+except ImportError as e:
+    pytest.skip(f"CUDA-only: {e}", allow_module_level=True)
 
 _is_hip = is_hip()
 
@@ -339,7 +347,7 @@ class PerTokenGroupQuantTest(TestCase):
                 num_tokens=params[0],
                 hidden_dim=params[1],
                 group_size=params[2],
-                dst_dtype=params[3],
+                dst_dtype=str(params[3]),
                 column_major_scales=params[4],
                 scale_tma_aligned=params[5],
             ):

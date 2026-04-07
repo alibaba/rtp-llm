@@ -27,4 +27,5 @@ RUN echo "%sdev ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
     groupadd sdev
 
 # for pre-commit
-RUN /opt/conda310/bin/python3 -m pip install pre-commit && ln -s /opt/conda310/bin/pre-commit /usr/local/bin/pre-commit
+RUN /opt/conda310/bin/uv pip install --python /opt/conda310/bin/python3 pre-commit && \
+    ln -s /opt/conda310/bin/pre-commit /usr/local/bin/pre-commit

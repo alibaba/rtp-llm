@@ -6,13 +6,20 @@ This mode is used when there's existing KV cache (prefix/prompt caching).
 
 import unittest
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.test_trt_base import (
     TRTAttnTestBase,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.trt_test_utils import (
     print_attn_inputs_detail,
 )
-from rtp_llm.ops.compute_ops import TRTPagedAttnOp
+try:
+    from rtp_llm.ops.compute_ops import TRTPagedAttnOp
+except ImportError as e:
+    pytest.skip(f"CUDA-only compute_ops unavailable: {e}", allow_module_level=True)
 
 
 class TestTRTPagedAttnOpNonPadded(TRTAttnTestBase):

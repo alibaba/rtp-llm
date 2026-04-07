@@ -9,6 +9,8 @@ import multiprocessing as mp
 import os
 import unittest
 
+import pytest
+
 logging.basicConfig(level=logging.INFO)
 
 import torch
@@ -27,6 +29,8 @@ from rtp_llm.models_py.distributed.collective_torch import (
 )
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.port_util import PortManager
+
+pytestmark = [pytest.mark.gpu(type="H20", count=4)]
 
 
 def _calculate_group_ranks(rank: int, world_size: int, tp_size: int, group_type: Group):
@@ -424,4 +428,5 @@ class TestDistributedEnvironment(unittest.TestCase):
 if __name__ == "__main__":
     os.environ["NCCL_DEBUG"] = "INFO"
     os.environ["NCCL_DEBUG_FILE"] = "nccl.log"
+if __name__ == "__main__":
     unittest.main()

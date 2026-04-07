@@ -2,15 +2,20 @@ import logging
 import os
 import unittest
 
+import pytest
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.test.utils.numeric_util import calc_diff
-from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
-    CudaFp4GEMMLinear,
-)
+pytestmark = [pytest.mark.gpu(type="SM100_ARM")]
 
-from flashinfer import fp4_quantize
+from rtp_llm.test.utils.numeric_util import calc_diff
+try:
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
+        CudaFp4GEMMLinear,
+    )
+    from flashinfer import fp4_quantize
+except ImportError as e:
+    pytest.skip(f"FP4 CUDA stack unavailable: {e}", allow_module_level=True)
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.device.device_impl import CudaImpl
 
@@ -362,4 +367,3 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

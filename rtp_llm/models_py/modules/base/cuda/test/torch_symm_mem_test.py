@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Optional
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -14,6 +15,8 @@ from torch.distributed import ProcessGroup
 
 from rtp_llm.models_py.distributed.symm_mem import TorchSymmMemCommunicator
 from rtp_llm.test.utils.port_util import PortsContext
+
+pytestmark = [pytest.mark.gpu(type="H20", count=2)]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

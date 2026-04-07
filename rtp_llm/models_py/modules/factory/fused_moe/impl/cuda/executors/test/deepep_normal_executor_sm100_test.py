@@ -1,4 +1,5 @@
 import platform
+import pytest
 import unittest
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
@@ -9,6 +10,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.deepep
     DeepGemmHybridExecutorTestBase,
 )
 
+pytestmark = [pytest.mark.gpu(type="SM100_ARM")]
 
 class DeepGemmHybridExecutorSM100Test(
     DeepGemmHybridExecutorTestBase, unittest.TestCase

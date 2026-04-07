@@ -362,10 +362,7 @@ cc_library(
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/cuda:cuda_utils_cu",
         "//rtp_llm/cpp/cuda:launch_utils",
-    ] + select({
-        "//:enable_triton": ["//rtp_llm/cpp/kernels/triton:triton_kernel"],
-        "//conditions:default": [],
-     }),
+    ],
     copts = any_cuda_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],

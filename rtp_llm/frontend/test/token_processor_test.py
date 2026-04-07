@@ -4,6 +4,10 @@ import os
 from typing import List
 from unittest import TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 import numpy as np
 import numpy.typing as npt
 

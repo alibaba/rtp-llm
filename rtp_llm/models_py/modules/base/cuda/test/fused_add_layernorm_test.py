@@ -1,6 +1,10 @@
 import itertools
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 import torch
 from torch import dtype as _dtype
 
@@ -42,7 +46,7 @@ class RMSLayerNormTest(TestCase):
             self.DTYPES,
         ):
             with self.subTest(
-                num_tokens=params[0], hidden_size=params[1], dtype=params[2]
+                num_tokens=params[0], hidden_size=params[1], dtype=str(params[2])
             ):
                 self._run_res_layernorm_test(*params)
 

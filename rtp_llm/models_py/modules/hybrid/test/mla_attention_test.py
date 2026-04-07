@@ -6,6 +6,10 @@ import sys
 from typing import Any, Dict, List, Optional
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 import torch.nn.functional as F
 
@@ -16,14 +20,18 @@ from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
 from rtp_llm.models_py.modules import MlaAttention
+from rtp_llm.models_py.modules.hybrid.test.mla_attention_ref import MlaAttentionRef
+from rtp_llm.ops import ParallelismConfig
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.utils.model_weight import W
+
+if not hasattr(rtp_llm_ops, "SparseMlaParams"):
+    pytest.skip("SparseMlaParams unavailable in compute_ops", allow_module_level=True)
+
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
     MlaFlashInferDecodeImpl,
     MlaFlashInferPrefillImpl,
 )
-from rtp_llm.models_py.modules.hybrid.test.mla_attention_ref import MlaAttentionRef
-from rtp_llm.ops import ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
-from rtp_llm.utils.model_weight import W
 
 
 def set_seed(seed: int):

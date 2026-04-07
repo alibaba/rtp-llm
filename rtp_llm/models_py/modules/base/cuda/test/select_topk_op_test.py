@@ -1,6 +1,10 @@
 import itertools
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 import torch.nn.functional as F
 from torch import dtype as _dtype
@@ -8,7 +12,10 @@ from torch.profiler import ProfilerActivity, profile
 
 from rtp_llm.config.model_config import ModelConfig
 
-from rtp_llm.ops.compute_ops import SelectTopkOp  # isort:skip
+try:
+    from rtp_llm.ops.compute_ops import SelectTopkOp  # isort:skip
+except ImportError as e:
+    pytest.skip(f"CUDA-only: {e}", allow_module_level=True)
 
 
 class SelectTopkOpTest(TestCase):

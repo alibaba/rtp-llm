@@ -28,9 +28,6 @@ cc_binary(
 py_library(
     name = "cuda_graph_test_utils",
     srcs = ["cuda_graph_test_utils.py"],
-    deps = [
-        "//rtp_llm/test/model_test/test_util:test_util",
-    ],
     visibility = ["//visibility:public"],
 )
 
@@ -45,7 +42,6 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
-        "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
         "LOAD_METHOD": "scratch",
@@ -71,7 +67,6 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
-        "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
         "LOAD_METHOD": "scratch",
@@ -96,9 +91,7 @@ py_test(
     data = [
         "//:th_transformer",
     ],
-    deps = [
-        "//rtp_llm/test/model_test/test_util:test_util",
-    ],
+    deps = [],
     env = {
         "NOT_USE_DEFAULT_STREAM": "1",
         "TEST_USING_DEVICE": "CUDA",

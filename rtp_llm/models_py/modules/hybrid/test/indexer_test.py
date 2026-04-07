@@ -2,11 +2,17 @@ import random
 from typing import Dict, Optional
 from unittest import SkipTest, TestCase, main, skipIf
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 device = torch.device("cuda")
 
-import deep_gemm
+try:
+    import deep_gemm
+except (ImportError, AssertionError, RuntimeError) as e:
+    pytest.skip(f"deep_gemm unavailable: {e}", allow_module_level=True)
 
 
 def check_cuda_version() -> bool:
@@ -26,7 +32,11 @@ SKIP_REASON = "CUDA version must be >= 12.9 for this test"
 CUDA_VERSION_OK = False
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops.compute_ops import PyAttentionInputs, rtp_llm_ops
+
+try:
+    from rtp_llm.ops.compute_ops import PyAttentionInputs, rtp_llm_ops
+except ImportError as e:
+    pytest.skip(f"CUDA-only: {e}", allow_module_level=True)
 from rtp_llm.utils.model_weight import W
 
 # Only import these modules if CUDA version is >= 12.9

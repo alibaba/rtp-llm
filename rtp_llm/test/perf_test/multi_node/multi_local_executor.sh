@@ -79,12 +79,10 @@ checkout_code() {
 
 install_requirements() {
   if [ "${BUILD_FROM_SCRATCH:-2}" -gt 1 ]; then
-    # Pip install requirements
-    if [ `uname -m` == "aarch64" ]; then
-      (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_cuda12_arm.txt) || exit 1;
-    else
-      (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_torch_gpu_cuda12.txt) || exit 1;
-    fi
+    export UV_SKIP_WHEEL_FILENAME_CHECK=${UV_SKIP_WHEEL_FILENAME_CHECK:-1}
+    # Install Python dependencies via the current editable-install workflow.
+    (/opt/conda310/bin/uv pip install --link-mode hardlink --python /opt/conda310/bin/python3 'setuptools>=64.0,<82' wheel 'tomli; python_version < "3.11"') || exit 1;
+    (RTP_SKIP_BAZEL_BUILD=1 /opt/conda310/bin/uv pip install --link-mode hardlink --python /opt/conda310/bin/python3 -e ".[dev]" --no-build-isolation) || exit 1;
   fi
 }
 
@@ -106,7 +104,7 @@ build_code() {
     (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2_grpc.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
     (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
     (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/cuda/deep_gemm/cutlass_hdr rtp_llm/cpp/cuda/deep_gemm/cutlass_hdr) || exit 1;
-    (/opt/conda310/bin/python -m pip install bazel-bin/rtp_llm/rtp_llm_deep_gemm-0.2.0-py3-none-any.whl ) || exit 1;
+    (/opt/conda310/bin/uv pip install --link-mode hardlink --python /opt/conda310/bin/python bazel-bin/rtp_llm/rtp_llm_deep_gemm-0.2.0-py3-none-any.whl ) || exit 1;
   fi
 }
 

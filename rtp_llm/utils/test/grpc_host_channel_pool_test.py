@@ -4,6 +4,10 @@ import unittest
 from unittest import TestCase
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 import grpc
 
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannel, GrpcHostChannelPool

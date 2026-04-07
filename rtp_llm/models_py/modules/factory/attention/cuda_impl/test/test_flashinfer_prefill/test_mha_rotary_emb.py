@@ -4,6 +4,10 @@ import math
 import unittest
 from typing import Tuple
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 from flashinfer import get_batch_indices_positions, get_seq_lens
 

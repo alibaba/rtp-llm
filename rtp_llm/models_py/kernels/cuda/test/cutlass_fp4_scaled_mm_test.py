@@ -1,12 +1,20 @@
 import pytest
 import torch
-from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
-    cutlass_scaled_fp4_mm_wrapper,
-    scaled_fp4_quant_wrapper,
-)
-from flashinfer import fp4_quantize
+try:
+    from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
+        cutlass_scaled_fp4_mm_wrapper,
+        scaled_fp4_quant_wrapper,
+    )
+    from flashinfer import fp4_quantize
+except ImportError as e:
+    pytest.skip(f"FP4 CUDA stack unavailable: {e}", allow_module_level=True)
 
-skip_condition = torch.cuda.get_device_capability() < (10, 0)
+pytestmark = [pytest.mark.manual]
+
+try:
+    skip_condition = torch.cuda.get_device_capability() < (10, 0)
+except Exception as e:
+    pytest.skip(f"CUDA capability unavailable: {e}", allow_module_level=True)
 
 DTYPES = [torch.float16, torch.bfloat16]
 # m, n, k

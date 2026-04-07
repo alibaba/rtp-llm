@@ -19,8 +19,11 @@ import sys
 from typing import Tuple
 from unittest import SkipTest, TestCase, main, skipIf
 
+import pytest
 import torch
 import torch.nn.functional as F
+
+pytestmark = [pytest.mark.gpu(type="H20"), pytest.mark.manual]
 
 sys.path.append("/data2/baowending.bwd/new/RTP-LLM/github-opensource/")
 

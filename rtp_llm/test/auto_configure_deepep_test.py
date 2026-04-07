@@ -1,8 +1,11 @@
 from unittest import TestCase, main
 
+import pytest
 from rtp_llm.config.py_config_modules import DeepEPConfig
 from rtp_llm.config.server_config_setup import auto_configure_deepep
 from rtp_llm.ops import MoeConfig, ParallelismConfig, RoleType
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 class AutoConfigureDeepepTest(TestCase):

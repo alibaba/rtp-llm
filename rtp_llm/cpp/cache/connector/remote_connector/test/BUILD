@@ -26,7 +26,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "A10"},
-    # tags = ["H20"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -39,7 +38,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "A10"},
-    # tags = ["H20"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -52,7 +50,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "A10"},
-    # tags = ["H20"],
     deps = [
         ":remote_connector_mock_base",
     ],
@@ -65,7 +62,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "A10"},
-    # tags = ["H20"],
     deps = [
         ":remote_connector_mock_base",
     ],
@@ -78,7 +74,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "A10"},
-    # tags = ["H20"],
     deps = test_deps + [
         ":mock",
     ],

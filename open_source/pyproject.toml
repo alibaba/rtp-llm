@@ -1,0 +1,383 @@
+# RTP-LLM Open Source Project Configuration
+# 
+# 此文件仅包含开源依赖，不包含私有 URL。
+# 适用于开源社区用户。
+
+[build-system]
+requires = [
+    "setuptools>=75.0,<82",
+    "wheel",
+    "tomli; python_version < '3.11'",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rtp-llm"
+dynamic = ["version", "dependencies"]
+description = "High-performance Large Language Model inference engine"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10,<3.12"
+authors = [
+    {name = "Alibaba RTP-LLM Team"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+# ============================================================
+# CUDA 12 (开源版本 - 使用公开 PyPI 包)
+# ============================================================
+cuda12 = [
+    "pynvml",
+
+    # PyTorch CUDA 12 (from PyPI)
+    "torch==2.6.0+cu126",
+    "torchvision==0.21.0+cu126",
+
+    # Flash Attention
+    "flash_attn @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl",
+
+    # FlashInfer (from PyPI)
+    "flashinfer-python==0.2.5",
+    "apache-tvm-ffi==0.1.1",
+
+    # TensorRT (from PyPI)
+    "tensorrt==10.3.0",
+    "tensorrt-cu12-bindings==10.3.0",
+    "tensorrt-cu12-libs==10.3.0",
+
+    # Quantization
+    "auto_gptq",
+    "autoawq>=0.2.9",
+
+    # Data
+    # Keep datasets aligned with pinned pyarrow 16.x.
+    "datasets==3.1.0",
+
+    # Deep EP & Deep Gemm
+    "deep-ep @ http://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_ep-1.2.1%2B29d31c0-cp310-cp310-linux_x86_64.whl",
+    "deep_gemm @ http://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_gemm-2.2.0%2B9b680f4-cp310-cp310-linux_x86_64.whl",
+
+    # NVSHMEM
+    "nvidia-nvshmem-cu12==3.4.5",
+]
+
+# ============================================================
+# ROCm/AMD (开源版本)
+# ============================================================
+rocm = [
+    # PyTorch ROCm
+    "torch @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.7.1%2Bgit9015dfd-cp310-cp310-linux_x86_64.whl",
+    "torchvision @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torchvision/torchvision-0.22.1%2B59a3e1f-cp310-cp310-linux_x86_64.whl",
+
+    "triton==3.5.0",
+    "pyrsmi==0.2.0",
+    "pyyaml==6.0.2",
+
+    # AIter
+    "aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.11%2Bgit.371a22f0.date.202601191515-cp310-cp310-linux_x86_64.whl",
+]
+
+# ============================================================
+# CUDA 12.9 ARM (开源版本)
+# ============================================================
+cuda12_arm = [
+    # PyTorch CUDA 12.9 ARM
+    "torch @ https://download.pytorch.org/whl/cu129/torch-2.9.0%2Bcu129-cp310-cp310-manylinux_2_28_aarch64.whl",
+    "torchvision @ https://download.pytorch.org/whl/cu128/torchvision-0.24.0-cp310-cp310-manylinux_2_28_aarch64.whl",
+
+    "mysql-connector-python",
+    "flashinfer-python==0.2.5",
+
+    # Fast Hadamard Transform (ARM)
+    "fast_hadamard_transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl",
+
+    # Flash MLA (ARM)
+    "flash_mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2B47c35a7-cp310-cp310-linux_aarch64.whl",
+]
+
+# ============================================================
+# CUDA 12.9 (开源版本 - 使用公开 OSS 包)
+# ============================================================
+cuda12_9 = [
+    "pynvml",
+
+    # PyTorch CUDA 12.9
+    "torch @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl",
+    "torchvision @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torchvision-0.23.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl",
+
+    # Flash Attention
+    "flash_attn @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_attn-2.8.3%2Bcu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl",
+    "flash_attn_3 @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl",
+
+    # Fast Safetensors
+    "fast-safetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl",
+    "fastsafetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fastsafetensors-0.1.19rc5%2Bali-cp310-cp310-linux_x86_64.whl",
+
+    # Deep EP & Deep Gemm
+    "deep-ep @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_ep-1.2.1.10%2Bd7d7b48-cp310-cp310-linux_x86_64.whl",
+    "deep_gemm @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_gemm-2.1.1%2Blocal-cp310-cp310-linux_x86_64.whl",
+
+    # FlashInfer
+    "flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_python-0.6.0%2Bmla384-py3-none-any.whl",
+    "flashinfer-jit-cache @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_jit_cache-0.6.0%2Bmla384-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "flashinfer-cubin @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_cubin-0.6.0%2Bmla384-py3-none-any.whl",
+
+    # Flash MLA
+    "flash_mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2Bca58fed-cp310-cp310-linux_x86_64.whl",
+
+    # Fast Hadamard Transform
+    "fast_hadamard_transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_x86_64.whl",
+
+    # RTP Kernel
+    "rtp_kernel @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/rtp_kernel_260317/rtp_kernel-0.1.0-cp310-cp310-linux_x86_64.whl",
+
+    # TensorRT
+    "tensorrt==10.3.0",
+    "tensorrt-cu12-bindings==10.3.0",
+    "tensorrt_cu12_libs @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/tensorrt_cu12_libs-10.3.0-py2.py3-none-manylinux_2_17_x86_64.whl",
+
+    # Quantization
+    "auto_gptq",
+    "autoawq",
+    "apache-tvm-ffi",
+
+    # Data & Utils
+    # Keep datasets aligned with pinned pyarrow 16.x.
+    "datasets==3.1.0",
+    "mysql-connector-python",
+    "sqlglot @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/sqlglot-19.8.4.dev4-py3-none-any.whl",
+    "tabulate==0.9.0",
+    "tilelang==0.1.6",
+]
+
+# ============================================================
+# Development & Testing
+# ============================================================
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-timeout>=2.0",
+    "pytest-xdist>=3.0",
+    "httpx>=0.24.0",
+    "coverage>=7.0",
+]
+
+# ============================================================
+# Documentation
+# ============================================================
+docs = [
+    "sphinx>=5.0",
+    "sphinx-rtd-theme",
+]
+
+# ============================================================
+# All (CUDA 12 + dev + docs)
+# ============================================================
+all = ["rtp-llm[cuda12,dev,docs]"]
+
+[project.scripts]
+rtp-llm = "rtp_llm.cli.main:main"
+rtp-llm-server = "rtp_llm.start_server:main"
+
+[project.entry-points."pytest11"]
+remote-gpu = "rtp_llm.test.remote_tests.plugin"
+rtp-ci-profile = "rtp_llm.test.ci_profile_plugin"
+
+[project.entry-points."rtp_llm.models"]
+# Model plugins can be registered here
+
+[tool.setuptools]
+package-dir = {"" = "."}
+packages = ["rtp_llm"]
+
+[tool.setuptools.package-data]
+rtp_llm = [
+    "libs/*.so",
+    "tokenizer_data/*",
+    "config/*.json",
+    "ops/**/*.pyi",
+]
+
+# ============================================================
+# RTP-LLM 构建配置
+# ============================================================
+[tool.rtp-llm]
+# 基础依赖 - 所有平台共用 (仅开源包)
+# 历史上由旧基础 requirements 源迁移而来
+base-dependencies = [
+    # Core
+    "filelock>=3.20.0",
+    "jinja2",
+    "sympy",
+    "typing-extensions",
+    "importlib_metadata",
+
+    # ML/Transformers
+    "transformers==4.51.2",
+    "sentencepiece==0.2.0",
+    "safetensors",
+    "numpy<2.0a0,>=1.25",
+    "einops",
+    "timm==0.9.12",
+    "bitsandbytes>=0.41.0",
+
+    # Server/API
+    "fastapi==0.115.6",
+    "uvicorn==0.30.0",
+    "grpcio==1.62.0",
+    "grpcio-tools==1.57.0",
+    "protobuf==4.25",
+    "aiohttp",
+    "orjson",
+    "pydantic",
+    # Pin pyarrow to 16.x: pyarrow 23.x reproducibly crashes TP convert tests
+    # in libarrow background_thread_entry during import/runtime initialization.
+    "pyarrow==16.1.0",
+
+    # Utilities
+    "setuptools>=64.0,<82",
+    "dacite",
+    "psutil",
+    "tiktoken==0.7.0",
+    "lru-dict",
+    "py-spy",
+    "cpm_kernels",
+    "prettytable",
+    "setproctitle",
+    "portalocker",
+    "concurrent_log_handler",
+    "pybind11_stubgen",
+    "pyOpenSSL==24.1.0",
+
+    # Image/Media
+    "Pillow",
+    "pillow-heif",
+    "pillow-avif-plugin==1.5.2",
+    "librosa",
+    "matplotlib",
+
+    # Cloud/Storage
+    "oss2",
+    "pyodps",
+    "blobfile",
+
+    # NLP/AI
+    "onnx==1.16.0",
+    "sentence-transformers==2.7.0",
+    "json5",
+    "dashscope>=1.11.0",
+    "jieba",
+    "openai",
+    "nest_asyncio",
+    "partial_json_parser",
+
+    # Monitoring
+    "thrift",
+
+    # Video processing
+    "decord==0.6.0 ; platform_machine == 'x86_64'",
+
+    # Platform-specific
+    "pynvml",
+    "xfastertransformer_devel==1.8.1.1 ; platform_machine == 'x86_64'",
+    "xfastertransformer_devel_icx==1.8.1.1 ; platform_machine == 'x86_64'",
+]
+
+[tool.pytest.ini_options]
+# Pytest 最低版本要求
+minversion = "7.0"
+
+# 测试搜索路径
+testpaths = [
+    "rtp_llm/test",
+    "rtp_llm/utils/test",
+    "rtp_llm/config/test",
+    "rtp_llm/distribute/test",
+    "rtp_llm/server",
+    "rtp_llm/frontend/test",
+    "rtp_llm/models/multimodal/test",
+    "rtp_llm/models_py",
+    "rtp_llm/cpp/models",
+    "rtp_llm/cpp/model_rpc/test",
+    "rtp_llm/aios",
+]
+
+# 测试文件、类和函数的匹配模式
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*", "*Test"]
+python_functions = ["test_*"]
+
+# JUnit XML 报告中的日志记录级别
+junit_logging = "all"
+
+# Markers matching Bazel tags
+markers = [
+    # Device/Platform markers
+    "gpu: requires GPU (any type)",
+    "cpu: CPU-only tests (no GPU required)",
+    "cuda: CUDA-specific tests (NVIDIA GPU)",
+    "rocm: ROCm-specific tests (AMD GPU)",
+
+    # GPU type markers
+    "A10: requires NVIDIA A10 GPU",
+    "GeForce_RTX_3090: requires NVIDIA GeForce RTX 3090 GPU",
+    "GeForce_RTX_4090: requires NVIDIA GeForce RTX 4090 GPU",
+    "Tesla_V100S_PCIE_32GB: Tesla V100S",
+    "L20: requires NVIDIA L20 GPU",
+    "H20: requires NVIDIA H20 GPU",
+    "SM100: requires NVIDIA SM100 GPU",
+    "SM100_ARM: requires NVIDIA SM100 ARM GPU",
+    "MI308X: requires AMD MI308X GPU",
+
+    # Test type markers
+    "smoke: smoke tests - quick sanity checks",
+    "light: light smoke test suite (quick validation)",
+    "manual: manual tests - not run automatically",
+    "slow: slow tests - may take long time",
+    "perf: performance tests",
+    "remote_cache: remote cache tests",
+
+    # Feature-specific markers
+    "open_skip: skip in open source build",
+
+    # CI marker expressions (-m) — registered for --strict-markers
+    "multi_device: multi-GPU / multi-device tests",
+    "custom_ar: custom all-reduce related tests",
+    "custom_ar_ut: custom AR unit tests",
+]
+
+# 日志配置
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+
+# 默认命令行选项
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "-ra",
+    # C++ wrapper tests (bazel-compiled test .so, run via cpp-ut-* jobs)
+    "--ignore=rtp_llm/cpp/models/context_parallel/test",
+    "--ignore=rtp_llm/cpp/models/eplb/test",
+]
+
+# 异步测试模式
+asyncio_mode = "auto"
+
+# 默认超时时间
+timeout = 60
+
+# 忽略特定类型的警告
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    "ignore::UserWarning",
+]

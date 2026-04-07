@@ -61,9 +61,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 ```bash
 # Install rtp-llm
 cd rtp-llm
-# For cuda12 environment, please use requirements_torch_gpu_cuda12.txt
-pip3 install -r ./open_source/deps/requirements_torch_gpu.txt
-# Use the corresponding whl from the release version, here's an example for the cuda11 version 0.1.0, for the cuda12 whl package please check the release page.
+# 安装与你的平台匹配的 release wheel，下面仅为示例
 pip3 install rtp_llm-0.1.9+cuda118-cp310-cp310-manylinux1_x86_64.whl
 # start http service
 
@@ -87,14 +85,6 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
     **Error log**: `OSError: /rtp-llm/rtp_llm/libs/libth_transformer.so: cannot open shared object file: No such file or directory`
 
     **Resolution**: 如果是通过whl或者开发镜像安装，测试时请不要在rtp-llm目录下，否则python会用相对路径下的rtp-llm包而非安装好的
-
-3. Bazel build time out
-
-    **Error log**: `ERROR: no such package '@pip_gpu_cuda12_torch//': rules_python_external failed: (Timed out)`
-
-    **Resolution**:
-     1. 修改pip源，在open_source/deps/pip.bzl里添加extra_pip_args=["--index_url=xxx"]配置
-     2. 手动安装python的依赖包，尤其是对于pytorch，因为bazel build默认的600秒超时对于pytorch的下载可能是不够的
 
 ## 文档
 * [镜像发布历史](docs/DockerHistory.md)

@@ -5,6 +5,7 @@ import time
 from typing import Generator, List, Tuple
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
@@ -24,6 +25,8 @@ from rtp_llm.test.utils.numeric_util import (
     per_channel_cast_to_fp8,
     per_token_cast_to_fp8,
 )
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 
 class KernelType(enum.Enum):
