@@ -23,6 +23,14 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s", maga_init_params_.misc_config.aux_string.c_str());
     propose_maga_init_params_ = propose_params.get();
+    if (maga_init_params_.parallelism_config.tp_rank == 0
+        && !maga_init_params_.runtime_config.worker_grpc_addrs.empty()) {
+        profile_broadcaster_ = std::make_shared<BroadcastManager>(maga_init_params_.runtime_config.worker_grpc_addrs);
+        if (!profile_broadcaster_->init()) {
+            RTP_LLM_LOG_WARNING("failed to init profile broadcaster");
+            profile_broadcaster_.reset();
+        }
+    }
 
     {
         pybind11::gil_scoped_release release;
@@ -115,13 +123,6 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
 grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*                   context,
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
-    const bool force_timeline   = engine_->isTimelineProfilingEnabled();
-    const bool request_timeline = request->generate_config().gen_timeline();
-    RTP_LLM_LOG_DEBUG("request [%ld] timeline gate, force_timeline=%d, request_timeline=%d",
-                      request->request_id(),
-                      int(force_timeline),
-                      int(request_timeline));
-
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
     AtomicGuard request_guard(onflight_requests_);
     auto        request_id = request->request_id();
@@ -129,15 +130,9 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     auto input = QueryConverter::transQuery(request);
-    if (force_timeline) {
+    if (applyTimelineGate(
+            generate_context.request_key, input->generate_config->gen_timeline, input->generate_config->profile_step)) {
         input->generate_config->gen_timeline = true;
-    }
-
-    // Per-request profiling: if gen_timeline=true in the request and no profiling session is active,
-    // configure the step-window profiler for this request. The profiler auto-stops after num_steps.
-    // configure() internally enforces first-come-first-served if a session is already running.
-    if (request_timeline && !force_timeline) {
-        engine_->startTimelineProfiling("", 0, request->generate_config().profile_step());
     }
 
     // need to check client has buffer at first
@@ -162,6 +157,18 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
     return generate_context.error_status;
+}
+
+bool LocalRpcServer::applyTimelineGate(const std::string& request_key, bool request_timeline, int profile_step) {
+    const bool force_timeline = engine_->isTimelineProfilingEnabled();
+    RTP_LLM_LOG_DEBUG("request [%s] timeline gate, force_timeline=%d, request_timeline=%d",
+                      request_key.c_str(),
+                      int(force_timeline),
+                      int(request_timeline));
+    if (!force_timeline && request_timeline) {
+        engine_->startTimelineProfiling("", 0, profile_step);
+    }
+    return force_timeline;
 }
 
 grpc::Status
@@ -361,10 +368,62 @@ LocalRpcServer::SetLogLevel(grpc::ServerContext* context, const SetLogLevelReque
 
 grpc::Status
 LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response) {
-    RTP_LLM_PROFILE_FUNCTION();
-    (void)context;
+    (void)response;
+    RTP_LLM_LOG_INFO("start_profile from %s start_step=%d num_steps=%d enable_all_rank=%d",
+                     context->peer().c_str(),
+                     request->start_step(),
+                     request->num_steps(),
+                     int(request->enable_all_rank()));
+    if (!request->enable_all_rank()) {
+        engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
+        return grpc::Status::OK;
+    }
+    if (maga_init_params_.parallelism_config.tp_rank != 0) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "enable_all_rank start_profile must be sent to tp_rank 0");
+    }
+    if (!profile_broadcaster_) {
+        if (maga_init_params_.parallelism_config.tp_size <= 1) {
+            RTP_LLM_LOG_INFO("start_profile enable_all_rank with tp_size=1, fallback to local start");
+            engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
+            return grpc::Status::OK;
+        }
+        return grpc::Status(grpc::StatusCode::INTERNAL, "tp broadcaster unavailable for enable_all_rank start_profile");
+    }
+
+    std::vector<StartProfileInternalRequestPB> requests(profile_broadcaster_->workerNum());
+    for (auto& internal_request : requests) {
+        internal_request.set_trace_name(request->trace_name());
+        internal_request.set_start_step(request->start_step());
+        internal_request.set_num_steps(request->num_steps());
+    }
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& context,
+                       const StartProfileInternalRequestPB&        internal_request,
+                       grpc::CompletionQueue*                      completion_queue) {
+        return stub->AsyncStartProfileInternal(context.get(), internal_request, completion_queue);
+    };
+    auto broadcast_result = profile_broadcaster_->broadcast<StartProfileInternalRequestPB, EmptyPB>(
+        requests, /*timeout_ms=*/3000, rpc_call);
+    if (!broadcast_result) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to broadcast start_profile_internal to tp group");
+    }
+    broadcast_result->waitDone();
+    if (!broadcast_result->success()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "broadcast start_profile_internal to tp group failed");
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::StartProfileInternal(grpc::ServerContext*                 context,
+                                                  const StartProfileInternalRequestPB* request,
+                                                  EmptyPB*                             response) {
+    (void)response;
+    RTP_LLM_LOG_INFO("start_profile_internal from %s start_step=%d num_steps=%d",
+                     context->peer().c_str(),
+                     request->start_step(),
+                     request->num_steps());
     engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
-    RTP_LLM_LOG_INFO("start_profile start_step=%d num_steps=%d", request->start_step(), request->num_steps());
     return grpc::Status::OK;
 }
 

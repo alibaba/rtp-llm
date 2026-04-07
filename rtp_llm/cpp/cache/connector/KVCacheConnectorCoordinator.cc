@@ -4,6 +4,7 @@
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #ifdef USE_REMOTE_KV_CACHE
@@ -87,6 +88,7 @@ void KVCacheConnectorCoordinator::initUpdateThread() {
 
 std::shared_ptr<AsyncContext>
 KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     if (stop_.load()) {
         return nullptr;
     }
@@ -193,11 +195,13 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
 }
 
 void KVCacheConnectorCoordinator::updateOnce() {
+    RTP_LLM_PROFILE_FUNCTION();
     processReadContexts();
     processWriteContexts();
 }
 
 void KVCacheConnectorCoordinator::processReadContexts() {
+    RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(update_mutex_);
     for (auto it = fused_async_read_context_list_.begin(); it != fused_async_read_context_list_.end();) {
         auto fused_read_context = *it;
@@ -233,6 +237,7 @@ void KVCacheConnectorCoordinator::processWriteContexts() {
 
 // this function is called under lock
 void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto match_contexts = fused_read_context->fusedMatchContext()->contexts();
     RTP_LLM_CHECK_WITH_INFO(
         match_contexts.size() == connectors_.size(),

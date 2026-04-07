@@ -53,6 +53,7 @@ absl::Status FIFOScheduler::stop() {
 }
 
 void FIFOScheduler::evaluateRunningRemote() {
+    RTP_LLM_PROFILE_FUNCTION();
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
         if ((*it)->needRemoteGenerate() && (*it)->setRemoteGenerate()) {
             remote_running_streams_.emplace_back(*it);
@@ -84,6 +85,7 @@ void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) {
 }
 
 absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
+    RTP_LLM_PROFILE_FUNCTION();
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.emplace_back(stream);
@@ -93,6 +95,7 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
 }
 
 absl::Status FIFOScheduler::batchEnqueue(const vector<GenerateStreamPtr>& streams) {
+    RTP_LLM_PROFILE_FUNCTION();
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.insert(waiting_streams_.end(), streams.begin(), streams.end());
@@ -129,6 +132,7 @@ int FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
 
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
                                           const GenerateStreamPtr&       new_stream) const {
+    RTP_LLM_PROFILE_FUNCTION();
     if (pd_sep_config_.role_type == RoleType::DECODE) {
         if (running_streams_.size() + streams.size() + 1 < max_generate_batch_size_) {
             return true;
@@ -157,6 +161,7 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
 bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
                                       const GenerateStreamPtr&       new_stream,
                                       size_t                         reserve_step) {
+    RTP_LLM_PROFILE_FUNCTION();
     if (!evaluateRunningMemory(streams, new_stream)) {
         return false;
     }

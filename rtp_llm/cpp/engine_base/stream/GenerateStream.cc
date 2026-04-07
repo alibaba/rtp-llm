@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -40,6 +41,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     mm_position_ids_style_(PositionIdsStyle(model_config.mm_model_config.mm_position_ids_style)),
     dtype_(model_config.data_type),
     hidden_size_(model_config.hidden_size) {
+    RTP_LLM_PROFILE_FUNCTION();
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
     }
@@ -114,6 +116,7 @@ void GenerateStream::cancel() {
 }
 
 absl::Status GenerateStream::initKVBlock(size_t reserve_step) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*output_mutex_);
     if (generate_status_->status == StreamState::WAITING) {
         wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
@@ -129,11 +132,13 @@ void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
 }
 
 absl::Status GenerateStream::incrKVBlock(size_t reserve_step) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*output_mutex_);
     return stream_cache_resource_->incrKVBlock(reserve_step);
 }
 
 void GenerateStream::releaseResource() {
+    RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*output_mutex_);
     if (!stream_cache_resource_->isResourceReleased()) {
         stream_cache_resource_->releaseResource();
@@ -706,6 +711,7 @@ void GenerateStream::matchStopWordsList() {
 }
 
 void GenerateStream::matchStopWordsList(int batch_id) {
+    RTP_LLM_PROFILE_FUNCTION();
     // note: stop_words_list in generate_config contains stop_words_list in special_tokens
     bool match = false;
     for (auto& stop_words : generate_input_->generate_config->stop_words_list) {
@@ -724,6 +730,7 @@ void GenerateStream::matchStopWordsList(int batch_id) {
 }
 
 void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*output_mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
     *is_context_stream_ = false;
@@ -811,6 +818,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*output_mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     *is_context_stream_ = false;
@@ -860,6 +868,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 
 // src_batch_indices: [batch_size] int, the element must less than the batch_size of last step.
 bool GenerateStream::updateKvCacheBlocks(const torch::Tensor& src_batch_indices) {
+    RTP_LLM_PROFILE_FUNCTION();
     if (!src_batch_indices.defined() || src_batch_indices.numel() == 0) {
         // no need to update, clear update mapping
         stream_cache_resource_->clearKVBlockUpdateMapping();
@@ -878,6 +887,7 @@ bool GenerateStream::updateKvCacheBlocks(const torch::Tensor& src_batch_indices)
 }
 
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices) {
+    RTP_LLM_PROFILE_FUNCTION();
     if (!src_batch_indices.defined() || !hasNumBeams()) {
         return;
     }
@@ -892,6 +902,7 @@ void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src
 }
 
 void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_info) {
+    RTP_LLM_PROFILE_FUNCTION();
     updateLogitProcessorMultiSeqStatus(update_info.src_batch_indices);
 
     const auto& new_tokens = update_info.new_tokens;
@@ -904,6 +915,7 @@ void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_i
 }
 
 void GenerateStream::setLoss(const torch::Tensor& loss) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto loss_cpu  = loss.is_cuda() ? loss.cpu() : loss;
     auto loss_size = loss_cpu.numel();
     RTP_LLM_CHECK(loss_index_ + loss_size < inputLength());
@@ -912,6 +924,7 @@ void GenerateStream::setLoss(const torch::Tensor& loss) {
 }
 
 void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto probs_cpu = softmax_probs.is_cuda() ? softmax_probs.cpu() : softmax_probs;
     RTP_LLM_CHECK(probs_cpu.dim() == 2);
     RTP_LLM_CHECK(probs_cpu.size(0) == currentBatchSize());
@@ -945,6 +958,7 @@ void GenerateStream::reportMetric() {
 }
 
 void GenerateStream::reportStreamMetrics() {
+    RTP_LLM_PROFILE_FUNCTION();
     if (metrics_reporter_) {
         bool                         cancelled = statusInfo().code() == ErrorCode::CANCELLED;
         bool                         timeout   = statusInfo().code() == ErrorCode::GENERATE_TIMEOUT;
@@ -1052,6 +1066,7 @@ StreamCacheResource& GenerateStream::streamCacheResource() {
 }
 
 void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_loss, bool share) {
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("GenerateStream::CopyOnWrite(copy_loss=%d, share=%d)", copy_loss, share);
     complete_token_ids_ = make_shared<CompleteTokenIds>(*other_stream.complete_token_ids_, share);
     cum_log_probs_      = other_stream.cum_log_probs_.clone();
     if (other_stream.calculateLoss() && copy_loss) {

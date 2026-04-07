@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
@@ -91,6 +92,7 @@ void StreamCacheResource::init(int batch_size) {
 }
 
 void StreamCacheResource::releaseResource() {
+    RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager) {
         return;
     }
@@ -128,6 +130,7 @@ void StreamCacheResource::releaseResource() {
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
 
     if (fake_inited_) {
@@ -175,6 +178,7 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int reserve_step) co
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
 absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
+    RTP_LLM_PROFILE_FUNCTION();
     // Decode side: first malloc should NOT use device cache, regardless of runtime config.
     // Follow-up allocations (incrKVBlock) will respect reuseCache() && enableDeviceCache().
     if (fake_inited_) {
@@ -218,6 +222,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
 }
 
 absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
+    RTP_LLM_PROFILE_FUNCTION();
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
@@ -331,14 +336,20 @@ void StreamCacheResource::loadCacheSync() {
     if (!reuseCache() || (!enableMemoryCache() && !enableRemoteCache())) {
         return;
     }
+    RTP_LLM_PROFILE_FUNCTION();
     assert(reuse_cache());
     auto meta               = std::make_shared<MetaImpl>(enableMemoryCache(), enableRemoteCache(), stream_->traceId());
     auto connector_context  = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
-    auto load_cache_context = resource_context_.cache_manager->asyncLoadCache(connector_context);
+    std::shared_ptr<AsyncContext> load_cache_context;
+    {
+        RTP_LLM_PROFILE_SCOPE("asyncLoadCache");
+        load_cache_context = resource_context_.cache_manager->asyncLoadCache(connector_context);
+    }
     waitLoadCacheDone(load_cache_context);
 }
 
 void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     if (!load_context) {
         return;
     }
@@ -368,6 +379,7 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
 
 std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
     const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
     auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
@@ -416,6 +428,7 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
 }
 
 void StreamCacheResource::waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     if (!store_context) {
         return;
     }
