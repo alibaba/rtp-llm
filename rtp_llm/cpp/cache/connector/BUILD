@@ -52,7 +52,6 @@ cc_library(
 cc_library(
     name = "connector_header",
     hdrs = [
-        "IGenerateStream.h",
         "IKVCacheConnectorCoordinator.h",
         "KVCacheConnectorReadWriteContext.h",
     ],

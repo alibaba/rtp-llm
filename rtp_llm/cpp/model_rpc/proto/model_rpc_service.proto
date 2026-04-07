@@ -506,18 +506,32 @@ message P2PConnectorStartLoadRequestPB {
     int64 deadline_ms = 3;
 }
 
+// Side-channel tensor blob: carries named tensor data between prefill and decode
+message SideChannelTensorPB {
+    TensorPB tensor = 1;
+}
+
+// Side-channel payload: replaces fixed first_token/reuse/SP/position_ids fields
+// Keys: "propose_tokens", "propose_probs", "propose_hidden", "position_ids"
+message SideChannelPayloadPB {
+    map<string, SideChannelTensorPB> tensors = 1;
+    // Scalar fields that don't fit tensor format
+    int64  first_generate_token_id = 2;
+    int32  total_reuse_len         = 3;
+    int32  local_reuse_len         = 4;
+    int32  remote_reuse_len        = 5;
+    int32  memory_reuse_len        = 6;
+}
+
 message P2PConnectorStartLoadResponsePB {
-    int64 first_generate_token_id = 1;
-    int32 total_reuse_len = 2;
-    int32 local_reuse_len = 3;
-    int32 remote_reuse_len = 4;
-    repeated int32 propose_token_ids = 5;
-    TensorPB propose_probs = 6;
-    TensorPB propose_hidden = 7;
-    repeated int32 position_ids = 8;
-    ErrorCodePB error_code = 9;
-    string error_message = 10;
-    int32 memory_reuse_len = 11;
+    // Legacy fixed fields reserved (replaced by SideChannelPayloadPB)
+    reserved 1 to 8;
+    reserved "first_generate_token_id", "total_reuse_len", "local_reuse_len", "remote_reuse_len", "propose_token_ids", "propose_probs", "propose_hidden", "position_ids";
+
+    // New side-channel payload: all data carried as structured map + scalars
+    SideChannelPayloadPB payload = 9;
+    ErrorCodePB error_code = 10;
+    string error_message = 11;
 }
 
 enum RemoteOpType {

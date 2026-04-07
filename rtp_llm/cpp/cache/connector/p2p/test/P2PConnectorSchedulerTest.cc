@@ -70,15 +70,15 @@ protected:
         return resource;
     }
 
-    std::shared_ptr<MockGenerateStream>
-    createMockStream(int64_t request_id, const std::string& unique_key, int64_t deadline_ms) {
-        std::string prefill_ip   = "127.0.0.1";
-        uint32_t    prefill_port = static_cast<uint32_t>(prefill_server_->listenPort());
-        auto        stream       = std::make_shared<MockGenerateStream>(prefill_ip, prefill_port);
-        stream->setRequestId(request_id);
-        stream->setUniqueKey(unique_key);
-        stream->setDeadlineMs(deadline_ms);
-        return stream;
+    std::shared_ptr<MockMeta>
+    createMockMeta(int64_t request_id, const std::string& unique_key, int64_t deadline_ms) {
+        auto meta = std::make_shared<MockMeta>();
+        meta->setRequestId(request_id);
+        meta->setUniqueKey(unique_key);
+        meta->setDeadlineMs(deadline_ms);
+        meta->setPrefillAddr("127.0.0.1", static_cast<uint32_t>(prefill_server_->listenPort()));
+        meta->setPrefillTpSize(1);
+        return meta;
     }
 
     KVCacheResourcePtr createInvalidKVCacheResource() {
@@ -249,11 +249,11 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnFalse_BroadcastCancelled) {
 
 // ==================== asyncRead 测试 (Decode 端功能) ====================
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNotNull_AllSuccess) {
-    auto resource        = createValidKVCacheResource(2, 2);
-    auto generate_stream = createMockStream(2001, "test_async_read_1", currentTimeMs() + 5000);
+    auto resource = createValidKVCacheResource(2, 2);
+    auto meta     = createMockMeta(2001, "test_async_read_1", currentTimeMs() + 5000);
 
     // block_range: {start_block_idx, block_count}, use -1 for block_count to include all blocks
-    auto result = scheduler_->asyncRead(resource, generate_stream, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -272,10 +272,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNotNull_AllSuccess) {
 
 // 验证 P2PConnectorAsyncReadContext::waitDone() 在 checkDone() 置 done 后由 condition_variable 唤醒
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_WaitDone_UnblocksWhenCheckDoneCompletes) {
-    auto resource        = createValidKVCacheResource(2, 2);
-    auto generate_stream = createMockStream(2010, "test_async_read_wait_done", currentTimeMs() + 5000);
+    auto resource = createValidKVCacheResource(2, 2);
+    auto meta     = createMockMeta(2010, "test_async_read_wait_done", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, generate_stream, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -304,9 +304,9 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_WaitDone_UnblocksWhenCheckDoneComple
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNull_NullResource) {
-    auto generate_stream = createMockStream(2002, "test_async_read_null_resource", currentTimeMs() + 5000);
+    auto meta = createMockMeta(2002, "test_async_read_null_resource", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(nullptr, generate_stream, {0, -1});
+    auto result = scheduler_->asyncRead(nullptr, meta, {0, -1});
 
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.context, nullptr);
@@ -319,10 +319,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNull_NullResource) {
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNull_EmptyResource) {
-    auto resource        = std::make_shared<KVCacheResource>();
-    auto generate_stream = createMockStream(2003, "test_async_read_empty", currentTimeMs() + 5000);
+    auto resource = std::make_shared<KVCacheResource>();
+    auto meta     = createMockMeta(2003, "test_async_read_empty", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, generate_stream, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
 
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.context, nullptr);
@@ -337,10 +337,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNull_EmptyResource) {
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BroadcastFailed) {
     tp_broadcast_servers_[0]->service()->setP2PResponseSuccess(false);
 
-    auto resource        = createValidKVCacheResource(2, 2);
-    auto generate_stream = createMockStream(2004, "test_async_read_broadcast_fail", currentTimeMs() + 5000);
+    auto resource = createValidKVCacheResource(2, 2);
+    auto meta     = createMockMeta(2004, "test_async_read_broadcast_fail", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, generate_stream, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -360,10 +360,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BroadcastFailed) {
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_LoadFailed) {
     prefill_server_->service()->setStartLoadResponseSuccess(false);
 
-    auto resource        = createValidKVCacheResource(2, 2);
-    auto generate_stream = createMockStream(2005, "test_async_read_load_fail", currentTimeMs() + 5000);
+    auto resource = createValidKVCacheResource(2, 2);
+    auto meta     = createMockMeta(2005, "test_async_read_load_fail", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, generate_stream, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -384,10 +384,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BothFailed) {
     tp_broadcast_servers_[0]->service()->setP2PResponseSuccess(false);
     prefill_server_->service()->setStartLoadResponseSuccess(false);
 
-    auto resource        = createValidKVCacheResource(2, 2);
-    auto generate_stream = createMockStream(2006, "test_async_read_both_fail", currentTimeMs() + 5000);
+    auto resource = createValidKVCacheResource(2, 2);
+    auto meta     = createMockMeta(2006, "test_async_read_both_fail", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, generate_stream, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -403,10 +403,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_PrefillTimeout) {
     // 设置 prefill server 延迟响应
     prefill_server_->service()->setSleepMillis(500);
 
-    auto resource        = createValidKVCacheResource(2, 2);
-    auto generate_stream = createMockStream(2007, "test_async_read_prefill_timeout", currentTimeMs() + 50);
+    auto resource = createValidKVCacheResource(2, 2);
+    auto meta     = createMockMeta(2007, "test_async_read_prefill_timeout", currentTimeMs() + 50);
 
-    auto result = scheduler_->asyncRead(resource, generate_stream, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -426,10 +426,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ThrowException_BroadcastTimeout) {
 
     scheduler_->stopChecker();
 
-    auto resource        = createValidKVCacheResource(2, 2);
-    auto generate_stream = createMockStream(2008, "test_async_read_broadcast_timeout", currentTimeMs() + 50);
+    auto resource = createValidKVCacheResource(2, 2);
+    auto meta     = createMockMeta(2008, "test_async_read_broadcast_timeout", currentTimeMs() + 50);
 
-    auto result = scheduler_->asyncRead(resource, generate_stream, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -447,10 +447,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelBroadcast_WhenPrefillFailed) {
         server->service()->setSleepMillis(200);
     }
 
-    auto resource        = createValidKVCacheResource(2, 2);
-    auto generate_stream = createMockStream(3001, "test_cancel_broadcast_when_prefill_failed", currentTimeMs() + 5000);
+    auto resource = createValidKVCacheResource(2, 2);
+    auto meta     = createMockMeta(3001, "test_cancel_broadcast_when_prefill_failed", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, generate_stream, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -484,10 +484,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelPrefill_WhenBroadcastFailed) {
     // 设置 prefill server 延迟响应，确保 broadcast 先完成
     prefill_server_->service()->setSleepMillis(200);
 
-    auto resource        = createValidKVCacheResource(2, 2);
-    auto generate_stream = createMockStream(3002, "test_cancel_prefill_when_broadcast_failed", currentTimeMs() + 5000);
+    auto resource = createValidKVCacheResource(2, 2);
+    auto meta     = createMockMeta(3002, "test_cancel_prefill_when_broadcast_failed", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, generate_stream, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -541,10 +541,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_HoldDelaysDoneAndSup
 
     scheduler_->stopChecker();
 
-    auto resource        = createValidKVCacheResource(2, 2);
-    auto generate_stream = createMockStream(5010, "test_transfer_not_done_hold", currentTimeMs() + 5000);
+    auto resource = createValidKVCacheResource(2, 2);
+    auto meta     = createMockMeta(5010, "test_transfer_not_done_hold", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, generate_stream, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -591,10 +591,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_ZeroHold_CompletesIm
 
     scheduler_->stopChecker();
 
-    auto resource        = createValidKVCacheResource(2, 2);
-    auto generate_stream = createMockStream(5011, "test_transfer_not_done_zero_hold", currentTimeMs() + 5000);
+    auto resource = createValidKVCacheResource(2, 2);
+    auto meta     = createMockMeta(5011, "test_transfer_not_done_zero_hold", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, generate_stream, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);

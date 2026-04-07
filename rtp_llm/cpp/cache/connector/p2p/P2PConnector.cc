@@ -54,13 +54,13 @@ bool P2PConnector::init() {
 
 std::shared_ptr<AsyncMatchContext> P2PConnector::asyncMatch(const KVCacheResourcePtr&    resource,
                                                             const std::shared_ptr<Meta>& meta) {
-    if (!meta || !resource || !meta->generateStream()) {
+    if (!meta || !resource || !meta->generateStreamOpaque()) {
         RTP_LLM_LOG_WARNING("asyncMatch failed, meta is null or resource is null or generate_stream is null");
         return nullptr;
     }
 
     if (config_.role_type == RoleType::PREFILL) {
-        if (!stream_store_->addResource(meta->generateStream(), resource)) {
+        if (!stream_store_->addResource(meta, resource)) {
             RTP_LLM_LOG_WARNING("asyncMatch failed, stream_store add resource failed");
             return nullptr;
         }
@@ -79,12 +79,11 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
                                                       const std::shared_ptr<AsyncMatchContext>& match_context,
                                                       int                                       start_read_block_index,
                                                       int                                       read_block_num) {
-    if (!meta || !resource || !meta->generateStream()) {
+    if (!meta || !resource || !meta->generateStreamOpaque()) {
         RTP_LLM_LOG_WARNING("asyncRead failed, meta is null");
         return nullptr;
     }
 
-    auto                generate_stream = meta->generateStream();
     std::pair<int, int> block_range{start_read_block_index, read_block_num};
 
     if (scheduler_ == nullptr) {
@@ -93,12 +92,12 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
     }
 
     if (config_.role_type == RoleType::DECODE) {
-        auto result = scheduler_->asyncRead(resource, generate_stream, block_range);
+        auto result = scheduler_->asyncRead(resource, meta, block_range);
         if (!result.ok()) {
             RTP_LLM_LOG_WARNING("asyncRead failed, unique_key: %s, error: %s",
-                                generate_stream->uniqueKey().c_str(),
+                                meta->p2pRouting().value_or(Meta::P2PRoutingContext{}).unique_key.c_str(),
                                 result.error_info.ToString().c_str());
-            generate_stream->setStop(result.error_info.code(), result.error_info.ToString());
+            meta->setStop(result.error_info.code(), result.error_info.ToString());
             return nullptr;
         }
         return result.context;
@@ -169,17 +168,53 @@ void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
         return;
     }
 
-    waitAndFillResponse(resource_entry, response);
+    waitAndFillResponse(resource_entry, response, is_cancelled);
 }
 
 void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
-                                       P2PConnectorStartLoadResponsePB&                  response) {
-    resource_entry->generate_stream->waitForRemoteGenerate();
+                                       P2PConnectorStartLoadResponsePB&                  response,
+                                       std::function<bool()>                             is_cancelled) {
+    // Wait for side-channel data to be ready (notified by prefill engine when first token / SP data is produced)
+    // Note: resource_entry has already been stolen from resource_map_, so we wait on it directly
+    const std::string& unique_key = resource_entry->unique_key;
+    int64_t deadline_ms = resource_entry->deadline_ms;
+
+    std::unique_lock<std::mutex> lock(resource_entry->side_channel_mutex);
+    const int64_t remaining_us  = deadline_ms * 1000 - currentTimeUs();
+    if (remaining_us <= 0) {
+        RTP_LLM_LOG_WARNING("waitAndFillResponse: past deadline, unique_key: %s", unique_key.c_str());
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
+        response.set_error_message("waitAndFillResponse: past deadline");
+        return;
+    }
+
+    const auto timeout_tp = std::chrono::system_clock::now() + std::chrono::microseconds(remaining_us);
+    while (!resource_entry->side_channel_ready) {
+        if (is_cancelled && is_cancelled()) {
+            RTP_LLM_LOG_DEBUG("waitAndFillResponse: cancelled, unique_key: %s", unique_key.c_str());
+            response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
+            response.set_error_message("waitAndFillResponse: cancelled");
+            return;
+        }
+        resource_entry->side_channel_cv.wait_until(lock, timeout_tp);
+        if (!resource_entry->side_channel_ready) {
+            if (std::chrono::system_clock::now() >= timeout_tp) {
+                RTP_LLM_LOG_WARNING("waitAndFillResponse: timeout, unique_key: %s", unique_key.c_str());
+                response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
+                response.set_error_message("waitAndFillResponse: timeout");
+                return;
+            }
+        }
+    }
+
+    // Release lock before calling fillResponseWithStreamInfo to avoid deadlock
+    // (fillResponseWithStreamInfo acquires side_channel_mutex internally)
+    lock.unlock();
 
     grpc::Status fill_status = fillResponseWithStreamInfo(resource_entry, response);
     if (!fill_status.ok()) {
         RTP_LLM_LOG_WARNING("waitAndFillResponse failed, unique_key: %s, error: %s",
-                            resource_entry->generate_stream->uniqueKey().c_str(),
+                            resource_entry->unique_key.c_str(),
                             fill_status.error_message().c_str());
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
         response.set_error_message("fillResponseWithStreamInfo failed: " + fill_status.error_message());
@@ -322,46 +357,57 @@ grpc::Status P2PConnector::waitForResourceEntry(const std::string&              
 
 grpc::Status P2PConnector::fillResponseWithStreamInfo(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
                                                       P2PConnectorStartLoadResponsePB&                  response) {
-    // return first token id
-    int  first_token = 0;
-    auto all_tokens  = resource_entry->generate_stream->currentExecuteTokens(0);
-    if (all_tokens.size() > 0) {
-        first_token = all_tokens[all_tokens.size() - 1];
-        response.set_first_generate_token_id(first_token);
-        RTP_LLM_LOG_DEBUG("fill response: first token: %d", first_token);
+    // Read side-channel data from entry (filled by notifySideChannelReady)
+    P2PConnectorResourceEntry::SideChannelData data;
+    {
+        std::lock_guard<std::mutex> lock(resource_entry->side_channel_mutex);
+        if (!resource_entry->side_channel_ready) {
+            return grpc::Status(grpc::StatusCode::INTERNAL, "side-channel data not ready");
+        }
+        data = resource_entry->side_channel_data;
+    }
+
+    // Fill response proto from side-channel data
+    auto* payload = response.mutable_payload();
+    payload->set_first_generate_token_id(data.first_token_id);
+    payload->set_total_reuse_len(data.total_reuse_len);
+    payload->set_local_reuse_len(data.local_reuse_len);
+    payload->set_remote_reuse_len(data.remote_reuse_len);
+    payload->set_memory_reuse_len(data.memory_reuse_len);
+
+    if (!data.propose_tokens.empty()) {
+        auto& propose_tensor = (*payload->mutable_tensors())["propose_tokens"];
+        auto* tokens_pb = propose_tensor.mutable_tensor();
+        tokens_pb->set_data_type(TensorPB::INT32);
+        tokens_pb->add_shape(data.propose_tokens.size());
+        std::vector<int32_t> int32_tokens(data.propose_tokens.begin(), data.propose_tokens.end());
+        tokens_pb->set_int32_data(int32_tokens.data(), int32_tokens.size() * sizeof(int32_t));
+    }
+    if (data.propose_probs.data_type() != TensorPB::FP32 && data.propose_probs.fp16_data().empty()
+        && data.propose_probs.bf16_data().empty() && data.propose_probs.fp32_data().empty()) {
+        // propose_probs is empty but that's OK — skip
     } else {
-        RTP_LLM_LOG_WARNING("fill response failed: first token not found");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "first token not found");
+        auto& probs_tensor = (*payload->mutable_tensors())["propose_probs"];
+        probs_tensor.mutable_tensor()->CopyFrom(data.propose_probs);
+    }
+    if (data.propose_hidden.data_type() != TensorPB::FP32 && data.propose_hidden.fp16_data().empty()
+        && data.propose_hidden.bf16_data().empty() && data.propose_hidden.fp32_data().empty()) {
+        // propose_hidden is empty but that's OK — skip
+    } else {
+        auto& hidden_tensor = (*payload->mutable_tensors())["propose_hidden"];
+        hidden_tensor.mutable_tensor()->CopyFrom(data.propose_hidden);
+    }
+    if (!data.position_ids.empty()) {
+        auto& pos_tensor = (*payload->mutable_tensors())["position_ids"];
+        auto* pos_pb = pos_tensor.mutable_tensor();
+        pos_pb->set_data_type(TensorPB::INT32);
+        pos_pb->add_shape(data.position_ids.size());
+        pos_pb->set_int32_data(data.position_ids.data(), data.position_ids.size() * sizeof(int32_t));
     }
 
-    // get context position ids from generate_stream
-    auto position_ids = resource_entry->generate_stream->getContextPositionIdsPB();
-    if (!position_ids.empty()) {
-        response.mutable_position_ids()->CopyFrom({position_ids.begin(), position_ids.end()});
-        RTP_LLM_LOG_DEBUG("fill response: position_ids: %s", vectorToString(position_ids).c_str());
-    }
-
-    auto [total_reuse_len, local_reuse_len, remote_reuse_len, memory_reuse_len] =
-        resource_entry->generate_stream->getReuseLength();
-    response.set_total_reuse_len(total_reuse_len);
-    response.set_local_reuse_len(local_reuse_len);
-    response.set_remote_reuse_len(remote_reuse_len);
-    response.set_memory_reuse_len(memory_reuse_len);
-    RTP_LLM_LOG_DEBUG("fill response: total: %d, local: %d, remote: %d, memory: %d",
-                      total_reuse_len,
-                      local_reuse_len,
-                      remote_reuse_len,
-                      memory_reuse_len);
-
-    // get propose info from generate_stream
-    auto sp_info_opt = resource_entry->generate_stream->getSPInfoPB();
-    if (sp_info_opt.has_value()) {
-        auto& [propose_tokens, propose_probs, propose_hidden] = sp_info_opt.value();
-        response.mutable_propose_token_ids()->CopyFrom({propose_tokens.begin(), propose_tokens.end()});
-        response.mutable_propose_probs()->CopyFrom(propose_probs);
-        response.mutable_propose_hidden()->CopyFrom(propose_hidden);
-        RTP_LLM_LOG_DEBUG("fill response: propose_tokens: %s", vectorToString(propose_tokens).c_str());
-    }
+    RTP_LLM_LOG_DEBUG("fill response from entry: first_token: %ld, total_reuse: %d, local: %d, remote: %d, memory: %d",
+                      data.first_token_id, data.total_reuse_len, data.local_reuse_len,
+                      data.remote_reuse_len, data.memory_reuse_len);
 
     return grpc::Status::OK;
 }

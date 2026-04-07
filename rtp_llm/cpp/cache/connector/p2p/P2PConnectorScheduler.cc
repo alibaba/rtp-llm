@@ -37,10 +37,10 @@ bool P2PConnectorScheduler::init(const std::string& process_id) {
     return true;
 }
 
-P2PConnectorScheduler::AsyncReadResult P2PConnectorScheduler::asyncRead(const KVCacheResourcePtr&  resource,
-                                                                        const IGenerateStreamPtr&  generate_stream,
-                                                                        const std::pair<int, int>& block_range) {
-    return decode_->asyncRead(resource, generate_stream, block_range);
+P2PConnectorScheduler::AsyncReadResult P2PConnectorScheduler::asyncRead(const KVCacheResourcePtr&    resource,
+                                                                        const std::shared_ptr<Meta>& meta,
+                                                                        const std::pair<int, int>&   block_range) {
+    return decode_->asyncRead(resource, meta, block_range);
 }
 
 ErrorInfo

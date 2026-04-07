@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
@@ -28,9 +29,9 @@ public:
     void stopChecker();
 
 public:
-    AsyncReadResult asyncRead(const KVCacheResourcePtr&  resource,
-                              const IGenerateStreamPtr&  generate_stream,
-                              const std::pair<int, int>& block_range);
+    AsyncReadResult asyncRead(const KVCacheResourcePtr&       resource,
+                              const std::shared_ptr<Meta>&    meta,
+                              const std::pair<int, int>&      block_range);
 
     ErrorInfo sendKVCache(const KVCacheResourcePtr&                            resource,
                           const std::string&                                   unique_key,
