@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
+#include <torch/torch.h>
+
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -182,6 +184,82 @@ void initPrefillCudaGraphCopyParams(PyModelInputs&           inputs,
                             "prefill_cuda_graph_copy_params cuda_graph_prefill_batch_size is not pinned memory");
     inputs.attention_inputs.prefill_cuda_graph_copy_params =
         PyPrefillCudaGaphCopyParams{cuda_graph_prefill_batch_size, max_seq_len, max_bs};
+}
+
+CudaGraphCapturePyModelInputs::CudaGraphCapturePyModelInputs(const GraphParams&       graph_params,
+                                                             size_t                   max_bs,
+                                                             int                      max_num_token,
+                                                             const at::TensorOptions& options_cuda_int32,
+                                                             const at::TensorOptions& options_cpu_int32,
+                                                             const at::TensorOptions& options_cuda_float,
+                                                             const at::Tensor&        position_encoding,
+                                                             const at::Tensor&        token_type_embedding,
+                                                             float                    input_embedding_scalar):
+    graph_params_(graph_params),
+    max_bs_(max_bs),
+    max_num_token_(max_num_token),
+    options_cuda_int32_(options_cuda_int32),
+    options_cpu_int32_(options_cpu_int32),
+    options_cuda_float_(options_cuda_float),
+    position_encoding_(position_encoding),
+    token_type_embedding_(token_type_embedding),
+    input_embedding_scalar_(input_embedding_scalar) {}
+
+void CudaGraphCapturePyModelInputs::fillCuSeqlensForCapture(PyModelInputs& py_inputs, size_t max_bs) {
+    torch::Tensor cu_seqlens = torch::zeros({int(max_bs + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+    torch::Tensor cu_kv_seqlens =
+        torch::zeros({int(max_bs + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+    auto input_lengths  = py_inputs.attention_inputs.input_lengths;
+    auto prefix_lengths = py_inputs.attention_inputs.prefix_lengths;
+
+    cu_seqlens.slice(0, 1, max_bs + 1) = input_lengths.cumsum(0);
+    if (prefix_lengths.defined()) {
+        cu_kv_seqlens.slice(0, 1, max_bs + 1) = input_lengths.add(prefix_lengths).cumsum(0);
+    }
+    py_inputs.attention_inputs.cu_seqlens    = cu_seqlens.pin_memory();
+    py_inputs.attention_inputs.cu_kv_seqlens = cu_kv_seqlens.pin_memory();
+}
+
+CaptureMemoryHold CudaGraphCapturePyModelInputs::makeCaptureMemoryHold() const {
+    PyModelInputs inputs;
+    initMaxCapturePyModelInputs(inputs,
+                                makeCaptureMaxPyModelInputsConfig(graph_params_,
+                                                                  max_bs_,
+                                                                  max_num_token_,
+                                                                  options_cuda_int32_,
+                                                                  options_cpu_int32_,
+                                                                  options_cuda_float_,
+                                                                  position_encoding_,
+                                                                  token_type_embedding_,
+                                                                  input_embedding_scalar_));
+    fillCuSeqlensForCapture(inputs, max_bs_);
+    at::Tensor output;
+    return CaptureMemoryHold(std::move(output), inputs);
+}
+
+void CudaGraphCapturePyModelInputs::allocateHiddenStatesAndPrefillCopyParams(CaptureMemoryHold& hold) const {
+    at::Tensor output =
+        torch::zeros({max_num_token_, static_cast<int64_t>(graph_params_.hidden_size)}, options_cuda_float_);
+    hold.setHiddenStates(std::move(output));
+    initPrefillCudaGraphCopyParams(
+        hold.py_model_inputs_, options_cpu_int32_, graph_params_.max_seq_len, static_cast<int>(max_bs_));
+}
+
+void CudaGraphCapturePyModelInputs::patchForPrefillProbeForward(CaptureMemoryHold& hold) const {
+    hold.py_model_inputs_.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = max_num_token_;
+    hold.py_model_inputs_.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1] = max_num_token_;
+    hold.py_model_inputs_.attention_inputs.input_lengths.data_ptr<int>()[0] = max_num_token_;
+}
+
+PyModelInputs CudaGraphCapturePyModelInputs::sliceForPrefillProbeForward(const CaptureMemoryHold& hold) const {
+    PyModelInputs sliced                                    = hold.py_model_inputs_;
+    const auto&   cap                                       = hold.py_model_inputs_.attention_inputs;
+    sliced.attention_inputs.cu_seqlens                      = cap.cu_seqlens.slice(0, 0, 2);
+    sliced.attention_inputs.cu_kv_seqlens                   = cap.cu_kv_seqlens.slice(0, 0, 2);
+    sliced.attention_inputs.input_lengths                   = cap.input_lengths.slice(0, 0, 1);
+    sliced.attention_inputs.kv_cache_kernel_block_id_device = cap.kv_cache_kernel_block_id_device.slice(0, 0, 1);
+    sliced.attention_inputs.kv_cache_kernel_block_id_host   = cap.kv_cache_kernel_block_id_host.slice(0, 0, 1);
+    return sliced;
 }
 
 void sliceTemplatePyModelInputsForCapture(PyModelInputs&       inputs,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <ATen/core/TensorBody.h>
 #include <c10/core/ScalarType.h>
@@ -66,6 +67,48 @@ void initPrefillCudaGraphCopyParams(torch_ext::PyModelInputs& inputs,
                                     const at::TensorOptions&  options_cpu_int32,
                                     int                       max_seq_len,
                                     int                       max_bs);
+
+/// Builds max-sized `PyModelInputs`, `cu_seqlens` / `cu_kv_seqlens`, and `CaptureMemoryHold` for CUDA graph capture
+/// init.
+class CudaGraphCapturePyModelInputs {
+public:
+    CudaGraphCapturePyModelInputs(const GraphParams&       graph_params,
+                                  size_t                   max_bs,
+                                  int                      max_num_token,
+                                  const at::TensorOptions& options_cuda_int32,
+                                  const at::TensorOptions& options_cpu_int32,
+                                  const at::TensorOptions& options_cuda_float,
+                                  const at::Tensor&        position_encoding,
+                                  const at::Tensor&        token_type_embedding,
+                                  float                    input_embedding_scalar);
+
+    /// Max template tensors + pinned cu_seqlens; hidden states placeholder until
+    /// `allocateHiddenStatesAndPrefillCopyParams`.
+    CaptureMemoryHold makeCaptureMemoryHold() const;
+
+    /// Allocates `all_layers_output_` and installs prefill CUDA-graph copy params on `hold.py_model_inputs_`.
+    void allocateHiddenStatesAndPrefillCopyParams(CaptureMemoryHold& hold) const;
+
+    /// Prefill-only: patch full template buffers for the extra probe `forward` before per-seq capture.
+    void patchForPrefillProbeForward(CaptureMemoryHold& hold) const;
+
+    /// Sliced `PyModelInputs` for that probe `forward` (batch 1 / short cu_seqlens views).
+    torch_ext::PyModelInputs sliceForPrefillProbeForward(const CaptureMemoryHold& hold) const;
+
+    /// Fills `cu_seqlens` / `cu_kv_seqlens` from `input_lengths` / `prefix_lengths` (length `max_bs + 1`, pinned).
+    static void fillCuSeqlensForCapture(torch_ext::PyModelInputs& py_inputs, size_t max_bs);
+
+private:
+    GraphParams       graph_params_;
+    size_t            max_bs_{1};
+    int               max_num_token_{1};
+    at::TensorOptions options_cuda_int32_;
+    at::TensorOptions options_cpu_int32_;
+    at::TensorOptions options_cuda_float_;
+    at::Tensor        position_encoding_;
+    at::Tensor        token_type_embedding_;
+    float             input_embedding_scalar_{0.f};
+};
 
 // Slice the max capture template down to the batch / token span used for one graph key.
 void sliceTemplatePyModelInputsForCapture(torch_ext::PyModelInputs&       dst,
