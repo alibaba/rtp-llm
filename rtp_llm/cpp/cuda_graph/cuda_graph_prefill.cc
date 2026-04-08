@@ -24,7 +24,7 @@ void CudaGraphRunner::capturePrefill() {
         inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
         inputs.attention_inputs.context_total_kv_length          = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
-            capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
+            capture_py_model_inputs_.memoryHold().py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
             inputs.bert_embedding_inputs.combo_position_ids =
                 inputs.bert_embedding_inputs.combo_position_ids.slice(0, 0, seq_len);

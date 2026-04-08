@@ -47,7 +47,7 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, BatchDescriptor
     if (!graph_params_.is_prefill_cuda_graph_mode) {
         decode_attn = graph_instances_[batch_descriptor.current_real_graph_bs].mem_hold_.attn_pyobj_;
     }
-    cuda_graph::copyRuntimePyModelIntoCaptureBuffers(
+    cuda_graph::CudaGraphCaptureBufferHelper::copyRuntimePyModelIntoCaptureBuffers(
         inputs, cap, batch_descriptor, graph_params_.is_prefill_cuda_graph_mode, decode_attn);
 }
 
@@ -228,29 +228,22 @@ void CudaGraphRunner::initCapture() {
             capture_range_ = getDecodeBatchSizesToCapture();
         }
 
-        cuda_graph::CudaGraphCapturePyModelInputs capture_py_inputs(graph_params_,
-                                                                    max_bs_,
-                                                                    max_num_token_,
-                                                                    options_cuda_int32_,
-                                                                    options_cpu_int32_,
-                                                                    options_cuda_float_,
-                                                                    position_encoding_,
-                                                                    token_type_embedding_,
-                                                                    input_embedding_scalar_);
-        capture_mem_hold_ = capture_py_inputs.makeCaptureMemoryHold();
+        capture_py_model_inputs_ = cuda_graph::CudaGraphCapturePyModelInputs(
+            graph_params_, max_bs_, max_num_token_, position_encoding_, token_type_embedding_, input_embedding_scalar_);
+        capture_py_model_inputs_.buildCaptureMemoryHold();
 
         // get real output data type (params already prepared in attn impl __init__/create_params)
-        auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
+        auto attn_pyobj = py_attn_pyobj_method_(capture_py_model_inputs_.memoryHold().py_model_inputs_, true);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
-        py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        py_forward_method_(capture_py_model_inputs_.memoryHold().py_model_inputs_, attn_pyobj);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
-        capture_py_inputs.allocateHiddenStatesAndPrefillCopyParams(capture_mem_hold_);
+        capture_py_model_inputs_.allocateHiddenStatesAndPrefillCopyParams();
         logCudaGraphPoolMemory("before_capture");
 
         if (graph_params_.is_prefill_cuda_graph_mode) {
             RTP_LLM_LOG_INFO("initCapture forward post check start for prefill");
-            capture_py_inputs.patchForPrefillProbeForward(capture_mem_hold_);
-            py_forward_method_(capture_py_inputs.sliceForPrefillProbeForward(capture_mem_hold_));
+            capture_py_model_inputs_.patchForPrefillProbeForward();
+            py_forward_method_(capture_py_model_inputs_.sliceForPrefillProbeForward());
             RTP_LLM_LOG_INFO("initCapture forward post check end for prefill");
             capturePrefill();
         } else {
@@ -258,7 +251,8 @@ void CudaGraphRunner::initCapture() {
         }
         logCudaGraphPoolMemory("after_capture");
     } else {
-        cuda_graph::CudaGraphCapturePyModelInputs::fillCuSeqlensForCapture(capture_mem_hold_.py_model_inputs_, max_bs_);
+        cuda_graph::CudaGraphCapturePyModelInputs::fillCuSeqlensForCapture(
+            capture_py_model_inputs_.memoryHold().py_model_inputs_, max_bs_);
         RTP_LLM_LOG_INFO("CUDA graph capture is not enabled, skipping initialization");
     }
 }
@@ -340,17 +334,19 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 }
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
-    cuda_graph::sliceTemplatePyModelInputsForCapture(inputs,
-                                                     capture_mem_hold_.py_model_inputs_,
-                                                     batch_size,
-                                                     seq_len_or_tokens,
-                                                     graph_params_.is_prefill_cuda_graph_mode,
-                                                     graph_params_.num_tokens_per_bs,
-                                                     graph_params_.is_target_verify);
+    cuda_graph::CudaGraphCaptureBufferHelper::sliceTemplatePyModelInputsForCapture(
+        inputs,
+        capture_py_model_inputs_.memoryHold().py_model_inputs_,
+        batch_size,
+        seq_len_or_tokens,
+        graph_params_.is_prefill_cuda_graph_mode,
+        graph_params_.num_tokens_per_bs,
+        graph_params_.is_target_verify);
 }
 
 CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {
-    return CaptureMemoryHold(capture_mem_hold_.all_layers_output_.slice(0, 0, tokens_count), inputs);
+    return CaptureMemoryHold(capture_py_model_inputs_.memoryHold().all_layers_output_.slice(0, 0, tokens_count),
+                             inputs);
 }
 
 CudaGraphRunner* CudaGraphRunner::createForPrefill(py::object py_instance, GraphParams params) {

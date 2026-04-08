@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_py_model_inputs.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -31,10 +32,6 @@ public:
         }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
-        options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
-        options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
-        options_cuda_float_ =
-            torch::TensorOptions().dtype(graph_params_.model_data_type).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph: %d, max_bs_: %zu, enable_cuda_graph_debug_mode: %d, max_seq_len: %d, kernel_tokens_per_block: %d, \
             hidden_size: %zu, num_tokens_per_bs: %d, is_prefill_cuda_graph_mode: %d, is_target_verify: %d",
@@ -102,15 +99,12 @@ private:
     std::vector<int>        capture_range_;
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
-    std::unordered_map<int, GraphInstance> graph_instances_;
-    CaptureMemoryHold                      capture_mem_hold_;
-    torch::Tensor                          position_encoding_;
-    torch::Tensor                          token_type_embedding_;
-    float                                  input_embedding_scalar_{};
-    at::TensorOptions                      options_cuda_int32_;
-    at::TensorOptions                      options_cpu_int32_;
-    at::TensorOptions                      options_cuda_float_;
-    cuda_graph::GraphPoolHandle            shared_graph_pool_{};
+    std::unordered_map<int, GraphInstance>    graph_instances_;
+    cuda_graph::CudaGraphCapturePyModelInputs capture_py_model_inputs_;
+    torch::Tensor                             position_encoding_;
+    torch::Tensor                             token_type_embedding_;
+    float                                     input_embedding_scalar_{};
+    cuda_graph::GraphPoolHandle               shared_graph_pool_{};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();
