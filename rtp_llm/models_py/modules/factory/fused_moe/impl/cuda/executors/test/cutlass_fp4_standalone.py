@@ -8,8 +8,6 @@ The kernel is CUTLASS GemmUniversal with BlockScaledTensorOp, SM100 only.
 """
 import functools
 import os
-import re
-import shutil
 import tempfile
 import torch
 
@@ -34,143 +32,58 @@ def swizzle_blockscale(scale_2d, M, K_div16):
     return swizzled.view(M_pad, K_pad)
 
 
-def _adapt_source(src_path: str, out_dir: str) -> str:
-    """Read vLLM kernel source and adapt from stable ABI to standard torch API."""
-    with open(src_path, "r") as f:
-        src = f.read()
 
-    # 1. Replace stable ABI includes with standard torch
-    src = src.replace('#include <torch/csrc/stable/library.h>', '#include <torch/extension.h>')
-    src = src.replace('#include <torch/csrc/stable/tensor.h>', '')
-    src = src.replace('#include "libtorch_stable/torch_utils.h"', '')
-
-    # 2. Replace torch::stable::Tensor -> torch::Tensor
-    src = src.replace('torch::stable::Tensor', 'torch::Tensor')
-
-    # 3. Replace torch::stable::empty -> torch::empty
-    # torch::stable::empty(size, dtype, ..., device) -> torch::empty({size}, torch::TensorOptions().dtype(dtype).device(device))
-    # This is complex, let's use a simpler pattern: replace the factory calls
-    src = re.sub(
-        r'torch::stable::empty\((\w+),\s*torch::headeronly::ScalarType::(\w+),\s*std::nullopt,\s*(\w+)\.device\(\)\)',
-        r'torch::empty({\1}, torch::TensorOptions().dtype(torch::kLong).device(\3.device()))',
-        src
-    )
-    # Handle 2D empty: torch::stable::empty({rows, cols}, ...)
-    src = re.sub(
-        r'torch::stable::empty\(\{(\w+),\s*(\w+)\},\s*torch::headeronly::ScalarType::(\w+),\s*std::nullopt,\s*(\w+)\.device\(\)\)',
-        r'torch::empty({\1, \2}, torch::TensorOptions().dtype(torch::kLong).device(\4.device()))',
-        src
-    )
-    # workspace: torch::stable::empty(workspace_size, Byte, ...)
-    src = re.sub(
-        r'torch::stable::empty\(workspace_size,\s*torch::headeronly::ScalarType::Byte,\s*std::nullopt,\s*(\w+)\.device\(\)\)',
-        r'torch::empty({static_cast<long>(workspace_size)}, torch::TensorOptions().dtype(torch::kByte).device(\\1.device()))',
-        src
-    )
-
-    # 4. Replace scalar type checks
-    src = src.replace('torch::headeronly::ScalarType::BFloat16', 'torch::kBFloat16')
-    src = src.replace('torch::headeronly::ScalarType::Half', 'torch::kHalf')
-    src = src.replace('torch::headeronly::ScalarType::Float', 'torch::kFloat32')
-    src = src.replace('torch::headeronly::ScalarType::Int', 'torch::kInt32')
-    src = src.replace('torch::headeronly::ScalarType::Long', 'torch::kLong')
-    src = src.replace('torch::headeronly::ScalarType::Byte', 'torch::kByte')
-
-    # 5. Replace STD_TORCH_CHECK -> TORCH_CHECK
-    src = src.replace('STD_TORCH_CHECK_NOT_IMPLEMENTED', 'TORCH_CHECK')
-    src = src.replace('STD_TORCH_CHECK', 'TORCH_CHECK')
-
-    # 6. Replace get_current_cuda_stream
-    src = src.replace(
-        'get_current_cuda_stream(a_tensors.get_device_index())',
-        'at::cuda::getCurrentCUDAStream(a_tensors.get_device()).stream()'
-    )
-    src = src.replace(
-        'get_current_cuda_stream(a.get_device_index())',
-        'at::cuda::getCurrentCUDAStream(a.get_device()).stream()'
-    )
-
-    # 7. Replace get_device_index() -> get_device()
-    src = src.replace('.get_device_index()', '.get_device()')
-
-    # 8. Replace STABLE_TORCH_LIBRARY_IMPL with pybind11 module
-    # Remove the library registration block
-    src = re.sub(
-        r'STABLE_TORCH_LIBRARY_IMPL\(_C, CUDA, m\)\s*\{[^}]*\}',
-        '',
-        src
-    )
-
-    # 9. Replace FLOAT4_E2M1X2 and SF_DTYPE checks (these macros may not exist)
-    # Remove CHECK_INPUT lines that use unknown macros
-    src = re.sub(r'#define CHECK_INPUT.*\n', '', src)
-    src = re.sub(r'#define CHECK_TYPE.*\n', '', src)
-    src = re.sub(r'CHECK_INPUT\([^)]*\);\n', '', src)
-
-    # 10. Add ATen CUDA stream include
-    src = '#include <ATen/cuda/CUDAContext.h>\n' + src
-
-    # 11. Add get_sm_version_num inline implementation
-    src = src.replace(
-        '#include "cutlass_extensions/common.hpp"',
-        '''// Inline SM version query (replaces cutlass_extensions/common.hpp)
-inline int32_t get_sm_version_num() {
-    int device_id;
-    cudaGetDevice(&device_id);
-    int major, minor;
-    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device_id);
-    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device_id);
-    return major * 10 + minor;
-}
-'''
-    )
-
-    # 12. Add pybind11 module at the end
-    src += '''
-// pybind11 module
-#include <pybind11/pybind11.h>
-namespace py = pybind11;
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("cutlass_fp4_group_mm", &cutlass_fp4_group_mm,
-          "CUTLASS FP4 Group GEMM for MoE (SM100)",
-          py::arg("output"), py::arg("a"), py::arg("b"),
-          py::arg("a_blockscale"), py::arg("b_blockscales"),
-          py::arg("alphas"), py::arg("problem_sizes"),
-          py::arg("expert_offsets"), py::arg("sf_offsets"));
-}
-'''
-
-    # Write adapted source
-    out_path = os.path.join(out_dir, "cutlass_fp4_group_mm.cu")
-    with open(out_path, "w") as f:
-        f.write(src)
-    return out_path
+def _find_cutlass_include():
+    """Find CUTLASS 4.x headers from pip packages or known paths."""
+    # Try pip-installed nvidia-cutlass-dsl
+    try:
+        import nvidia_cutlass_dsl
+        pkg_dir = os.path.dirname(nvidia_cutlass_dsl.__file__)
+        candidate = os.path.join(pkg_dir, "python_packages", "cutlass", "include")
+        if os.path.exists(os.path.join(candidate, "cutlass", "cutlass.h")):
+            tools = os.path.join(pkg_dir, "python_packages", "cutlass", "tools", "util", "include")
+            return candidate, tools if os.path.exists(tools) else candidate
+    except ImportError:
+        pass
+    # Try cutlass package
+    try:
+        import cutlass
+        pkg_dir = os.path.dirname(cutlass.__file__)
+        for rel in ["include", "../include", "../../include"]:
+            candidate = os.path.normpath(os.path.join(pkg_dir, rel))
+            if os.path.exists(os.path.join(candidate, "cutlass", "cutlass.h")):
+                tools = os.path.normpath(os.path.join(candidate, "..", "tools", "util", "include"))
+                return candidate, tools if os.path.exists(tools) else candidate
+    except ImportError:
+        pass
+    # Known paths
+    for base in ["/dev/shm/liukan.lk/cutlass", "/usr/local/cutlass"]:
+        inc = os.path.join(base, "include")
+        tools = os.path.join(base, "tools", "util", "include")
+        if os.path.exists(os.path.join(inc, "cutlass", "cutlass.h")):
+            return inc, tools if os.path.exists(tools) else inc
+    raise ImportError("CUTLASS 4.x headers not found (need cutlass/cutlass.h)")
 
 
 @functools.lru_cache(maxsize=1)
 def _try_load_cutlass_fp4_module():
-    """JIT-compile the adapted CUTLASS FP4 kernel."""
+    """JIT-compile the bundled CUTLASS FP4 kernel."""
     from torch.utils.cpp_extension import load
 
-    vllm_src = "/dev/shm/liukan.lk/vllm/csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
-    cutlass_include = "/dev/shm/liukan.lk/cutlass/include"
-    cutlass_tools = "/dev/shm/liukan.lk/cutlass/tools/util/include"
+    # Use the bundled adapted source (same directory as this file)
+    this_dir = os.path.dirname(os.path.abspath(__file__))
+    cu_src = os.path.join(this_dir, "cutlass_fp4_group_mm.cu")
+    if not os.path.exists(cu_src):
+        raise ImportError(f"Bundled kernel source not found: {cu_src}")
 
-    if not os.path.exists(vllm_src):
-        raise ImportError(f"vLLM kernel source not found: {vllm_src}")
-    if not os.path.exists(cutlass_include):
-        raise ImportError(f"CUTLASS headers not found: {cutlass_include}")
+    cutlass_include, cutlass_tools = _find_cutlass_include()
 
-    # Create temp dir for adapted source
     build_dir = os.path.join(tempfile.gettempdir(), "cutlass_fp4_jit")
     os.makedirs(build_dir, exist_ok=True)
 
-    adapted_src = _adapt_source(vllm_src, build_dir)
-
     module = load(
         name="cutlass_fp4_group_mm_ext",
-        sources=[adapted_src],
+        sources=[cu_src],
         extra_include_paths=[cutlass_include, cutlass_tools],
         extra_cuda_cflags=[
             "-DENABLE_NVFP4_SM100=1",
