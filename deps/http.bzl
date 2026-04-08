@@ -103,26 +103,53 @@ def http_deps():
         sha256 = "658122cfb1f25be76ea212b00f5eb047d8e2adc8bcf923b918461f2b1e37cdf2",
     )
 
+    # hf3fs
+    # https://github.com/alibaba/tair-kvcache/releases/tag/__binary-dependency-0.0.2
+    # .github/workflows/build-hf3fs-usrbio-rpm.yml
     http_file(
-        name = "hf3fs_rpm",
-        urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/3fs/hf3fs-1.3.0-1.alios7.x86_64.rpm"],
-        sha256 = "dd375f794557a1135934b40b23a7435569644922c5c7116cb69dd36f699ad5a4",
+        name = "hf3fs_rpm_aarch64",
+        urls = ["http://search-ad.cn-hangzhou-k.oss-internal.aliyun-inc.com/pkg/3fs/libhf3fs_api_shared-1.2.1-1.aarch64.rpm"],
+        sha256 = "94c10e4aa3916600b6e2fcb531f137a53ecc38bf7e19662ce09b6bec16ee7462",
+    )
+    http_file(
+        name = "hf3fs_rpm_x86_64",
+        urls = ["http://search-ad.cn-hangzhou-k.oss-internal.aliyun-inc.com/pkg/3fs/libhf3fs_api_shared-1.2.1-1.x86_64.rpm"],
+        sha256 = "48e0b91a8851b1b86d779c6c52dc7336bcc902795ac77558941ba1ba09321e50",
     )
 
     http_file(
-        name = "remote_kv_cache_manager_client_rpm",
+        name = "remote_kv_cache_manager_client_rpm_x86_64",
         urls = [
             "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/kvcm/kv-cache-manager-client-2026_04_02_12_08.rpm",
         ],
         sha256 = "52e8f29e1de1099fa90665443f774a7cbd7b3fa86827a3693273fdd6fc57773e",
     )
 
+    http_file(
+        name = "remote_kv_cache_manager_client_rpm_aarch64",
+        urls = [
+            "http://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/kv_cache_manager/client_aarch64/kv-cache-manager-client-aarch64-2026_04_14_17_05.rpm",
+        ],
+        sha256 = "60af5a3060deb51e835753d0edbd91e971352166f11c497379b12caa54dcff6c",
+    )
+
     http_archive(
-        name = "remote_kv_cache_manager_server",
+        name = "remote_kv_cache_manager_server_x86_64",
         urls = [
             "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/kvcm/kv_cache_manager_server_2026_02_28_11_36.tar.gz",
         ],
         sha256 = "757eaec92b45a156ae02bae2000db54d767538c572276269ebc803c1513bb3f2",
+        build_file_content = """
+exports_files(["bin/kv_cache_manager_bin"])
+        """,
+    )
+
+    http_archive(
+        name = "remote_kv_cache_manager_server_aarch64",
+        urls = [
+            "http://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/kv_cache_manager/server_aarch64/kv_cache_manager_server_aarch64_2026_04_08_19_25.tar.gz",
+        ],
+        sha256 = "ae1b65119709c94bfd2e7fff971046e61cae9f286e1fd78081e1f9de51b65523",
         build_file_content = """
 exports_files(["bin/kv_cache_manager_bin"])
         """,

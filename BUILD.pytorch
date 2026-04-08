@@ -77,10 +77,14 @@ cc_library(
 cc_library(
     name = "torch_libs",
     srcs = glob([
-        "torch.libs/libarm_compute*.so",
-        "torch.libs/libgfortran*.so*",
-        "torch.libs/libgomp*.so*",
-        "torch.libs/libopenblasp*.so",
+        "torch/lib/libarm_compute*.so",
+        "torch/lib/libgfortran*.so*",
+        "torch/lib/libgomp*.so*",
+        "torch/lib/libopenblasp*.so",
+        "torch/lib/libnvpl*.so*",
+        "torch/lib/libnvpl*.so*",
+        "torch/lib/libtorch_nvshmem.so",
+        "torch/lib/libtorch_global_deps.so",
     ]),
     linkopts = select({
         "@//:cuda_pre_12_9": [

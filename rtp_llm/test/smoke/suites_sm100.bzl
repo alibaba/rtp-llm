@@ -89,3 +89,15 @@ def sm100_suites():
         ]
     )
 
+    # Remote
+    native.test_suite(
+        name = "smoke_sm100_remote_cache",
+        smoke_test(
+            name = "qwen25_05b_base_openai_remote_cache_arm",
+            data = ["@remote_kv_cache_manager_server_aarch64//:bin/kv_cache_manager_bin"],
+            gpu_type = ["SM100_ARM"],
+            kvcm_envs = ["KVCM_LOG_LEVEL=DEBUG"],
+            smoke_args = "--load_python_model 1 --warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 16 --write_cache_sync 1 --enable_remote_cache true --enable_device_cache 0 --deterministic_attn 1",
+            task_info = "data/model/qwen25/q_r_l20_remote_cache_arm.json",
+        ),
+    )

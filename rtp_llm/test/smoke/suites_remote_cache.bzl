@@ -8,7 +8,7 @@ def remote_cache_suites():
         tests = [
             smoke_test(
                 name = "remote_cache_basic",
-                data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
+                data = ["@remote_kv_cache_manager_server_x86_64//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --write_cache_sync 1 --enable_remote_cache true --enable_device_cache 0",
@@ -16,7 +16,7 @@ def remote_cache_suites():
             ),
             smoke_test(
                 name = "remote_cache_basic_async",
-                data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
+                data = ["@remote_kv_cache_manager_server_x86_64//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 10,
@@ -25,7 +25,7 @@ def remote_cache_suites():
             ),
             smoke_test(
                 name = "remote_cache_kill",
-                data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
+                data = ["@remote_kv_cache_manager_server_x86_64//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
                 kill_remote = True,
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
@@ -35,7 +35,7 @@ def remote_cache_suites():
             ),
             smoke_test(
                 name = "remote_cache_tp2",
-                data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
+                data = ["@remote_kv_cache_manager_server_x86_64//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 20,
@@ -44,7 +44,7 @@ def remote_cache_suites():
             ),
             smoke_test(
                 name = "remote_cache_pd",
-                data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
+                data = ["@remote_kv_cache_manager_server_x86_64//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 20,
@@ -56,7 +56,7 @@ def remote_cache_suites():
             ),
             smoke_test(
                 name = "remote_cache_match_fail",
-                data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
+                data = ["@remote_kv_cache_manager_server_x86_64//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", 
                     "KVCM_LOG_LEVEL=DEBUG",
@@ -69,7 +69,7 @@ def remote_cache_suites():
             ),
             smoke_test(
                 name = "remote_cache_write_start_fail",
-                data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
+                data = ["@remote_kv_cache_manager_server_x86_64//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", 
                     "KVCM_LOG_LEVEL=DEBUG",
@@ -82,7 +82,7 @@ def remote_cache_suites():
             ),
             smoke_test(
                 name = "remote_cache_write_finish_fail",
-                data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
+                data = ["@remote_kv_cache_manager_server_x86_64//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", 
                     "KVCM_LOG_LEVEL=DEBUG",
@@ -95,7 +95,7 @@ def remote_cache_suites():
             ),
             smoke_test(
                 name = "remote_cache_edge",
-                data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
+                data = ["@remote_kv_cache_manager_server_x86_64//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=4", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 10,
