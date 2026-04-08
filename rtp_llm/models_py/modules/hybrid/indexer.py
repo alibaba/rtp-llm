@@ -182,7 +182,6 @@ class Indexer(nn.Module):
             )
         if self._prefill_cp_enabled():
             assert cp_params is not None
-            kv_n = cp_params.kv_restore_unpad_indices.shape[0]
             return self.indexer_op._get_topk_ragged_cp(
                 q_fp8,
                 weights,
@@ -192,7 +191,7 @@ class Indexer(nn.Module):
                 cp_params.total_local_ids,
                 cp_params.total_global_ids,
                 cp_params.cu_kv_seqlens_global,
-                kv_n,
+                cp_params.total_kv_len,
             )
         return self.indexer_op._get_topk_ragged(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs

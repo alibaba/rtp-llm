@@ -272,6 +272,16 @@ void cp_gather_indexer_k_quant_cache(const torch::Tensor& kv_cache,     // [num_
     TORCH_CHECK(kv_cache.device() == block_table.device(), "kv_cache and block_table must be on the same device");
     TORCH_CHECK(kv_cache.device() == cu_seq_lens.device(), "kv_cache and cu_seq_lens must be on the same device");
     TORCH_CHECK(head_dim % quant_block_size == 0, "head_dim must be divisible by quant_block_size");
+    TORCH_CHECK(dst_k.size(0) == dst_scale.size(0),
+                "dst_k and dst_scale num_tokens mismatch: dst_k.size(0)=",
+                dst_k.size(0),
+                ", dst_scale.size(0)=",
+                dst_scale.size(0));
+    TORCH_CHECK(cu_seq_lens.size(0) == batch_size + 1,
+                "cu_seq_lens length mismatch: expected batch_size+1=",
+                batch_size + 1,
+                ", got ",
+                cu_seq_lens.size(0));
 
     constexpr int              vec_size = 16;
     const c10::cuda::CUDAGuard device_guard(kv_cache.device());
