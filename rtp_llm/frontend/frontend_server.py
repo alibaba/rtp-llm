@@ -83,6 +83,7 @@ class FrontendServer(object):
             embedding_config=self.py_env_configs.embedding_config,
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
+            fmha_config=self.py_env_configs.fmha_config,
         )
 
         # Create a temporary tokenizer to initialize special_tokens
@@ -142,7 +143,10 @@ class FrontendServer(object):
             )
             sequence = self._global_controller.increment() % 4096  # 12 bits
             request[request_id_field_name] = generate_request_id(
-                self.py_env_configs.server_config.ip, self.py_env_configs.server_config.server_port, self.server_id, sequence
+                self.py_env_configs.server_config.ip,
+                self.py_env_configs.server_config.server_port,
+                self.server_id,
+                sequence,
             )
         except Exception as e:
             return self._handle_exception(request, e)
@@ -229,7 +233,10 @@ class FrontendServer(object):
             assert isinstance(req, dict)
             sequence = self._global_controller.increment() % 4096  # 12 bits
             req[request_id_field_name] = generate_request_id(
-                self.py_env_configs.server_config.ip, self.py_env_configs.server_config.server_port, self.server_id, sequence
+                self.py_env_configs.server_config.ip,
+                self.py_env_configs.server_config.server_port,
+                self.server_id,
+                sequence,
             )
         except Exception as e:
             return self._handle_exception(req, e)
@@ -266,7 +273,10 @@ class FrontendServer(object):
     ):
         sequence = self._global_controller.increment() % 4096  # 12 bits
         request_id = generate_request_id(
-            self.py_env_configs.server_config.ip, self.py_env_configs.server_config.server_port, self.server_id, sequence
+            self.py_env_configs.server_config.ip,
+            self.py_env_configs.server_config.server_port,
+            self.server_id,
+            sequence,
         )
 
         def generate_call():

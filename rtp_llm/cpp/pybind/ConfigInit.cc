@@ -237,6 +237,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_aiter_pa", &FMHAConfig::use_aiter_pa)
         .def_readwrite("use_asm_pa", &FMHAConfig::use_asm_pa)
         .def_readwrite("use_triton_pa", &FMHAConfig::use_triton_pa)
+        .def_readwrite("shared_attn_workspace_buffer", &FMHAConfig::shared_attn_workspace_buffer)
         .def_readwrite("absorb_opt_len", &FMHAConfig::absorb_opt_len)
         .def("to_string", &FMHAConfig::to_string)
         .def(py::pickle(
@@ -252,10 +253,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_aiter_pa,
                                       self.use_asm_pa,
                                       self.use_triton_pa,
+                                      self.shared_attn_workspace_buffer,
                                       self.absorb_opt_len);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() < 11 || t.size() > 13)
                     throw std::runtime_error("Invalid state!");
                 FMHAConfig c;
                 try {
@@ -270,7 +272,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_aiter_pa                  = t[8].cast<bool>();
                     c.use_asm_pa                    = t[9].cast<bool>();
                     c.use_triton_pa                 = t[10].cast<bool>();
-                    c.absorb_opt_len                = t[11].cast<int64_t>();
+                    if (t.size() > 11)
+                        c.shared_attn_workspace_buffer = t[11].cast<bool>();
+                    if (t.size() > 12)
+                        c.absorb_opt_len = t[12].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }
@@ -1287,7 +1292,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
         .def_readwrite("dtype", &AttentionConfigs::dtype)
         .def_readwrite("max_seq_len", &AttentionConfigs::max_seq_len)
-        .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle);
+        .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle)
+        .def_readwrite("shared_attn_workspace_buffer", &AttentionConfigs::shared_attn_workspace_buffer);
 
     py::class_<EPLBConfig>(m, "EPLBConfig")
         .def(py::init<>())

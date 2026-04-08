@@ -256,6 +256,7 @@ class ModelFactory:
         quantization_config: Optional[QuantizationConfig] = None,
         render_config: Optional[Any] = None,
         eplb_config: Optional[Any] = None,
+        fmha_config: Optional[Any] = None,
     ) -> ModelConfig:
         """Create ModelConfig from configuration objects.
 
@@ -289,6 +290,7 @@ class ModelFactory:
             profiling_debug_logging_config=profiling_debug_logging_config,
             embedding_config=embedding_config,
             quantization_config=quantization_config,
+            fmha_config=fmha_config,
         )
 
         # Set model metadata fields
@@ -400,12 +402,14 @@ class ModelFactory:
         )
 
         # Build propose model config (no finalize_scheduler_config for propose model)
+        # IMPORTANT: Pass fmha_config to ensure shared_attn_workspace_buffer is propagated
         build_model_config(
             model_config=propose_model_config,
             model_args=propose_model_args,
             kv_cache_config=engine_config.kv_cache_config,
             profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
             embedding_config=None,  # Propose model doesn't need embedding_config
+            fmha_config=engine_config.fmha_config,  # Pass fmha_config for shared buffer setting
         )
 
         return propose_model_config

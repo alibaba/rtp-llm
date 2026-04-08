@@ -30,6 +30,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     get_py_flashinfer_workspace_buffer,
+    release_py_flashinfer_workspace_buffer,
 )
 
 
@@ -65,7 +66,10 @@ class PCPAllGatherOverlapAttnOp:
         self.kv_layout = kv_layout
 
         self.device = torch.cuda.current_device()
-        self.workspace_buffer = get_py_flashinfer_workspace_buffer()
+        self.use_shared_buffer = attn_configs.shared_attn_workspace_buffer
+        self.workspace_buffer = get_py_flashinfer_workspace_buffer(
+            shared=self.use_shared_buffer
+        )
 
         self.context_parallel_info = attn_inputs.context_parallel_info
         self.prefill_cp_rank = parallelism_config.tp_rank
@@ -87,6 +91,13 @@ class PCPAllGatherOverlapAttnOp:
 
         self.communication_stream = torch.cuda.Stream(device=self.device)
         self.ub_communicator = get_user_buffers_communicator()
+
+    def __del__(self):
+        """Release workspace buffer back to pool when object is destroyed."""
+        if hasattr(self, "workspace_buffer") and hasattr(self, "use_shared_buffer"):
+            release_py_flashinfer_workspace_buffer(
+                self.workspace_buffer, shared=self.use_shared_buffer
+            )
 
     def support(self, attention_inputs: PyAttentionInputs) -> bool:
         return attention_inputs.is_prefill

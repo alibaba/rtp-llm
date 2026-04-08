@@ -17,11 +17,28 @@ void CudaGraphRunner::capturePrefill() {
         // we will transfer a `batch size tensor(int)` for `copy kernel`.
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, max_bs_, seq_len);
-        // Prefill-specific settings
-        inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = seq_len;
-        inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1] = seq_len;
-        inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
-        inputs.attention_inputs.context_total_kv_length          = seq_len;
+        // Prefill-specific settings, one the first seq is valid, the post ones are all empty
+        if (is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == max_seq_len_) {
+            // embedding model, without kv cache
+            inputs.attention_inputs.prefix_lengths.fill_(0);
+            // Must set cu_seqlens/cu_kv_seqlens/input_lengths to match actual seq_len,
+            // otherwise FlashInfer plans for max_seq_len tokens but q/k/v only have seq_len tokens
+            inputs.attention_inputs.cu_seqlens.data_ptr<int>()[0]    = 0;
+            inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = seq_len;
+            inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
+        } else {
+            inputs.attention_inputs.cu_seqlens.fill_(seq_len);
+            inputs.attention_inputs.input_lengths.fill_(0);
+            int kv_len     = max_seq_len_ + seq_len;
+            int prefix_len = kv_len;
+            inputs.attention_inputs.cu_kv_seqlens.fill_(kv_len);
+            inputs.attention_inputs.prefix_lengths.fill_(prefix_len);
+            inputs.attention_inputs.cu_seqlens.data_ptr<int>()[0]    = 0;
+            inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[0] = 0;
+            inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
+        }
+
+        inputs.attention_inputs.context_total_kv_length = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
@@ -43,7 +60,21 @@ void CudaGraphRunner::capturePrefill() {
 }
 
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
-    // prefill_capture_seq_lens_ must be provided from Python and cannot be empty
+    // Draft model prefill (num_tokens_per_bs_ != max_seq_len_): generate range 1 ~ max_bs_ * num_tokens_per_bs_
+    if (num_tokens_per_bs_ != max_seq_len_) {
+        int              max_seq = max_bs_ * num_tokens_per_bs_;
+        std::vector<int> result;
+        for (int i = 1; i <= max_seq; ++i) {
+            result.push_back(i);
+        }
+        RTP_LLM_LOG_INFO("Draft model prefill: capture seq_lens 1~%d (max_bs=%d, num_tokens_per_bs=%d)",
+                         max_seq,
+                         max_bs_,
+                         num_tokens_per_bs_);
+        return result;
+    }
+
+    // Embedding model prefill: use Python-provided capture seq_lens
     RTP_LLM_CHECK_WITH_INFO(!prefill_capture_seq_lens_.empty(),
                             "prefill_capture_seq_lens_ must be provided from Python and cannot be empty");
 

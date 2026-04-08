@@ -151,6 +151,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 weights,
                 quant_config,
                 attn_configs.kv_cache_dtype,
+                shared_workspace_buffer=attn_configs.shared_attn_workspace_buffer,
             ),
             NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,
@@ -197,6 +198,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 attn_configs.use_mla,
                 attn_configs.is_sparse,
                 weights,
+                shared_workspace_buffer=attn_configs.shared_attn_workspace_buffer,
             )
             self.absorb_fmha.plan(self.fmha_params)
 
@@ -306,6 +308,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
                 max_context_len=max_seq_len,
                 num_tokens=int(attn_inputs.sequence_lengths.sum().item()),
                 is_cuda_graph=is_cuda_graph,
+                shared_workspace_buffer=attn_configs.shared_attn_workspace_buffer,
             ),
             NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,

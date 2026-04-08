@@ -43,19 +43,57 @@ DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
 _g_py_flashinfer_workspace_pool: list[torch.Tensor] = []
 _g_py_flashinfer_pool_lock = __import__("threading").Lock()
 
+# Global shared workspace buffer for CUDA graph mode
+_g_py_flashinfer_shared_workspace_buffer: torch.Tensor = None
+_g_py_flashinfer_shared_workspace_lock = __import__("threading").Lock()
 
-def get_py_flashinfer_workspace_buffer(device: str = "cuda") -> torch.Tensor:
-    """Get a PyFlashInfer workspace buffer from the pool.
 
-    This function manages a pool of workspace buffers to support multiple
-    concurrent instances while avoiding excessive memory allocation.
+def get_py_flashinfer_shared_workspace_buffer(device: str = "cuda") -> torch.Tensor:
+    """Get or create the global shared PyFlashInfer workspace buffer.
+
+    This function returns a single shared workspace buffer that can be reused
+    across all attention instances. This is especially useful in CUDA graph mode
+    to reduce memory consumption.
+
+    WARNING: The shared buffer is only safe when all attention ops execute
+    serially on a single CUDA stream (e.g., CUDA graph mode). Concurrent
+    execution on different streams will corrupt the workspace.
 
     Args:
         device: CUDA device to allocate buffer on (default: "cuda")
 
     Returns:
+        Global shared workspace buffer tensor of size DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB
+    """
+    global _g_py_flashinfer_shared_workspace_buffer
+    with _g_py_flashinfer_shared_workspace_lock:
+        if _g_py_flashinfer_shared_workspace_buffer is None:
+            _g_py_flashinfer_shared_workspace_buffer = torch.zeros(
+                DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * 1024 * 1024,
+                dtype=torch.uint8,
+                device=device,
+            )
+        return _g_py_flashinfer_shared_workspace_buffer
+
+
+def get_py_flashinfer_workspace_buffer(
+    device: str = "cuda", shared: bool = False
+) -> torch.Tensor:
+    """Get a PyFlashInfer workspace buffer from the pool or shared buffer.
+
+    This function manages workspace buffers to support multiple concurrent instances.
+    When shared=True, it returns a global shared buffer for all instances.
+    When shared=False, it returns a buffer from the pool for exclusive use.
+
+    Args:
+        device: CUDA device to allocate buffer on (default: "cuda")
+        shared: If True, return the global shared buffer; if False, get from pool
+
+    Returns:
         Workspace buffer tensor of size DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB
     """
+    if shared:
+        return get_py_flashinfer_shared_workspace_buffer(device)
     with _g_py_flashinfer_pool_lock:
         if _g_py_flashinfer_workspace_pool:
             return _g_py_flashinfer_workspace_pool.pop()
@@ -68,12 +106,19 @@ def get_py_flashinfer_workspace_buffer(device: str = "cuda") -> torch.Tensor:
             )
 
 
-def release_py_flashinfer_workspace_buffer(buffer: torch.Tensor) -> None:
+def release_py_flashinfer_workspace_buffer(
+    buffer: torch.Tensor, shared: bool = False
+) -> None:
     """Release a PyFlashInfer workspace buffer back to the pool.
 
     Args:
         buffer: The workspace buffer to release
+        shared: If True, this is a shared buffer and should not be released; if False, return to pool
     """
+    if shared:
+        # Shared buffer is never released, just skip
+        return
+
     with _g_py_flashinfer_pool_lock:
         _g_py_flashinfer_workspace_pool.append(buffer)
 
@@ -87,7 +132,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
         attn_inputs: PyAttentionInputs,
         backend: str = "auto",
     ) -> None:
-        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
+        self.use_shared_buffer = attn_configs.shared_attn_workspace_buffer
+        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer(
+            shared=self.use_shared_buffer
+        )
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
@@ -97,6 +145,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.max_seq_len = attn_configs.max_seq_len
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
+        self.prefill_cuda_graph_copy_params = None
+        # Pre-allocated buffers for CUDA graph copy path (avoid per-forward allocation)
+        self._aligned_q_buf = None
+        self._compact_out_buf = None
         # Use Paged KV Cache wrapper
         self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
             self.g_workspace_buffer,
@@ -106,7 +158,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
 
     def __del__(self):
         """Release workspace buffer back to pool when object is destroyed."""
-        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
+        if hasattr(self, "g_workspace_buffer") and hasattr(self, "use_shared_buffer"):
+            release_py_flashinfer_workspace_buffer(
+                self.g_workspace_buffer, shared=self.use_shared_buffer
+            )
 
     def set_params(self, params: Any):
         """Set the params object to be used by this op."""
@@ -123,7 +178,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
         forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
         check_attention_inputs(attn_inputs)
-        qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -132,6 +186,15 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.page_size,
             forbid_realloc,
         )
+        # Store CUDA graph copy parameters
+        # Define qo_indptr early for CUDA graph initialization
+        if attn_inputs.prefill_cuda_graph_copy_params is not None:
+            # For CUDA graph mode, create a buffer that will be filled later
+            self.input_lengths = attn_inputs.input_lengths
+            self.cu_seq_lens = attn_inputs.cu_seqlens
+            qo_indptr = attn_inputs.cu_seqlens.clone()
+        else:
+            qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
 
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
             self.prefill_wrapper._use_cuda_graph = True
@@ -143,7 +206,39 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 self.fmha_params.paged_kv_last_page_len_d
             )
             self.prefill_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
-            self.prefill_wrapper._fixed_batch_size = len(qo_indptr) - 1
+            self.prefill_wrapper._fixed_batch_size = len(attn_inputs.cu_seqlens) - 1
+            if attn_inputs.prefill_cuda_graph_copy_params is not None:
+                self.prefill_cuda_graph_copy_params = (
+                    attn_inputs.prefill_cuda_graph_copy_params
+                )
+                # input_lengths and cu_seq_lens were already set above
+                self.qo_indptr = qo_indptr
+                # Fill with cumulative sequence: [0, max_seq_len, 2*max_seq_len, ...]
+                self.qo_indptr.copy_(
+                    torch.arange(
+                        self.qo_indptr.size(0),
+                        device=self.qo_indptr.device,
+                        dtype=self.qo_indptr.dtype,
+                    )
+                    * self.prefill_cuda_graph_copy_params.max_seq_len
+                )
+
+        # Update buffers for subsequent calls if in CUDA graph mode
+        if self.prefill_cuda_graph_copy_params is not None:
+            assert attn_inputs.prefill_cuda_graph_copy_params is not None
+            assert self.input_lengths is not None
+            assert self.cu_seq_lens is not None
+            self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size[0] = (
+                attn_inputs.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size
+            )
+            self.input_lengths[: attn_inputs.input_lengths.size(0)] = (
+                attn_inputs.input_lengths
+            )
+            self.cu_seq_lens[: attn_inputs.cu_seqlens.size(0)] = attn_inputs.cu_seqlens
+            # Use dynamically computed qo_indptr from fill_params instead of fixed
+            # self.qo_indptr to ensure FlashInfer plans with actual token counts,
+            # avoiding numerical differences from processing padding tokens.
+            qo_indptr = self.fmha_params.qo_indptr_d
 
         self.prefill_wrapper.plan(
             qo_indptr,
@@ -178,19 +273,109 @@ class PyFlashinferPrefillPagedAttnOp(object):
         Returns:
             output: [total_tokens, num_heads, head_dim]
         """
+        from rtp_llm.ops.compute_ops import (
+            cuda_graph_copy_large2small,
+            cuda_graph_copy_small2large,
+        )
+
         assert kv_cache is not None, "kv_cache is required for paged attention"
         assert (
             q.dim() == 3
         ), f"Expected q to be 3D tensor [total_tokens, num_heads, head_dim], got {q.dim()}D"
 
-        result = self.prefill_wrapper.run(q, kv_cache.kv_cache_base)
+        paged_kv_cache = kv_cache.kv_cache_base
+        if paged_kv_cache.dim() == 2:
+            paged_kv_cache = common.reshape_paged_kv_cache(
+                paged_kv_cache, self.local_kv_head_num, self.page_size, self.head_dim_qk
+            )
+        # CUDA graph copy logic for prefill
+        if self.prefill_cuda_graph_copy_params:
+            assert (
+                self.input_lengths is not None
+            ), "input_lengths is required for CUDA graph copy"
+            assert (
+                self.cu_seq_lens is not None
+            ), "cu_seq_lens is required for CUDA graph copy"
+
+            # Reshape from 3D [token_num, head_num, head_size] to 2D [token_num, hidden_size]
+            token_num, head_num, head_size = q.shape
+            hidden_size = head_num * head_size
+
+            # Pre-allocate buffers on first use (avoid per-forward GPU allocation)
+            total_len = (
+                self.prefill_cuda_graph_copy_params.max_seq_len
+                * self.prefill_cuda_graph_copy_params.max_batch_size
+            )
+            if self._aligned_q_buf is None or self._aligned_q_buf.shape != (
+                total_len,
+                hidden_size,
+            ):
+                self._aligned_q_buf = torch.zeros(
+                    (total_len, hidden_size), dtype=q.dtype, device=q.device
+                )
+            if self._compact_out_buf is None or self._compact_out_buf.shape != (
+                token_num,
+                hidden_size,
+            ):
+                self._compact_out_buf = torch.zeros(
+                    (token_num, hidden_size), dtype=q.dtype, device=q.device
+                )
+
+            q_2d = q.view(token_num, hidden_size).contiguous()
+            self._aligned_q_buf.zero_()
+
+            # Copy small to large (compact -> aligned)
+            cuda_graph_copy_small2large(
+                q_2d,
+                self._aligned_q_buf,
+                self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
+                self.prefill_cuda_graph_copy_params.max_batch_size,
+                self.prefill_cuda_graph_copy_params.max_seq_len,
+                self.input_lengths,
+                hidden_size,
+                self.cu_seq_lens,
+            )
+
+            # Reshape back to 3D for FlashInfer
+            q_aligned = self._aligned_q_buf.view(total_len, head_num, head_size)
+
+            result = self.prefill_wrapper.run(q_aligned, paged_kv_cache)
+
+            # Reshape result to 2D for copy back (ensure contiguous)
+            result_2d = result.view(total_len, hidden_size).contiguous()
+            self._compact_out_buf.zero_()
+
+            # Copy large to small (aligned -> compact)
+            cuda_graph_copy_large2small(
+                result_2d,
+                self._compact_out_buf,
+                self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
+                self.prefill_cuda_graph_copy_params.max_batch_size,
+                self.prefill_cuda_graph_copy_params.max_seq_len,
+                self.input_lengths,
+                hidden_size,
+                self.cu_seq_lens,
+            )
+
+            # Reshape back to 3D
+            result = self._compact_out_buf.view(token_num, head_num, head_size)
+        else:
+            # No CUDA graph copy, direct execution
+            result = self.prefill_wrapper.run(q, paged_kv_cache)
 
         return result
 
 
 class PyFlashinferPrefillAttnOp(object):
-    def __init__(self, attn_configs: AttentionConfigs, backend: str = "auto") -> None:
-        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        backend: str = "auto",
+    ) -> None:
+        self.use_shared_buffer = attn_configs.shared_attn_workspace_buffer
+        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer(
+            shared=self.use_shared_buffer
+        )
         # attn_configs.head_num and kv_head_num are already divided by tp_size in ModelConfig::getAttentionConfigs
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
@@ -207,7 +392,10 @@ class PyFlashinferPrefillAttnOp(object):
 
     def __del__(self):
         """Release workspace buffer back to pool when object is destroyed."""
-        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
+        if hasattr(self, "g_workspace_buffer") and hasattr(self, "use_shared_buffer"):
+            release_py_flashinfer_workspace_buffer(
+                self.g_workspace_buffer, shared=self.use_shared_buffer
+            )
 
     def set_params(self, params: ParamsBase):
         """Set the params object to be used by this op."""
@@ -431,7 +619,10 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         2. The underlying paged FMHA op supports the inputs
         3. MhaRotaryEmbeddingOp supports the inputs
         """
-        return not is_sm_100() and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
+        is_sm100_result = is_sm_100()
+        paged_support_result = PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
+        final_result = not is_sm100_result and paged_support_result
+        return final_result
 
     def support_cuda_graph(self) -> bool:
         return True
@@ -498,8 +689,14 @@ def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bo
 
 
 class PyFlashinferDecodeAttnOp(object):
-    def __init__(self, attn_configs: AttentionConfigs) -> None:
-        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+    ) -> None:
+        self.use_shared_buffer = attn_configs.shared_attn_workspace_buffer
+        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer(
+            shared=self.use_shared_buffer
+        )
         # attn_configs already has head_num and kv_head_num divided by tp_size
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
@@ -516,7 +713,10 @@ class PyFlashinferDecodeAttnOp(object):
 
     def __del__(self):
         """Release workspace buffer back to pool when object is destroyed."""
-        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
+        if hasattr(self, "g_workspace_buffer") and hasattr(self, "use_shared_buffer"):
+            release_py_flashinfer_workspace_buffer(
+                self.g_workspace_buffer, shared=self.use_shared_buffer
+            )
 
     def prepare(self, attn_inputs: PyAttentionInputs):
         # from rtp_llm.models_py.utils.debug import set_trace_on_tty
