@@ -4,9 +4,11 @@ Tests for TokenNormalizer with adaptive sliding window.
 These tests verify that the normalizer correctly handles:
 1. Normal single-byte tokens
 2. Multi-byte Unicode characters split across tokens (ChatGLM-style)
-3. Adaptive sliding window when \\uFFFD is detected
+3. Adaptive sliding window when \uFFFD is detected
+4. Real Qwen tokenizer behavior with Chinese text containing spaces (MTP-safe streaming)
 """
 
+import os
 import unittest
 from unittest.mock import Mock
 
@@ -192,6 +194,244 @@ class TestSimpleTokenizer(unittest.TestCase):
         self.assertEqual(len(deltas), 2)
         self.assertEqual(deltas[0], "C")
         self.assertEqual(deltas[1], "D")
+
+
+def _get_qwen_tokenizer():
+    """
+    Get Qwen tokenizer with fallback chain for CI compatibility.
+
+    Priority:
+    1. Local Qwen3-8B (most accurate for testing)
+    2. Repo testdata qwen3_30b/tokenizer
+    3. Repo testdata qwen2_tokenizer (similar behavior for space handling)
+    4. HuggingFace remote (Qwen/Qwen2.5-7B-Instruct)
+
+    Returns:
+        tokenizer or None if not available
+    """
+    try:
+        from transformers import AutoTokenizer
+    except ImportError:
+        return None
+
+    tokenizer_paths = [
+        # Repo testdata paths
+        "rtp_llm/test/model_test/fake_test/testdata/qwen3_30b/tokenizer",
+        "rtp_llm/test/tokenizer_test/testdata/qwen2_tokenizer",
+    ]
+
+    for path in tokenizer_paths:
+        if os.path.exists(path):
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    path, trust_remote_code=True, verbose=False
+                )
+                return tokenizer
+            except Exception:
+                continue
+
+    # Fallback to HuggingFace remote
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            "Qwen/Qwen2.5-7B-Instruct", trust_remote_code=True, verbose=False
+        )
+        return tokenizer
+    except Exception:
+        return None
+
+
+class TestTokenNormalizerWithQwen(unittest.TestCase):
+    """
+    Test TokenNormalizer with real Qwen tokenizer behavior.
+
+    This tests the critical bug fix: spaces between Chinese characters must be
+    preserved during streaming token normalization.
+
+    Bug scenario:
+    - Model outputs: {"intent": "可乐 薯片 饼干"}
+    - Before fix: {"intent": "可乐"}  <- Lost " 薯片 饼干"
+    - After fix: {"intent": "可乐 薯片 饼干"} (correct)
+
+    Root cause: Qwen tokenizer encodes " 薯" (space + Chinese char) as 3 tokens
+    where individual tokens produce \\uFFFD (replacement character) when decoded
+    alone. TokenNormalizer must use sliding window to resolve these.
+    """
+
+    def setUp(self):
+        """Load Qwen tokenizer with fallbacks."""
+        self.tokenizer = _get_qwen_tokenizer()
+        self.tokenizer_available = self.tokenizer is not None
+
+    def test_single_token_streaming_preserves_spaces(self):
+        """
+        Test single-token streaming (one token per call).
+
+        Simulates traditional streaming where each token arrives separately.
+        """
+        if not self.tokenizer_available:
+            self.skipTest("Qwen tokenizer not available")
+
+        text = "可乐 薯片 饼干"
+        tokens = self.tokenizer.encode(text, add_special_tokens=False)
+
+        normalizer = TokenNormalizer(self.tokenizer)
+        prev_tokens = []
+        all_deltas = []
+
+        for token in tokens:
+            deltas = list(normalizer.normalize_tokens(prev_tokens, [token]))
+            all_deltas.extend(deltas)
+            prev_tokens = prev_tokens + [token]
+
+        reconstructed = "".join(all_deltas)
+        self.assertEqual(
+            reconstructed,
+            text,
+            f"Single-token streaming should preserve spaces: "
+            f"expected {repr(text)}, got {repr(reconstructed)}",
+        )
+
+    def test_mtp_streaming_preserves_spaces(self):
+        """
+        Test MTP (Multi-Token-Per-step) streaming.
+
+        Simulates speculative decoding where multiple tokens arrive per call.
+        This is the exact scenario where the bug occurred in production.
+        """
+        if not self.tokenizer_available:
+            self.skipTest("Qwen tokenizer not available")
+
+        text = "可乐 薯片 饼干"
+        tokens = self.tokenizer.encode(text, add_special_tokens=False)
+
+        # Test various chunk sizes (MTP scenarios, chunk_size=1 covered by single-token test)
+        chunk_sizes = [2, 3, 4]
+
+        for chunk_size in chunk_sizes:
+            normalizer = TokenNormalizer(self.tokenizer)
+            prev_tokens = []
+            all_deltas = []
+
+            for i in range(0, len(tokens), chunk_size):
+                chunk = tokens[i : i + chunk_size]
+                deltas = list(normalizer.normalize_tokens(prev_tokens, chunk))
+                all_deltas.extend(deltas)
+                prev_tokens = prev_tokens + chunk
+
+            reconstructed = "".join(all_deltas)
+            self.assertEqual(
+                reconstructed,
+                text,
+                f"MTP streaming with chunk_size={chunk_size} should preserve spaces: "
+                f"expected {repr(text)}, got {repr(reconstructed)}",
+            )
+
+    def test_no_replacement_characters_in_final_result(self):
+        """
+        Verify final result has no replacement characters.
+
+        This is a critical invariant: the normalizer should resolve all
+        incomplete UTF-8 sequences and never emit \\uFFFD.
+        """
+        if not self.tokenizer_available:
+            self.skipTest("Qwen tokenizer not available")
+
+        text = "可乐 薯片 饼干"
+        tokens = self.tokenizer.encode(text, add_special_tokens=False)
+
+        normalizer = TokenNormalizer(self.tokenizer)
+        prev_tokens = []
+        all_deltas = []
+
+        for token in tokens:
+            deltas = list(normalizer.normalize_tokens(prev_tokens, [token]))
+            all_deltas.extend(deltas)
+            prev_tokens = prev_tokens + [token]
+
+        result = "".join(all_deltas)
+        self.assertNotIn(
+            "\uFFFD", result, "Final result should not contain replacement characters"
+        )
+
+
+class TestTokenNormalizerMockEdgeCases(unittest.TestCase):
+    """
+    Test edge cases with mock tokenizer to simulate problematic scenarios.
+
+    These tests ensure the normalizer handles the specific case where:
+    - Space token produces \\uFFFD when decoded alone
+    - Space is correctly decoded with context from adjacent tokens
+    """
+
+    def test_space_preserved_with_replacement_char_handling(self):
+        """
+        Simulate exact scenario: space token produces \\uFFFD alone.
+
+        Token sequence:
+        - Token 100: "可乐" (complete)
+        - Token 101: space -> \\uFFFD alone, but works with context
+        - Token 102: "薯片" (complete)
+
+        Expected: "可乐 薯片" (space preserved)
+        """
+        mock_tokenizer = Mock()
+
+        def mock_decode(token_ids):
+            if not token_ids:
+                return ""
+
+            # Simulate Qwen-style encoding where space is part of multi-token sequence
+            token_map = {
+                (100,): "可乐",
+                (101,): "\uFFFD",  # Space alone produces replacement
+                (100, 101): "可乐 ",  # Space works with preceding context
+                (102,): "薯片",
+                (101, 102): " 薯片",  # Space works with following context
+                (100, 101, 102): "可乐 薯片",
+            }
+
+            key = tuple(token_ids)
+            if key in token_map:
+                return token_map[key]
+
+            # Fallback concatenation
+            result = ""
+            for tid in token_ids:
+                if tid == 100:
+                    result += "可乐"
+                elif tid == 101:
+                    result += "\uFFFD"
+                elif tid == 102:
+                    result += "薯片"
+            return result
+
+        mock_tokenizer.decode = mock_decode
+
+        normalizer = TokenNormalizer(mock_tokenizer)
+        prev_tokens = []
+        all_deltas = []
+
+        # Process token 100 ("可乐")
+        deltas = list(normalizer.normalize_tokens(prev_tokens, [100]))
+        all_deltas.extend(deltas)
+        prev_tokens = [100]
+
+        # Process token 101 (space that produces \\uFFFD alone)
+        deltas = list(normalizer.normalize_tokens(prev_tokens, [101]))
+        all_deltas.extend(deltas)
+        prev_tokens = [100, 101]
+
+        # Process token 102 ("薯片")
+        deltas = list(normalizer.normalize_tokens(prev_tokens, [102]))
+        all_deltas.extend(deltas)
+
+        result = "".join(all_deltas)
+        expected = "可乐 薯片"
+        self.assertEqual(
+            result,
+            expected,
+            f"Space should be preserved: expected {repr(expected)}, got {repr(result)}",
+        )
 
 
 if __name__ == "__main__":
