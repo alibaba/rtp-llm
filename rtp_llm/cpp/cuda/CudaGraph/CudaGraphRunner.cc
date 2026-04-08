@@ -178,6 +178,11 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                                            == group,
                                 "kv_cache_kernel_block_id_host_by_group size mismatch");
         for (size_t g = 0; g < group; ++g) {
+            // Clear per-group block tables before copying real entries.
+            // Without this, padding entries retain stale block IDs from previous calls,
+            // causing linear attention (GatedDeltaNet) to corrupt SSM/conv states of stale blocks.
+            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g].fill_(0);
+            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host_by_group[g].fill_(0);
             copySmallerIntoLarger(inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group[g],
                                   py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g]);
             copySmallerIntoLarger(inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group[g],
