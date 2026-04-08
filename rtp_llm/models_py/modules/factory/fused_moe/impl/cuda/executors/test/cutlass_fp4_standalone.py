@@ -56,13 +56,39 @@ def _find_cutlass_include():
                 return candidate, tools if os.path.exists(tools) else candidate
     except ImportError:
         pass
+    # Search sys.path for nvidia_cutlass_dsl (handles Bazel runfiles)
+    import sys
+    for p in sys.path:
+        for sub in [
+            "nvidia_cutlass_dsl/python_packages/cutlass/include",
+            "nvidia_cutlass_dsl/include",
+        ]:
+            candidate = os.path.join(p, sub)
+            if os.path.exists(os.path.join(candidate, "cutlass", "cutlass.h")):
+                tools = os.path.join(os.path.dirname(candidate), "tools", "util", "include")
+                return candidate, tools if os.path.exists(tools) else candidate
+    # Search RUNFILES_DIR for cutlass headers
+    runfiles = os.environ.get("RUNFILES_DIR", "")
+    if runfiles:
+        for root, dirs, _ in os.walk(runfiles):
+            if "cutlass" in dirs:
+                candidate = os.path.join(root, "cutlass")
+                if os.path.exists(os.path.join(root, "cutlass", "cutlass.h")):
+                    # root is the include dir
+                    tools = os.path.join(os.path.dirname(root), "tools", "util", "include")
+                    return root, tools if os.path.exists(tools) else root
+            if root.count(os.sep) - runfiles.count(os.sep) > 6:
+                break  # don't recurse too deep
     # Known paths
     for base in ["/dev/shm/liukan.lk/cutlass", "/usr/local/cutlass"]:
         inc = os.path.join(base, "include")
         tools = os.path.join(base, "tools", "util", "include")
         if os.path.exists(os.path.join(inc, "cutlass", "cutlass.h")):
             return inc, tools if os.path.exists(tools) else inc
-    raise ImportError("CUTLASS 4.x headers not found (need cutlass/cutlass.h)")
+    raise ImportError(
+        f"CUTLASS 4.x headers not found (need cutlass/cutlass.h). "
+        f"sys.path has {len(sys.path)} entries, RUNFILES_DIR={runfiles[:100]}"
+    )
 
 
 def _find_cu_source():
