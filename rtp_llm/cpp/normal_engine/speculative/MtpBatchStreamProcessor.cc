@@ -164,8 +164,8 @@ void MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput(const StreamGro
                                                                  GptModelInputs&     model_input) {
     size_t batch_size = stream_groups.size();
 
-    // prepare target model input buffer
-    auto target_prefix_lengths = model_input.sequence_lengths.cpu().clone();
+    // prefix_lengths for target verify = tokens already in KV cache before current decode = seqLength - 1
+    auto target_prefix_lengths = model_input.sequence_lengths_minus_one.cpu().clone();
 
     // allocate target_combo_tokens shape [batch_size, propose_step_ + 1]
     auto target_combo_tokens =
@@ -187,10 +187,11 @@ void MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput(const StreamGro
     }
 
     // update model_input
-    model_input.combo_tokens       = std::move(target_combo_tokens);
-    model_input.prefix_lengths     = target_prefix_lengths;
-    model_input.sequence_lengths   = torch::empty({0}, torch::kInt32).pin_memory();
-    model_input.last_hidden_states = torch::Tensor();
+    model_input.combo_tokens               = std::move(target_combo_tokens);
+    model_input.prefix_lengths             = target_prefix_lengths;
+    model_input.sequence_lengths           = torch::empty({0}, torch::kInt32).pin_memory();
+    model_input.sequence_lengths_minus_one = torch::empty({0}, torch::kInt32).pin_memory();
+    model_input.last_hidden_states         = torch::Tensor();
 
     for (int i = 0; i < model_input.input_lengths.size(0); i++) {
         model_input.input_lengths.data_ptr<int>()[i] = propose_step_ + 1;
@@ -213,7 +214,8 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
     // here combo_tokens is a device buffer
     model_input.combo_tokens = draft_token_ids.reshape({batch_size});
 
-    model_input.sequence_lengths = model_input.sequence_lengths.cpu().clone().pin_memory();
+    model_input.sequence_lengths           = model_input.sequence_lengths.cpu().clone().pin_memory();
+    model_input.sequence_lengths_minus_one = model_input.sequence_lengths.clone();
     for (int i = 0; i < batch_size; i++) {
         model_input.sequence_lengths.data_ptr<int>()[i]++;
     }

@@ -67,13 +67,14 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 2}, pinned_i32);
         model_input.cache_keys = torch::empty({(int64_t)total_context_batch_size, (int64_t)max_blocks_num}, pinned_i64);
     }
-    model_input.request_id            = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
-    model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
-    model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
-    model_input.sequence_lengths      = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
-    model_input.lm_output_indexes     = torch::empty({(int64_t)total_batch_size}, pinned_i32);
-    model_input.lm_output_lengths     = torch::empty({(int64_t)total_batch_size}, pinned_i32);
-    model_input.prefix_lengths        = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    model_input.request_id                 = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
+    model_input.request_pd_separation      = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
+    model_input.input_lengths              = torch::empty({(int64_t)total_batch_size}, pinned_i32);
+    model_input.sequence_lengths           = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
+    model_input.sequence_lengths_minus_one = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
+    model_input.lm_output_indexes          = torch::empty({(int64_t)total_batch_size}, pinned_i32);
+    model_input.lm_output_lengths          = torch::empty({(int64_t)total_batch_size}, pinned_i32);
+    model_input.prefix_lengths             = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
     if (need_cal_position_id) {
         model_input.combo_position_ids =
             torch::empty({(int64_t)(current_tokens_size * position_id_len_factor_)}, pinned_i32);
@@ -91,12 +92,13 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     model_input.decode_entrance           = decode_entrance_;
     model_input.is_fake_stream            = stream_groups.isFakeStream();
 
-    int* merged_tokens      = model_input.combo_tokens.data_ptr<int32_t>();
-    int* input_lengths      = model_input.input_lengths.data_ptr<int32_t>();
-    int* sequence_lengths   = model_input.sequence_lengths.data_ptr<int32_t>();
-    int* lm_output_indexes  = model_input.lm_output_indexes.data_ptr<int32_t>();
-    int* lm_output_lengths  = model_input.lm_output_lengths.data_ptr<int32_t>();
-    int* prefix_lengths     = model_input.prefix_lengths.data_ptr<int32_t>();
+    int* merged_tokens              = model_input.combo_tokens.data_ptr<int32_t>();
+    int* input_lengths              = model_input.input_lengths.data_ptr<int32_t>();
+    int* sequence_lengths           = model_input.sequence_lengths.data_ptr<int32_t>();
+    int* sequence_lengths_minus_one = model_input.sequence_lengths_minus_one.data_ptr<int32_t>();
+    int* lm_output_indexes          = model_input.lm_output_indexes.data_ptr<int32_t>();
+    int* lm_output_lengths          = model_input.lm_output_lengths.data_ptr<int32_t>();
+    int* prefix_lengths             = model_input.prefix_lengths.data_ptr<int32_t>();
     int* combo_position_ids = need_cal_position_id ? model_input.combo_position_ids.data_ptr<int32_t>() : nullptr;
     int* merged_text_mask   = has_multimodal_input ? model_input.text_tokens_mask.data_ptr<int32_t>() : nullptr;
     int* mm_features_locs   = has_multimodal_input ? model_input.mm_features_locs.data_ptr<int32_t>() : nullptr;
@@ -147,9 +149,10 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                           << " exceed vocab_size " << input_vocab_size;
                 return absl::InvalidArgumentError(error_msg.str());
             }
-            merged_tokens[batch_idx]    = currentTokens[0];
-            input_lengths[batch_idx]    = stream->inputLength();
-            sequence_lengths[batch_idx] = stream->seqLength() - 1;  // need remove
+            merged_tokens[batch_idx]              = currentTokens[0];
+            input_lengths[batch_idx]              = stream->inputLength();
+            sequence_lengths[batch_idx]           = stream->seqLength();
+            sequence_lengths_minus_one[batch_idx] = stream->seqLength() - 1;
             if (need_cal_position_id) {
                 stream->generateNextPositionId(combo_position_ids + batch_idx * position_id_len_factor_);
             }

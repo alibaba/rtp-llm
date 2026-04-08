@@ -123,6 +123,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]});
         inputs.sequence_lengths =
             allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]});
+        inputs.sequence_lengths_minus_one =
+            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]});
         inputs.prefix_lengths = allocBuf(rtp_llm::DataType::TYPE_INT32, {context_batch_size});
         if (max_kernel_blocks != 0) {
             inputs.kv_cache_kernel_block_id = allocBuf(
@@ -194,6 +196,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.combo_tokens);
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);
+    collect(inputs.sequence_lengths_minus_one);
     collect(inputs.prefix_lengths);
     if (max_kernel_blocks || max_blocks) {
         collect(inputs.kv_cache_kernel_block_id);

@@ -86,12 +86,13 @@ struct GptModelInputs {
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
-    mutable torch::Tensor combo_tokens;       // [cumulated_seq_len]
-    torch::Tensor         input_lengths;      // [batch_size]
-    torch::Tensor         sequence_lengths;   // [decoder_batch_size]
-    torch::Tensor         lm_output_indexes;  // [sum(lm_output_lengths)]
-    torch::Tensor         lm_output_lengths;  // [total_batch_size]
-    torch::Tensor         prefix_lengths;     // [context_batch_size]
+    mutable torch::Tensor combo_tokens;                // [cumulated_seq_len]
+    torch::Tensor         input_lengths;               // [batch_size]
+    torch::Tensor         sequence_lengths;            // [decoder_batch_size]
+    torch::Tensor         sequence_lengths_minus_one;  // [decoder_batch_size], equals sequence_lengths - 1
+    torch::Tensor         lm_output_indexes;           // [sum(lm_output_lengths)]
+    torch::Tensor         lm_output_lengths;           // [total_batch_size]
+    torch::Tensor         prefix_lengths;              // [context_batch_size]
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]

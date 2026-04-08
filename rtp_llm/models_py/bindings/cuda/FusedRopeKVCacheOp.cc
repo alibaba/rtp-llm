@@ -230,7 +230,7 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
     attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
     attn_params->cu_seqlens                = attn_inputs.cu_seqlens;
     attn_params->cu_kv_seqlens             = attn_inputs.cu_kv_seqlens;
-    attn_params->sequence_lengths          = attn_inputs.sequence_lengths;
+    attn_params->sequence_lengths          = attn_inputs.sequence_lengths_minus_one;
     attn_params->cp_position_ids           = attn_inputs.position_ids;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     return attn_params;

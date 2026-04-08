@@ -614,19 +614,19 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
     draft_input_1.combo_tokens       = torch::tensor({3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_1.sequence_lengths   = torch::tensor({2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({3}, torch::kInt32);
     draft_input_1.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_1.last_hidden_states = stream1_hidden_states;
 
     draft_input_2.combo_tokens       = torch::tensor({2}, torch::kInt32);
     draft_input_2.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_2.sequence_lengths   = torch::tensor({3}, torch::kInt32);
+    draft_input_2.sequence_lengths   = torch::tensor({4}, torch::kInt32);
     draft_input_2.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_2.last_hidden_states = draft_output_1.all_hidden_states;
 
     draft_input_3.combo_tokens       = torch::tensor({1}, torch::kInt32);
     draft_input_3.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_3.sequence_lengths   = torch::tensor({4}, torch::kInt32);
+    draft_input_3.sequence_lengths   = torch::tensor({5}, torch::kInt32);
     draft_input_3.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_3.last_hidden_states = draft_output_2.all_hidden_states;
 
@@ -773,19 +773,19 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
 
     draft_input_1.combo_tokens       = torch::tensor({2, 3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_1.sequence_lengths   = torch::tensor({3, 2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({4, 3}, torch::kInt32);
     draft_input_1.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_1.last_hidden_states = torch::tensor({0.03f, 0.04f, 2.1f, 2.12f}).reshape({2, 2});
 
     draft_input_2.combo_tokens       = torch::tensor({1, 0}, torch::kInt32);
     draft_input_2.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_2.sequence_lengths   = torch::tensor({4, 3}, torch::kInt32);
+    draft_input_2.sequence_lengths   = torch::tensor({5, 4}, torch::kInt32);
     draft_input_2.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_2.last_hidden_states = draft_output_1.all_hidden_states;
 
     draft_input_3.combo_tokens       = torch::tensor({2, 2}, torch::kInt32);
     draft_input_3.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_3.sequence_lengths   = torch::tensor({5, 4}, torch::kInt32);
+    draft_input_3.sequence_lengths   = torch::tensor({6, 5}, torch::kInt32);
     draft_input_3.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_3.last_hidden_states = draft_output_2.all_hidden_states;
 

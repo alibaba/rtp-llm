@@ -110,6 +110,9 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         optimizedCopyAsync(inputs.attention_inputs.sequence_lengths,
                            py_model_inputs_.attention_inputs.sequence_lengths,
                            state.current_batch_size * sizeof(int));
+        optimizedCopyAsync(inputs.attention_inputs.sequence_lengths_minus_one,
+                           py_model_inputs_.attention_inputs.sequence_lengths_minus_one,
+                           state.current_batch_size * sizeof(int));
 
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_kernel_block_id_device,
                               py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
@@ -353,8 +356,13 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // sequence_lengths [batch_size, int32] (decode only)
     // sequence_length should in pinned memory
     inputs.attention_inputs.sequence_lengths = torch::ones({int(max_bs_)}, options_cpu_int32_);
-    inputs.attention_inputs.sequence_lengths.fill_(max_seq_len_ - num_tokens_per_bs - 1);
+    inputs.attention_inputs.sequence_lengths.fill_(max_seq_len_ - num_tokens_per_bs);
     inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
+    // sequence_lengths_minus_one = sequence_lengths - 1
+    inputs.attention_inputs.sequence_lengths_minus_one = torch::ones({int(max_bs_)}, options_cpu_int32_);
+    inputs.attention_inputs.sequence_lengths_minus_one.fill_(max_seq_len_ - num_tokens_per_bs - 1);
+    inputs.attention_inputs.sequence_lengths_minus_one =
+        inputs.attention_inputs.sequence_lengths_minus_one.pin_memory();
 
     const int64_t max_kv_blocks =
         static_cast<int64_t>(((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_) + sp_steps_);
@@ -639,6 +647,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     }
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);
+    if (capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_minus_one.defined()) {
+        inputs.attention_inputs.sequence_lengths_minus_one =
+            capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_minus_one.slice(0, 0, batch_size);
+    }
 
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
         capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.slice(0, 0, batch_size);

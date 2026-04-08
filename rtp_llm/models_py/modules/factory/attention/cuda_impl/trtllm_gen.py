@@ -454,18 +454,15 @@ class FlashInferTRTLLMDecodeOp(object):
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> FlashInferTRTLLMParams:
         if not attention_inputs.is_prefill:
-            # need transfer to cuda, cuda graph can capture the add
             sequence_lengths = torch.ones_like(
                 attention_inputs.sequence_lengths,
                 device="cuda",
                 dtype=attention_inputs.sequence_lengths.dtype,
             )
-            sequence_lengths.copy_(
-                attention_inputs.sequence_lengths, non_blocking=True
-            ).add_(1)
+            sequence_lengths.copy_(attention_inputs.sequence_lengths, non_blocking=True)
             return FlashInferTRTLLMParams(
                 batch_size=attention_inputs.sequence_lengths.size(0),
-                max_seq_len=attention_inputs.sequence_lengths.max().item() + 1,
+                max_seq_len=attention_inputs.sequence_lengths.max().item(),
                 seq_lens=sequence_lengths,
                 block_tables=attention_inputs.kv_cache_kernel_block_id_device,
             )

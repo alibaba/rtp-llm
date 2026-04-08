@@ -235,7 +235,7 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
                                positions_h);
             refreshBuffer(batch_size, batch_size, false);
         }
-        // In decode mode, expanded_seq_lens equals kvlen_d (sequence_lengths + 1)
+        // In decode mode, expanded_seq_lens equals kvlen_d (= sequence_lengths)
         expanded_seq_lens = kvlen_d;
     }
 }

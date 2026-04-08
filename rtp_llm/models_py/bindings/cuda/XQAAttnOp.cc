@@ -35,7 +35,7 @@ ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     params->kv_cache_offset           = ((TRTAttn*)trt_params.get())->kv_cache_offset.clone();
     params->batch_size                = batch_size;
     params->max_seq_len               = attn_inputs.sequence_lengths.max().item<int32_t>();
-    params->sequence_lengths          = attn_inputs.sequence_lengths;
+    params->sequence_lengths          = attn_inputs.sequence_lengths_minus_one;
     params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
 
     return ParamsBasePtr(params);
@@ -71,7 +71,7 @@ torch::Tensor XQAAttnOp::forward(const torch::Tensor&                   input,
            size_per_head,
            params->batch_size,
            static_cast<size_t>(kv_block_array.mMaxBlocksPerSeq),
-           params->max_seq_len + 1,
+           params->max_seq_len,
            attn_configs_.kernel_tokens_per_block,
            kv_cache.value().kv_cache_base.data_ptr(),  // params->kv_block_array.mPrimaryPoolPtr,
            reinterpret_cast<int32_t*>((KVCacheIndex*)(params->kv_cache_offset.data_ptr())),

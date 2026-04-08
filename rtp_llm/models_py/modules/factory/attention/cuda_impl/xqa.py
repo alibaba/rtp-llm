@@ -110,7 +110,6 @@ class XQAImpl(FMHAImplBase):
 
 class XQADecodeImpl(FMHAImplBase):
 
-
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -215,10 +214,10 @@ class XQAWrapper:
     ) -> XQAParams:
         return XQAParams(
             page_table=attn_inputs.kv_cache_kernel_block_id_device,
-            seq_lens=attn_inputs.sequence_lengths,
+            seq_lens=attn_inputs.sequence_lengths_minus_one,
             batch_size=attn_inputs.sequence_lengths.size(0),
             max_seq_len=(
-                attn_inputs.sequence_lengths.max().item() + 1
+                attn_inputs.sequence_lengths.max().item()
                 if attn_inputs.sequence_lengths.numel() > 0
                 else 0
             ),

@@ -110,7 +110,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         auto&       model_input       = merge_input_status.value();
         vector<int> combo_tokens      = {2, 3, 1, 2, 3, 2, 3, 4};
         vector<int> input_lengths     = {1, 2, 3, 3};
-        vector<int> sequence_lengths  = {1, 2};
+        vector<int> sequence_lengths  = {2, 3};
         vector<int> prefix_lengths    = {0, 1};
         vector<int> kv_cache_block_id = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 0, 11, 12, 13, 14};
         EXPECT_EQ(combo_tokens, toVec<int>(model_input.combo_tokens));

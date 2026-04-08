@@ -271,7 +271,7 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
     attn_params->cu_seqlens                = attn_inputs.cu_seqlens;
     attn_params->cu_kv_seqlens             = attn_inputs.cu_kv_seqlens;
-    attn_params->sequence_lengths          = attn_inputs.sequence_lengths;
+    attn_params->sequence_lengths          = attn_inputs.sequence_lengths_minus_one;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     attn_params->input_lengths             = attn_inputs.input_lengths;
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;

@@ -190,7 +190,6 @@ class FlashInferPythonMHATest(TestCase):
             out_ref = out_ref[last_token_idx]
             op = FlashInferTRTLLMDecodeOp(config)
             q = q_ref[last_token_idx]
-            attn_inputs.sequence_lengths -= 1
             input_params = op.prepare(attn_inputs)
             out_trtllm = op.forward(q, kv_cache, input_params)
 

@@ -316,8 +316,8 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
                                     batch_size,
                                     max_input_token_num_);
             batch_indice_ptr[i] = i;
-            positions_ptr[i]    = sequence_lengths[i];
-            seq_len             = sequence_lengths[i] + 1;
+            positions_ptr[i]    = sequence_lengths[i] - 1;
+            seq_len             = sequence_lengths[i];
             accu_q_len += 1;
             accu_kv_len += 1;
         }
@@ -431,7 +431,7 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
             reuse_page_num += (prefix_length + seq_size_per_block - 1) / seq_size_per_block;
         } else {
             input_token_num += 1;
-            seq_len = sequence_lengths_ptr[i] + 1;
+            seq_len = sequence_lengths_ptr[i];
         }
         page_num += (seq_len + seq_size_per_block - 1) / seq_size_per_block;
     }

@@ -114,7 +114,6 @@ forward_param PagedAttnDecodeOp::forward(const torch::Tensor&                   
         int64_t block_size   = attn_configs_.tokens_per_block;
 
         auto context_lens = params->sequence_lengths;
-        context_lens      = context_lens + 1;
 
         return {out,
                 exp_sums,

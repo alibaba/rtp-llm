@@ -207,8 +207,8 @@ void FlashInferAttnParams::fillFlashInfer(const torch::Tensor& prefix_lengths_ho
             accu_q_len += input_length;
         } else {
             batch_indice[i] = i;
-            positions[i]    = sequence_lengths[i];
-            seq_len         = sequence_lengths[i] + 1;
+            positions[i]    = sequence_lengths[i] - 1;
+            seq_len         = sequence_lengths[i];
             accu_q_len += 1;
         }
         paged_kv_last_page_len[i] = (seq_len - 1) % tokens_per_block + 1;

@@ -784,9 +784,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     // clear host buffers holder
     buffer_holder_.release();
 
-    const auto& mtp_cache_cfg          = cache_manager_->getMTPModuleCacheConfig(0);
-    model_input.kv_block_stride_bytes  = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes  = mtp_cache_cfg.kv_scale_stride_bytes;
+    const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
+    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
+    model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
 
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_ids_list;
@@ -794,7 +794,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
     // update TP > 0 batch_size
     size_t batch_size   = model_input.combo_tokens.size(0);
-    spec_prefix_lengths = model_input.sequence_lengths.cpu().clone();
+    spec_prefix_lengths = model_input.sequence_lengths_minus_one.cpu().clone();
 
     auto pre_propose_token_t_raw = model_input.combo_tokens.to(torch::kCUDA).clone();
 
@@ -858,12 +858,13 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             lm_output_indexes.data_ptr<int>()[i] = i;
         }
 
-        model_input.input_lengths      = std::move(input_lengths);
-        model_input.lm_output_indexes  = std::move(lm_output_indexes);
-        model_input.prefix_lengths     = spec_prefix_lengths;
-        model_input.combo_tokens       = draft_token_ids_t.reshape({(int64_t)(batch_size * (propose_step_ + 1))});
-        model_input.sequence_lengths   = torch::empty({0}, torch::kInt32);
-        model_input.last_hidden_states = torch::Tensor();
+        model_input.input_lengths     = std::move(input_lengths);
+        model_input.lm_output_indexes = std::move(lm_output_indexes);
+        model_input.prefix_lengths    = spec_prefix_lengths;
+        model_input.combo_tokens      = draft_token_ids_t.reshape({(int64_t)(batch_size * (propose_step_ + 1))});
+        model_input.sequence_lengths  = torch::empty({0}, torch::kInt32);
+        model_input.sequence_lengths_minus_one = torch::empty({0}, torch::kInt32);
+        model_input.last_hidden_states         = torch::Tensor();
 
         // Since other tp ranks don't have streams, its combo_tokens' first token is not correct.
         // Thus, we need to broadcast the combo_tokens to other tp ranks.
@@ -871,8 +872,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
         const auto& cache_cfg             = cache_manager_->cacheConfig();
         model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes  = cache_cfg.kv_scale_stride_bytes;
-
+        model_input.kv_scale_stride_bytes = cache_cfg.kv_scale_stride_bytes;
     }
 }
 

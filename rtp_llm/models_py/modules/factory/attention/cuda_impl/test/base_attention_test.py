@@ -154,8 +154,11 @@ class BaseAttentionTest(unittest.TestCase):
 
         # Decode mode
         attn_inputs.is_prefill = False
-        attn_inputs.sequence_lengths = (
-            torch.tensor(sequence_lengths, dtype=torch.int32, device="cpu") - 1
+        attn_inputs.sequence_lengths = torch.tensor(
+            sequence_lengths, dtype=torch.int32, device="cpu"
+        ).pin_memory()
+        attn_inputs.sequence_lengths_minus_one = (
+            attn_inputs.sequence_lengths - 1
         ).pin_memory()
 
         # Input lengths for decode are all 1 (generating one token per sequence)

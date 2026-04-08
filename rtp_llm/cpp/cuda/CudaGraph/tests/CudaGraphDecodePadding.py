@@ -101,11 +101,14 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         attention_inputs.input_lengths = torch.ones(batch_size, dtype=torch.int32)
 
         # sequence_lengths [batch_size, int32] (decode only), with pin_memory
-        attention_inputs.sequence_lengths = torch.ones(
-            batch_size, dtype=torch.int32
+        attention_inputs.sequence_lengths = torch.full(
+            (batch_size,), 2, dtype=torch.int32
+        ).pin_memory()
+        attention_inputs.sequence_lengths_minus_one = torch.full(
+            (batch_size,), 1, dtype=torch.int32
         ).pin_memory()
 
-        # sequence_lengths_plus_1_d [batch_size] int32 on cuda (decode: 1 token per batch -> 2)
+        # sequence_lengths_plus_1_d: device copy of sequence_lengths (name is legacy)
         attention_inputs.sequence_lengths_plus_1_d = torch.full(
             (batch_size,), 2, dtype=torch.int32, device="cuda"
         )

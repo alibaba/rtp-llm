@@ -299,8 +299,9 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     auto model_input_status = processor.gatherDecodeModelInput(stream_groups);
     EXPECT_TRUE(model_input_status.ok());
 
-    auto& model_input            = model_input_status.value();
-    model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
+    auto& model_input                      = model_input_status.value();
+    model_input.sequence_lengths           = torch::tensor({2, 3}, torch::kInt32);
+    model_input.sequence_lengths_minus_one = torch::tensor({1, 2}, torch::kInt32);
 
     processor.prepareOneStepSpecDecodeModelInput(stream_groups, model_input);
 
@@ -397,8 +398,9 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     auto model_input_status = processor.gatherDecodeModelInput(stream_groups);
     EXPECT_TRUE(model_input_status.ok());
 
-    auto& model_input            = model_input_status.value();
-    model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
+    auto& model_input                      = model_input_status.value();
+    model_input.sequence_lengths           = torch::tensor({2, 3}, torch::kInt32);
+    model_input.sequence_lengths_minus_one = torch::tensor({1, 2}, torch::kInt32);
 
     processor.prepareDecodeDraftModelInput(stream_groups, model_input);
 
@@ -452,8 +454,9 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     auto model_input_status = processor.gatherModelInput(stream_groups);
     EXPECT_TRUE(model_input_status.ok());
 
-    auto& model_input            = model_input_status.value();
-    model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
+    auto& model_input                      = model_input_status.value();
+    model_input.sequence_lengths           = torch::tensor({2, 3}, torch::kInt32);
+    model_input.sequence_lengths_minus_one = torch::tensor({1, 2}, torch::kInt32);
 
     GptModelOutputs model_output;
     model_output.all_hidden_states =
