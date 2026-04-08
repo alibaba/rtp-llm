@@ -65,16 +65,40 @@ def _find_cutlass_include():
     raise ImportError("CUTLASS 4.x headers not found (need cutlass/cutlass.h)")
 
 
+def _find_cu_source():
+    """Find the bundled .cu source, handling Bazel runfiles."""
+    # Try same directory as this file
+    this_dir = os.path.dirname(os.path.abspath(__file__))
+    candidate = os.path.join(this_dir, "cutlass_fp4_group_mm.cu")
+    if os.path.exists(candidate):
+        return candidate
+    # Try Bazel runfiles
+    runfiles_dir = os.environ.get("RUNFILES_DIR", "")
+    if runfiles_dir:
+        for pattern in [
+            "rtp_llm/rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/cutlass_fp4_group_mm.cu",
+            "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/cutlass_fp4_group_mm.cu",
+        ]:
+            candidate = os.path.join(runfiles_dir, pattern)
+            if os.path.exists(candidate):
+                return candidate
+    # Search recursively from runfiles
+    if runfiles_dir:
+        for root, _, files in os.walk(runfiles_dir):
+            if "cutlass_fp4_group_mm.cu" in files:
+                return os.path.join(root, "cutlass_fp4_group_mm.cu")
+    raise ImportError(
+        f"cutlass_fp4_group_mm.cu not found. "
+        f"Searched: {this_dir}, RUNFILES_DIR={runfiles_dir}"
+    )
+
+
 @functools.lru_cache(maxsize=1)
 def _try_load_cutlass_fp4_module():
     """JIT-compile the bundled CUTLASS FP4 kernel."""
     from torch.utils.cpp_extension import load
 
-    # Use the bundled adapted source (same directory as this file)
-    this_dir = os.path.dirname(os.path.abspath(__file__))
-    cu_src = os.path.join(this_dir, "cutlass_fp4_group_mm.cu")
-    if not os.path.exists(cu_src):
-        raise ImportError(f"Bundled kernel source not found: {cu_src}")
+    cu_src = _find_cu_source()
 
     cutlass_include, cutlass_tools = _find_cutlass_include()
 

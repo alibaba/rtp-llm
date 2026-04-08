@@ -573,8 +573,6 @@ def _bench_cutlass_fp4_standalone(E, tokens_per_expert, K, N):
     try:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.cutlass_fp4_standalone import bench_cutlass_fp4
         return bench_cutlass_fp4(E, tokens_per_expert, K, N, SEED, WARMUP_ITERS, BENCH_ITERS)
-    except ImportError:
-        return None, None, "cutlass_fp4_standalone not available (requires JIT compilation)"
     except Exception as e:
         return None, None, str(e)[:200]
 
