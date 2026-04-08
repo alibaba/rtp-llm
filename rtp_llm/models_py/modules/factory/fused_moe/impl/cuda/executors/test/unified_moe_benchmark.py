@@ -34,6 +34,9 @@ FLOAT4_E2M1_MAX = 6.0
 FLOAT8_E4M3_MAX = 448.0
 SEED = 42
 
+# Collect autotune details for all kernels (printed at end of benchmark)
+_AUTOTUNE_LOG = []
+
 
 def _bench_time(fn, warmup=WARMUP_ITERS, iters=BENCH_ITERS):
     for _ in range(warmup):
@@ -174,25 +177,42 @@ def _bench_flashinfer_fp8(E, tokens_per_expert, K, N):
     for i in range(E):
         m_indptr[i + 1] = m_indptr[i] + M_padded
 
-    def run():
-        inp_fp8, inp_scale = sgl_per_token_group_quant_fp8(
-            grouped_input, group_size=BLOCK_SIZE,
-            column_major_scales=True, scale_tma_aligned=False, scale_ue8m0=False)
-        inp_scale_mn = inp_scale.T.contiguous()
-        fc1 = group_gemm_fp8_nt_groupwise(
-            a=inp_fp8, b=w1_fp8, a_scale=inp_scale_mn, b_scale=w1_scale_mn,
-            m_indptr=m_indptr, scale_major_mode="MN", out_dtype=torch.bfloat16)
-        act = torch.empty((total_M, N), device=device, dtype=torch.bfloat16)
-        silu_and_mul(act, fc1)
-        fc2_fp8, fc2_scale = sgl_per_token_group_quant_fp8(
-            act, group_size=BLOCK_SIZE,
-            column_major_scales=True, scale_tma_aligned=False, scale_ue8m0=False)
-        fc2_scale_mn = fc2_scale.T.contiguous()
-        return group_gemm_fp8_nt_groupwise(
-            a=fc2_fp8, b=w2_fp8, a_scale=fc2_scale_mn, b_scale=w2_scale_mn,
-            m_indptr=m_indptr, scale_major_mode="MN", out_dtype=torch.bfloat16)
+    def make_run(mma_sm):
+        def run():
+            inp_fp8, inp_scale = sgl_per_token_group_quant_fp8(
+                grouped_input, group_size=BLOCK_SIZE,
+                column_major_scales=True, scale_tma_aligned=False, scale_ue8m0=False)
+            inp_scale_mn = inp_scale.T.contiguous()
+            fc1 = group_gemm_fp8_nt_groupwise(
+                a=inp_fp8, b=w1_fp8, a_scale=inp_scale_mn, b_scale=w1_scale_mn,
+                m_indptr=m_indptr, scale_major_mode="MN", out_dtype=torch.bfloat16,
+                mma_sm=mma_sm)
+            act = torch.empty((total_M, N), device=device, dtype=torch.bfloat16)
+            silu_and_mul(act, fc1)
+            fc2_fp8, fc2_scale = sgl_per_token_group_quant_fp8(
+                act, group_size=BLOCK_SIZE,
+                column_major_scales=True, scale_tma_aligned=False, scale_ue8m0=False)
+            fc2_scale_mn = fc2_scale.T.contiguous()
+            return group_gemm_fp8_nt_groupwise(
+                a=fc2_fp8, b=w2_fp8, a_scale=fc2_scale_mn, b_scale=w2_scale_mn,
+                m_indptr=m_indptr, scale_major_mode="MN", out_dtype=torch.bfloat16,
+                mma_sm=mma_sm)
+        return run
 
-    avg_ms = _bench_time(run)
+    # Exhaustive autotune: benchmark both mma_sm=1 (128x128) and mma_sm=2 (256x128)
+    best_ms, best_sm = float('inf'), 1
+    tune_details = []
+    for mma_sm in [1, 2]:
+        try:
+            ms = _bench_time(make_run(mma_sm))
+            tune_details.append(f"sm{mma_sm}={ms:.3f}ms")
+            if ms < best_ms:
+                best_ms, best_sm = ms, mma_sm
+        except Exception:
+            tune_details.append(f"sm{mma_sm}=ERR")
+    _AUTOTUNE_LOG.append(f"FP8-FI totM={total_tokens}: {' '.join(tune_details)} → best=sm{best_sm}")
+
+    avg_ms = best_ms
     return avg_ms, _compute_moe_tflops(total_tokens, N, K, avg_ms), None
 
 
@@ -711,6 +731,11 @@ class TestUnifiedMoeBenchmark(unittest.TestCase):
         print("  * = fused end-to-end MoE (includes routing + gather overhead)")
         print(f"  Workload: Full MoE (FC1[M,K]x[2N,K]^T + SiLU + FC2[M,N]x[K,N]^T)")
         print(f"  SkA = long-tail (38%/25%/12.5%/...), SkB = extreme (75%/rest=1 each)")
+
+        if _AUTOTUNE_LOG:
+            print(f"\nAutotune Details ({len(_AUTOTUNE_LOG)}):")
+            for entry in _AUTOTUNE_LOG:
+                print(f"  {entry}")
 
         if all_errors:
             print(f"\nErrors ({len(all_errors)}):")
