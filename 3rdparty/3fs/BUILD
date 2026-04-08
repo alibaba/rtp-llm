@@ -2,9 +2,11 @@ load("//bazel:defs.bzl", "rpm_library")
 
 rpm_library(
     name = "hf3fs",
-    rpms = [
-        "@hf3fs_rpm//file:file",
-    ],
+    rpms = select({
+        "@platforms//cpu:aarch64": ["@hf3fs_rpm_aarch64//file:file"],
+        "@platforms//cpu:x86_64": ["@hf3fs_rpm_x86_64//file:file"],
+        "//conditions:default": ["@hf3fs_rpm_x86_64//file:file"],
+    }),
     lib_path = "usr/lib64",
     include_path = "usr/include",
     shared_libs = [

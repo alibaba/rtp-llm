@@ -26,7 +26,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
-    # tags = ["H20"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -39,7 +38,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
-    # tags = ["H20"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -52,7 +50,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
-    # tags = ["H20"],
     deps = [
         ":remote_connector_mock_base",
     ],
@@ -78,7 +75,6 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
-    # tags = ["H20"],
     deps = [
         ":remote_connector_mock_base",
     ],
@@ -91,7 +87,71 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
-    # tags = ["H20"],
+    deps = test_deps + [
+        ":mock",
+    ],
+)
+
+cc_test(
+    name = "group_policy_test_arm",
+    srcs = [
+        "GroupPolicyTest.cc",
+    ],
+    copts = test_copts,
+    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+    tags = ["SM100_ARM"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/connector/remote_connector",
+    ],
+)
+
+cc_test(
+    name = "remote_connector_internal_test_arm",
+    srcs = [
+        "RemoteConnectorInternalTest.cc",
+    ],
+    copts = test_copts,
+    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+    tags = ["SM100_ARM"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/connector/remote_connector",
+    ],
+)
+
+cc_test(
+    name = "remote_connector_mock_full_linear_test_arm",
+    srcs = [
+        "RemoteConnectorMockFullLinearTest.cc",
+    ],
+    copts = test_copts,
+    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+    tags = ["SM100_ARM"],
+    deps = [
+        ":remote_connector_mock_base",
+    ],
+)
+
+cc_test(
+    name = "remote_connector_mock_only_full_test_arm",
+    srcs = [
+        "RemoteConnectorMockOnlyFullTest.cc",
+    ],
+    copts = test_copts,
+    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+    tags = ["SM100_ARM"],
+    deps = [
+        ":remote_connector_mock_base",
+    ],
+)
+
+cc_test(
+    name = "client_wrapper_test_arm",
+    srcs = [
+        "ClientWrapperTest.cc",
+    ],
+    copts = test_copts,
+    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+    tags = ["SM100_ARM"],
     deps = test_deps + [
         ":mock",
     ],
