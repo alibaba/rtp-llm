@@ -125,7 +125,6 @@ build:cuda13_arm --define=using_cuda12_9_x86=false
 build:cuda13_arm --action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0"
 build:cuda13_arm --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0"
 build:cuda13_arm --copt -DUSE_CUDA_ARM=0
-build:cuda13_arm --define=use_remote_kv_cache=false
 build:cuda13_arm --copt="-DENABLE_FP4=1"
 # Suppress missing-field-initializers being promoted to an error (newer
 # Python/gcc combo on CUDA 13 ARM trips on PyModuleDef's trailing fields).
