@@ -622,3 +622,156 @@ class TestQwen25DetectAndParse(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStreamingStringWithSpaces(unittest.TestCase):
+    """Test that string values containing spaces are not truncated during streaming.
+
+    This guards against a bug where partial_json_parser auto-adds closing quotes
+    to incomplete strings, and the streaming logic failed to handle the first
+    argument streaming after tool name was sent (prev_arguments was None).
+
+    Bug: When streaming "可乐 薯片 饼干", the content after the first space was lost.
+    """
+
+    def setUp(self):
+        self.tools = [
+            Tool(
+                type="function",
+                function=Function(
+                    name="search_item",
+                    description="Search for items",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "intent": {"type": "string"},
+                            "isDeduplicate": {"type": "integer"},
+                        },
+                    },
+                ),
+            )
+        ]
+
+    def test_string_with_spaces_not_truncated(self):
+        """
+        Test that string values containing spaces are NOT truncated during streaming.
+
+        This is the exact bug scenario:
+        - Chunk 1: tool name + partial string "可乐"
+        - Chunk 2: more string content " 薯片" (space + content)
+        - Chunk 3: remaining string " 饼干..." (space + content)
+
+        Previously, chunks 2 and 3 were lost because:
+        1. After chunk 1, prev_tool_call_arr was not updated
+        2. When chunk 2 arrived, prev_arguments was None
+        3. The elif branch was skipped, argument_diff stayed None
+        """
+        detector = Qwen25Detector()
+
+        chunks = [
+            detector.bot_token,
+            '{"name": "search_item", "arguments": {"intent": "可乐',
+            " ",
+            "薯片",  # This was being lost
+            " ",
+            "饼干",
+            '"',
+            ",",
+            " ",
+            '"',
+            "isDeduplicate",
+            '"',
+            ":",
+            "0}}",
+            detector.eot_token,
+        ]
+
+        all_calls = []
+        for chunk in chunks:
+            result = detector.parse_streaming_increment(chunk, self.tools)
+            all_calls.extend(result.calls)
+
+        # Collect all parameters
+        final_params = "".join([c.parameters for c in all_calls if c.parameters])
+        expected = json.dumps(
+            {"intent": "可乐 薯片 饼干", "isDeduplicate": 0}, ensure_ascii=False
+        )
+
+        self.assertEqual(
+            final_params,
+            expected,
+            f"Expected '{expected}' but got '{final_params}'. "
+            f"String with spaces was truncated!",
+        )
+
+    def test_string_with_spaces_character_by_character(self):
+        """
+        Test string with spaces streamed character by character.
+
+        This is an even more extreme case where each character arrives separately.
+        """
+        detector = Qwen25Detector()
+
+        # Character-by-character streaming after the tool name is sent
+        chunks = [
+            detector.bot_token,
+            '{"name": "search_item", "arguments": {"intent": "',
+            "a",  # First char
+            " ",  # Space - critical test
+            "b",  # Char after space
+            " ",
+            "c",
+            '"}',
+            "}",
+            detector.eot_token,
+        ]
+
+        all_calls = []
+        for chunk in chunks:
+            result = detector.parse_streaming_increment(chunk, self.tools)
+            all_calls.extend(result.calls)
+
+        final_params = "".join([c.parameters for c in all_calls if c.parameters])
+        expected = json.dumps({"intent": "a b c"}, ensure_ascii=False)
+
+        self.assertEqual(final_params, expected)
+
+    def test_multiple_string_parameters_with_spaces(self):
+        """Test multiple string parameters, each with spaces."""
+        detector = Qwen25Detector()
+
+        tools = [
+            Tool(
+                type="function",
+                function=Function(
+                    name="search",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "filter": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+
+        chunks = [
+            detector.bot_token,
+            '{"name": "search", "arguments": {"query": "hello',
+            " world",
+            '", "filter": "foo',
+            " bar",
+            '"}}',
+            detector.eot_token,
+        ]
+
+        all_calls = []
+        for chunk in chunks:
+            result = detector.parse_streaming_increment(chunk, tools)
+            all_calls.extend(result.calls)
+
+        final_params = "".join([c.parameters for c in all_calls if c.parameters])
+        expected = json.dumps({"query": "hello world", "filter": "foo bar"})
+
+        self.assertEqual(final_params, expected)
