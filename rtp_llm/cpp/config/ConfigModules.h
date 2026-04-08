@@ -68,6 +68,7 @@ struct ParallelismConfig {
     int64_t ffn_tp_size      = 1;
     int64_t ffn_tp_rank      = 0;
     bool    enable_sp        = false;
+    bool    use_ub_comm      = false;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
 
