@@ -45,6 +45,16 @@ def _find_cutlass_include():
             return candidate, tools if os.path.exists(tools) else candidate
     except ImportError:
         pass
+    # Try deep_gemm package (SGLang installs CUTLASS headers into deep_gemm/include/)
+    try:
+        import deep_gemm
+        pkg_dir = os.path.dirname(deep_gemm.__file__)
+        candidate = os.path.join(pkg_dir, "include")
+        if os.path.exists(os.path.join(candidate, "cutlass", "cutlass.h")):
+            tools = os.path.join(candidate, "..", "tools", "util", "include")
+            return candidate, tools if os.path.exists(tools) else candidate
+    except ImportError:
+        pass
     # Try cutlass package
     try:
         import cutlass
@@ -56,10 +66,11 @@ def _find_cutlass_include():
                 return candidate, tools if os.path.exists(tools) else candidate
     except ImportError:
         pass
-    # Search sys.path for nvidia_cutlass_dsl (handles Bazel runfiles)
+    # Search sys.path for CUTLASS headers (handles Bazel runfiles)
     import sys
     for p in sys.path:
         for sub in [
+            "deep_gemm/include",
             "nvidia_cutlass_dsl/python_packages/cutlass/include",
             "nvidia_cutlass_dsl/include",
         ]:
