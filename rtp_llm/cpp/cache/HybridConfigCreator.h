@@ -3,6 +3,7 @@
 #include <memory>
 #include <vector>
 #include <utility>
+#include <tuple>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 
@@ -21,16 +22,29 @@ public:
 private:
     // Helper functions for creating hybrid config in the order they appear in the main flow
     static std::pair<std::vector<int>, std::vector<int>> splitLayersByAttentionType(const ModelConfig& model_config);
-    static CacheConfig                                   initializeConfig(const ModelConfig&      model_config,
-                                                                          const std::vector<int>& linear_layers,
-                                                                          const std::vector<int>& full_layers,
-                                                                          rtp_llm::DataType       dtype);
-    static KVCacheSpecPtr                                createFullAttentionSpec(const ModelConfig&       model_config,
-                                                                                 const ParallelismConfig& parallelism_config,
-                                                                                 rtp_llm::DataType        dtype);
-    static KVCacheSpecPtr                                createLinearAttentionSpec(const ModelConfig&       model_config,
-                                                                                   const ParallelismConfig& parallelism_config,
-                                                                                   rtp_llm::DataType        dtype);
+    // Three-way split: returns (linear_layers, sliding_window_layers, full_layers)
+    static std::tuple<std::vector<int>, std::vector<int>, std::vector<int>>
+    splitLayersByAttentionType3(const ModelConfig& model_config);
+
+    static CacheConfig initializeConfig(const ModelConfig&      model_config,
+                                        const std::vector<int>& linear_layers,
+                                        const std::vector<int>& full_layers,
+                                        rtp_llm::DataType       dtype);
+    static KVCacheSpecPtr createFullAttentionSpec(const ModelConfig&       model_config,
+                                                  const ParallelismConfig& parallelism_config,
+                                                  rtp_llm::DataType        dtype);
+    static KVCacheSpecPtr createLinearAttentionSpec(const ModelConfig&       model_config,
+                                                    const ParallelismConfig& parallelism_config,
+                                                    rtp_llm::DataType        dtype);
+    static KVCacheSpecPtr createSlidingWindowSpec(const ModelConfig&       model_config,
+                                                  const ParallelismConfig& parallelism_config,
+                                                  rtp_llm::DataType        dtype);
+    static KVCacheSpecPtr createCustomMHASpec(int                      kv_head_num,
+                                              int                      size_per_head,
+                                              int                      tokens_per_block,
+                                              const ParallelismConfig& parallelism_config,
+                                              rtp_llm::DataType        dtype);
+
     static std::pair<std::vector<std::vector<int>>, std::vector<std::vector<int>>>
     createLayerGroups(const std::vector<int>& linear_layers, const std::vector<int>& full_layers, int& group_layer_num);
     static void setupCacheConfigSpecs(CacheConfig&                         config,
@@ -40,6 +54,7 @@ private:
                                       const KVCacheSpecPtr&                full_spec);
     static void
     setupPhysicalSizes(CacheConfig& config, const KVCacheSpecPtr& full_spec, const KVCacheSpecPtr& linear_spec);
+    static void setupPhysicalSizes(CacheConfig& config, const std::vector<KVCacheSpecPtr>& all_specs);
     static void setupLayerToGroupMapping(CacheConfig& config);
 };
 

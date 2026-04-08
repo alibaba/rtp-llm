@@ -653,7 +653,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
              pybind11::arg("hybrid_attention_types")  = std::vector<HybridAttentionType>{})
         .def("to_string", &HybridAttentionConfig::to_string)
         .def_readwrite("enable_hybrid_attention", &HybridAttentionConfig::enable_hybrid_attention)
-        .def_readwrite("hybrid_attention_types", &HybridAttentionConfig::hybrid_attention_types);
+        .def_readwrite("hybrid_attention_types", &HybridAttentionConfig::hybrid_attention_types)
+        .def_readwrite("sliding_window_size", &HybridAttentionConfig::sliding_window_size)
+        .def_readwrite("sliding_window_kv_head_num", &HybridAttentionConfig::sliding_window_kv_head_num)
+        .def_readwrite("sliding_window_size_per_head", &HybridAttentionConfig::sliding_window_size_per_head)
+        .def_readwrite("global_kv_head_num", &HybridAttentionConfig::global_kv_head_num)
+        .def_readwrite("global_size_per_head", &HybridAttentionConfig::global_size_per_head);
 
     // Register SpeculativeType enum
     py::enum_<SpeculativeType>(m, "SpeculativeType")

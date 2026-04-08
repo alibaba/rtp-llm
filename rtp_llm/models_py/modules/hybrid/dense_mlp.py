@@ -11,12 +11,24 @@ from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import ActivationType, HWKernelConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
+class GeluAndMul(nn.Module):
+    """Gated GELU activation: gelu(gate) * up, used by Gemma models."""
+    def __init__(self):
+        super().__init__()
+        self.gelu = nn.GELU(approximate="tanh")
+
+    def forward(self, gate_up: torch.Tensor) -> torch.Tensor:
+        d = gate_up.shape[-1] // 2
+        return self.gelu(gate_up[..., :d]) * gate_up[..., d:]
+
+
 _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
     ActivationType.Swiglu: FusedSiluAndMul,
     ActivationType.Gelu: nn.GELU,
+    ActivationType.Geglu: GeluAndMul,
 }
 
-_GATED_ACTIVATION_TYPE_LIST = [ActivationType.Swiglu]
+_GATED_ACTIVATION_TYPE_LIST = [ActivationType.Swiglu, ActivationType.Geglu]
 
 
 class DenseMLP(nn.Module):

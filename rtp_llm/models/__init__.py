@@ -38,6 +38,7 @@ from .glm4_moe import Glm4Moe
 from .jina_bert.jina_bert import JinaBert
 from .megatron_bert import MegatronBert
 from .mixtral import Mixtral
+from .gemma4 import Gemma4
 from .qwen3_next.qwen3_next import Qwen3Next
 from .qwen3_next.qwen3_next_mtp import Qwen3NextMTP
 from .qwen_v2_moe import Qwen2Moe

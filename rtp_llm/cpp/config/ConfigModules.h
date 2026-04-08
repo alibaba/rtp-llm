@@ -513,7 +513,17 @@ enum class HybridAttentionType {
 struct HybridAttentionConfig {
     bool                             enable_hybrid_attention = false;
     std::vector<HybridAttentionType> hybrid_attention_types;
-    std::string                      to_string() const;
+
+    // Per-type KV dimensions for models with heterogeneous attention layers (e.g., Gemma4).
+    // When set (> 0), HybridConfigCreator uses these to create separate MHAKVCacheSpec
+    // for SLIDING_WINDOW vs FULL (NONE) layers.
+    int sliding_window_size          = -1;
+    int sliding_window_kv_head_num   = 0;
+    int sliding_window_size_per_head = 0;
+    int global_kv_head_num           = 0;
+    int global_size_per_head         = 0;
+
+    std::string to_string() const;
 };
 
 }  // namespace rtp_llm

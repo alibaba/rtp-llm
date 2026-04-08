@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 
+#include <algorithm>
 #include <numeric>
 
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
@@ -55,6 +56,30 @@ HybridConfigCreator::splitLayersByAttentionType(const ModelConfig& model_config)
     return std::make_pair(std::move(linear_layers), std::move(full_layers));
 }
 
+std::tuple<std::vector<int>, std::vector<int>, std::vector<int>>
+HybridConfigCreator::splitLayersByAttentionType3(const ModelConfig& model_config) {
+    int64_t layer_num = model_config.num_layers;
+    RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "invalid model_config.num_layers=%ld", layer_num);
+
+    std::vector<int> linear_layers;
+    std::vector<int> sliding_window_layers;
+    std::vector<int> full_layers;
+
+    const auto& types = model_config.hybrid_attention_config.hybrid_attention_types;
+    for (int i = 0; i < static_cast<int>(layer_num); ++i) {
+        auto t = types[static_cast<size_t>(i)];
+        if (t == HybridAttentionType::LINEAR) {
+            linear_layers.push_back(i);
+        } else if (t == HybridAttentionType::SLIDING_WINDOW) {
+            sliding_window_layers.push_back(i);
+        } else {
+            full_layers.push_back(i);
+        }
+    }
+
+    return std::make_tuple(std::move(linear_layers), std::move(sliding_window_layers), std::move(full_layers));
+}
+
 CacheConfig HybridConfigCreator::initializeConfig(const ModelConfig&      model_config,
                                                   const std::vector<int>& linear_layers,
                                                   const std::vector<int>& full_layers,
@@ -100,6 +125,37 @@ KVCacheSpecPtr HybridConfigCreator::createLinearAttentionSpec(const ModelConfig&
     return linear_spec;
 }
 
+KVCacheSpecPtr HybridConfigCreator::createCustomMHASpec(int                      kv_head_num,
+                                                        int                      size_per_head,
+                                                        int                      tokens_per_block,
+                                                        const ParallelismConfig& parallelism_config,
+                                                        rtp_llm::DataType        dtype) {
+    auto spec              = std::make_shared<MHAKVCacheSpec>();
+    spec->type             = KVCacheSpecType::MultiHeadAttention;
+    spec->layer_num        = 1;
+    spec->local_head_num_kv = static_cast<uint32_t>(
+        std::max(1,
+                 (kv_head_num > 1) ?
+                     static_cast<int>(kv_head_num / parallelism_config.get_attn_tp_size()) :
+                     kv_head_num));
+    spec->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
+    spec->size_per_head      = static_cast<uint32_t>(size_per_head);
+    spec->dtype              = dtype;
+    return spec;
+}
+
+KVCacheSpecPtr HybridConfigCreator::createSlidingWindowSpec(const ModelConfig&       model_config,
+                                                            const ParallelismConfig& parallelism_config,
+                                                            rtp_llm::DataType        dtype) {
+    const auto& hybrid_config = model_config.hybrid_attention_config;
+    return createCustomMHASpec(
+        hybrid_config.sliding_window_kv_head_num,
+        hybrid_config.sliding_window_size_per_head,
+        model_config.attn_config.tokens_per_block,
+        parallelism_config,
+        dtype);
+}
+
 std::pair<std::vector<std::vector<int>>, std::vector<std::vector<int>>> HybridConfigCreator::createLayerGroups(
     const std::vector<int>& linear_layers, const std::vector<int>& full_layers, int& group_layer_num) {
     const int linear_cnt = static_cast<int>(linear_layers.size());
@@ -142,17 +198,23 @@ void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                    
 void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
                                              const KVCacheSpecPtr& full_spec,
                                              const KVCacheSpecPtr& linear_spec) {
-    // Decide the physical KV block/scale sizes by taking max between full and linear specs.
-    const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
-    const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
+    setupPhysicalSizes(config, {full_spec, linear_spec});
+}
 
-    // now we only support that linear attention block have padding
-    RTP_LLM_CHECK_WITH_INFO(full_kv_block_stride_bytes >= linear_kv_block_stride_bytes,
-                            "not support full attention with padding now");
+void HybridConfigCreator::setupPhysicalSizes(CacheConfig& config, const std::vector<KVCacheSpecPtr>& all_specs) {
+    size_t max_kv_block_stride_bytes = 0;
+    size_t max_scale_stride_bytes    = 0;
 
-    config.kv_block_stride_bytes = full_kv_block_stride_bytes;
+    for (const auto& spec : all_specs) {
+        if (spec) {
+            max_kv_block_stride_bytes = std::max(max_kv_block_stride_bytes, spec->block_size_bytes());
+            max_scale_stride_bytes    = std::max(max_scale_stride_bytes, spec->scale_block_size_bytes());
+        }
+    }
+
+    config.kv_block_stride_bytes = max_kv_block_stride_bytes;
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
+    config.kv_scale_stride_bytes = max_scale_stride_bytes;
     config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
     config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 }
@@ -173,7 +235,93 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
                                                     bool                     is_mtp) {
     auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config, buildDeviceType());
 
-    // Split layers by attention type
+    const auto& hybrid_config = model_config.hybrid_attention_config;
+    const bool  has_sliding_window = hybrid_config.sliding_window_kv_head_num > 0;
+
+    // Check if we have a three-way split (SLIDING_WINDOW + FULL, e.g., Gemma4)
+    if (has_sliding_window) {
+        auto [linear_layers, sw_layers, full_layers] =
+            HybridConfigCreator::splitLayersByAttentionType3(model_config);
+
+        RTP_LLM_CHECK_WITH_INFO(linear_layers.empty(),
+            "Models with SLIDING_WINDOW layers cannot also have LINEAR layers");
+
+        int64_t layer_num = model_config.num_layers;
+        CacheConfig config;
+        config.layer_num          = static_cast<uint32_t>(layer_num);
+        config.layer_all_num      = static_cast<uint32_t>(layer_num);
+        config.block_num          = 0;
+        config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+        config.use_mla            = model_config.attn_config.use_mla;
+        config.dtype              = dtype;
+        config.linear_step        = 1;
+
+        // Create specs for each type
+        auto sw_spec = HybridConfigCreator::createSlidingWindowSpec(model_config, parallelism_config, dtype);
+
+        KVCacheSpecPtr full_spec;
+        if (hybrid_config.global_kv_head_num > 0) {
+            full_spec = createCustomMHASpec(
+                hybrid_config.global_kv_head_num,
+                hybrid_config.global_size_per_head,
+                model_config.attn_config.tokens_per_block,
+                parallelism_config,
+                dtype);
+        } else {
+            full_spec = HybridConfigCreator::createFullAttentionSpec(model_config, parallelism_config, dtype);
+        }
+
+        // Calculate group layer num from the two MHA types
+        const int sw_cnt   = static_cast<int>(sw_layers.size());
+        const int full_cnt = static_cast<int>(full_layers.size());
+        int group_layer_num = calculateGroupLayerNum(sw_cnt, full_cnt);
+        config.group_layer_num = group_layer_num;
+
+        auto sw_groups   = splitIntoGroups(sw_layers, group_layer_num);
+        auto full_groups = splitIntoGroups(full_layers, group_layer_num);
+
+        // Setup groups: sliding window first (larger cache), then full attention
+        config.global_layer_ids.clear();
+        config.layer_ids.clear();
+        config.cache_specs.clear();
+        config.group_types.clear();
+
+        for (const auto& g : sw_groups) {
+            config.global_layer_ids.push_back(g);
+            config.layer_ids.push_back(g);
+            config.cache_specs.push_back(sw_spec);
+            config.group_types.push_back(CacheGroupType::SLIDING_WINDOW);
+        }
+        for (const auto& g : full_groups) {
+            config.global_layer_ids.push_back(g);
+            config.layer_ids.push_back(g);
+            config.cache_specs.push_back(full_spec);
+            config.group_types.push_back(CacheGroupType::FULL);
+        }
+        config.linear_group_num = 0;
+        config.full_group_num   = static_cast<int>(full_groups.size());
+
+        // Setup physical sizes using max of all specs
+        setupPhysicalSizes(config, {sw_spec, full_spec});
+
+        // Setup layer to group mapping
+        setupLayerToGroupMapping(config);
+
+        config.layer_attn_types.assign(config.layer_num, CacheGroupType::FULL);
+        for (size_t layer_id = 0; layer_id < config.layer_to_group_id.size(); ++layer_id) {
+            const int gid = config.layer_to_group_id[layer_id];
+            if (gid >= 0 && static_cast<size_t>(gid) < config.group_types.size()) {
+                config.layer_attn_types[layer_id] = config.group_types[static_cast<size_t>(gid)];
+            }
+        }
+
+        const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+        config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
+                                                  static_cast<int>(per_layer_stride_bytes));
+        return config;
+    }
+
+    // Original two-way split path (LINEAR + FULL)
     auto [linear_layers, full_layers] = HybridConfigCreator::splitLayersByAttentionType(model_config);
 
     // Initialize config
