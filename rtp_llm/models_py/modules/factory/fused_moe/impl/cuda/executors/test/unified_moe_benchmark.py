@@ -741,5 +741,145 @@ class TestUnifiedMoeBenchmark(unittest.TestCase):
                 print(f"  {e}")
 
 
+    # =====================================================================
+    # End-to-End MoE Benchmark (with routing overhead for fair comparison)
+    # =====================================================================
+
+    def test_e2e_with_routing(self):
+        """End-to-end MoE benchmark: routing + GEMM + gather.
+
+        Adds softmax→topk→scatter/gather overhead to non-fused impls
+        so they can be fairly compared with fused TRT-LLM impls.
+        """
+        if torch.cuda.get_device_capability() < (10, 0):
+            self.skipTest("SM100+ required")
+
+        torch.manual_seed(SEED)
+        torch.cuda.manual_seed_all(SEED)
+
+        E, N, K, top_k = 8, 2048, 7168, 8
+        device = "cuda"
+
+        # Only test uniform scenarios for E2E (subset for time)
+        e2e_scenarios = [
+            ("M/E=8",    8,    "decode"),
+            ("M/E=16",   16,   "decode"),
+            ("M/E=64",   64,   "prefill"),
+            ("M/E=256",  256,  "prefill"),
+            ("M/E=512",  512,  "prefill"),
+            ("M/E=1024", 1024, "prefill"),
+            ("M/E=2048", 2048, "prefill"),
+        ]
+
+        # Select impls for E2E comparison (skip FP8-CUT per-tensor - too slow)
+        e2e_impls = [
+            ("FP4-CD",  _bench_cutedsl_fp4,        False),
+            ("FP4-TRT", _bench_trtllm_fp4,         True),
+            ("FP8-FI",  _bench_flashinfer_fp8,     False),
+            ("FP8-DGC", _bench_deepgemm_contiguous, False),
+            ("FP8-TRT", _bench_trtllm_fp8,         True),
+        ]
+
+        def _routing_overhead(total_tokens, E, top_k):
+            """Measure routing-only overhead: softmax + topk + scatter + gather."""
+            router_logits = torch.randn(total_tokens, E, device=device, dtype=torch.bfloat16)
+            hidden = torch.randn(total_tokens, K, device=device, dtype=torch.bfloat16)
+            # Pre-allocate output
+            output = torch.empty_like(hidden)
+
+            def route():
+                # 1. Softmax + TopK (routing)
+                weights = torch.softmax(router_logits.float(), dim=1)
+                routing_weights, topk_idx = torch.topk(weights, top_k, dim=-1)
+                routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+
+                # 2. Scatter: sort tokens by expert assignment
+                flat_idx = topk_idx.view(-1)
+                sorted_idx = torch.argsort(flat_idx, stable=True)
+                expert_counts = torch.bincount(flat_idx, minlength=E)
+
+                # Expand hidden for top_k selections
+                expanded = hidden.unsqueeze(1).expand(-1, top_k, -1).reshape(-1, K)
+                scattered = expanded[sorted_idx]
+
+                # 3. Gather: apply routing weights and sum
+                # (simulate: result[i] += weight * expert_output[sorted_pos])
+                dummy_expert_out = scattered  # placeholder
+                weighted = dummy_expert_out * routing_weights.view(-1, 1)
+                # scatter_add back to original positions
+                inv_sorted = torch.argsort(sorted_idx)
+                reordered = weighted[inv_sorted].view(total_tokens, top_k, K)
+                output[:] = reordered.sum(dim=1)
+                return output
+
+            return _bench_time(route)
+
+        print("\n" + "=" * 130)
+        print(f"  End-to-End MoE Benchmark — SM100 (Routing + FC1+SiLU+FC2 + Gather)")
+        print(f"  E={E}, N={N}, K={K}, top_k={top_k}")
+        print(f"  Non-fused impls include: softmax→topk→scatter + GEMM + weighted-gather")
+        print(f"  Fused impls (*): routing is built into the kernel")
+        print("=" * 130)
+
+        # Print header
+        col_w = 12
+        hdr = f"{'Scenario':<12} {'Type':<8} {'TotM':>6} | {'Route ms':>10} | "
+        for name, _, is_fused in e2e_impls:
+            mark = "*" if is_fused else ""
+            hdr += f"{name + mark:>{col_w}} {'TF':>7} | "
+        hdr += f"{'Best':>10}"
+        print(hdr)
+        print("-" * 130)
+
+        all_errors = []
+
+        for label, m_per_e, stype in e2e_scenarios:
+            total_tokens = E * m_per_e
+
+            # Measure routing overhead once
+            route_ms = _routing_overhead(total_tokens, E, top_k)
+
+            results = {}
+            for name, bench_fn, is_fused in e2e_impls:
+                gemm_ms, tf, err = _safe_run(lambda fn=bench_fn: fn(E, m_per_e, K, N))
+                if gemm_ms is not None:
+                    if is_fused:
+                        # Fused: already includes routing
+                        e2e_ms = gemm_ms
+                    else:
+                        # Non-fused: add routing overhead
+                        e2e_ms = gemm_ms + route_ms
+                    e2e_tf = _compute_moe_tflops(total_tokens, N, K, e2e_ms)
+                    results[name] = (e2e_ms, e2e_tf, None)
+                else:
+                    results[name] = (None, None, err)
+                    if err:
+                        all_errors.append(f"[{name}] {label}: {err}")
+
+            row = f"{label:<12} {stype:<8} {total_tokens:>6} | {route_ms:>8.3f}ms | "
+            candidates = []
+            for name, _, is_fused in e2e_impls:
+                ms, tf, _ = results[name]
+                ms_s = f"{ms:.3f}" if ms else "ERR"
+                tf_s = f"{tf:.1f}" if tf else "-"
+                row += f"{ms_s:>{col_w}} {tf_s:>7} | "
+                if ms:
+                    candidates.append((name, ms))
+            best = min(candidates, key=lambda x: x[1])[0] if candidates else "N/A"
+            row += f"{best:>10}"
+            print(row)
+
+        print("=" * 130)
+        print("E2E = Routing(softmax+topk+scatter) + GEMM(FC1+SiLU+FC2) + Gather(weighted-sum)")
+        print("  * = fused kernel (routing built-in, no separate overhead)")
+        print("  Route ms = standalone routing overhead (added to non-fused impls)")
+        print("  Note: routing overhead is measured separately and added to GEMM time")
+
+        if all_errors:
+            print(f"\nErrors ({len(all_errors)}):")
+            for e in all_errors:
+                print(f"  {e}")
+
+
 if __name__ == "__main__":
     unittest.main()
