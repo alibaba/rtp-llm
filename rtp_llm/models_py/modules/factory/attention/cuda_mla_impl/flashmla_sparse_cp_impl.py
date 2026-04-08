@@ -156,6 +156,25 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         )
         self.total_local_ids = torch.cat([self.q0_idx, self.q1_idx], dim=0)
 
+        # --- Bounds checks (moved from forward hot-path to avoid device-host sync) ---
+        unpadded_total = int(padding_mask.sum().item())
+        if self.total_local_ids.numel() > 0:
+            max_lid = self.total_local_ids.max().item()
+            if max_lid >= local_tokens:
+                raise ValueError(
+                    f"[plan] total_local_ids out of range: "
+                    f"max(total_local_ids)={max_lid}, local_tokens={local_tokens}. "
+                    "Check CP plan() local chunk vs actual input size."
+                )
+        if self.total_global_ids.numel() > 0:
+            max_gid = self.total_global_ids.max().item()
+            if max_gid >= unpadded_total:
+                raise ValueError(
+                    f"[plan] total_global_ids out of range: "
+                    f"max(total_global_ids)={max_gid}, unpadded_total={unpadded_total}. "
+                    "Check padded-to-unpadded coordinate conversion."
+                )
+
         # attention_inputs.cu_kv_seqlens is based on local CP chunk lengths
         # (input_lengths is overwritten by ContextParallelProcessor), but the
         # gather kernel needs cumulative lengths covering the full (global) sequence.
@@ -164,6 +183,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         kv_lengths = actual_input_lengths.int() + prefix_lengths.int()
         cu_kv_seqlens_cpu = torch.zeros(kv_lengths.shape[0] + 1, dtype=torch.int32)
         cu_kv_seqlens_cpu[1:] = torch.cumsum(kv_lengths, dim=0)
+        self.total_kv_len = int(cu_kv_seqlens_cpu[-1])
         self.cu_kv_seqlens_global = cu_kv_seqlens_cpu.to(self.device)
 
         # get_mla_metadata: num_q_tokens_per_head_k = num_q_tokens * num_heads_q // num_heads_k (for tile scheduling).
@@ -387,6 +407,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             total_global_ids=self.fmha_impl.total_global_ids,
             total_local_ids=self.fmha_impl.total_local_ids,
             cu_kv_seqlens_global=self.fmha_impl.cu_kv_seqlens_global,
+            total_kv_len=self.fmha_impl.total_kv_len,
         )
 
     @classmethod
