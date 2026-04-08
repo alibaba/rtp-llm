@@ -363,9 +363,9 @@ def _bench_trtllm_fp4(E, tokens_per_expert, K, N):
         w2_sf_list.append(sf2)
 
     w1_fp4 = torch.stack(w1_fp4_list)
-    w1_sf = torch.stack(w1_sf_list)
+    w1_sf = torch.stack(w1_sf_list).view(torch.float8_e4m3fn)  # kernel requires fp8 dtype
     w2_fp4 = torch.stack(w2_fp4_list)
-    w2_sf = torch.stack(w2_sf_list)
+    w2_sf = torch.stack(w2_sf_list).view(torch.float8_e4m3fn)  # kernel requires fp8 dtype
 
     # Input
     hidden = torch.randn(total_tokens, K, device=device, dtype=torch.bfloat16,
