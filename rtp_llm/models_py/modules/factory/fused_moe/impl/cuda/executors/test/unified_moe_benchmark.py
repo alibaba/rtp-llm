@@ -329,7 +329,7 @@ def _bench_trtllm_fp4(E, tokens_per_expert, K, N):
     if isinstance(tokens_per_expert, int):
         tokens_per_expert = [tokens_per_expert] * E
     total_tokens = sum(tokens_per_expert)
-    top_k = min(8, E)
+    top_k = min(8, E - 1)  # TRT-LLM requires num_experts > top_k
 
     # Generate weights
     w1_bf16 = (torch.randn(E, 2 * N, K, device=device, dtype=torch.float32,
@@ -373,6 +373,8 @@ def _bench_trtllm_fp4(E, tokens_per_expert, K, N):
     hs_global_sf = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / hidden.float().abs().max().clamp(min=1e-4)
     hs_fp4, hs_sf = fp4_quantize(hidden, hs_global_sf, sf_vec_size=sf_vec_size,
                                   sf_use_ue8m0=False, is_sf_swizzled_layout=False)
+    # Convert scale to float8_e4m3fn view (kernel requirement)
+    hs_sf = hs_sf.view(torch.float8_e4m3fn).reshape(total_tokens, -1)
 
     # Construct routing logits that produce desired token distribution
     routing_logits = torch.full((total_tokens, E), -10.0, device=device, dtype=torch.bfloat16)
@@ -411,7 +413,7 @@ def _bench_trtllm_fp4(E, tokens_per_expert, K, N):
             intermediate_size=N,
             local_expert_offset=0, local_num_experts=E,
             routed_scaling_factor=None,
-            routing_method_type=0,
+            routing_method_type=1,  # Renormalize: TopK -> Softmax
             do_finalize=True,
             tune_max_num_tokens=max(total_tokens, 4096),
         )
@@ -431,7 +433,7 @@ def _bench_trtllm_fp8(E, tokens_per_expert, K, N):
     if isinstance(tokens_per_expert, int):
         tokens_per_expert = [tokens_per_expert] * E
     total_tokens = sum(tokens_per_expert)
-    top_k = min(8, E)
+    top_k = min(8, E - 1)  # TRT-LLM requires num_experts > top_k
 
     w1_bf16 = (torch.randn(E, 2 * N, K, device=device, dtype=torch.float32,
                             generator=torch.Generator(device).manual_seed(SEED)) * 0.1).to(torch.bfloat16)
@@ -476,7 +478,7 @@ def _bench_trtllm_fp8(E, tokens_per_expert, K, N):
             intermediate_size=N,
             local_expert_offset=0, local_num_experts=E,
             routed_scaling_factor=None,
-            routing_method_type=0,
+            routing_method_type=1,  # Renormalize: TopK -> Softmax
             do_finalize=True,
             tune_max_num_tokens=max(total_tokens, 4096),
         )
