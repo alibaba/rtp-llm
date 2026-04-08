@@ -175,7 +175,7 @@ def truncate_token_with_stop_word_id(
         "Convert ndarray/tensor with .tolist() before calling."
     )
     for stop_word_id in stop_word_ids:
-        if stop_word_id and np.array_equal(tokens[-len(stop_word_id) :], stop_word_id):
+        if stop_word_id and tokens[-len(stop_word_id) :] == stop_word_id:
             tokens = tokens[: (-len(stop_word_id))]
             break
     return tokens
