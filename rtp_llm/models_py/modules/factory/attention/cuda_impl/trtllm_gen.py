@@ -25,19 +25,54 @@ DEFAULT_TRT_WORKSPACE_SIZE_MB = (
 _g_trt_workspace_pool: list[torch.Tensor] = []
 _g_trt_pool_lock = __import__("threading").Lock()
 
+# Global shared workspace buffer for CUDA graph mode
+_g_trt_shared_workspace_buffer: torch.Tensor = None
+_g_trt_shared_workspace_lock = __import__("threading").Lock()
 
-def get_trt_workspace_buffer(device: str = "cuda") -> torch.Tensor:
-    """Get a TRT workspace buffer from the pool.
 
-    This function manages a pool of workspace buffers to support multiple
-    concurrent instances while avoiding excessive memory allocation.
+def get_trt_shared_workspace_buffer(device: str = "cuda") -> torch.Tensor:
+    """Get or create the global shared TRT workspace buffer.
+
+    This function returns a single shared workspace buffer that can be reused
+    across all attention instances. This is especially useful in CUDA graph mode
+    to reduce memory consumption.
 
     Args:
         device: CUDA device to allocate buffer on (default: "cuda")
 
     Returns:
+        Global shared workspace buffer tensor of size DEFAULT_TRT_WORKSPACE_SIZE_MB
+    """
+    global _g_trt_shared_workspace_buffer
+    with _g_trt_shared_workspace_lock:
+        if _g_trt_shared_workspace_buffer is None:
+            _g_trt_shared_workspace_buffer = torch.zeros(
+                DEFAULT_TRT_WORKSPACE_SIZE_MB * 1024 * 1024,
+                dtype=torch.uint8,
+                device=device,
+            )
+        return _g_trt_shared_workspace_buffer
+
+
+def get_trt_workspace_buffer(
+    device: str = "cuda", shared: bool = False
+) -> torch.Tensor:
+    """Get a TRT workspace buffer from the pool or shared buffer.
+
+    This function manages workspace buffers to support multiple concurrent instances.
+    When shared=True, it returns a global shared buffer for all instances.
+    When shared=False, it returns a buffer from the pool for exclusive use.
+
+    Args:
+        device: CUDA device to allocate buffer on (default: "cuda")
+        shared: If True, return the global shared buffer; if False, get from pool
+
+    Returns:
         Workspace buffer tensor of size DEFAULT_TRT_WORKSPACE_SIZE_MB
     """
+    if shared:
+        return get_trt_shared_workspace_buffer(device)
+
     with _g_trt_pool_lock:
         if _g_trt_workspace_pool:
             return _g_trt_workspace_pool.pop()
@@ -50,12 +85,17 @@ def get_trt_workspace_buffer(device: str = "cuda") -> torch.Tensor:
             )
 
 
-def release_trt_workspace_buffer(buffer: torch.Tensor) -> None:
+def release_trt_workspace_buffer(buffer: torch.Tensor, shared: bool = False) -> None:
     """Release a TRT workspace buffer back to the pool.
 
     Args:
         buffer: The workspace buffer to release
+        shared: If True, this is a shared buffer and should not be released; if False, return to pool
     """
+    if shared:
+        # Shared buffer is never released, just skip
+        return
+
     with _g_trt_pool_lock:
         _g_trt_workspace_pool.append(buffer)
 
@@ -323,11 +363,15 @@ class FlashInferTRTLLMPrefillOp(object):
         self.local_head_num = attn_configs.head_num
         self.local_head_kv_num = attn_configs.kv_head_num
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
-        self.workspace_buffer = get_trt_workspace_buffer()
+        self.use_shared_buffer = attn_configs.shared_attn_workspace_buffer
+        self.workspace_buffer = get_trt_workspace_buffer(shared=self.use_shared_buffer)
 
     def __del__(self):
         """Release workspace buffer back to pool when object is destroyed."""
-        release_trt_workspace_buffer(self.workspace_buffer)
+        if hasattr(self, "workspace_buffer") and hasattr(self, "use_shared_buffer"):
+            release_trt_workspace_buffer(
+                self.workspace_buffer, shared=self.use_shared_buffer
+            )
 
     def support(self, attention_inputs: PyAttentionInputs):
         return (
@@ -431,11 +475,15 @@ class FlashInferTRTLLMDecodeOp(object):
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.local_head_num = attn_configs.head_num
         self.local_head_kv_num = attn_configs.kv_head_num
-        self.workspace_buffer = get_trt_workspace_buffer()
+        self.use_shared_buffer = attn_configs.shared_attn_workspace_buffer
+        self.workspace_buffer = get_trt_workspace_buffer(shared=self.use_shared_buffer)
 
     def __del__(self):
         """Release workspace buffer back to pool when object is destroyed."""
-        release_trt_workspace_buffer(self.workspace_buffer)
+        if hasattr(self, "workspace_buffer") and hasattr(self, "use_shared_buffer"):
+            release_trt_workspace_buffer(
+                self.workspace_buffer, shared=self.use_shared_buffer
+            )
 
     def support(self, attention_inputs: PyAttentionInputs):
         if not is_sm_100():

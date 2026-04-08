@@ -94,6 +94,7 @@ std::string FMHAConfig::to_string() const {
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
         << "use_triton_pa: " << use_triton_pa << "\n"
+        << "shared_attn_workspace_buffer: " << shared_attn_workspace_buffer << "\n"
         << "absorb_opt_len: " << absorb_opt_len << "\n";
     return oss.str();
 }

@@ -27,8 +27,54 @@ DEFAULT_XQA_WORKSPACE_SIZE_MB = 248
 _g_xqa_workspace_pool: list[torch.Tensor] = []
 _g_xqa_pool_lock = __import__("threading").Lock()
 
+# Global shared workspace buffer for CUDA graph mode
+_g_xqa_shared_workspace_buffer: torch.Tensor = None
+_g_xqa_shared_workspace_lock = __import__("threading").Lock()
 
-def get_xqa_workspace_buffer(device: str = "cuda") -> torch.Tensor:
+
+def get_xqa_shared_workspace_buffer(device: str = "cuda") -> torch.Tensor:
+    """Get or create the global shared XQA workspace buffer.
+
+    This function returns a single shared workspace buffer that can be reused
+    across all attention instances. This is especially useful in CUDA graph mode
+    to reduce memory consumption.
+
+    Args:
+        device: CUDA device to allocate buffer on (default: "cuda")
+
+    Returns:
+        Global shared workspace buffer tensor of size DEFAULT_XQA_WORKSPACE_SIZE_MB
+    """
+    global _g_xqa_shared_workspace_buffer
+    with _g_xqa_shared_workspace_lock:
+        if _g_xqa_shared_workspace_buffer is None:
+            _g_xqa_shared_workspace_buffer = torch.zeros(
+                DEFAULT_XQA_WORKSPACE_SIZE_MB * 1024 * 1024,
+                dtype=torch.uint8,
+                device=device,
+            )
+        return _g_xqa_shared_workspace_buffer
+
+
+def get_xqa_workspace_buffer(
+    device: str = "cuda", shared: bool = False
+) -> torch.Tensor:
+    """Get an XQA workspace buffer from the pool or shared buffer.
+
+    This function manages workspace buffers to support multiple concurrent instances.
+    When shared=True, it returns a global shared buffer for all instances.
+    When shared=False, it returns a buffer from the pool for exclusive use.
+
+    Args:
+        device: CUDA device to allocate buffer on (default: "cuda")
+        shared: If True, return the global shared buffer; if False, get from pool
+
+    Returns:
+        Workspace buffer tensor of size DEFAULT_XQA_WORKSPACE_SIZE_MB
+    """
+    if shared:
+        return get_xqa_shared_workspace_buffer(device)
+
     with _g_xqa_pool_lock:
         if _g_xqa_workspace_pool:
             return _g_xqa_workspace_pool.pop()
@@ -40,7 +86,17 @@ def get_xqa_workspace_buffer(device: str = "cuda") -> torch.Tensor:
             )
 
 
-def release_xqa_workspace_buffer(buffer: torch.Tensor) -> None:
+def release_xqa_workspace_buffer(buffer: torch.Tensor, shared: bool = False) -> None:
+    """Release an XQA workspace buffer back to the pool.
+
+    Args:
+        buffer: The workspace buffer to release
+        shared: If True, this is a shared buffer and should not be released; if False, return to pool
+    """
+    if shared:
+        # Shared buffer is never released, just skip
+        return
+
     with _g_xqa_pool_lock:
         _g_xqa_workspace_pool.append(buffer)
 
@@ -109,7 +165,6 @@ class XQAImpl(FMHAImplBase):
 
 
 class XQADecodeImpl(FMHAImplBase):
-
 
     def __init__(
         self,
@@ -181,11 +236,18 @@ class XQAWrapper:
         self.attn_inputs = attn_inputs
         self.cu_qseqlens = attn_inputs.cu_seqlens
         assert not self.attn_inputs.is_prefill, "XQA is not supported"
-        self.workspace_buffer = get_xqa_workspace_buffer()
+        # attention_inputs is not used
+        # init workspace_buffer and semaphores
+        self.use_shared_buffer = config.shared_attn_workspace_buffer
+        self.workspace_buffer = get_xqa_workspace_buffer(shared=self.use_shared_buffer)
         self.semaphores = torch.zeros(8 * 1024 * 1024, dtype=torch.uint8, device="cuda")
 
     def __del__(self):
-        release_xqa_workspace_buffer(self.workspace_buffer)
+        """Release workspace buffer back to pool when object is destroyed."""
+        if hasattr(self, "workspace_buffer") and hasattr(self, "use_shared_buffer"):
+            release_xqa_workspace_buffer(
+                self.workspace_buffer, shared=self.use_shared_buffer
+            )
 
     def support(self, attn_inputs: Any) -> bool:
         group_size = self.config.head_num // self.config.kv_head_num

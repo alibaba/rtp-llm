@@ -80,12 +80,15 @@ class TestCudaGraphPrefill(unittest.TestCase):
             1,
             3,
             6,
+            10,
             30,
             60,
             100,
             125,
             128,
+            150,
             278,
+            338,
             466,
             448,
             512,
@@ -168,19 +171,9 @@ class TestCudaGraphPrefill(unittest.TestCase):
                 input_ids[i] = (i + 1) % 10 + 10
 
         inputs.input_ids = input_ids
+        inputs.input_hiddens = torch.empty(0, dtype=torch.bfloat16, device="cuda")
         attention_inputs.input_lengths = torch.tensor(
             input_lengths_data, dtype=torch.int32, device="cpu"
-        )
-
-        # kv_cache_block_id [batch_size, block_num]
-        need_block_nums = (
-            max_seq_len + seq_size_per_block - 1
-        ) // seq_size_per_block + 1
-        attention_inputs.kv_cache_block_id_device = torch.zeros(
-            batch_size, need_block_nums, dtype=torch.int32, device="cuda"
-        )
-        attention_inputs.kv_cache_block_id_host = torch.zeros(
-            batch_size, need_block_nums, dtype=torch.int32, device="cpu"
         )
 
         attention_inputs.prefix_lengths = torch.zeros(
@@ -247,8 +240,11 @@ class TestCudaGraphPrefill(unittest.TestCase):
         close_mask = torch.isclose(
             outputs1.hidden_states, valid_outputs2_tensor, rtol=1e-2, atol=1e-2
         )
-
-        print(f"trt padded mode success for batch: {batch_size}!!")
+        padded_pass_ratio = close_mask.float().mean().item()
+        print(
+            f"padded vs non-padded pass ratio: {padded_pass_ratio*100:.2f}%", flush=True
+        )
+        print(f"trt padded mode success for batch: {batch_size}!!", flush=True)
 
         inputs3 = self.build_inputs(
             batch_size, max_seq_len, kernel_seq_size_per_block, False
@@ -272,6 +268,8 @@ class TestCudaGraphPrefill(unittest.TestCase):
             outputs1.hidden_states, outputs3.hidden_states, rtol=1e-2, atol=1e-2
         )
         pass_ratio = close_mask.float().mean().item()
+        print(f"normal vs cuda_graph pass ratio: {pass_ratio*100:.2f}%", flush=True)
+
         assert (
             pass_ratio >= 0.999
         ), f"Only {pass_ratio*100:.2f}% elements pass, expected >= 99.99%"

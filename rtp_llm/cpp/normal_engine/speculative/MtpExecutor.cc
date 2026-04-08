@@ -214,6 +214,17 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             draft_model_.reset(new PyWrappedModel(
                 model_params, params.py_sp_model, false, false, draft_cache_layer_layout.layer_to_groups));
+            // Create separate model for speculative prefill with CUDA graph if enabled (from params)
+            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
+            RTP_LLM_LOG_INFO(
+                "[speculative decoding] enable_cuda_graph=%d (set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_)",
+                static_cast<int>(enable_cuda_graph));
+            if (enable_cuda_graph) {
+                RTP_LLM_LOG_INFO(
+                    "[speculative decoding] creating separate prefill draft model with CUDA graph support");
+                sp_prefill_draft_model_.reset(new PyWrappedModel(
+                    model_params, params.py_sp_model, true, false, draft_cache_layer_layout.layer_to_groups));
+            }
         }
         break;  // NOTE: only support one mtp model now
     }
@@ -640,7 +651,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
-        draft_prefill_model_output = std::move(draft_model_->forward(model_input));
+        // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_
+        if (sp_prefill_draft_model_) {
+            draft_prefill_model_output = std::move(sp_prefill_draft_model_->forward(model_input));
+        } else {
+            draft_prefill_model_output = std::move(draft_model_->forward(model_input));
+        }
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -784,9 +800,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     // clear host buffers holder
     buffer_holder_.release();
 
-    const auto& mtp_cache_cfg          = cache_manager_->getMTPModuleCacheConfig(0);
-    model_input.kv_block_stride_bytes  = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes  = mtp_cache_cfg.kv_scale_stride_bytes;
+    const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
+    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
+    model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
 
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_ids_list;
@@ -871,8 +887,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
         const auto& cache_cfg             = cache_manager_->cacheConfig();
         model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes  = cache_cfg.kv_scale_stride_bytes;
-
+        model_input.kv_scale_stride_bytes = cache_cfg.kv_scale_stride_bytes;
     }
 }
 
