@@ -267,6 +267,213 @@ def fused_recurrent_gated_delta_rule_fwd(
     return o, final_state
 
 
+# ---------------------------------------------------------------------------
+# Fused Gating + Recurrent kernel (Phase 5: SM8x fallback optimization)
+# Eliminates the separate fused_gdn_gating kernel launch by computing
+# g = -exp(A_log) * softplus(a + dt_bias) and beta = sigmoid(b) inline.
+# ---------------------------------------------------------------------------
+@triton.jit
+def _softplus(x, beta: tl.constexpr = 1.0, threshold: tl.constexpr = 20.0):
+    return tl.where(x * beta > threshold, x, tl.log(1.0 + exp(x * beta)) / beta)
+
+
+@triton.heuristics(
+    {
+        "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
+        "IS_CONTINUOUS_BATCHING": lambda args: args["block_map"] is not None,
+    }
+)
+@triton.jit(do_not_specialize=["N", "T"])
+def fused_recurrent_with_gating_kernel(
+    q, k, v,
+    A_log,      # [HV] float32
+    a_raw,      # [B, T, HV] raw a input
+    dt_bias,    # [HV]
+    b_raw,      # [B, T, HV] raw b input
+    o, h0, ht,
+    block_map, sequence_lengths,
+    max_block_size: tl.int32,
+    scale,
+    N: tl.constexpr,
+    T: tl.constexpr,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    stride_qs: tl.constexpr,
+    stride_qh: tl.constexpr,
+    stride_ks: tl.constexpr,
+    stride_kh: tl.constexpr,
+    stride_vs: tl.constexpr,
+    stride_vh: tl.constexpr,
+    stride_init_state_token: tl.constexpr,
+    stride_final_state_token: tl.constexpr,
+    USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    INPLACE_FINAL_STATE: tl.constexpr,
+    IS_CONTINUOUS_BATCHING: tl.constexpr,
+    SEQ_SIZE_PER_BLOCK: tl.constexpr,
+):
+    """Fused gating + recurrent GDN decode kernel.
+    Computes g and beta from raw A_log, a, dt_bias, b inline."""
+    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_n, i_hv = i_nh // HV, i_nh % HV
+    i_h = i_hv // (HV // H)
+
+    bos, eos = i_n * T, i_n * T + T
+
+    if IS_CONTINUOUS_BATCHING:
+        sequence_length = tl.load(sequence_lengths + i_n).to(tl.int64)
+    else:
+        sequence_length = 0
+
+    if T <= 0:
+        return
+
+    o_k = i_k * BK + tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+
+    p_q = q + bos * stride_qs + i_h * stride_qh + o_k
+    p_k = k + bos * stride_ks + i_h * stride_kh + o_k
+    p_v = v + bos * stride_vs + i_hv * stride_vh + o_v
+    p_o = o + ((i_k * B * T + bos) * HV + i_hv) * V + o_v
+
+    b_A_log = tl.load(A_log + i_hv).to(tl.float32)
+    b_dt_bias = tl.load(dt_bias + i_hv).to(tl.float32)
+
+    p_a = a_raw + bos * HV + i_hv
+    p_b = b_raw + bos * HV + i_hv
+
+    mask_k = o_k < K
+    mask_v = o_v < V
+    mask_h = mask_k[:, None] & mask_v[None, :]
+
+    b_h = tl.zeros([BK, BV], dtype=tl.float32)
+    if USE_INITIAL_STATE:
+        if IS_CONTINUOUS_BATCHING:
+            load_block_offset = cal_block_idx(sequence_length - 1, SEQ_SIZE_PER_BLOCK)
+            read_block_id = tl.load(
+                block_map + i_n * max_block_size + load_block_offset
+            ).to(tl.int64)
+            if read_block_id <= 0:
+                return
+            p_h0 = h0 + read_block_id * stride_init_state_token
+        else:
+            p_h0 = h0 + bos * HV * K * V
+        p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+        b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+
+    for i_t in range(0, T):
+        b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
+        b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
+        b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
+
+        # Inline gating (replaces fused_gdn_gating)
+        b_a = tl.load(p_a).to(tl.float32)
+        b_b = tl.load(p_b).to(tl.float32)
+        b_g = -exp(b_A_log) * _softplus(b_a + b_dt_bias)
+        b_beta = tl.sigmoid(b_b)
+
+        if USE_QK_L2NORM_IN_KERNEL:
+            b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+            b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+        b_q = b_q * scale
+
+        b_h *= exp(b_g)
+        b_v -= tl.sum(b_h * b_k[:, None], 0)
+        b_v *= b_beta
+        b_h += b_k[:, None] * b_v[None, :]
+        b_o = tl.sum(b_h * b_q[:, None], 0)
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
+
+        if INPLACE_FINAL_STATE and IS_CONTINUOUS_BATCHING:
+            write_block_offset = (
+                cal_block_idx(sequence_length, SEQ_SIZE_PER_BLOCK) + i_t
+            )
+            write_block_id = tl.load(
+                block_map + i_n * max_block_size + write_block_offset
+            ).to(tl.int64)
+            p_ht = ht + write_block_id * stride_final_state_token
+        else:
+            p_ht = ht + (bos + i_t) * stride_final_state_token
+        p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+
+        p_q += stride_qs
+        p_k += stride_ks
+        p_o += HV * V
+        p_v += stride_vs
+        p_a += HV
+        p_b += HV
+
+
+def fused_recurrent_gated_delta_rule_with_gating(
+    q: torch.Tensor,       # [B, T, H, K]
+    k: torch.Tensor,       # [B, T, H, K]
+    v: torch.Tensor,       # [B, T, HV, V]
+    A_log: torch.Tensor,   # [HV]
+    a: torch.Tensor,       # [B, HV] or [B, T, HV]
+    dt_bias: torch.Tensor, # [HV]
+    b: torch.Tensor,       # [B, HV] or [B, T, HV]
+    scale: float = None,
+    initial_state: torch.Tensor = None,
+    inplace_final_state: bool = True,
+    block_map: Optional[torch.Tensor] = None,
+    seq_size_per_block: int = 1,
+    sequence_lengths: Optional[torch.Tensor] = None,
+    use_qk_l2norm_in_kernel: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused gating + recurrent GDN decode. Single kernel launch.
+    Equivalent to fused_gdn_gating() + fused_recurrent_gated_delta_rule()."""
+    B, T, H, K = q.shape
+    HV, V = v.shape[2], v.shape[3]
+
+    if scale is None:
+        scale = K ** -0.5
+
+    if a.dim() == 2:
+        a = a.unsqueeze(1)
+    if b.dim() == 2:
+        b = b.unsqueeze(1)
+    a = a.contiguous()
+    b = b.contiguous()
+
+    BK = triton.next_power_of_2(K)
+    BV = min(triton.next_power_of_2(V), 8)
+    NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
+    assert NK == 1
+
+    o = q.new_empty(NK, *v.shape)
+    final_state = initial_state if inplace_final_state else q.new_empty(T, HV, K, V, dtype=initial_state.dtype)
+
+    max_block_size = block_map.shape[1] if block_map is not None else 0
+
+    grid = (NK, NV, B * HV)
+    fused_recurrent_with_gating_kernel[grid](
+        q=q, k=k, v=v,
+        A_log=A_log, a_raw=a, dt_bias=dt_bias, b_raw=b,
+        o=o, h0=initial_state, ht=final_state,
+        block_map=block_map, sequence_lengths=sequence_lengths,
+        max_block_size=max_block_size,
+        scale=scale,
+        N=B, T=T, B=B, H=H, HV=HV, K=K, V=V, BK=BK, BV=BV,
+        stride_qs=q.stride(1), stride_qh=q.stride(2),
+        stride_ks=k.stride(1), stride_kh=k.stride(2),
+        stride_vs=v.stride(1), stride_vh=v.stride(2),
+        stride_init_state_token=initial_state.stride(0),
+        stride_final_state_token=final_state.stride(0),
+        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        INPLACE_FINAL_STATE=inplace_final_state,
+        SEQ_SIZE_PER_BLOCK=seq_size_per_block,
+        num_warps=1,
+        num_stages=3,
+    )
+    return o.squeeze(0), final_state
+
+
 class FusedRecurrentFunction(torch.autograd.Function):
 
     @staticmethod

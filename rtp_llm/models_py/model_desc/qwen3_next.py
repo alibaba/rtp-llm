@@ -150,6 +150,8 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         weights: Dict[str, torch.Tensor],
     ):
         super().__init__(linear_attn_config, parallelism_config, weights)
+        from rtp_llm.models_py.utils.arch import is_flashinfer_gdn_available
+        self.use_flashinfer_gdn = is_flashinfer_gdn_available()
 
     def _conv1d(
         self,
@@ -229,29 +231,60 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         query = query.view(1, query.shape[0], self.local_num_k_heads, self.head_k_dim)
         key = key.view(1, key.shape[0], self.local_num_k_heads, self.head_k_dim)
         value = value.view(1, value.shape[0], self.local_num_v_heads, self.head_v_dim)
-        attn_out, h, final_state = chunk_gated_delta_rule(
-            query,
-            key,
-            value,
-            g,
-            beta,
-            initial_state=initial_states,
-            output_final_state=True,
-            cu_seqlens=cu_seqlens_without_padding,
-            use_qk_l2norm_in_kernel=True,
-        )
-        if ssm_states is not None:
-            store_ssm_state_to_block_map(
-                h,
-                final_state,
-                attn_inputs.prefix_lengths_d,
-                cu_seqlens_without_padding,
-                attn_inputs.kv_cache_kernel_block_id_device,
-                ssm_states,
-                seq_size_per_block,
-                chunk_size=64,
+
+        if self.use_flashinfer_gdn:
+            # FlashInfer CUTLASS TMA prefill (SM90+)
+            from rtp_llm.models_py.triton_kernels.fla.flashinfer_gdn import flashinfer_gdn_prefill
+            # FlashInfer expects [total_tokens, H, D] (no batch dim)
+            attn_out, final_state = flashinfer_gdn_prefill(
+                q=query.squeeze(0),                     # [total_tokens, HK, K]
+                k=key.squeeze(0),                       # [total_tokens, HK, K]
+                v=value.squeeze(0),                     # [total_tokens, HV, V]
+                g=g.squeeze(0) if g.dim() > 2 else g,  # [total_tokens, HV] float32
+                beta=beta.squeeze(0) if beta.dim() > 2 else beta,
+                initial_state=initial_states,           # [N, HV, V, K] float32
+                cu_seqlens=cu_seqlens_without_padding.to(torch.int64),
+                use_qk_l2norm=True,
+                output_final_state=True,
             )
-        return attn_out.squeeze_(0)
+            # FlashInfer only returns final_state (no intermediate h)
+            # Store only final_state to block map using simplified kernel
+            if ssm_states is not None and final_state is not None:
+                from rtp_llm.models_py.triton_kernels.fla.block import store_final_state_only_to_block_map
+                store_final_state_only_to_block_map(
+                    final_state,
+                    attn_inputs.prefix_lengths_d,
+                    cu_seqlens_without_padding,
+                    attn_inputs.kv_cache_kernel_block_id_device,
+                    ssm_states,
+                    seq_size_per_block,
+                )
+            return attn_out
+        else:
+            # FLA Triton fallback
+            attn_out, h, final_state = chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                initial_state=initial_states,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens_without_padding,
+                use_qk_l2norm_in_kernel=True,
+            )
+            if ssm_states is not None:
+                store_ssm_state_to_block_map(
+                    h,
+                    final_state,
+                    attn_inputs.prefix_lengths_d,
+                    cu_seqlens_without_padding,
+                    attn_inputs.kv_cache_kernel_block_id_device,
+                    ssm_states,
+                    seq_size_per_block,
+                    chunk_size=64,
+                )
+            return attn_out.squeeze_(0)
 
     def forward(
         self,
@@ -292,6 +325,16 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
 
 
 class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
+    def __init__(
+        self,
+        linear_attn_config: LinearAttentionConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+    ):
+        super().__init__(linear_attn_config, parallelism_config, weights)
+        from rtp_llm.models_py.utils.arch import is_flashinfer_gdn_available
+        self.use_flashinfer_gdn = is_flashinfer_gdn_available()
+
     def _conv1d(
         self,
         mixed_qkv: torch.Tensor,
@@ -334,7 +377,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         batch, seq = self._get_bs_from_attenion_input(
             mixed_qkv, attn_inputs, is_target_verify
         )
-        # asserr head_k_dim == head_v_dim
+        # assert head_k_dim == head_v_dim
         mixed_qkv = mixed_qkv.reshape(
             batch,
             seq,
@@ -350,18 +393,64 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             ],
             dim=2,
         )
-        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
 
-        # contiguous will be applyed when call fused_recurrent_gated_delta_rule
-        g = g.view(batch, seq, self.local_num_v_heads)
-        beta = beta.view(batch, seq, self.local_num_v_heads)
         ssm_states = self._get_ssm_states(kv_cache_tensor)
-        core_attn_out, _ = fused_recurrent_gated_delta_rule(
+
+        # FlashInfer MTP path: SM90+ target_verify (speculative decoding, T > 1)
+        if self.use_flashinfer_gdn and is_target_verify:
+            from rtp_llm.models_py.triton_kernels.fla.flashinfer_gdn import flashinfer_gdn_mtp_decode
+            core_attn_out = flashinfer_gdn_mtp_decode(
+                q=query,
+                k=key,
+                v=value,
+                A_log=self.alog,
+                a=a,
+                dt_bias=self.dt_bias,
+                b=b,
+                ssm_states=ssm_states,
+                block_map=attn_inputs.kv_cache_kernel_block_id_device,
+                sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
+                seq_size_per_block=seq_size_per_block,
+            )
+            res = core_attn_out.reshape(
+                [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
+            )
+            return res
+
+        # FlashInfer path: SM90+, single kernel call, skips fused_gdn_gating
+        if self.use_flashinfer_gdn and not is_target_verify:
+            from rtp_llm.models_py.triton_kernels.fla.flashinfer_gdn import flashinfer_gdn_decode
+            core_attn_out = flashinfer_gdn_decode(
+                q=query,
+                k=key,
+                v=value,
+                A_log=self.alog,
+                a=a,
+                dt_bias=self.dt_bias,
+                b=b,
+                ssm_states=ssm_states,
+                block_map=attn_inputs.kv_cache_kernel_block_id_device,
+                sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
+                seq_size_per_block=seq_size_per_block,
+            )
+            res = core_attn_out.reshape(
+                [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
+            )
+            return res
+
+        # FLA Triton fallback path (SM8x or target_verify)
+        # Use fused gating+recurrent kernel (single launch instead of 2)
+        from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
+            fused_recurrent_gated_delta_rule_with_gating,
+        )
+        core_attn_out, _ = fused_recurrent_gated_delta_rule_with_gating(
             q=query,
             k=key,
             v=value,
-            g=g,
-            beta=beta,
+            A_log=self.alog,
+            a=a,
+            dt_bias=self.dt_bias,
+            b=b,
             scale=None,
             initial_state=ssm_states,
             inplace_final_state=True,

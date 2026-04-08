@@ -34,3 +34,23 @@ def get_num_device_sms() -> int:
 def get_sm(device_id: int = 0) -> Tuple[int, int]:
     major, minor = torch.cuda.get_device_capability(device_id)
     return major, minor
+
+
+_flashinfer_gdn_available: bool | None = None
+
+
+def is_flashinfer_gdn_available() -> bool:
+    """Check if FlashInfer GDN kernels are available (requires SM90+ and flashinfer >= 0.6)."""
+    global _flashinfer_gdn_available
+    if _flashinfer_gdn_available is not None:
+        return _flashinfer_gdn_available
+    try:
+        major, _ = torch.cuda.get_device_capability()
+        if major < 9:
+            _flashinfer_gdn_available = False
+            return False
+        from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose  # noqa: F401
+        _flashinfer_gdn_available = True
+    except (ImportError, Exception):
+        _flashinfer_gdn_available = False
+    return _flashinfer_gdn_available
