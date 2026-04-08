@@ -123,6 +123,9 @@ class GenerateConfig(BaseModel):
     adapter_name: Optional[Union[str, List[str]]] = None
     is_streaming: bool = False
 
+    # beam dedup biz
+    beam_dedup_idx: Optional[int] = None
+
     # multimodal preprocess
     resized_shape: Optional[List[int]] = None
 

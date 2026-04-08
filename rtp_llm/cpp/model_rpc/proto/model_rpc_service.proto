@@ -96,6 +96,7 @@ message GenerateConfigPB {
     bool enable_device_cache = 52;
     bool enable_remote_cache = 53;
     string unique_key = 54;
+    google.protobuf.Int32Value beam_dedup_idx = 101;
 }
 
 message MMPreprocessConfigPB {
