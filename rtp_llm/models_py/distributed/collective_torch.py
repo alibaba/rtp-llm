@@ -317,49 +317,27 @@ def distributed_environment_initialized() -> bool:
 
 
 def init_user_buffers_environment(parallelism_config: ParallelismConfig):
-    """Initialize user buffers communicator for context parallelism.
+    """Initialize user buffers communicator for context parallelism."""
+    from rtp_llm.models_py.utils.arch import is_cuda
 
-    This function initializes the user buffers communicator for CP (Context Parallelism).
-    It should be called after init_distributed_environment() if cp_size > 1.
+    if parallelism_config.use_ub_comm and is_cuda():
 
-    Args:
-        parallelism_config: Configuration for parallelism setup
-        buffer_size: Size of the communication buffer in bytes (default: 512MB)
-                    Recommended calculation: max_seq_len * sizeof(act_type) * num_kv_head * head_dim
-                    where:
-                    - max_seq_len: maximum sequence length
-                    - sizeof(act_type): size of activation data type (e.g., 2 for fp16, 4 for fp32)
-                    - num_kv_head: number of key-value heads
-                    - head_dim: dimension of each attention head
-    Raises:
-        RuntimeError: If distributed environment is not initialized
-    """
-    if not torch.distributed.is_initialized():
-        raise RuntimeError(
-            "Distributed environment is not initialized. "
-            "Call init_distributed_environment(parallelism_config) first."
+        from rtp_llm.models_py.distributed.user_buffers import (
+            init_user_buffers_communicator,
         )
 
-    if parallelism_config.prefill_cp_config.is_enabled():
-        from rtp_llm.models_py.utils.arch import is_cuda
+        local_rank = parallelism_config.local_rank
+        world_size = parallelism_config.world_size
 
-        if is_cuda():
-            from rtp_llm.models_py.distributed.user_buffers import (
-                init_user_buffers_communicator,
-            )
+        buffer_size = parallelism_config.prefill_cp_config.comm_buffer_size
 
-            local_rank = parallelism_config.local_rank
-            world_size = parallelism_config.world_size
-
-            buffer_size = parallelism_config.prefill_cp_config.comm_buffer_size
-
-            logging.info(
-                f"[rank: {parallelism_config.world_rank}] Initializing user buffers communicator "
-                f"with buffer_size: {buffer_size}, local_rank: {local_rank}, world_size: {world_size}"
-            )
-            init_user_buffers_communicator(
-                _get_group(Group.TP), local_rank, world_size, buffer_size
-            )
+        logging.info(
+            f"[rank: {parallelism_config.world_rank}] Initializing user buffers communicator "
+            f"with buffer_size: {buffer_size}, local_rank: {local_rank}, world_size: {world_size}"
+        )
+        init_user_buffers_communicator(
+            _get_group(Group.TP), local_rank, world_size, buffer_size
+        )
 
 
 def destroy_distributed_environment():

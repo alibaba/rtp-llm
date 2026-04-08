@@ -26,7 +26,7 @@ def init_parallel_group_args(
         type=int,
         default=0,
         help="专家并行（Expert Parallelism）大小。默认 0 表示 EP 模式，自动推导为 tp_size * dp_size；"
-             "显式设为 1 表示纯 TP 模式（需 tp_size>1, dp_size=1）；单卡模式下保持默认即可。",
+        "显式设为 1 表示纯 TP 模式（需 tp_size>1, dp_size=1）；单卡模式下保持默认即可。",
     )
     parallel_group.add_argument(
         "--dp_size",
@@ -91,4 +91,12 @@ def init_parallel_group_args(
         type=int,
         default=512 * 1024 * 1024,
         help="指定用于上下文并行通信的缓冲区大小，单位为字节。默认值为 512MB。",
+    )
+    parallel_group.add_argument(
+        "--use_ub_comm",
+        env_name="USE_UB_COMM",
+        bind_to=(parallelism_config, "use_ub_comm"),
+        type=str2bool,
+        default=False,
+        help="启用 CUDA IPC user-buffer 通信器用于上下文并行。仅支持单机场景，需要 CP 已启用且非 ALL_GATHER 方法。",
     )

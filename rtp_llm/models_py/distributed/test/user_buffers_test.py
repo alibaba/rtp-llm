@@ -45,9 +45,12 @@ def get_parallelism_config(world_rank, world_size, tp_size, dp_size, port):
     parallelism_config.tp_size = tp_size
     parallelism_config.dp_size = dp_size
 
+    parallelism_config.local_world_size = world_size
+
     parallelism_config.prefill_cp_config = PrefillCPConfig()
-    parallelism_config.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+    parallelism_config.prefill_cp_config.method = CPRotateMethod.ALL_GATHER_WITH_OVERLAP
     parallelism_config.prefill_cp_config.comm_buffer_size = BUFFER_SIZE
+    parallelism_config.use_ub_comm = True
 
     master_port = int(os.getenv("MASTER_PORT", "8376"))
     base_port = master_port + 11
