@@ -347,7 +347,7 @@ def _bench_trtllm_fp4(E, tokens_per_expert, K, N):
     permute_cache = {}
     for i in range(E):
         q, sf = fp4_quantize(w1_bf16[i], w1_global_sf[i], sf_vec_size=sf_vec_size,
-                             use_ue8m0=False, is_sf_swizzled_layout=False)
+                             sf_use_ue8m0=False, is_sf_swizzled_layout=False)
         perm = _maybe_get_cached_w3_w1_permute_indices(permute_cache, q, epilogue_tile_m=128)
         q = q[perm]
         sf = block_scale_interleave(sf[perm])
@@ -355,7 +355,7 @@ def _bench_trtllm_fp4(E, tokens_per_expert, K, N):
         w1_sf_list.append(sf)
 
         q2, sf2 = fp4_quantize(w2_bf16[i], w2_global_sf[i], sf_vec_size=sf_vec_size,
-                                use_ue8m0=False, is_sf_swizzled_layout=False)
+                                sf_use_ue8m0=False, is_sf_swizzled_layout=False)
         perm2 = get_w2_permute_indices_with_cache(permute_cache, q2, epilogue_tile_m=128)
         q2 = q2[perm2]
         sf2 = block_scale_interleave(sf2[perm2])
@@ -372,7 +372,7 @@ def _bench_trtllm_fp4(E, tokens_per_expert, K, N):
                           generator=torch.Generator(device).manual_seed(SEED + 2)) * 0.1
     hs_global_sf = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / hidden.float().abs().max().clamp(min=1e-4)
     hs_fp4, hs_sf = fp4_quantize(hidden, hs_global_sf, sf_vec_size=sf_vec_size,
-                                  use_ue8m0=False, is_sf_swizzled_layout=False)
+                                  sf_use_ue8m0=False, is_sf_swizzled_layout=False)
 
     # Construct routing logits that produce desired token distribution
     routing_logits = torch.full((total_tokens, E), -10.0, device=device, dtype=torch.bfloat16)
@@ -453,7 +453,7 @@ def _bench_trtllm_fp8(E, tokens_per_expert, K, N):
     hidden_scale = torch.ones(k_blocks, total_tokens, device=device, dtype=torch.float32)
 
     # Routing logits for desired distribution
-    routing_logits = torch.full((total_tokens, E), -10.0, device=device, dtype=torch.float32)
+    routing_logits = torch.full((total_tokens, E), -10.0, device=device, dtype=torch.bfloat16)
     offset = 0
     for expert_id in range(E):
         for _ in range(tokens_per_expert[expert_id]):
