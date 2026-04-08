@@ -84,8 +84,10 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert = DenseMLP(
                 config.activation_type, parallelism_config, weights, quant_config
             )
+            self._shared_expert_stream = torch.cuda.Stream()
         else:
             self.shared_expert = None
+            self._shared_expert_stream = None
         if weights.get(W.shared_expert_gate, None) is not None:
             self.shared_expert_gate = LinearFactory.create_linear_from_weights(
                 weights, W.shared_expert_gate, None, None, config
@@ -139,19 +141,28 @@ class GenericMoeLayer(nn.Module):
             # Top-K selection using C++ SelectTopkOp
             self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
+        if self.shared_expert is not None:
+            # Launch shared expert on a side stream to overlap with routed expert.
+            # hidden_states is only read (not modified in-place) by both paths.
+            self._shared_expert_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self._shared_expert_stream):
+                shared_expert_output = self.shared_expert(hidden_states)
+                if self.shared_expert_gate is not None:
+                    shared_gate_output = self.shared_expert_gate(hidden_states)
+
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
         )
+
         if self.shared_expert is not None:
-            shared_expert_output = self.shared_expert(hidden_states)
+            torch.cuda.current_stream().wait_stream(self._shared_expert_stream)
             if self.shared_expert_gate is not None:
-                gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
                 # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
                 self.sigmoid_gate_scale_add(
-                    gate_output, shared_expert_output, experts_output
+                    shared_gate_output, shared_expert_output, experts_output
                 )
             else:
                 experts_output = experts_output + shared_expert_output
