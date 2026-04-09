@@ -197,7 +197,7 @@ def _try_load_cutlass_fp4_module():
             "--expt-relaxed-constexpr",
         ],
         build_directory=build_dir,
-        verbose=False,
+        verbose=True,
     )
     return module
 
