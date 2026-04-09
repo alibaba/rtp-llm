@@ -94,11 +94,3 @@ def init_fmha_group_args(parser, fmha_config):
         default=1024,
         help="控制命中reuse cache后，走absorb attn的最大q_len",
     )
-    fmha_group.add_argument(
-        "--shared_attn_workspace_buffer",
-        env_name="SHARED_ATTN_WORKSPACE_BUFFER",
-        bind_to=(fmha_config, "shared_attn_workspace_buffer"),
-        type=str2bool,
-        default=False,
-        help="控制attention实现是否使用全局共享的workspace buffer。启用后可显著降低CUDA Graph实例的内存占用。可选值: True (启用), False (禁用)。",
-    )

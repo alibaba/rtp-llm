@@ -83,7 +83,6 @@ class FrontendServer(object):
             embedding_config=self.py_env_configs.embedding_config,
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
-            fmha_config=self.py_env_configs.fmha_config,
         )
 
         # Create a temporary tokenizer to initialize special_tokens

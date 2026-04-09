@@ -546,7 +546,7 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
                       &FlashInferMlaAttnParams::batch_reuse_info_vec_h,
                       "Batch reuse info vector on HOST")
         // DEVICE tensors (_d suffix)
-        .def_readwrite("batch_indice_d", &FlashInferMlaAttnParams::batch_indice_d, "Batch indices on DEVICE")
+        .def_readonly("batch_indice_d", &FlashInferMlaAttnParams::batch_indice_d, "Batch indices on DEVICE")
         .def_readonly("page_indice_d", &FlashInferMlaAttnParams::page_indice_d, "Page indices on DEVICE")
         .def_readonly("reuse_cache_page_indice_d",
                       &FlashInferMlaAttnParams::reuse_cache_page_indice_d,

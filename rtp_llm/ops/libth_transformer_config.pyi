@@ -119,7 +119,6 @@ class AttentionConfigs:
     q_scaling: float
     rope_config: RopeConfig
     rope_head_dim: int
-    shared_attn_workspace_buffer: bool
     size_per_head: int
     softmax_extra_scale: float
     tokens_per_block: int
@@ -511,7 +510,6 @@ class FMHAConfig:
     use_aiter_pa: bool
     use_asm_pa: bool
     use_triton_pa: bool
-    shared_attn_workspace_buffer: bool
     def __getstate__(self) -> tuple:
         ...
 
@@ -1625,6 +1623,43 @@ class RopeCache:
     def __init__(self) -> None:
         ...
 
+
+class RopeConfig:
+    dim: int
+    extrapolation_factor: float
+    factor1: float
+    factor2: float
+    index_factor: int
+    indexer_is_neox_style: bool
+    is_neox_style: bool
+    max_pos: int
+    mrope_dim1: int
+    mrope_dim2: int
+    mrope_dim3: int
+    mscale: float
+    offset: int
+    scale: float
+
+    def __init__(self) -> None:
+        ...
+
+    @property
+    def base(self) -> int:
+        ...
+
+    @base.setter
+    def base(self, arg1: typing.Any) -> None:
+        ...
+
+    @property
+    def style(self) -> RopeStyle:
+        ...
+
+    @style.setter
+    def style(self, arg1: typing.Any) -> None:
+        ...
+
+
 class RopeStyle:
     """
     Members:
@@ -1693,6 +1728,7 @@ class RopeStyle:
     @property
     def value(self) -> int:
         ...
+
 
 class RuntimeConfig:
     acext_gemm_config_dir: str
