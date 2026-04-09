@@ -106,7 +106,11 @@ py::object PyWrappedModel::initializeCudaGraphCapture(py::object                
         graph_params.sp_steps = device_params.sp_config.gen_num_per_cycle;
     }
 
-    graph_runner_ = new CudaGraphRunner(graph_params, py_instance);
+    if (graph_params.is_prefill_cuda_graph_mode) {
+        graph_runner_ = new CudaGraphPrefillRunner(graph_params, py_instance);
+    } else {
+        graph_runner_ = new CudaGraphDecodeRunner(graph_params, py_instance);
+    }
     RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
     {
         void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm(nullptr);

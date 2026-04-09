@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 
 namespace rtp_llm {
-void CudaGraphRunner::capturePrefill() {
+void CudaGraphPrefillRunner::capturePrefill() {
     RTP_LLM_LOG_INFO("Capture Prefill Start");
     // Pre-initialize all graph instances with keep_graph based on debug mode
     for (int seq_len : capture_dispatcher_.captureRange()) {
@@ -43,7 +43,7 @@ void CudaGraphRunner::capturePrefill() {
     RTP_LLM_LOG_INFO("Capture Prefill End");
 }
 
-void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {
+void CudaGraphPrefillRunner::capturePrefillOneSeqLen(int seq_len) {
     try {
         captureOneGraphInstance(seq_len, "seq len");
     } catch (const std::exception& e) {
@@ -55,7 +55,7 @@ void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {
     }
 }
 
-void CudaGraphRunner::replayPrefill(int seq_len) {
+void CudaGraphPrefillRunner::replayPrefill(int seq_len) {
     replayGraph(seq_len);
 }
 }  // namespace rtp_llm

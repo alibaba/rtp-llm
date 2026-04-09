@@ -16,83 +16,16 @@ namespace py = pybind11;
 
 namespace rtp_llm {
 
-class CudaGraphRunner: public CudaGraphRunnerBase {
-public:
-    CudaGraphRunner(const GraphParams& graph_params, py::object py_instance):
-        CudaGraphRunnerBase(std::move(py_instance)),
-        graph_params_(graph_params),
-        capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
-        max_bs_(graph_params.is_prefill_cuda_graph_mode ? graph_params.max_context_batch_size :
-                                                          graph_params.concurrency_limit) {
-        py::gil_scoped_acquire gil;
-        if (!py_instance_ || py_instance_.is_none()) {
-            throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
-        }
-        if (graph_params_.kernel_tokens_per_block <= 0) {
-            throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
-        }
-        py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
-        py_forward_method_    = py_instance_.attr("forward");
-        RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
-            enable_cuda_graph: %d, max_bs_: %zu, enable_cuda_graph_debug_mode: %d, max_seq_len: %d, kernel_tokens_per_block: %d, \
-            hidden_size: %zu, num_tokens_per_bs: %d, is_prefill_cuda_graph_mode: %d, is_target_verify: %d",
-                         graph_params_.enable_cuda_graph,
-                         max_bs_,
-                         graph_params_.enable_cuda_graph_debug_mode,
-                         graph_params_.max_seq_len,
-                         graph_params_.kernel_tokens_per_block,
-                         graph_params_.hidden_size,
-                         graph_params_.num_tokens_per_bs,
-                         graph_params_.is_prefill_cuda_graph_mode,
-                         graph_params_.is_target_verify);
-    }
+/// Shared capture/replay state and helpers for prefill vs decode CUDA graph runners.
+class CudaGraphRunnerShared {
+protected:
+    CudaGraphRunnerShared(CudaGraphRunnerBase& owner, GraphParams graph_params, size_t max_bs, bool is_prefill_capture);
 
-    ~CudaGraphRunner() {
-        RTP_LLM_LOG_INFO("Release CudaGraphRunner .....");
-        py::gil_scoped_acquire gil;
-        py_instance_.release();
-        RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
-    }
-    void           captureDecode();
-    void           capturePrefill();
-    void           captureDecodeOneBatchSize(int bs);
-    void           capturePrefillOneSeqLen(int seq_len);
-    void           prepareInputs(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor);
-    bool           canRun(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor) override;
-    void           replayGraph(int key);
-    void           replayDecode(int bs);
-    void           replayPrefill(int seq_len);
-    int            getCurrentRealGraphBs(const BatchDescriptor& batch_descriptor) const;
-    PyModelOutputs forward(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor) override;
-    void           initCapture() override;
-
-    // Factory methods for test: take GraphParams so callers can reuse the same struct
-    static CudaGraphRunner* createForPrefill(py::object py_instance, GraphParams params);
-    static CudaGraphRunner* createForDecode(py::object py_instance, GraphParams params);
-
-private:
-    // Common capture logic for both prefill and decode
-    void captureOneGraphInstance(int key, const char* key_type);
-    // Common replay and sync check logic
-    void replayAndSyncCheck(int key, const char* key_type);
-    // Common input preparation logic for capture
-    void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
-    // Common memory hold creation logic
-    CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
-    void              logCudaGraphPoolMemory(const char* phase);
-    void              setPositionEncoding(torch::Tensor position_encoding) override;
-    void              setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
-    void              setInputEmbeddingScalar(float input_embedding_scalar) override;
-
-private:
-    py::object              py_forward_method_;
-    py::object              py_attn_pyobj_method_;
-    GraphParams             graph_params_;
-    cuda_graph::GraphStream capture_stream_;
-    size_t                  max_bs_{1};
-    int                     max_num_token_{1};
-    // capture seqLen -> GraphInstance (prefill)
-    // batch_size -> GraphInstance (decode)
+    CudaGraphRunnerBase&                      owner_;
+    GraphParams                               graph_params_;
+    cuda_graph::GraphStream                   capture_stream_;
+    size_t                                    max_bs_{1};
+    int                                       max_num_token_{1};
     std::unordered_map<int, GraphInstance>    graph_instances_;
     cuda_graph::CudaGraphCaptureDispatcher    capture_dispatcher_;
     cuda_graph::CudaGraphCapturePyModelInputs capture_py_model_inputs_;
@@ -100,9 +33,79 @@ private:
     torch::Tensor                             token_type_embedding_;
     float                                     input_embedding_scalar_{};
     cuda_graph::GraphPoolHandle               shared_graph_pool_{};
+    torch::Event                              forward_event_ = cuda_graph::makeGraphEvent();
 
-    // event to record forward done
-    torch::Event forward_event_ = cuda_graph::makeGraphEvent();
+    py::object py_forward_method_;
+    py::object py_attn_pyobj_method_;
+
+    const bool is_prefill_capture_;
+
+    void              captureOneGraphInstance(int key, const char* key_type);
+    void              replayGraph(int key);
+    void              replayAndSyncCheck(int key, const char* key_type);
+    void              prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
+    CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
+    void              logCudaGraphPoolMemory(const char* phase);
+
+    /// When enable_cuda_graph: pool, dispatcher, template buffers, first forward, allocate outputs, log
+    /// "before_capture".
+    void initCapturePreamble();
+};
+
+class CudaGraphPrefillRunner: public CudaGraphRunnerBase, private CudaGraphRunnerShared {
+public:
+    explicit CudaGraphPrefillRunner(GraphParams graph_params, py::object py_instance);
+
+    ~CudaGraphPrefillRunner() override {
+        RTP_LLM_LOG_INFO("Release CudaGraphPrefillRunner .....");
+        py::gil_scoped_acquire gil;
+        py_instance_.release();
+        RTP_LLM_LOG_INFO("Release CudaGraphPrefillRunner Successfully");
+    }
+
+    void           capturePrefill();
+    void           capturePrefillOneSeqLen(int seq_len);
+    void           replayPrefill(int seq_len);
+    void           prepareInputs(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor);
+    bool           canRun(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor) override;
+    PyModelOutputs forward(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor) override;
+    void           initCapture() override;
+    int            getCurrentRealGraphSize(const BatchDescriptor& batch_descriptor) const override;
+
+    void setPositionEncoding(torch::Tensor position_encoding) override;
+    void setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
+    void setInputEmbeddingScalar(float input_embedding_scalar) override;
+};
+
+class CudaGraphDecodeRunner: public CudaGraphRunnerBase, private CudaGraphRunnerShared {
+public:
+    explicit CudaGraphDecodeRunner(GraphParams graph_params, py::object py_instance);
+
+    ~CudaGraphDecodeRunner() override {
+        RTP_LLM_LOG_INFO("Release CudaGraphDecodeRunner .....");
+        py::gil_scoped_acquire gil;
+        py_instance_.release();
+        RTP_LLM_LOG_INFO("Release CudaGraphDecodeRunner Successfully");
+    }
+
+    void           captureDecode();
+    void           captureDecodeOneBatchSize(int bs);
+    void           replayDecode(int bs);
+    void           prepareInputs(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor);
+    bool           canRun(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor) override;
+    PyModelOutputs forward(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor) override;
+    void           initCapture() override;
+    int            getCurrentRealGraphSize(const BatchDescriptor& batch_descriptor) const override;
+
+    void setPositionEncoding(torch::Tensor position_encoding) override;
+    void setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
+    void setInputEmbeddingScalar(float input_embedding_scalar) override;
+};
+
+/// Factory namespace for tests and internal use (no instances).
+struct CudaGraphRunner {
+    static CudaGraphRunnerBase* createForPrefill(py::object py_instance, GraphParams params);
+    static CudaGraphRunnerBase* createForDecode(py::object py_instance, GraphParams params);
 };
 
 }  // namespace rtp_llm

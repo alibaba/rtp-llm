@@ -207,7 +207,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                               mtp_params->moe_config),
                                 cache_manager ? std::make_optional(draft_cache_layer_layout) : std::nullopt,
                                 mtp_params->model_id,
-                                mtp_params->parallelism_config,
+                                PyWrappedModel mtp_params->parallelism_config,
                                 exec_init_params,
                                 cache_manager});
         if (!params.py_sp_model.is_none()) {
@@ -784,9 +784,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     // clear host buffers holder
     buffer_holder_.release();
 
-    const auto& mtp_cache_cfg          = cache_manager_->getMTPModuleCacheConfig(0);
-    model_input.kv_block_stride_bytes  = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes  = mtp_cache_cfg.kv_scale_stride_bytes;
+    const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
+    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
+    model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
 
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_ids_list;
@@ -871,8 +871,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
         const auto& cache_cfg             = cache_manager_->cacheConfig();
         model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes  = cache_cfg.kv_scale_stride_bytes;
-
+        model_input.kv_scale_stride_bytes = cache_cfg.kv_scale_stride_bytes;
     }
 }
 

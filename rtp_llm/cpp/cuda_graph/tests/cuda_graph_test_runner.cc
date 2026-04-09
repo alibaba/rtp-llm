@@ -70,7 +70,7 @@ public:
     }
 
     int getCurrentRealGraphSize() {
-        return runner_ != nullptr ? runner_->getCurrentRealGraphBs(batch_descriptor_) : 0;
+        return runner_ != nullptr ? runner_->getCurrentRealGraphSize(batch_descriptor_) : 0;
     }
 
     ~CudaGraphTestRunner() {
@@ -85,8 +85,8 @@ private:
         }
     }
 
-    CudaGraphRunner* runner_ = nullptr;
-    BatchDescriptor  batch_descriptor_{};
+    CudaGraphRunnerBase* runner_ = nullptr;
+    BatchDescriptor      batch_descriptor_{};
 };
 
 }  // namespace rtp_llm

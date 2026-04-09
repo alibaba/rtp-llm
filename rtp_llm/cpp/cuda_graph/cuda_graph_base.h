@@ -49,6 +49,8 @@ public:
     virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)               = 0;
     virtual void           setInputEmbeddingScalar(float input_embedding_scalar)                   = 0;
     virtual bool           canRun(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor)  = 0;
-    py::object             py_instance_;
+    /// Decode: captured batch key; prefill: captured seq_len key (for tests / diagnostics).
+    virtual int getCurrentRealGraphSize(const BatchDescriptor& batch_descriptor) const = 0;
+    py::object  py_instance_;
 };
 }  // namespace rtp_llm
