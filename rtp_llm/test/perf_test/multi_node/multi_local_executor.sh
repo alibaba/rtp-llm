@@ -93,11 +93,8 @@ build_code() {
     # Kill bazel build processes
     (ps axuww | grep 'bazelisk --batch --output_user_root' | grep -v grep | awk '{print $2}' | xargs kill -9) || true;
     # Build with all arguments
-    (bazelisk --batch --output_user_root=$WORK_DIR/bazel_cache build //:th_transformer //rtp_llm:rtp_llm_lib //rtp_llm:rtp_llm_deepgemm_whl ${BAZEL_BUILD_ARGS}) || exit 1;
-    if [ $? -ne 0 ]; then
-      echo "bazel build failed !";
-      exit 1;
-    fi
+    BAZEL_TARGETS=${BAZEL_TARGETS:-"//:th_transformer //rtp_llm:rtp_llm_lib"}
+    (bazelisk --batch --output_user_root=$WORK_DIR/bazel_cache build ${BAZEL_TARGETS} ${BAZEL_BUILD_ARGS}) || exit 1;
     # Create symbolic links for proto files
     bazel_subdir=k8-opt
     if [ -d "bazel-out/aarch64-opt" ]; then
@@ -119,6 +116,19 @@ configure_env() {
   export FT_CORE_DUMP_ON_EXCEPTION=1;
   export NCCL_TOPO_DUMP_FILE="/tmp/nccl_topo.xml";
   export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/lib64:/usr/local/nvidia/lib64/:/usr/local/cuda/lib64/:/usr/local/cuda/extras/CUPTI/lib64/";
+  # Set CUDA_VISIBLE_DEVICES based on LOCAL_WORLD_SIZE if not already set
+  if [ -z "$CUDA_VISIBLE_DEVICES" ] && [ -n "$LOCAL_WORLD_SIZE" ]; then
+    CUDA_DEVICES=""
+    for i in $(seq 0 $((LOCAL_WORLD_SIZE - 1))); do
+      if [ -z "$CUDA_DEVICES" ]; then
+        CUDA_DEVICES="$i"
+      else
+        CUDA_DEVICES="$CUDA_DEVICES,$i"
+      fi
+    done
+    export CUDA_VISIBLE_DEVICES="$CUDA_DEVICES"
+    echo "Set CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES (LOCAL_WORLD_SIZE=$LOCAL_WORLD_SIZE)"
+  fi
   # Configure optional environment variables
   echo -e "\nActive environment variables:"
   (printenv | grep -E 'NCCL|ACCL|NVSHMEM' | sort) || exit 1
@@ -170,6 +180,11 @@ local_build_script() {
   enter_work_dir || exit 1;
   # Checkout code from git if not exist
   checkout_code || exit 1;
+  # Apply patches if PATCH_COMMANDS is set
+  if [ -n "$PATCH_COMMANDS" ]; then
+    echo "Applying patches..."
+    bash -euo pipefail -c "$PATCH_COMMANDS" || exit 1;
+  fi
   # Pip install requirements
   install_requirements || exit 1;
   # Build with all args
