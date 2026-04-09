@@ -28,6 +28,7 @@ struct CKAttn {
     torch::Tensor sequence_lengths;
     torch::Tensor padding_offset;
     int           max_seq_len;
+    int           max_prefix_length = 0;
     bool          decode_plan;
 
     DataType attn_type;

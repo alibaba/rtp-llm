@@ -81,9 +81,11 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         if (!prefix_lengths.is_cuda()) {
             prefix_lengths = prefix_lengths.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true);
         }
-        attn_params->prefix_lengths = prefix_lengths.contiguous();
+        attn_params->prefix_lengths    = prefix_lengths.contiguous();
+        attn_params->max_prefix_length = prefix_lengths.max().item<int>();
     } else {
-        attn_params->prefix_lengths = attn_inputs.prefix_lengths;
+        attn_params->prefix_lengths    = attn_inputs.prefix_lengths;
+        attn_params->max_prefix_length = 0;
     }
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     return attn_params;
@@ -99,10 +101,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     const int seq_len           = params->max_seq_len;
 
     // 计算包含 prefix 的序列长度
-    int max_prefix_length = 0;
-    if (params->prefix_lengths.size(0)) {
-        max_prefix_length = params->prefix_lengths.max().item<int>();
-    }
+    int       max_prefix_length   = params->max_prefix_length;
     const int seq_len_with_prefix = seq_len + max_prefix_length;
 
     const int     q_output_token_num = (use_paged_fmha && pad_query) ? batch_size * seq_len : token_num;
@@ -306,6 +305,12 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->padding_offset            = attn_inputs.padding_offset;
 
+    if (attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0) {
+        attn_params->max_prefix_length = attn_inputs.prefix_lengths.max().item<int>();
+    } else {
+        attn_params->max_prefix_length = 0;
+    }
+
     if (attn_inputs.kv_cache_kernel_block_id_device.defined()
         && attn_inputs.kv_cache_kernel_block_id_device.numel() > 0) {
         attn_params->kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
@@ -339,10 +344,8 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
     prefix_prompt_param.kv_block_array = kv_block_array;
 
     // 设置 prefix_lengths 参数
-    int max_prefix_length = 0;
-    if (params->prefix_lengths.defined() && params->prefix_lengths.size(0) > 0) {
-        max_prefix_length = params->prefix_lengths.max().item<int>();
-
+    int max_prefix_length = params->max_prefix_length;
+    if (max_prefix_length > 0) {
         int* prefix_lengths_ptr = params->prefix_lengths.data_ptr<int>();
         if (prefix_lengths_ptr == nullptr) {
             throw std::runtime_error("FusedRopeKVCacheDecodeOp: prefix_lengths data pointer is null");
