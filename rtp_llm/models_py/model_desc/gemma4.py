@@ -101,6 +101,14 @@ class Gemma4DecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> torch.Tensor:
+        # C++ getLayerCache() reshapes kv_cache_base to 5D with global num_kv_heads,
+        # but global layers have different kv_head_num. Flatten back to 2D so the
+        # Python FMHA reshapes with the correct per-layer config.
+        if kv_cache is not None and not self.is_sliding:
+            base = kv_cache.kv_cache_base
+            if base is not None and base.dim() > 2:
+                kv_cache.kv_cache_base = base.reshape(base.shape[0], -1)
+
         # Self Attention
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
