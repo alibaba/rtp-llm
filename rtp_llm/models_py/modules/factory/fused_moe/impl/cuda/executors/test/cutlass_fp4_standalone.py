@@ -131,43 +131,44 @@ def _find_cu_source():
 
 
 def _ensure_ninja():
-    """Ensure ninja binary is in PATH (required by torch cpp_extension).
-
-    The ninja pip package installs both a Python module and the ninja binary.
-    In Bazel sandbox / JIT cache envs, the Python module may be importable
-    but the binary may not be on PATH. We fix both cases.
-    """
+    """Ensure ninja binary is in PATH (required by torch cpp_extension)."""
     import shutil
     import subprocess
     import sys
 
-    # Case 1: ninja binary already in PATH — nothing to do
     if shutil.which("ninja"):
         return
 
-    # Case 2: ninja Python package installed but binary not in PATH
+    # ninja pip package exposes BIN_DIR with the binary location
     try:
         import ninja
-        ninja_bin_dir = os.path.join(os.path.dirname(ninja.__file__), "..", "..", "..", "bin")
-        ninja_bin_dir = os.path.normpath(ninja_bin_dir)
-        # Also check ninja's own bin path (some installations)
-        ninja_pkg_dir = os.path.dirname(ninja.__file__)
-        for candidate in [ninja_bin_dir, ninja_pkg_dir,
-                          os.path.join(ninja_pkg_dir, "data", "bin")]:
-            candidate = os.path.normpath(candidate)
+        bin_dir = getattr(ninja, "BIN_DIR", None)
+        if bin_dir and os.path.isfile(os.path.join(bin_dir, "ninja")):
+            os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+            return
+        # Fallback: search common locations relative to package
+        pkg_dir = os.path.dirname(os.path.abspath(ninja.__file__))
+        for sub in ["data/bin", ".", "../../../bin", "../../bin", "../bin"]:
+            candidate = os.path.normpath(os.path.join(pkg_dir, sub))
             if os.path.isfile(os.path.join(candidate, "ninja")):
                 os.environ["PATH"] = candidate + os.pathsep + os.environ.get("PATH", "")
+                return
+        # Last resort: find ninja binary anywhere under the package tree
+        site_pkg = os.path.dirname(pkg_dir)
+        for root, _, files in os.walk(site_pkg):
+            if "ninja" in files and os.access(os.path.join(root, "ninja"), os.X_OK):
+                os.environ["PATH"] = root + os.pathsep + os.environ.get("PATH", "")
                 return
     except ImportError:
         pass
 
-    # Case 3: ninja not installed at all — pip install it
+    # ninja not found — try pip install
     try:
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "ninja", "-q"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except subprocess.CalledProcessError:
-        pass  # will fail later with a clear error from torch
+        pass
 
 
 @functools.lru_cache(maxsize=1)
