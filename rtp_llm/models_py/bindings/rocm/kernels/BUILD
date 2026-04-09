@@ -73,3 +73,15 @@ cc_library(
     copts = rocm_copts(),
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "rocm_trtllm_allreduce_fusion",
+    srcs = ["trtllm_allreduce_fusion.cu"],
+    hdrs = [
+        "trtllm_allreduce_fusion.h",
+        "hip_float8_impl.h",
+    ],
+    deps = rocm_deps + torch_deps(),
+    copts = rocm_copts(),
+    visibility = ["//visibility:public"],
+)

@@ -68,7 +68,7 @@ py_test(
         "//:th_transformer_config",
         "//:rtp_compute_ops",
     ],
-    exec_properties = {'gpu':'A10'}
+    exec_properties = {'gpu':'H20'}
 )
 
 py_test(
@@ -84,7 +84,7 @@ py_test(
         "//:th_transformer_config",
         "//:rtp_compute_ops",
     ],
-    exec_properties = {'gpu':'A10'}
+    exec_properties = {'gpu':'H20'}
 )
 
 load("//bazel:arch_select.bzl", "requirement")
@@ -107,5 +107,5 @@ py_test(
         "//:th_transformer_config",
         "//:rtp_compute_ops",
     ],
-    exec_properties = {'gpu':'A10'}
+    exec_properties = {'gpu':'H20'}
 )

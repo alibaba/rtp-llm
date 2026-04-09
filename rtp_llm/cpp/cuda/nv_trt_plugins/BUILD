@@ -55,5 +55,5 @@ cc_test(
         ":trt_plugins",
     ],
     tags = ["manual"],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )

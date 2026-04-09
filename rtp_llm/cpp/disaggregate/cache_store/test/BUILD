@@ -47,6 +47,6 @@ cc_test(
         "DEVICE_RESERVE_MEMORY_BYTES": "128000000",
     },
     copts = ["-fno-access-control"] + copts(),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 

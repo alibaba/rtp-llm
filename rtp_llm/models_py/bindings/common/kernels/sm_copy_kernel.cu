@@ -1,4 +1,4 @@
-#include "rtp_llm/models_py/bindings/kernels/sm_copy_kernel.h"
+#include "rtp_llm/models_py/bindings/common/kernels/sm_copy_kernel.h"
 
 namespace sDevMPS {
 

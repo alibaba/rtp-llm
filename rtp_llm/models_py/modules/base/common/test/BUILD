@@ -12,6 +12,6 @@ py_test (
     srcs = ["embeding_test.py"],
     deps = py_test_deps,
     env = test_envs,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 

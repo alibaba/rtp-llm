@@ -20,7 +20,7 @@ py_test (
     data = [
         "//:th_transformer"
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 test_deps = [
@@ -61,7 +61,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -76,5 +76,5 @@ cc_test(
         "@havenask//aios/autil:net",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )

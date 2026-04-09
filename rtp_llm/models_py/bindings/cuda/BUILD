@@ -7,7 +7,7 @@ cc_library(
     hdrs = ["SplitKvCacheCopy.h"],
     copts = copts(),
     deps = torch_deps() + [
-        "//rtp_llm/models_py/bindings/kernels:sm_copy_kernel",
+        "//rtp_llm/models_py/bindings/common/kernels:sm_copy_kernel",
         "//rtp_llm/cpp/cuda:cuda_host_utils",
     ],
     visibility = ["//visibility:public"],

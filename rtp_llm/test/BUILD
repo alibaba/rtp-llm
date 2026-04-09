@@ -10,7 +10,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -27,7 +27,7 @@ py_test(
         "//rtp_llm/test/model_test/test_util",
     ],
     imports = ["aios/kmonitor/python_client"],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -41,7 +41,7 @@ py_test(
         "//rtp_llm/test/model_test/test_util",
     ],
     imports = [],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -54,7 +54,7 @@ py_test(
         "//rtp_llm:testlib",
     ],
     imports = [],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -67,7 +67,7 @@ py_test(
         "//rtp_llm:testlib",
     ],
     imports = [],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -81,7 +81,7 @@ py_test(
         "//rtp_llm/test/model_test/test_util",
     ],
     imports = [],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -97,7 +97,7 @@ py_test(
         "//rtp_llm/test/model_test/fake_test/testdata:testdata",
         "//rtp_llm/test/tokenizer_test:testdata",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -131,7 +131,7 @@ py_test(
         "//rtp_llm/test/model_test/test_util",
     ],
     timeout = 'short',
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
     shard_count = 1,
 )
 
@@ -155,7 +155,7 @@ py_test(
         "//rtp_llm/test/model_test/fake_test/testdata:testdata",
         "//rtp_llm/test/tokenizer_test:testdata",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -167,7 +167,7 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm:sdk",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -178,7 +178,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -190,7 +190,7 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm:sdk",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -203,7 +203,7 @@ py_test(
         "//rtp_llm:testlib"
     ],
     imports = [],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -214,7 +214,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties={"gpu": "A10"},
+    exec_properties={"gpu": "H20"},
 )
 
 py_test(
@@ -225,7 +225,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties={"gpu": "A10"},
+    exec_properties={"gpu": "H20"},
 )
 
 py_test(
@@ -238,7 +238,7 @@ py_test(
         "//rtp_llm:testlib"
     ],
     imports = [],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -249,7 +249,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties={"gpu": "A10"},
+    exec_properties={"gpu": "H20"},
 )
 
 py_test(
@@ -260,7 +260,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties={"gpu": "A10"},
+    exec_properties={"gpu": "H20"},
 )
 
 py_test(
@@ -271,7 +271,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties={"gpu": "A10"},
+    exec_properties={"gpu": "H20"},
 )
 
 py_test(
@@ -282,7 +282,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties={"gpu": "A10"},
+    exec_properties={"gpu": "H20"},
 )
 
 py_test(
@@ -293,5 +293,5 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties={"gpu": "A10"},
+    exec_properties={"gpu": "H20"},
 )

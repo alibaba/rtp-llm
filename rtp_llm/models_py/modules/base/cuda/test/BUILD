@@ -12,7 +12,7 @@ py_test (
     srcs = ["norm_test.py"],
     deps = py_test_deps,
     env = test_envs,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test (
@@ -20,7 +20,7 @@ py_test (
     srcs = ["rmsresnorm_test.py"],
     deps = py_test_deps,
     env = test_envs,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test (
@@ -28,7 +28,7 @@ py_test (
     srcs = ["fusedqkrmsnorm_test.py"],
     deps = py_test_deps,
     env = test_envs,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test (
@@ -36,7 +36,7 @@ py_test (
     srcs = ["layernorm_test.py"],
     deps = py_test_deps,
     env = test_envs,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test (
@@ -44,7 +44,7 @@ py_test (
     srcs = ["fused_add_layernorm_test.py"],
     deps = py_test_deps,
     env = test_envs,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test (

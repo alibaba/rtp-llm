@@ -40,7 +40,7 @@ cc_test(
     deps = test_deps + [
         "//rtp_llm/cpp/cuda/ops:gpu_base",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -52,7 +52,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -64,7 +64,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
