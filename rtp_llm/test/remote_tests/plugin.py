@@ -904,7 +904,8 @@ class RemoteREAPIPlugin:
                 .strip()
             )
             if xml_content:
-                junit_path = self.rootdir / "pytest_results.xml"
+                junit_path = self.rootdir / "bazel-testlogs" / "pytest" / "test.xml"
+                junit_path.parent.mkdir(parents=True, exist_ok=True)
                 junit_path.write_text(xml_content)
                 log.info(
                     "Wrote remote junitxml to %s (%d bytes)",
@@ -915,10 +916,14 @@ class RemoteREAPIPlugin:
 
         display_stdout = _strip_phase_marker_lines(stdout)
         if display_stdout:
+            print("::group::Remote Worker Output (stdout)")
             print(display_stdout, end="" if display_stdout.endswith("\n") else "\n")
+            print("::endgroup::")
         stderr_disp = _strip_phase_marker_lines(stderr)
         if stderr_disp:
+            print("::group::Remote Worker Output (stderr)", file=_sys.stderr)
             print(stderr_disp, file=_sys.stderr)
+            print("::endgroup::", file=_sys.stderr)
 
         exit_code = result.exit_code
         if "EXIT_CODE=" in stdout:
@@ -971,6 +976,7 @@ class RemoteREAPIPlugin:
         # pytest_args comes from --remote-pytest-args (operator-controlled), not user input
         run_cmd = (
             f"{outputs_prefix}"
+            "mkdir -p bazel-testlogs/pytest; "
             "echo \">>>RTP_REMOTE_HOST_IP $(hostname -I 2>/dev/null | awk '{print $1}')\"; "
             'echo ">>>PHASE:pytest_start $(date +%s)"; '
             f"python -m pytest {pytest_args} "
@@ -978,12 +984,12 @@ class RemoteREAPIPlugin:
             f"{mark_arg}"
             f"-n {self.workers} "
             f"--continue-on-collection-errors "
-            f"--junitxml=pytest_results.xml "
+            f"--junitxml=bazel-testlogs/pytest/test.xml "
             f"--override-ini='addopts=' {ignore_args} "
             f"--tb=short 2>&1; ec=$?; "
             'echo ">>>PHASE:pytest_end $(date +%s)"; '
             "echo EXIT_CODE=$ec; "
-            f"echo '<<<JUNIT_XML>>>'; cat pytest_results.xml 2>/dev/null; echo '<<<END_JUNIT_XML>>>'; "
+            f"echo '<<<JUNIT_XML>>>'; cat bazel-testlogs/pytest/test.xml 2>/dev/null; echo '<<<END_JUNIT_XML>>>'; "
             f"{outputs_postscript}"
             "exit $ec"
         )
