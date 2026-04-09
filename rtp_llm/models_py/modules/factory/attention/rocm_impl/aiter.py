@@ -92,7 +92,7 @@ class FMHAParams(ParamsBase):
             self.kv_cache_block_id_device = kv_cache_block_id_device
 
             if self.enable_cuda_graph:
-                self.max_seq_len = 8192
+                self.max_seq_len = sequence_lengths.max().item() + 1
             else:
                 self.max_seq_len = input_lengths.max().item() + 1
 
@@ -113,7 +113,7 @@ class FMHAParams(ParamsBase):
         self.kv_cache_block_id_host = kv_cache_block_id_host
         if self.seq_lens is not None and self.sequence_lengths is not None:
             self.seq_lens.copy_((self.sequence_lengths + 1).to(torch.device("cuda")))
-            self.max_seq_len = 8192
+            self.max_seq_len = self.seq_lens.max().item()
 
     def check_recycle(self) -> bool:
         """Check whether the params can be recycled automatically."""
@@ -679,7 +679,8 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         num_seqs, num_heads, head_size = query.shape
         block_size = value_cache.shape[2]
         output = torch.empty_like(query).view((num_seqs, num_heads, head_size))
-        if max_seq_len <= 16384 and (not using_fp8_kvcache):
+        #if max_seq_len <= 16384 and (not using_fp8_kvcache):
+        if False:
             _PARTITION_SIZE_ROCM = 512
             max_num_partitions = (
                 max_seq_len + _PARTITION_SIZE_ROCM - 1
