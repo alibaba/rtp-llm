@@ -285,8 +285,6 @@ base-dependencies = [
 
     # Platform-specific
     "pynvml",
-    "xfastertransformer_devel==1.8.1.1 ; platform_machine == 'x86_64'",
-    "xfastertransformer_devel_icx==1.8.1.1 ; platform_machine == 'x86_64'",
 ]
 
 [tool.pytest.ini_options]
