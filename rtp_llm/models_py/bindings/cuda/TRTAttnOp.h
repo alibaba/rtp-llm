@@ -47,5 +47,6 @@ public:
 };
 
 void registerTRTAttnOp(const py::module& m);
+void registerTRTAttn(const py::module& m);
 
 }  // namespace rtp_llm

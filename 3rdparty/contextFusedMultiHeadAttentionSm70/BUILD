@@ -15,7 +15,7 @@ cc_library(
         ":trt_sm70_fmha_header",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_common_define_header",
         "//3rdparty:cuda_driver",
-        "//rtp_llm/cpp/kernels:attn_utils",
+        "//rtp_llm/models_py/bindings/common/kernels:attn_utils",
         "//rtp_llm/cpp/cuda:cuda_host_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
         "@local_config_cuda//cuda:cuda_headers",

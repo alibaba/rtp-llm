@@ -13,11 +13,11 @@ cc_library(
         "//rtp_llm/cpp/core:cache_store_async_writer",
     ] + torch_deps() + select({
         "//:using_cuda": [
-            "//rtp_llm/cpp/kernels:kernels_cu",
+            "//rtp_llm/models_py/bindings/common/kernels:kernels_cu",
             "//rtp_llm/cpp/cuda/ops:cuda_impl",
         ],
         "//:using_rocm": [
-            "//rtp_llm/cpp/kernels:kernels_cu",
+            "//rtp_llm/models_py/bindings/common/kernels:kernels_cu",
             "//rtp_llm/cpp/core:exec_ctx_rocm",
         ],
         "//conditions:default": [],

@@ -1,3 +1,0 @@
-# Triton AOT kernel compilation has been removed.
-# The AOT compiler (aot_triton_kernel_compiler.py) is not compatible with PPU builds.
-# The layernorm triton kernels were only used behind the ENABLE_TRITON flag.

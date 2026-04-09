@@ -3,12 +3,12 @@
 #include "rtp_llm/models_py/bindings/cuda/RegisterAttnOpBindings.hpp"
 
 #if defined(ENABLE_FP4)
-#include "rtp_llm/cpp/kernels/scaled_fp4_quant.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp4_gemm/nvfp4_scaled_mm.h"
 #endif
 
-#include "rtp_llm/cpp/kernels/scaled_fp8_quant.h"
-#include "rtp_llm/cpp/kernels/moe/ep_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
+#include "rtp_llm/models_py/bindings/common/kernels/moe/ep_utils.h"
 
 namespace rtp_llm {
 

@@ -4,7 +4,7 @@
 #include <torch/extension.h>
 #include <torch/all.h>
 #include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
-#include "rtp_llm/cpp/kernels/rocm/layernorm_kernels.h"
+#include "rtp_llm/models_py/bindings/rocm/kernels/layernorm_kernels.h"
 
 namespace rtp_llm {
 

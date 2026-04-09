@@ -74,24 +74,3 @@ cc_library(
 )
 
 
-cc_library(
-    name="memory_utils",
-    srcs=[
-        # "memory_utils.cu",
-    ],
-
-    hdrs=[
-        # "memory_utils.h",
-    ],
-
-    deps=[
-        ":rocm_utils",
-        "//rtp_llm/cpp:utils",
-        "//rtp_llm/cpp/core:allocator",
-        "@local_config_rocm//rocm:rocm_headers",
-        "@local_config_rocm//rocm:rocm",
-    ],
-    copts=rocm_copts(),
-    include_prefix="src",
-    visibility=["//visibility:public"],
-)

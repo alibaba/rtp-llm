@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda/ops/tests/CudaTestUtils.h"
-#include "rtp_llm/cpp/kernels/banRepeatNgram.h"
+#include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>

@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
-#include "rtp_llm/cpp/kernels/moe_kernels.h"
+#include "rtp_llm/models_py/bindings/common/kernels/moe_kernels.h"
 
 namespace trt_plugins = tensorrt_llm::plugins;
 

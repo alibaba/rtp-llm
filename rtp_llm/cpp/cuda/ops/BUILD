@@ -59,7 +59,7 @@ cc_library(
         "//rtp_llm/cpp/cuda:quantize_utils",
         "//rtp_llm/cpp/core:types_hdr",
         "//rtp_llm/cpp/core:torch_event",
-        "//rtp_llm/cpp/kernels:kernels_cu",
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_cu",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/cuda/deep_gemm:deep_gemm_plugins_impl",
         "//rtp_llm/cpp/pybind:th_utils",
@@ -112,8 +112,8 @@ cc_library(
     srcs = ["StandaloneOps.cc"],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/kernels:kernels_activation",
-        "//rtp_llm/cpp/kernels:kernels_sampling",
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_activation",
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
         "@local_config_cuda//cuda:cuda_headers",
     ],
     visibility = ["//visibility:public"],
@@ -126,7 +126,7 @@ cc_library(
     deps = [
         ":gpu_base",
         ":torch_beam_search_op_impl",
-        "//rtp_llm/cpp/kernels:scaled_fp8_quant",
+        "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
         "//rtp_llm/cpp/utils:debug_utils",
     ],
     visibility = ["//visibility:public"],

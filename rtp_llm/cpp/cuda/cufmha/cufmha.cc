@@ -1,6 +1,6 @@
 #include "cufmha.h"
 #include "fmha_profiling_interface.h"
-#include "rtp_llm/cpp/kernels/tensor_ops_kernels.h"
+#include "rtp_llm/models_py/bindings/common/kernels/tensor_ops_kernels.h"
 #include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
 

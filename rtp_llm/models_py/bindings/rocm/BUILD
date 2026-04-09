@@ -14,8 +14,8 @@ cc_library(
     copts = rocm_copts(),
     deps = torch_deps() + [
         "//rtp_llm/cpp/core:types_hdr",
-        "//rtp_llm/cpp/kernels:kernels_kv_cache",
-        "//rtp_llm/cpp/kernels:rocm_atrex_pa",
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache",
+        "//rtp_llm/models_py/bindings/rocm/kernels:rocm_atrex_pa",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",

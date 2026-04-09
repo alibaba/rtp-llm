@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda/ops/tests/CudaTestUtils.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
-#include "rtp_llm/cpp/kernels/banRepeatNgram.h"
+#include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>  // For half
 #include <cuda_bf16.h>  // For __nv_bfloat16

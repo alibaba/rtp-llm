@@ -1,5 +1,5 @@
 #include "rtp_llm/models_py/bindings/cuda/UserBuffersOp.h"
-#include "rtp_llm/cpp/kernels/user_buffer/user_buffers.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/user_buffer/user_buffers.h"
 
 namespace rtp_llm {
 

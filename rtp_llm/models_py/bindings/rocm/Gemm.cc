@@ -1,6 +1,5 @@
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
 #include "rtp_llm/cpp/rocm/hip_host_utils.h"
-#include "rtp_llm/cpp/rocm/hipblasMMWrapper.h"
 #include <hipblas/hipblas.h>
 #include <hipblaslt/hipblaslt.h>
 #include <hipblaslt/hipblaslt-ext.hpp>

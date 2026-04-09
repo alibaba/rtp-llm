@@ -11,10 +11,10 @@
 #include <ATen/cuda/CUDAContext.h>
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include "ATen/ops/cat.h"
-#include "rtp_llm/cpp/kernels/batch_copy.h"
-#include "rtp_llm/cpp/kernels/copy_utils.h"
+#include "rtp_llm/models_py/bindings/common/kernels/batch_copy.h"
+#include "rtp_llm/models_py/bindings/common/kernels/copy_utils.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
-#include "rtp_llm/cpp/kernels/mask_logits.h"
+#include "rtp_llm/models_py/bindings/common/kernels/mask_logits.h"
 #include <cuda_profiler_api.h>
 #elif USING_ROCM
 #include "rtp_llm/cpp/rocm/hip_host_utils.h"

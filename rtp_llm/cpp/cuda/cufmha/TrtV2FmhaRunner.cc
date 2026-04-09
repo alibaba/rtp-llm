@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
-#include "rtp_llm/cpp/kernels/kv_cache_kernels.h"
+#include "rtp_llm/models_py/bindings/common/kernels/kv_cache_kernels.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <ATen/cuda/CUDAContext.h>

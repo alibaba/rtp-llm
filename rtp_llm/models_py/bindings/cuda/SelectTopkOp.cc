@@ -1,6 +1,7 @@
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
 #include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/models_py/bindings/common/kernels/moe_kernels.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 
 namespace rtp_llm {
