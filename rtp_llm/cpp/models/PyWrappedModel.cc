@@ -367,8 +367,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             attention_inputs.context_parallel_info = cp_params;
         }
 
-        BufferPtr              kv_cache_block_id_device;
-        std::vector<BufferPtr> kv_cache_block_id_device_by_group;
         if (!inputs.warmup && inputs.pd_separation) {
             attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
             cache_store_async_writer_->init();
