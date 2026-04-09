@@ -680,7 +680,7 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         block_size = value_cache.shape[2]
         output = torch.empty_like(query).view((num_seqs, num_heads, head_size))
         #if max_seq_len <= 16384 and (not using_fp8_kvcache):
-        if False:
+        if True:
             _PARTITION_SIZE_ROCM = 512
             max_num_partitions = (
                 max_seq_len + _PARTITION_SIZE_ROCM - 1
