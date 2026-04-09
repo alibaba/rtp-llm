@@ -124,7 +124,9 @@ class FMHAParams(ParamsBase):
 
             # Create seq_lens on CUDA
             if sequence_lengths is not None:
-                self.seq_lens = (sequence_lengths + 1).to(torch.device("cuda"))
+                self.seq_lens = (sequence_lengths + 1).to(
+                    torch.device("cuda"), non_blocking=True
+                )
             else:
                 self.seq_lens = None
 
@@ -145,7 +147,7 @@ class FMHAParams(ParamsBase):
         if kv_cache_block_id_device is not None:
             self.kv_cache_block_id_device = kv_cache_block_id_device
         if self.seq_lens is not None and self.sequence_lengths is not None:
-            self.seq_lens.copy_((self.sequence_lengths + 1).to(torch.device("cuda")))
+            self.seq_lens.copy_((self.sequence_lengths + 1).to(torch.device("cuda"), non_blocking=True), non_blocking=True)
             if (
                 self.enable_cuda_graph
                 and self.graph_max_seq_len is not None
@@ -235,8 +237,8 @@ class AiterPrefillAttnOp:
         # Split into Q/K/V and use flash_attn_varlen_fp8_pertensor_func.
         if q_tensor.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
             query, key, value = self._split_qkv_fp8(q_tensor)
-            cu_seqlens_q = fmha_params.cu_seqlens_q.to(query.device)
-            cu_seqlens_k = fmha_params.cu_seqlens_k.to(query.device)
+            cu_seqlens_q = fmha_params.cu_seqlens_q.to(query.device, non_blocking=True)
+            cu_seqlens_k = fmha_params.cu_seqlens_k.to(query.device, non_blocking=True)
             res = aiter.flash_attn_varlen_fp8_pertensor_func(
                 query,
                 key,
@@ -323,14 +325,16 @@ class AiterPrefillAttnOpPaged:
             kv_sizes[0], kv_sizes[1], kv_sizes[2] // x, kv_sizes[3], x
         )
 
-        cu_seqlens_q = fmha_params.cu_seqlens_q.to(device)
+        cu_seqlens_q = fmha_params.cu_seqlens_q.to(device, non_blocking=True)
         batch_size = cu_seqlens_q.shape[0] - 1
 
-        cu_seqlens_k = fmha_params.cu_seqlens_k.to(device)
-        seqlen_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).to(torch.int32)
+        cu_seqlens_k = fmha_params.cu_seqlens_k.to(device, non_blocking=True)
+        seqlen_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).to(
+            torch.int32, non_blocking=True
+        )
 
         block_table = fmha_params.kv_cache_block_id_device.to(
-            dtype=torch.int32, device=device
+            dtype=torch.int32, device=device, non_blocking=True
         )
 
         kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
