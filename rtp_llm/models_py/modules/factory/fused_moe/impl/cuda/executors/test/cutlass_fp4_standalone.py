@@ -130,9 +130,22 @@ def _find_cu_source():
     )
 
 
+def _ensure_ninja():
+    """Install ninja if not available (required by torch cpp_extension)."""
+    try:
+        import ninja  # noqa: F401
+    except ImportError:
+        import subprocess
+        import sys
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "ninja", "-q"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 @functools.lru_cache(maxsize=1)
 def _try_load_cutlass_fp4_module():
     """JIT-compile the bundled CUTLASS FP4 kernel."""
+    _ensure_ninja()
     from torch.utils.cpp_extension import load
 
     cu_src = _find_cu_source()
