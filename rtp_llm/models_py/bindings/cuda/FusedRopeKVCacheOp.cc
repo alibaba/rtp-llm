@@ -127,8 +127,16 @@ TRTAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs a
 
     if (attn_inputs.context_parallel_info.has_value()
         && attn_inputs.context_parallel_info->prefill_shuffle_indices.defined()) {
-        attn_params->cp_position_ids = attn_inputs.context_parallel_info->prefill_shuffle_indices;
+        auto cp_pos = attn_inputs.context_parallel_info->prefill_shuffle_indices;
+        if (attn_params->max_prefix_length > 0) {
+            auto device = cp_pos.device();
+            auto per_token_prefix =
+                at::repeat_interleave(attn_inputs.prefix_lengths.to(device), attn_inputs.input_lengths.to(device));
+            cp_pos = cp_pos + per_token_prefix;
+        }
+        attn_params->cp_position_ids = cp_pos;
     }
+
     return attn_params;
 }
 

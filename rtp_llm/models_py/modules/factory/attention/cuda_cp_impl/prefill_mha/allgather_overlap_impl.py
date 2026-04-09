@@ -1,32 +1,32 @@
 import logging
-from enum import Enum, auto
-from functools import cached_property
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import torch
-from numpy import append
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, recv, send
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.distributed.user_buffers import get_user_buffers_communicator
-from rtp_llm.ops import AttentionConfigs, CPRotateMethod, FMHAType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
     ParamsBase,
     PyAttentionInputs,
-    PyContextParallelParams,
     fill_mla_params,
 )
 
 logger = logging.getLogger(__name__)
 
 
-from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
+from flashinfer import (
+    BatchPrefillWithPagedKVCacheWrapper,
+    BatchPrefillWithRaggedKVCacheWrapper,
+)
 from flashinfer.cascade import merge_state
 from flashinfer.page import append_paged_kv_cache
 
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
-    generate_kv_indices,
+    generate_nonlocal_causal_kv_indices,
     generate_q_indices,
+    plan_prefix_paged_attention,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     get_py_flashinfer_workspace_buffer,
@@ -71,22 +71,35 @@ class PCPAllGatherOverlapAttnOp:
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
 
+        self.seq_size_per_block = attn_configs.tokens_per_block
+
         # write kv cache params
         self.kv_restore_unpad_indices = None
 
         # init flashinfer attention wrapper
-        self.prefill_wrappers = {}
-        for wrapper_name in ["causal", "non_causal_part_0", "non_causal_part_1"]:
-            self.prefill_wrappers[wrapper_name] = BatchPrefillWithRaggedKVCacheWrapper(
-                self.workspace_buffer,
-                kv_layout=kv_layout,
-                backend=backend,
-            )
+        self.prefill_wrappers = {
+            "ragged": {
+                name: BatchPrefillWithRaggedKVCacheWrapper(
+                    self.workspace_buffer,
+                    kv_layout=kv_layout,
+                    backend=backend,
+                )
+                for name in ["causal", "non_causal_part_0", "non_causal_part_1"]
+            },
+            "paged": {
+                "prefix": BatchPrefillWithPagedKVCacheWrapper(
+                    self.workspace_buffer,
+                    kv_layout="HND",
+                    backend=backend,
+                ),
+            },
+        }
         self.q0_idx = self.q1_idx = None
         self.kv0_idx = self.kv1_idx = None
 
         self.communication_stream = torch.cuda.Stream(device=self.device)
         self.ub_communicator = get_user_buffers_communicator()
+        self.use_ub = self.ub_communicator is not None
 
     def support(self, attention_inputs: PyAttentionInputs) -> bool:
         return attention_inputs.is_prefill
@@ -102,11 +115,49 @@ class PCPAllGatherOverlapAttnOp:
         self.kv_restore_unpad_indices = kv_restore_indices[padding_mask == 1]
 
         qo_indptr = cu_seqlens // 2
-        kv_indptr_part0 = qo_indptr * self.prefill_cp_rank
-        kv_indptr_part1 = qo_indptr * (
-            2 * self.prefill_cp_size - self.prefill_cp_rank - 1
+
+        q0_idx, q1_idx = generate_q_indices(prefill_cp_chunk_lengths)
+        kv0_idx, kv1_idx = generate_nonlocal_causal_kv_indices(
+            prefill_cp_chunk_lengths,
+            self.prefill_cp_rank,
+            self.prefill_cp_size,
         )
 
+        self.q0_idx = torch.tensor(q0_idx, device=self.device)
+        self.q1_idx = torch.tensor(q1_idx, device=self.device)
+        self.kv0_idx = kv_restore_indices[kv0_idx]
+        self.kv1_idx = kv_restore_indices[kv1_idx]
+
+        params = fill_mla_params(
+            self.attn_inputs.prefix_lengths,
+            self.attn_inputs.sequence_lengths,
+            cp_info.prefill_actual_input_lengths_cpu,
+            self.attn_inputs.kv_cache_kernel_block_id_host,
+            self.attn_configs.kernel_tokens_per_block,
+        )
+
+        self._plan_ragged(cu_seqlens, qo_indptr)
+        self.has_prefix = self.attn_inputs.prefix_lengths.any().item()
+        if self.has_prefix:
+            plan_prefix_paged_attention(
+                self.prefill_wrappers["paged"]["prefix"],
+                cu_seqlens,
+                attention_inputs.prefix_lengths,
+                params,
+                num_qo_heads=self.num_qo_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_dim,
+                page_size=self.seq_size_per_block,
+                device=self.device,
+            )
+
+        return params
+
+    def _plan_ragged(self, cu_seqlens: torch.Tensor, qo_indptr: torch.Tensor) -> None:
+        kv_indptr_part0 = qo_indptr * self.prefill_cp_rank
+        kv_indptr_part1 = qo_indptr * (
+            2 * self.prefill_cp_size - self.prefill_cp_rank - 2
+        )
         common_params = {
             "num_qo_heads": self.num_qo_heads,
             "num_kv_heads": self.num_kv_heads,
@@ -135,28 +186,48 @@ class PCPAllGatherOverlapAttnOp:
         ]
         for config in configs:
             wrapper_name = config.pop("wrapper_name")
-            self.prefill_wrappers[wrapper_name].plan(**config, **common_params)
+            self.prefill_wrappers["ragged"][wrapper_name].plan(
+                **config, **common_params
+            )
 
-        q0_idx, q1_idx = generate_q_indices(prefill_cp_chunk_lengths)
-        kv0_idx, kv1_idx = generate_kv_indices(
-            prefill_cp_chunk_lengths,
-            self.prefill_cp_rank,
-            self.prefill_cp_size,
-            is_non_local=True,
+    def _all_gather_kv(self, k: torch.Tensor, v: torch.Tensor):
+        gather_shape = (
+            k.shape[0] * self.prefill_cp_size,
+            self.num_kv_heads,
+            self.head_dim,
         )
+        if self.use_ub and self.ub_communicator.can_handle_tensor(k):
+            all_keys = self.ub_communicator.all_gather(k).reshape(gather_shape)
+            all_values = self.ub_communicator.all_gather(v).reshape(gather_shape)
+        else:
+            all_keys = all_gather(k, group=Group.TP).reshape(gather_shape)
+            all_values = all_gather(v, group=Group.TP).reshape(gather_shape)
+        return all_keys, all_values
 
-        self.q0_idx = torch.tensor(q0_idx, device=self.device)
-        self.q1_idx = torch.tensor(q1_idx, device=self.device)
-        self.kv0_idx = kv_restore_indices[kv0_idx]
-        self.kv1_idx = kv_restore_indices[kv1_idx]
-
-        return fill_mla_params(
-            self.attn_inputs.prefix_lengths,
-            self.attn_inputs.sequence_lengths,
-            cp_info.prefill_actual_input_lengths_cpu,
-            self.attn_inputs.kv_cache_kernel_block_id_host,
-            self.attn_configs.kernel_tokens_per_block,
+    def _write_kv_cache(
+        self,
+        all_keys: torch.Tensor,
+        all_values: torch.Tensor,
+        kv_cache: KVCache,
+        params: ParamsBase,
+    ):
+        restore_k = all_keys[self.kv_restore_unpad_indices]
+        restore_v = all_values[self.kv_restore_unpad_indices]
+        kv_cache_tensor = kv_cache.kv_cache_base.view(
+            -1, 2, self.num_kv_heads, self.seq_size_per_block, self.head_dim
         )
+        append_paged_kv_cache(
+            append_key=restore_k,
+            append_value=restore_v,
+            batch_indices=params.batch_indice_d,
+            positions=params.positions_d,
+            paged_kv_cache=kv_cache_tensor,
+            kv_indices=params.page_indice_d,
+            kv_indptr=params.decode_page_indptr_d,
+            kv_last_page_len=params.paged_kv_last_page_len_d,
+            kv_layout="HND",
+        )
+        return kv_cache_tensor
 
     def forward(
         self,
@@ -164,7 +235,6 @@ class PCPAllGatherOverlapAttnOp:
         kv_cache: Optional[KVCache] = None,
         params: ParamsBase = None,
     ) -> torch.Tensor:
-        # reshape qkv to q, k, v
         qkv = qkv.reshape(qkv.shape[0], -1)
         q, k, v = torch.split(
             qkv,
@@ -182,47 +252,33 @@ class PCPAllGatherOverlapAttnOp:
         self.communication_stream.wait_stream(torch.cuda.current_stream())
 
         with torch.cuda.stream(self.communication_stream):
-            gather_shape = (
-                k.shape[0] * self.prefill_cp_size,
-                self.num_kv_heads,
-                self.head_dim,
-            )
-            if (
-                self.ub_communicator is not None
-                and self.ub_communicator.can_handle_tensor(k)
-            ):
-                all_keys = self.ub_communicator.all_gather(k).reshape(gather_shape)
-                all_values = self.ub_communicator.all_gather(v).reshape(gather_shape)
-            else:
-                all_keys = all_gather(k, group=Group.TP).reshape(gather_shape)
-                all_values = all_gather(v, group=Group.TP).reshape(gather_shape)
+            all_keys, all_values = self._all_gather_kv(k, v)
 
         q_reshaped = q.reshape(-1, self.num_qo_heads, self.head_dim)
-        output, lse = self.prefill_wrappers["causal"].run(
+
+        # Local causal attention (overlaps with all-gather)
+        output, lse = self.prefill_wrappers["ragged"]["causal"].run(
             q_reshaped,
             k.reshape(-1, self.num_kv_heads, self.head_dim),
             v.reshape(-1, self.num_kv_heads, self.head_dim),
             return_lse=True,
         )
+
+        if self.has_prefix:
+            # Prefix paged attention (also overlaps with all-gather)
+            kv_cache_tensor = kv_cache.kv_cache_base.view(
+                -1, 2, self.num_kv_heads, self.seq_size_per_block, self.head_dim
+            )
+            prefix_out, prefix_lse = self.prefill_wrappers["paged"]["prefix"].run(
+                q_reshaped, kv_cache_tensor, return_lse=True
+            )
+            output, lse = merge_state(
+                v_a=output, s_a=lse, v_b=prefix_out, s_b=prefix_lse
+            )
+
         torch.cuda.current_stream().wait_stream(self.communication_stream)
 
-        # TODO: make write local kvcache async
-        restore_k = all_keys[self.kv_restore_unpad_indices]
-        restore_v = all_values[self.kv_restore_unpad_indices]
-        kv_cache_tensor = kv_cache.kv_cache_base.view(
-            -1, 2, self.num_kv_heads, kv_cache.seq_size_per_block, self.head_dim
-        )
-        append_paged_kv_cache(
-            append_key=restore_k,
-            append_value=restore_v,
-            batch_indices=params.batch_indice_d,
-            positions=params.positions_d,
-            paged_kv_cache=kv_cache_tensor,
-            kv_indices=params.page_indice_d,
-            kv_indptr=params.prefill_ragged_kv_len_indptr_d,
-            kv_last_page_len=params.paged_kv_last_page_len_d,
-            kv_layout="HND",
-        )
+        self._write_kv_cache(all_keys, all_values, kv_cache, params)
 
         q0 = torch.index_select(q_reshaped, 0, self.q0_idx).contiguous()
         q1 = torch.index_select(q_reshaped, 0, self.q1_idx).contiguous()
@@ -246,14 +302,14 @@ class PCPAllGatherOverlapAttnOp:
             (
                 out_buffer[self.q0_idx, :, :],
                 lse_buffer[self.q0_idx, :],
-            ) = self.prefill_wrappers["non_causal_part_0"].run(
+            ) = self.prefill_wrappers["ragged"]["non_causal_part_0"].run(
                 q=q0, k=k0, v=v0, return_lse=True
             )
         if k1.numel() > 0:
             (
                 out_buffer[self.q1_idx, :, :],
                 lse_buffer[self.q1_idx, :],
-            ) = self.prefill_wrappers["non_causal_part_1"].run(
+            ) = self.prefill_wrappers["ragged"]["non_causal_part_1"].run(
                 q=q1, k=k1, v=v1, return_lse=True
             )
         merged_output, merged_lse = merge_state(
