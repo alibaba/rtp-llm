@@ -10,9 +10,12 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/embed.h>
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
-#include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #if USING_CUDA || USING_ROCM
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#else
+namespace rtp_llm {
+class CudaGraphRunnerBase;
+}
 #endif
 
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"

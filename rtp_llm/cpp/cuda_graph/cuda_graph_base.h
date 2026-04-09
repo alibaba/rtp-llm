@@ -39,18 +39,4 @@ struct GraphParams {
     int32_t              kv_cache_group_num = 0;   // number of kv cache groups
 };
 
-class CudaGraphRunnerBase {
-public:
-    CudaGraphRunnerBase(py::object py_instance): py_instance_(std::move(py_instance)) {}
-    virtual ~CudaGraphRunnerBase() {}
-    virtual void           initCapture()                                                           = 0;
-    virtual PyModelOutputs forward(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor) = 0;
-    virtual void           setPositionEncoding(torch::Tensor position_encoding)                    = 0;
-    virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)               = 0;
-    virtual void           setInputEmbeddingScalar(float input_embedding_scalar)                   = 0;
-    virtual bool           canRun(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor)  = 0;
-    /// Decode: captured batch key; prefill: captured seq_len key (for tests / diagnostics).
-    virtual int getCurrentRealGraphSize(const BatchDescriptor& batch_descriptor) const = 0;
-    py::object  py_instance_;
-};
 }  // namespace rtp_llm
