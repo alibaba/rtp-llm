@@ -105,12 +105,16 @@ except BaseException as e:
 import sysconfig
 from ctypes import cdll
 
-_pylib = f"libpython{sys.version_info.major}.{sys.version_info.minor}.so"
-_pylib_path = os.path.join(sysconfig.get_config_var("LIBDIR"), _pylib)
-if os.path.exists(_pylib_path):
-    cdll.LoadLibrary(_pylib_path)
+_libdir = sysconfig.get_config_var("LIBDIR")
+if _libdir:
+    _pylib = f"libpython{sys.version_info.major}.{sys.version_info.minor}.so"
+    _pylib_path = os.path.join(_libdir, _pylib)
+    if os.path.exists(_pylib_path):
+        cdll.LoadLibrary(_pylib_path)
+    else:
+        logging.warning(f"Could not find {_pylib_path}, shared lib loading may fail")
 else:
-    logging.warning(f"Could not find {_pylib_path}, shared lib loading may fail")
+    logging.warning("sysconfig LIBDIR is not set, skipping libpython preload")
 
 try:
     from libth_transformer_config import (
