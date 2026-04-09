@@ -73,7 +73,7 @@ class MoeConfigResolver:
         Returns:
             Whether EP is enabled
         """
-        return config.parallelism_config.ep_size > 1
+        return config.ep_size > 1
 
     @staticmethod
     def use_low_latency(config: MoEConfigAdapter) -> bool:
@@ -97,7 +97,7 @@ class MoeConfigResolver:
         Returns:
             Whether single GPU
         """
-        return config.parallelism_config.ep_size == 1
+        return config.ep_size == 1
 
     @staticmethod
     def is_tp_equal_ep(config: MoEConfigAdapter) -> bool:
@@ -110,7 +110,7 @@ class MoeConfigResolver:
             Whether TP size equals EP size
         """
         # in cp mode, tp_size is set to 1
-        return config.tp_size == config.parallelism_config.ep_size
+        return config.tp_size == config.ep_size
 
     @staticmethod
     def is_pure_tp_mode(config: MoEConfigAdapter) -> bool:
@@ -128,11 +128,7 @@ class MoeConfigResolver:
         Returns:
             Whether pure TP mode can be used
         """
-        return (
-            config.parallelism_config.ep_size == 1
-            and config.parallelism_config.dp_size == 1
-            and config.parallelism_config.tp_size >= 1
-        )
+        return config.ep_size == 1 and config.dp_size == 1 and config.tp_size >= 1
 
     @staticmethod
     def use_all_gather(config: MoEConfigAdapter) -> bool:
