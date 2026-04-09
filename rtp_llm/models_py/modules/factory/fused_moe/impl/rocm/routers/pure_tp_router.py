@@ -200,8 +200,8 @@ class PureTpRouterFp8PerBlockPassthrough(PureTpRouterBase):
         quant_method = resolver.get_quant_method(config)
         checker.check(
             quant_method in (
-                "FP4_PER_GROUP_QUARK",
-                "modelopt_fp4",
+                "FP8_PER_BLOCK",
+                "FP8_PER_BLOCK_QUARK",
             )
         )
 
