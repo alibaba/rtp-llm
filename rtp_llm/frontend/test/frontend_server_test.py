@@ -7,10 +7,16 @@ from pydantic import BaseModel
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.openai.api_datatype import ChatCompletionRequest, ChatMessage
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
-from rtp_llm.utils.concurrency_controller import init_controller, set_global_controller
+from rtp_llm.utils.concurrency_controller import (
+    ConcurrencyController,
+    ConcurrencyException,
+    init_controller,
+    set_global_controller,
+)
 
 
 class FakePipelinResponse(BaseModel):
@@ -82,6 +88,54 @@ class FrontendServerTest(TestCase):
         # test error input
         res = self.frontend_server.tokenizer_encode('{"text": "b c d e"}')
         self.assertEqual(json.loads(res.body.decode("utf-8"))["error_code"], 514)
+
+    def _make_concurrency_full_controller(self):
+        """Create a controller with max_concurrency=0 so increment() always raises."""
+        controller = ConcurrencyController(max_concurrency=0)
+        set_global_controller(controller)
+        self.frontend_server._global_controller = controller
+
+    def test_inference_increment_failure_returns_json(self):
+        self._make_concurrency_full_controller()
+        loop = asyncio.new_event_loop()
+        res = loop.run_until_complete(
+            self.frontend_server.inference(
+                req={"prompt": "hello"}, raw_request=FakeRawRequest()
+            )
+        )
+        self.assertEqual(res.status_code, 500)
+        body = json.loads(res.body.decode("utf-8"))
+        self.assertIn("error_code", body)
+        self.assertIn("message", body)
+
+    def test_embedding_increment_failure_returns_json(self):
+        self._make_concurrency_full_controller()
+        loop = asyncio.new_event_loop()
+        res = loop.run_until_complete(
+            self.frontend_server.embedding(
+                request={"source": "test"}, raw_request=FakeRawRequest()
+            )
+        )
+        self.assertEqual(res.status_code, 500)
+        body = json.loads(res.body.decode("utf-8"))
+        self.assertIn("error_code", body)
+        self.assertIn("message", body)
+
+    def test_chat_completion_increment_failure_returns_json(self):
+        self._make_concurrency_full_controller()
+        chat_request = ChatCompletionRequest(
+            messages=[ChatMessage(role="user", content="hello")]
+        )
+        loop = asyncio.new_event_loop()
+        res = loop.run_until_complete(
+            self.frontend_server.chat_completion(
+                request=chat_request, raw_request=FakeRawRequest()
+            )
+        )
+        self.assertEqual(res.status_code, 500)
+        body = json.loads(res.body.decode("utf-8"))
+        self.assertIn("error_code", body)
+        self.assertIn("message", body)
 
 
 main()

@@ -264,10 +264,13 @@ class FrontendServer(object):
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        sequence = self._global_controller.increment() % 4096  # 12 bits
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip, self.py_env_configs.server_config.server_port, self.server_id, sequence
-        )
+        try:
+            sequence = self._global_controller.increment() % 4096  # 12 bits
+            request_id = generate_request_id(
+                self.py_env_configs.server_config.ip, self.py_env_configs.server_config.server_port, self.server_id, sequence
+            )
+        except Exception as e:
+            return self._handle_exception(request.model_dump(exclude_none=True), e)
 
         def generate_call():
             assert self._openai_endpoint != None
