@@ -296,10 +296,10 @@ void run_fp4_blockwise_scaled_group_mm_sm100(
       torch::empty({num_experts}, torch::TensorOptions().dtype(torch::kLong).device(a.device()));
   torch::Tensor alpha_ptrs =
       torch::empty({num_experts}, torch::TensorOptions().dtype(torch::kLong).device(a.device()));
-  torch::Tensor layout_sfa = torch::stable::empty(
+  torch::Tensor layout_sfa = torch::empty(
       {num_experts, 5}, torch::headeronly::ScalarType::Long, std::nullopt,
       a.device());
-  torch::Tensor layout_sfb = torch::stable::empty(
+  torch::Tensor layout_sfb = torch::empty(
       {num_experts, 5}, torch::headeronly::ScalarType::Long, std::nullopt,
       a.device());
   torch::Tensor a_strides1 =
@@ -483,10 +483,10 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
       torch::empty({num_experts}, torch::TensorOptions().dtype(torch::kLong).device(a.device()));
   torch::Tensor alpha_ptrs =
       torch::empty({num_experts}, torch::TensorOptions().dtype(torch::kLong).device(a.device()));
-  torch::Tensor layout_sfa = torch::stable::empty(
+  torch::Tensor layout_sfa = torch::empty(
       {num_experts, 5}, torch::headeronly::ScalarType::Long, std::nullopt,
       a.device());
-  torch::Tensor layout_sfb = torch::stable::empty(
+  torch::Tensor layout_sfb = torch::empty(
       {num_experts, 5}, torch::headeronly::ScalarType::Long, std::nullopt,
       a.device());
   torch::Tensor a_strides1 =
@@ -613,7 +613,7 @@ void run_fp4_blockwise_scaled_group_mm(
 #if (defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100) || \
     (defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120)
 constexpr auto FLOAT4_E2M1X2 = torch::headeronly::ScalarType::Byte;
-constexpr auto SF_DTYPE = torch::kFloat328_e4m3fn;
+constexpr auto SF_DTYPE = torch::kFloat8_e4m3fn;
 #endif
 
   TORCH_CHECK(x.scalar_type() == st, \
