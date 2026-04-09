@@ -101,11 +101,16 @@ try:
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
-# frontend cannot load libpython3.10.so, so we need to load it manually
+# frontend cannot load libpython*.so, so we need to load it manually
 import sysconfig
 from ctypes import cdll
 
-cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
+_pylib = f"libpython{sys.version_info.major}.{sys.version_info.minor}.so"
+_pylib_path = os.path.join(sysconfig.get_config_var("LIBDIR"), _pylib)
+if os.path.exists(_pylib_path):
+    cdll.LoadLibrary(_pylib_path)
+else:
+    logging.warning(f"Could not find {_pylib_path}, shared lib loading may fail")
 
 try:
     from libth_transformer_config import (
