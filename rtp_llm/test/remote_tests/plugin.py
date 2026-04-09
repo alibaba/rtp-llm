@@ -505,6 +505,17 @@ class RemoteREAPIPlugin:
                 time.sleep(wait)
         return last_result
 
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_collect_file(self, file_path, parent):
+        """In session mode, skip local collection entirely.
+
+        The remote worker will re-collect with its own GPU environment.
+        This avoids ImportError noise from CUDA extensions on CPU-only
+        CI controller nodes.
+        """
+        if self.mode == RemoteDispatchMode.SESSION:
+            return None  # prevent pytest from importing the file
+
     @pytest.hookimpl(trylast=True)
     def pytest_collection_modifyitems(self, items, config=None, session=None):
         if self.mode == RemoteDispatchMode.SESSION:
