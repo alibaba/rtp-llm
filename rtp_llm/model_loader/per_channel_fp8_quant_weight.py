@@ -1,5 +1,6 @@
 import copy
 import functools
+import os
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -32,11 +33,11 @@ from rtp_llm.utils.model_weight import (
     sp_head_gemm_a8,
     sp_head_s_gemm_a8_channel,
     sp_id,
+    sp_moe_neg1,
+    sp_moe_w1,
     sp_neg1,
     stack_,
     stack_moe_w1,
-    sp_moe_w1,
-    sp_moe_neg1
 )
 from rtp_llm.utils.util import check_with_info
 
@@ -45,9 +46,11 @@ B_SUFFIX = ".bias"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale"
 
+
 def cast_to_fp8(x: torch.Tensor):
     """Convert tensor to FP8 format."""
     return x.to(torch.float8_e4m3fn)
+
 
 def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -57,7 +60,10 @@ def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Quantized tensor and channel-wise scales
     """
-    assert x.dim() in [2, 3], f"weight dim=2 or dim=3 supported, but got shape {x.shape}"
+    assert x.dim() in [
+        2,
+        3,
+    ], f"weight dim=2 or dim=3 supported, but got shape {x.shape}"
     if x.dim() == 3:
         channel_max = x.abs().amax(dim=-1, keepdim=True).clamp(1e-4)
         scales = (channel_max / FP8_E4M3_MAX).to(torch.float32)
@@ -71,6 +77,7 @@ def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     # Quantize the tensor
     quantized = (x / scales).to(torch.float8_e4m3fn)
     return (quantized.T).contiguous(), (scales.T).contiguous()
+
 
 def gemm_channel_fp8_gpt_style_tp_strategy():
     gemm_channel_fp8_weight_tp_strategy: Dict[str, Any] = {
@@ -89,7 +96,7 @@ def gemm_channel_fp8_gpt_style_tp_strategy():
         W.moe_w1: sp_moe_w1,
         W.moe_s1: sp_moe_w1,
         W.moe_w2: sp_moe_neg1,
-        W.moe_s2: sp_id
+        W.moe_s2: sp_id,
     }
     tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
     tp_strategy.update(gemm_channel_fp8_weight_tp_strategy)
@@ -154,10 +161,18 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
         if not quant_config.is_quanted() or not isinstance(
-            quant_config, (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig)
+            quant_config,
+            (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig),
         ):
             return False
         name = src_weight_info.name
+        # Skip FP8 for MoE weights when ATREX deterministic mode or SKIP_MOE_FP8 is active
+        _skip_moe_fp8 = (
+            os.environ.get("USE_ATREX_MOE", "0") == "1"
+            or os.environ.get("SKIP_MOE_FP8", "0") == "1"
+        )
+        if _skip_moe_fp8 and name in (W.moe_w1, W.moe_w2):
+            return False
         return name in cls.w8a8_weight_list
 
     def __init__(
@@ -423,6 +438,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
 
         return processed_res
 
+
 class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
     """
     LoadQuantPerChannelFp8Weight class for dynamic per-channel FP8 quantization.
@@ -440,6 +456,13 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         ):
             return False
         name = src_weight_info.name
+        # Skip FP8 for MoE weights when ATREX deterministic mode or SKIP_MOE_FP8 is active
+        _skip_moe_fp8 = (
+            os.environ.get("USE_ATREX_MOE", "0") == "1"
+            or os.environ.get("SKIP_MOE_FP8", "0") == "1"
+        )
+        if _skip_moe_fp8 and name in (W.moe_w1, W.moe_w2):
+            return False
         return name in cls.w8a8_weight_list
 
     def __init__(

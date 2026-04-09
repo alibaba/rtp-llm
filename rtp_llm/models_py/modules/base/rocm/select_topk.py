@@ -20,11 +20,12 @@ class SelectTopk(nn.Module):
         token_expert_indicies = torch.empty(
             topk_ids.shape[0], self.top_k, dtype=torch.int32, device=topk_ids.device
         )
-        topk_ids = topk_ids.int()
+        topk_ids_int32 = topk_ids.int()
         aiter.topk_softmax(
             topk_weights,
-            topk_ids,
+            topk_ids_int32,
             token_expert_indicies,
             router_logits_fp32,  # TODO(woosuk): Optimize this.
             True,
         )
+        topk_ids.copy_(topk_ids_int32)

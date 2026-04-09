@@ -922,6 +922,12 @@ class RocmImpl(GpuImpl):
         do_shuffle = name in [W.moe_w1, W.moe_w2]
         if x.dim() == 2:
             x = x.unsqueeze(-1)
+
+        # When USE_ATREX_MOE=1, skip all processing (swap/pad/shuffle).
+        # ATREX executor handles weight layout conversion itself.
+        if os.environ.get("USE_ATREX_MOE", "0") == "1" and do_shuffle:
+            return x
+
         x_ = (
             self.cat_0([x[:, x.shape[1] // 2 :, :], x[:, : x.shape[1] // 2, :]], dim=1)
             if is_gate

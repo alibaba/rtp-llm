@@ -42,3 +42,17 @@ py_test (
     exec_properties = {'gpu':'MI308X'},
 )
 
+py_test (
+    name = "test_moe_mixtbstars",
+    srcs = ["test_moe_mixtbstars.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    timeout = "eternal",
+    env = test_envs,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)

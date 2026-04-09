@@ -35,6 +35,9 @@ if device_type == DeviceType.ROCm:
         GroupTopK,
         IndexerOp,
     )
+
+    # Use torch implementation for RMSResNorm on ROCm
+    RMSResNorm = RMSResNormTorch
     from rtp_llm.models_py.modules.base.rocm.select_topk import SelectTopk
 else:
     from rtp_llm.models_py.modules.base.cuda.activation import FusedSiluAndMul
