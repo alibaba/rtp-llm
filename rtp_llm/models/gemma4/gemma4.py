@@ -102,8 +102,15 @@ class Gemma4(BaseModel):
         config.hybrid_attention_config.sliding_window_size_per_head = text_config["head_dim"]
         config.hybrid_attention_config.sliding_window_size = text_config.get("sliding_window", 1024)
 
-        config.hybrid_attention_config.global_kv_head_num = text_config.get("num_global_key_value_heads", 4)
-        config.hybrid_attention_config.global_size_per_head = text_config.get("global_head_dim", 512)
+        # Global layers use head_dim=512 but no decode kernel supports >256.
+        # Reshape: [4 KV×512] → [8 KV×256] to fit FlashInfer constraints.
+        # Physical block stride mismatch is handled by reshape_paged_kv_cache slicing.
+        global_kv_heads = text_config.get("num_global_key_value_heads", 4)
+        global_head_dim = text_config.get("global_head_dim", 512)
+        sliding_head_dim = text_config["head_dim"]  # 256
+        reshape_factor = global_head_dim // sliding_head_dim  # 2
+        config.hybrid_attention_config.global_kv_head_num = global_kv_heads * reshape_factor
+        config.hybrid_attention_config.global_size_per_head = sliding_head_dim
 
     @classmethod
     def _parse_normalization_config(cls, text_config: dict, config: ModelConfig):
@@ -138,11 +145,18 @@ class Gemma4(BaseModel):
         rope_params = text_config.get("rope_parameters", {})
         full_rope = rope_params.get("full_attention", {})
 
+        # Reshape global attention: [4 KV×512] → [8 KV×256] for FlashInfer decode
+        global_kv_heads = text_config.get("num_global_key_value_heads", 4)
+        global_head_dim = text_config.get("global_head_dim", 512)
+        sliding_head_dim = text_config["head_dim"]  # 256
+        reshape_factor = global_head_dim // sliding_head_dim
+        orig_partial_rotary = full_rope.get("partial_rotary_factor", 0.25)
         config.gemma4_global_attn_config = {
-            "kv_head_num": text_config.get("num_global_key_value_heads", 4),
-            "head_dim": text_config.get("global_head_dim", 512),
+            "kv_head_num": global_kv_heads * reshape_factor,  # 8
+            "head_dim": sliding_head_dim,  # 256
+            "head_num": text_config["num_attention_heads"] * reshape_factor,  # 64
             "rope_theta": full_rope.get("rope_theta", 1000000.0),
-            "partial_rotary_factor": full_rope.get("partial_rotary_factor", 0.25),
+            "partial_rotary_factor": orig_partial_rotary * reshape_factor,  # 0.5
         }
         config.gemma4_sliding_attn_config = {
             "kv_head_num": text_config["num_key_value_heads"],

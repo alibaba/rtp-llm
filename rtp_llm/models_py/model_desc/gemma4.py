@@ -53,10 +53,11 @@ class Gemma4DecoderLayer(nn.Module):
 
         kv_head_num = attn_info.get("kv_head_num", model_config.attn_config.kv_head_num)
         head_dim = attn_info.get("head_dim", model_config.attn_config.size_per_head)
+        head_num = attn_info.get("head_num", model_config.attn_config.head_num)
 
         # Build per-layer AttentionConfigs
         attn_config = AttentionConfigs()
-        attn_config.head_num = model_config.attn_config.head_num
+        attn_config.head_num = head_num
         attn_config.kv_head_num = kv_head_num
         attn_config.size_per_head = head_dim
         attn_config.tokens_per_block = model_config.attn_config.tokens_per_block
@@ -192,10 +193,11 @@ class Gemma4Model(GptModelBase):
     def _build_attn_config(self, model_config: ModelConfig, attr_name: str) -> AttentionConfigs:
         info = getattr(model_config, attr_name, {})
         config = AttentionConfigs()
-        config.head_num = model_config.attn_config.head_num
+        config.head_num = info.get("head_num", model_config.attn_config.head_num)
         config.kv_head_num = info.get("kv_head_num", model_config.attn_config.kv_head_num)
         config.size_per_head = info.get("head_dim", model_config.attn_config.size_per_head)
         config.tokens_per_block = model_config.attn_config.tokens_per_block
+        config.kernel_tokens_per_block = model_config.attn_config.kernel_tokens_per_block
 
         rope_theta = info.get("rope_theta", 10000.0)
         partial_rotary_factor = info.get("partial_rotary_factor", 1.0)
@@ -211,11 +213,15 @@ class Gemma4Model(GptModelBase):
         inputs: PyModelInputs,
     ) -> FMHAImplBase:
         """Create FMHA impl with a specific attention config."""
-        # tokens_per_block is set by C++ engine AFTER Python model construction,
-        # so re-read it from the live config at forward time
+        # tokens_per_block and kernel_tokens_per_block are set by the C++ engine
+        # AFTER Python model construction, so re-read from the live config at
+        # forward time to avoid division-by-zero in fillParams.
         live_tpb = self.config.attn_config.tokens_per_block
         if live_tpb > 0 and attn_config.tokens_per_block != live_tpb:
             attn_config.tokens_per_block = live_tpb
+        live_ktpb = self.config.attn_config.kernel_tokens_per_block
+        if live_ktpb > 0 and attn_config.kernel_tokens_per_block != live_ktpb:
+            attn_config.kernel_tokens_per_block = live_ktpb
         return get_fmha_impl(
             attn_config,
             self.weight,
