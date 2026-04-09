@@ -84,6 +84,17 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        # Gemma4-specific fields
+        "final_logit_softcapping",
+        "gemma4_sliding_attn_config",
+        "gemma4_global_attn_config",
+        "gemma4_attention_k_eq_v",
+        "gemma4_layer_types",
+        "gemma4_vision_config",
+        "gemma4_boi_token_id",
+        "gemma4_eoi_token_id",
+        "gemma4_image_token_id",
+        "gemma4_vision_soft_tokens",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)

@@ -25,7 +25,8 @@ def plus_one(ts):
 class Gemma4WeightInfo(ModelDeployWeightInfo):
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
-        self.prefix = "model."
+        # Gemma4ForConditionalGeneration nests text model under language_model
+        self.prefix = "model.language_model."
 
     def _get_weight_info(self):
         weights: List[WeightModule] = []
@@ -99,6 +100,9 @@ class Gemma4WeightInfo(ModelDeployWeightInfo):
                     )
                 ],
             ),
+            # Note: pre_feedforward_layernorm and post_feedforward_layernorm
+            # exist in Gemma 4 but are handled differently in the model_desc
+            # forward pass. Skip loading them as separate weight slots for now.
         ]
 
     def _create_attention_weight(
@@ -114,18 +118,22 @@ class Gemma4WeightInfo(ModelDeployWeightInfo):
         # We duplicate kv_proj for both K and V slots
         k_eq_v = getattr(self.model_config, "gemma4_attention_k_eq_v", False)
 
-        if k_eq_v:
+        # Gemma4 checkpoint always has separate q_proj, k_proj, v_proj
+        # (even with attention_k_eq_v=True, convert script outputs separate keys)
+        # For global layers with k_eq_v: k_proj acts as both K and V
+        if k_eq_v and not is_sliding:
+            # Global attention layers: k_proj.weight serves as both K and V
             qkv_ckpt = [
                 CkptWeightInfo(
                     self.prefix + "layers.{i}.self_attn.q_proj.weight",
                     identity,
                 ),
                 CkptWeightInfo(
-                    self.prefix + "layers.{i}.self_attn.kv_proj.weight",
+                    self.prefix + "layers.{i}.self_attn.k_proj.weight",
                     identity,
                 ),
                 CkptWeightInfo(
-                    self.prefix + "layers.{i}.self_attn.kv_proj.weight",
+                    self.prefix + "layers.{i}.self_attn.k_proj.weight",
                     identity,
                 ),
             ]

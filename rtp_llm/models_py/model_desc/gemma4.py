@@ -240,11 +240,7 @@ class Gemma4Model(GptModelBase):
 
         hidden_states = self.norm(hidden_states)
 
-        # Final logit softcapping
-        if self.final_logit_softcapping > 0:
-            hidden_states = (
-                torch.tanh(hidden_states / self.final_logit_softcapping)
-                * self.final_logit_softcapping
-            )
+        # NOTE: final_logit_softcapping should be applied to logits (after lm_head),
+        # but lm_head lives in C++ PyWrappedModel. Skipped here; handled separately.
 
         return PyModelOutputs(hidden_states, fmha_impl_sliding.fmha_params)

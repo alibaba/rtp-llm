@@ -40,7 +40,15 @@ class Gemma4(BaseModel):
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
-            raise FileNotFoundError(f"config.json not found in {ckpt_path}")
+            # Auto-download from HuggingFace if HF_ENDPOINT is set
+            hf_endpoint = os.environ.get("HF_ENDPOINT")
+            if hf_endpoint:
+                import logging
+                logging.info(f"Model not found at {ckpt_path}, attempting HF download...")
+                from huggingface_hub import snapshot_download
+                snapshot_download("google/gemma-4-31B-it", local_dir=ckpt_path)
+            if not os.path.exists(config_path):
+                raise FileNotFoundError(f"config.json not found in {ckpt_path}")
 
         with open(config_path) as reader:
             config_json = json.loads(reader.read())
@@ -78,25 +86,23 @@ class Gemma4(BaseModel):
         if not layer_types:
             return
 
-        config.hybrid_attention_config.enable_hybrid_attention = True
-
         hybrid_layer_types: List[HybridAttentionType] = []
         for lt in layer_types:
             if lt == "sliding_attention":
                 hybrid_layer_types.append(HybridAttentionType.SLIDING_WINDOW)
             else:  # "full_attention"
                 hybrid_layer_types.append(HybridAttentionType.NONE)
+
+        # Enable C++ hybrid attention with heterogeneous KV cache groups
+        config.hybrid_attention_config.enable_hybrid_attention = True
         config.hybrid_attention_config.hybrid_attention_types = hybrid_layer_types
 
-        # Per-type KV dimensions for heterogeneous cache allocation
-        sliding_window = text_config.get("sliding_window", 1024)
-        config.hybrid_attention_config.sliding_window_size = sliding_window
+        # Per-type KV dimensions for separate MHAKVCacheSpec per group
         config.hybrid_attention_config.sliding_window_kv_head_num = text_config["num_key_value_heads"]
         config.hybrid_attention_config.sliding_window_size_per_head = text_config["head_dim"]
-        config.hybrid_attention_config.global_kv_head_num = text_config.get("num_global_key_value_heads",
-                                                                            text_config["num_key_value_heads"])
-        config.hybrid_attention_config.global_size_per_head = text_config.get("global_head_dim",
-                                                                              text_config["head_dim"])
+        config.hybrid_attention_config.sliding_window_size = text_config.get("sliding_window", 1024)
+        config.hybrid_attention_config.global_kv_head_num = text_config.get("num_global_key_value_heads", 4)
+        config.hybrid_attention_config.global_size_per_head = text_config.get("global_head_dim", 512)
 
     @classmethod
     def _parse_normalization_config(cls, text_config: dict, config: ModelConfig):
