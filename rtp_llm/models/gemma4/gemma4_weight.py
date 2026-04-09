@@ -182,7 +182,7 @@ class Gemma4WeightInfo(ModelDeployWeightInfo):
     def _get_attn_config_for_layer(self, is_sliding: bool):
         """Get the attention config for weight loading, with correct KV dims per layer type."""
         # For sliding layers: use the default attn_config (kv_head_num=16, head_dim=256)
-        # For global layers: reshaped dimensions (kv_head_num=8, head_dim=256)
+        # For global layers: different dimensions (kv_head_num=4, head_dim=512)
         if is_sliding:
             return self.attn_config
         else:
@@ -190,7 +190,7 @@ class Gemma4WeightInfo(ModelDeployWeightInfo):
             if global_config:
                 from rtp_llm.ops import AttentionConfigs
                 config = AttentionConfigs()
-                config.head_num = global_config.get("head_num", self.model_config.attn_config.head_num)
+                config.head_num = self.model_config.attn_config.head_num
                 config.kv_head_num = global_config["kv_head_num"]
                 config.size_per_head = global_config["head_dim"]
                 config.tokens_per_block = self.model_config.attn_config.tokens_per_block
