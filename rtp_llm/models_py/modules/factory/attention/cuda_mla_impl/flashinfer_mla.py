@@ -21,33 +21,7 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 g_workspace_buffer = None
-g_shared_workspace_buffer = None
-g_shared_workspace_lock = __import__("threading").Lock()
 warm_up_done = False
-
-
-def get_mla_shared_workspace_buffer(device: str = "cuda") -> torch.Tensor:
-    """Get or create the global shared MLA workspace buffer.
-
-    This function returns a single shared workspace buffer that can be reused
-    across all MLA attention instances. This is especially useful in CUDA graph mode
-    to reduce memory consumption.
-
-    Args:
-        device: CUDA device to allocate buffer on (default: "cuda")
-
-    Returns:
-        Global shared workspace buffer tensor
-    """
-    global g_shared_workspace_buffer
-    with g_shared_workspace_lock:
-        if g_shared_workspace_buffer is None:
-            g_shared_workspace_buffer = torch.empty(
-                512 * 1024 * 1024,
-                dtype=torch.int8,
-                device=device,
-            )
-        return g_shared_workspace_buffer
 
 
 def warmup_flashinfer_python():
@@ -202,7 +176,6 @@ class MlaFlashInferPrefillOp(object):
         weights: List[Dict[str, torch.Tensor]] | None,
         quant_config: Optional[object] = None,
         kv_cache_dtype: KvCacheDataType = KvCacheDataType.BASE,
-        shared_workspace_buffer: bool = False,
     ):
         super().__init__()
 
@@ -220,24 +193,16 @@ class MlaFlashInferPrefillOp(object):
         self.softmax_extra_scale = softmax_extra_scale
         self.use_mla = use_mla
         self.kv_cache_type = kv_cache_dtype
-        self.use_shared_buffer = shared_workspace_buffer
-
-        if self.use_shared_buffer:
-            workspace_buffer = get_mla_shared_workspace_buffer(
-                device=self.weights[0].get(W.mla_kv_b_w).device
+        global g_workspace_buffer
+        if g_workspace_buffer is None:
+            g_workspace_buffer = torch.empty(
+                512 * 1024 * 1024,
+                dtype=torch.int8,
+                device=self.weights[0].get(W.mla_kv_b_w).device,
             )
-        else:
-            global g_workspace_buffer
-            if g_workspace_buffer is None:
-                g_workspace_buffer = torch.empty(
-                    512 * 1024 * 1024,
-                    dtype=torch.int8,
-                    device=self.weights[0].get(W.mla_kv_b_w).device,
-                )
-            workspace_buffer = g_workspace_buffer
 
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
-            workspace_buffer,
+            g_workspace_buffer,
             "NHD",
             backend="auto",
             use_cuda_graph=False,
@@ -433,7 +398,6 @@ class MlaFlashInferDecodeOp(object):
         max_context_len: int = 0,
         num_tokens: int = 0,
         is_cuda_graph: bool = False,
-        shared_workspace_buffer: bool = False,
     ):
         super().__init__()
 
@@ -450,8 +414,7 @@ class MlaFlashInferDecodeOp(object):
         self.use_mla = use_mla
         self.is_sparse = is_sparse
         self.use_cuda_graph = is_cuda_graph
-        self.use_shared_buffer = shared_workspace_buffer
-
+        global g_workspace_buffer
         self.kv_indices_d = torch.empty(
             ((max_context_len + self.token_per_block - 1) // self.token_per_block)
             * max_bs,
@@ -462,22 +425,15 @@ class MlaFlashInferDecodeOp(object):
         self.kv_indptr_h = torch.zeros((max_bs + 1,), dtype=torch.int32, device="cpu")
         self.kv_len_arr_h = torch.ones((max_bs,), dtype=torch.int32, device="cpu")
 
-        if self.use_shared_buffer:
-            workspace_buffer = get_mla_shared_workspace_buffer(
-                device=self.weights[0].get(W.mla_vc).device
+        if g_workspace_buffer is None:
+            g_workspace_buffer = torch.empty(
+                512 * 1024 * 1024,
+                dtype=torch.int8,
+                device=self.weights[0].get(W.mla_vc).device,
             )
-        else:
-            global g_workspace_buffer
-            if g_workspace_buffer is None:
-                g_workspace_buffer = torch.empty(
-                    512 * 1024 * 1024,
-                    dtype=torch.int8,
-                    device=self.weights[0].get(W.mla_vc).device,
-                )
-            workspace_buffer = g_workspace_buffer
 
         self.mla_wrapper = BatchMLAPagedAttentionWrapper(
-            workspace_buffer,
+            g_workspace_buffer,
             backend="auto",
             use_cuda_graph=is_cuda_graph,
             qo_indptr=self.qo_indptr_h,
