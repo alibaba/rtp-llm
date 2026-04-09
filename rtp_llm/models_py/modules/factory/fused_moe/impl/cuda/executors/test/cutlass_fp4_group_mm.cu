@@ -297,11 +297,9 @@ void run_fp4_blockwise_scaled_group_mm_sm100(
   torch::Tensor alpha_ptrs =
       torch::empty({num_experts}, torch::TensorOptions().dtype(torch::kLong).device(a.device()));
   torch::Tensor layout_sfa = torch::empty(
-      {num_experts, 5}, at::kLong, std::nullopt,
-      a.device());
+      {num_experts, 5}, torch::TensorOptions().dtype(at::kLong).device(a.device()));
   torch::Tensor layout_sfb = torch::empty(
-      {num_experts, 5}, at::kLong, std::nullopt,
-      a.device());
+      {num_experts, 5}, torch::TensorOptions().dtype(at::kLong).device(a.device()));
   torch::Tensor a_strides1 =
       torch::empty({num_experts}, torch::TensorOptions().dtype(torch::kLong).device(a.device()));
   torch::Tensor b_strides1 =
@@ -484,11 +482,9 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
   torch::Tensor alpha_ptrs =
       torch::empty({num_experts}, torch::TensorOptions().dtype(torch::kLong).device(a.device()));
   torch::Tensor layout_sfa = torch::empty(
-      {num_experts, 5}, at::kLong, std::nullopt,
-      a.device());
+      {num_experts, 5}, torch::TensorOptions().dtype(at::kLong).device(a.device()));
   torch::Tensor layout_sfb = torch::empty(
-      {num_experts, 5}, at::kLong, std::nullopt,
-      a.device());
+      {num_experts, 5}, torch::TensorOptions().dtype(at::kLong).device(a.device()));
   torch::Tensor a_strides1 =
       torch::empty({num_experts}, torch::TensorOptions().dtype(torch::kLong).device(a.device()));
   torch::Tensor b_strides1 =
