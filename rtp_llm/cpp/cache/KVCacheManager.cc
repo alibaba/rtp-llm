@@ -252,7 +252,6 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
     auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
 
-    layout.layer_to_groups.resize(config_.layer_num);
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_num);
     if (!all_scale_tensors.empty()) {
         layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
@@ -260,6 +259,7 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
 
     layout.layer_to_groups = config_.layer_to_group_id;
     layout.group_types     = config_.group_types;
+    layout.layer_to_groups.resize(config_.layer_num);
     layout.layer_attn_types.resize(config_.layer_num, CacheGroupType::FULL);
 
     RTP_LLM_CHECK_WITH_INFO(config_.layer_num <= all_layer_tensors.size(),
