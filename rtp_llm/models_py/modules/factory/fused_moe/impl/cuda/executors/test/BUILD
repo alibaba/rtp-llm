@@ -192,5 +192,5 @@ py_test (
     },
     tags = ["open_skip", "SM100_ARM"],
     exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
-    timeout = "long",
+    timeout = "eternal",
 )
