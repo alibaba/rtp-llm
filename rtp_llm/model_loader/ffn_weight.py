@@ -70,9 +70,11 @@ def w13_lora_a_func_wrap(
     ts: torch.Tensor, origin_w1: FfnAtomicWeight, origin_w3: FfnAtomicWeight
 ):
     assert origin_w1.lora_a_process_func and origin_w3.lora_a_process_func
-    w1, w3 = torch.chunk(ts, 2, dim=-1)
-    w1 = origin_w1.lora_a_process_func(w1)
-    w3 = origin_w3.lora_a_process_func(w3)
+    w1, w3 = (
+        torch.chunk(ts, 2, dim=-1) if isinstance(ts, torch.Tensor) else (ts[0], ts[1])
+    )
+    w1 = origin_w1.lora_a_process_func([w1])
+    w3 = origin_w3.lora_a_process_func([w3])
     return torch.concat([w1, w3], dim=-1).contiguous()
 
 
@@ -80,10 +82,20 @@ def w13_lora_b_func_wrap(
     ts: torch.Tensor, origin_w1: FfnAtomicWeight, origin_w3: FfnAtomicWeight
 ):
     assert origin_w1.lora_b_process_func and origin_w3.lora_b_process_func
-    w1, w3 = torch.chunk(ts, 2, dim=-1)
-    w1 = origin_w1.lora_b_process_func(w1)
-    w3 = origin_w3.lora_b_process_func(w3)
-    return torch.concat([w1, w3], dim=-1).contiguous()
+    w1, w3 = (
+        torch.chunk(ts, 2, dim=-1) if isinstance(ts, torch.Tensor) else (ts[0], ts[1])
+    )
+    w1 = origin_w1.lora_b_process_func([w1])
+    w3 = origin_w3.lora_b_process_func([w3])
+
+    # Create block diagonal matrix [[w1, 0], [0, w3]] for proper LoRA B matrix multiplication
+    w1_rows, w1_cols = w1.shape
+    w3_rows, w3_cols = w3.shape
+    zeros_top_right = torch.zeros(w1_rows, w3_cols, dtype=w1.dtype, device=w1.device)
+    zeros_bottom_left = torch.zeros(w3_rows, w1_cols, dtype=w3.dtype, device=w3.device)
+    top_row = torch.cat([w1, zeros_top_right], dim=1)
+    bottom_row = torch.cat([zeros_bottom_left, w3], dim=1)
+    return torch.cat([top_row, bottom_row], dim=0)
 
 
 def w13_lora_a_split_func_wrap(
@@ -103,7 +115,15 @@ def w13_lora_b_split_func_wrap(
     w1, w3 = torch.chunk(ts, 2, dim=-1)
     w1 = origin_w1.lora_b_split_func(w1)
     w3 = origin_w3.lora_b_split_func(w3)
-    return torch.concat([w1, w3], dim=-1).contiguous()
+
+    # Create block diagonal matrix [[w1, 0], [0, w3]] for proper LoRA B matrix multiplication
+    w1_rows, w1_cols = w1.shape
+    w3_rows, w3_cols = w3.shape
+    zeros_top_right = torch.zeros(w1_rows, w3_cols, dtype=w1.dtype, device=w1.device)
+    zeros_bottom_left = torch.zeros(w3_rows, w1_cols, dtype=w3.dtype, device=w3.device)
+    top_row = torch.cat([w1, zeros_top_right], dim=1)
+    bottom_row = torch.cat([zeros_bottom_left, w3], dim=1)
+    return torch.cat([top_row, bottom_row], dim=0)
 
 
 def fix_merge_w13(sub_weight_dict: Dict[str, FfnAtomicWeight]):

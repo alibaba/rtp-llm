@@ -142,7 +142,7 @@ class QWenWeight(ModelDeployWeightInfo):
                         functools.partial(transpose_pad, align_size=align_size, dim=1),
                         config=ffn_config,
                         lora_a_process_func=functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
+                            transpose_pad, align_size=align_size, dim=1
                         ),
                         lora_b_process_func=transpose,
                         lora_a_split_func=sp_0,
