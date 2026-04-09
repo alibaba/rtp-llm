@@ -26,8 +26,9 @@ RUN wget $CONDA_URL -O /tmp/conda.sh && \
     sh /tmp/conda.sh -b -p /opt/conda310/ && \
     rm /tmp/conda.sh -f
 
-ADD deps/requirements_rocm.txt /deps/requirements_rocm.txt
-RUN /opt/conda310/bin/python3 -m pip install -r /deps/requirements_rocm.txt -i https://rtp-pypi-mirrors.alibaba-inc.com/root/pypi/+simple/
+ADD deps /deps
+RUN /opt/conda310/bin/python3 -m pip install --find-links /deps -r /deps/requirements_rocm.txt -i https://rtp-pypi-mirrors.alibaba-inc.com/root/pypi/+simple/ && \
+    rm -rf /deps
 
 ARG BAZELISK_URL
 RUN wget -q $BAZELISK_URL -O /usr/local/bin/bazelisk && chmod a+x /usr/local/bin/bazelisk

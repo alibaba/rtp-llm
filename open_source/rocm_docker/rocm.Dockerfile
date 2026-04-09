@@ -41,7 +41,7 @@ ENV PATH $PATH:/opt/conda310/bin
 
 ARG PYPI_URL
 ADD deps /tmp/deps
-RUN /opt/conda310/bin/pip install -r /tmp/deps/requirements_rocm.txt -i $PYPI_URL && \
+RUN /opt/conda310/bin/pip install --find-links /tmp/deps -r /tmp/deps/requirements_rocm.txt -i $PYPI_URL && \
     rm -rf /tmp/deps && pip cache purge
 
 ARG BAZELISK_URL

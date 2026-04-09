@@ -1,14 +1,15 @@
 """ROCm F16 (non-quantized) Linear implementation"""
 
 import os
+from functools import lru_cache
 from typing import Optional
 
 import torch
+from aiter import hipb_create_extension, hipb_mm
 
 from rtp_llm.models_py.modules.factory.linear import LinearBase
-from aiter import hipb_mm, hipb_create_extension
-from functools import lru_cache
 from rtp_llm.ops import HWKernelConfig
+
 
 class RocmF16LinearBase(LinearBase):
     """ROCm F16 (non-quantized) Linear"""
@@ -19,7 +20,7 @@ class RocmF16LinearBase(LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
@@ -34,12 +35,13 @@ class RocmF16LinearBase(LinearBase):
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(weight, weight_scales, input_scales,
-                         bias, quant_config, weight_scale_2)
+        super().__init__(
+            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+        )
         self.weight = weight
         self.bias = bias
-        
-    @staticmethod    
+
+    @staticmethod
     @lru_cache(maxsize=1)
     def init_hipblas():
         hipb_create_extension()
@@ -47,7 +49,7 @@ class RocmF16LinearBase(LinearBase):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError("Subclasses must implement `forward`.")
 
-        
+
 class RocmF16LinearWithSwizzle(RocmF16LinearBase):
 
     @classmethod
@@ -56,11 +58,15 @@ class RocmF16LinearWithSwizzle(RocmF16LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional['HWKernelConfig'],
+        hw_kernel_config: Optional["HWKernelConfig"],
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        return weight_scales is None and hw_kernel_config is not None and hw_kernel_config.use_swizzleA
+        return (
+            weight_scales is None
+            and hw_kernel_config is not None
+            and hw_kernel_config.use_swizzleA
+        )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         self.init_hipblas()
@@ -75,7 +81,8 @@ class RocmF16LinearWithSwizzle(RocmF16LinearBase):
             scaleOut=None,
             bpreshuffle=True,
         )
-        
+
+
 class RocmF16LinearNoSwizzle(RocmF16LinearBase):
 
     @classmethod
@@ -84,7 +91,7 @@ class RocmF16LinearNoSwizzle(RocmF16LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional['HWKernelConfig'],
+        hw_kernel_config: Optional["HWKernelConfig"],
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
@@ -98,6 +105,11 @@ class RocmF16LinearNoSwizzle(RocmF16LinearBase):
             return False
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if os.environ.get("USE_DETERMINISTIC_GEMM", "0") == "1":
+            output = torch.mm(input, self.weight)
+            if self.bias is not None:
+                output = output + self.bias
+            return output
         self.init_hipblas()
         return hipb_mm(
             input,

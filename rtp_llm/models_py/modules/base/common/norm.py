@@ -88,8 +88,8 @@ class RMSResNormTorch(BaseResNorm):
         self.rmsnorm_torch = RMSNormTorch(weight, eps)
 
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
-        hidden_states = hidden_states + residual
-        return self.rmsnorm_torch(hidden_states)
+        residual.add_(hidden_states)
+        return self.rmsnorm_torch(residual)
 
 
 class AddBiasResLayerNormTorch(BaseAddBiasResLayerNorm):

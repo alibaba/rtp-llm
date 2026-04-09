@@ -1,9 +1,13 @@
 """Rocm FP8 PerChannel quantization strategies"""
 
+import os
 from typing import Any
 
 import torch
 
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
 )
@@ -12,8 +16,15 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
 
+
 class RocmFp8PerChannelPureTPStrategy(MoeStrategy):
     """Rocm FP8 PerChannel(PTPC) pure TP strategy"""
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        checker.check(
+            os.environ.get("USE_ATREX_MOE", "0") != "1",
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.rocm_moe import (
@@ -33,4 +44,3 @@ class RocmFp8PerChannelPureTPStrategy(MoeStrategy):
             executor_class=RocmExpertsFp8PerChannel,
             quant_config=quant_config,
         )
-

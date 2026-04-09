@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -29,6 +30,61 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+# ── Determinism checker ──────────────────────────────────────────────
+# SAVE_DETERMINISM_REF=1  → save tensors to /tmp/determinism_ref/
+# CHECK_DETERMINISM=1     → compare against saved tensors, report diffs
+_DET_SAVE = os.environ.get("SAVE_DETERMINISM_REF", "0") == "1"
+_DET_CHECK = os.environ.get("CHECK_DETERMINISM", "0") == "1"
+_DET_DIR = os.environ.get("DETERMINISM_REF_DIR", "/tmp/determinism_ref")
+_det_call_count = 0  # track forward call index (prefill vs decode steps)
+
+if _DET_SAVE:
+    os.makedirs(_DET_DIR, exist_ok=True)
+    print(f"[DETERMINISM] Saving reference tensors to {_DET_DIR}", flush=True)
+if _DET_CHECK:
+    print(f"[DETERMINISM] Checking against reference tensors in {_DET_DIR}", flush=True)
+
+
+def _det_checkpoint(tag: str, tensor: torch.Tensor):
+    """Save or compare a tensor at a named checkpoint."""
+    global _det_call_count
+    path = os.path.join(_DET_DIR, f"call{_det_call_count}_{tag}.pt")
+
+    if _DET_SAVE:
+        torch.save(tensor.detach().cpu(), path)
+    elif _DET_CHECK:
+        if not os.path.exists(path):
+            print(f"[DETERMINISM] SKIP {tag} — no reference file", flush=True)
+            return
+        ref = torch.load(path, map_location="cpu", weights_only=True)
+        cur = tensor.detach().cpu()
+        if ref.shape != cur.shape:
+            print(
+                f"[DETERMINISM] SHAPE MISMATCH {tag}: ref={list(ref.shape)} cur={list(cur.shape)}",
+                flush=True,
+            )
+            return
+        diff = (ref.float() - cur.float()).abs()
+        max_diff = diff.max().item()
+        mean_diff = diff.mean().item()
+        exact = torch.equal(ref, cur)
+        status = "EXACT" if exact else f"DIFF max={max_diff:.8f} mean={mean_diff:.8f}"
+        print(f"[DETERMINISM] {tag}: {status}", flush=True)
+        if not exact:
+            # Show where the biggest diffs are
+            n_nonzero = (diff > 0).sum().item()
+            n_total = diff.numel()
+            print(
+                f"[DETERMINISM]   non-zero diffs: {n_nonzero}/{n_total} ({100*n_nonzero/n_total:.2f}%)",
+                flush=True,
+            )
+
+
+def _det_bump_call():
+    """Increment the forward call counter (call after each full model forward)."""
+    global _det_call_count
+    _det_call_count += 1
 
 
 class GenericMoeLayer(nn.Module):
@@ -153,6 +209,7 @@ class GenericMoeLayer(nn.Module):
             topk_ids=topk_ids,
             activation="SiGLU",
         )
+
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(hidden_states)
             if self.shared_expert_gate is not None:
@@ -241,6 +298,23 @@ class GenericMoeDecoderLayer(nn.Module):
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
 
+    def _debug_dump(self, tag: str, layer_idx: int, tensor: torch.Tensor):
+        """Dump tensor stats for debugging. Enable with DEBUG_LAYER_DUMP=1."""
+        import os
+
+        if not os.environ.get("DEBUG_LAYER_DUMP"):
+            return
+        t = tensor.float()
+        print(
+            f"[DEBUG] layer={layer_idx} {tag}: shape={list(tensor.shape)} "
+            f"dtype={tensor.dtype} "
+            f"mean={t.mean().item():.6f} std={t.std().item():.6f} "
+            f"min={t.min().item():.6f} max={t.max().item():.6f} "
+            f"abs_mean={t.abs().mean().item():.6f} "
+            f"nan={torch.isnan(t).sum().item()} inf={torch.isinf(t).sum().item()}",
+            flush=True,
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -248,22 +322,41 @@ class GenericMoeDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> DecodeLayerOutput:
-        # equivalent to:
-        # residual = residual + hidden_states
-        # hidden_states = self.input_layernorm(hidden_states)
+        layer_idx = self.layer_idx
+
+        self._debug_dump("input_hidden", layer_idx, hidden_states)
+        self._debug_dump("input_residual", layer_idx, residual)
+
+        if _DET_SAVE or _DET_CHECK:
+            _det_checkpoint(f"L{layer_idx}_input_hidden", hidden_states)
+            _det_checkpoint(f"L{layer_idx}_input_residual", residual)
+
         hidden_states = self.input_layernorm(hidden_states, residual)
+        self._debug_dump("after_input_ln", layer_idx, hidden_states)
+
+        if _DET_SAVE or _DET_CHECK:
+            _det_checkpoint(f"L{layer_idx}_after_input_ln", hidden_states)
 
         hidden_states = self.self_attn(
             hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
         )
+        self._debug_dump("after_attn", layer_idx, hidden_states)
 
-        # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
+        if _DET_SAVE or _DET_CHECK:
+            _det_checkpoint(f"L{layer_idx}_after_attn", hidden_states)
+
         hidden_states = self.post_attention_layernorm(hidden_states, residual)
+        self._debug_dump("after_post_ln", layer_idx, hidden_states)
 
-        # MLP (Dense or MoE，shared expert 逻辑已经在 GenericMoeLayer 内部处理)
+        if _DET_SAVE or _DET_CHECK:
+            _det_checkpoint(f"L{layer_idx}_after_post_ln", hidden_states)
+
         hidden_states = self.mlp(hidden_states)
+        self._debug_dump("after_mlp", layer_idx, hidden_states)
 
-        # 返回 mlp_output 和 residual，让下一层的 input_layernorm 来 fuse 最后的 add
+        if _DET_SAVE or _DET_CHECK:
+            _det_checkpoint(f"L{layer_idx}_after_mlp", hidden_states)
+
         return DecodeLayerOutput(hidden_states, residual)
 
 
@@ -327,6 +420,21 @@ class GenericMoeModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
+
+        _debug = os.environ.get("DEBUG_LAYER_DUMP")
+        if _debug:
+            t = hidden_states.float()
+            print(
+                f"[DEBUG] embedding: shape={list(hidden_states.shape)} "
+                f"mean={t.mean().item():.6f} std={t.std().item():.6f} "
+                f"min={t.min().item():.6f} max={t.max().item():.6f}",
+                flush=True,
+            )
+
+        if _DET_SAVE or _DET_CHECK:
+            _det_checkpoint("embedding", hidden_states)
+            _det_checkpoint("input_ids", input_ids)
+
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
@@ -340,6 +448,19 @@ class GenericMoeModel(GptModelBase):
             residual = output.residual
 
         hidden_states = self.norm(hidden_states, residual)
+
+        if _debug:
+            t = hidden_states.float()
+            print(
+                f"[DEBUG] final_norm: shape={list(hidden_states.shape)} "
+                f"mean={t.mean().item():.6f} std={t.std().item():.6f} "
+                f"min={t.min().item():.6f} max={t.max().item():.6f}",
+                flush=True,
+            )
+
+        if _DET_SAVE or _DET_CHECK:
+            _det_checkpoint("final_norm", hidden_states)
+            _det_bump_call()
 
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 

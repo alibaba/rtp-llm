@@ -19,6 +19,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeSt
 class RocmEpNormalStrategy(MoeStrategy):
     """ROCm EP normal mode strategy"""
 
+    def can_handle(self, config: MoEConfigAdapter) -> bool:
+        try:
+            return super().can_handle(config)
+        except (ImportError, ModuleNotFoundError):
+            return False
+
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deepep_normal_fused_moe_executor import (
             FusedMoeExecutor,
