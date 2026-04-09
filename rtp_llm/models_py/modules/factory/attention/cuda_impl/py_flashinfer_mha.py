@@ -43,82 +43,24 @@ DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
 _g_py_flashinfer_workspace_pool: list[torch.Tensor] = []
 _g_py_flashinfer_pool_lock = __import__("threading").Lock()
 
-# Global shared workspace buffer for CUDA graph mode
-_g_py_flashinfer_shared_workspace_buffer: torch.Tensor = None
-_g_py_flashinfer_shared_workspace_lock = __import__("threading").Lock()
 
-
-def get_py_flashinfer_shared_workspace_buffer(device: str = "cuda") -> torch.Tensor:
-    """Get or create the global shared PyFlashInfer workspace buffer.
-
-    This function returns a single shared workspace buffer that can be reused
-    across all attention instances. This is especially useful in CUDA graph mode
-    to reduce memory consumption.
-
-    WARNING: The shared buffer is only safe when all attention ops execute
-    serially on a single CUDA stream (e.g., CUDA graph mode). Concurrent
-    execution on different streams will corrupt the workspace.
-
-    Args:
-        device: CUDA device to allocate buffer on (default: "cuda")
-
-    Returns:
-        Global shared workspace buffer tensor of size DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB
-    """
-    global _g_py_flashinfer_shared_workspace_buffer
-    with _g_py_flashinfer_shared_workspace_lock:
-        if _g_py_flashinfer_shared_workspace_buffer is None:
-            _g_py_flashinfer_shared_workspace_buffer = torch.zeros(
-                DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * 1024 * 1024,
-                dtype=torch.uint8,
-                device=device,
-            )
-        return _g_py_flashinfer_shared_workspace_buffer
-
-
-def get_py_flashinfer_workspace_buffer(
-    device: str = "cuda", shared: bool = False
-) -> torch.Tensor:
-    """Get a PyFlashInfer workspace buffer from the pool or shared buffer.
+def get_py_flashinfer_workspace_buffer(device: str = "cuda") -> torch.Tensor:
+    """Get a PyFlashInfer workspace buffer from the pool.
 
     This function manages workspace buffers to support multiple concurrent instances.
-    When shared=True, it returns a global shared buffer for all instances.
-    When shared=False, it returns a buffer from the pool for exclusive use.
-
-    Args:
-        device: CUDA device to allocate buffer on (default: "cuda")
-        shared: If True, return the global shared buffer; if False, get from pool
-
-    Returns:
-        Workspace buffer tensor of size DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB
     """
-    if shared:
-        return get_py_flashinfer_shared_workspace_buffer(device)
     with _g_py_flashinfer_pool_lock:
         if _g_py_flashinfer_workspace_pool:
             return _g_py_flashinfer_workspace_pool.pop()
-        else:
-            # No available buffer in pool, create a new one
-            return torch.zeros(
-                DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * 1024 * 1024,
-                dtype=torch.uint8,
-                device=device,
-            )
+    return torch.zeros(
+        DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * 1024 * 1024,
+        dtype=torch.uint8,
+        device=device,
+    )
 
 
-def release_py_flashinfer_workspace_buffer(
-    buffer: torch.Tensor, shared: bool = False
-) -> None:
-    """Release a PyFlashInfer workspace buffer back to the pool.
-
-    Args:
-        buffer: The workspace buffer to release
-        shared: If True, this is a shared buffer and should not be released; if False, return to pool
-    """
-    if shared:
-        # Shared buffer is never released, just skip
-        return
-
+def release_py_flashinfer_workspace_buffer(buffer: torch.Tensor) -> None:
+    """Release a PyFlashInfer workspace buffer back to the pool."""
     with _g_py_flashinfer_pool_lock:
         _g_py_flashinfer_workspace_pool.append(buffer)
 
@@ -132,10 +74,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         attn_inputs: PyAttentionInputs,
         backend: str = "auto",
     ) -> None:
-        self.use_shared_buffer = attn_configs.shared_attn_workspace_buffer
-        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer(
-            shared=self.use_shared_buffer
-        )
+        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
@@ -157,11 +96,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         )
 
     def __del__(self):
-        """Release workspace buffer back to pool when object is destroyed."""
-        if hasattr(self, "g_workspace_buffer") and hasattr(self, "use_shared_buffer"):
-            release_py_flashinfer_workspace_buffer(
-                self.g_workspace_buffer, shared=self.use_shared_buffer
-            )
+        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
     def set_params(self, params: Any):
         """Set the params object to be used by this op."""
@@ -372,10 +307,7 @@ class PyFlashinferPrefillAttnOp(object):
         attn_configs: AttentionConfigs,
         backend: str = "auto",
     ) -> None:
-        self.use_shared_buffer = attn_configs.shared_attn_workspace_buffer
-        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer(
-            shared=self.use_shared_buffer
-        )
+        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs.head_num and kv_head_num are already divided by tp_size in ModelConfig::getAttentionConfigs
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
@@ -391,11 +323,7 @@ class PyFlashinferPrefillAttnOp(object):
         self.params = None
 
     def __del__(self):
-        """Release workspace buffer back to pool when object is destroyed."""
-        if hasattr(self, "g_workspace_buffer") and hasattr(self, "use_shared_buffer"):
-            release_py_flashinfer_workspace_buffer(
-                self.g_workspace_buffer, shared=self.use_shared_buffer
-            )
+        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
     def set_params(self, params: ParamsBase):
         """Set the params object to be used by this op."""
@@ -693,10 +621,7 @@ class PyFlashinferDecodeAttnOp(object):
         self,
         attn_configs: AttentionConfigs,
     ) -> None:
-        self.use_shared_buffer = attn_configs.shared_attn_workspace_buffer
-        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer(
-            shared=self.use_shared_buffer
-        )
+        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs already has head_num and kv_head_num divided by tp_size
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
@@ -712,11 +637,7 @@ class PyFlashinferDecodeAttnOp(object):
         self.kv_cache_dtype = attn_configs.kv_cache_dtype
 
     def __del__(self):
-        """Release workspace buffer back to pool when object is destroyed."""
-        if hasattr(self, "g_workspace_buffer") and hasattr(self, "use_shared_buffer"):
-            release_py_flashinfer_workspace_buffer(
-                self.g_workspace_buffer, shared=self.use_shared_buffer
-            )
+        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
     def prepare(self, attn_inputs: PyAttentionInputs):
         # from rtp_llm.models_py.utils.debug import set_trace_on_tty
