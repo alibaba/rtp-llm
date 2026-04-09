@@ -131,15 +131,43 @@ def _find_cu_source():
 
 
 def _ensure_ninja():
-    """Install ninja if not available (required by torch cpp_extension)."""
+    """Ensure ninja binary is in PATH (required by torch cpp_extension).
+
+    The ninja pip package installs both a Python module and the ninja binary.
+    In Bazel sandbox / JIT cache envs, the Python module may be importable
+    but the binary may not be on PATH. We fix both cases.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    # Case 1: ninja binary already in PATH — nothing to do
+    if shutil.which("ninja"):
+        return
+
+    # Case 2: ninja Python package installed but binary not in PATH
     try:
-        import ninja  # noqa: F401
+        import ninja
+        ninja_bin_dir = os.path.join(os.path.dirname(ninja.__file__), "..", "..", "..", "bin")
+        ninja_bin_dir = os.path.normpath(ninja_bin_dir)
+        # Also check ninja's own bin path (some installations)
+        ninja_pkg_dir = os.path.dirname(ninja.__file__)
+        for candidate in [ninja_bin_dir, ninja_pkg_dir,
+                          os.path.join(ninja_pkg_dir, "data", "bin")]:
+            candidate = os.path.normpath(candidate)
+            if os.path.isfile(os.path.join(candidate, "ninja")):
+                os.environ["PATH"] = candidate + os.pathsep + os.environ.get("PATH", "")
+                return
     except ImportError:
-        import subprocess
-        import sys
+        pass
+
+    # Case 3: ninja not installed at all — pip install it
+    try:
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "ninja", "-q"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        pass  # will fail later with a clear error from torch
 
 
 @functools.lru_cache(maxsize=1)
