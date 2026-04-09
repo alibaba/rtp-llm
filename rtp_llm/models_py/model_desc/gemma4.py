@@ -55,10 +55,15 @@ class Gemma4DecoderLayer(nn.Module):
         head_dim = attn_info.get("head_dim", model_config.attn_config.size_per_head)
         head_num = attn_info.get("head_num", model_config.attn_config.head_num)
 
-        # Build per-layer AttentionConfigs
+        # TP-split head counts (FMHA and CausalAttention expect per-rank values)
+        tp_size = parallelism_config.get_attn_tp_size()
+        local_head_num = head_num // tp_size
+        local_kv_head_num = max(1, kv_head_num // tp_size)
+
+        # Build per-layer AttentionConfigs (TP-split)
         attn_config = AttentionConfigs()
-        attn_config.head_num = head_num
-        attn_config.kv_head_num = kv_head_num
+        attn_config.head_num = local_head_num
+        attn_config.kv_head_num = local_kv_head_num
         attn_config.size_per_head = head_dim
         attn_config.tokens_per_block = model_config.attn_config.tokens_per_block
 
@@ -192,9 +197,13 @@ class Gemma4Model(GptModelBase):
 
     def _build_attn_config(self, model_config: ModelConfig, attr_name: str) -> AttentionConfigs:
         info = getattr(model_config, attr_name, {})
+        tp_size = self.parallelism_config.get_attn_tp_size()
+        raw_head_num = info.get("head_num", model_config.attn_config.head_num)
+        raw_kv_head_num = info.get("kv_head_num", model_config.attn_config.kv_head_num)
+
         config = AttentionConfigs()
-        config.head_num = info.get("head_num", model_config.attn_config.head_num)
-        config.kv_head_num = info.get("kv_head_num", model_config.attn_config.kv_head_num)
+        config.head_num = raw_head_num // tp_size
+        config.kv_head_num = max(1, raw_kv_head_num // tp_size)
         config.size_per_head = info.get("head_dim", model_config.attn_config.size_per_head)
         config.tokens_per_block = model_config.attn_config.tokens_per_block
         config.kernel_tokens_per_block = model_config.attn_config.kernel_tokens_per_block
