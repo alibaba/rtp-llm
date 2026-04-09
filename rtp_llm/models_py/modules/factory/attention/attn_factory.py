@@ -161,7 +161,6 @@ def get_fmha_impl(
         # Check if implementation supports parallelism config
         if not impl.support_parallelism_config(parallelism_config):
             continue
-
         try:
             instance = impl(attn_configs, attn_inputs, parallelism_config)
             if not is_cuda_graph or instance.support_cuda_graph():
@@ -203,7 +202,7 @@ class AttnImplFactory(object):
         attn_configs = model_config.getAttentionConfigs(
             parallelism_config.get_attn_tp_size()
         )
-        attn_inputs.headwise_config = getattr(model_config, 'headwise_config', None)
+        attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
         instance = fmha_impl_method(
