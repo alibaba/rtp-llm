@@ -390,3 +390,7 @@ def main():
         args.tp_size,
         metrics_list,
     )
+
+
+if __name__ == "__main__":
+    main()
