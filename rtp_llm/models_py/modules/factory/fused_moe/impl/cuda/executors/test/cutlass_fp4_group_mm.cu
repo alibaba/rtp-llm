@@ -297,10 +297,10 @@ void run_fp4_blockwise_scaled_group_mm_sm100(
   torch::Tensor alpha_ptrs =
       torch::empty({num_experts}, torch::TensorOptions().dtype(torch::kLong).device(a.device()));
   torch::Tensor layout_sfa = torch::empty(
-      {num_experts, 5}, torch::headeronly::ScalarType::Long, std::nullopt,
+      {num_experts, 5}, at::kLong, std::nullopt,
       a.device());
   torch::Tensor layout_sfb = torch::empty(
-      {num_experts, 5}, torch::headeronly::ScalarType::Long, std::nullopt,
+      {num_experts, 5}, at::kLong, std::nullopt,
       a.device());
   torch::Tensor a_strides1 =
       torch::empty({num_experts}, torch::TensorOptions().dtype(torch::kLong).device(a.device()));
@@ -484,10 +484,10 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
   torch::Tensor alpha_ptrs =
       torch::empty({num_experts}, torch::TensorOptions().dtype(torch::kLong).device(a.device()));
   torch::Tensor layout_sfa = torch::empty(
-      {num_experts, 5}, torch::headeronly::ScalarType::Long, std::nullopt,
+      {num_experts, 5}, at::kLong, std::nullopt,
       a.device());
   torch::Tensor layout_sfb = torch::empty(
-      {num_experts, 5}, torch::headeronly::ScalarType::Long, std::nullopt,
+      {num_experts, 5}, at::kLong, std::nullopt,
       a.device());
   torch::Tensor a_strides1 =
       torch::empty({num_experts}, torch::TensorOptions().dtype(torch::kLong).device(a.device()));
@@ -612,16 +612,18 @@ void run_fp4_blockwise_scaled_group_mm(
 
 #if (defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100) || \
     (defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120)
-constexpr auto FLOAT4_E2M1X2 = torch::headeronly::ScalarType::Byte;
+constexpr auto FLOAT4_E2M1X2 = at::kByte;
 constexpr auto SF_DTYPE = torch::kFloat8_e4m3fn;
 #endif
 
+#define CHECK_TYPE(x, st, m) \
   TORCH_CHECK(x.scalar_type() == st, \
                   ": Inconsistency of torch::Tensor type:", m)
 #define CHECK_TH_CUDA(x, m) \
   TORCH_CHECK(x.is_cuda(), m, ": must be a CUDA tensor.")
 #define CHECK_CONTIGUOUS(x, m) \
   TORCH_CHECK(x.is_contiguous(), m, ": must be contiguous.")
+#define CHECK_INPUT(x, st, m) \
   CHECK_TH_CUDA(x, m);        \
   CHECK_CONTIGUOUS(x, m);     \
   CHECK_TYPE(x, st, m)
