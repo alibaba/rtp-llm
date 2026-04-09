@@ -2,6 +2,7 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.factory.attention import common
 
 # Select implementation based on CP method
@@ -145,7 +146,15 @@ class CPFlashInferImpl(FMHAImplBase):
         # Create params
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+        if attn_inputs.is_prefill and attn_inputs.cache_store_inputs:
+            self.write_cache_store_impl = WriteCacheStoreOp(
+                attn_inputs.context_parallel_info.prefill_actual_input_lengths_cpu,
+                attn_inputs.prefix_lengths,
+                attn_inputs.kv_cache_block_id_host,
+                attn_inputs.cache_store_inputs,
+            )
+        else:
+            self.write_cache_store_impl = None
 
         self.attn_inputs = attn_inputs
 

@@ -2,7 +2,10 @@ import logging
 from typing import Optional
 
 import torch
-from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
+from flashinfer import (
+    BatchPrefillWithPagedKVCacheWrapper,
+    BatchPrefillWithRaggedKVCacheWrapper,
+)
 from flashinfer.cascade import merge_state
 from flashinfer.page import append_paged_kv_cache
 
@@ -11,6 +14,7 @@ from rtp_llm.models_py.distributed.user_buffers import get_user_buffers_communic
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_half_kv_indices,
     generate_half_q_indices,
+    plan_prefix_paged_attention,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     get_py_flashinfer_workspace_buffer,
@@ -63,6 +67,8 @@ class PCPAll2AllAttnOp:
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
 
+        self.seq_size_per_block = attn_configs.tokens_per_block
+
         self.communication_stream = torch.cuda.Stream(device=self.device)
         self.comm_events = [torch.cuda.Event() for _ in range(self.prefill_cp_size)]
         self.math_events = [torch.cuda.Event() for _ in range(self.prefill_cp_size)]
@@ -80,7 +86,13 @@ class PCPAll2AllAttnOp:
             )
             for name in wrapper_names
         }
+        self.prefix_paged_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+            self.workspace_buffer,
+            kv_layout="HND",
+            backend=backend,
+        )
         self.ub_communicator = get_user_buffers_communicator()
+        self.use_ub = self.ub_communicator is not None
 
     def support(self, attention_inputs: PyAttentionInputs) -> bool:
         return attention_inputs.is_prefill
@@ -131,13 +143,37 @@ class PCPAll2AllAttnOp:
         self.half_q_idx = torch.tensor(half_q_indices, device=self.device)
         self.half_kv_idx = torch.tensor(half_kv_indices, device=self.device)
 
-        return fill_mla_params(
+        params = fill_mla_params(
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
-            self.attn_inputs.input_lengths,
+            self.cp_info.prefill_actual_input_lengths_cpu,
             self.attn_inputs.kv_cache_kernel_block_id_host,
             self.attn_configs.kernel_tokens_per_block,
         )
+
+        chunk_lens = prefill_cp_chunk_lengths.tolist()
+        self.append_batch_indice = torch.cat(
+            [
+                torch.full((cl,), i, dtype=torch.int32, device=self.device)
+                for i, cl in enumerate(chunk_lens)
+            ]
+        )
+
+        self.has_prefix = self.attn_inputs.prefix_lengths.any().item()
+        if self.has_prefix:
+            plan_prefix_paged_attention(
+                self.prefix_paged_wrapper,
+                cu_seqlens,
+                attention_inputs.prefix_lengths,
+                params,
+                num_qo_heads=self.num_qo_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_dim,
+                page_size=self.seq_size_per_block,
+                device=self.device,
+            )
+
+        return params
 
     def forward(
         self,
@@ -145,7 +181,6 @@ class PCPAll2AllAttnOp:
         kv_cache: Optional[KVCache] = None,
         params: ParamsBase = None,
     ) -> torch.Tensor:
-        # reshape qkv to q, k, v
         qkv = qkv.reshape(qkv.shape[0], -1)
         q, k, v = torch.split(
             qkv,
@@ -160,9 +195,8 @@ class PCPAll2AllAttnOp:
         k = k.contiguous()
         v = v.contiguous()
 
-        # init kv buffer
         kv_buffer = torch.cat([k, v], dim=0)
-        remote_kv_buffer = torch.empty_like(kv_buffer)
+        remote_kv_buffers = [torch.empty_like(kv_buffer) for _ in range(2)]
         self.communication_stream.wait_stream(torch.cuda.current_stream())
 
         out_buffer = torch.empty(
@@ -176,7 +210,7 @@ class PCPAll2AllAttnOp:
             device=q.device,
         )
         kv_cache_tensor = kv_cache.kv_cache_base.view(
-            -1, 2, self.num_kv_heads, kv_cache.seq_size_per_block, self.head_dim
+            -1, 2, self.num_kv_heads, self.seq_size_per_block, self.head_dim
         )
         for round_id in range(0, self.prefill_cp_size):
             if round_id > 0:
@@ -184,6 +218,7 @@ class PCPAll2AllAttnOp:
                 lse_buffer.fill_(float("-inf"))
 
             if round_id < self.prefill_cp_size - 1:
+                recv_buf = remote_kv_buffers[round_id % 2]
                 with torch.cuda.stream(self.communication_stream):
                     prev_rank_id = (
                         self.prefill_cp_rank - round_id - 1
@@ -192,24 +227,21 @@ class PCPAll2AllAttnOp:
                         self.prefill_cp_rank + round_id + 1
                     ) % self.prefill_cp_size
 
-                    if (
-                        self.ub_communicator is not None
-                        and self.ub_communicator.can_handle_tensor(kv_buffer)
+                    if self.use_ub and self.ub_communicator.can_handle_tensor(
+                        kv_buffer
                     ):
                         self.ub_communicator.send(kv_buffer, dst=next_rank_id)
-                        self.ub_communicator.recv(remote_kv_buffer, src=prev_rank_id)
+                        self.ub_communicator.recv(recv_buf, src=prev_rank_id)
                     else:
-                        # Fall back to standard collective communication
                         if self.prefill_cp_rank < next_rank_id:
                             send(kv_buffer, dst=next_rank_id, group=Group.TP)
-                            recv(remote_kv_buffer, src=prev_rank_id, group=Group.TP)
+                            recv(recv_buf, src=prev_rank_id, group=Group.TP)
                         else:
-                            recv(remote_kv_buffer, src=prev_rank_id, group=Group.TP)
+                            recv(recv_buf, src=prev_rank_id, group=Group.TP)
                             send(kv_buffer, dst=next_rank_id, group=Group.TP)
                     self.comm_events[round_id].record()
 
             if round_id == 0:  # local attention
-                self.math_events[round_id].record()
                 # TODO: make write local kvcache async
 
                 k = k.reshape(-1, self.num_kv_heads, self.head_dim)
@@ -218,25 +250,41 @@ class PCPAll2AllAttnOp:
                 append_paged_kv_cache(
                     append_key=k,
                     append_value=v,
-                    batch_indices=params.batch_indice_d,
+                    batch_indices=self.append_batch_indice,
                     positions=self.all_shuffle_indices[self.prefill_cp_rank],
                     paged_kv_cache=kv_cache_tensor,
                     kv_indices=params.page_indice_d,
-                    kv_indptr=params.prefill_ragged_kv_len_indptr_d,
+                    kv_indptr=params.decode_page_indptr_d,
                     kv_last_page_len=params.paged_kv_last_page_len_d,
                     kv_layout="HND",
                 )
+
+                q_reshaped = q.reshape(-1, self.num_qo_heads, self.head_dim)
                 merged_out, merged_lse = self.prefill_wrappers["causal"].run(
-                    q.reshape(-1, self.num_qo_heads, self.head_dim),
+                    q_reshaped,
                     k,
                     v,
                     return_lse=True,
                 )
+
+                if self.has_prefix:
+                    prefix_out, prefix_lse = self.prefix_paged_wrapper.run(
+                        q_reshaped,
+                        kv_cache_tensor,
+                        return_lse=True,
+                    )
+                    merged_out, merged_lse = merge_state(
+                        v_a=merged_out,
+                        s_a=merged_lse,
+                        v_b=prefix_out,
+                        s_b=prefix_lse,
+                    )
+                self.math_events[round_id].record()
             else:
                 torch.cuda.current_stream().wait_event(self.comm_events[round_id - 1])
-                self.comm_events[round_id - 1].synchronize()
+                compute_buf = remote_kv_buffers[(round_id - 1) % 2]
                 remote_k, remote_v = torch.split(
-                    remote_kv_buffer, [k.shape[0], v.shape[0]], dim=0
+                    compute_buf, [k.shape[0], v.shape[0]], dim=0
                 )
                 remote_k = remote_k.contiguous().reshape(
                     -1, self.num_kv_heads, self.head_dim
@@ -245,20 +293,19 @@ class PCPAll2AllAttnOp:
                     -1, self.num_kv_heads, self.head_dim
                 )
                 # TODO: make write local kvcache async
-                src_rank = (self.prefill_cp_rank - round_id - 1) % self.prefill_cp_size
+                src_rank = (self.prefill_cp_rank - round_id) % self.prefill_cp_size
                 append_paged_kv_cache(
                     append_key=remote_k,
                     append_value=remote_v,
-                    batch_indices=params.batch_indice_d,
+                    batch_indices=self.append_batch_indice,
                     positions=self.all_shuffle_indices[src_rank],
                     paged_kv_cache=kv_cache_tensor,
                     kv_indices=params.page_indice_d,
-                    kv_indptr=params.prefill_ragged_kv_len_indptr_d,
+                    kv_indptr=params.decode_page_indptr_d,
                     kv_last_page_len=params.paged_kv_last_page_len_d,
                     kv_layout="HND",
                 )
                 if round_id > self.prefill_cp_rank:
-                    # half q and full kv
                     q_split = (
                         torch.index_select(q, 0, self.half_q_idx)
                         .contiguous()
@@ -266,7 +313,6 @@ class PCPAll2AllAttnOp:
                     )
                     k_split = remote_k
                     v_split = remote_v
-                    self.math_events[round_id].record()
                     (
                         out_buffer[self.half_q_idx, :, :],
                         lse_buffer[self.half_q_idx, :],
@@ -283,7 +329,6 @@ class PCPAll2AllAttnOp:
                         s_b=lse_buffer,
                     )
                 else:
-                    # half kv and full q
                     k_split = torch.index_select(
                         remote_k, 0, self.half_kv_idx
                     ).contiguous()
@@ -293,7 +338,6 @@ class PCPAll2AllAttnOp:
                     q_split = q.contiguous().reshape(
                         -1, self.num_qo_heads, self.head_dim
                     )
-                    self.math_events[round_id].record()
                     out_buffer, lse_buffer = self.prefill_wrappers[
                         "non_causal_pattern_0"
                     ].run(
@@ -308,8 +352,8 @@ class PCPAll2AllAttnOp:
                         v_b=out_buffer,
                         s_b=lse_buffer,
                     )
+                self.math_events[round_id].record()
             if round_id < self.prefill_cp_size - 1:
                 self.communication_stream.wait_event(self.math_events[round_id])
-                self.math_events[round_id].synchronize()
 
         return merged_out
