@@ -92,16 +92,21 @@ if _TRITON_AVAILABLE:
 
         s_base = s_ptr + seq_idx * s_s0 + head_idx * s_s2
 
+        # Clamp index to stay within tensor bounds when k >= num_states.
+        # The mask ensures the loaded value is replaced by `other`, but the
+        # address must still be valid to avoid illegal-memory-access errors.
         s_max = -1e30
         for k in range(MAX_STATES_CONST):
             mask_k = k < num_states
-            sk = tl.load(s_base + k * s_s1, mask=mask_k, other=-1e30)
+            safe_k = tl.minimum(k, num_states - 1)
+            sk = tl.load(s_base + safe_k * s_s1, mask=mask_k, other=-1e30)
             s_max = tl.maximum(s_max, sk)
 
         exp_sum = 0.0
         for k in range(MAX_STATES_CONST):
             mask_k = k < num_states
-            sk = tl.load(s_base + k * s_s1, mask=mask_k, other=-1e30)
+            safe_k = tl.minimum(k, num_states - 1)
+            sk = tl.load(s_base + safe_k * s_s1, mask=mask_k, other=-1e30)
             exp_sum += tl.where(mask_k, tl.exp(sk - s_max), 0.0)
         lse = tl.log(exp_sum) + s_max
 
@@ -109,11 +114,12 @@ if _TRITON_AVAILABLE:
         v_base = v_ptr + seq_idx * v_s0 + head_idx * v_s2
         for k in range(MAX_STATES_CONST):
             mask_k = k < num_states
-            sk = tl.load(s_base + k * s_s1, mask=mask_k, other=-1e30)
+            safe_k = tl.minimum(k, num_states - 1)
+            sk = tl.load(s_base + safe_k * s_s1, mask=mask_k, other=-1e30)
             wk = tl.where(mask_k, tl.exp(sk - lse), 0.0)
             vk = tl.load(
-                v_base + k * v_s1 + offs_d * v_s3,
-                mask=mask_d,
+                v_base + safe_k * v_s1 + offs_d * v_s3,
+                mask=mask_d & mask_k,
                 other=0.0,
             ).to(tl.float32)
             acc += wk * vk

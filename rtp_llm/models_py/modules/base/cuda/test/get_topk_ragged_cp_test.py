@@ -20,7 +20,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_q_indices,
 )
 from rtp_llm.ops.compute_ops import (
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     PyContextParallelParams,
     rtp_llm_ops,
@@ -119,6 +119,8 @@ class GetTopkRaggedCPTest(TestCase):
         op.cu_kv_seqlens_global = torch.tensor(
             [0, total_tokens], dtype=torch.int32, device=device
         )
+        op.kv_len = total_tokens
+        op.total_kv_len = total_tokens
 
         q_fp8 = torch.randn(
             total_tokens,
@@ -140,7 +142,7 @@ class GetTopkRaggedCPTest(TestCase):
             dtype=torch.uint8,
             device=device,
         )
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
         kv_cache.kv_scale_base = kv_scale_base
 
         attn_inputs = PyAttentionInputs()
@@ -225,6 +227,8 @@ class GetTopkRaggedCPTest(TestCase):
         op.cu_kv_seqlens_global = torch.tensor(
             [0, total_kv], dtype=torch.int32, device=device
         )
+        op.kv_len = total_kv
+        op.total_kv_len = total_kv
 
         q_fp8 = torch.randn(
             new_tokens,
@@ -245,7 +249,7 @@ class GetTopkRaggedCPTest(TestCase):
             cache_stride,
             device=device,
         ).to(torch.uint8)
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
         kv_cache.kv_scale_base = kv_scale_base
 
         attn_inputs = PyAttentionInputs()
@@ -337,6 +341,8 @@ class GetTopkRaggedCPTest(TestCase):
         op.cu_kv_seqlens_global = torch.tensor(
             [0, total_tokens], dtype=torch.int32, device=device
         )
+        op.kv_len = total_tokens
+        op.total_kv_len = total_tokens
 
         q_fp8 = torch.randn(
             total_tokens,
@@ -357,7 +363,7 @@ class GetTopkRaggedCPTest(TestCase):
             dtype=torch.uint8,
             device=device,
         )
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
         kv_cache.kv_scale_base = kv_scale_base
 
         attn_inputs = PyAttentionInputs()
@@ -379,13 +385,21 @@ class GetTopkRaggedCPTest(TestCase):
         )
 
         topk1 = op._get_topk_ragged_cp_zigzag(
-            q_fp8, weights, kv_cache, fmha_params, attn_inputs,
+            q_fp8,
+            weights,
+            kv_cache,
+            fmha_params,
+            attn_inputs,
         )
         self.assertIsNotNone(topk1)
 
         # Second call should also succeed
         topk2 = op._get_topk_ragged_cp_zigzag(
-            q_fp8, weights, kv_cache, fmha_params, attn_inputs,
+            q_fp8,
+            weights,
+            kv_cache,
+            fmha_params,
+            attn_inputs,
         )
         self.assertIsNotNone(topk2)
         self.assertEqual(topk1.shape, topk2.shape)

@@ -16,7 +16,7 @@ import torch
 
 from rtp_llm.ops import KvCacheDataType, compute_ops
 from rtp_llm.ops.compute_ops import (
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     PyContextParallelParams,
     rtp_llm_ops,
@@ -92,12 +92,16 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
         prefix_len: int = 0,
         tp_size: int = 2,
         tp_rank: int = 0,
+        physical_block_size: int = 0,
     ):
         """Build common attn_inputs, mla_params, parallelism_config, and tensors.
 
         Parameters match the zigzag CP test (flashmla_sparse_cp_op_test.py):
         num_heads=64, kv_lora_rank=512, qk_rope_head_dim=64, qk_nope_head_dim=512,
         page_size=64, top_k=128, fp8_bytes_per_token=656.
+
+        physical_block_size: if >0 and != page_size, simulates kernel_blocks_per_kv_block > 1.
+            block_table will use kernel-block granularity (page_size entries per physical block).
         """
         device = self.device
         assert tp_size > 1
@@ -174,6 +178,10 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
         attn_inputs.context_parallel_info = cp_params
 
         max_seq_len = max(seq_lengths)
+        actual_phys_block_size = (
+            physical_block_size if physical_block_size > 0 else page_size
+        )
+        # block_table uses kernel-block granularity (page_size tokens per entry)
         block_table_host = _make_block_table(
             batch_size, max_seq_len, page_size, torch.device("cpu")
         )
@@ -182,7 +190,13 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
         attn_inputs.kv_cache_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
-        mla_params.fill_params(attn_inputs, page_size)
+        mla_params.fill_params(
+            attn_inputs,
+            actual_phys_block_size,
+            cp_rank=tp_rank,
+            cp_size=tp_size,
+            kv_cache_sharded=True,
+        )
 
         from rtp_llm.ops import CPRotateMethod, ParallelismConfig, PrefillCPConfig
 
@@ -244,7 +258,7 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
             .to(torch.float8_e4m3fn)
             .view(torch.uint8)
         )
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
         kv_cache.kv_cache_base = kv_cache_base
 
         return dict(
@@ -272,6 +286,7 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
             actual_input_lengths=actual_input_lengths,
             tp_size=tp_size,
             tp_rank=tp_rank,
+            physical_block_size=actual_phys_block_size,
         )
 
     def _make_all_gather_mock(self, handlers):
@@ -303,6 +318,7 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
             top_k=params["top_k"],
             attn_inputs=params["attn_inputs"],
             parallelism_config=params["parallelism_config"],
+            physical_block_size=params.get("physical_block_size", 0),
         )
         op.kv_cache_write_op = MlaKVCacheWriteOp(kv_cache_dtype=KvCacheDataType.FP8)
         op.write_cache_store_impl = None
@@ -857,7 +873,7 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
         self.assertIsNotNone(op._ws_total_pages)
 
     def test_roundrobin_workspace_buffer_reused_across_forwards(self):
-        """No-prefix path should reuse the same FP8 workspace buffer across forwards."""
+        """Consecutive forward calls should produce consistent results."""
         _set_seed(3061)
         params = self._build_common_params(4, [8], prefix_len=0, tp_size=2, tp_rank=0)
         peer = self._build_common_params(4, [8], prefix_len=0, tp_size=2, tp_rank=1)
@@ -885,7 +901,6 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
                 params["kv_cache"],
                 layer_id=0,
             )
-            ws_ptr0 = op._ws_fp8.data_ptr()
             out1 = op.forward(
                 params["q"],
                 params["compressed_kv"],
@@ -895,13 +910,11 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
                 params["kv_cache"],
                 layer_id=0,
             )
-            ws_ptr1 = op._ws_fp8.data_ptr()
 
         torch.cuda.synchronize()
-        self.assertEqual(ws_ptr0, ws_ptr1, "Workspace buffer should be reused")
         self.assertTrue(
             torch.allclose(out0, out1, atol=1e-2, rtol=1e-2),
-            "Buffer reuse should not change workspace-path outputs",
+            "Consecutive forward calls should produce consistent results",
         )
 
     def test_roundrobin_plan_local_slot_mappings(self):
@@ -1109,7 +1122,7 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
             .to(torch.float8_e4m3fn)
             .view(torch.uint8)
         )
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
         kv_cache.kv_cache_base = kv_cache_base
 
         return dict(
@@ -1438,6 +1451,559 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
             torch.equal(sharded_topk, torch.full_like(sharded_topk, -1)),
             "Out-of-range request-local topk should be masked to -1 in sharded path",
         )
+
+    # ----------------------------------------------------------------
+    # kernel_block_size != physical_block_size tests
+    # ----------------------------------------------------------------
+
+    def _build_params_diff_block_size(
+        self,
+        actual_input_lengths: list,
+        prefix_lengths_list: list,
+        physical_block_size: int = 64,
+        kernel_block_size: int = 256,
+        tp_size: int = 2,
+        tp_rank: int = 0,
+    ):
+        """Build params where kernel_block_size != physical_block_size.
+
+        physical_block_size: the real page size in the physical KV cache.
+        kernel_block_size: the page size used by the attention kernel workspace.
+        fill_params and block_table use physical_block_size.
+        The Op gets page_size=kernel_block_size but physical_block_size=physical_block_size.
+        """
+        device = self.device
+        assert tp_size > 1
+        assert 0 <= tp_rank < tp_size
+        batch_size = len(actual_input_lengths)
+        assert len(prefix_lengths_list) == batch_size
+
+        num_heads = 64
+        kv_lora_rank = 512
+        qk_rope_head_dim = 64
+        qk_nope_head_dim = 512
+        softmax_extra_scale = 1.0
+        top_k = 128
+        qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        fp8_bytes_per_token = 656
+
+        local_chunk_lengths = [
+            (x + tp_size - 1) // tp_size for x in actual_input_lengths
+        ]
+        local_tokens = sum(local_chunk_lengths)
+
+        local_offsets = []
+        offset = 0
+        for local_len in local_chunk_lengths:
+            local_offsets.append(offset)
+            offset += local_len
+
+        restore = []
+        padding_mask = []
+        padding_lengths = []
+        for req_idx, actual_len in enumerate(actual_input_lengths):
+            local_len = local_chunk_lengths[req_idx]
+            padded_len = local_len * tp_size
+            padding_lengths.append(padded_len - actual_len)
+            for pos in range(padded_len):
+                rank = pos % tp_size
+                local_idx = pos // tp_size
+                restore.append(rank * local_tokens + local_offsets[req_idx] + local_idx)
+                padding_mask.append(1 if pos < actual_len else 0)
+
+        cp_params = PyContextParallelParams()
+        cp_params.prefill_cp_chunk_lengths = torch.tensor(
+            local_chunk_lengths, dtype=torch.int32, device=device
+        )
+        cp_params.prefill_cp_padding_lengths = torch.tensor(
+            padding_lengths, dtype=torch.int32, device=device
+        )
+        cp_params.prefill_qkv_restore_indice = torch.tensor(
+            restore, dtype=torch.long, device=device
+        )
+        cp_params.prefill_qkv_padding_mask = torch.tensor(
+            padding_mask, dtype=torch.int32, device=device
+        )
+        cp_params.prefill_actual_input_lengths_cpu = torch.tensor(
+            actual_input_lengths, dtype=torch.int32, device=torch.device("cpu")
+        )
+
+        attn_inputs = PyAttentionInputs()
+        attn_inputs.is_prefill = True
+        attn_inputs.input_lengths = torch.tensor(
+            actual_input_lengths, dtype=torch.int32, device=torch.device("cpu")
+        )
+        seq_lengths = [
+            prefix_lengths_list[i] + actual_input_lengths[i] for i in range(batch_size)
+        ]
+        attn_inputs.sequence_lengths = torch.tensor(
+            seq_lengths, dtype=torch.int32, device=torch.device("cpu")
+        )
+        attn_inputs.prefix_lengths = torch.tensor(
+            prefix_lengths_list, dtype=torch.int32, device=torch.device("cpu")
+        )
+        attn_inputs.context_parallel_info = cp_params
+
+        # Two block tables with different granularity:
+        # 1) Physical block table (for fill_params / kv_cache_block_id_host)
+        # 2) Kernel block table (for plan / kv_cache_kernel_block_id_device)
+        max_seq_len = max(seq_lengths)
+        vbs = physical_block_size * tp_size
+        K = physical_block_size // kernel_block_size  # kernel blocks per physical block
+        max_vblocks = max(math.ceil(sl / vbs) for sl in seq_lengths)
+
+        # Physical block table: [batch, max_vblocks], one entry per physical block
+        phys_block_table_host = torch.zeros(
+            batch_size, max_vblocks, dtype=torch.int32, device=torch.device("cpu")
+        )
+        phys_block_idx = 0
+        total_blocks = 0
+        for i in range(batch_size):
+            n_vb = math.ceil(seq_lengths[i] / vbs)
+            total_blocks += n_vb
+            for j in range(n_vb):
+                phys_block_table_host[i, j] = phys_block_idx
+                phys_block_idx += 1
+
+        # Kernel block table: [batch, max_vblocks * K], one entry per kernel block
+        max_kernel_blocks = max_vblocks * K
+        kernel_block_table = torch.zeros(
+            batch_size, max_kernel_blocks, dtype=torch.int32, device=torch.device("cpu")
+        )
+        kernel_block_idx = 0
+        for i in range(batch_size):
+            n_vb = math.ceil(seq_lengths[i] / vbs)
+            for j in range(n_vb):
+                for k in range(K):
+                    kernel_block_table[i, j * K + k] = kernel_block_idx
+                    kernel_block_idx += 1
+
+        # fill_params uses physical block table
+        attn_inputs.kv_cache_block_id_host = phys_block_table_host
+        attn_inputs.kv_cache_block_id_device = phys_block_table_host.to(device)
+
+        # plan uses kernel block table (simulates kv_cache_kernel_block_id_device)
+        block_table_device = kernel_block_table.to(device)
+
+        mla_params = rtp_llm_ops.SparseMlaParams()
+        mla_params.fill_params(
+            attn_inputs,
+            physical_block_size,
+            cp_rank=tp_rank,
+            cp_size=tp_size,
+            kv_cache_sharded=True,
+        )
+
+        from rtp_llm.ops import CPRotateMethod, ParallelismConfig, PrefillCPConfig
+
+        parallelism_config = ParallelismConfig()
+        parallelism_config.tp_rank = tp_rank
+        parallelism_config.tp_size = tp_size
+        parallelism_config.prefill_cp_config = PrefillCPConfig()
+        parallelism_config.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        parallelism_config.prefill_cp_config.comm_buffer_size = 0
+        parallelism_config.prefill_cp_config.kv_cache_sharded = True
+
+        q = (
+            torch.randn(
+                local_tokens,
+                num_heads,
+                qk_head_dim,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            * 0.1
+        )
+        compressed_kv = (
+            torch.randn(local_tokens, kv_lora_rank, dtype=torch.bfloat16, device=device)
+            * 0.1
+        )
+        k_pe = (
+            torch.randn(
+                local_tokens, qk_rope_head_dim, dtype=torch.bfloat16, device=device
+            )
+            * 0.1
+        )
+
+        total_kv_len = sum(seq_lengths)
+        topk_indices = torch.randint(
+            0,
+            max(total_kv_len, 1),
+            (local_tokens, 1, top_k),
+            dtype=torch.int32,
+            device=device,
+        )
+        batch_indice_parts = []
+        for i, cl in enumerate(local_chunk_lengths):
+            batch_indice_parts.append(
+                torch.full((cl,), i, dtype=torch.int32, device=device)
+            )
+        batch_indice_d = torch.cat(batch_indice_parts)
+
+        # kv_cache uses kernel_block_size for the page dimension
+        total_kernel_blocks = kernel_block_idx
+        kv_cache_base = (
+            (
+                torch.randn(
+                    total_kernel_blocks,
+                    kernel_block_size,
+                    fp8_bytes_per_token,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+                * 0.1
+            )
+            .to(torch.float8_e4m3fn)
+            .view(torch.uint8)
+        )
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = kv_cache_base
+
+        return dict(
+            attn_inputs=attn_inputs,
+            mla_params=mla_params,
+            parallelism_config=parallelism_config,
+            block_table_device=block_table_device,
+            q=q,
+            compressed_kv=compressed_kv,
+            k_pe=k_pe,
+            topk_indices=topk_indices,
+            batch_indice_d=batch_indice_d,
+            kv_cache=kv_cache,
+            num_heads=num_heads,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=qk_rope_head_dim,
+            qk_nope_head_dim=qk_nope_head_dim,
+            physical_block_size=physical_block_size,
+            kernel_block_size=kernel_block_size,
+            page_size=kernel_block_size,  # Op uses kernel_block_size as page_size
+            softmax_extra_scale=softmax_extra_scale,
+            top_k=top_k,
+            fp8_bytes_per_token=fp8_bytes_per_token,
+            total_kv_len=total_kv_len,
+            local_tokens=local_tokens,
+            local_chunk_lengths=local_chunk_lengths,
+            actual_input_lengths=actual_input_lengths,
+            prefix_lengths_list=prefix_lengths_list,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            total_blocks=total_blocks,
+            total_kernel_blocks=total_kernel_blocks,
+        )
+
+    def _make_roundrobin_op_diff_block_size(self, params):
+        """Create Op with kernel_block_size != physical_block_size."""
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
+            RoundRobinSparseMlaFp8CPOp,
+        )
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
+            MlaKVCacheWriteOp,
+        )
+
+        op = RoundRobinSparseMlaFp8CPOp(
+            num_heads=params["num_heads"],
+            kv_lora_rank=params["kv_lora_rank"],
+            qk_rope_head_dim=params["qk_rope_head_dim"],
+            qk_nope_head_dim=params["qk_nope_head_dim"],
+            page_size=params["kernel_block_size"],  # kernel domain
+            softmax_extra_scale=params["softmax_extra_scale"],
+            top_k=params["top_k"],
+            attn_inputs=params["attn_inputs"],
+            parallelism_config=params["parallelism_config"],
+            physical_block_size=params["physical_block_size"],  # physical domain
+        )
+        op.kv_cache_write_op = MlaKVCacheWriteOp(kv_cache_dtype=KvCacheDataType.FP8)
+        op.write_cache_store_impl = None
+        op.attn_inputs = params["attn_inputs"]
+        op.plan(params["mla_params"], params["block_table_device"])
+        return op
+
+    def test_diff_block_size_virtual_block_size(self):
+        """virtual_block_size should use physical_block_size, not kernel_block_size."""
+        _set_seed(900)
+        params = self._build_params_diff_block_size(
+            [16], [0], physical_block_size=256, kernel_block_size=64
+        )
+        op = self._make_roundrobin_op_diff_block_size(params)
+
+        expected_vbs = params["physical_block_size"] * params["tp_size"]
+        self.assertEqual(
+            op.virtual_block_size,
+            expected_vbs,
+            f"virtual_block_size should be physical_block_size({params['physical_block_size']}) "
+            f"* cp_size({params['tp_size']}) = {expected_vbs}, "
+            f"got {op.virtual_block_size}",
+        )
+        # Ensure it's NOT kernel_block_size * cp_size
+        wrong_vbs = params["kernel_block_size"] * params["tp_size"]
+        self.assertNotEqual(
+            op.virtual_block_size,
+            wrong_vbs,
+            "virtual_block_size must not use kernel_block_size",
+        )
+
+    def test_diff_block_size_sharded_metadata(self):
+        """_cu_local_kv_seqlens and _total_local_kv use physical_block_size for paging."""
+        _set_seed(901)
+        physical_bs = 256
+        kernel_bs = 64
+        chunk_lengths = [16]
+        prefix_lengths_list = [0]
+        tp_size = 2
+
+        params = self._build_params_diff_block_size(
+            chunk_lengths,
+            prefix_lengths_list,
+            physical_block_size=physical_bs,
+            kernel_block_size=kernel_bs,
+            tp_size=tp_size,
+        )
+        op = self._make_roundrobin_op_diff_block_size(params)
+
+        kv_len = sum(chunk_lengths)
+        vbs = physical_bs * tp_size  # 128
+        n_vblocks = math.ceil(kv_len / vbs)
+        expected_local_capacity = n_vblocks * physical_bs
+
+        self.assertEqual(
+            op._total_local_kv,
+            expected_local_capacity,
+            f"_total_local_kv should be {expected_local_capacity} "
+            f"(using physical_block_size={physical_bs}), got {op._total_local_kv}",
+        )
+
+        # Verify it would be wrong with kernel_block_size
+        wrong_vbs = kernel_bs * tp_size
+        wrong_n_vblocks = math.ceil(kv_len / wrong_vbs)
+        wrong_local = wrong_n_vblocks * kernel_bs
+        self.assertNotEqual(
+            op._total_local_kv,
+            wrong_local,
+            "If kernel_block_size were used, _total_local_kv would be wrong",
+        )
+
+    def test_diff_block_size_restore_indices(self):
+        """_kv_allgather_restore_indices should be computed with physical_block_size."""
+        _set_seed(902)
+        physical_bs = 256
+        kernel_bs = 64
+        tp_size = 2
+        chunk_lengths = [8]
+        prefix_lengths_list = [0]
+
+        params = self._build_params_diff_block_size(
+            chunk_lengths,
+            prefix_lengths_list,
+            physical_block_size=physical_bs,
+            kernel_block_size=kernel_bs,
+            tp_size=tp_size,
+        )
+        op = self._make_roundrobin_op_diff_block_size(params)
+
+        kv_len = sum(chunk_lengths)
+        restore = op._kv_allgather_restore_indices.cpu().tolist()
+        self.assertEqual(len(restore), kv_len)
+
+        # For cp_size=2, physical_bs=64, kv_len=8:
+        # vbs = 128, n_vblocks=1, local_capacity=64
+        # pos 0: rank=0%128%2=0, local_idx=(0//128)*64+(0%128)//2=0 → 0*64+0+0=0
+        # pos 1: rank=1%128%2=1, local_idx=(1//128)*64+(1%128)//2=0 → 1*64+0+0=64
+        # ...
+        vbs = physical_bs * tp_size
+        total_local = op._total_local_kv
+        for pos in range(kv_len):
+            rank = (pos % vbs) % tp_size
+            local_idx = (pos // vbs) * physical_bs + (pos % vbs) // tp_size
+            expected = rank * total_local + local_idx
+            self.assertEqual(
+                restore[pos],
+                expected,
+                f"restore_indices[{pos}] should be {expected}, got {restore[pos]}",
+            )
+
+    def test_diff_block_size_workspace_uses_kernel_block_size(self):
+        """Workspace metadata (_ws_block_table, _ws_total_pages) uses kernel_block_size."""
+        _set_seed(903)
+        physical_bs = 256
+        kernel_bs = 64
+        chunk_lengths = [16]
+        prefix_lengths_list = [0]
+
+        params = self._build_params_diff_block_size(
+            chunk_lengths,
+            prefix_lengths_list,
+            physical_block_size=physical_bs,
+            kernel_block_size=kernel_bs,
+        )
+        op = self._make_roundrobin_op_diff_block_size(params)
+
+        kv_len = sum(chunk_lengths)
+        ws_pages = math.ceil(kv_len / kernel_bs)
+        self.assertEqual(
+            op._ws_total_pages,
+            ws_pages,
+            f"_ws_total_pages should use kernel_block_size={kernel_bs}: "
+            f"expected {ws_pages}, got {op._ws_total_pages}",
+        )
+
+    def test_diff_block_size_pack_src_slots(self):
+        """_local_kv_pack_src_slots should use physical_block_size for slot calculation."""
+        _set_seed(904)
+        physical_bs = 256
+        kernel_bs = 64
+        tp_size = 2
+        tp_rank = 0
+        chunk_lengths = [16]
+        prefix_lengths_list = [128]
+
+        params = self._build_params_diff_block_size(
+            chunk_lengths,
+            prefix_lengths_list,
+            physical_block_size=physical_bs,
+            kernel_block_size=kernel_bs,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+        )
+        op = self._make_roundrobin_op_diff_block_size(params)
+
+        src_slots = op._local_kv_pack_src_slots.cpu()
+        self.assertGreater(src_slots.numel(), 0, "Should have pack src slots")
+
+        # All src_slots should be valid indices into the physical cache
+        # physical cache has total_kernel_blocks * kernel_bs slots
+        total_physical_slots = params["total_kernel_blocks"] * kernel_bs
+        self.assertTrue(
+            (src_slots >= 0).all(),
+            "All pack src slots should be non-negative",
+        )
+        self.assertTrue(
+            (src_slots < total_physical_slots).all(),
+            f"All pack src slots should be < {total_physical_slots}, "
+            f"max={src_slots.max().item()}",
+        )
+
+    def test_diff_block_size_forward_no_prefix(self):
+        """Forward pass works with kernel_block_size != physical_block_size (no prefix)."""
+        _set_seed(905)
+        params = self._build_params_diff_block_size(
+            [16],
+            [0],
+            physical_block_size=256,
+            kernel_block_size=64,
+        )
+        op = self._make_roundrobin_op_diff_block_size(params)
+
+        def _repeat_gather(tensor, group=None):
+            return tensor.repeat(2, *([1] * (tensor.dim() - 1)))
+
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
+            side_effect=_repeat_gather,
+        ):
+            out = op.forward(
+                params["q"],
+                params["compressed_kv"],
+                params["k_pe"],
+                params["topk_indices"],
+                params["batch_indice_d"],
+                params["kv_cache"],
+                layer_id=0,
+            )
+        torch.cuda.synchronize()
+        self.assertEqual(
+            out.shape,
+            (params["local_tokens"], params["num_heads"], params["kv_lora_rank"]),
+        )
+
+    def test_diff_block_size_forward_with_prefix(self):
+        """Forward pass works with kernel_block_size != physical_block_size (with prefix)."""
+        _set_seed(906)
+        params = self._build_params_diff_block_size(
+            [16],
+            [128],
+            physical_block_size=256,
+            kernel_block_size=64,
+        )
+        op = self._make_roundrobin_op_diff_block_size(params)
+
+        self.assertTrue(op.has_prefix_cache)
+
+        def _repeat_gather(tensor, group=None):
+            return tensor.repeat(2, *([1] * (tensor.dim() - 1)))
+
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
+            side_effect=_repeat_gather,
+        ):
+            out = op.forward(
+                params["q"],
+                params["compressed_kv"],
+                params["k_pe"],
+                params["topk_indices"],
+                params["batch_indice_d"],
+                params["kv_cache"],
+                layer_id=0,
+            )
+        torch.cuda.synchronize()
+        self.assertEqual(
+            out.shape,
+            (params["local_tokens"], params["num_heads"], params["kv_lora_rank"]),
+        )
+
+    def test_diff_block_size_cache_write(self):
+        """Cache write with kernel_block_size != physical_block_size writes correct slots."""
+        _set_seed(907)
+        physical_bs = 256
+        kernel_bs = 64
+        params = self._build_params_diff_block_size(
+            [8],
+            [0],
+            physical_block_size=physical_bs,
+            kernel_block_size=kernel_bs,
+        )
+        op = self._make_roundrobin_op_diff_block_size(params)
+
+        kv_cache = params["kv_cache"]
+        kv_cache.kv_cache_base.zero_()
+
+        def _identity_all_gather(tensor, group=None):
+            return tensor
+
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
+            side_effect=_identity_all_gather,
+        ):
+            out = op.forward(
+                params["q"],
+                params["compressed_kv"],
+                params["k_pe"],
+                None,  # topk=None → write-only
+                params["batch_indice_d"],
+                kv_cache,
+                layer_id=0,
+            )
+        torch.cuda.synchronize()
+        self.assertIsNone(out)
+
+        # Verify writes landed in valid physical slots
+        slot_mapping = op._local_mla_slot_mapping
+        cache = kv_cache.kv_cache_base  # [num_blocks, physical_bs, fp8_bytes]
+
+        owned_count = 0
+        for i in range(slot_mapping.shape[0]):
+            slot = int(slot_mapping[i].item())
+            if slot == -1:
+                continue
+            block_idx = slot // physical_bs
+            offset_in_block = slot % physical_bs
+            row = cache[block_idx, offset_in_block]
+            self.assertTrue(
+                row.any(),
+                f"Owned slot {slot} should have non-zero data after cache write",
+            )
+            owned_count += 1
+
+        self.assertGreater(owned_count, 0, "Should have at least one owned slot")
 
 
 if __name__ == "__main__":

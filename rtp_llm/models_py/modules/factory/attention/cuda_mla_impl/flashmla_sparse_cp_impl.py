@@ -45,7 +45,7 @@ from rtp_llm.ops import (
     ParallelismConfig,
     compute_ops,
 )
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 
 from .flashmla_sparse_impl import (
     SparseMlaFp8DecodeParams,
@@ -79,6 +79,7 @@ class ZigZagSparseMlaFp8CPOp(SparseMlaFp8Op):
         top_k: int,
         attn_inputs: Optional[PyAttentionInputs] = None,
         parallelism_config: Optional[ParallelismConfig] = None,
+        physical_block_size: int = 0,
     ):
         super().__init__(
             num_heads=num_heads,
@@ -88,6 +89,7 @@ class ZigZagSparseMlaFp8CPOp(SparseMlaFp8Op):
             page_size=page_size,
             softmax_extra_scale=softmax_extra_scale,
             top_k=top_k,
+            physical_block_size=physical_block_size,
         )
 
         self.attn_inputs = attn_inputs
@@ -262,7 +264,7 @@ class ZigZagSparseMlaFp8CPOp(SparseMlaFp8Op):
         k_pe: torch.Tensor,
         topk: Optional[torch.Tensor],
         batch_indice_d: torch.Tensor,
-        kv_cache=None,
+        kv_cache: Optional[LayerKVCache] = None,
         layer_id: int = 0,
     ) -> torch.Tensor:
         """
@@ -387,6 +389,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         top_k: int,
         attn_inputs: Optional[PyAttentionInputs] = None,
         parallelism_config: Optional[ParallelismConfig] = None,
+        physical_block_size: int = 0,
     ):
         super().__init__(
             num_heads=num_heads,
@@ -396,6 +399,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
             page_size=page_size,
             softmax_extra_scale=softmax_extra_scale,
             top_k=top_k,
+            physical_block_size=physical_block_size,
         )
 
         self.attn_inputs = attn_inputs
@@ -406,7 +410,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         self.prefill_cp_size = parallelism_config.tp_size
 
         self.kv_cache_sharded = parallelism_config.prefill_cp_config.kv_cache_sharded
-        self.virtual_block_size = self.token_per_block * self.prefill_cp_size
+        self.virtual_block_size = self.physical_block_size * self.prefill_cp_size
         self.device = torch.cuda.current_device()
 
         self._scale_one = torch.tensor(1.0, dtype=torch.float32, device=self.device)
@@ -511,19 +515,20 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         self.has_prefix_cache = prefix_lengths.sum().item() > 0
         self._use_prefix_q_path = self._should_use_prefix_q_path()
 
-        page_size = self.token_per_block
+        ws_page_size = self.token_per_block  # workspace uses kernel block size
+        page_size = self.physical_block_size  # physical cache uses physical block size
 
         # --- MLA workspace metadata ---
         # The workspace stores all-gathered KV in a contiguous paged tensor
         # for the workspace attention path used by both no-prefix and prefix-hit.
         ws_cu = self.cu_kv_seqlens_global.cpu().int()
         ws_lengths_t = ws_cu[1:] - ws_cu[:-1]
-        ws_pages_per_req = (ws_lengths_t + page_size - 1) // page_size
-        ws_aligned_sizes = ws_pages_per_req * page_size
+        ws_pages_per_req = (ws_lengths_t + ws_page_size - 1) // ws_page_size
+        ws_aligned_sizes = ws_pages_per_req * ws_page_size
         ws_cu_aligned = torch.zeros(ws_aligned_sizes.size(0) + 1, dtype=torch.int32)
         ws_cu_aligned[1:] = torch.cumsum(ws_aligned_sizes, dim=0)
         ws_total_aligned = int(ws_cu_aligned[-1].item())
-        self._ws_total_pages = (ws_total_aligned + page_size - 1) // page_size
+        self._ws_total_pages = (ws_total_aligned + ws_page_size - 1) // ws_page_size
 
         total_ws_tokens = int(ws_lengths_t.sum().item())
         if total_ws_tokens > 0:
@@ -546,7 +551,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
 
         self._ws_block_table = common.build_contiguous_block_table(
             ws_cu_aligned.to(self.device),
-            page_size,
+            ws_page_size,
             self.device,
         )
 
@@ -610,15 +615,24 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         if total_kv > 0:
             owned_mask = ranks == self.prefill_cp_rank
             req_ids_d = req_ids.to(self.device)
-            # Sharded RR cache stores one local page per virtual block, not per
-            # global page. Map global token position to:
-            #   page id   = global_pos // virtual_block_size
-            #   page lane = (global_pos % virtual_block_size) // cp_size
-            block_offsets_d = (positions_flat // vbs).to(self.device)
-            token_offsets_d = ((positions_flat % vbs) // C).to(self.device)
+            # Sharded RR cache stores one local page per virtual block.
+            # block_table is kernel-block granularity (kv_cache_kernel_block_id),
+            # so we must convert virtual-block-level offsets to kernel-block indices.
+            #   local_token_pos   = token position within the local physical block
+            #   kernel_block_off  = which kernel block within that physical block
+            #   kernel_block_idx  = index into kernel block table
+            #   token_in_kernel   = offset within the kernel block
+            kernel_page_size = self.token_per_block
+            K = page_size // kernel_page_size  # kernel blocks per physical block
+            phys_block_idx = positions_flat // vbs
+            local_token_pos = (positions_flat % vbs) // C
+            kernel_block_off = local_token_pos // kernel_page_size
+            kernel_block_idx_d = (phys_block_idx * K + kernel_block_off).to(self.device)
+            token_in_kernel_d = (local_token_pos % kernel_page_size).to(self.device)
             physical_slots = (
-                self.block_table[req_ids_d, block_offsets_d].long() * page_size
-                + token_offsets_d
+                self.block_table[req_ids_d, kernel_block_idx_d].long()
+                * kernel_page_size
+                + token_in_kernel_d
             )
             self._local_kv_pack_dst_rows = (cu_offsets + local_idx)[owned_mask].to(
                 self.device
@@ -709,7 +723,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         q_to_kv_ratio = global_q_len / total_kv_len
         return q_to_kv_ratio <= 0.00614
 
-    def _alloc_workspace_kv_cache(self, kv_cache: KVCache) -> torch.Tensor:
+    def _alloc_workspace_kv_cache(self, kv_cache: LayerKVCache) -> torch.Tensor:
         """Allocate a fresh temporary KV cache workspace for this forward pass."""
         kv_dim_bytes = kv_cache.kv_cache_base.size(-1)
         return torch.empty(
@@ -754,7 +768,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         self,
         restored_ckv: torch.Tensor,
         restored_k_pe: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
     ) -> torch.Tensor:
         workspace_cache = self._alloc_workspace_kv_cache(kv_cache)
         compute_ops.concat_and_cache_mla(
@@ -767,7 +781,9 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         )
         return workspace_cache
 
-    def _build_workspace_from_sharded_cache(self, kv_cache: KVCache) -> torch.Tensor:
+    def _build_workspace_from_sharded_cache(
+        self, kv_cache: LayerKVCache
+    ) -> torch.Tensor:
         kv_dim_bytes = kv_cache.kv_cache_base.size(-1)
         local_rows = torch.zeros(
             self._total_local_kv,
@@ -810,7 +826,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
             token_indices=topk_indices_2d,
             cp_rank=self.prefill_cp_rank,
             cp_size=self.prefill_cp_size,
-            block_size=self.token_per_block,
+            block_size=self.physical_block_size,
             BLOCK_N=min(128, self.top_k),
         )
 
@@ -855,7 +871,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         k_pe: torch.Tensor,
         topk: Optional[torch.Tensor],
         batch_indice_d: torch.Tensor,
-        kv_cache=None,
+        kv_cache: Optional[LayerKVCache] = None,
         layer_id: int = 0,
     ) -> torch.Tensor:
         # Step 1: Write local KV to sharded cache (owned tokens only, no all_gather needed)
@@ -970,7 +986,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         restored_ckv: torch.Tensor,
         restored_k_pe: torch.Tensor,
         topk: Optional[torch.Tensor],
-        kv_cache=None,
+        kv_cache: Optional[LayerKVCache] = None,
         layer_id: int = 0,
     ) -> torch.Tensor:
         """No-prefix path: build global workspace from gathered dense KV, then attend."""
@@ -990,7 +1006,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         self,
         q: torch.Tensor,
         topk: Optional[torch.Tensor],
-        kv_cache=None,
+        kv_cache: Optional[LayerKVCache] = None,
         layer_id: int = 0,
     ) -> torch.Tensor:
         if self._use_prefix_q_path:
@@ -1001,7 +1017,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         self,
         q: torch.Tensor,
         topk: Optional[torch.Tensor],
-        kv_cache=None,
+        kv_cache: Optional[LayerKVCache] = None,
         layer_id: int = 0,
     ) -> Optional[torch.Tensor]:
         """Prefix-cache path: all-gather sharded KV into a workspace, then reuse workspace attention."""
@@ -1019,7 +1035,7 @@ class RoundRobinSparseMlaFp8CPOp(SparseMlaFp8Op):
         self,
         q: torch.Tensor,
         topk: Optional[torch.Tensor],
-        kv_cache=None,
+        kv_cache: Optional[LayerKVCache] = None,
         layer_id: int = 0,
     ) -> Optional[torch.Tensor]:
         """Prefix-cache path: all-gather q/topk, attend on local shard, then merge states."""
@@ -1193,13 +1209,15 @@ class SparseMlaCpImpl(SparseMlaImpl):
         pc = self._cp_parallelism_config
         self.fmha_params.fill_params(
             attn_inputs,
-            self.seq_size_per_block,
+            self.physical_tokens_per_block,
             forbid_realloc,
             cp_rank=pc.tp_rank,
             cp_size=pc.tp_size,
             kv_cache_sharded=pc.prefill_cp_config.kv_cache_sharded,
         )
-        self.fmha_impl.plan(self.fmha_params, attn_inputs.kv_cache_block_id_device)
+        self.fmha_impl.plan(
+            self.fmha_params, attn_inputs.kv_cache_kernel_block_id_device
+        )
 
         impl = self.fmha_impl
 
@@ -1236,7 +1254,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         q: torch.Tensor,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         layer_id: int,
         topk_indices: Optional[torch.Tensor],
     ) -> torch.Tensor:

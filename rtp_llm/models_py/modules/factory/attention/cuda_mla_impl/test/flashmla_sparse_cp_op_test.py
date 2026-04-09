@@ -17,7 +17,7 @@ import torch
 
 from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import (
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     PyContextParallelParams,
     rtp_llm_ops,
@@ -194,7 +194,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         kv_cache_base = torch.empty(
             num_blocks, page_size, fp8_bytes_per_token, dtype=torch.uint8, device=device
         )
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
         kv_cache.kv_cache_base = kv_cache_base
 
         cp_op = ZigZagSparseMlaFp8CPOp(
@@ -350,7 +350,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         kv_cache_base = torch.empty(
             num_blocks, page_size, fp8_bytes_per_token, dtype=torch.uint8, device=device
         )
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
         kv_cache.kv_cache_base = kv_cache_base
 
         cp_op = ZigZagSparseMlaFp8CPOp(
@@ -519,7 +519,7 @@ class SparseMlaFp8CPOpTest(TestCase):
             .to(torch.float8_e4m3fn)
             .view(torch.uint8)
         )
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
         kv_cache.kv_cache_base = kv_cache_base
 
         cp_op = ZigZagSparseMlaFp8CPOp(
