@@ -170,10 +170,25 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 attn_inputs.input_lengths
             )
             self.cu_seq_lens[: attn_inputs.cu_seqlens.size(0)] = attn_inputs.cu_seqlens
-            # Use dynamically computed qo_indptr from fill_params instead of fixed
-            # self.qo_indptr to ensure FlashInfer plans with actual token counts,
-            # avoiding numerical differences from processing padding tokens.
-            qo_indptr = self.fmha_params.qo_indptr_d
+            # Build qo_indptr matching the padded Q layout produced by small2large copy.
+            # Each batch's Q tokens sit at [i*max_seq_len, i*max_seq_len + input_len_i)
+            # in the padded buffer, so qo_indptr[i] = i*max_seq_len, but we set
+            # qo_indptr[i+1] = i*max_seq_len + input_len_i to tell FlashInfer the
+            # exact number of real tokens per batch (avoiding padding token processing
+            # which causes numerical differences).
+            batch_size = attn_inputs.input_lengths.size(0)
+            max_sl = self.prefill_cuda_graph_copy_params.max_seq_len
+            offsets = (
+                torch.arange(
+                    batch_size, device=self.qo_indptr.device, dtype=self.qo_indptr.dtype
+                )
+                * max_sl
+            )
+            self.qo_indptr[0] = 0
+            self.qo_indptr[1 : batch_size + 1] = offsets + attn_inputs.input_lengths.to(
+                self.qo_indptr.device
+            )
+            qo_indptr = self.qo_indptr
 
         self.prefill_wrapper.plan(
             qo_indptr,
@@ -547,10 +562,7 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         2. The underlying paged FMHA op supports the inputs
         3. MhaRotaryEmbeddingOp supports the inputs
         """
-        is_sm100_result = is_sm_100()
-        paged_support_result = PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
-        final_result = not is_sm100_result and paged_support_result
-        return final_result
+        return not is_sm_100() and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
 
     def support_cuda_graph(self) -> bool:
         return True
