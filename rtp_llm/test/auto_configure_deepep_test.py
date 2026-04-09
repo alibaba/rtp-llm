@@ -36,12 +36,14 @@ class AutoConfigureDeepepTest(TestCase):
 
     def test_use_all_gather_disables_all_deepep(self):
         """Test: USE_ALL_GATHER enabled should disable all DeepEP settings"""
-        # Setup: ep_size == tp_size and USE_ALL_GATHER is True
+        # use_all_gather only works when ep_size == 1 (pure TP mode).
+        # When ep_size > 1, use_all_gather is silently disabled and DeepEP
+        # auto-configuration kicks in.
 
+        # Part 1: use_all_gather=True with ep_size > 1 is overridden to False
         self._setup_parallel_info(
             world_size=8, tp_size=8, ep_size=8, local_world_size=8
         )
-
         self.moe_config.use_all_gather = True
         role_type = RoleType.PDFUSION
 
@@ -52,9 +54,27 @@ class AutoConfigureDeepepTest(TestCase):
             role_type=role_type,
         )
 
+        # use_all_gather is forced False because ep_size != 1,
+        # so auto-configure runs (single-node multi-GPU => moe=True)
+        self._assert_deepep_config(moe=True, low_latency=False, internode=False)
+
+        # Part 2: use_all_gather=True with ep_size == 1 disables all DeepEP
+        self._setup_parallel_info(
+            world_size=8, tp_size=8, ep_size=1, local_world_size=8
+        )
+        self.moe_config.use_all_gather = True
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=role_type,
+        )
+
         # Verify: All DeepEP settings should be 0
         self._assert_deepep_config(moe=False, low_latency=False, internode=False)
-        # test set use_all_gather = False cause use_deepep_moe = True
+
+        # Part 3: use_all_gather=False with ep_size == 1 triggers auto-configure
         self.moe_config.use_all_gather = False
         self.moe_config.use_deepep_moe = False
         self.moe_config.use_deepep_low_latency = False

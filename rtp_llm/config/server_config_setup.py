@@ -53,14 +53,17 @@ def auto_configure_deepep(
     - PD separation + Decode node + Multi-node multi-GPU (>=9 GPUs): 1, 1, 1
     """
 
-    # in cp mode, do not use all gather, tp_size set to 1
+    # Use all_gather only in pure TP mode (ep_size == 1).
+    # When ep_size > 1, use DeepEP for expert parallel dispatch regardless
+    # of whether ep_size equals tp_size (e.g. 4tp4ep, 8tp8ep).
+    # In CP mode, do not use all gather, tp_size set to 1
     tp_size = parallelism_config.get_attn_tp_size()
     ep_size = parallelism_config.ep_size
     moe_config.ll_num_max_token = ll_num_max_token
     moe_config.use_all_gather = (
         moe_config.use_all_gather
         and not deep_ep_config.use_deepep_low_latency
-        and (ep_size == tp_size or ep_size == 1)
+        and ep_size == 1
     )
     if moe_config.use_all_gather:
         moe_config.use_deepep_moe = False
@@ -336,12 +339,18 @@ def setup_default_args(py_env_configs):
             "[MI308X] enable FT_DISABLE_CUSTOM_AR by default, as amd has own implementation."
         )
 
-    if os.path.exists("/dev/kfd") and py_env_configs.kv_cache_config.seq_size_per_block == 0:
+    if (
+        os.path.exists("/dev/kfd")
+        and py_env_configs.kv_cache_config.seq_size_per_block == 0
+    ):
         py_env_configs.kv_cache_config.seq_size_per_block = 16
         logging.info(
             "[MI308X] set SEQ_SIZE_PER_BLOCK 16 by default, as it just support 16 now."
         )
-    if os.path.exists("/dev/alixpu") and py_env_configs.kv_cache_config.seq_size_per_block == 0:
+    if (
+        os.path.exists("/dev/alixpu")
+        and py_env_configs.kv_cache_config.seq_size_per_block == 0
+    ):
         py_env_configs.kv_cache_config.seq_size_per_block = 256
         logging.info("set SEQ_SIZE_PER_BLOCK 256 by default")
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:

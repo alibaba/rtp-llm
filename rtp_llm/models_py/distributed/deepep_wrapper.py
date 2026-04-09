@@ -14,9 +14,14 @@ from enum import IntEnum, auto
 from typing import Optional, Tuple
 
 import torch
-from deep_ep import Buffer as DeepEPBuffer
-from deep_ep import Config as DeepEPConfig
 from torch.distributed import ProcessGroup
+
+try:
+    from deep_ep import Buffer as DeepEPBuffer
+    from deep_ep import Config as DeepEPConfig
+except ImportError:
+    DeepEPBuffer = None  # type: ignore[misc,assignment]
+    DeepEPConfig = None  # type: ignore[misc,assignment]
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
