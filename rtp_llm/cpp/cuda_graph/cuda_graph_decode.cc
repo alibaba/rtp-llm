@@ -1,36 +1,8 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 
-#include <algorithm>
-
 namespace rtp_llm {
 void CudaGraphRunner::replayDecode(int bs) {
     replayGraph(bs);
-}
-
-std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
-    if (!graph_params_.decode_capture_batch_sizes.empty()) {
-        std::vector<int> sizes = graph_params_.decode_capture_batch_sizes;
-        RTP_LLM_LOG_INFO("Using decode capture batch sizes from Python: %zu sizes", sizes.size());
-        std::sort(sizes.begin(), sizes.end());
-        return sizes;
-    }
-
-    // Otherwise, use default logic
-    std::vector<int> capture_bs;
-    int              max_generate_batch_size = max_bs_;
-    RTP_LLM_LOG_INFO("max_generate_batch_size for cuda graph: %d", max_generate_batch_size);
-    // Add range 1 to 32 (inclusive)
-    for (int i = 1; i <= std::min(32, max_generate_batch_size); i += 1) {
-        capture_bs.push_back(i);
-    }
-    // Add range from 48 to max_generate_batch_size (exclusive), stepping by 16
-    for (int i = 48; i <= max_generate_batch_size; i += 16) {
-        capture_bs.push_back(i);
-    }
-    if (capture_bs[capture_bs.size() - 1] != max_generate_batch_size) {
-        capture_bs.push_back(max_generate_batch_size);
-    }
-    return capture_bs;
 }
 
 void CudaGraphRunner::captureDecodeOneBatchSize(int bs) {
@@ -40,12 +12,13 @@ void CudaGraphRunner::captureDecodeOneBatchSize(int bs) {
 void CudaGraphRunner::captureDecode() {
     RTP_LLM_LOG_INFO("Capture Decode Start");
     // Pre-initialize all graph instances with keep_graph based on debug mode
-    for (int bs : capture_range_) {
+    for (int bs : capture_dispatcher_.captureRange()) {
         graph_instances_.try_emplace(bs, graph_params_.enable_cuda_graph_debug_mode);
     }
-    int capture_range_size = capture_range_.size();
+    const auto& range              = capture_dispatcher_.captureRange();
+    int         capture_range_size = static_cast<int>(range.size());
     for (int i = capture_range_size - 1; i >= 0; i--) {
-        int           bs = capture_range_[i];
+        int           bs = range[static_cast<size_t>(i)];
         PyModelInputs inputs;
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, bs, bs * graph_params_.num_tokens_per_bs);

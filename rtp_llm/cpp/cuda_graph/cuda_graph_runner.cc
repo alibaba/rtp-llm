@@ -2,7 +2,6 @@
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_py_model_inputs.h"
 
-#include <algorithm>
 #include <string>
 
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -47,7 +46,7 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, BatchDescriptor
     if (!graph_params_.is_prefill_cuda_graph_mode) {
         decode_attn = graph_instances_[batch_descriptor.current_real_graph_bs].mem_hold_.attn_pyobj_;
     }
-    cuda_graph::CudaGraphCaptureBufferHelper::copyRuntimePyModelIntoCaptureBuffers(
+    cuda_graph::CudaGraphCapturePyModelInputs::copyRuntimePyModelIntoCaptureBuffers(
         inputs, cap, batch_descriptor, graph_params_.is_prefill_cuda_graph_mode, decode_attn);
 }
 
@@ -80,55 +79,6 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, BatchDescri
     return outputs;
 }
 
-bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor) {
-    batch_descriptor.current_seq_len = inputs.attention_inputs.input_lengths.sum(0).item<int>();
-    if (capture_range_.empty()) {
-        RTP_LLM_LOG_WARNING("prefill cuda graph: capture_range_ is empty, cannot run");
-        return false;
-    }
-    auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), batch_descriptor.current_seq_len);
-    // No captured graph for seq_len >= current (all captures smaller than requested)
-    if (it == capture_range_.end()) {
-        RTP_LLM_LOG_WARNING("prefill seq_len %d exceeds max captured %d, fallback to normal run",
-                            batch_descriptor.current_seq_len,
-                            capture_range_.back());
-        return false;
-    }
-    batch_descriptor.current_real_graph_seq_len = *it;
-    batch_descriptor.current_batch_size         = inputs.attention_inputs.input_lengths.size(0);
-    return true;
-}
-
-bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor) {
-    int cuda_graph_bs                   = inputs.attention_inputs.input_lengths.size(0);
-    batch_descriptor.current_batch_size = cuda_graph_bs;
-    RTP_LLM_LOG_DEBUG("canRun judge for batch size: %d", cuda_graph_bs);
-    if (capture_range_.empty()) {
-        RTP_LLM_LOG_WARNING("decode cuda graph: capture_range_ is empty, cannot run");
-        return false;
-    }
-    auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), batch_descriptor.current_batch_size);
-    // No captured graph for batch >= current (all captures smaller)
-    if (it == capture_range_.end()) {
-        RTP_LLM_LOG_WARNING("decode batch size %d exceeds max captured %d, fallback to normal run",
-                            batch_descriptor.current_batch_size,
-                            capture_range_.back());
-        return false;
-    }
-    batch_descriptor.current_real_graph_bs = *it;
-    RTP_LLM_LOG_DEBUG("batch size used in replay: %d (graph key %d)",
-                      batch_descriptor.current_batch_size,
-                      batch_descriptor.current_real_graph_bs);
-
-    if (inputs.attention_inputs.is_prefill) {
-        batch_descriptor.seq_len_sum = inputs.attention_inputs.input_lengths.sum(0).item<int>();
-    } else {
-        batch_descriptor.seq_len_sum = cuda_graph_bs;
-    }
-    RTP_LLM_LOG_DEBUG("can run cuda graph for decode");
-    return true;
-}
-
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
     // Check if this is speculative sampling:
@@ -139,7 +89,7 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, BatchDescriptor& batch
         if (inputs.attention_inputs.is_target_verify) {
             // Target-verify must also respect captured decode range.
             // Otherwise we may replay an uncaptured graph key.
-            return tryGetRealGraphDecodeBatchSize(inputs, batch_descriptor);
+            return capture_dispatcher_.tryGetRealGraphDecodeBatchSize(inputs, batch_descriptor);
         }
         return false;
     }
@@ -164,13 +114,12 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, BatchDescriptor& batch
     }
 
     if (graph_params_.is_prefill_cuda_graph_mode) {
-        if (!tryGetRealGraphPrefillSeqLen(inputs, batch_descriptor)) {
+        if (!capture_dispatcher_.tryGetRealGraphPrefillSeqLen(inputs, batch_descriptor)) {
             return false;
         }
-        // current_real_graph_seq_len is always *it from lower_bound within capture_range_
         RTP_LLM_LOG_DEBUG("prefill cuda graph replay seq_len key %d", batch_descriptor.current_real_graph_seq_len);
     } else {
-        if (!tryGetRealGraphDecodeBatchSize(inputs, batch_descriptor)) {
+        if (!capture_dispatcher_.tryGetRealGraphDecodeBatchSize(inputs, batch_descriptor)) {
             return false;
         }
     }
@@ -222,11 +171,7 @@ void CudaGraphRunner::initCapture() {
                              graph_params_.num_tokens_per_bs);
         }
         max_num_token_ = max_bs_ * graph_params_.num_tokens_per_bs;
-        if (graph_params_.is_prefill_cuda_graph_mode) {
-            capture_range_ = getPrefillSequenceLengthsToCapture();
-        } else {
-            capture_range_ = getDecodeBatchSizesToCapture();
-        }
+        capture_dispatcher_.build(graph_params_, max_bs_, graph_params_.is_prefill_cuda_graph_mode);
 
         capture_py_model_inputs_ = cuda_graph::CudaGraphCapturePyModelInputs(
             graph_params_, max_bs_, max_num_token_, position_encoding_, token_type_embedding_, input_embedding_scalar_);
@@ -334,7 +279,7 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 }
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
-    cuda_graph::CudaGraphCaptureBufferHelper::sliceTemplatePyModelInputsForCapture(
+    cuda_graph::CudaGraphCapturePyModelInputs::sliceTemplatePyModelInputsForCapture(
         inputs,
         capture_py_model_inputs_.memoryHold().py_model_inputs_,
         batch_size,

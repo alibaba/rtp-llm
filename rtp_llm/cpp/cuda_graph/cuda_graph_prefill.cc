@@ -1,17 +1,16 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 
-#include <algorithm>
-
 namespace rtp_llm {
 void CudaGraphRunner::capturePrefill() {
     RTP_LLM_LOG_INFO("Capture Prefill Start");
     // Pre-initialize all graph instances with keep_graph based on debug mode
-    for (int seq_len : capture_range_) {
+    for (int seq_len : capture_dispatcher_.captureRange()) {
         graph_instances_.try_emplace(seq_len, graph_params_.enable_cuda_graph_debug_mode);
     }
-    int capture_range_size = capture_range_.size();
+    const auto& range              = capture_dispatcher_.captureRange();
+    int         capture_range_size = static_cast<int>(range.size());
     for (int i = capture_range_size - 1; i >= 0; i--) {
-        int seq_len = capture_range_[i];
+        int seq_len = range[static_cast<size_t>(i)];
         RTP_LLM_LOG_INFO("capture range for seq len: %d", seq_len);
         PyModelInputs inputs;
         // for attention, it always run the max_bs, so when we run `forward`, the real batch size is not sure
@@ -42,23 +41,6 @@ void CudaGraphRunner::capturePrefill() {
         RTP_LLM_LOG_INFO("capture success for seq_len: %d", seq_len);
     }
     RTP_LLM_LOG_INFO("Capture Prefill End");
-}
-
-std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
-    RTP_LLM_CHECK_WITH_INFO(!graph_params_.prefill_capture_seq_lens.empty(),
-                            "prefill_capture_seq_lens must be provided from Python and cannot be empty");
-
-    RTP_LLM_LOG_INFO("Using prefill capture sequence lengths from Python: %zu lengths",
-                     graph_params_.prefill_capture_seq_lens.size());
-
-    // Sort and remove duplicates
-    std::vector<int> result = graph_params_.prefill_capture_seq_lens;
-    std::sort(result.begin(), result.end());
-    result.erase(std::unique(result.begin(), result.end()), result.end());
-
-    RTP_LLM_LOG_INFO(
-        "Total sequence lengths to capture: %zu (min: %d, max: %d)", result.size(), result.front(), result.back());
-    return result;
 }
 
 void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {

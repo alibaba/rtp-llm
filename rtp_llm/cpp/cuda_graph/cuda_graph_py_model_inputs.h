@@ -33,28 +33,6 @@ struct CaptureAttentionLayoutConfig {
     at::TensorOptions    options_cpu_int32;
 };
 
-/// Maps runtime / small spans into max capture templates: tensor copies, slices, and padded-buffer fills.
-struct CudaGraphCaptureBufferHelper {
-    CudaGraphCaptureBufferHelper()                                               = delete;
-    CudaGraphCaptureBufferHelper(const CudaGraphCaptureBufferHelper&)            = delete;
-    CudaGraphCaptureBufferHelper& operator=(const CudaGraphCaptureBufferHelper&) = delete;
-
-    static void copySmallerIntoLarger(const at::Tensor& source_tensor, at::Tensor& target_tensor);
-    static void optimizedCopyAsync(const at::Tensor& src, at::Tensor& dst, size_t size);
-    static void sliceTemplatePyModelInputsForCapture(torch_ext::PyModelInputs&       dst,
-                                                     const torch_ext::PyModelInputs& cap_template,
-                                                     int                             batch_size,
-                                                     int                             seq_len_or_tokens,
-                                                     bool                            is_prefill_cuda_graph_mode,
-                                                     int                             member_num_tokens_per_bs,
-                                                     bool                            is_target_verify);
-    static void copyRuntimePyModelIntoCaptureBuffers(const torch_ext::PyModelInputs& runtime,
-                                                     torch_ext::PyModelInputs&       cap,
-                                                     const BatchDescriptor&          batch_descriptor,
-                                                     bool                            is_prefill_cuda_graph_mode,
-                                                     pybind11::object                decode_attn_pyobj);
-};
-
 // Full max-sized PyModelInputs for CUDA graph capture (token tensors, attention, BERT slots).
 struct CaptureMaxPyModelInputsConfig {
     int64_t                      hidden_size{0};
@@ -105,6 +83,22 @@ public:
 
     /// Fills `cu_seqlens` / `cu_kv_seqlens` from `input_lengths` / `prefix_lengths` (length `max_bs + 1`, pinned).
     static void fillCuSeqlensForCapture(torch_ext::PyModelInputs& py_inputs, size_t max_bs);
+
+    /// Runtime / small spans into max capture templates: copies, slices, padded-buffer fills.
+    static void copySmallerIntoLarger(const at::Tensor& source_tensor, at::Tensor& target_tensor);
+    static void optimizedCopyAsync(const at::Tensor& src, at::Tensor& dst, size_t size);
+    static void sliceTemplatePyModelInputsForCapture(torch_ext::PyModelInputs&       dst,
+                                                     const torch_ext::PyModelInputs& cap_template,
+                                                     int                             batch_size,
+                                                     int                             seq_len_or_tokens,
+                                                     bool                            is_prefill_cuda_graph_mode,
+                                                     int                             member_num_tokens_per_bs,
+                                                     bool                            is_target_verify);
+    static void copyRuntimePyModelIntoCaptureBuffers(const torch_ext::PyModelInputs& runtime,
+                                                     torch_ext::PyModelInputs&       cap,
+                                                     const BatchDescriptor&          batch_descriptor,
+                                                     bool                            is_prefill_cuda_graph_mode,
+                                                     pybind11::object                decode_attn_pyobj);
 
 private:
     static void initCaptureAttentionTensors(torch_ext::PyModelInputs& inputs, const CaptureAttentionLayoutConfig& cfg);

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_dispatcher.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_py_model_inputs.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -84,22 +85,16 @@ private:
     void              setInputEmbeddingScalar(float input_embedding_scalar) override;
 
 private:
-    std::vector<int> getDecodeBatchSizesToCapture();
-    std::vector<int> getPrefillSequenceLengthsToCapture();
-    /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).
-    bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor);
-    /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
-    bool        tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, BatchDescriptor& batch_descriptor);
-    py::object  py_forward_method_;
-    py::object  py_attn_pyobj_method_;
-    GraphParams graph_params_;
+    py::object              py_forward_method_;
+    py::object              py_attn_pyobj_method_;
+    GraphParams             graph_params_;
     cuda_graph::GraphStream capture_stream_;
     size_t                  max_bs_{1};
     int                     max_num_token_{1};
-    std::vector<int>        capture_range_;
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance>    graph_instances_;
+    cuda_graph::CudaGraphCaptureDispatcher    capture_dispatcher_;
     cuda_graph::CudaGraphCapturePyModelInputs capture_py_model_inputs_;
     torch::Tensor                             position_encoding_;
     torch::Tensor                             token_type_embedding_;

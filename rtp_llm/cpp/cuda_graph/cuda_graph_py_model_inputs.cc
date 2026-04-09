@@ -14,7 +14,7 @@ using namespace torch_ext;
 namespace rtp_llm {
 namespace cuda_graph {
 
-void CudaGraphCaptureBufferHelper::optimizedCopyAsync(const at::Tensor& src, at::Tensor& dst, size_t size) {
+void CudaGraphCapturePyModelInputs::optimizedCopyAsync(const at::Tensor& src, at::Tensor& dst, size_t size) {
     if (!src.defined() || src.numel() <= 0) {
         return;
     }
@@ -31,7 +31,7 @@ void CudaGraphCaptureBufferHelper::optimizedCopyAsync(const at::Tensor& src, at:
     }
 }
 
-void CudaGraphCaptureBufferHelper::copySmallerIntoLarger(const at::Tensor& source_tensor, at::Tensor& target_tensor) {
+void CudaGraphCapturePyModelInputs::copySmallerIntoLarger(const at::Tensor& source_tensor, at::Tensor& target_tensor) {
     if (source_tensor.dim() != target_tensor.dim()) {
         throw std::runtime_error("Error: Source and target tensors must have the same number of dimensions.");
     }
@@ -242,13 +242,13 @@ PyModelInputs CudaGraphCapturePyModelInputs::sliceForPrefillProbeForward() const
     return sliced;
 }
 
-void CudaGraphCaptureBufferHelper::sliceTemplatePyModelInputsForCapture(PyModelInputs&       inputs,
-                                                                        const PyModelInputs& cap_template,
-                                                                        int                  batch_size,
-                                                                        int                  seq_len_or_tokens,
-                                                                        bool                 is_prefill_cuda_graph_mode,
-                                                                        int                  member_num_tokens_per_bs,
-                                                                        bool                 is_target_verify) {
+void CudaGraphCapturePyModelInputs::sliceTemplatePyModelInputsForCapture(PyModelInputs&       inputs,
+                                                                         const PyModelInputs& cap_template,
+                                                                         int                  batch_size,
+                                                                         int                  seq_len_or_tokens,
+                                                                         bool is_prefill_cuda_graph_mode,
+                                                                         int  member_num_tokens_per_bs,
+                                                                         bool is_target_verify) {
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode || member_num_tokens_per_bs > 1;
     inputs.attention_inputs.is_target_verify = is_target_verify;
     inputs.input_ids                         = cap_template.input_ids.slice(0, 0, seq_len_or_tokens);
@@ -297,54 +297,54 @@ void CudaGraphCaptureBufferHelper::sliceTemplatePyModelInputsForCapture(PyModelI
     inputs.attention_inputs.is_s_padded             = true;
 }
 
-void CudaGraphCaptureBufferHelper::copyRuntimePyModelIntoCaptureBuffers(const PyModelInputs&   runtime,
-                                                                        PyModelInputs&         cap,
-                                                                        const BatchDescriptor& batch_descriptor,
-                                                                        bool             is_prefill_cuda_graph_mode,
-                                                                        pybind11::object decode_attn_pyobj) {
+void CudaGraphCapturePyModelInputs::copyRuntimePyModelIntoCaptureBuffers(const PyModelInputs&   runtime,
+                                                                         PyModelInputs&         cap,
+                                                                         const BatchDescriptor& batch_descriptor,
+                                                                         bool             is_prefill_cuda_graph_mode,
+                                                                         pybind11::object decode_attn_pyobj) {
     if (!is_prefill_cuda_graph_mode) {
         cap.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
 
-        CudaGraphCaptureBufferHelper::optimizedCopyAsync(runtime.attention_inputs.prefix_lengths,
-                                                         cap.attention_inputs.prefix_lengths,
-                                                         static_cast<size_t>(batch_descriptor.current_batch_size)
-                                                             * sizeof(int));
-        CudaGraphCaptureBufferHelper::optimizedCopyAsync(
+        CudaGraphCapturePyModelInputs::optimizedCopyAsync(runtime.attention_inputs.prefix_lengths,
+                                                          cap.attention_inputs.prefix_lengths,
+                                                          static_cast<size_t>(batch_descriptor.current_batch_size)
+                                                              * sizeof(int));
+        CudaGraphCapturePyModelInputs::optimizedCopyAsync(
             runtime.input_ids, cap.input_ids, runtime.input_ids.size(0) * sizeof(int));
 
-        CudaGraphCaptureBufferHelper::optimizedCopyAsync(runtime.input_hiddens,
-                                                         cap.input_hiddens,
-                                                         runtime.input_hiddens.numel()
-                                                             * runtime.input_hiddens.element_size());
+        CudaGraphCapturePyModelInputs::optimizedCopyAsync(runtime.input_hiddens,
+                                                          cap.input_hiddens,
+                                                          runtime.input_hiddens.numel()
+                                                              * runtime.input_hiddens.element_size());
 
-        CudaGraphCaptureBufferHelper::optimizedCopyAsync(runtime.attention_inputs.sequence_lengths,
-                                                         cap.attention_inputs.sequence_lengths,
-                                                         static_cast<size_t>(batch_descriptor.current_batch_size)
-                                                             * sizeof(int));
+        CudaGraphCapturePyModelInputs::optimizedCopyAsync(runtime.attention_inputs.sequence_lengths,
+                                                          cap.attention_inputs.sequence_lengths,
+                                                          static_cast<size_t>(batch_descriptor.current_batch_size)
+                                                              * sizeof(int));
 
-        CudaGraphCaptureBufferHelper::copySmallerIntoLarger(runtime.attention_inputs.kv_cache_kernel_block_id_device,
-                                                            cap.attention_inputs.kv_cache_kernel_block_id_device);
-        CudaGraphCaptureBufferHelper::copySmallerIntoLarger(runtime.attention_inputs.kv_cache_kernel_block_id_host,
-                                                            cap.attention_inputs.kv_cache_kernel_block_id_host);
-        CudaGraphCaptureBufferHelper::optimizedCopyAsync(runtime.attention_inputs.sequence_lengths_plus_1_d,
-                                                         cap.attention_inputs.sequence_lengths_plus_1_d,
-                                                         static_cast<size_t>(batch_descriptor.current_batch_size)
-                                                             * sizeof(int));
-        CudaGraphCaptureBufferHelper::optimizedCopyAsync(runtime.attention_inputs.decode_cu_seqlens_d,
-                                                         cap.attention_inputs.decode_cu_seqlens_d,
-                                                         static_cast<size_t>(batch_descriptor.current_batch_size + 1)
-                                                             * sizeof(int));
+        CudaGraphCapturePyModelInputs::copySmallerIntoLarger(runtime.attention_inputs.kv_cache_kernel_block_id_device,
+                                                             cap.attention_inputs.kv_cache_kernel_block_id_device);
+        CudaGraphCapturePyModelInputs::copySmallerIntoLarger(runtime.attention_inputs.kv_cache_kernel_block_id_host,
+                                                             cap.attention_inputs.kv_cache_kernel_block_id_host);
+        CudaGraphCapturePyModelInputs::optimizedCopyAsync(runtime.attention_inputs.sequence_lengths_plus_1_d,
+                                                          cap.attention_inputs.sequence_lengths_plus_1_d,
+                                                          static_cast<size_t>(batch_descriptor.current_batch_size)
+                                                              * sizeof(int));
+        CudaGraphCapturePyModelInputs::optimizedCopyAsync(runtime.attention_inputs.decode_cu_seqlens_d,
+                                                          cap.attention_inputs.decode_cu_seqlens_d,
+                                                          static_cast<size_t>(batch_descriptor.current_batch_size + 1)
+                                                              * sizeof(int));
         decode_attn_pyobj.attr("prepare_cuda_graph")(cap.attention_inputs);
     } else {
         cap.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
 
-        CudaGraphCaptureBufferHelper::optimizedCopyAsync(
+        CudaGraphCapturePyModelInputs::optimizedCopyAsync(
             runtime.input_ids, cap.input_ids, static_cast<size_t>(batch_descriptor.current_seq_len) * sizeof(int));
 
-        CudaGraphCaptureBufferHelper::optimizedCopyAsync(runtime.attention_inputs.padding_offset,
-                                                         cap.attention_inputs.padding_offset,
-                                                         static_cast<size_t>(batch_descriptor.current_seq_len)
-                                                             * sizeof(int));
+        CudaGraphCapturePyModelInputs::optimizedCopyAsync(runtime.attention_inputs.padding_offset,
+                                                          cap.attention_inputs.padding_offset,
+                                                          static_cast<size_t>(batch_descriptor.current_seq_len)
+                                                              * sizeof(int));
 
         if (cap.attention_inputs.prefill_cuda_graph_copy_params) {
             (*(cap.attention_inputs.prefill_cuda_graph_copy_params->cuda_graph_prefill_batch_size.data_ptr<int>())) =
@@ -352,32 +352,32 @@ void CudaGraphCaptureBufferHelper::copyRuntimePyModelIntoCaptureBuffers(const Py
         }
 
         if (runtime.bert_embedding_inputs.position_encoding.numel() > 0) {
-            CudaGraphCaptureBufferHelper::optimizedCopyAsync(runtime.bert_embedding_inputs.combo_position_ids,
-                                                             cap.bert_embedding_inputs.combo_position_ids,
-                                                             static_cast<size_t>(batch_descriptor.current_seq_len)
-                                                                 * sizeof(int));
+            CudaGraphCapturePyModelInputs::optimizedCopyAsync(runtime.bert_embedding_inputs.combo_position_ids,
+                                                              cap.bert_embedding_inputs.combo_position_ids,
+                                                              static_cast<size_t>(batch_descriptor.current_seq_len)
+                                                                  * sizeof(int));
 
-            CudaGraphCaptureBufferHelper::optimizedCopyAsync(runtime.bert_embedding_inputs.combo_tokens_type_ids,
-                                                             cap.bert_embedding_inputs.combo_tokens_type_ids,
-                                                             static_cast<size_t>(batch_descriptor.current_seq_len)
-                                                                 * sizeof(int));
+            CudaGraphCapturePyModelInputs::optimizedCopyAsync(runtime.bert_embedding_inputs.combo_tokens_type_ids,
+                                                              cap.bert_embedding_inputs.combo_tokens_type_ids,
+                                                              static_cast<size_t>(batch_descriptor.current_seq_len)
+                                                                  * sizeof(int));
         }
     }
 
-    CudaGraphCaptureBufferHelper::optimizedCopyAsync(runtime.attention_inputs.input_lengths,
-                                                     cap.attention_inputs.input_lengths,
-                                                     static_cast<size_t>(batch_descriptor.current_batch_size)
-                                                         * sizeof(int));
+    CudaGraphCapturePyModelInputs::optimizedCopyAsync(runtime.attention_inputs.input_lengths,
+                                                      cap.attention_inputs.input_lengths,
+                                                      static_cast<size_t>(batch_descriptor.current_batch_size)
+                                                          * sizeof(int));
 
-    CudaGraphCaptureBufferHelper::optimizedCopyAsync(runtime.attention_inputs.cu_seqlens,
-                                                     cap.attention_inputs.cu_seqlens,
-                                                     static_cast<size_t>(batch_descriptor.current_batch_size + 1)
-                                                         * sizeof(int));
+    CudaGraphCapturePyModelInputs::optimizedCopyAsync(runtime.attention_inputs.cu_seqlens,
+                                                      cap.attention_inputs.cu_seqlens,
+                                                      static_cast<size_t>(batch_descriptor.current_batch_size + 1)
+                                                          * sizeof(int));
 
-    CudaGraphCaptureBufferHelper::optimizedCopyAsync(runtime.attention_inputs.cu_kv_seqlens,
-                                                     cap.attention_inputs.cu_kv_seqlens,
-                                                     static_cast<size_t>(batch_descriptor.current_batch_size + 1)
-                                                         * sizeof(int));
+    CudaGraphCapturePyModelInputs::optimizedCopyAsync(runtime.attention_inputs.cu_kv_seqlens,
+                                                      cap.attention_inputs.cu_kv_seqlens,
+                                                      static_cast<size_t>(batch_descriptor.current_batch_size + 1)
+                                                          * sizeof(int));
 
     if (!runtime.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()
         && !runtime.attention_inputs.kv_cache_kernel_block_id_host_by_group.empty()
@@ -391,16 +391,16 @@ void CudaGraphCaptureBufferHelper::copyRuntimePyModelIntoCaptureBuffers(const Py
                                     && cap.attention_inputs.kv_cache_kernel_block_id_host_by_group.size() == group,
                                 "kv_cache_kernel_block_id_host_by_group size mismatch");
         for (size_t g = 0; g < group; ++g) {
-            CudaGraphCaptureBufferHelper::copySmallerIntoLarger(
+            CudaGraphCapturePyModelInputs::copySmallerIntoLarger(
                 runtime.attention_inputs.kv_cache_kernel_block_id_device_by_group[g],
                 cap.attention_inputs.kv_cache_kernel_block_id_device_by_group[g]);
-            CudaGraphCaptureBufferHelper::copySmallerIntoLarger(
+            CudaGraphCapturePyModelInputs::copySmallerIntoLarger(
                 runtime.attention_inputs.kv_cache_kernel_block_id_host_by_group[g],
                 cap.attention_inputs.kv_cache_kernel_block_id_host_by_group[g]);
         }
     }
 
-    CudaGraphCaptureBufferHelper::optimizedCopyAsync(
+    CudaGraphCapturePyModelInputs::optimizedCopyAsync(
         runtime.attention_inputs.kv_cache_layer_to_group,
         cap.attention_inputs.kv_cache_layer_to_group,
         static_cast<size_t>(runtime.attention_inputs.kv_cache_layer_to_group.numel()) * sizeof(int32_t));
