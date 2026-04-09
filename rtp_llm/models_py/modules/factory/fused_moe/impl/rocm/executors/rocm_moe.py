@@ -466,11 +466,19 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
             ), "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
+        
+        # view w1 and w2 to float4_e2m1fn_x2 if they are uint8
+        w1 = self.w1
+        w2 = self.w2
+        if w1.dtype == torch.uint8:
+            w1 = w1.view(torch.float4_e2m1fn_x2)
+        if w2.dtype == torch.uint8:
+            w2 = w2.view(torch.float4_e2m1fn_x2)
 
         output = fused_moe(
             hidden_states,
-            self.w1,
-            self.w2,
+            w1,
+            w2,
             topk_weights,
             topk_ids,
             quant_type=aiter.QuantType.per_1x32,
