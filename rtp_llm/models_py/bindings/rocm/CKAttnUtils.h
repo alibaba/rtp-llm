@@ -1,7 +1,7 @@
 #pragma once
 
-#include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
-#include "rtp_llm/cpp/kernels/kv_cache_kernels.h"
+#include "rtp_llm/models_py/bindings/common/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/models_py/bindings/common/kernels/kv_cache_kernels.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/core/Types.h"

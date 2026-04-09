@@ -1,4 +1,5 @@
 #include "rtp_llm/models_py/bindings/cuda/TRTAttnOp.h"
+#include "rtp_llm/cpp/cuda/cufmha/TRTAttn.h"
 #include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
 #include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
@@ -224,6 +225,16 @@ void registerTRTAttnOp(const py::module& m) {
         .def("support", &TRTNormalPrefillOp::support, py::arg("attn_inputs"))
         .def("prepare", &TRTNormalPrefillOp::prepare, py::arg("attn_inputs"))
         .def("forward", &TRTNormalPrefillOp::forward, py::arg("input"), py::arg("kv_cache"), py::arg("params"));
+}
+
+void registerTRTAttn(const py::module& m) {
+    pybind11::class_<TRTAttn, std::shared_ptr<TRTAttn>, rtp_llm::ParamsBase>(m, "TRTAttn")
+        .def(pybind11::init<>())
+        .def_readwrite("kv_cache_offset", &TRTAttn::kv_cache_offset)
+        .def(
+            "__cpp_ptr__",
+            [](TRTAttn& self) { return reinterpret_cast<uintptr_t>(&self); },
+            "Get C++ object pointer address");
 }
 
 }  // namespace rtp_llm

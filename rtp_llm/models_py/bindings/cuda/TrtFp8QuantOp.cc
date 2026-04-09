@@ -1,6 +1,6 @@
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
-#include "rtp_llm/cpp/kernels/scaled_fp8_quant.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
@@ -133,13 +133,13 @@ void trt_fp8_quantize_128_inplace(const at::Tensor& input,
 
     try {
         rtp_llm::invokeComputeFP8Quantize128(reinterpret_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
-                                                          reinterpret_cast<float*>(output_s.data_ptr()),
-                                                          reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
-                                                          dim0,
-                                                          dim1,
-                                                          input.numel(),
-                                                          col_major_scale,
-                                                          stream);
+                                             reinterpret_cast<float*>(output_s.data_ptr()),
+                                             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                                             dim0,
+                                             dim1,
+                                             input.numel(),
+                                             col_major_scale,
+                                             stream);
 
         // Check CUDA errors
         cudaError_t cuda_error = cudaGetLastError();

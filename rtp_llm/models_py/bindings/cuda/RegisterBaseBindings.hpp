@@ -13,7 +13,6 @@
 // RtpProcessGroup is deprecated, use rtp_llm.distribute.collective_torch instead
 // #include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
 #include "rtp_llm/models_py/bindings/cuda/PerTokenGroupQuantFp8.h"
-#include "rtp_llm/models_py/bindings/cuda/MoETopkSoftmax.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 #include "rtp_llm/models_py/bindings/cuda/ReuseKVCacheOp.h"
@@ -23,7 +22,7 @@
 #include "rtp_llm/models_py/bindings/cuda/UserBuffersOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
 
-#include "rtp_llm/cpp/kernels/mla_quant_kernel.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
 
 using namespace rtp_llm;
 
@@ -144,14 +143,6 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("scale_ue8m0"),
                   py::arg("fuse_silu_and_mul"),
                   py::arg("masked_m"));
-
-    rtp_ops_m.def("moe_topk_softmax",
-                  &moe_topk_softmax,
-                  "MoE Topk Softmax kernel",
-                  py::arg("topk_weights"),
-                  py::arg("topk_indices"),
-                  py::arg("token_expert_indices"),
-                  py::arg("gating_output"));
 
     rtp_ops_m.def(
         "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));

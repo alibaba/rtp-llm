@@ -3,7 +3,7 @@
 #include <torch/torch.h>
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
-#include "rtp_llm/cpp/kernels/no_aux_tc_kernels.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/no_aux_tc_kernels.h"
 
 namespace rtp_llm {
 

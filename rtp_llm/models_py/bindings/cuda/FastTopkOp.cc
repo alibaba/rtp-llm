@@ -1,5 +1,5 @@
 #include "rtp_llm/models_py/bindings/cuda/FastTopkOp.h"
-#include "rtp_llm/cpp/kernels/fast_topk.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/fast_topk.h"
 
 namespace torch_ext {
 

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
-#include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/models_py/bindings/common/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/cuda/cufmha/TRTAttn.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <optional>
@@ -53,7 +53,5 @@ protected:
 };
 
 void registerFusedRopeKVCacheOp(const py::module& m);
-
-void registerTRTAttn(const py::module& m);
 
 }  // namespace rtp_llm

@@ -2,7 +2,7 @@
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
 #include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
-#include "rtp_llm/cpp/kernels/cuda_graph_copy_kernel.h"
+#include "rtp_llm/models_py/bindings/common/kernels/cuda_graph_copy_kernel.h"
 #include <cstdint>
 #include <iostream>
 #include <type_traits>

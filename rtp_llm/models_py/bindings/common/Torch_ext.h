@@ -8,8 +8,8 @@
 #include <rtp_llm/cpp/rocm/amd_bfloat16.h>
 #include <hip/hip_runtime.h>
 #include <ATen/hip/HIPContext.h>
-#include "rtp_llm/cpp/kernels/rocm/fused_qk_rmsnorm.h"
-#include "rtp_llm/cpp/kernels/rocm/layernorm_kernels.h"
+#include "rtp_llm/models_py/bindings/rocm/kernels/fused_qk_rmsnorm.h"
+#include "rtp_llm/models_py/bindings/rocm/kernels/layernorm_kernels.h"
 using bf16_type  = amd_bfloat16;
 using StreamType = hipStream_t;
 #define GET_CURRENT_STREAM() at::hip::getCurrentHIPStream().stream()
@@ -21,9 +21,8 @@ using StreamType = hipStream_t;
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
-#include "rtp_llm/cpp/kernels/layernorm_kernels.h"
-#include "rtp_llm/cpp/kernels/fused_qk_rmsnorm.h"
-#include "rtp_llm/cpp/kernels/rmsnormKernels.h"
+#include "rtp_llm/models_py/bindings/common/kernels/layernorm_kernels.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/fused_qk_rmsnorm.h"
 using bf16_type  = nv_bfloat16;
 using StreamType = cudaStream_t;
 #define GET_CURRENT_STREAM() at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream()

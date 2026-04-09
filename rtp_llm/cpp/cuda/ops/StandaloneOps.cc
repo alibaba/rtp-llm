@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/cuda/ops/StandaloneOps.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/kernels/activation_kernels.h"
-#include "rtp_llm/cpp/kernels/mask_logits.h"
+#include "rtp_llm/models_py/bindings/common/kernels/activation_kernels.h"
+#include "rtp_llm/models_py/bindings/common/kernels/mask_logits.h"
 
 namespace rtp_llm {
 

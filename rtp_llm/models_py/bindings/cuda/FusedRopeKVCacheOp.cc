@@ -1,5 +1,5 @@
 #include "rtp_llm/models_py/bindings/cuda/FusedRopeKVCacheOp.h"
-#include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
+#include "rtp_llm/models_py/bindings/common/kernels/unfused_attention_kernels.h"
 #include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -267,8 +267,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
         kv_block_array,
         qkv.data_ptr(),
         params->sequence_lengths.data_ptr<int>(),
-        nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
-                  // params.weights.qkv_weight->bias->data() : nullptr,
+        nullptr,  // qkv_bias
         rope_cache.used,
         checkRopeCache(attn_configs_.rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
         batch_size,
@@ -319,16 +318,6 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
              py::arg("use_fp8_fmha") = false)
         .def("prepare", &FusedRopeKVCacheDecodeOp::prepare, py::arg("attn_inputs"))
         .def("forward", &FusedRopeKVCacheDecodeOp::forward, py::arg("qkv"), py::arg("kv_cache"), py::arg("params"));
-}
-
-void registerTRTAttn(const py::module& m) {
-    pybind11::class_<TRTAttn, std::shared_ptr<TRTAttn>, rtp_llm::ParamsBase>(m, "TRTAttn")
-        .def(pybind11::init<>())
-        .def_readwrite("kv_cache_offset", &TRTAttn::kv_cache_offset)
-        .def(
-            "__cpp_ptr__",
-            [](TRTAttn& self) { return reinterpret_cast<uintptr_t>(&self); },
-            "Get C++ object pointer address");
 }
 
 }  // namespace rtp_llm

@@ -4,8 +4,8 @@
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
-#include "rtp_llm/cpp/kernels/sampling_penalty_kernels.h"
-#include "rtp_llm/cpp/kernels/banRepeatNgram.h"
+#include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
+#include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include <cstddef>
@@ -312,7 +312,7 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
 }  // namespace rtp_llm
 
 #include <ATen/hip/HIPContext.h>
-#include "rtp_llm/cpp/kernels/rocm/sampling/sampling.h"
+#include "rtp_llm/models_py/bindings/rocm/kernels/sampling/sampling.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 
 namespace rtp_llm {  // reopen
