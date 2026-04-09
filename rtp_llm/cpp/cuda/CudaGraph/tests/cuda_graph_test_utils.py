@@ -123,7 +123,6 @@ class CudaGraphTestModelBuilder:
             embedding_config=self.py_env_configs.embedding_config,
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
-            fmha_config=engine_config.fmha_config,
         )
         model_config.attn_config.is_causal = is_casual
         model_config.attn_config.need_rope_kv_cache = is_casual

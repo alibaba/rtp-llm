@@ -68,9 +68,6 @@ struct AttentionConfigs {
     // speculative decoding: tokens generated per cycle (0 = no speculative decoding)
     int64_t gen_num_per_cycle = 0;
 
-    // workspace buffer sharing for CUDA graph
-    bool shared_attn_workspace_buffer = false;
-
 public:
     std::string DebugAttentionConfigStr() const;
 };

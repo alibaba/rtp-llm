@@ -777,7 +777,6 @@ def build_model_config(
     quantization_config: Optional[
         Any
     ] = None,  # QuantizationConfig (optional, for quantization)
-    fmha_config: Optional[Any] = None,  # FMHAConfig (optional, for attention settings)
 ) -> None:
     """Build and initialize ModelConfig from model_args.
 
@@ -824,13 +823,8 @@ def build_model_config(
     model_config.init_precision_config(
         kv_cache_config=kv_cache_config, act_type=model_args.act_type
     )
-
-    # CRITICAL: model_config.attn_config uses def_readwrite in pybind11, which returns
-    # a COPY not a reference. We must read once, modify all fields, then write back.
-    attn_config_copy = model_config.attn_config
-
-    attn_config_copy.tokens_per_block = kv_cache_config.seq_size_per_block
-    attn_config_copy.kernel_tokens_per_block = (
+    model_config.attn_config.tokens_per_block = kv_cache_config.seq_size_per_block
+    model_config.attn_config.kernel_tokens_per_block = (
         kv_cache_config.kernel_seq_size_per_block
         if kv_cache_config.kernel_seq_size_per_block > 0
         else kv_cache_config.seq_size_per_block
@@ -839,13 +833,6 @@ def build_model_config(
         ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)
     )
     model_config.linear_attention_config.conv_state_dtype = model_config.data_type
-
-    if fmha_config is not None:
-        attn_config_copy.shared_attn_workspace_buffer = (
-            fmha_config.shared_attn_workspace_buffer
-        )
-
-    model_config.attn_config = attn_config_copy
 
     model_config.use_kvcache = model_config.task_type == TaskType.LANGUAGE_MODEL
     logging.info(

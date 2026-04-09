@@ -134,7 +134,6 @@ struct FMHAConfig {
     bool        use_aiter_pa                  = true;
     bool        use_asm_pa                    = true;
     bool        use_triton_pa                 = true;
-    bool        shared_attn_workspace_buffer  = false;
     int64_t     absorb_opt_len                = 1024;
     std::string to_string() const;
 };
