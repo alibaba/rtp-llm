@@ -1,5 +1,5 @@
 #include "rtp_llm/models_py/bindings/cuda/SplitKvCacheCopy.h"
-#include "rtp_llm/models_py/bindings/kernels/sm_copy_kernel.h"
+#include "rtp_llm/models_py/bindings/common/kernels/sm_copy_kernel.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 
 namespace rtp_llm {

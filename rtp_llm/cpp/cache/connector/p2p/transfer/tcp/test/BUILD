@@ -15,7 +15,7 @@ cc_test(
         "main.cc",
     ],
     copts = test_copts,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_task_context",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
@@ -41,7 +41,7 @@ cc_test(
         # Limit per-process GPU reservation when many cc_tests run in parallel (bazel test //...).
         "DEVICE_RESERVE_MEMORY_BYTES": "512000000",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_transfer_service",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
@@ -66,7 +66,7 @@ cc_test(
     env = {
         "DEVICE_RESERVE_MEMORY_BYTES": "512000000",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
