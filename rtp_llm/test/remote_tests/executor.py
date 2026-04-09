@@ -1,6 +1,8 @@
 """Remote Execution client wrapping the REAPI Execute RPC."""
 
+import atexit
 import logging
+import signal
 import threading
 import time
 from dataclasses import dataclass, field
@@ -208,10 +210,50 @@ class RemoteExecutor:
         started_stderr = False
         logged_metadata_worker: Optional[str] = None
 
+        # --- atexit / SIGTERM cancel: abort remote action if local process dies ---
+        _op_name_holder: List[Optional[str]] = [None]  # mutable for closure
+        _original_sigterm = signal.getsignal(signal.SIGTERM)
+
+        def _cancel_remote():
+            name = _op_name_holder[0]
+            if not name:
+                return
+            _op_name_holder[0] = None  # prevent double cancel
+            try:
+                # Use generic unary-unary call — no Operations proto needed
+                self.channel.unary_unary(
+                    "/google.longrunning.Operations/CancelOperation",
+                    request_serializer=lambda req: req,
+                    response_deserializer=lambda resp: resp,
+                )(
+                    # CancelOperationRequest { string name = 1; }
+                    # Field 1, length-delimited (wire type 2) = 0x0a, then varint length, then UTF-8
+                    b"\x0a" + bytes([len(name)]) + name.encode("utf-8"),
+                    metadata=self.metadata,
+                    timeout=5,
+                )
+                log.info("Cancelled remote operation %s on exit", name)
+            except Exception:
+                pass
+
+        def _sigterm_handler(signum, frame):
+            _cancel_remote()
+            if callable(_original_sigterm) and _original_sigterm not in (
+                signal.SIG_DFL, signal.SIG_IGN,
+            ):
+                _original_sigterm(signum, frame)
+            else:
+                raise SystemExit(128 + signum)
+
+        atexit.register(_cancel_remote)
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+
         try:
             for op in self.stub.Execute(
                 request, metadata=self.metadata, timeout=timeout + 120
             ):
+                if _op_name_holder[0] is None and op.name:
+                    _op_name_holder[0] = op.name
                 meta = self._try_unpack_execute_metadata(op)
                 if meta is not None:
                     w = (meta.partial_execution_metadata.worker or "").strip()
@@ -320,6 +362,11 @@ class RemoteExecutor:
                 stream_stdout_path=abs_stdout,
                 stream_stderr_path=abs_stderr,
             )
+        finally:
+            # Unregister cancel handlers — action completed or errored
+            _op_name_holder[0] = None
+            atexit.unregister(_cancel_remote)
+            signal.signal(signal.SIGTERM, _original_sigterm)
 
         stop_event.set()
         for t in stream_threads:
