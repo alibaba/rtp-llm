@@ -27,6 +27,12 @@ from pathlib import Path
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 
+# Force line-buffered stdout so prints appear in real-time in CI (no TTY)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
+
 try:
     from wheel.bdist_wheel import bdist_wheel
 except ImportError:
