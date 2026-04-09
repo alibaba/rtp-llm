@@ -41,17 +41,8 @@ inline int32_t get_sm_version_num() {
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 
-#include "cutlass/util/command_line.h"
-#include "cutlass/util/distribution.h"
-#include "cutlass/util/host_tensor.h"
-#include "cutlass/util/packed_stride.hpp"
-#include "cutlass/util/tensor_view_io.h"
-#include "cutlass/util/reference/device/gemm.h"
-#include "cutlass/util/reference/device/tensor_compare.h"
-#include "cutlass/util/reference/host/tensor_fill.h"
-#include "cutlass/util/reference/host/gett.hpp"
-#include "cutlass/util/reference/host/tensor_norm.h"
-#include "cutlass/util/reference/host/tensor_compare.h"
+// cutlass/util/ headers removed — they live in tools/util/include/ which
+// deep_gemm doesn't bundle, and none are actually used by the kernel.
 #include <cassert>
 
 using namespace cute;
