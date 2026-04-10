@@ -6,6 +6,7 @@ TORCH_DTYPE_SIZE_BYTES = {
     torch.float32: 4,
     torch.int8: 1,
     torch.float8_e4m3fn: 1,
+    torch.uint8: 1,
 }
 
 

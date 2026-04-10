@@ -121,6 +121,7 @@ size_t getTypeSize(DataType type) {
         case DataType::TYPE_INT4X2:
         case DataType::TYPE_QINT4X2:
         case DataType::TYPE_FP8_E8M0:
+        case DataType::TYPE_NVFP4:
             return 1;
         default:
             return 0;
@@ -152,6 +153,9 @@ size_t getTypeBits(DataType type) {
             return 4;
         }
         case TYPE_INT4X2: {
+            return 4;
+        }
+        case TYPE_NVFP4: {
             return 4;
         }
         default:

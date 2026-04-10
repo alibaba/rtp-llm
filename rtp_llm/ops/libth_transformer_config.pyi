@@ -790,6 +790,7 @@ class KVCacheConfig:
     enable_remote_cache: bool
     fp8_kv_cache: int
     int8_kv_cache: int
+    nvfp4_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int
     max_block_size_per_item: int
@@ -832,11 +833,14 @@ class KvCacheDataType:
       INT8
 
       FP8
+
+      NVFP4
     """
     BASE: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.BASE: 0>
     FP8: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.FP8: 2>
     INT8: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.INT8: 1>
-    # value = {'BASE': <KvCacheDataType.BASE: 0>, 'INT8': <KvCacheDataType.INT8: 1>, 'FP8': <KvCacheDataType.FP8: 2>}
+    NVFP4: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.NVFP4: 3>
+    # value = {'BASE': <KvCacheDataType.BASE: 0>, 'INT8': <KvCacheDataType.INT8: 1>, 'FP8': <KvCacheDataType.FP8: 2>, 'NVFP4': <KvCacheDataType.NVFP4: 3>}
     __members__: typing.ClassVar[dict[str, KvCacheDataType]]
 
     def __eq__(self, other: typing.Any) -> bool:
