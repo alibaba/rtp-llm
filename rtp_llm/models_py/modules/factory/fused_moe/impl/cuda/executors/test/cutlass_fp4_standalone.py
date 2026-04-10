@@ -202,12 +202,54 @@ def _try_load_cutlass_fp4_module():
     return module
 
 
-def bench_cutlass_fp4(E, tokens_per_expert, K, N, seed, warmup, iters):
-    """Benchmark CUTLASS FP4 group GEMM (vLLM/SGLang kernel).
+def _prepare_fp4_gemm_args(E, tokens_per_expert, out_dim, in_dim, seed_offset, device="cuda"):
+    """Prepare FP4 GEMM arguments for one matmul stage.
 
+    Args:
+        E: number of experts
+        tokens_per_expert: list of token counts per expert
+        out_dim: output dimension (2N for FC1, K for FC2)
+        in_dim: input dimension (K for FC1, N for FC2)
+        seed_offset: seed offset for weight generation
+    Returns: (w_fp4, b_scales, problem_sizes, expert_offsets, sf_offsets, sf_sizes)
+    """
+    total_tokens = sum(tokens_per_expert)
+    group_size = 16
+
+    w_fp4 = torch.randint(0, 256, (E, out_dim, in_dim // 2), device=device, dtype=torch.uint8)
+    b_scales = torch.ones(E, out_dim, in_dim // group_size, device=device, dtype=torch.float8_e4m3fn)
+
+    problem_sizes = torch.zeros(E, 3, device=device, dtype=torch.int32)
+    for i in range(E):
+        problem_sizes[i, 0] = tokens_per_expert[i]
+        problem_sizes[i, 1] = out_dim
+        problem_sizes[i, 2] = in_dim
+
+    expert_offsets = torch.zeros(E, device=device, dtype=torch.int32)
+    offset = 0
+    for i in range(E):
+        expert_offsets[i] = offset
+        offset += tokens_per_expert[i]
+
+    sf_sizes = [((m + 127) // 128) * 128 for m in tokens_per_expert]
+    total_sf = sum(sf_sizes)
+    sf_offsets = torch.zeros(E, device=device, dtype=torch.int32)
+    sf_off = 0
+    for i in range(E):
+        sf_offsets[i] = sf_off
+        sf_off += sf_sizes[i]
+
+    return w_fp4, b_scales, problem_sizes, expert_offsets, sf_offsets, sf_sizes
+
+
+def bench_cutlass_fp4(E, tokens_per_expert, K, N, seed, warmup, iters):
+    """Benchmark CUTLASS FP4 Full MoE: FC1(K→2N) + SiLU + FC2(N→K).
+
+    Runs TWO group GEMMs per iteration to match other Full MoE implementations.
     Returns: (avg_ms, tflops, error_str_or_None)
     """
     import time
+    from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
 
     module = _try_load_cutlass_fp4_module()
     device = "cuda"
@@ -216,60 +258,42 @@ def bench_cutlass_fp4(E, tokens_per_expert, K, N, seed, warmup, iters):
         tokens_per_expert = [tokens_per_expert] * E
 
     total_tokens = sum(tokens_per_expert)
-    group_size = 16  # FP4 block scale group size
+    group_size = 16
 
-    # Weights: [E, N, K//2] uint8 (packed FP4)
-    w_bf16 = (torch.randn(E, N, K, device=device, dtype=torch.float32,
-                           generator=torch.Generator(device).manual_seed(seed)) * 0.1).to(torch.bfloat16)
-    # Quantize to FP4 (naive: cast to float8 then pack pairs)
-    w_fp8 = w_bf16.to(torch.float8_e4m3fn)
-    # Pack FP4: take pairs of fp8 values, pack as uint8
-    # For benchmark purposes, use random uint8 (kernel perf doesn't depend on values)
-    w_fp4 = torch.randint(0, 256, (E, N, K // 2), device=device, dtype=torch.uint8)
+    # --- FC1: [total_tokens, K] → [total_tokens, 2N] ---
+    w1_fp4, w1_scales, ps1, eo1, sfo1, sf_sizes1 = \
+        _prepare_fp4_gemm_args(E, tokens_per_expert, 2 * N, K, seed, device)
+    a1_fp4 = torch.randint(0, 256, (total_tokens, K // 2), device=device, dtype=torch.uint8)
+    total_sf1 = sum(sf_sizes1)
+    a1_scales = torch.ones(total_sf1, K // group_size, device=device, dtype=torch.float8_e4m3fn)
+    alphas1 = torch.ones(E, device=device, dtype=torch.float32)
+    fc1_out = torch.empty(total_tokens, 2 * N, device=device, dtype=torch.bfloat16)
 
-    # Weight blockscale: [E, N, K//group_size] float8_e4m3fn
-    b_scales = torch.ones(E, N, K // group_size, device=device, dtype=torch.float8_e4m3fn)
+    # --- FC2: [total_tokens, N] → [total_tokens, K] ---
+    w2_fp4, w2_scales, ps2, eo2, sfo2, sf_sizes2 = \
+        _prepare_fp4_gemm_args(E, tokens_per_expert, K, N, seed + 1, device)
+    a2_fp4 = torch.randint(0, 256, (total_tokens, N // 2), device=device, dtype=torch.uint8)
+    total_sf2 = sum(sf_sizes2)
+    a2_scales = torch.ones(total_sf2, N // group_size, device=device, dtype=torch.float8_e4m3fn)
+    alphas2 = torch.ones(E, device=device, dtype=torch.float32)
+    fc2_out = torch.empty(total_tokens, K, device=device, dtype=torch.bfloat16)
 
-    # Input: [total_tokens, K//2] uint8 (packed FP4)
-    a_fp4 = torch.randint(0, 256, (total_tokens, K // 2), device=device, dtype=torch.uint8)
-
-    # Input blockscale: [sum(sf_sizes), K//group_size] float8_e4m3fn
-    # sf_sizes = ceil(M_i / 128) * 128 for each expert
-    sf_sizes = [((m + 127) // 128) * 128 for m in tokens_per_expert]
-    total_sf = sum(sf_sizes)
-    a_scales = torch.ones(total_sf, K // group_size, device=device, dtype=torch.float8_e4m3fn)
-
-    # Alphas: [E] float32
-    alphas = torch.ones(E, device=device, dtype=torch.float32)
-
-    # Problem sizes: [E, 3] int32 — (M_i, N, K)
-    problem_sizes = torch.zeros(E, 3, device=device, dtype=torch.int32)
-    for i in range(E):
-        problem_sizes[i, 0] = tokens_per_expert[i]
-        problem_sizes[i, 1] = N
-        problem_sizes[i, 2] = K
-
-    # Expert offsets: [E] int32 — cumulative token offsets
-    expert_offsets = torch.zeros(E, device=device, dtype=torch.int32)
-    offset = 0
-    for i in range(E):
-        expert_offsets[i] = offset
-        offset += tokens_per_expert[i]
-
-    # SF offsets: [E] int32 — cumulative scale factor offsets
-    sf_offsets = torch.zeros(E, device=device, dtype=torch.int32)
-    sf_off = 0
-    for i in range(E):
-        sf_offsets[i] = sf_off
-        sf_off += sf_sizes[i]
-
-    # Output: [total_tokens, N] bfloat16
-    output = torch.empty(total_tokens, N, device=device, dtype=torch.bfloat16)
+    # SiLU intermediate
+    act_out = torch.empty(total_tokens, N, device=device, dtype=torch.bfloat16)
 
     def run():
+        # FC1: [M, K] x [2N, K]^T → [M, 2N]
         module.cutlass_fp4_group_mm(
-            output, a_fp4, w_fp4, a_scales, b_scales, alphas,
-            problem_sizes, expert_offsets, sf_offsets)
+            fc1_out, a1_fp4, w1_fp4, a1_scales, w1_scales, alphas1,
+            ps1, eo1, sfo1)
+        # SiLU activation: [M, 2N] → [M, N]
+        silu_and_mul(act_out, fc1_out)
+        # FC2: [M, N] x [K, N]^T → [M, K]
+        # Note: FC2 input is bfloat16 from SiLU, we use pre-generated FP4
+        # data for kernel-level benchmark (perf doesn't depend on values)
+        module.cutlass_fp4_group_mm(
+            fc2_out, a2_fp4, w2_fp4, a2_scales, w2_scales, alphas2,
+            ps2, eo2, sfo2)
 
     # Warmup
     for _ in range(warmup):
@@ -284,9 +308,8 @@ def bench_cutlass_fp4(E, tokens_per_expert, K, N, seed, warmup, iters):
     torch.cuda.synchronize()
     avg_ms = ((time.perf_counter() - start) / iters) * 1000
 
-    # TFLOPS: this is a single GEMM (not full MoE with FC1+FC2)
-    # To be comparable with full MoE, caller needs to handle this
-    flops = total_tokens * N * K * 2  # single GEMM FLOPS
+    # Full MoE TFLOPS: FC1(M*2N*K*2) + FC2(M*K*N*2)
+    flops = total_tokens * (2 * N * K * 2 + K * N * 2)
     tflops = (flops / (avg_ms / 1000)) / 1e12
 
     return avg_ms, tflops, None
