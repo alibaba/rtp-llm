@@ -761,7 +761,21 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
                 max_seq_len + _PARTITION_SIZE_ROCM - 1
             ) // _PARTITION_SIZE_ROCM
             assert _PARTITION_SIZE_ROCM % block_size == 0
-            # output already allocated above via _get_output(query); reuse it here.
+
+            # Reinterpret KV cache shape to match paged_attention_rocm expected layout.
+            # C++ V1 kernel (NonAsm) writes K as [num_kv_heads, head_dim/x, block_size, x]
+            # and V as [num_kv_heads, head_dim, block_size] in physical memory.
+            # OpDefs.h incorrectly reshapes this as [num_blocks, 2, num_kv_heads, block_size, head_dim].
+            # We reinterpret via view (no data copy) to the correct logical shape.
+            x = 16 // key_cache.element_size()
+            num_blocks = key_cache.shape[0]
+            key_cache = key_cache.view(
+                num_blocks, num_kv_heads, head_size // x, block_size, x
+            )
+            value_cache = value_cache.view(
+                num_blocks, num_kv_heads, head_size, block_size
+            )
+
             # init tmp_output
             tmp_output = torch.empty(
                 size=(num_seqs, num_heads, max_num_partitions, head_size),
@@ -799,7 +813,7 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
                 block_size,
                 max_seq_len,
                 alibi_slopes,
-                kv_cache_dtype,  # kv_cache_dtype
+                kv_cache_dtype,
                 k_scale,
                 v_scale,
                 fp8_out_scale if cpa_fp8_out else None,
