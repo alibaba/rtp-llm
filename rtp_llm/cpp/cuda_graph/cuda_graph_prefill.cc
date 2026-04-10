@@ -27,15 +27,31 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = seq_len;
             inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
         } else {
-            inputs.attention_inputs.cu_seqlens.fill_(seq_len);
+            // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
+            // All max_bs_ batches get prefix to ensure buffer allocation covers worst-case replay.
+            int active_bs  = (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
+            int prefix_len = max_seq_len_;
+
+            // All batches get prefix_len to maximize buffer allocation during capture.
+            // Active batches get real input tokens, inactive batches get 0 input tokens.
             inputs.attention_inputs.input_lengths.fill_(0);
-            int kv_len     = max_seq_len_ + seq_len;
-            int prefix_len = kv_len;
-            inputs.attention_inputs.cu_kv_seqlens.fill_(kv_len);
             inputs.attention_inputs.prefix_lengths.fill_(prefix_len);
-            inputs.attention_inputs.cu_seqlens.data_ptr<int>()[0]    = 0;
-            inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>()[0] = 0;
-            inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
+            auto* input_lengths_ptr = inputs.attention_inputs.input_lengths.data_ptr<int>();
+            for (int b = 0; b < active_bs; b++) {
+                int tokens           = (b < active_bs - 1) ? num_tokens_per_bs_ : (seq_len - b * num_tokens_per_bs_);
+                input_lengths_ptr[b] = tokens;
+            }
+
+            // Build cu_seqlens and cu_kv_seqlens as cumulative sums
+            auto* prefix_lengths_ptr = inputs.attention_inputs.prefix_lengths.data_ptr<int>();
+            auto* cu_seqlens_ptr     = inputs.attention_inputs.cu_seqlens.data_ptr<int>();
+            auto* cu_kv_seqlens_ptr  = inputs.attention_inputs.cu_kv_seqlens.data_ptr<int>();
+            cu_seqlens_ptr[0]        = 0;
+            cu_kv_seqlens_ptr[0]     = 0;
+            for (int b = 0; b < max_bs_; b++) {
+                cu_seqlens_ptr[b + 1]    = cu_seqlens_ptr[b] + input_lengths_ptr[b];
+                cu_kv_seqlens_ptr[b + 1] = cu_kv_seqlens_ptr[b] + input_lengths_ptr[b] + prefix_lengths_ptr[b];
+            }
         }
 
         inputs.attention_inputs.context_total_kv_length = seq_len;
