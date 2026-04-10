@@ -3,7 +3,11 @@ import copy
 from typing import Any, List, Dict, Union
 import torch
 
-from rtp_llm.config.quant_config import ModelOptFp4Config, QuantizationConfig
+from rtp_llm.config.quant_config import (
+    Fp4PerGroupQuarkQuantConfig,
+    ModelOptFp4Config,
+    QuantizationConfig,
+)
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
@@ -163,12 +167,20 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
         if not quant_config.is_quanted() or not isinstance(
-            quant_config, ModelOptFp4Config
+            quant_config, (ModelOptFp4Config, Fp4PerGroupQuarkQuantConfig)
         ):
             return False
         name = src_weight_info.name
-        return (name in cls.unquantized_weight_list or name in cls.w4a4_weight_list) \
-               and quant_config.mixed_attention
+        if isinstance(quant_config, Fp4PerGroupQuarkQuantConfig):
+            # Some Quark checkpoints keep shared_expert in non-quantized format
+            # (no *.weight_scale). Let those weights bypass quant wrappers.
+            ckpt_names = [w.name for w in getattr(src_weight_info, "weights", [])]
+            if any(".shared_expert." in n for n in ckpt_names):
+                return False
+            return name in cls.unquantized_weight_list or name in cls.w4a4_weight_list
+        return (name in cls.unquantized_weight_list or name in cls.w4a4_weight_list) and getattr(
+            quant_config, "mixed_attention", False
+        )
                 
 
     def __init__(
@@ -201,10 +213,19 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             kernel = self._get_norm_weight(src_weight_info)
         elif src_weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13]:
             kernel, scale, scale_2, input_scale = self._get_ffn_quant_weight(src_weight_info)
+            if isinstance(quant_config, Fp4PerGroupQuarkQuantConfig):
+                scale_2 = None
+                input_scale = None
         elif src_weight_info.name == W.moe_w1:
             kernel, scale, scale_2, input_scale = self._get_moe_w1_quant_weight(src_weight_info)
+            if isinstance(quant_config, Fp4PerGroupQuarkQuantConfig):
+                scale_2 = None
+                input_scale = None
         elif src_weight_info.name == W.moe_w2:
             kernel, scale, scale_2, input_scale = self._get_moe_w2_quant_weight(src_weight_info)
+            if isinstance(quant_config, Fp4PerGroupQuarkQuantConfig):
+                scale_2 = None
+                input_scale = None
 
         sub_weights = {kernel.name: kernel}
         if scale is not None:
