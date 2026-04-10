@@ -206,14 +206,17 @@ class QuantizationConfig(ABC):
             group_size = weights_config["group_size"]
             if (
                 weights_config["type"] == "float"
-                and bits == 4 and activation_bits == 4
+                and bits == 4
+                and activation_bits == 4
                 and group_size == 16
             ):
                 quant_method = ModelOptFp4Config.get_method()
                 mixed_attention = False
                 text_config = config_json.get("text_config", None)
                 if text_config is not None:
-                    full_attention_interval = text_config.get("full_attention_interval", 0)
+                    full_attention_interval = text_config.get(
+                        "full_attention_interval", 0
+                    )
                     if full_attention_interval != 0:
                         mixed_attention = True
                 return ModelOptFp4Config.from_config(
@@ -225,7 +228,6 @@ class QuantizationConfig(ABC):
                         "mixed_attention": mixed_attention,
                     }
                 )
-            
 
         result = cls.from_config(
             {
@@ -364,7 +366,7 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
         return [torch.bfloat16]
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn, torch.uint8]
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -618,7 +620,7 @@ class ModelOptFp4Config(QuantizationConfig):
 
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
-        self.mixed_attention = kwargs.get('mixed_attention', False)
+        self.mixed_attention = kwargs.get("mixed_attention", False)
 
     @classmethod
     def get_method(cls) -> str:
@@ -632,7 +634,7 @@ class ModelOptFp4Config(QuantizationConfig):
         return [torch.float16, torch.bfloat16]
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn, torch.uint8]
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -687,9 +689,7 @@ DEFAULT_MODELOPT_FP4_QUANT_CONFIG = ModelOptFp4Config(
 )
 
 DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = W4a8Int4PerChannelQuantConfig(
-    bits=4,
-    group_size=128,
-    is_quanted=False
+    bits=4, group_size=128, is_quanted=False
 )
 
 preset_quant_config = {

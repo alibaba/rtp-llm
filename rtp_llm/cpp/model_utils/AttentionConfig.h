@@ -6,9 +6,10 @@
 namespace rtp_llm {
 
 enum class KvCacheDataType : int8_t {
-    BASE = 0,
-    INT8 = 1,
-    FP8  = 2
+    BASE  = 0,
+    INT8  = 1,
+    FP8   = 2,
+    NVFP4 = 3
 };
 
 KvCacheDataType inline loadKvCacheDataTypeFromString(const std::string& str) {
@@ -18,6 +19,8 @@ KvCacheDataType inline loadKvCacheDataTypeFromString(const std::string& str) {
         return KvCacheDataType::INT8;
     } else if (str == "fp8") {
         return KvCacheDataType::FP8;
+    } else if (str == "nvfp4") {
+        return KvCacheDataType::NVFP4;
     } else {
         return KvCacheDataType::BASE;
     }

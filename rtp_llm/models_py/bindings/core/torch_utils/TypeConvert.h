@@ -69,6 +69,8 @@ inline c10::ScalarType dataTypeToTorchType(DataType data_type) {
             return torch::kByte;
         case TYPE_QFP8_E4M3:
             return TORCH_FP8_E4M3_TYPE;
+        case TYPE_NVFP4:
+            return torch::kByte;  // NVFP4 is sub-byte (4-bit), stored packed as uint8
         default:
             throw std::runtime_error("Unsupported data type: " + std::to_string((int8_t)data_type));
     }

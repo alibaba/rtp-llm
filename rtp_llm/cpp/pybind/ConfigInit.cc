@@ -293,6 +293,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
+        .def_readwrite("nvfp4_kv_cache", &KVCacheConfig::nvfp4_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
@@ -341,6 +342,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.linear_step,
                                       self.int8_kv_cache,
                                       self.fp8_kv_cache,
+                                      self.nvfp4_kv_cache,
                                       self.kv_cache_mem_mb,
                                       self.seq_size_per_block,
                                       self.kernel_seq_size_per_block,
@@ -391,13 +393,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.linear_step                          = t[8].cast<int>();
                     c.int8_kv_cache                        = t[9].cast<int>();
                     c.fp8_kv_cache                         = t[10].cast<int>();
-                    c.kv_cache_mem_mb                      = t[11].cast<int64_t>();
-                    c.seq_size_per_block                   = t[12].cast<int>();
-                    c.kernel_seq_size_per_block            = t[13].cast<int>();
-                    c.test_block_num                       = t[14].cast<int>();
-                    c.use_block_cache                      = t[15].cast<int>();
-                    c.enable_device_cache                  = t[16].cast<bool>();
-                    c.enable_memory_cache                  = t[17].cast<bool>();
+                    c.nvfp4_kv_cache                       = t[11].cast<int>();
+                    c.kv_cache_mem_mb                      = t[12].cast<int64_t>();
+                    c.seq_size_per_block                   = t[13].cast<int>();
+                    c.kernel_seq_size_per_block            = t[14].cast<int>();
+                    c.test_block_num                       = t[15].cast<int>();
+                    c.use_block_cache                      = t[16].cast<int>();
+                    c.enable_device_cache                  = t[17].cast<bool>();
+                    c.enable_memory_cache                  = t[18].cast<bool>();
                     c.enable_memory_cache_sm_copy          = t[18].cast<bool>();
                     c.enable_remote_cache                  = t[19].cast<bool>();
                     c.write_cache_sync                     = t[20].cast<bool>();
@@ -1174,7 +1177,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::enum_<KvCacheDataType>(m, "KvCacheDataType")
         .value("BASE", KvCacheDataType::BASE)
         .value("INT8", KvCacheDataType::INT8)
-        .value("FP8", KvCacheDataType::FP8);
+        .value("FP8", KvCacheDataType::FP8)
+        .value("NVFP4", KvCacheDataType::NVFP4);
 
     // Register RopeStyle enum
     py::enum_<RopeStyle>(m, "RopeStyle")
