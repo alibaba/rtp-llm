@@ -234,7 +234,7 @@ class FusedRopeKVCacheDecodeOp:
             attn_inputs.cu_kv_seqlens,
             attn_inputs.input_lengths,
             attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
+            attn_inputs.sequence_lengths_minus_one,
             0,
             0,
             attn_inputs.context_total_kv_length,

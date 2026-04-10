@@ -212,8 +212,10 @@ class AutoModel:
         attention_inputs.input_lengths = torch.tensor([1], dtype=torch.int32)
         attention_inputs.prefix_lengths = torch.tensor([], dtype=torch.int32)
 
-        # sequence_lengths is index, so minus 1
         attention_inputs.sequence_lengths = torch.tensor(
+            [sequence_length], dtype=torch.int32
+        ).pin_memory()
+        attention_inputs.sequence_lengths_minus_one = torch.tensor(
             [sequence_length - 1], dtype=torch.int32
         ).pin_memory()
         attention_inputs.kv_cache_block_id_device = torch.tensor(
