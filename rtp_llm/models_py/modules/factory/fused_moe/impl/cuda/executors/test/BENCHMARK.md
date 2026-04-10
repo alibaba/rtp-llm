@@ -2,14 +2,14 @@
 
 - **GPU**: NVIDIA L20A (SM100, GB200 Grace-Blackwell)
 - **Software**: PyTorch 2.9.0+cu129, FlashInfer 0.6.6, DeepGEMM 2.1.1
-- **CI Run**: 35372622 (2026-04-10)
-- **Branch**: `flashinfer-fp8-groupwise` @ `5bb0f29e1`
+- **CI Run**: 35478209 (2026-04-10, Full MoE FC1+SiLU+FC2 for all implementations)
+- **Branch**: `flashinfer-fp8-groupwise` @ `fad24ca13`
 
 ---
 
 ## 1. 实现清单
 
-8 种 MoE Group-GEMM kernel 实现，覆盖 FP4/FP8 两种精度。
+8 种 MoE Group-GEMM kernel，覆盖 FP4/FP8 两种精度。所有实现均执行 Full MoE pipeline: FC1(M,K→2N) + SiLU + FC2(M,N→K)。
 
 | # | 全名 | Kernel | 来源 | 精度 | Fused | 状态 |
 |---|------|--------|------|------|-------|------|
@@ -26,7 +26,7 @@ Fused = 包含 routing (softmax→topk→scatter) + gather 的端到端 MoE kern
 
 **注**:
 1. DeepGEMM FP8 Masked: SkA 大 M 场景 (maxM/E > 1024) 偶发崩溃
-2. CUTLASS FP8 Per-Tensor: 性能极差 (~15-17ms)，per-tensor scale 不适合 SM100 MoE
+2. CUTLASS FP8 Per-Tensor: 性能极差 (~16-19ms)，per-tensor scale 不适合 SM100 MoE
 
 ---
 
@@ -36,38 +36,38 @@ Fused = 包含 routing (softmax→topk→scatter) + gather 的端到端 MoE kern
 
 ### 2.1 均匀激活
 
-| Scenario | Type | E | M/E | TotM | FlashInfer CuteDSL FP4 | TRT-LLM Fused FP4 | CUTLASS FP4 (vLLM) | FlashInfer FP8 Groupwise | DeepGEMM FP8 Masked | DeepGEMM FP8 Contiguous | CUTLASS FP8 Per-Tensor | TRT-LLM Fused FP8 | Best |
+| Scenario | Type | E | M/E | TotM | FlashInfer CuteDSL FP4 ms (TF) | TRT-LLM Fused FP4 ms (TF) | CUTLASS FP4 (vLLM) ms (TF) | FlashInfer FP8 Groupwise ms (TF) | DeepGEMM FP8 Masked ms (TF) | DeepGEMM FP8 Contiguous ms (TF) | CUTLASS FP8 Per-Tensor ms (TF) | TRT-LLM Fused FP8 ms (TF) | Best |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| M/E=8 | decode | 8 | 8 | 64 | 0.273ms 20.7TF | 0.302ms 18.6TF | **0.026ms 73.6TF** | 0.232ms 24.3TF | 2.463ms 2.3TF | 0.515ms 10.9TF | 17.3ms 0.3TF | 0.257ms 21.9TF | **CUTLASS FP4** |
-| M/E=16 | decode | 8 | 16 | 128 | 0.263ms 42.9TF | 0.252ms 44.7TF | **0.023ms 163.6TF** | 0.222ms 50.8TF | 2.423ms 4.7TF | 0.506ms 22.3TF | 17.7ms 0.6TF | 0.243ms 46.3TF | **CUTLASS FP4** |
-| M/E=64 | prefill | 8 | 64 | 512 | 0.272ms 165.7TF | 0.253ms 178.4TF | **0.024ms 626.4TF** | 0.234ms 193.0TF | 2.428ms 18.6TF | 0.511ms 88.2TF | 16.7ms 2.7TF | 0.356ms 126.6TF | **CUTLASS FP4** |
-| M/E=256 | prefill | 8 | 256 | 2048 | 0.255ms 706.7TF | 0.381ms 474.0TF | **0.033ms 1807TF** | 0.217ms 830.6TF | 2.397ms 75.3TF | 0.512ms 352.4TF | 15.6ms 11.5TF | 1.277ms 141.3TF | **CUTLASS FP4** |
-| M/E=512 | prefill | 8 | 512 | 4096 | 0.266ms 1355TF | 0.698ms 516.5TF | **0.059ms 2035TF** | 0.288ms 1252TF | 2.374ms 152.0TF | 0.530ms 680.6TF | 15.7ms 23.0TF | 2.511ms 143.7TF | **CUTLASS FP4** |
-| M/E=1024 | prefill | 8 | 1024 | 8192 | 0.264ms 2729TF | 1.354ms 532.9TF | **0.097ms 2478TF** | 0.541ms 1333TF | 2.448ms 294.7TF | 0.691ms 1044TF | 16.1ms 44.8TF | 4.974ms 145.1TF | **CUTLASS FP4** |
-| M/E=2048 | prefill | 8 | 2048 | 16384 | 0.463ms 3116TF | 2.868ms 503.3TF | **0.172ms 2795TF** | 0.987ms 1462TF | 2.634ms 547.9TF | 1.075ms 1342TF | 16.6ms 86.8TF | 9.939ms 145.2TF | **CUTLASS FP4** |
-| E64-M/E=8 | decode | 64 | 8 | 512 | 0.278ms 162.2TF | 0.412ms 109.4TF | **0.109ms 137.8TF** | 0.580ms 77.8TF | 15.5ms 2.9TF | 0.936ms 48.2TF | 16.0ms 2.8TF | 0.882ms 51.1TF | **CUTLASS FP4** |
+| M/E=8 | decode | 8 | 8 | 64 | 0.267 (21.1) | 0.302 (18.7) | **0.087 (64.9)** | 0.262 (21.5) | 2.360 (2.4) | 0.498 (11.3) | 18.6 (0.3) | 0.264 (21.4) | **CUTLASS FP4** |
+| M/E=16 | decode | 8 | 16 | 128 | 0.269 (41.9) | 0.258 (43.7) | **0.077 (145.7)** | 0.227 (49.8) | 2.428 (4.6) | 0.521 (21.6) | 19.0 (0.6) | 0.259 (43.5) | **CUTLASS FP4** |
+| M/E=64 | prefill | 8 | 64 | 512 | 0.258 (174.8) | 0.252 (179.3) | **0.078 (580.4)** | 0.222 (203.5) | 2.428 (18.6) | 0.524 (86.1) | 17.0 (2.7) | 0.356 (126.8) | **CUTLASS FP4** |
+| M/E=256 | prefill | 8 | 256 | 2048 | 0.267 (675.5) | 0.384 (469.6) | **0.109 (1655.6)** | 0.227 (795.6) | 2.395 (75.3) | 0.522 (345.8) | 16.0 (11.3) | 1.278 (141.2) | **CUTLASS FP4** |
+| M/E=512 | prefill | 8 | 512 | 4096 | 0.264 (1365.7) | 0.699 (515.8) | **0.178 (2030.7)** | 0.298 (1211.1) | 2.362 (152.8) | 0.543 (664.4) | 16.2 (22.3) | 2.530 (142.6) | **CUTLASS FP4** |
+| M/E=1024 | prefill | 8 | 1024 | 8192 | **0.266 (2713.5)** | 1.401 (514.9) | 0.320 (2254.8) | 0.525 (1374.3) | 2.457 (293.7) | 0.699 (1032.5) | 16.5 (43.8) | 5.009 (144.1) | **CuteDSL FP4** |
+| M/E=2048 | prefill | 8 | 2048 | 16384 | **0.464 (3108.1)** | 2.944 (490.2) | 0.531 (2719.6) | 0.968 (1490.5) | 2.674 (539.7) | 1.080 (1336.8) | 16.9 (85.6) | 9.989 (144.5) | **CuteDSL FP4** |
+| E64-M/E=8 | decode | 64 | 8 | 512 | **0.269 (167.6)** | 0.412 (109.3) | 0.344 (131.1) | 0.569 (79.3) | 14.871 (3.0) | 0.935 (48.2) | 16.5 (2.7) | 0.883 (51.1) | **CuteDSL FP4** |
 
 ### 2.2 非均匀激活 — SkA (长尾: 38%/25%/12.5%/...)
 
-| Scenario | TotM | maxM/E | FlashInfer CuteDSL FP4 | TRT-LLM Fused FP4 | CUTLASS FP4 (vLLM) | FlashInfer FP8 Groupwise | DeepGEMM FP8 Masked | DeepGEMM FP8 Contiguous | TRT-LLM Fused FP8 | Best |
+| Scenario | TotM | maxM/E | FlashInfer CuteDSL FP4 ms (TF) | TRT-LLM Fused FP4 ms (TF) | CUTLASS FP4 (vLLM) ms (TF) | FlashInfer FP8 Groupwise ms (TF) | DeepGEMM FP8 Masked ms (TF) | DeepGEMM FP8 Contiguous ms (TF) | TRT-LLM Fused FP8 ms (TF) | Best |
 |---|---|---|---|---|---|---|---|---|---|---|
-| SkA-64 | 64 | 25 | 0.265ms 21.3TF | 0.294ms 19.2TF | **0.027ms 69.4TF** | 0.218ms 25.9TF | 2.449ms 2.3TF | 0.514ms 11.0TF | 0.250ms 22.6TF | **CUTLASS FP4** |
-| SkA-512 | 512 | 194 | 0.271ms 166.7TF | 0.254ms 177.5TF | **0.027ms 565.7TF** | 0.223ms 202.5TF | 2.443ms 18.5TF | 0.524ms 86.1TF | 0.361ms 124.8TF | **CUTLASS FP4** |
-| SkA-2048 | 2048 | 770 | 0.271ms 665.9TF | 0.378ms 477.8TF | **0.043ms 1406TF** | 0.463ms 389.9TF | ERR | 0.517ms 348.8TF | 1.282ms 140.8TF | **CUTLASS FP4** |
-| SkA-4096 | 4096 | 1538 | 0.257ms 1403TF | 0.731ms 493.3TF | **0.056ms 2152TF** | 0.805ms 448.1TF | ERR | 0.565ms 638.1TF | 2.519ms 143.2TF | **CUTLASS FP4** |
-| SkA-8192 | 8192 | 3074 | 0.291ms 2483TF | 1.418ms 508.8TF | **0.099ms 2438TF** | 1.520ms 474.8TF | ERR | 0.734ms 983.3TF | 4.985ms 144.7TF | **CUTLASS FP4** |
-| SkA-16384 | 16384 | 6146 | 0.528ms 2734TF | 2.791ms 517.1TF | **0.166ms 2896TF** | 2.923ms 493.8TF | 2.983ms 483.8TF | 1.114ms 1296TF | 9.950ms 145.0TF | **CUTLASS FP4** |
+| SkA-64 | 64 | 25 | 0.256 (22.0) | 0.295 (19.1) | **0.082 (68.8)** | 0.221 (25.6) | 2.346 (2.4) | 0.509 (11.1) | 0.256 (22.0) | **CUTLASS FP4** |
+| SkA-512 | 512 | 194 | 0.254 (177.6) | 0.252 (178.8) | **0.084 (539.9)** | 0.222 (203.1) | 2.322 (19.4) | 0.518 (87.0) | 0.360 (125.2) | **CUTLASS FP4** |
+| SkA-2048 | 2048 | 770 | 0.262 (687.9) | 0.383 (470.9) | **0.119 (1510.7)** | 0.456 (395.4) | ERR | 0.520 (346.8) | 1.285 (140.4) | **CUTLASS FP4** |
+| SkA-4096 | 4096 | 1538 | 0.265 (1361.6) | 0.738 (488.6) | **0.180 (2008.6)** | 0.792 (455.5) | ERR | 0.592 (609.1) | 2.534 (142.4) | **CUTLASS FP4** |
+| SkA-8192 | 8192 | 3074 | **0.290 (2486.9)** | 1.439 (501.3) | 0.327 (2207.3) | 1.584 (455.6) | ERR | 0.741 (973.6) | 5.021 (143.7) | **CuteDSL FP4** |
+| SkA-16384 | 16384 | 6146 | **0.536 (2692.3)** | 2.981 (484.1) | 0.583 (2477.3) | 3.074 (469.5) | 2.962 (487.2) | 1.112 (1297.8) | 9.988 (144.5) | **CuteDSL FP4** |
 
 ### 2.3 非均匀激活 — SkB (极端集中: 75%/rest=1 each)
 
-| Scenario | TotM | maxM/E | FlashInfer CuteDSL FP4 | TRT-LLM Fused FP4 | CUTLASS FP4 (vLLM) | FlashInfer FP8 Groupwise | DeepGEMM FP8 Masked | DeepGEMM FP8 Contiguous | TRT-LLM Fused FP8 | Best |
+| Scenario | TotM | maxM/E | FlashInfer CuteDSL FP4 ms (TF) | TRT-LLM Fused FP4 ms (TF) | CUTLASS FP4 (vLLM) ms (TF) | FlashInfer FP8 Groupwise ms (TF) | DeepGEMM FP8 Masked ms (TF) | DeepGEMM FP8 Contiguous ms (TF) | TRT-LLM Fused FP8 ms (TF) | Best |
 |---|---|---|---|---|---|---|---|---|---|---|
-| SkB-64 | 64 | 57 | 0.260ms 21.7TF | 0.295ms 19.1TF | **0.027ms 69.2TF** | 0.221ms 25.5TF | 2.414ms 2.3TF | 0.513ms 11.0TF | 0.249ms 22.6TF | **CUTLASS FP4** |
-| SkB-512 | 512 | 505 | 0.263ms 171.4TF | 0.254ms 177.7TF | **0.031ms 480.0TF** | 0.287ms 157.1TF | 2.459ms 18.3TF | 0.516ms 87.5TF | 0.358ms 126.0TF | **CUTLASS FP4** |
-| SkB-2048 | 2048 | 2041 | 0.269ms 671.4TF | 0.381ms 472.8TF | **0.042ms 1445TF** | 0.970ms 185.9TF | 2.478ms 72.8TF | 0.522ms 345.4TF | 1.283ms 140.6TF | **CUTLASS FP4** |
-| SkB-4096 | 4096 | 4089 | 0.262ms 1375TF | 0.719ms 501.8TF | **0.060ms 2001TF** | 1.932ms 186.8TF | 2.541ms 142.0TF | 0.571ms 631.5TF | 2.520ms 143.2TF | **CUTLASS FP4** |
-| SkB-8192 | 8192 | 8185 | 0.429ms 1683TF | 1.350ms 534.5TF | **0.097ms 2469TF** | 3.890ms 185.5TF | 3.027ms 238.3TF | 0.738ms 978.2TF | 4.985ms 144.8TF | **CUTLASS FP4** |
-| SkB-16384 | 16384 | 16377 | 0.790ms 1826TF | 2.774ms 520.2TF | **0.169ms 2855TF** | 8.777ms 164.4TF | 4.606ms 313.3TF | 1.131ms 1276TF | 9.952ms 145.0TF | **CUTLASS FP4** |
+| SkB-64 | 64 | 57 | 0.258 (21.8) | 0.296 (19.1) | **0.085 (66.2)** | 0.220 (25.7) | 2.323 (2.4) | 0.502 (11.2) | 0.258 (21.8) | **CUTLASS FP4** |
+| SkB-512 | 512 | 505 | 0.255 (176.8) | 0.253 (178.0) | **0.093 (486.7)** | 0.280 (161.3) | 2.326 (19.4) | 0.520 (86.7) | 0.359 (125.5) | **CUTLASS FP4** |
+| SkB-2048 | 2048 | 2041 | 0.255 (707.8) | 0.384 (469.3) | **0.136 (1329.1)** | 0.991 (182.1) | 2.351 (76.7) | 0.530 (340.5) | 1.286 (140.2) | **CUTLASS FP4** |
+| SkB-4096 | 4096 | 4089 | 0.259 (1390.3) | 0.720 (501.4) | **0.189 (1906.2)** | 2.011 (179.4) | 2.500 (144.3) | 0.577 (625.5) | 2.578 (140.0) | **CUTLASS FP4** |
+| SkB-8192 | 8192 | 8185 | 0.428 (1684.9) | 1.392 (518.2) | **0.328 (2200.6)** | 4.107 (175.7) | 3.019 (239.0) | 0.742 (973.0) | 4.994 (144.5) | **CUTLASS FP4** |
+| SkB-16384 | 16384 | 16377 | 0.790 (1826.4) | 2.979 (484.5) | **0.569 (2536.4)** | 9.305 (155.1) | 4.629 (311.7) | 1.125 (1282.6) | 9.991 (144.4) | **CUTLASS FP4** |
 
 ---
 
@@ -77,37 +77,44 @@ Fused = 包含 routing (softmax→topk→scatter) + gather 的端到端 MoE kern
 
 | 梯队 | 实现 | 峰值 TFLOPS | GEMM 胜率 | 定位 |
 |------|------|------------|----------|------|
-| **T0** | **CUTLASS FP4 (vLLM)** | 2896 | **20/20** | GEMM-only 全场景绝对最快 |
-| **T1** | FlashInfer CuteDSL FP4 | 3116 | 0/20 | GEMM 第二快, TFLOPS 天花板最高 |
-| **T1** | TRT-LLM Fused FP4 | 537 | 0/20 | E2E fused 全场景最快 |
-| **T2** | FlashInfer FP8 Groupwise | 831 | 0/20 | 小 batch 均匀场景尚可 |
-| **T2** | DeepGEMM FP8 Contiguous | 1296 | 0/20 | 全场景稳定, 非均匀免疫 |
-| **T3** | TRT-LLM Fused FP8 | 146 | 0/20 | E2E 小 batch decode |
-| **T4** | DeepGEMM FP8 Masked | 548 | 0/20 | 有崩溃风险 |
-| **T5** | CUTLASS FP8 Per-Tensor | 87 | 0/20 | 不推荐 |
+| **T0** | **CUTLASS FP4 (vLLM)** | 2537 | **14/20** | 小~中 batch GEMM 最快, 大 batch 次优 |
+| **T0** | **FlashInfer CuteDSL FP4** | 3108 | **6/20** | 大 batch GEMM 最快, TFLOPS 天花板最高 |
+| **T1** | TRT-LLM Fused FP4 | 516 | 0/20 | E2E fused 全场景最快 |
+| **T2** | FlashInfer FP8 Groupwise | 1491 | 0/20 | 小 batch 均匀场景尚可 |
+| **T2** | DeepGEMM FP8 Contiguous | 1338 | 0/20 | 全场景稳定, 非均匀免疫 |
+| **T3** | TRT-LLM Fused FP8 | 145 | 0/20 | E2E 小 batch decode |
+| **T4** | DeepGEMM FP8 Masked | 540 | 0/20 | 有崩溃风险 |
+| **T5** | CUTLASS FP8 Per-Tensor | 86 | 0/20 | 不推荐 |
 
 ### 3.2 CUTLASS FP4 (vLLM) vs FlashInfer CuteDSL FP4
 
-| Scenario | TotM | CUTLASS FP4 | CuteDSL FP4 | 加速比 |
-|---|---|---|---|---|
-| M/E=8 | 64 | 0.026ms | 0.273ms | **10.5x** |
-| M/E=64 | 512 | 0.024ms | 0.272ms | **11.3x** |
-| M/E=256 | 2048 | 0.033ms | 0.255ms | **7.7x** |
-| M/E=512 | 4096 | 0.059ms | 0.266ms | **4.5x** |
-| M/E=1024 | 8192 | 0.097ms | 0.264ms | **2.7x** |
-| M/E=2048 | 16384 | 0.172ms | 0.463ms | **2.7x** |
-| SkB-16384 | 16384 | 0.169ms | 0.790ms | **4.7x** |
+| Scenario | TotM | CUTLASS FP4 ms | CuteDSL FP4 ms | 加速比 | Winner |
+|---|---|---|---|---|---|
+| M/E=8 | 64 | **0.087** | 0.267 | **3.1x** | CUTLASS FP4 |
+| M/E=16 | 128 | **0.077** | 0.269 | **3.5x** | CUTLASS FP4 |
+| M/E=64 | 512 | **0.078** | 0.258 | **3.3x** | CUTLASS FP4 |
+| M/E=256 | 2048 | **0.109** | 0.267 | **2.5x** | CUTLASS FP4 |
+| M/E=512 | 4096 | **0.178** | 0.264 | **1.5x** | CUTLASS FP4 |
+| M/E=1024 | 8192 | 0.320 | **0.266** | 0.83x | CuteDSL FP4 |
+| M/E=2048 | 16384 | 0.531 | **0.464** | 0.87x | CuteDSL FP4 |
+| SkB-8192 | 8192 | **0.328** | 0.428 | **1.3x** | CUTLASS FP4 |
+| SkB-16384 | 16384 | **0.569** | 0.790 | **1.4x** | CUTLASS FP4 |
 
-**重要**: CUTLASS FP4 延迟异常低 (M/E=8 仅 0.026ms)，数值正确性待验证。
+**交叉点**: M/E ≈ 768 (均匀), M/E ≈ 4096+ (非均匀 SkB CUTLASS FP4 仍领先)
+
+**关键发现**:
+- CUTLASS FP4 在小~中 batch (M/E<=512) 快 1.5-3.5x — kernel launch 开销极低
+- CuteDSL FP4 在大 batch (M/E>=1024, 均匀) 领先 — TFLOPS 天花板更高
+- 非均匀 SkB 场景下 CUTLASS FP4 优势扩大, 即使在大 batch 仍领先 1.3-1.4x
 
 ### 3.3 非均匀激活退化
 
 | 实现 | Layout | 均匀→SkA | 均匀→SkB | 原因 |
 |------|--------|---------|---------|------|
-| CUTLASS FP4 (vLLM) | grouped GEMM | 1.0x | 1.0x~1.2x | problem_sizes 自适应 |
+| CUTLASS FP4 (vLLM) | grouped GEMM | 1.0x~1.1x | 1.0x~1.1x | problem_sizes 自适应 |
 | FlashInfer CuteDSL FP4 | masked 3D | 1.0x~1.1x | 1.0x~1.7x | maxM/E→padding |
 | TRT-LLM Fused FP4 | fused routed | 1.0x | 1.0x | 内部 routing 自适应 |
-| FlashInfer FP8 Groupwise | contiguous | 1.0x~1.3x | 1.3x~8.7x | 热 expert 大 GEMM 主导 |
+| FlashInfer FP8 Groupwise | contiguous | 1.0x~1.3x | 1.3x~9.6x | 热 expert 大 GEMM 主导 |
 | DeepGEMM FP8 Contiguous | contiguous | 1.0x | 1.0x | 无 padding |
 | DeepGEMM FP8 Masked | masked 3D | 崩溃 | 1.0x~1.7x | 内存超限 |
 
@@ -119,29 +126,29 @@ Fused = 包含 routing (softmax→topk→scatter) + gather 的端到端 MoE kern
 
 ### 4.1 Routing 开销
 
-| TotM | Routing ms | vs CUTLASS FP4 GEMM |
-|------|-----------|---------------------|
-| 64 | 0.335 | 12.9x |
-| 128 | 0.326 | 14.2x |
-| 512 | 0.458 | 19.1x |
-| 2048 | 1.348 | 40.8x |
-| 4096 | 2.330 | 39.5x |
-| 8192 | 4.290 | 44.2x |
-| 16384 | 8.169 | 47.5x |
+| TotM | Routing ms |
+|------|-----------|
+| 64 | 0.333 |
+| 128 | 0.320 |
+| 512 | 0.458 |
+| 2048 | 1.356 |
+| 4096 | 2.344 |
+| 8192 | 4.288 |
+| 16384 | 8.163 |
 
 ### 4.2 E2E 对比
 
-| Scenario | TotM | Route ms | FlashInfer CuteDSL FP4 | TRT-LLM Fused FP4 | FlashInfer FP8 Groupwise | DeepGEMM FP8 Contiguous | TRT-LLM Fused FP8 | Best |
+| Scenario | TotM | Route ms | FlashInfer CuteDSL FP4 ms (TF) | TRT-LLM Fused FP4 ms (TF) | FlashInfer FP8 Groupwise ms (TF) | DeepGEMM FP8 Contiguous ms (TF) | TRT-LLM Fused FP8 ms (TF) | Best |
 |---|---|---|---|---|---|---|---|---|
-| M/E=8 | 64 | 0.335 | 0.580ms 9.7TF | 0.284ms 19.8TF | 0.551ms 10.2TF | 0.838ms 6.7TF | **0.238ms 23.7TF** | **TRT-LLM Fused FP8** |
-| M/E=16 | 128 | 0.326 | 0.558ms 20.2TF | **0.237ms 47.6TF** | 0.537ms 21.0TF | 0.821ms 13.7TF | **0.237ms 47.6TF** | **TRT-LLM Fused FP4/FP8** |
-| M/E=64 | 512 | 0.458 | 0.693ms 65.1TF | **0.238ms 189.6TF** | 0.672ms 67.1TF | 0.956ms 47.2TF | 0.355ms 127.1TF | **TRT-LLM Fused FP4** |
-| M/E=256 | 2048 | 1.348 | 1.591ms 113.4TF | **0.379ms 475.7TF** | 1.563ms 115.4TF | 1.863ms 96.8TF | 1.279ms 141.0TF | **TRT-LLM Fused FP4** |
-| M/E=512 | 4096 | 2.330 | 2.574ms 140.1TF | **0.700ms 515.7TF** | 2.616ms 137.9TF | 2.863ms 126.0TF | 2.515ms 143.4TF | **TRT-LLM Fused FP4** |
-| M/E=1024 | 8192 | 4.290 | 4.542ms 158.9TF | **1.380ms 522.9TF** | 4.805ms 150.2TF | 4.991ms 144.6TF | 4.980ms 144.9TF | **TRT-LLM Fused FP4** |
-| M/E=2048 | 16384 | 8.169 | 8.630ms 167.2TF | **2.811ms 513.3TF** | 9.175ms 157.3TF | 9.243ms 156.1TF | 9.936ms 145.2TF | **TRT-LLM Fused FP4** |
+| M/E=8 | 64 | 0.333 | 0.577 (9.8) | 0.290 (19.5) | 0.550 (10.3) | 0.836 (6.7) | **0.243 (23.2)** | **TRT-LLM Fused FP8** |
+| M/E=16 | 128 | 0.320 | 0.546 (20.7) | **0.242 (46.7)** | 0.530 (21.3) | 0.819 (13.8) | 0.243 (46.4) | **TRT-LLM Fused FP4** |
+| M/E=64 | 512 | 0.458 | 0.692 (65.2) | **0.241 (186.8)** | 0.669 (67.4) | 0.960 (47.0) | 0.354 (127.6) | **TRT-LLM Fused FP4** |
+| M/E=256 | 2048 | 1.356 | 1.582 (114.0) | **0.377 (479.0)** | 1.567 (115.1) | 1.863 (96.8) | 1.291 (139.7) | **TRT-LLM Fused FP4** |
+| M/E=512 | 4096 | 2.344 | 2.578 (139.9) | **0.700 (515.1)** | 2.631 (137.1) | 2.878 (125.4) | 2.524 (142.9) | **TRT-LLM Fused FP4** |
+| M/E=1024 | 8192 | 4.288 | 4.536 (159.1) | **1.390 (519.0)** | 4.834 (149.3) | 4.978 (145.0) | 5.025 (143.6) | **TRT-LLM Fused FP4** |
+| M/E=2048 | 16384 | 8.163 | 8.620 (167.4) | **2.968 (486.2)** | 9.181 (157.2) | 9.246 (156.1) | 10.077 (143.2) | **TRT-LLM Fused FP4** |
 
-**结论**: Fused MoE (TRT-LLM) E2E 全场景最快。routing 开销是 GEMM 时间的 13-47x，完全主导延迟。
+**结论**: TRT-LLM Fused FP4 E2E 6/7 全胜 (M/E=8 由 TRT-LLM Fused FP8 胜出)。routing 开销完全主导非 fused 实现的延迟。
 
 ---
 
@@ -149,18 +156,23 @@ Fused = 包含 routing (softmax→topk→scatter) + gather 的端到端 MoE kern
 
 | 场景 | 推荐 | 备选 |
 |------|------|------|
-| **GEMM-only 全场景** | **CUTLASS FP4 (vLLM)** | FlashInfer CuteDSL FP4 |
+| **GEMM-only 小~中 batch (M/E<=512)** | **CUTLASS FP4 (vLLM)** | FlashInfer CuteDSL FP4 |
+| **GEMM-only 大 batch (M/E>=1024)** | **FlashInfer CuteDSL FP4** | CUTLASS FP4 (vLLM) |
+| **GEMM-only 非均匀 SkB** | **CUTLASS FP4 (vLLM)** | FlashInfer CuteDSL FP4 |
 | **E2E (含 routing)** | **TRT-LLM Fused FP4** | TRT-LLM Fused FP8 |
-| **Decode (M/E<=16)** | CUTLASS FP4 / TRT-LLM Fused | FlashInfer FP8 |
-| **Prefill (M/E>=512)** | **CUTLASS FP4 (vLLM)** | FlashInfer CuteDSL FP4 |
+| **Decode (M/E<=16)** | CUTLASS FP4 (GEMM) / TRT-LLM Fused (E2E) | — |
+| **Prefill (M/E>=512)** | CUTLASS FP4 / CuteDSL FP4 | DeepGEMM FP8 Contiguous |
 | **非均匀大 batch** | **CUTLASS FP4 (vLLM)** | DeepGEMM FP8 Contiguous |
 
 ### 核心结论
 
-1. **CUTLASS FP4 (vLLM) GEMM-only 20/20 全胜**, 峰值 2896 TFLOPS, 小 batch 比 CuteDSL 快 10x
-2. **TRT-LLM Fused FP4 E2E 7/7 全胜**, routing 开销使非 fused 实现的 GEMM 优势被抵消
-3. **FP4 全面优于 FP8**, 大 batch 和非均匀场景下碾压
-4. **CUTLASS FP4 数值正确性待验证** — 异常低延迟需与 reference 对比
+1. **FP4 双雄格局**: CUTLASS FP4 (vLLM) 和 CuteDSL FP4 分别统治小 batch 和大 batch, 合计 20/20 GEMM 场景全胜
+2. **CUTLASS FP4 小 batch 快 3x**: M/E<=64 时比 CuteDSL 快 3.1-3.5x, kernel launch 开销极低
+3. **CuteDSL FP4 TFLOPS 天花板最高**: 大 batch 峰值 3108 TFLOPS, CUTLASS FP4 峰值 2537 TFLOPS
+4. **交叉点 M/E ≈ 768**: 均匀激活下两者在此处性能持平, 之后 CuteDSL 反超
+5. **非均匀 SkB CUTLASS FP4 优势扩大**: 即使大 batch (16384 tokens) CUTLASS 仍快 1.4x
+6. **TRT-LLM Fused FP4 E2E 全胜**: routing 开销 (0.3-8.2ms) 使 GEMM 速度优势无意义
+7. **FP4 全面优于 FP8**: 所有 FP4 实现在 GEMM 场景均碾压 FP8
 
 ---
 
@@ -168,7 +180,8 @@ Fused = 包含 routing (softmax→topk→scatter) + gather 的端到端 MoE kern
 
 - Warmup=10, Bench=50 iters, SEED=42
 - 计时: `torch.cuda.synchronize()` + `time.perf_counter()`
-- TFLOPS: `(total_tokens * 2N * K * 2 + total_tokens * K * N * 2) / (ms/1000) / 1e12`
+- TFLOPS: Full MoE = `(total_tokens * 2N * K * 2 + total_tokens * K * N * 2) / (ms/1000) / 1e12`
 - 非均匀: SkA (长尾 38%/25%/12.5%/...), SkB (极端 75%/rest=1)
-- FP4-TRT/FP8-TRT top_k=7, 其他 top_k=8
-- CUTLASS FP4 首次运行需 JIT 编译 (~2-3 分钟)
+- TRT-LLM Fused FP4/FP8 top_k=7, 其他 top_k=8
+- CUTLASS FP4 首次运行需 JIT 编译 (~2-3 分钟), 后续 cached
+- FlashInfer FP8 Groupwise 使用 mma_sm autotune (每场景自动选择最优 tile config)
