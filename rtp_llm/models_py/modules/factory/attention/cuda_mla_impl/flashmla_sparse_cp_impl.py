@@ -26,7 +26,7 @@ except (ImportError, AttributeError, ValueError) as e:
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, barrier
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
-    generate_kv_indices,
+    generate_full_causal_kv_indices,
     generate_q_indices,
 )
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
@@ -108,7 +108,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
 
         chunk_lengths = cp_info.prefill_cp_chunk_lengths
         q0_idx, q1_idx = generate_q_indices(chunk_lengths)
-        kv0_idx, kv1_idx = generate_kv_indices(
+        kv0_idx, kv1_idx = generate_full_causal_kv_indices(
             chunk_lengths,
             self.prefill_cp_rank,
             self.prefill_cp_size,
