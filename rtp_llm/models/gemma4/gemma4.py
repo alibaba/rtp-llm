@@ -64,7 +64,11 @@ class Gemma4(BaseModel, MultiModalMixin):
         )
 
     def support_cuda_graph(self) -> bool:
-        return True
+        # Disabled: Gemma4 creates two separate FMHA impls (sliding + global) in forward(),
+        # but CudaGraphRunner only calls prepare_cuda_graph() on the single one returned by
+        # prepare_fmha_impl(). During replay, the internal impls' params won't be updated.
+        # Enabling requires a composite FMHA wrapper or multi-impl graph runner support.
+        return False
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
