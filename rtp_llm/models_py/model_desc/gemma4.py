@@ -151,6 +151,13 @@ class Gemma4Model(GptModelBase):
             device_resource_config=device_resource_config,
         )
 
+        # CUDA graph support
+        self._enable_cuda_graph = (
+            py_hw_kernel_config.enable_cuda_graph
+            if py_hw_kernel_config is not None
+            else False
+        )
+
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
@@ -236,6 +243,7 @@ class Gemma4Model(GptModelBase):
             self.weight,
             inputs.attention_inputs,
             self.fmha_config,
+            is_cuda_graph=self._enable_cuda_graph,
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:

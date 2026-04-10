@@ -34,7 +34,7 @@ class Gemma4(BaseModel):
         return self.py_model
 
     def support_cuda_graph(self) -> bool:
-        return False  # Disable initially due to dual fmha_impl
+        return True
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
