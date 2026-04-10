@@ -87,6 +87,8 @@ public:
     bool             enable_remote_cache = true;
     std::string      trace_id;
 
+    std::optional<int> beam_dedup_idx;
+
     bool top1() {
         return top_k == 1;
     }

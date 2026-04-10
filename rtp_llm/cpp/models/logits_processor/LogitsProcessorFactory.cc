@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/BeamDedupLogitsProcessor.h"
 
 namespace rtp_llm {
 
@@ -30,6 +31,11 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
     auto multi_seq_processor = MultiSeqLogitsProcessor::fromGenerateInput(generate_input, eos_token_id);
     if (multi_seq_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(multi_seq_processor));
+    }
+
+    auto beam_dedup_processor = BeamDedupLogitsProcessor::fromGenerateInput(generate_input);
+    if (beam_dedup_processor != nullptr) {
+        result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(beam_dedup_processor));
     }
 
     return result;
