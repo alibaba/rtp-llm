@@ -1,6 +1,6 @@
 py_library(
     name = "fla",
-    srcs = glob(["fla/*.py"]),
+    srcs = glob(["fla/*.py"]) + glob(["fla/blackwell_prefill/*.py"]),
     deps = [":common"],
     visibility = ["//visibility:public"]
 )

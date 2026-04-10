@@ -40,6 +40,7 @@ def recompute_w_u_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    s_v_t=0,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -64,11 +65,12 @@ def recompute_w_u_fwd_kernel(
     b_A = tl.load(p_A, boundary_check=(0, 1))
     b_g = tl.exp(tl.load(p_g, boundary_check=(0,)))
 
+    s_u_t = H * V
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(
-            v + (bos * H + i_h) * V,
+            v + bos * s_v_t + i_h * V,
             (T, V),
-            (H * V, 1),
+            (s_v_t, 1),
             (i_t * BT, i_v * BV),
             (BT, BV),
             (1, 0),
@@ -76,7 +78,7 @@ def recompute_w_u_fwd_kernel(
         p_u = tl.make_block_ptr(
             u + (bos * H + i_h) * V,
             (T, V),
-            (H * V, 1),
+            (s_u_t, 1),
             (i_t * BT, i_v * BV),
             (BT, BV),
             (1, 0),
@@ -127,8 +129,9 @@ def recompute_w_u_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK = 64
     BV = 64
-    u = torch.empty_like(v)
+    u = torch.empty(v.shape, dtype=v.dtype, device=v.device)
     w = k.new_empty(B, T, H, K)
+    s_v_t = v.stride(-3)
     recompute_w_u_fwd_kernel[(NT, B * H)](
         k=k,
         v=v,
@@ -147,6 +150,7 @@ def recompute_w_u_fwd(
         BT=BT,
         BK=BK,
         BV=BV,
+        s_v_t=s_v_t,
         num_warps=4,
         num_stages=3,
     )

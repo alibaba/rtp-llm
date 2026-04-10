@@ -46,7 +46,7 @@ def _curl_server_single_worker(
 
     if profile:
         req["gen_timeline"] = True
-        req["profile_step"] = 1
+        req["profile_step"] = 3
     try:
         response = requests.post(
             f"http://127.0.0.1:{base_port}", json=req, timeout=wait_time
@@ -148,6 +148,10 @@ class BatchPerfImpl(object):
         results = self._curl_server()
         if self.profile:
             _ = self._curl_server(True)
+            _ = self._curl_server()
+            import time
+
+            time.sleep(5)
         return results
 
     def _set_concurrency(self):

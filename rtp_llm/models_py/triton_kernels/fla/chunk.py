@@ -12,6 +12,7 @@ from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h import (
 )
 from rtp_llm.models_py.triton_kernels.fla.chunk_o import chunk_fwd_o
 from rtp_llm.models_py.triton_kernels.fla.chunk_scaled_dot_kkt import (
+    chunk_cumsum_kkt_fwd,
     chunk_scaled_dot_kkt_fwd,
 )
 from rtp_llm.models_py.triton_kernels.fla.cumsum import chunk_local_cumsum
@@ -20,6 +21,7 @@ from rtp_llm.models_py.triton_kernels.fla.solve_tril import solve_tril
 from rtp_llm.models_py.triton_kernels.fla.utils import (
     SUPPRESS_LEVEL,
     autocast_custom_fwd,
+    custom_device_ctx,
     input_guard,
 )
 from rtp_llm.models_py.triton_kernels.fla.wy_fast import recompute_w_u_fwd
@@ -36,10 +38,10 @@ def chunk_gated_delta_rule_fwd(
     output_final_state: bool,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
-    # obtain WY representation. u is actually the new v.
-    A = chunk_scaled_dot_kkt_fwd(
-        k=k, beta=beta, g_cumsum=g, cu_seqlens=cu_seqlens, output_dtype=torch.float32
+    # Fused cumsum + KKT: computes g_cumsum and A in a single kernel launch,
+    # avoiding the intermediate g_cumsum global memory round-trip.
+    g, A = chunk_cumsum_kkt_fwd(
+        k=k, beta=beta, g=g, cu_seqlens=cu_seqlens, output_dtype=torch.float32
     )
     A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
     w, u = recompute_w_u_fwd(
@@ -74,7 +76,6 @@ def chunk_gated_delta_rule_fwd(
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
 
     @staticmethod
-    @input_guard
     @autocast_custom_fwd
     def forward(
         ctx,
@@ -89,25 +90,30 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = False,
     ):
-        q_orig = q
-        k_orig = k
+        # q, k, v may be non-contiguous views from packed qkv split;
+        # l2norm_fwd handles non-contiguous q/k via reshape, and
+        # recompute_w_u_fwd handles non-contiguous v via stride param.
+        # g, beta, initial_state, cu_seqlens should already be contiguous.
+        with custom_device_ctx(q.device.index):
+            q_orig = q
+            k_orig = k
 
-        if use_qk_l2norm_in_kernel:
-            q = l2norm_fwd(q)
-            k = l2norm_fwd(k)
+            if use_qk_l2norm_in_kernel:
+                q = l2norm_fwd(q)
+                k = l2norm_fwd(k)
 
-        g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            scale=scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu_seqlens,
-        )
-        return o.to(q.dtype), h, final_state
+            g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                scale=scale,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                cu_seqlens=cu_seqlens,
+            )
+            return o.to(q.dtype), h, final_state
 
 
 @torch.compiler.disable

@@ -1,4 +1,7 @@
 import logging
+
+logger = logging.getLogger(__name__)
+import os
 import sys
 from typing import Any, Dict, Optional
 
@@ -19,6 +22,7 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     LinearFactory,
     RMSNorm,
+    RMSResNorm,
 )
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
@@ -27,6 +31,9 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
+from rtp_llm.models_py.triton_kernels.fla.blackwell_prefill import (
+    chunk_gated_delta_rule as blackwell_chunk_gated_delta_rule,
+)
 from rtp_llm.models_py.triton_kernels.fla.block import (
     load_initial_state_from_block_map,
     store_ssm_state_to_block_map,
@@ -36,6 +43,7 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -181,6 +189,149 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         ).transpose(0, 1)
         return out
 
+    _BLACKWELL_SEQ_THRESHOLD = 6144
+    _blackwell_available: Optional[bool] = None
+    _blackwell_warmed_up: bool = False
+
+    @classmethod
+    def _is_blackwell_gpu(cls) -> bool:
+        if cls._blackwell_available is None:
+            if not torch.cuda.is_available():
+                cls._blackwell_available = False
+            else:
+                major, _ = torch.cuda.get_device_capability()
+                cls._blackwell_available = major >= 10
+        return cls._blackwell_available
+
+    def _use_blackwell_kernel(self, total_seq_len: int, batch_size: int = 1) -> bool:
+        if os.environ.get("ENABLE_BLACKWELL_GDN", "0") != "1":
+            return False
+        if blackwell_chunk_gated_delta_rule is None:
+            return False
+        if self.head_k_dim != 128:
+            return False
+        if not self._is_blackwell_gpu():
+            return False
+        # Blackwell kernel's varlen support has correctness issues with
+        # multi-sequence batches; restrict to single-sequence requests.
+        if batch_size > 1:
+            return False
+        return True
+
+    @classmethod
+    def warmup_blackwell_kernel(
+        cls,
+        head_k_dim: int,
+        local_num_k_heads: int,
+        local_num_v_heads: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        """Pre-compile Blackwell GDN kernel while GPU memory is available.
+
+        Must be called during model init, before KV cache fills GPU memory.
+        Triggers JIT compilation (~15s) and cudaLibraryLoad so that subsequent
+        calls only need the cached compiled kernel.
+        """
+        if cls._blackwell_warmed_up:
+            return
+        if os.environ.get("ENABLE_BLACKWELL_GDN", "0") != "1":
+            return
+        if blackwell_chunk_gated_delta_rule is None:
+            return
+        if head_k_dim != 128:
+            return
+        if not cls._is_blackwell_gpu():
+            return
+
+        logger.info("Blackwell GDN kernel: starting warmup JIT compilation (~15s)...")
+        # Use a small seq_len to minimize memory and compute during warmup.
+        # The compiled kernel is cached by (D, dtype, is_varlen, is_initial_state,
+        # output_final_state, scale, device_idx) — seq_len doesn't affect the cache key.
+        warmup_seq = 128  # one chunk
+        warmup_batch = 1
+        try:
+            q = torch.randn(
+                warmup_batch,
+                warmup_seq,
+                local_num_k_heads,
+                head_k_dim,
+                dtype=dtype,
+                device=device,
+            )
+            k = torch.randn_like(q)
+            v = torch.randn(
+                warmup_batch,
+                warmup_seq,
+                local_num_v_heads,
+                head_k_dim,
+                dtype=dtype,
+                device=device,
+            )
+            g = torch.randn(
+                1, warmup_seq, local_num_v_heads, dtype=torch.float32, device=device
+            )
+            beta = torch.rand(
+                1, warmup_seq, local_num_v_heads, dtype=torch.float32, device=device
+            )
+            initial_state = torch.zeros(
+                warmup_batch,
+                local_num_v_heads,
+                head_k_dim,
+                head_k_dim,
+                dtype=torch.float32,
+                device=device,
+            )
+            output = torch.empty_like(v)
+            output_state = torch.empty(
+                warmup_batch,
+                local_num_v_heads,
+                head_k_dim,
+                head_k_dim,
+                dtype=torch.float32,
+                device=device,
+            )
+            cu_seqlens = torch.tensor([0, warmup_seq], dtype=torch.int32, device=device)
+
+            # Warmup WITH initial_state + output_final_state (the common prefill config)
+            blackwell_chunk_gated_delta_rule(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                initial_state=initial_state,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens,
+                output=output,
+                output_state=output_state,
+            )
+            torch.cuda.synchronize(device)
+
+            # Also warmup WITHOUT initial_state (first prefill, no KV cache)
+            blackwell_chunk_gated_delta_rule(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                initial_state=None,
+                output_final_state=False,
+                cu_seqlens=cu_seqlens,
+                output=output,
+            )
+            torch.cuda.synchronize(device)
+
+            del q, k, v, g, beta, initial_state, output, output_state, cu_seqlens
+            cls._blackwell_warmed_up = True
+            logger.info("Blackwell GDN kernel: warmup complete, kernel cached.")
+        except Exception:
+            logger.warning(
+                "Blackwell GDN kernel warmup failed, disabling Blackwell path",
+                exc_info=True,
+            )
+            cls._blackwell_available = False
+
     def _fla(
         self,
         mixed_qkv: torch.Tensor,
@@ -190,6 +341,18 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
     ) -> torch.Tensor:
+        # Lazy warmup: trigger Blackwell JIT compilation on the first forward call.
+        # This runs after KVCache allocation, so CUDA driver memory from JIT
+        # doesn't interfere with memory accounting.
+        if not Qwen3NextGatedDeltaNetPrefill._blackwell_warmed_up:
+            Qwen3NextGatedDeltaNetPrefill.warmup_blackwell_kernel(
+                self.head_k_dim,
+                self.local_num_k_heads,
+                self.local_num_v_heads,
+                mixed_qkv.dtype,
+                mixed_qkv.device,
+            )
+
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         ssm_states = (
             self._get_ssm_states(kv_cache_tensor)
@@ -229,6 +392,22 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         query = query.view(1, query.shape[0], self.local_num_k_heads, self.head_k_dim)
         key = key.view(1, key.shape[0], self.local_num_k_heads, self.head_k_dim)
         value = value.view(1, value.shape[0], self.local_num_v_heads, self.head_v_dim)
+
+        total_seq_len = mixed_qkv.shape[0]
+        if self._use_blackwell_kernel(total_seq_len, context_batch_size):
+            return self._fla_blackwell(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                initial_states,
+                ssm_states,
+                cu_seqlens_without_padding,
+                attn_inputs,
+                seq_size_per_block,
+            )
+
         attn_out, h, final_state = chunk_gated_delta_rule(
             query,
             key,
@@ -251,6 +430,106 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 seq_size_per_block,
                 chunk_size=64,
             )
+        return attn_out.squeeze_(0)
+
+    def _fla_blackwell(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_states: Optional[torch.Tensor],
+        ssm_states: Optional[torch.Tensor],
+        cu_seqlens: torch.Tensor,
+        attn_inputs: PyAttentionInputs,
+        seq_size_per_block: int,
+    ) -> torch.Tensor:
+        # l2norm_fwd handles non-contiguous input directly (strided kernel),
+        # producing contiguous output in a single kernel per tensor.
+        # q and k must be separate calls: downstream chunk pipeline kernels
+        # require each to be independently contiguous with stride H_qk*D.
+        query = l2norm_fwd(query)
+        key = l2norm_fwd(key)
+        value = value.contiguous()
+        beta = beta.float()
+        # g from fused_gdn_gating is already contiguous
+
+        output_final_state = ssm_states is not None
+        # Pre-allocate output tensors so blackwell_chunk_gated_delta_rule
+        # doesn't allocate device memory internally.
+        output = torch.empty_like(value)
+        output_state = None
+        if output_final_state:
+            batch_size = initial_states.shape[0] if initial_states is not None else 1
+            output_state = torch.empty(
+                batch_size,
+                self.local_num_v_heads,
+                self.head_v_dim,
+                self.head_v_dim,
+                dtype=torch.float32,
+                device=query.device,
+            )
+
+        try:
+            result = blackwell_chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                initial_state=initial_states,
+                output_final_state=output_final_state,
+                cu_seqlens=cu_seqlens,
+                output=output,
+                output_state=output_state,
+            )
+        except Exception:
+            logger.warning(
+                "Blackwell GDN kernel failed, falling back to Triton",
+                exc_info=True,
+            )
+            Qwen3NextGatedDeltaNetPrefill._blackwell_available = False
+            # Re-do with Triton (q/k already l2norm-ed, so pass use_qk_l2norm_in_kernel=False)
+            attn_out, h, final_state = chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g,
+                beta.to(query.dtype),
+                initial_state=initial_states,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens,
+                use_qk_l2norm_in_kernel=False,
+            )
+            if ssm_states is not None:
+                store_ssm_state_to_block_map(
+                    h,
+                    final_state,
+                    attn_inputs.prefix_lengths_d,
+                    cu_seqlens,
+                    attn_inputs.kv_cache_kernel_block_id_device,
+                    ssm_states,
+                    seq_size_per_block,
+                    chunk_size=64,
+                )
+            return attn_out.squeeze_(0)
+
+        if output_final_state:
+            attn_out, final_state = result
+            final_state = final_state.transpose(-1, -2).contiguous()
+            store_ssm_state_to_block_map(
+                final_state,
+                final_state,
+                attn_inputs.prefix_lengths_d,
+                cu_seqlens,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                ssm_states,
+                seq_size_per_block,
+                chunk_size=128,
+            )
+        else:
+            attn_out = result if not isinstance(result, tuple) else result[0]
         return attn_out.squeeze_(0)
 
     def forward(
@@ -476,14 +755,28 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self.parallelism_config = parallelism_config
         self.weights = weights
         self.quant_config = quant_config
-        # in_proj_qkvz is bf16 / fp8
-        self.in_proj_qkvz = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_qkvz_w, W.linear_attn_qkvz_s, None, quant_config
-        )
-        # in_proj_ba is bf16
-        self.in_proj_ba = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_ba_w, None, None, quant_config
-        )
+
+        qkvz_w = weights[W.linear_attn_qkvz_w]
+        ba_w = weights[W.linear_attn_ba_w]
+        has_qkvz_scale = weights.get(W.linear_attn_qkvz_s) is not None
+        self._use_merged_proj = not has_qkvz_scale and qkvz_w.dtype == ba_w.dtype
+        if self._use_merged_proj:
+            self._qkvz_dim = qkvz_w.shape[0]
+            merged_w = torch.cat([qkvz_w, ba_w], dim=0)
+            self.in_proj_merged = LinearFactory.create_linear(
+                weight=merged_w,
+                bias=None,
+                weight_scales=None,
+                quant_config=quant_config,
+            )
+        else:
+            self._qkvz_dim = 0
+            self.in_proj_qkvz = LinearFactory.create_linear_from_weights(
+                weights, W.linear_attn_qkvz_w, W.linear_attn_qkvz_s, None, quant_config
+            )
+            self.in_proj_ba = LinearFactory.create_linear_from_weights(
+                weights, W.linear_attn_ba_w, None, None, quant_config
+            )
         self.head_k_dim = linear_attn_config.linear_key_head_dim
         self.head_v_dim = linear_attn_config.linear_value_head_dim
         self.local_num_k_heads = (
@@ -500,6 +793,9 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self.decode_gdn = Qwen3NextGatedDeltaNetDecode(
             linear_attn_config, parallelism_config, weights
         )
+        # Blackwell GDN kernel uses lazy JIT compilation on first inference call.
+        # Warmup during init is disabled to avoid CUDA memory interference with
+        # KV cache allocation.
         self.norm = RmsNormGated(
             weights[W.linear_attn_norm_w],
             eps=layernorm_eps,
@@ -547,8 +843,13 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             or not attention_inputs.is_prefill
             or attn_meta.get_prefill_conv1d_meta() is not None
         ), "prefill_conv1d_meta is required for prefill"
-        projected_states_qkvz = self.in_proj_qkvz(hidden_states)
-        projected_states_ba = self.in_proj_ba(hidden_states)
+        if self._use_merged_proj:
+            merged_out = self.in_proj_merged(hidden_states)
+            projected_states_qkvz = merged_out[:, : self._qkvz_dim]
+            projected_states_ba = merged_out[:, self._qkvz_dim :].contiguous()
+        else:
+            projected_states_qkvz = self.in_proj_qkvz(hidden_states)
+            projected_states_ba = self.in_proj_ba(hidden_states)
         mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
@@ -621,23 +922,24 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.activation_type, parallelism_config, weights, config.quant_config
             )
 
-        self.input_layernorm = RMSNorm(
+        self.input_layernorm = RMSResNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
-        self.post_attention_layernorm = RMSNorm(
+        self.post_attention_layernorm = RMSResNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
+        residual: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
-    ) -> torch.Tensor:
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Fused: residual = residual + hidden_states; hidden_states = rmsnorm(residual)
+        hidden_states = self.input_layernorm(hidden_states, residual)
         # Self Attention
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
@@ -646,13 +948,11 @@ class Qwen3NextDecoderLayer(nn.Module):
             attention_inputs=attention_inputs,
             attn_meta=attn_meta,
         )
-        hidden_states = residual + hidden_states
+        # Fused: residual = residual + hidden_states; hidden_states = rmsnorm(residual)
+        hidden_states = self.post_attention_layernorm(hidden_states, residual)
         # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-        return hidden_states
+        return hidden_states, residual
 
 
 class Qwen3NextModel(GptModelBase):
@@ -699,7 +999,7 @@ class Qwen3NextModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
-        self.norm = RMSNorm(
+        self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
@@ -707,6 +1007,7 @@ class Qwen3NextModel(GptModelBase):
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
+        residual = torch.zeros_like(hidden_states)
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         prefill_conv1d_meta = None
@@ -720,23 +1021,19 @@ class Qwen3NextModel(GptModelBase):
 
         attn_meta = Qwen3NextMetadata(prefill_conv1d_meta, is_target_verify)
 
-        # qwen3_next model has only one full group (group 0): use fmha_impl from input param
-        # if there is a model with more than 1 full groups,
-        # we should prepare fmha_impl for each full group/ fix later
-
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
         for i, decoder_layer in enumerate(self.layers):
-            # Switch to correct block_map for this layer in hybrid attention mode
             select_block_map_for_layer(attention_inputs, i)
-            hidden_states = decoder_layer(
+            hidden_states, residual = decoder_layer(
                 hidden_states,
+                residual,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
             )
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
