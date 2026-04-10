@@ -331,6 +331,10 @@ def trans_output(
                 current_aux_info.softmax_probs = trans_tensor(
                     aux_info_pb.softmax_probs
                 ).tolist()
+            if len(aux_info_pb.multimodal_lengths) > 0:
+                current_aux_info.multimodal_lengths = dict(
+                    aux_info_pb.multimodal_lengths
+                )
 
             output_py.aux_info = current_aux_info
 

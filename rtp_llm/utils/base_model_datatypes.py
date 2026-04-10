@@ -107,6 +107,8 @@ class AuxInfo:
     decode_remote_reuse_len: int = 0
     decode_memory_reuse_len: int = 0
 
+    multimodal_lengths: Dict[int, int] = field(default_factory=dict)
+
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
 

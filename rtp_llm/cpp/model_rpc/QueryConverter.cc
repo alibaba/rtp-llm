@@ -401,6 +401,10 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_decode_remote_reuse_len(response.aux_info.decode_remote_reuse_len);
             aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
             aux_info->set_aux_string(aux_string);
+            auto* mm_map = aux_info->mutable_multimodal_lengths();
+            for (const auto& [key, value] : response.aux_info.multimodal_lengths) {
+                (*mm_map)[key] = value;
+            }
             if (response.aux_info.cum_log_probs.has_value()) {
                 transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value());
             }

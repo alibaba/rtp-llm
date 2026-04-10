@@ -168,6 +168,7 @@ message AuxInfoPB {
     int32 memory_reuse_len = 24;
     int32 prefill_memory_reuse_len = 25;
     int32 decode_memory_reuse_len = 26;
+    map<int32, int32> multimodal_lengths = 27;
 }
 
 message FlattenOutputPB {
