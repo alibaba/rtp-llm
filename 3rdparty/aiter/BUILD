@@ -107,6 +107,8 @@ genrule(
         "aiter/jit/libmodule_gemm_a8w8.so",
         "aiter/jit/libmodule_moe_ck2stages.so",
         "aiter/jit/libmodule_deepgemm.so",
+        "aiter/jit/libmodule_gemm_common.so",
+        "aiter/jit/libmodule_hipbsolgemm.so",
     ],
     cmd = """
         cd external/aiter_src;
@@ -138,6 +140,8 @@ genrule(
         cp external/aiter_src/aiter/jit/module_fmha_v3_varlen_fwd.so $(location aiter/jit/libmodule_fmha_v3_varlen_fwd.so);
         cp external/aiter_src/aiter/jit/module_gemm_a8w8.so $(location aiter/jit/libmodule_gemm_a8w8.so);
         cp external/aiter_src/aiter/jit/module_moe_ck2stages.so $(location aiter/jit/libmodule_moe_ck2stages.so);
+        cp external/aiter_src/aiter/jit/module_gemm_common.so $(location aiter/jit/libmodule_gemm_common.so);
+        cp external/aiter_src/aiter/jit/module_hipbsolgemm.so $(location aiter/jit/libmodule_hipbsolgemm.so);
     """,
     visibility = ["//visibility:public"],
     tags = ["rocm","local"],

@@ -108,6 +108,8 @@ genrule(
         "libmodule_rmsnorm.so",
         "libmodule_gemm_a8w8.so",
         "libmodule_moe_ck2stages.so",
+        "libmodule_gemm_common.so",
+        "libmodule_hipbsolgemm.so",
     ],
     cmd = """
        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_aiter_enum.so $(location libmodule_aiter_enum.so);
@@ -130,6 +132,8 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_rmsnorm.so $(lo
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8.so $(location libmodule_gemm_a8w8.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_ck2stages.so $(location libmodule_moe_ck2stages.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_deepgemm.so $(location libmodule_deepgemm.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_common.so $(location libmodule_gemm_common.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_hipbsolgemm.so $(location libmodule_hipbsolgemm.so);
 """,
     tags = [
         "local",
