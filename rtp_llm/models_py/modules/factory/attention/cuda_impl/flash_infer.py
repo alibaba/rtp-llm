@@ -10,7 +10,7 @@ from rtp_llm.ops.compute_ops import (
     FlashInferDecodeOp,
     FlashInferPrefillOp,
     FusedRopeKVCacheDecodeOp,
-    FusedRopeKVCachePrefillOpQKVOut,
+    FusedRopeKVCachePrefillOpQOut,
     LayerKVCache,
     PyAttentionInputs,
 )
@@ -27,7 +27,7 @@ class FlashInferPrefillImpl(FMHAImplBase):
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = FlashInferPrefillOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
         self.attn_configs = attn_configs
 
         # Store input info

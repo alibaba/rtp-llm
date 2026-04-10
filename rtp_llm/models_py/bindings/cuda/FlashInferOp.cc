@@ -55,23 +55,44 @@ ParamsBasePtr FlashInferPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inp
     return ParamsBasePtr(attn_params);
 }
 
-torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&                   q,
+torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&                   q_in,
                                            std::optional<torch_ext::LayerKVCache> kv_cache,
                                            const FlashInferAttnParamsPtr&         params) {
     RTP_LLM_CHECK_WITH_INFO(params != nullptr, "flash infer op should have params");
 
-    const int     local_head_num = attn_configs_.head_num;
-    const int     size_per_head  = attn_configs_.size_per_head;
-    const int     bs             = q.size(0);
+    const int local_head_num = attn_configs_.head_num;
+    const int size_per_head  = attn_configs_.size_per_head;
+
+    // FlashInfer expects 3D query: [nnz, num_heads, head_dim]
+    torch::Tensor q;
+    if (q_in.dim() == 2) {
+        q = q_in.view({q_in.size(0), local_head_num, size_per_head});
+    } else if (q_in.dim() == 3) {
+        q = q_in;
+    } else {
+        q = q_in.view({-1, local_head_num, size_per_head});
+    }
+
+    const int bs = q.size(0);
+
+    if (!kv_cache.has_value()) {
+        return torch::zeros({bs, local_head_num * size_per_head}, torch::TensorOptions(q.dtype()).device(q.device()));
+    }
+
     torch::Tensor output =
-        torch::empty({bs, local_head_num * size_per_head}, torch::TensorOptions(q.dtype()).device(q.device()));
+        torch::empty({bs, local_head_num, size_per_head}, torch::TensorOptions(q.dtype()).device(q.device()));
     auto softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * attn_configs_.softmax_extra_scale;
     RTP_LLM_LOG_DEBUG("prefill flashinfer");
-    torch::Tensor k_cache, v_cache;
-    if (kv_cache.has_value()) {
-        k_cache = kv_cache.value().kv_cache_base.select(1, 0);
-        v_cache = kv_cache.value().kv_cache_base.select(1, 1);
+
+    auto kv_base = kv_cache.value().kv_cache_base;
+    if (kv_base.dim() == 2) {
+        const int64_t page_size   = attn_configs_.tokens_per_block;
+        const int64_t kv_head_num = attn_configs_.kv_head_num;
+        kv_base                   = kv_base.view({-1, 2, page_size, kv_head_num, (int64_t)size_per_head});
     }
+    torch::Tensor k_cache = kv_base.select(1, 0);
+    torch::Tensor v_cache = kv_base.select(1, 1);
+
     StreamType stream = GET_CURRENT_STREAM();
     BatchPrefillWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer
                                     params->int_workspace_d,           // int_workspace_buffer
@@ -96,7 +117,7 @@ torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&                 
                                     attn_configs_.rope_config.scale,
                                     attn_configs_.rope_config.base,
                                     (int64_t)stream);
-    return output;
+    return output.view({bs, local_head_num * size_per_head});
 }
 
 FlashInferDecodeOp::FlashInferDecodeOp(const AttentionConfigs& attn_configs,

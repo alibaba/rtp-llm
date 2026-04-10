@@ -393,6 +393,268 @@ def merge_16x16_to_64x64_inverse_kernel(
     )
 
 
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.jit(do_not_specialize=["T"])
+def solve_tril_merge_64x64_kernel(
+    A,
+    Ai,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    """Fused 16×16 solve + merge into 64×64 inverse in a single kernel.
+
+    Each thread block handles one 64×64 tile: solves 4 diagonal 16×16 blocks,
+    then merges them using the block-triangular inverse formula.
+    """
+    BT: tl.constexpr = 64
+    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_b, i_h = i_bh // H, i_bh % H
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
+            chunk_indices + i_t * 2 + 1
+        ).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+            cu_seqlens + i_n + 1
+        ).to(tl.int32)
+        T = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
+
+    A_base = A + (bos * H + i_h) * BT
+    o_i = tl.arange(0, 16)
+
+    # --- Phase 1: Solve 4 diagonal 16×16 blocks ---
+    # Block 0: rows [0:16], cols [0:16]
+    p0 = tl.make_block_ptr(
+        A_base, (T, BT), (H * BT, 1), (i_t * 64, 0), (16, 16), (1, 0)
+    )
+    b0 = tl.load(p0, boundary_check=(0, 1)).to(tl.float32)
+    b0 = -tl.where(o_i[:, None] > o_i[None, :], b0, 0)
+    for i in range(1, 16):
+        row = -tl.load(A_base + (i_t * 64 + i) * H * BT + o_i + 0)
+        row = row + tl.sum(row[:, None] * b0, 0)
+        b0 = tl.where((o_i == i)[:, None], row, b0)
+    Ai_11 = b0 + (o_i[:, None] == o_i[None, :]).to(tl.float32)
+
+    # Block 1: rows [16:32], cols [16:32]
+    p1 = tl.make_block_ptr(
+        A_base, (T, BT), (H * BT, 1), (i_t * 64 + 16, 16), (16, 16), (1, 0)
+    )
+    b1 = tl.load(p1, boundary_check=(0, 1)).to(tl.float32)
+    b1 = -tl.where(o_i[:, None] > o_i[None, :], b1, 0)
+    for i in range(1, 16):
+        row = -tl.load(A_base + (i_t * 64 + 16 + i) * H * BT + o_i + 16)
+        row = row + tl.sum(row[:, None] * b1, 0)
+        b1 = tl.where((o_i == i)[:, None], row, b1)
+    Ai_22 = b1 + (o_i[:, None] == o_i[None, :]).to(tl.float32)
+
+    # Block 2: rows [32:48], cols [32:48]
+    p2 = tl.make_block_ptr(
+        A_base, (T, BT), (H * BT, 1), (i_t * 64 + 32, 32), (16, 16), (1, 0)
+    )
+    b2 = tl.load(p2, boundary_check=(0, 1)).to(tl.float32)
+    b2 = -tl.where(o_i[:, None] > o_i[None, :], b2, 0)
+    for i in range(1, 16):
+        row = -tl.load(A_base + (i_t * 64 + 32 + i) * H * BT + o_i + 32)
+        row = row + tl.sum(row[:, None] * b2, 0)
+        b2 = tl.where((o_i == i)[:, None], row, b2)
+    Ai_33 = b2 + (o_i[:, None] == o_i[None, :]).to(tl.float32)
+
+    # Block 3: rows [48:64], cols [48:64]
+    p3 = tl.make_block_ptr(
+        A_base, (T, BT), (H * BT, 1), (i_t * 64 + 48, 48), (16, 16), (1, 0)
+    )
+    b3 = tl.load(p3, boundary_check=(0, 1)).to(tl.float32)
+    b3 = -tl.where(o_i[:, None] > o_i[None, :], b3, 0)
+    for i in range(1, 16):
+        row = -tl.load(A_base + (i_t * 64 + 48 + i) * H * BT + o_i + 48)
+        row = row + tl.sum(row[:, None] * b3, 0)
+        b3 = tl.where((o_i == i)[:, None], row, b3)
+    Ai_44 = b3 + (o_i[:, None] == o_i[None, :]).to(tl.float32)
+
+    # --- Phase 2: Merge (block-triangular inverse formula) ---
+    Ai_base = Ai + (bos * H + i_h) * BT
+
+    p_A_21 = tl.make_block_ptr(
+        A_base, (T, BT), (H * BT, 1), (i_t * 64 + 16, 0), (16, 16), (1, 0)
+    )
+    p_A_32 = tl.make_block_ptr(
+        A_base, (T, BT), (H * BT, 1), (i_t * 64 + 32, 16), (16, 16), (1, 0)
+    )
+    p_A_31 = tl.make_block_ptr(
+        A_base, (T, BT), (H * BT, 1), (i_t * 64 + 32, 0), (16, 16), (1, 0)
+    )
+    p_A_43 = tl.make_block_ptr(
+        A_base, (T, BT), (H * BT, 1), (i_t * 64 + 48, 32), (16, 16), (1, 0)
+    )
+    p_A_42 = tl.make_block_ptr(
+        A_base, (T, BT), (H * BT, 1), (i_t * 64 + 48, 16), (16, 16), (1, 0)
+    )
+    p_A_41 = tl.make_block_ptr(
+        A_base, (T, BT), (H * BT, 1), (i_t * 64 + 48, 0), (16, 16), (1, 0)
+    )
+
+    A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
+    A_32 = tl.load(p_A_32, boundary_check=(0, 1)).to(tl.float32)
+    A_31 = tl.load(p_A_31, boundary_check=(0, 1)).to(tl.float32)
+    A_43 = tl.load(p_A_43, boundary_check=(0, 1)).to(tl.float32)
+    A_42 = tl.load(p_A_42, boundary_check=(0, 1)).to(tl.float32)
+    A_41 = tl.load(p_A_41, boundary_check=(0, 1)).to(tl.float32)
+
+    Ai_21 = -tl.dot(
+        tl.dot(Ai_22, A_21, input_precision="ieee"), Ai_11, input_precision="ieee"
+    )
+    Ai_32 = -tl.dot(
+        tl.dot(Ai_33, A_32, input_precision="ieee"), Ai_22, input_precision="ieee"
+    )
+    Ai_43 = -tl.dot(
+        tl.dot(Ai_44, A_43, input_precision="ieee"), Ai_33, input_precision="ieee"
+    )
+    Ai_31 = -tl.dot(
+        Ai_33,
+        tl.dot(A_31, Ai_11, input_precision="ieee")
+        + tl.dot(A_32, Ai_21, input_precision="ieee"),
+        input_precision="ieee",
+    )
+    Ai_42 = -tl.dot(
+        Ai_44,
+        tl.dot(A_42, Ai_22, input_precision="ieee")
+        + tl.dot(A_43, Ai_32, input_precision="ieee"),
+        input_precision="ieee",
+    )
+    Ai_41 = -tl.dot(
+        Ai_44,
+        tl.dot(A_41, Ai_11, input_precision="ieee")
+        + tl.dot(A_42, Ai_21, input_precision="ieee")
+        + tl.dot(A_43, Ai_31, input_precision="ieee"),
+        input_precision="ieee",
+    )
+
+    # --- Phase 3: Store all 16 blocks ---
+    fill_zeros = tl.zeros((16, 16), dtype=tl.float32)
+    stride_row = H * BT
+    base_t = i_t * 64
+
+    # Diagonal
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t, 0), (16, 16), (1, 0)
+        ),
+        Ai_11.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t + 16, 16), (16, 16), (1, 0)
+        ),
+        Ai_22.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t + 32, 32), (16, 16), (1, 0)
+        ),
+        Ai_33.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t + 48, 48), (16, 16), (1, 0)
+        ),
+        Ai_44.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    # Lower triangular
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t + 16, 0), (16, 16), (1, 0)
+        ),
+        Ai_21.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t + 32, 0), (16, 16), (1, 0)
+        ),
+        Ai_31.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t + 32, 16), (16, 16), (1, 0)
+        ),
+        Ai_32.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t + 48, 0), (16, 16), (1, 0)
+        ),
+        Ai_41.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t + 48, 16), (16, 16), (1, 0)
+        ),
+        Ai_42.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t + 48, 32), (16, 16), (1, 0)
+        ),
+        Ai_43.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    # Upper triangular (zeros)
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t, 16), (16, 16), (1, 0)
+        ),
+        fill_zeros.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t, 32), (16, 16), (1, 0)
+        ),
+        fill_zeros.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t, 48), (16, 16), (1, 0)
+        ),
+        fill_zeros.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t + 16, 32), (16, 16), (1, 0)
+        ),
+        fill_zeros.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t + 16, 48), (16, 16), (1, 0)
+        ),
+        fill_zeros.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+    tl.store(
+        tl.make_block_ptr(
+            Ai_base, (T, BT), (stride_row, 1), (base_t + 32, 48), (16, 16), (1, 0)
+        ),
+        fill_zeros.to(Ai_base.dtype.element_ty, fp_downcast_rounding="rtne"),
+        boundary_check=(0, 1),
+    )
+
+
 @input_guard
 def solve_tril(
     A: torch.Tensor,
@@ -418,10 +680,10 @@ def solve_tril(
     assert A.shape[-1] in [16, 32, 64]
 
     B, T, H, BT = A.shape
+
     Ad = torch.empty(
         B, T, H, 16, device=A.device, dtype=torch.float if BT != 16 else output_dtype
     )
-
     chunk_indices = (
         prepare_chunk_indices(cu_seqlens, 16) if cu_seqlens is not None else None
     )

@@ -328,11 +328,14 @@ class FlashInferTRTLLMPrefillOp(object):
     def __del__(self):
         release_trt_workspace_buffer(self.workspace_buffer)
 
+    _SUPPORTED_PAGE_SIZES = {32, 64}
+
     def support(self, attention_inputs: PyAttentionInputs):
         return (
             is_sm_100()
             and attention_inputs.is_prefill
             and attention_inputs.kv_cache_kernel_block_id_device is not None
+            and self.seq_size_per_block in self._SUPPORTED_PAGE_SIZES
         )
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> FlashInferTRTLLMParams:
@@ -435,8 +438,12 @@ class FlashInferTRTLLMDecodeOp(object):
     def __del__(self):
         release_trt_workspace_buffer(self.workspace_buffer)
 
+    _SUPPORTED_PAGE_SIZES = {32, 64}
+
     def support(self, attention_inputs: PyAttentionInputs):
         if not is_sm_100():
+            return False
+        if self.seq_size_per_block not in self._SUPPORTED_PAGE_SIZES:
             return False
         # Note: this max q length is used for mtp decode verification.
         decode_kernel_max_q_len = 11

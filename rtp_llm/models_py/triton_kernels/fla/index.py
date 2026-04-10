@@ -13,23 +13,39 @@ def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     return cu_seqlens[1:] - cu_seqlens[:-1]
 
 
+def _cdiv_cpu(lens: torch.LongTensor, chunk_size: int):
+    """Ceiling division on CPU to avoid GPU kernel launches for tiny tensors."""
+    lens_cpu = lens.tolist()
+    return [triton.cdiv(l, chunk_size) for l in lens_cpu]
+
+
 @tensor_cache
 def prepare_chunk_indices(
     cu_seqlens: torch.LongTensor, chunk_size: int
 ) -> torch.LongTensor:
-    indices = torch.cat(
-        [
-            torch.arange(n)
-            for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()
-        ]
+    # Build indices entirely on CPU, then transfer to GPU once.
+    # Each entry is (batch_idx, chunk_idx_within_seq).
+    chunks_per_seq = _cdiv_cpu(prepare_lens(cu_seqlens), chunk_size)
+    batch_ids = []
+    chunk_ids = []
+    for seq_idx, n_chunks in enumerate(chunks_per_seq):
+        batch_ids.extend([seq_idx] * n_chunks)
+        chunk_ids.extend(range(n_chunks))
+    result = torch.tensor(
+        list(zip(batch_ids, chunk_ids)),
+        dtype=cu_seqlens.dtype,
+        device=cu_seqlens.device,
     )
-    return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
+    return result
 
 
 @tensor_cache
 def prepare_chunk_offsets(
     cu_seqlens: torch.LongTensor, chunk_size: int
 ) -> torch.LongTensor:
-    return torch.cat(
-        [cu_seqlens.new_tensor([0]), triton.cdiv(prepare_lens(cu_seqlens), chunk_size)]
-    ).cumsum(-1)
+    chunks = _cdiv_cpu(prepare_lens(cu_seqlens), chunk_size)
+    # Cumsum on CPU (only batch+1 elements), then transfer to GPU once
+    import itertools
+
+    offsets = list(itertools.accumulate([0] + chunks))
+    return torch.tensor(offsets, dtype=cu_seqlens.dtype, device=cu_seqlens.device)

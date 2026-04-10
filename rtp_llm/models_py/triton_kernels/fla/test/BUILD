@@ -49,3 +49,15 @@ py_test(
     visibility = ["//visibility:public"],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "test_gdn_prefill_perf",
+    srcs = [
+        "test_gdn_prefill_perf.py"
+    ],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
+    visibility = ["//visibility:public"],
+    exec_properties = {'gpu':'H20'},
+)

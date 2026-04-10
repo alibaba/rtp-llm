@@ -43,6 +43,41 @@ def l2norm_fwd_kernel1(
     tl.store(y + cols, b_y, mask=mask)
 
 
+@triton.jit
+def l2norm_fwd_strided_kernel(
+    x,
+    y,
+    stride_x_row: tl.int64,
+    D,
+    BD: tl.constexpr,
+    HEADS_PER_TOKEN: tl.constexpr,
+    eps,
+):
+    """L2-normalize rows from a non-contiguous input into contiguous output.
+
+    Input layout:  each token has HEADS_PER_TOKEN * D contiguous elements,
+                   but tokens are separated by stride_x_row (> HEADS_PER_TOKEN * D).
+    Output layout: fully contiguous (T * HEADS_PER_TOKEN, D).
+
+    program_id(0) iterates over T * HEADS_PER_TOKEN rows.
+    """
+    i_t = tl.program_id(0)
+    # Map flat row index to (token, head_within_token)
+    token = i_t // HEADS_PER_TOKEN
+    head = i_t % HEADS_PER_TOKEN
+    # Input: strided by token, contiguous within token
+    x += token * stride_x_row + head * D
+    # Output: always contiguous
+    y += i_t * D
+    cols = tl.arange(0, BD)
+    mask = cols < D
+    b_x = tl.load(x + cols, mask=mask, other=0.0).to(tl.float32)
+    b_var = tl.sum(b_x * b_x, axis=0)
+    b_rstd = 1 / tl.sqrt(b_var + eps)
+    b_y = b_x * b_rstd
+    tl.store(y + cols, b_y, mask=mask)
+
+
 # @triton.autotune(
 #     configs=[
 #         triton.Config({"BT": BT}, num_warps=num_warps)
@@ -75,23 +110,51 @@ def l2norm_fwd(
     x: torch.Tensor, eps: float = 1e-6, output_dtype: Optional[torch.dtype] = None
 ):
     x_shape_og = x.shape
-    x = x.view(-1, x.shape[-1])
-    # allocate output
-    if output_dtype is None:
-        y = torch.empty_like(x)
-    else:
-        y = torch.empty_like(x, dtype=output_dtype)
-    assert y.stride(-1) == 1
-    T, D = x.shape[0], x.shape[-1]
-    # rstd = torch.empty((T,), dtype=torch.float32, device=x.device)
-    # Less than 64KB per feature: enqueue fused kernel
+    D = x.shape[-1]
+
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
     if D > BD:
         raise RuntimeError("This layer doesn't support feature dim >= 64KB.")
 
-    # Not use this path since different batch will always go into compile， since T is different,
-    # and compile time is too long (70ms) compared to kernel execution time (under 1ms)
+    # Fast path: non-contiguous input with contiguous last dim (e.g. from torch.split + view).
+    # Directly read strided input and write contiguous output — avoids the implicit copy
+    # that .reshape() would trigger.
+    if not x.is_contiguous() and x.stride(-1) == 1 and x.ndim >= 3:
+        # x is (..., heads, D) where heads*D is contiguous per-token but tokens are strided
+        heads = x.shape[-2]
+        num_tokens = x.numel() // (heads * D)
+        # token stride in elements (the non-contiguous gap)
+        stride_token = x.stride(-3)
+        total_rows = num_tokens * heads
+
+        if output_dtype is None:
+            y = torch.empty(total_rows, D, dtype=x.dtype, device=x.device)
+        else:
+            y = torch.empty(total_rows, D, dtype=output_dtype, device=x.device)
+
+        l2norm_fwd_strided_kernel[(total_rows,)](
+            x,
+            y,
+            stride_x_row=stride_token,
+            eps=eps,
+            D=D,
+            BD=BD,
+            HEADS_PER_TOKEN=heads,
+            num_warps=8,
+            num_stages=3,
+        )
+        return y.view(x_shape_og)
+
+    # Standard path: contiguous input
+    x = x.reshape(-1, x.shape[-1])
+    if output_dtype is None:
+        y = torch.empty_like(x)
+    else:
+        y = torch.empty_like(x, dtype=output_dtype)
+    assert y.stride(-1) == 1
+    T = x.shape[0]
+
     if D <= 512 and T <= 128:
         NB = triton.cdiv(T, 2048)
 
