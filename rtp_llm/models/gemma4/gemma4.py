@@ -3,13 +3,25 @@ import os
 from typing import List
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.gemma4.gemma4_weight import Gemma4WeightInfo
+from rtp_llm.models.multimodal.multimodal_mixin import (
+    BaseMultiModalWeightInfo,
+    BaseVitWeights,
+    MultiModalMixin,
+)
 from rtp_llm.ops import HybridAttentionType
 
 
-class Gemma4(BaseModel):
+class Gemma4VitWeight(BaseVitWeights):
+    def _set_weight_prefix(self):
+        self._ckpt_prefix = "model."
+        self._ft_prefix = "self.mm_part."
+
+
+class Gemma4(BaseModel, MultiModalMixin):
     @staticmethod
     def get_weight_cls():
         return Gemma4WeightInfo
@@ -32,6 +44,24 @@ class Gemma4(BaseModel):
             device_resource_config=self.device_resource_config,
         )
         return self.py_model
+
+    def _init_multimodal(self, mm_model_config, vit_config: VitConfig):
+        from rtp_llm.models.gemma4.gemma4_vit import Gemma4ImageEmbedding
+
+        self.mm_part = Gemma4ImageEmbedding(
+            self.model_config.mm_related_params, model_config=self.model_config
+        )
+        # Register vision weights for loading.
+        # Checkpoint prefix: model.vision_tower.* and model.embed_vision.*
+        # Module prefix: self.mm_part.vision_tower.* and self.mm_part.embed_vision.*
+        # We name the projector as "embed_vision" to match checkpoint naming.
+        vit_parts = {
+            "vision_tower": self.mm_part.vision_tower,
+            "embed_vision": self.mm_part.embed_vision,
+        }
+        self.model_config.mm_related_params.vit_weights = Gemma4VitWeight(
+            vit_parts, with_prefix=True
+        )
 
     def support_cuda_graph(self) -> bool:
         return True
@@ -172,14 +202,26 @@ class Gemma4(BaseModel):
         # Layer types for model_desc
         config.gemma4_layer_types = text_config.get("layer_types", [])
 
-        # Vision config (for Phase 2)
+        # Vision config
         vision_config = config_json.get("vision_config", None)
         if vision_config:
             config.gemma4_vision_config = vision_config
-            config.gemma4_boi_token_id = config_json.get("boi_token_id", 255999)
-            config.gemma4_eoi_token_id = config_json.get("eoi_token_id", 258882)
-            config.gemma4_image_token_id = config_json.get("image_token_id", 258880)
+            boi_token_id = config_json.get("boi_token_id", 255999)
+            eoi_token_id = config_json.get("eoi_token_id", 258882)
+            image_token_id = config_json.get("image_token_id", 258880)
+            config.gemma4_boi_token_id = boi_token_id
+            config.gemma4_eoi_token_id = eoi_token_id
+            config.gemma4_image_token_id = image_token_id
             config.gemma4_vision_soft_tokens = config_json.get("vision_soft_tokens_per_image", 280)
+
+            # Set up mm_related_params for multimodal pipeline
+            config.mm_related_params.config = vision_config
+            config.mm_related_params.config["ckpt_path"] = config.ckpt_path
+            if config.mm_related_params.special_tokens is None:
+                from rtp_llm.config.model_config import SpecialTokens
+                config.mm_related_params.special_tokens = SpecialTokens()
+            config.mm_related_params.special_tokens.update({"default_mm_token": "<image>"})
+            config.mm_model_config.mm_sep_tokens = [[boi_token_id, eoi_token_id]]
 
 
 register_model("gemma4", Gemma4, ["Gemma4ForConditionalGeneration"])

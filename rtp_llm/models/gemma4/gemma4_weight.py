@@ -7,6 +7,7 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
+from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
 from rtp_llm.ops import HybridAttentionType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -22,9 +23,13 @@ def plus_one(ts):
     return ts[0] + 1
 
 
-class Gemma4WeightInfo(ModelDeployWeightInfo):
+class Gemma4WeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
-        super().__init__(*args, **kwargs)
+        ModelDeployWeightInfo.__init__(self, *args, **kwargs)
+        # Vision weights will be set during _init_multimodal
+        vit_weights = getattr(self.model_config, "mm_related_params", None)
+        vit_weights = vit_weights.vit_weights if vit_weights else None
+        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights)
         # Gemma4ForConditionalGeneration nests text model under language_model
         self.prefix = "model.language_model."
 
@@ -78,7 +83,9 @@ class Gemma4WeightInfo(ModelDeployWeightInfo):
             layer_weight.extend(self._create_ffn_weight())
             all_layer_weights.append(layer_weight)
 
-        return ModelWeightInfo(layer_weights=all_layer_weights, weights=weights)
+        model_weight_info = ModelWeightInfo(layer_weights=all_layer_weights, weights=weights)
+        # Add vision weights if multimodal
+        return self._get_vit_info(model_weight_info)
 
     def _create_layer_norm_weight(self) -> List[WeightModule]:
         return [
