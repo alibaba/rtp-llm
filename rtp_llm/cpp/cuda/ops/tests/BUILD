@@ -105,7 +105,7 @@ cc_test(
     deps = test_deps + [
         "//rtp_llm/cpp/kernels:kernels_block_zero",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 # Aliases: CudaGraph tests at //rtp_llm/cpp/cuda/CudaGraph/tests/

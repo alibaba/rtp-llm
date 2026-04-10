@@ -218,3 +218,161 @@ TEST_F(CudaBlockZeroKernelTest, EmptyInputNoOp) {
     cudaStreamSynchronize(stream_);
     EXPECT_EQ(cudaGetLastError(), cudaSuccess);
 }
+
+// ─── Performance benchmarks ────────────────────────────────────────────────
+
+struct BenchConfig {
+    const char* label;
+    size_t batch_size;
+    size_t layer_num;
+    size_t block_stride_bytes;
+    size_t seq_size_per_block;
+    bool   all_on_boundary;
+};
+
+static const char* variantName(BlockZeroVariant v) {
+    switch (v) {
+        case BlockZeroVariant::kLayerFused:      return "Fused";
+        case BlockZeroVariant::kLayerFusedCG:    return "Fused+CG";
+        case BlockZeroVariant::kLayerParallel:   return "Parallel";
+        case BlockZeroVariant::kLayerParallelCG: return "Para+CG";
+        case BlockZeroVariant::kLayerPerBlock:   return "PerBlock";
+    }
+    return "?";
+}
+
+TEST_F(CudaBlockZeroKernelTest, PerfBenchmarkVariants) {
+    constexpr int kWarmup = 200;
+    constexpr int kIters  = 1000;
+    constexpr size_t kMaxBlocks = 512;
+    constexpr size_t kMaxBlocksPerBatch = 64;
+
+    const BenchConfig configs[] = {
+        // --- Decode: MHA GQA BF16 (Qwen2.5-72B / Llama-70B) L=80 stride=32K ---
+        {"decode GQA-BF16  bs=1   L=80",   1,   80, 32768,  8, true},
+        {"decode GQA-BF16  bs=32  L=80",   32,  80, 32768,  8, true},
+        {"decode GQA-BF16  bs=128 L=80",   128, 80, 32768,  8, true},
+        {"decode GQA-BF16  bs=256 L=80",   256, 80, 32768,  8, true},
+
+        // --- Decode: MHA GQA FP8 (Qwen2.5-72B) L=80 stride=16K ---
+        {"decode GQA-FP8   bs=32  L=80",   32,  80, 16384,  8, true},
+        {"decode GQA-FP8   bs=128 L=80",   128, 80, 16384,  8, true},
+        {"decode GQA-FP8   bs=256 L=80",   256, 80, 16384,  8, true},
+
+        // --- Decode: MLA BF16 (DeepSeek-V3) L=61 stride=9216 ---
+        {"decode MLA-BF16  bs=1   L=61",   1,   61, 9216,   8, true},
+        {"decode MLA-BF16  bs=32  L=61",   32,  61, 9216,   8, true},
+        {"decode MLA-BF16  bs=128 L=61",   128, 61, 9216,   8, true},
+        {"decode MLA-BF16  bs=256 L=61",   256, 61, 9216,   8, true},
+
+        // --- Decode: MLA FP8 (DeepSeek-V3) L=61 stride=5248 ---
+        {"decode MLA-FP8   bs=128 L=61",   128, 61, 5248,   8, true},
+        {"decode MLA-FP8   bs=256 L=61",   256, 61, 5248,   8, true},
+
+        // --- Decode: MQA BF16 (small) L=32 stride=4K ---
+        {"decode MQA-BF16  bs=128 L=32",   128, 32, 4096,   8, true},
+        {"decode MQA-BF16  bs=256 L=32",   256, 32, 4096,   8, true},
+
+        // --- Decode: Llama-8B GQA BF16 L=32 stride=32K ---
+        {"decode 8B-BF16   bs=32  L=32",   32,  32, 32768,  8, true},
+        {"decode 8B-BF16   bs=128 L=32",   128, 32, 32768,  8, true},
+
+        // --- Prefill: small batch, same strides ---
+        {"prefill GQA-BF16 bs=1   L=80",   1,   80, 32768,  8, true},
+        {"prefill GQA-BF16 bs=4   L=80",   4,   80, 32768,  8, true},
+        {"prefill MLA-BF16 bs=1   L=61",   1,   61, 9216,   8, true},
+        {"prefill MLA-BF16 bs=4   L=61",   4,   61, 9216,   8, true},
+
+        // --- No-op (not at boundary) per stride ---
+        {"no-op  GQA-BF16  bs=128 L=80",   128, 80, 32768,  8, false},
+        {"no-op  GQA-BF16  bs=256 L=80",   256, 80, 32768,  8, false},
+        {"no-op  MLA-BF16  bs=128 L=61",   128, 61, 9216,   8, false},
+        {"no-op  MLA-BF16  bs=256 L=61",   256, 61, 9216,   8, false},
+        {"no-op  MQA-BF16  bs=256 L=32",   256, 32, 4096,   8, false},
+    };
+
+    const BlockZeroVariant variants[] = {
+        BlockZeroVariant::kLayerFused,
+        BlockZeroVariant::kLayerParallel,
+        BlockZeroVariant::kLayerPerBlock,
+    };
+    constexpr int kNumVariants = 3;
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    printf("\n%-38s  %10s  %10s  %10s  %10s\n",
+           "Config", "Data(MB)", variantName(variants[0]),
+           variantName(variants[1]), variantName(variants[2]));
+    printf("%s\n", std::string(90, '-').c_str());
+
+    for (const auto& cfg : configs) {
+        auto mem = setupMemory(cfg.layer_num, kMaxBlocks, cfg.block_stride_bytes, 0xAA);
+
+        int32_t tok = cfg.all_on_boundary
+                          ? static_cast<int32_t>(cfg.seq_size_per_block) + 1
+                          : static_cast<int32_t>(cfg.seq_size_per_block) + 2;
+        std::vector<int32_t> token_counts(cfg.batch_size, tok);
+
+        std::vector<int32_t> block_ids(cfg.batch_size * kMaxBlocksPerBatch, 0);
+        for (size_t b = 0; b < cfg.batch_size; ++b) {
+            size_t needed = (tok - 1) / cfg.seq_size_per_block + 1;
+            for (size_t i = 0; i < std::min(needed, kMaxBlocksPerBatch); ++i) {
+                int32_t id = static_cast<int32_t>(b * kMaxBlocksPerBatch + i + 1);
+                if (id < static_cast<int32_t>(kMaxBlocks))
+                    block_ids[b * kMaxBlocksPerBatch + i] = id;
+            }
+        }
+
+        auto* d_tc   = toDevice(token_counts);
+        auto* d_bids = toDevice(block_ids);
+
+        double data_mb = cfg.all_on_boundary
+            ? static_cast<double>(cfg.batch_size) * cfg.layer_num
+              * cfg.block_stride_bytes / (1024.0 * 1024.0)
+            : 0.0;
+
+        float results_us[kNumVariants] = {};
+
+        for (int vi = 0; vi < kNumVariants; ++vi) {
+            for (int i = 0; i < kWarmup; ++i) {
+                invokeZeroIncompleteKvCacheBlocksVariant(
+                    reinterpret_cast<const void* const*>(mem.bases),
+                    d_bids, d_tc, nullptr,
+                    cfg.batch_size, cfg.layer_num, cfg.batch_size,
+                    kMaxBlocksPerBatch, cfg.block_stride_bytes,
+                    cfg.seq_size_per_block, stream_, variants[vi]);
+            }
+            cudaStreamSynchronize(stream_);
+
+            cudaEventRecord(start, stream_);
+            for (int i = 0; i < kIters; ++i) {
+                invokeZeroIncompleteKvCacheBlocksVariant(
+                    reinterpret_cast<const void* const*>(mem.bases),
+                    d_bids, d_tc, nullptr,
+                    cfg.batch_size, cfg.layer_num, cfg.batch_size,
+                    kMaxBlocksPerBatch, cfg.block_stride_bytes,
+                    cfg.seq_size_per_block, stream_, variants[vi]);
+            }
+            cudaEventRecord(stop, stream_);
+            cudaEventSynchronize(stop);
+
+            float total_ms = 0;
+            cudaEventElapsedTime(&total_ms, start, stop);
+            results_us[vi] = total_ms * 1000.0f / kIters;
+        }
+
+        printf("%-38s  %8.1f MB  %8.2f us  %8.2f us  %8.2f us\n",
+               cfg.label, data_mb,
+               results_us[0], results_us[1], results_us[2]);
+
+        cudaFree(d_tc);
+        cudaFree(d_bids);
+    }
+
+    printf("\n");
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    EXPECT_EQ(cudaGetLastError(), cudaSuccess);
+}
