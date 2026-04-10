@@ -472,8 +472,10 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
         w2 = self.w2
         if w1.dtype == torch.uint8:
             w1 = w1.view(torch.float4_e2m1fn_x2)
+            w1.is_shuffled = True
         if w2.dtype == torch.uint8:
             w2 = w2.view(torch.float4_e2m1fn_x2)
+            w2.is_shuffled = True
 
         output = fused_moe(
             hidden_states,
@@ -487,10 +489,6 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
             activation=_moe_activation_type(activation),
             expert_mask=expert_map if expert_map is not None else self.expert_mask,
             doweight_stage1=apply_router_weight_on_input,
-            hidden_pad=self.hidden_pad,
-            intermediate_pad=self.intermediate_pad,
-            bias1=None,
-            bias2=None,
         )
 
         return CombineForwardPayload(fused_expert_output=output)

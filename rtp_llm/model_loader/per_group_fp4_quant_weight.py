@@ -132,18 +132,16 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
     def support(
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
+        # Keep this path for legacy A4W4 per-group only.
+        # MXFP4/Quark should be handled by MixedFp4Weight.
         if not quant_config.is_quanted() or not isinstance(
-            quant_config, (ModelOptFp4Config, Fp4PerGroupQuarkQuantConfig)
+            quant_config, ModelOptFp4Config
         ):
             return False
-        # Qwen3-next MXFP4 quark checkpoints may keep shared_expert in non-quantized
-        # format (no *.weight_scale). Skip quant wrapping for those tensors.
-        if isinstance(quant_config, Fp4PerGroupQuarkQuantConfig):
-            ckpt_names = [w.name for w in getattr(src_weight_info, "weights", [])]
-            if any(".shared_expert." in n for n in ckpt_names):
-                return False
         name = src_weight_info.name
-        return name in cls.w4a4_weight_list and not quant_config.mixed_attention
+        return name in cls.w4a4_weight_list and not getattr(
+            quant_config, "mixed_attention", False
+        )
 
     def __init__(
         self,
