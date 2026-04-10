@@ -101,12 +101,6 @@ try:
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
-# frontend cannot load libpython3.10.so, so we need to load it manually
-import sysconfig
-from ctypes import cdll
-
-cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
-
 try:
     from libth_transformer_config import (
         ArpcConfig,

@@ -261,12 +261,62 @@ def _create_local_python_repository(repository_ctx):
   python_include_rule = _symlink_genrule_for_dir(
       repository_ctx, python_include, 'python_include', 'python_include')
   python_import_lib_genrule = ""
-  # To build Python C/C++ extension on Windows, we need to link to python import library pythonXY.lib
-  # See https://docs.python.org/3/extending/windows.html
   if _is_windows(repository_ctx):
+    # To build Python C/C++ extension on Windows, we need to link to python import library pythonXY.lib
+    # See https://docs.python.org/3/extending/windows.html
     python_include = _norm_path(python_include)
     python_import_lib_name = _get_python_import_lib_name(repository_ctx, python_bin)
     python_import_lib_src = python_include.rsplit('/', 1)[0] + "/libs/" + python_import_lib_name
+    python_import_lib_genrule = _symlink_genrule_for_dir(
+      repository_ctx, None, '', 'python_import_lib',
+      [python_import_lib_src], [python_import_lib_name])
+  else:
+    # On non-Windows platforms, detect the Python shared library via sysconfig,
+    # with a version-matched fallback for the default CI container image.
+    python_import_lib_result = _execute(
+        repository_ctx,
+        [python_bin, "-c", "\n".join([
+            "import os, sys, sysconfig",
+            "major = sys.version_info[0]",
+            "minor = sys.version_info[1]",
+            "# Prefer LDLIBRARY (unversioned linker name), then INSTSONAME, then derive from version",
+            "libname = (sysconfig.get_config_var('LDLIBRARY') or",
+            "           sysconfig.get_config_var('INSTSONAME') or",
+            "           'libpython%d.%d.so' % (major, minor))",
+            "# If libname is a static archive, replace with .so",
+            "if libname.endswith('.a'):",
+            "    libname = libname[:-2] + '.so'",
+            "libdir = sysconfig.get_config_var('LIBDIR') or ''",
+            "libpl = sysconfig.get_config_var('LIBPL') or ''",
+            "prefix_lib = os.path.join(sys.prefix, 'lib')",
+            "conda_lib = '/opt/conda%d%d/lib' % (major, minor)",
+            "candidates = []",
+            "if libdir:",
+            "    candidates.append(os.path.join(libdir, libname))",
+            "if libpl:",
+            "    candidates.append(os.path.join(libpl, libname))",
+            "candidates.append(os.path.join(prefix_lib, libname))",
+            "candidates.append(os.path.join(conda_lib, libname))",
+            "src = ''",
+            "for c in candidates:",
+            "    if os.path.exists(c):",
+            "        src = c",
+            "        break",
+            "if not src:",
+            "    src = candidates[0] if candidates else conda_lib + '/' + libname",
+            "print(libname)",
+            "print(src)",
+        ])],
+        error_msg="Problem getting python shared library information.",
+        empty_stdout_fine=True).stdout.strip().split("\n")
+    # Note: "".split("\n") returns [""] (single-element list with empty string),
+    # so len() > 0 is always True; the real guard is the emptiness check below.
+    python_import_lib_name = python_import_lib_result[0] if len(python_import_lib_result) > 0 else ""
+    python_import_lib_src = python_import_lib_result[1] if len(python_import_lib_result) > 1 else ""
+    if not python_import_lib_name or not python_import_lib_src:
+      fail("Failed to detect Python shared library. " +
+           "Please set PYTHON_LIB_PATH to the directory containing libpythonX.Y.so, " +
+           "e.g. export PYTHON_LIB_PATH=/usr/lib/x86_64-linux-gnu")
     python_import_lib_genrule = _symlink_genrule_for_dir(
       repository_ctx, None, '', 'python_import_lib',
       [python_import_lib_src], [python_import_lib_name])

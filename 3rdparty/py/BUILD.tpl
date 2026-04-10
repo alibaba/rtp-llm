@@ -16,12 +16,4 @@ cc_library(
 
 %{PYTHON_INCLUDE_GENRULE}
 
-genrule(
-    name = "python_import_lib",
-    outs = [
-        "libpython3.10.so",
-    ],
-    cmd = """
-cp -f "/opt/conda310/lib/libpython3.10.so" "$(@D)/libpython3.10.so"
-   """,
-)
+%{PYTHON_IMPORT_LIB_GENRULE}
