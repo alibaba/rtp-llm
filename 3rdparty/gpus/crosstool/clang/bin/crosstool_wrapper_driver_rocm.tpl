@@ -172,6 +172,13 @@ def InvokeHipcc(argv, log=False):
   out = ' -o ' + out_file[0]
 
   hipccopts = ' '
+  # Add --offload-arch from GPU_ARCHS to target the correct GPU architecture
+  gpu_archs = os.getenv('GPU_ARCHS', '')
+  if gpu_archs:
+    for arch in gpu_archs.split(','):
+      arch = arch.strip()
+      if arch:
+        hipccopts += ' --offload-arch=' + arch + ' '
   # In hip-clang environment, we need to make sure that hip header is included
   # before some standard math header like <complex> is included in any source.
   # Otherwise, we get build error.
