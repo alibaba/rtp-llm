@@ -68,6 +68,7 @@ class ModelConfig(CppModelConfig):
     _python_fields = {
         "is_mtp",
         "normalize_lm_head_weight",
+        "enable_fp32_lm_head",
         "has_lm_head_bias",
         "tie_word_embeddings",
         "quantization",
@@ -489,6 +490,7 @@ class ModelConfig(CppModelConfig):
         # Additional Python-only fields
         self.is_mtp: bool = False
         self.normalize_lm_head_weight: bool = False
+        self.enable_fp32_lm_head: bool = True
         self.has_lm_head_bias: bool = False
         self.tie_word_embeddings: bool = False
         # Model loading related fields
@@ -852,6 +854,9 @@ def build_model_config(
     if hack_layer_num:
         logging.info(f"hack layernum to {hack_layer_num}")
         model_config.num_layers = hack_layer_num
+
+    if model_args.enable_fp32_lm_head is not None:
+        model_config.enable_fp32_lm_head = model_args.enable_fp32_lm_head
 
     # Apply model override args
     if model_args.json_model_override_args:

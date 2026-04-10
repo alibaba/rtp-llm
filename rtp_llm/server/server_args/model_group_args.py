@@ -93,3 +93,11 @@ def init_model_group_args(parser, model_args):
         default=None,
         help="最大序列长度",
     )
+    model_group.add_argument(
+        "--enable_fp32_lm_head",
+        env_name="ENABLE_FP32_LM_HEAD",
+        bind_to=(model_args, "enable_fp32_lm_head"),
+        type=str2bool,
+        default=None,
+        help="是否将lm_head权重加载为fp32精度，默认为true",
+    )

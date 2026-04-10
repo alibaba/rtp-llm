@@ -28,6 +28,7 @@ class ModelArgs:
         "mla_ops_type",
         "json_model_override_args",
         "phy2log_path",
+        "enable_fp32_lm_head",
     ]
 
     def __init__(self):
@@ -57,3 +58,6 @@ class ModelArgs:
 
         # EPLB config
         self.phy2log_path: str = ""
+
+        # LM head precision
+        self.enable_fp32_lm_head: Optional[bool] = None
