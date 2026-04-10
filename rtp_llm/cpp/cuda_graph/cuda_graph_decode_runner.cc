@@ -33,17 +33,8 @@ void CudaGraphDecodeRunner::captureDecode() {
         int           bs = range[static_cast<size_t>(i)];
         PyModelInputs inputs;
         prepareCaptureInputs(inputs, bs, bs * graph_params_.num_tokens_per_bs);
-
-        int max_input_len  = inputs.attention_inputs.input_lengths.max().item<int>();
-        int max_prefix_len = 0;
-        if (inputs.attention_inputs.prefix_lengths.defined()) {
-            max_prefix_len = inputs.attention_inputs.prefix_lengths.max().item<int>();
-        }
-        inputs.attention_inputs.context_total_kv_length = bs * (max_input_len + max_prefix_len);
-
-        graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * graph_params_.num_tokens_per_bs);
-        graph_instances_[bs].mem_hold_.attn_pyobj_ =
-            py_attn_pyobj_method_(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
+        patchDecodeCaptureInputs(inputs, bs);
+        setupDecodeCaptureMemoryHold(bs, inputs);
         captureDecodeOneBatchSize(bs);
         replayAndSyncCheck(bs, "batch size");
         RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
@@ -127,6 +118,21 @@ void CudaGraphDecodeRunner::initCapture() {
 
 void CudaGraphDecodeRunner::buildCaptureDispatcher() {
     decode_capture_dispatcher_.build(graph_params_, max_bs_);
+}
+
+void CudaGraphDecodeRunner::patchDecodeCaptureInputs(PyModelInputs& inputs, int bs) {
+    int max_input_len  = inputs.attention_inputs.input_lengths.max().item<int>();
+    int max_prefix_len = 0;
+    if (inputs.attention_inputs.prefix_lengths.defined()) {
+        max_prefix_len = inputs.attention_inputs.prefix_lengths.max().item<int>();
+    }
+    inputs.attention_inputs.context_total_kv_length = bs * (max_input_len + max_prefix_len);
+}
+
+void CudaGraphDecodeRunner::setupDecodeCaptureMemoryHold(int bs, PyModelInputs& inputs) {
+    graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * graph_params_.num_tokens_per_bs);
+    graph_instances_[bs].mem_hold_.attn_pyobj_ =
+        py_attn_pyobj_method_(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
 }
 
 }  // namespace rtp_llm

@@ -22,6 +22,10 @@ protected:
     void buildCaptureDispatcher() override;
 
     cuda_graph::CudaGraphPrefillCaptureDispatcher prefill_capture_dispatcher_;
+
+private:
+    void patchPrefillCaptureInputs(PyModelInputs& inputs, int seq_len);
+    void setupPrefillCaptureMemoryHold(int seq_len, PyModelInputs& inputs);
 };
 
 }  // namespace rtp_llm
