@@ -238,6 +238,7 @@ class ModelDeployWeightInfo:
         self.moe_style_ = model_config.moe_style
 
         self.tie_word_embeddings = model_config.tie_word_embeddings
+        self.enable_fp32_lm_head = model_config.enable_fp32_lm_head
         self.weight_style = WeightStyle.NONE
 
         # for mla
@@ -252,7 +253,9 @@ class ModelDeployWeightInfo:
         )
 
         # for moe
-        self._moe_pure_tp_mode = (self.tp_size > 1 and self.dp_size == 1 and self.ep_size == 1)
+        self._moe_pure_tp_mode = (
+            self.tp_size > 1 and self.dp_size == 1 and self.ep_size == 1
+        )
 
         self.gen_dummy_reciprocal = (
             model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
@@ -338,6 +341,10 @@ class ModelDeployWeightInfo:
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")
             weight_info = self._fix_tie_lm_head(weight_info)
+
+        if self.enable_fp32_lm_head:
+            weight_info = self._fix_fp32_lm_head(weight_info)
+
         return weight_info
 
     def _fix_weight_style_layer_weight(self, origin_weight_info: ModelWeightInfo):
@@ -457,6 +464,13 @@ class ModelDeployWeightInfo:
         logging.info(
             f"fix weight config when need_merge_w13 {origin_weight_info.layer_weights[0]}"
         )
+        return origin_weight_info
+
+    def _fix_fp32_lm_head(self, origin_weight_info: ModelWeightInfo) -> ModelWeightInfo:
+        for weight in origin_weight_info.weights:
+            if isinstance(weight, AtomicWeight) and weight.name == W.lm_head:
+                weight.data_type = torch.float32
+                break
         return origin_weight_info
 
     def _fix_tie_lm_head(self, origin_weight_info: ModelWeightInfo) -> ModelWeightInfo:
