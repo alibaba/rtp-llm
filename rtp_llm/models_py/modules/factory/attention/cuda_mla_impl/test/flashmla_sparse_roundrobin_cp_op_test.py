@@ -188,6 +188,8 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
         block_table_device = block_table_host.to(device)
         attn_inputs.kv_cache_block_id_host = block_table_host
         attn_inputs.kv_cache_block_id_device = block_table_device
+        attn_inputs.kv_cache_kernel_block_id_host = block_table_host
+        attn_inputs.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
         mla_params.fill_params(
@@ -1044,6 +1046,8 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
         block_table_device = block_table_host.to(device)
         attn_inputs.kv_cache_block_id_host = block_table_host
         attn_inputs.kv_cache_block_id_device = block_table_device
+        attn_inputs.kv_cache_kernel_block_id_host = block_table_host
+        attn_inputs.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
         mla_params.fill_params(
@@ -1578,17 +1582,18 @@ class RoundRobinSparseMlaFp8CPOpTest(TestCase):
                     kernel_block_table[i, j * K + k] = kernel_block_idx
                     kernel_block_idx += 1
 
-        # fill_params uses physical block table
         attn_inputs.kv_cache_block_id_host = phys_block_table_host
         attn_inputs.kv_cache_block_id_device = phys_block_table_host.to(device)
+        attn_inputs.kv_cache_kernel_block_id_host = kernel_block_table
+        attn_inputs.kv_cache_kernel_block_id_device = kernel_block_table.to(device)
 
-        # plan uses kernel block table (simulates kv_cache_kernel_block_id_device)
+        # plan uses kernel block table
         block_table_device = kernel_block_table.to(device)
 
         mla_params = rtp_llm_ops.SparseMlaParams()
         mla_params.fill_params(
             attn_inputs,
-            physical_block_size,
+            kernel_block_size,
             cp_rank=tp_rank,
             cp_size=tp_size,
             kv_cache_sharded=True,

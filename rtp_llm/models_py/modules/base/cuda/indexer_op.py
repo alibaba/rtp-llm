@@ -354,9 +354,9 @@ class IndexerOp(nn.Module):
         assert kv_cache is not None, "kv_cache is required"
 
         if kv_cache_sharded:
-            assert local_indexer_slot_mapping is not None, (
-                "local_indexer_slot_mapping is required when kv_cache_sharded=True"
-            )
+            assert (
+                local_indexer_slot_mapping is not None
+            ), "local_indexer_slot_mapping is required when kv_cache_sharded=True"
             rtp_llm_ops.indexer_k_quant_and_cache(
                 key,
                 kv_cache.kv_scale_base,
@@ -657,7 +657,7 @@ class IndexerOp(nn.Module):
         k_fp8, k_scale = self._gather_kv_fp8(
             total_kv_tokens,
             kv_cache.kv_scale_base,
-            attention_inputs.kv_cache_block_id_device,
+            attention_inputs.kv_cache_kernel_block_id_device,
             q_fp8.device,
         )
         kv_fp8 = (k_fp8, k_scale.view(torch.float32))
@@ -692,7 +692,7 @@ class IndexerOp(nn.Module):
             kv_cache.kv_scale_base,
             k_fp8_local,
             k_scale_local,
-            attention_inputs.kv_cache_block_id_device,
+            attention_inputs.kv_cache_kernel_block_id_device,
             self._cu_local_kv_seqlens,
         )
 

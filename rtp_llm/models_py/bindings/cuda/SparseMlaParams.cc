@@ -250,7 +250,7 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
     FlashInferMlaAttnParams::fillParams(attn_inputs.prefix_lengths,
                                         attn_inputs.sequence_lengths,
                                         attn_inputs.input_lengths,
-                                        attn_inputs.kv_cache_block_id_host,
+                                        attn_inputs.kv_cache_kernel_block_id_host,
                                         seq_size_per_block,
                                         forbid_realloc,
                                         cp_rank,
@@ -330,7 +330,8 @@ void registerPySparseMlaParams(pybind11::module& m) {
                int                          cp_size,
                bool                         kv_cache_sharded) {
                 if (cp_size > 1) {
-                    self.fillParams(attn_inputs, seq_size_per_block, forbid_realloc, cp_rank, cp_size, kv_cache_sharded);
+                    self.fillParams(
+                        attn_inputs, seq_size_per_block, forbid_realloc, cp_rank, cp_size, kv_cache_sharded);
                 } else {
                     self.fillParams(attn_inputs, seq_size_per_block, forbid_realloc);
                 }
@@ -338,9 +339,9 @@ void registerPySparseMlaParams(pybind11::module& m) {
             pybind11::arg("attention_inputs"),
             pybind11::arg("seq_size_per_block"),
             pybind11::arg("forbid_realloc")   = false,
-            pybind11::arg("cp_rank")           = 0,
-            pybind11::arg("cp_size")           = 1,
-            pybind11::arg("kv_cache_sharded")  = false)
+            pybind11::arg("cp_rank")          = 0,
+            pybind11::arg("cp_size")          = 1,
+            pybind11::arg("kv_cache_sharded") = false)
         .def_readonly("expanded_seq_lens", &SparseMlaParams::expanded_seq_lens)
         .def_readonly("topk_indices_offset", &SparseMlaParams::topk_indices_offset)
         .def_readonly("ks", &SparseMlaParams::ks)

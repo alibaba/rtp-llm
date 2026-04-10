@@ -1209,7 +1209,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         pc = self._cp_parallelism_config
         self.fmha_params.fill_params(
             attn_inputs,
-            self.physical_tokens_per_block,
+            self.seq_size_per_block,
             forbid_realloc,
             cp_rank=pc.tp_rank,
             cp_size=pc.tp_size,

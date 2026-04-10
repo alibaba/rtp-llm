@@ -156,6 +156,8 @@ class SparseMlaFp8CPOpTest(TestCase):
         block_table_device = block_table_host.to(device)
         attn_inputs.kv_cache_block_id_host = block_table_host
         attn_inputs.kv_cache_block_id_device = block_table_device
+        attn_inputs.kv_cache_kernel_block_id_host = block_table_host
+        attn_inputs.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
         mla_params.fill_params(attn_inputs, page_size)
@@ -315,6 +317,8 @@ class SparseMlaFp8CPOpTest(TestCase):
         block_table_device = block_table_host.to(device)
         attn_inputs.kv_cache_block_id_host = block_table_host
         attn_inputs.kv_cache_block_id_device = block_table_device
+        attn_inputs.kv_cache_kernel_block_id_host = block_table_host
+        attn_inputs.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
         mla_params.fill_params(attn_inputs, page_size)
@@ -471,6 +475,8 @@ class SparseMlaFp8CPOpTest(TestCase):
         block_table_device = block_table_host.to(device)
         attn_inputs.kv_cache_block_id_host = block_table_host
         attn_inputs.kv_cache_block_id_device = block_table_device
+        attn_inputs.kv_cache_kernel_block_id_host = block_table_host
+        attn_inputs.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
         mla_params.fill_params(attn_inputs, page_size)
