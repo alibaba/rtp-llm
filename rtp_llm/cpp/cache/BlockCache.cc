@@ -13,7 +13,7 @@ BlockCache::MatchResult BlockCache::match(CacheKeyType cache_key, int group_id, 
     if (success) {
         if (current_batch_epoch == NO_EPOCH_FILTER
             || item.epoch == 0
-            || (current_batch_epoch > 0 && item.epoch == current_batch_epoch)) {
+            || item.epoch == current_batch_epoch) {
             return {item.block_index};
         }
     }

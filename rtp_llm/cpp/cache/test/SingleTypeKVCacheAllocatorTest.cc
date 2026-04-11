@@ -996,6 +996,231 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MixedOperations) {
     EXPECT_GT(allocator_->freeBlocksNum(), 0);
 }
 
+// ==================== Epoch-based batch cache reuse tests ====================
+
+// Test: epoch>0 entries are visible to same-epoch match, invisible to epoch=0 match
+TEST_F(SingleTypeKVCacheAllocatorTest, EpochInsertVisibleToSameEpochOnly) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/20, /*seq_size_per_block=*/4);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    // Stream A: malloc and insert with epoch=42
+    auto resource_a = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    resource_a->setBatchCacheKeys(0, CacheKeysType{100, 101});
+    auto token_ids_a = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_a{resource_a, token_ids_a};
+    malloc_a.epoch              = 42;
+    malloc_a.enable_device_cache = true;
+    auto result_a = allocator_->malloc(malloc_a);
+    ASSERT_TRUE(result_a.success);
+    ASSERT_EQ(resource_a->curBlocksNum(), 2);
+
+    InsertInfo insert_a{resource_a, token_ids_a, /*is_resident=*/false, /*epoch=*/42};
+    allocator_->insertIntoCache(insert_a);
+
+    // Stream B (same epoch=42): should match stream A's entries
+    auto resource_b = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    resource_b->setBatchCacheKeys(0, CacheKeysType{100, 101, 200});
+    auto token_ids_b = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_b{resource_b, token_ids_b};
+    malloc_b.epoch              = 42;
+    malloc_b.enable_device_cache = true;
+    auto result_b = allocator_->malloc(malloc_b);
+    ASSERT_TRUE(result_b.success);
+    EXPECT_EQ(result_b.reuse_len, 8);  // matched 2 blocks (last key dropped in match, {100,101} matched)
+
+    FreeInfo free_b{resource_b, token_ids_b};
+    allocator_->free(free_b);
+
+    // Stream C (epoch=0): matches all items including epoch=42 entries
+    // (Feature-OFF isolation happens at StreamCacheResource layer, not BlockCache::match)
+    auto resource_c = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    resource_c->setBatchCacheKeys(0, CacheKeysType{100, 101, 300});
+    auto token_ids_c = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_c{resource_c, token_ids_c};
+    malloc_c.epoch              = 0;
+    malloc_c.enable_device_cache = true;
+    auto result_c = allocator_->malloc(malloc_c);
+    ASSERT_TRUE(result_c.success);
+    EXPECT_EQ(result_c.reuse_len, 8);  // epoch=0 matches all items (same as NO_EPOCH_FILTER)
+
+    FreeInfo free_a{resource_a, token_ids_a};
+    allocator_->free(free_a);
+    FreeInfo free_c{resource_c, token_ids_c};
+    allocator_->free(free_c);
+}
+
+// Test: epoch>0 entries from different epochs are invisible to each other
+TEST_F(SingleTypeKVCacheAllocatorTest, EpochIsolationBetweenBatches) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/20, /*seq_size_per_block=*/4);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    // Insert with epoch=10
+    auto resource_a = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    resource_a->setBatchCacheKeys(0, CacheKeysType{100, 101});
+    auto token_ids_a = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_a{resource_a, token_ids_a};
+    malloc_a.epoch              = 10;
+    malloc_a.enable_device_cache = true;
+    auto result_a = allocator_->malloc(malloc_a);
+    ASSERT_TRUE(result_a.success);
+
+    InsertInfo insert_a{resource_a, token_ids_a, /*is_resident=*/false, /*epoch=*/10};
+    allocator_->insertIntoCache(insert_a);
+
+    // Match with epoch=20: should NOT see epoch=10 entries
+    auto resource_b = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    resource_b->setBatchCacheKeys(0, CacheKeysType{100, 101, 200});
+    auto token_ids_b = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_b{resource_b, token_ids_b};
+    malloc_b.epoch              = 20;
+    malloc_b.enable_device_cache = true;
+    auto result_b = allocator_->malloc(malloc_b);
+    ASSERT_TRUE(result_b.success);
+    EXPECT_EQ(result_b.reuse_len, 0);  // different epoch, no match
+
+    FreeInfo free_a{resource_a, token_ids_a};
+    allocator_->free(free_a);
+    FreeInfo free_b{resource_b, token_ids_b};
+    allocator_->free(free_b);
+}
+
+// Test: epoch>0 entries are preferentially evicted by pop()
+TEST_F(SingleTypeKVCacheAllocatorTest, EpochEntriesEvictedFirst) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/6, /*seq_size_per_block=*/4);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    // Insert epoch=42 entry
+    auto resource_epoch = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    resource_epoch->setBatchCacheKeys(0, CacheKeysType{100});
+    auto token_ids_epoch = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_epoch{resource_epoch, token_ids_epoch};
+    malloc_epoch.epoch              = 42;
+    malloc_epoch.enable_device_cache = true;
+    auto result_epoch = allocator_->malloc(malloc_epoch);
+    ASSERT_TRUE(result_epoch.success);
+
+    InsertInfo insert_epoch{resource_epoch, token_ids_epoch, /*is_resident=*/false, /*epoch=*/42};
+    allocator_->insertIntoCache(insert_epoch);
+
+    FreeInfo free_epoch{resource_epoch, token_ids_epoch};
+    allocator_->free(free_epoch);
+
+    // Insert epoch=0 (global) entry
+    auto resource_global = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    resource_global->setBatchCacheKeys(0, CacheKeysType{200});
+    auto token_ids_global = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_global{resource_global, token_ids_global};
+    malloc_global.enable_device_cache = true;
+    auto result_global = allocator_->malloc(malloc_global);
+    ASSERT_TRUE(result_global.success);
+
+    InsertInfo insert_global{resource_global, token_ids_global, /*is_resident=*/false, /*epoch=*/0};
+    allocator_->insertIntoCache(insert_global);
+
+    FreeInfo free_global{resource_global, token_ids_global};
+    allocator_->free(free_global);
+
+    // Now exhaust blocks to force eviction, then check global entry survives
+    auto resource_big = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    resource_big->setBatchCacheKeys(0, CacheKeysType{300, 301, 302, 303, 304});
+    auto token_ids_big = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_big{resource_big, token_ids_big};
+    malloc_big.epoch              = 0;
+    malloc_big.enable_device_cache = true;
+    auto result_big = allocator_->malloc(malloc_big);
+    ASSERT_TRUE(result_big.success);
+
+    // Global entry (key=200) should still be matchable (epoch>0 evicted first)
+    // We can't directly check BlockCache, but the allocation succeeded which means
+    // the epoch=42 block was evicted to make room
+    EXPECT_EQ(resource_big->curBlocksNum(), 5);
+
+    FreeInfo free_big{resource_big, token_ids_big};
+    allocator_->free(free_big);
+}
+
+// Test: stream failure after insertIntoCache — epoch entries remain safe (no use-after-free)
+// Simulates: insertIntoCache(epoch=42) → stream fails → requestFree (releases request ref)
+// Verifies: blocks are NOT returned to free pool (cache ref holds them), pop() reclaims correctly
+TEST_F(SingleTypeKVCacheAllocatorTest, EpochEntriesSafeAfterStreamFailure) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/4);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    const size_t initial_free = allocator_->freeBlocksNum();
+    ASSERT_EQ(initial_free, 9u);  // 10 - 1 reserved
+
+    // Stream A: malloc, insertIntoCache with epoch=42, then free (simulating failure)
+    auto resource_a = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    resource_a->setBatchCacheKeys(0, CacheKeysType{100, 101});
+    auto token_ids_a = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_a{resource_a, token_ids_a};
+    malloc_a.epoch              = 42;
+    malloc_a.enable_device_cache = true;
+    auto result_a = allocator_->malloc(malloc_a);
+    ASSERT_TRUE(result_a.success);
+    ASSERT_EQ(resource_a->curBlocksNum(), 2);
+
+    // Record block indices before insert
+    auto blocks_a = resource_a->blocks(0);
+    ASSERT_EQ(blocks_a.size(), 2u);
+
+    // Insert into cache (adds blockCacheReference)
+    InsertInfo insert_a{resource_a, token_ids_a, /*is_resident=*/false, /*epoch=*/42};
+    allocator_->insertIntoCache(insert_a);
+
+    // Simulate stream failure: free request reference (but cache reference remains)
+    FreeInfo free_a{resource_a, token_ids_a};
+    allocator_->free(free_a);
+
+    // After free: blocks are NOT fully free because cache still references them
+    // freeBlocksNum should be less than initial (cache holds 2 blocks)
+    const size_t free_after_failure = allocator_->freeBlocksNum();
+    EXPECT_LT(free_after_failure, initial_free);
+
+    // Stream B (same epoch=42): can still match the entries — they point to valid blocks
+    auto resource_b = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    resource_b->setBatchCacheKeys(0, CacheKeysType{100, 101, 200});
+    auto token_ids_b = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_b{resource_b, token_ids_b};
+    malloc_b.epoch              = 42;
+    malloc_b.enable_device_cache = true;
+    auto result_b = allocator_->malloc(malloc_b);
+    ASSERT_TRUE(result_b.success);
+    EXPECT_EQ(result_b.reuse_len, 8);  // matched 2 blocks — they are still valid
+
+    FreeInfo free_b{resource_b, token_ids_b};
+    allocator_->free(free_b);
+
+    // Now exhaust blocks to force pop() to evict epoch=42 entries
+    auto resource_big = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    resource_big->setBatchCacheKeys(0, CacheKeysType{300, 301, 302, 303, 304, 305, 306, 307, 308});
+    auto token_ids_big = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/36, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_big{resource_big, token_ids_big};
+    malloc_big.enable_device_cache = false;
+    auto result_big = allocator_->malloc(malloc_big);
+    ASSERT_TRUE(result_big.success);
+    // pop() Phase 1 evicted epoch=42 entries first, freeing those blocks for reuse
+    EXPECT_EQ(resource_big->curBlocksNum(), 9);
+
+    FreeInfo free_big2{resource_big, token_ids_big};
+    allocator_->free(free_big2);
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

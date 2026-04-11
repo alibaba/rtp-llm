@@ -25,7 +25,7 @@ public:
         GroupIdType  group_id;
         BlockIdxType block_index;
         bool         is_resident = false;
-        int64_t      epoch       = 0;  // Epoch ID: 0 = global visible, >0 = batch-specific
+        int64_t      epoch       = 0;  // Epoch ID: 0 = globally visible, >=1 = visible only within the same batch
         std::string  debugString() const {
             std::stringstream debug_string;
             debug_string << "CacheItem cache_key: " << cache_key << ", group_id: " << group_id
@@ -70,8 +70,11 @@ public:
 
     bool contains(CacheKeyType cache_key, int group_id = 0) const;
 
-    static constexpr int64_t NO_EPOCH_FILTER = -1;
+    static constexpr int64_t NO_EPOCH_FILTER = 0;
 
+    // current_batch_epoch semantics:
+    //   0 (NO_EPOCH_FILTER): match all items regardless of epoch (default for non-epoch callers)
+    //   >=1: match global items (epoch==0) OR same-batch items (same epoch)
     MatchResult match(CacheKeyType cache_key, int group_id = 0, int64_t current_batch_epoch = NO_EPOCH_FILTER);
 
     BlockIndicesType pop(int n);
@@ -95,7 +98,7 @@ private:
     size_t       seq_size_per_block_;
     LRUCacheType lru_cache_;
     // All public methods acquire mu_ before accessing lru_cache_.
-    // This mutex is required because BlockCache is shared across scheduler and stream threads.
+    // This mutex is required because BlockCache is shared across scheduler and rpc threads.
     mutable std::mutex mu_;
 };
 

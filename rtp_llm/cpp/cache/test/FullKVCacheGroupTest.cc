@@ -264,8 +264,8 @@ TEST_F(FullKVCacheGroupTest, EpochMatchVisibilityTest) {
     auto result3 = group.match({202}, /*current_batch_epoch=*/99);
     EXPECT_EQ(result3.reuse_blocks, 0);
 
-    // NO_EPOCH_FILTER (-1) matches all items (backward compat)
-    auto result4 = group.match({202}, BlockCache::NO_EPOCH_FILTER);
+    // NO_EPOCH_FILTER (0) matches all items regardless of epoch
+    auto result4 = group.match({202}, /*current_batch_epoch=*/0);
     EXPECT_EQ(result4.reuse_blocks, 1);
 }
 

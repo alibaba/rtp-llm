@@ -113,6 +113,10 @@ public:
 
     void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
 
+    // Deep copy: creates independent BlockIds objects (not shared_ptr aliases).
+    // Required because default copy only shallow-copies shared_ptrs.
+    KVCacheResource deepCopy() const;
+
     std::string debugString() const;
 
 private:

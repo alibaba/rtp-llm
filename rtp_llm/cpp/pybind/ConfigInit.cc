@@ -283,7 +283,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
-        .def_readwrite("enable_batch_cache_reuse", &KVCacheConfig::enable_batch_cache_reuse)
+        .def_readwrite("enable_reuse_cache_in_batch", &KVCacheConfig::enable_reuse_cache_in_batch)
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
         .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str)
         .def_readwrite("multi_task_prompt_tokens", &KVCacheConfig::multi_task_prompt_tokens)
@@ -374,10 +374,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_get_broadcast_timeout,
                                       self.reco_put_broadcast_timeout,
                                       self.reco_client_config,
-                                      self.ssm_state_dtype);
+                                      self.ssm_state_dtype,
+                                      self.enable_reuse_cache_in_batch);
             },
             [](py::tuple t) {
-                if (t.size() != 44)
+                if (t.size() != 45)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -425,6 +426,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_put_broadcast_timeout           = t[41].cast<int>();
                     c.reco_client_config                   = t[42].cast<std::string>();
                     c.ssm_state_dtype                      = t[43].cast<std::string>();
+                    c.enable_reuse_cache_in_batch             = t[44].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }

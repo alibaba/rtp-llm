@@ -248,4 +248,31 @@ void KVCacheResource::swapBlocks(size_t group_id, size_t rhs, size_t lhs) {
     group_block_ids[group_id]->swap(rhs, lhs);
 }
 
+KVCacheResource KVCacheResource::deepCopy() const {
+    KVCacheResource copy;
+    copy.cache_keys              = cache_keys;
+    copy.device_reuse_block_num_ = device_reuse_block_num_;
+    copy.memory_reuse_block_num_ = memory_reuse_block_num_;
+    copy.remote_reuse_block_num_ = remote_reuse_block_num_;
+    copy.last_block_aligned_     = last_block_aligned_;
+
+    // Deep copy group blocks (new BlockIds objects, not shared_ptr aliases)
+    copy.group_block_ids.reserve(group_block_ids.size());
+    for (const auto& group : group_block_ids) {
+        copy.group_block_ids.push_back(std::make_shared<BlockIds>(*group));
+    }
+
+    // Rebuild layer→group pointer mapping
+    copy.layer_block_ids.resize(layer_block_ids.size());
+    for (size_t l = 0; l < layer_block_ids.size(); ++l) {
+        for (size_t g = 0; g < group_block_ids.size(); ++g) {
+            if (layer_block_ids[l].get() == group_block_ids[g].get()) {
+                copy.layer_block_ids[l] = copy.group_block_ids[g];
+                break;
+            }
+        }
+    }
+    return copy;
+}
+
 }  // namespace rtp_llm

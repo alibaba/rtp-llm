@@ -51,7 +51,7 @@ struct MallocInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     int64_t                 request_id          = 0;
-    int64_t                 epoch               = 0;     // Batch Epoch ID: 0 = not assigned, >0 = batch-specific
+    int64_t                 epoch               = 0;     // Batch Epoch ID: 0 = globally visible, >=1 = visible only within the same batch
     bool                    verbose             = true;  // for failed log
     bool                    reuse_cache         = true;
     bool                    enable_device_cache = true;
@@ -77,7 +77,7 @@ struct InsertInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
-    int64_t                 epoch = 0;  // Epoch ID: 0 = global visible, >0 = batch-specific
+    int64_t                 epoch = 0;  // Epoch ID: 0 = globally visible, >=1 = visible only within the same batch
 };
 
 }  // namespace rtp_llm

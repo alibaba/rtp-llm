@@ -254,40 +254,10 @@ public:
 
 private:
     void initializeFrom(const BatchKVCacheResource& other) {
-        resetBatchSize(other.batchSize());
-        if (other.batchSize() == 0 || other.groupNums() == 0) {
-            return;
-        }
-
-        // Derive layer_to_group mapping from the first batch's layer/group block pointer relationships.
-        // layer_block_ids[i] is a shared_ptr alias to group_block_ids[gid], so we match by pointer identity.
-        const auto&      src_layers = other.batch_resource[0].layerBlocks();
-        const auto&      src_groups = other.batch_resource[0].groupBlocks();
-        int              layer_num  = static_cast<int>(src_layers.size());
-        std::vector<int> layer_to_group_id;
-        if (layer_num > 0) {
-            layer_to_group_id.resize(layer_num, 0);
-            for (int l = 0; l < layer_num; ++l) {
-                bool found = false;
-                for (int g = 0; g < static_cast<int>(src_groups.size()); ++g) {
-                    if (src_layers[l].get() == src_groups[g].get()) {
-                        layer_to_group_id[l] = g;
-                        found = true;
-                        break;
-                    }
-                }
-                RTP_LLM_CHECK_WITH_INFO(found, "initializeFrom: layer " + std::to_string(l) + " has no matching group");
-            }
-        }
-
-        initGroups(other.groupNums(), layer_num, layer_to_group_id);
-
-        for (int batch_id = 0; batch_id < other.batchSize(); ++batch_id) {
-            for (int group_id = 0; group_id < other.groupNums(); ++group_id) {
-                const auto& blocks = other.batch_resource[batch_id].blocks(group_id);
-                setBatchBlocks(batch_id, group_id, blocks);
-            }
-            setBatchCacheKeys(batch_id, other.batch_resource[batch_id].cacheKeys());
+        batch_resource.clear();
+        batch_resource.reserve(other.batch_resource.size());
+        for (const auto& res : other.batch_resource) {
+            batch_resource.push_back(res.deepCopy());
         }
     }
 
