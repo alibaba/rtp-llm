@@ -40,6 +40,7 @@ log = logging.getLogger(__name__)
 DEFAULT_CONCURRENCY = 16
 MAX_RETRIES = 2
 MAX_REMOTE_TIMEOUT = 7200
+_GPU_COUNT_TIERS = [1, 2, 4]
 
 _PHASE_LINE_RE = re.compile(r"^>>>PHASE:\S+\s+\d+\s*$")
 
@@ -519,6 +520,7 @@ class RemoteREAPIPlugin:
             f"{outputs_prefix}"
             "echo \">>>RTP_REMOTE_HOST_IP $(hostname -I 2>/dev/null | awk '{print $1}')\"; "
             'echo ">>>PHASE:pytest_start $(date +%s)"; '
+            f"python rtp_llm/test/utils/device_resource.py "
             f"python -m pytest -xvs --tb=long --timeout={self.timeout} "
             f"--override-ini='addopts=' {ignore_args} "
             f"{mark_arg}"
@@ -530,23 +532,49 @@ class RemoteREAPIPlugin:
         )
         return ["bash", "-c", f"{runtime.remote_setup_prefix}{run_cmd}"]
 
+    _GPU_LOCK_RETRY_PATTERNS = (
+        b"GpuLockTimeoutError",
+        b"GPU lock timed out",
+    )
+
+    @staticmethod
+    def _is_gpu_lock_failure(result) -> bool:
+        """Check if a remote execution failed due to GPU lock contention."""
+        if result.exit_code == 0:
+            return False
+        for blob in (result.stdout_raw, result.stderr_raw):
+            if blob:
+                for pat in RemoteREAPIPlugin._GPU_LOCK_RETRY_PATTERNS:
+                    if pat in blob:
+                        return True
+        return False
+
     def _execute_with_retry(self, **kwargs) -> ExecutionResult:
         self._ensure_remote_clients()
         last_result = None
         for attempt in range(MAX_RETRIES + 1):
             result = self.executor.execute(**kwargs)
-            if result.exit_code != -1:
+            should_retry = (
+                result.exit_code == -1
+                or self._is_gpu_lock_failure(result)
+            )
+            if not should_retry:
                 return result
             last_result = result
             if attempt < MAX_RETRIES:
-                wait = 2**attempt
+                wait = 2 ** (attempt + 1)
+                reason = (
+                    "GPU lock contention" if self._is_gpu_lock_failure(result)
+                    else "REAPI infra error"
+                )
                 log.warning(
-                    "[RETRY] %s after %ds (attempt %d/%d)",
+                    "[RETRY] %s (%s) after %ds (attempt %d/%d)",
                     (
                         kwargs.get("command", ["?"])[2][:60]
                         if len(kwargs.get("command", [])) > 2
                         else "?"
                     ),
+                    reason,
                     wait,
                     attempt + 1,
                     MAX_RETRIES,
@@ -1331,42 +1359,152 @@ class RemoteREAPIPlugin:
         ci_profile: Optional[str] = None,
         extra_deselect_args: str = "",
     ) -> List[str]:
+        """Generate a multi-phase bash script that runs tests by gpu_count tier.
+
+        Each phase uses a different GPU_COUNT_PER_WORKER and xdist worker count
+        so GPUs are perfectly partitioned with no contention between workers.
+        """
+        total_gpus = self.workers
         ignore_args = quote_args(runtime.ignore_args)
-        # Forward markexpr to remote worker if set locally
         markexpr = getattr(self.config.option, "markexpr", "") or ""
-        mark_arg = f"-m {shlex.quote(markexpr)} " if markexpr else ""
-        profile_arg = (
-            f"--rtp-ci-profile={shlex.quote(ci_profile)} " if ci_profile else ""
-        )
+        deselect_part = f"{extra_deselect_args} " if extra_deselect_args else ""
 
         outputs_prefix = ""
         outputs_postscript = ""
         if self._collect_outputs:
             from .output_collector import make_mkdir_prefix, make_tar_postscript
             outputs_prefix = make_mkdir_prefix()
-            outputs_postscript = make_tar_postscript() + "; "
+            outputs_postscript = make_tar_postscript()
 
-        deselect_part = f"{extra_deselect_args} " if extra_deselect_args else ""
+        # Determine phases: only tiers that fit in total_gpus
+        higher_tiers = sorted(t for t in _GPU_COUNT_TIERS if t > 1 and total_gpus >= t)
+        phases: List[Tuple[int, int, str]] = []
+        for tier in _GPU_COUNT_TIERS:
+            if total_gpus < tier:
+                continue
+            n_workers = total_gpus // tier
+            if tier == 1:
+                excludes = " and ".join(f"not gpu_count_{t}" for t in higher_tiers)
+                if markexpr and excludes:
+                    phase_mark = f"({markexpr}) and {excludes}"
+                elif markexpr:
+                    phase_mark = markexpr
+                else:
+                    phase_mark = excludes
+            else:
+                phase_mark = (
+                    f"({markexpr}) and gpu_count_{tier}" if markexpr
+                    else f"gpu_count_{tier}"
+                )
+            phases.append((tier, n_workers, phase_mark))
 
-        # pytest_args comes from --remote-pytest-args (operator-controlled), not user input
-        run_cmd = (
-            f"{outputs_prefix}"
-            "mkdir -p bazel-testlogs/pytest; "
-            "echo \">>>RTP_REMOTE_HOST_IP $(hostname -I 2>/dev/null | awk '{print $1}')\"; "
-            'echo ">>>PHASE:pytest_start $(date +%s)"; '
-            f"python -m pytest {pytest_args} "
-            f"{profile_arg}"
-            f"{mark_arg}"
-            f"{deselect_part}"
-            f"-n {self.workers} "
-            f"--continue-on-collection-errors "
-            f"--junitxml=bazel-testlogs/pytest/test.xml "
-            f"--override-ini='addopts=' {ignore_args} "
-            f"--tb=short 2>&1; ec=$?; "
-            'echo ">>>PHASE:pytest_end $(date +%s)"; '
-            "echo EXIT_CODE=$ec; "
-            f"echo '<<<JUNIT_XML>>>'; cat bazel-testlogs/pytest/test.xml 2>/dev/null; echo '<<<END_JUNIT_XML>>>'; "
-            f"{outputs_postscript}"
-            "exit $ec"
+        log.info(
+            "Multi-phase session: total_gpus=%d, phases=%s",
+            total_gpus,
+            [(tier, nw) for tier, nw, _ in phases],
         )
+
+        # Resolve CI profile's default_pytest_cli into concrete args for the
+        # remote worker (since rtp-ci-profile plugin is blocked there).
+        profile_cli_args = ""
+        if ci_profile:
+            try:
+                from rtp_llm.test.ci_profile_plugin import (
+                    _get_pytest_ci_section,
+                )
+                section = _get_pytest_ci_section(Path(self.config.rootpath))
+                default_cli = (section.get("default_pytest_cli") or "").strip()
+                if default_cli:
+                    profile_cli_args = default_cli + " "
+            except Exception:
+                profile_cli_args = "-v --tb=short --timeout=300 "
+
+        # Common pytest arguments shared by all phases
+        # Note: profile_arg is NOT forwarded — the rtp-ci-profile plugin is blocked
+        # on the remote worker via -p no:rtp-ci-profile. Profile markexpr is already
+        # resolved locally and applied via phase_mark. Profile's default_pytest_cli
+        # is pre-expanded into profile_cli_args.
+        common = (
+            f"{pytest_args} {profile_cli_args}{deselect_part}"
+            f"--continue-on-collection-errors "
+            f"--override-ini='addopts=' {ignore_args} "
+            f"--tb=short"
+        ).strip()
+
+        # Build multi-phase bash script (newline-separated for heredoc support)
+        lines: List[str] = []
+        if outputs_prefix:
+            lines.append(outputs_prefix.rstrip("; "))
+        lines.append("mkdir -p bazel-testlogs/pytest")
+        lines.append(
+            "echo \">>>RTP_REMOTE_HOST_IP $(hostname -I 2>/dev/null "
+            "| awk '{print $1}')\""
+        )
+        lines.append('echo ">>>PHASE:pytest_start $(date +%s)"')
+        lines.append("final_ec=0; any_ran=0")
+        lines.append('export PYTHONPATH="$PWD:${PYTHONPATH:-}"')
+        lines.append("export PYTHONFAULTHANDLER=1")
+        lines.append("ulimit -c unlimited 2>/dev/null || true")
+        lines.append(
+            'echo ">>>INHERITED_CVD=${CUDA_VISIBLE_DEVICES:-unset} HVD=${HIP_VISIBLE_DEVICES:-unset}"'
+        )
+
+        # Crash diagnostics: all output to /tmp/rtp_crash_diag/ files.
+        # Runs before xdist phases to capture import-time crash stacks.
+        lines.append(
+            'if [ -f rtp_llm/test/utils/crash_diag.py ]; then '
+            'echo ">>>CRASH_DIAG_START"; '
+            'python rtp_llm/test/utils/crash_diag.py --layers LG 2>&1; '
+            'echo ">>>CRASH_DIAG_END"; '
+            'fi'
+        )
+
+        for tier, n_workers, phase_mark in phases:
+            mark_arg = f"-m {shlex.quote(phase_mark)} " if phase_mark else ""
+            lines.append(
+                f'echo "--- Phase: {tier}-GPU tests, {n_workers} workers ---"; '
+                f"export GPU_COUNT_PER_WORKER={tier}; "
+                f"python rtp_llm/test/utils/device_resource.py "
+                f"python -m pytest -p no:remote-gpu -p no:rtp-ci-profile {common} "
+                f"{mark_arg}"
+                f"-n {n_workers} "
+                f"--junitxml=bazel-testlogs/pytest/test_{tier}gpu.xml "
+                f"2>&1; ec=$?; "
+                f"[ $ec -ne 5 ] && any_ran=1; "
+                f"[ $ec -ne 0 ] && [ $ec -ne 5 ] && [ $final_ec -eq 0 ] && final_ec=$ec; "
+                f'echo ">>>PHASE:phase_{tier}gpu_done $(date +%s)"'
+            )
+
+        # Merge per-phase junitxml into single file
+        lines.extend([
+            "python <<'_MERGE_PY_'",
+            "import xml.etree.ElementTree as ET, glob",
+            "s = ET.Element('testsuites')",
+            "for f in sorted(glob.glob('bazel-testlogs/pytest/test_*gpu.xml')):",
+            "    try:",
+            "        r = ET.parse(f).getroot()",
+            "        for c in (list(r) if r.tag == 'testsuites' else [r]): s.append(c)",
+            "    except Exception: pass",
+            "ET.ElementTree(s).write('bazel-testlogs/pytest/test.xml', xml_declaration=True, encoding='unicode')",
+            "_MERGE_PY_",
+        ])
+
+        lines.append("[ $any_ran -eq 0 ] && final_ec=5")
+        lines.append('echo ">>>PHASE:pytest_end $(date +%s)"')
+        lines.append(
+            'echo ">>>GPU_LOCK_DIAG_START"; '
+            'cat /tmp/rtp_llm_gpu_diag/* 2>/dev/null; '
+            'echo ">>>GPU_LOCK_DIAG_END"'
+        )
+        lines.append("echo EXIT_CODE=$final_ec")
+        lines.append(
+            "echo '<<<JUNIT_XML>>>'; "
+            "cat bazel-testlogs/pytest/test.xml 2>/dev/null; "
+            "echo '<<<END_JUNIT_XML>>>'"
+        )
+        if outputs_postscript:
+            lines.append(outputs_postscript)
+        lines.append("exit $final_ec")
+
+        run_cmd = "\n".join(lines)
         return ["bash", "-c", f"{runtime.remote_setup_prefix}{run_cmd}"]

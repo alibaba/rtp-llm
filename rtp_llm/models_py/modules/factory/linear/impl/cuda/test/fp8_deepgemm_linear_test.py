@@ -31,6 +31,9 @@ class CudaFp8DeepGEMMLinearTestBase:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.device == "cpu":
             self.skipTest("FP8 tests require CUDA")
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
         logging.getLogger(
             "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear"
         ).setLevel(logging.WARNING)

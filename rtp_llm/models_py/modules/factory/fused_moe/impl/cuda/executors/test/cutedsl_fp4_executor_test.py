@@ -27,7 +27,7 @@ try:
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutedsl_fp4_executor import (
         CutedslFp4Executor,
     )
-except ImportError as e:
+except (ImportError, RuntimeError) as e:
     pytest.skip(f"flashinfer API not available: {e}", allow_module_level=True)
 from torch.nn import functional as F
 

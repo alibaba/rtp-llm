@@ -92,7 +92,13 @@ def _get_pytest_ci_section(root: Path) -> Dict[str, Any]:
 
 
 def _apply_default_cli(config: pytest.Config, cli: str) -> None:
-    """Apply -v / --tb= / --timeout= to config (best-effort for pytest-timeout)."""
+    """Apply -v / --tb= / --timeout= to config (best-effort for pytest-timeout).
+
+    Only sets defaults — never overwrites values the user explicitly passed on
+    the command line (detected via ``config.getoption`` returning non-default).
+    """
+    # Snapshot user-explicit values *before* we touch anything.
+    user_timeout = config.getoption("--timeout", default=None)
     for tok in shlex.split(cli):
         if tok == "-v":
             config.option.verbose = max(getattr(config.option, "verbose", 0), 1)
@@ -101,9 +107,11 @@ def _apply_default_cli(config: pytest.Config, cli: str) -> None:
         elif tok.startswith("--tb="):
             config.option.tbstyle = tok.split("=", 1)[1]
         elif tok.startswith("--timeout="):
-            val = int(tok.split("=", 1)[1])
-            if hasattr(config.option, "timeout"):
-                setattr(config.option, "timeout", val)
+            # Only apply default timeout when the user did not pass --timeout.
+            if user_timeout is None:
+                val = int(tok.split("=", 1)[1])
+                if hasattr(config.option, "timeout"):
+                    setattr(config.option, "timeout", val)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -142,6 +150,10 @@ def pytest_configure(config: pytest.Config) -> None:
         config.option.markexpr = f"({profile_markexpr}) and ({user_markexpr})"
     else:
         config.option.markexpr = profile_markexpr
+
+    gpu_type = prof.get("gpu_type")
+    if gpu_type and not getattr(config.option, "remote_gpu_type", None):
+        config.option.remote_gpu_type = gpu_type
 
     paths = prof.get("paths")
     if paths is not None:

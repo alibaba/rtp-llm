@@ -234,11 +234,9 @@ def test_single(world_size: int, test_tp_size: int, use_fp8: bool):
         parallelism_config.world_rank = rank
         parallelism_config.local_world_size = world_size
 
-        # 创建进程
-        p = mp.Process(
+        p = mp.get_context("spawn").Process(
             target=worker_function,
             args=(rank, use_fp8, token_num_per_rank, parallelism_config, nccl_port),
-            kwargs={},
         )
         processes.append(p)
         p.start()

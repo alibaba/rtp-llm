@@ -1,14 +1,145 @@
+# ============================================================================
+# xdist Per-Worker GPU Slicing (MUST be first — before any torch import)
+# ============================================================================
+import os as _os
+import sys as _sys
 
+_xdist_worker = _os.environ.get("PYTEST_XDIST_WORKER")
+if _xdist_worker:
+    _os.environ["_RTP_TORCH_BEFORE_SLICE"] = "1" if "torch" in _sys.modules else "0"
+
+    _wn = int(_xdist_worker.replace("gw", ""))
+    _cvd = _os.environ.get("CUDA_VISIBLE_DEVICES")
+    _hvd = _os.environ.get("HIP_VISIBLE_DEVICES")
+    _pool = _cvd or _hvd or ""
+    if _pool:
+        _all_gpus = [g.strip() for g in _pool.split(",") if g.strip()]
+        _gpu_per_worker = int(_os.environ.get("GPU_COUNT_PER_WORKER", "1"))
+        _start = _wn * _gpu_per_worker
+        _my_gpus = _all_gpus[_start : _start + _gpu_per_worker]
+        if _my_gpus:
+            _slice = ",".join(_my_gpus)
+        else:
+            _slice = ""
+        if _cvd is not None:
+            _os.environ["CUDA_VISIBLE_DEVICES"] = _slice
+        if _hvd is not None:
+            _os.environ["HIP_VISIBLE_DEVICES"] = _slice
+        _sys.stderr.write(
+            f"[conftest_gpu_slice] {_xdist_worker}: CVD={_os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')} "
+            f"HVD={_os.environ.get('HIP_VISIBLE_DEVICES', 'unset')} "
+            f"torch_before_slice={_os.environ['_RTP_TORCH_BEFORE_SLICE']} "
+            f"(from pool {_pool}, per_worker={_gpu_per_worker})\n"
+        )
+        _sys.stderr.flush()
+
+    # File-based faulthandler: write crash stacks to per-worker files so they
+    # survive even when xdist swallows worker stderr (which it always does on
+    # crash — see xdist/workermanage.py:406 "Not properly terminated").
+    import faulthandler as _fh
+    _fault_dir = "/tmp/rtp_xdist_crash"
+    _os.makedirs(_fault_dir, exist_ok=True)
+    _fault_path = f"{_fault_dir}/{_xdist_worker}.fault"
+    _fault_file = open(_fault_path, "w")
+    _fh.enable(file=_fault_file, all_threads=True)
+    _sys.stderr.write(f"[conftest] faulthandler → {_fault_path}\n")
+    _sys.stderr.flush()
+
+# ============================================================================
+# GPU isolation is handled by:
+#   - conftest.py module-level code (above): xdist workers slice inherited CVD
+#   - device_resource.py __main__: per-test remote / smoke wraps pytest
+# Both set CUDA_VISIBLE_DEVICES BEFORE entry-point plugins trigger cuInit().
+# ============================================================================
 import logging
 import os
-import pytest
 import re
+
+import pytest
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Session-scoped diagnostic — prints GPU assignment visible in xdist output
+# ============================================================================
+
+@pytest.fixture(scope="session", autouse=True)
+def _log_gpu_assignment():
+    """Log GPU assignment at session start (visible in xdist worker output)."""
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "controller")
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "unset")
+    hvd = os.environ.get("HIP_VISIBLE_DEVICES", "unset")
+    gpus = f"CUDA={cvd}" if hvd == "unset" else f"HIP={hvd}"
+    print(f"\n[GPU_ASSIGN] {worker} pid={os.getpid()} {gpus}")
+    try:
+        import torch
+        if torch.cuda.is_available():
+            dc = torch.cuda.device_count()
+            free, total = torch.cuda.mem_get_info(0)
+            name = torch.cuda.get_device_name(0)
+            print(
+                f"[GPU_VERIFY] {worker} device_count={dc} name={name} "
+                f"free={free/1e9:.1f}GB total={total/1e9:.1f}GB"
+            )
+    except Exception as e:
+        print(f"[GPU_VERIFY] {worker} error: {e}")
+    yield
+
+
+# ============================================================================
+# Per-test GPU memory monitoring + cleanup
+# ============================================================================
+
+def _get_gpu_mem_mb():
+    """Return (allocated_MB, reserved_MB) for current default CUDA device, or None."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return None
+        return (
+            torch.cuda.memory_allocated() / (1024 * 1024),
+            torch.cuda.memory_reserved() / (1024 * 1024),
+        )
+    except Exception:
+        return None
+
+
+@pytest.fixture(scope="function", autouse=True)
+def _gpu_mem_monitor(request):
+    """Per-test GPU memory tracking and aggressive cleanup between tests."""
+    before = _get_gpu_mem_mb()
+    yield
+
+    try:
+        import gc
+        gc.collect()
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+    after = _get_gpu_mem_mb()
+
+    if before is not None and after is not None:
+        alloc_before, reserved_before = before
+        alloc_after, reserved_after = after
+        delta_alloc = alloc_after - alloc_before
+        delta_reserved = reserved_after - reserved_before
+        worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+        if abs(delta_alloc) > 10 or abs(delta_reserved) > 100:
+            logger.warning(
+                "[GPU_MEM] %s %s: alloc %.0f->%.0f MB (d%+.0f), "
+                "reserved %.0f->%.0f MB (d%+.0f)",
+                worker, request.node.nodeid,
+                alloc_before, alloc_after, delta_alloc,
+                reserved_before, reserved_after, delta_reserved,
+            )
 
 
 # ============================================================================
@@ -47,70 +178,8 @@ def pytest_configure(config):
 
 
 # ============================================================================
-# GPU Lock — delegates to DeviceResource (file-lock based, cross-process safe)
+# Collection hooks
 # ============================================================================
-
-def _get_gpu_count_from_markers(node) -> int:
-    """Get required GPU count from @pytest.mark.gpu(count=N), GPU_COUNT env, or default 1."""
-    gpu_marker = node.get_closest_marker("gpu")
-    if gpu_marker:
-        if "count" in gpu_marker.kwargs:
-            return int(gpu_marker.kwargs["count"])
-        return 1
-
-    gpu_count_env = os.environ.get("GPU_COUNT")
-    if gpu_count_env:
-        try:
-            return int(gpu_count_env)
-        except ValueError:
-            logger.warning(f"Invalid GPU_COUNT env: {gpu_count_env}, using default 1")
-
-    return 1
-
-
-@pytest.fixture(scope="function")
-def gpu_lock(request):
-    """
-    Function-scoped GPU lock — acquires N GPUs for this test.
-
-    N is determined by @pytest.mark.gpu(count=N) or GPU_COUNT env.
-    Uses DeviceResource file locks for cross-process safety:
-    - xdist workers on the same session compete for GPUs
-    - Multiple sessions on the same machine compete via the same file locks
-    - REAPI ensures the machine has enough GPUs (via gpu_count scheduling)
-
-    count=1: lock 1 GPU, other workers/sessions can use remaining GPUs
-    count=2: lock 2 GPUs
-    count=4: lock 4 GPUs, other tests wait
-    """
-    if request.node.get_closest_marker("no_gpu_lock"):
-        yield None
-        return
-
-    gpu_count = _get_gpu_count_from_markers(request.node)
-    if gpu_count < 1:
-        yield None
-        return
-
-    from rtp_llm.test.utils.device_resource import (
-        DeviceResource,
-        get_device_info,
-        _get_visible_devices_env,
-    )
-
-    device_info = get_device_info()
-    if not device_info:
-        yield None
-        return
-
-    device_name, _ = device_info
-    env_name = _get_visible_devices_env(device_name)
-
-    with DeviceResource(required_gpu_count=gpu_count) as gpu_resource:
-        os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
-        logger.info(f"gpu_lock: {env_name}={os.environ[env_name]} (count={gpu_count})")
-        yield gpu_resource
-
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):

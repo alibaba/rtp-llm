@@ -6,7 +6,7 @@ try:
         scaled_fp4_quant_wrapper,
     )
     from flashinfer import fp4_quantize
-except ImportError as e:
+except (ImportError, RuntimeError) as e:
     pytest.skip(f"FP4 CUDA stack unavailable: {e}", allow_module_level=True)
 
 pytestmark = [pytest.mark.manual]

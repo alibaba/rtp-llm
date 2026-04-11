@@ -34,7 +34,7 @@ _test_params = build_smoke_params(pytest)
 @pytest.mark.manual
 @pytest.mark.timeout(7200)
 @pytest.mark.parametrize("test_name,test_config", _test_params)
-def test_smoke(test_name: str, test_config: dict, gpu_lock):
+def test_smoke(test_name: str, test_config: dict):
     """Smoke test stub - actual execution happens on remote GPU worker.
 
     When --remote is used, the plugin intercepts this and runs it remotely.

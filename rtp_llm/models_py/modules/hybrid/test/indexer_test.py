@@ -29,7 +29,6 @@ def check_cuda_version() -> bool:
 
 CUDA_VERSION_OK = check_cuda_version()
 SKIP_REASON = "CUDA version must be >= 12.9 for this test"
-CUDA_VERSION_OK = False
 
 from rtp_llm.config.model_config import ModelConfig
 

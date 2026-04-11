@@ -177,6 +177,15 @@ class TestHeadwisePrefillOp(unittest.TestCase):
         op._get_headwise_config(0)
         return op.forward(qkv, cache, None)
 
+    def tearDown(self):
+        """Release GPU memory between test methods."""
+        self._op = None
+        self._cached_op_key = None
+        self.compiled_flex_attention = None
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
     # -------------------------
     # Core Test Runner Logic
     # -------------------------
@@ -217,6 +226,13 @@ class TestHeadwisePrefillOp(unittest.TestCase):
 
         torch.testing.assert_close(out_ref_flat, out_op_flat, rtol=rtol, atol=atol)
         logging.info(f"✓ Test passed for case: {case}")
+
+        del q, k, v, cache, qkv, attn_inputs, out_op, out_ref, out_op_flat, out_ref_flat
+        self._op = None
+        self._cached_op_key = None
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
 
     # -------------------------
     # Test Cases (replaces the old main loop)

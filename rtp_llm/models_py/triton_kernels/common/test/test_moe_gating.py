@@ -125,6 +125,7 @@ class TestCorrectness(unittest.TestCase):
                             f"dtype={str(dtype).replace('torch.',''):>8}  "
                             f"max_diff={max_diff:.3e}  OK"
                         )
+                    torch.cuda.empty_cache()
 
     def test_nonpow2_H(self):
         """Non-power-of-2 H values to verify boundary mask correctness."""
@@ -270,7 +271,6 @@ class TestPerformance(unittest.TestCase):
                         self.__class__._results.append(
                             (T, H, dtype_str, torch_us, triton_us)
                         )
-                        # Soft assertion: not catastrophically slower
                         self.assertLessEqual(
                             triton_us,
                             torch_us * 1.5,
@@ -278,6 +278,7 @@ class TestPerformance(unittest.TestCase):
                             f"Triton {triton_us:.1f}µs is >50% slower than "
                             f"Torch {torch_us:.1f}µs",
                         )
+                    torch.cuda.empty_cache()
 
 
 # ---------------------------------------------------------------------------

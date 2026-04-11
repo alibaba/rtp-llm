@@ -338,12 +338,7 @@ class TestCollectiveOperations(unittest.TestCase):
         if not torch.cuda.is_available():
             self.skipTest("CUDA not available")
 
-        # Set spawn method for multiprocessing
-        try:
-            mp.set_start_method("spawn", force=True)
-        except RuntimeError:
-            pass  # Already set
-
+        self._mp_ctx = mp.get_context("spawn")
         self.port_manager = PortManager()
 
     def tearDown(self):
@@ -360,7 +355,7 @@ class TestCollectiveOperations(unittest.TestCase):
         try:
             processes = []
             for rank in range(world_size):
-                p = mp.Process(
+                p = self._mp_ctx.Process(
                     target=worker_func,
                     args=(rank, world_size, tp_size, dp_size, nccl_port),
                     name=f"rank-{rank}",
@@ -418,7 +413,7 @@ class TestDistributedEnvironment(unittest.TestCase):
     """Test distributed environment initialization"""
 
     def setUp(self):
-        mp.set_start_method("spawn", force=True)
+        pass
 
     def test_distributed_environment_initialized(self):
         """Test checking if distributed environment is initialized"""

@@ -267,7 +267,7 @@ class MoeReorderTest(TestCase):
                 num_expert=params[1],
                 hidden_dim=params[2],
                 top_k=params[3],
-                dtype=params[4],
+                dtype=str(params[4]),
                 ep_size=params[5],
             ):
                 top_k, num_expert = params[3], params[1]

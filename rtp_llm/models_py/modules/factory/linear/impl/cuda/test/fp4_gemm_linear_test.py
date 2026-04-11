@@ -14,7 +14,7 @@ try:
         CudaFp4GEMMLinear,
     )
     from flashinfer import fp4_quantize
-except ImportError as e:
+except (ImportError, RuntimeError) as e:
     pytest.skip(f"FP4 CUDA stack unavailable: {e}", allow_module_level=True)
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.device.device_impl import CudaImpl

@@ -179,11 +179,7 @@ class TestUserBufferCommunicator(unittest.TestCase):
         if not torch.cuda.is_available():
             self.skipTest("CUDA not available")
 
-        # Set spawn method for multiprocessing
-        try:
-            mp.set_start_method("spawn", force=True)
-        except RuntimeError:
-            pass  # Already set
+        self._mp_ctx = mp.get_context("spawn")
         self.port_manager = PortManager()
 
     def _run_multi_process_test(self, worker_func, world_size: int, test_name: str):
@@ -197,7 +193,7 @@ class TestUserBufferCommunicator(unittest.TestCase):
         try:
             processes = []
             for rank in range(world_size):
-                p = mp.Process(
+                p = self._mp_ctx.Process(
                     target=worker_func,
                     args=(rank, world_size, master_port),
                     name=f"rank-{rank}",

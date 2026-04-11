@@ -74,7 +74,7 @@ class MLPTest(TestCase):
             self.NUM_TOKENS, self.HIDDEN_SIZES, self.DTYPES
         ):
             with self.subTest(
-                num_tokens=params[0], hidden_size=params[1], dtype=params[2]
+                num_tokens=params[0], hidden_size=params[1], dtype=str(params[2])
             ):
                 self._run_mlp_test(*params)
 

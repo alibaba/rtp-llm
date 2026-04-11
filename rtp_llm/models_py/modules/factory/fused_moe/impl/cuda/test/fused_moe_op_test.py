@@ -219,7 +219,7 @@ class FusedMoEOpTest(TestCase):
                 num_tokens=params[0],
                 num_expert=params[1],
                 top_k=params[2],
-                dtype=params[3],
+                dtype=str(params[3]),
                 hidden_dim=params[4],
                 inter_dim=params[5],
             ):

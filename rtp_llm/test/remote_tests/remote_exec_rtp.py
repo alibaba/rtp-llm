@@ -172,12 +172,24 @@ def build_remote_setup_command(rootdir: Path) -> str:
     CWD on the remote worker is github-opensource (CAS rootdir).
     prepare_venv.py is included in the CAS upload via _collect_base_files().
     """
+    gpu_diag = (
+        'echo ">>>GPU_DIAG_START"; '
+        "nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu "
+        "--format=csv,noheader 2>/dev/null || true; "
+        "nvidia-smi --query-compute-apps=pid,gpu_uuid,used_gpu_memory,name "
+        "--format=csv,noheader 2>/dev/null || true; "
+        "for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | tr -d ' '); do "
+        '  echo "PID=$p CMD=$(cat /proc/$p/cmdline 2>/dev/null | tr \'\\0\' \' \' || echo N/A) '
+        'CGROUP=$(cat /proc/$p/cgroup 2>/dev/null | head -1 || echo N/A)"; '
+        "done; "
+        'echo ">>>GPU_DIAG_END"; '
+    )
     return (
         "export HOME=/home/admin; "
         "export RTP_SKIP_BAZEL_BUILD=1; "
-        # for nvidia driver & cuda sdk
         "export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64; "
-        'echo ">>>PHASE:pip_install_start $(date +%s)"; '
+        + gpu_diag
+        + 'echo ">>>PHASE:pip_install_start $(date +%s)"; '
         'eval "$(/opt/conda310/bin/python internal_source/ci/prepare_venv.py)"; '
         'echo ">>>PHASE:pip_install_done $(date +%s)"; '
     )

@@ -1239,11 +1239,18 @@ class BuildBazelExtension(build_ext):
 if bdist_wheel is not None:
 
     class BdistWheelWithPlatform(bdist_wheel):
-        """Custom bdist_wheel that sets platform-specific wheel name."""
+        """Custom bdist_wheel that sets platform-specific wheel name.
+
+        Set WHEEL_COMPRESSION=stored (or pass --compression=stored) to skip
+        zlib compression.  For large native .so wheels this can cut packaging
+        time from minutes to seconds with negligible size difference.
+        """
 
         def finalize_options(self):
+            env_comp = os.environ.get("WHEEL_COMPRESSION")
+            if env_comp and not getattr(self, "_compression_set_by_cli", False):
+                self.compression = env_comp
             super().finalize_options()
-            # Force platform-specific wheel (not "any")
             self.root_is_pure = False
             self.plat_name_supplied = True
             self.plat_name = get_platform_tag()

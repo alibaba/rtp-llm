@@ -1,16 +1,36 @@
 import json
 import logging
 import os
-import signal
 import socket
 import subprocess
 import sys
 import time
 import traceback
 from contextlib import ExitStack
-from typing import Any, List, Set
+from typing import Any, Dict, List, Optional
 
 from filelock import FileLock, Timeout
+
+GPU_LOCK_TIMEOUT_ENV = "RTP_GPU_LOCK_TIMEOUT"
+GPU_LOCK_DEFAULT_TIMEOUT = 120
+GPU_STATUS_ROOT = "/tmp/rtp_llm/smoke/test/gpu_status"
+GPU_GLOBAL_LOCK_FILE = "/tmp/rtp_llm/smoke/test/gpu_status_lock"
+
+
+class GpuLockError(RuntimeError):
+    """Raised when GPU lock acquisition fails (timeout or insufficient GPUs)."""
+    pass
+
+
+class GpuLockTimeoutError(GpuLockError):
+    """Raised when GPU lock acquisition times out (GPUs are busy)."""
+    pass
+
+
+class GpuInsufficientError(GpuLockError):
+    """Raised when the visible GPU count cannot satisfy the request at all."""
+    pass
+
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -116,7 +136,11 @@ def get_gpu_ids():
     logging.info(f"{device_info}")
 
     if not device_info:
-        return list(range(128))
+        raise RuntimeError(
+            "get_gpu_ids(): no GPU/accelerator detected — "
+            "nvidia-smi / rocm-smi not found or returned no devices. "
+            "Cannot allocate GPUs."
+        )
     device_name = device_info[0]
     total_gpus = range(device_info[1])
 
@@ -128,17 +152,35 @@ def get_gpu_ids():
 
 
 class DeviceResource:
-    def __init__(self, required_gpu_count: int):
+    def __init__(self, required_gpu_count: int, timeout: Optional[int] = None):
+        """
+        Args:
+            timeout: seconds to wait for GPU locks.
+                     None (default) = wait forever (for Bazel / standalone usage).
+                     Pytest fixtures should pass an explicit timeout.
+        """
         self.required_gpu_count = required_gpu_count
         self.total_gpus = get_gpu_ids()
         if required_gpu_count > len(self.total_gpus):
-            raise ValueError(
-                f"required gpu count {required_gpu_count} is greater than total gpu count {len(self.total_gpus)}"
+            raise GpuInsufficientError(
+                f"Need {required_gpu_count} GPUs but only {len(self.total_gpus)} visible "
+                f"(CUDA/HIP_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', os.environ.get('HIP_VISIBLE_DEVICES', 'unset'))})"
             )
-        self.gpu_ids: List[int] = []
+        os.makedirs(GPU_STATUS_ROOT, exist_ok=True)
+        env_timeout = os.environ.get(GPU_LOCK_TIMEOUT_ENV)
+        if timeout is not None:
+            self.timeout = timeout
+        elif env_timeout is not None:
+            self.timeout = int(env_timeout)
+        else:
+            self.timeout = None  # wait forever (Bazel / standalone)
+        self.gpu_ids: List[str] = []
         self.gpu_locks = ExitStack()
-        self.global_lock_file = "/tmp/rtp_llm/smoke/test/gpu_status_lock"
-        self.gpu_status_root_path = "/tmp/rtp_llm/smoke/test/gpu_status"
+        self.global_lock_file = GPU_GLOBAL_LOCK_FILE
+        self.gpu_status_root_path = GPU_STATUS_ROOT
+        self._gpu_bad_until: Dict[str, float] = {}
+        self.bad_gpu_cooldown_s = 30
+        self._lock_start_idx = 0
 
     def _get_gpu_pids(self, gpu_id: str) -> List[int]:
         """Return PIDs of compute processes on a physical GPU.
@@ -179,73 +221,46 @@ class DeviceResource:
             return False
         return all(not self._pid_alive(p) for p in pids)
 
-    def _ensure_gpus_released(self, timeout: int = 30):
-        """Wait until acquired GPUs have no stale compute processes.
+    def _check_gpu_usable(self) -> bool:
+        """Return False if any locked GPU has zombie CUDA contexts. Never kills processes.
 
-        Uses SIGTERM first to allow graceful CUDA cleanup, then SIGKILL
-        as a last resort. Detects zombie GPU contexts (dead processes that
-        still hold GPU memory) which indicate unrecoverable state.
-
-        Returns True if GPUs are clean, False if zombie contexts detected.
+        NOTE on Docker PID namespaces: nvidia-smi reports host-namespace PIDs,
+        while /proc/<pid> and os.kill() operate in the container namespace.
+        This means _pid_alive() may return False for a host PID that is actually
+        alive (just invisible from inside the container), or True for a
+        completely unrelated container-local process.  We only use this check
+        to detect the worst case — zombie GPU contexts where memory is
+        permanently leaked.  False positives (skipping a usable GPU) are
+        harmless; false negatives are caught by file locks.
         """
-        my_pid = os.getpid()
-        sigterm_sent: Set[int] = set()
-        sigkill_sent: Set[int] = set()
-        deadline = time.time() + timeout
+        for gpu_id in self.gpu_ids:
+            if self._has_zombie_gpu_contexts(str(gpu_id)):
+                logging.warning("GPU %s has zombie contexts (dead PIDs still hold memory), skipping", gpu_id)
+                return False
+        return True
 
-        while time.time() < deadline:
-            all_clear = True
-            for gpu_id in self.gpu_ids:
-                stale = [p for p in self._get_gpu_pids(gpu_id) if p != my_pid]
-                live_stale = [p for p in stale if self._pid_alive(p)]
+    def _iter_gpu_ids(self):
+        """Yield GPU IDs starting from _lock_start_idx, wrapping around.
 
-                if not stale:
-                    continue
-
-                if not live_stale:
-                    # All nvidia-smi PIDs are dead → zombie GPU contexts
-                    logging.warning(
-                        f"GPU {gpu_id} has zombie CUDA contexts (dead PIDs: {stale}). "
-                        f"Memory is permanently leaked until GPU reset."
-                    )
-                    return False
-
-                all_clear = False
-                for pid in live_stale:
-                    if pid not in sigterm_sent:
-                        try:
-                            os.kill(pid, signal.SIGTERM)
-                            logging.info(f"SIGTERM pid {pid} on GPU {gpu_id}")
-                            sigterm_sent.add(pid)
-                        except (ProcessLookupError, PermissionError):
-                            pass
-                    elif pid not in sigkill_sent:
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                            logging.info(f"SIGKILL pid {pid} on GPU {gpu_id}")
-                            sigkill_sent.add(pid)
-                        except (ProcessLookupError, PermissionError):
-                            pass
-                break
-
-            if all_clear:
-                return True
-            time.sleep(1)
-
-        logging.warning(f"GPU cleanup timed out after {timeout}s for GPUs {self.gpu_ids}")
-        return False
+        This distributes lock attempts across GPUs so multiple concurrent
+        DeviceResource instances don't all contend for GPU 0 first.
+        """
+        n = len(self.total_gpus)
+        for i in range(n):
+            yield self.total_gpus[(self._lock_start_idx + i) % n]
+        self._lock_start_idx = (self._lock_start_idx + 1) % n
 
     def _lock_gpus(self):
         with ExitStack() as stack:
             gpu_ids = []
-            for id in self.total_gpus:
-                if self._has_zombie_gpu_contexts(str(id)):
-                    logging.info(f"skip GPU {id}: zombie CUDA contexts detected")
+            now = time.time()
+            for id in self._iter_gpu_ids():
+                if self._gpu_bad_until.get(str(id), 0) > now:
                     continue
                 lock_device = FileLock(f"{self.gpu_status_root_path}/{id}")
                 try:
-                    stack.enter_context(lock_device.acquire(timeout=1))
-                except Timeout as _:
+                    stack.enter_context(lock_device.acquire(timeout=0))
+                except Timeout:
                     logging.info(f"lock device {id} failed")
                     continue
                 gpu_ids.append(str(id))
@@ -258,25 +273,35 @@ class DeviceResource:
         return False
 
     def __enter__(self):
-        logging.info(f"waiting for gpu count:[{self.required_gpu_count}]")
+        timeout_desc = f"{self.timeout}s" if self.timeout is not None else "infinite"
+        logging.info(f"waiting for gpu count:[{self.required_gpu_count}] timeout={timeout_desc}")
+        deadline = (time.time() + self.timeout) if self.timeout is not None else None
         while True:
+            locked = False
             with FileLock(self.global_lock_file):
                 try:
-                    if self._lock_gpus():
-                        gpus_clean = self._ensure_gpus_released()
-                        if gpus_clean:
-                            break
-                        # Zombie contexts found — release these GPUs and retry
-                        logging.warning(f"GPUs {self.gpu_ids} have zombie contexts, retrying")
-                        self.gpu_ids = []
-                        self.gpu_locks.close()
-                except Exception as e:
-                    logging.warn(f"{traceback.format_exc()}")
+                    locked = self._lock_gpus()
+                except (GpuLockError, GpuInsufficientError):
+                    raise
+                except Exception:
+                    logging.warning(f"{traceback.format_exc()}")
+            if locked:
+                if self._check_gpu_usable():
+                    break
+                logging.warning("GPUs %s have zombie contexts, retrying", self.gpu_ids)
+                for gid in self.gpu_ids:
+                    self._gpu_bad_until[gid] = time.time() + self.bad_gpu_cooldown_s
+                self.gpu_ids = []
+                self.gpu_locks.close()
+            if deadline is not None and time.time() >= deadline:
+                raise GpuLockTimeoutError(
+                    f"GPU lock timed out after {self.timeout}s: "
+                    f"need {self.required_gpu_count} GPUs from {self.total_gpus}"
+                )
             time.sleep(1)
         return self
 
     def __exit__(self, *args: Any):
-        self._ensure_gpus_released()
         with FileLock(self.global_lock_file):
             logging.info(f"release gpu:{self.gpu_ids}")
             self.gpu_ids = []
@@ -293,25 +318,32 @@ def _get_visible_devices_env(device_name: str) -> str:
 
 if __name__ == "__main__":
     device_info = get_device_info()
+    require_count = int(
+        os.environ.get("GPU_COUNT", os.environ.get("WORLD_SIZE", "1"))
+    )
+
     if not device_info:
-        logging.info("no device detected, running without GPU isolation")
+        if require_count > 0:
+            raise RuntimeError(
+                f"[device_resource] GPU_COUNT={require_count} requested but no GPU detected "
+                f"(nvidia-smi / rocm-smi not found or returned no devices)"
+            )
+        logging.warning(
+            "[device_resource] no GPU detected, running without GPU isolation"
+        )
+        result = subprocess.run(sys.argv[1:])
+        sys.exit(result.returncode)
+
+    device_name, _ = device_info
+    env_name = _get_visible_devices_env(device_name)
+
+    with DeviceResource(require_count) as gpu_resource:
+        os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
+        sys.stderr.write(
+            f"[device_resource] {env_name}={os.environ[env_name]} "
+            f"locked={gpu_resource.gpu_ids} pid={os.getpid()}\n"
+        )
+        sys.stderr.flush()
         result = subprocess.run(sys.argv[1:])
         logging.info("exitcode: %d", result.returncode)
         sys.exit(result.returncode)
-    else:
-        try:
-            from jit_sys_path_setup import setup_jit_cache
-            setup_jit_cache()
-        except Exception as e:
-            logging.warning(f"JIT cache setup skipped: {e}")
-
-        device_name, _ = device_info
-        require_count = int(
-            os.environ.get("WORLD_SIZE", os.environ.get("GPU_COUNT", "1"))
-        )
-        with DeviceResource(require_count) as gpu_resource:
-            env_name = _get_visible_devices_env(device_name)
-            os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
-            result = subprocess.run(sys.argv[1:])
-            logging.info("exitcode: %d", result.returncode)
-            sys.exit(result.returncode)

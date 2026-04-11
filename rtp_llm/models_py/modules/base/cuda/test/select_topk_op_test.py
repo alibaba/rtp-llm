@@ -170,7 +170,7 @@ class SelectTopkOpTest(TestCase):
                 num_tokens=params[0],
                 num_expert=params[1],
                 top_k=params[2],
-                dtype=params[3],
+                dtype=str(params[3]),
             ):
                 self._run_select_topk_op_test(*params)
 
