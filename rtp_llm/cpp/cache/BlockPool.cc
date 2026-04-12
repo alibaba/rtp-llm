@@ -192,8 +192,19 @@ BlockCachePtr BlockPool::blockCache() {
 }
 
 void BlockPool::initFreeBlocks() {
-    // block 0 is reserved
-    for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
+    // Validation experiment: hard-cap usable physical block ids to avoid ids whose
+    // page_stride * block_id byte offset can cross the int32 addressing limit in
+    // ROCm attention kernels. Block 0 remains reserved.
+    const BlockIdxType configured_last_block_id = static_cast<BlockIdxType>(config_.block_num) - 1;
+    max_usable_block_id_                        = std::min(configured_last_block_id, kMaxSafeBlockIdForInt32Offset);
+    if (configured_last_block_id > max_usable_block_id_) {
+        RTP_LLM_LOG_WARNING("BlockPool validation clamp enabled: configured_last_block_id=%d, max_usable_block_id=%d, "
+                            "disabled_blocks=%d",
+                            configured_last_block_id,
+                            max_usable_block_id_,
+                            configured_last_block_id - max_usable_block_id_);
+    }
+    for (BlockIdxType i = 1; i <= max_usable_block_id_; ++i) {
         free_block_ids_.insert(i);
     }
     request_ref_counter_.init(config_.block_num);
@@ -434,8 +445,7 @@ size_t BlockPool::freeBlocksNum() const {
 }
 
 size_t BlockPool::totalBlocksNum() const {
-    // reserve block 0 for internal use
-    return config_.block_num - 1;
+    return max_usable_block_id_ > 0 ? static_cast<size_t>(max_usable_block_id_) : 0;
 }
 
 // Available blocks need to satisfy two conditions:

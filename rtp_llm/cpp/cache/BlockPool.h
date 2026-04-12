@@ -76,6 +76,8 @@ public:
     }
 
 private:
+    static constexpr BlockIdxType kMaxSafeBlockIdForInt32Offset = 32767;
+
     void initFreeBlocks();
     void tryFreeBlocks(const BlockIndicesType& block_indices);
     // global_layer_id -> {layout_index, local_layer_id}
@@ -119,6 +121,7 @@ private:
     mutable std::mutex     free_mu_;
     mutable std::mutex     ref_mu_;
     std::set<BlockIdxType> free_block_ids_;
+    BlockIdxType           max_usable_block_id_ = 0;
     BlockRefCounter        request_ref_counter_;
     BlockRefCounter        connector_ref_counter_;
     BlockRefCounter        req_con_ref_counter_;

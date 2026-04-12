@@ -65,9 +65,9 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
                                         size_t            v_scale_stride_bytes = 0,
                                         rtp_llm::DataType dtype                = rtp_llm::DataType::TYPE_FP16,
                                         uint32_t          local_head_num_kv    = 1,
-                                        uint32_t          seq_size_per_block   = 1) {
+                                        uint32_t          seq_size_per_block   = 1,
+                                        uint32_t          block_num            = 10) {
     constexpr uint32_t kLayerNum = 4;
-    constexpr uint32_t kBlockNum = 10;
 
     auto spec = createTestKvCacheSpec(
         kLayerNum, dtype, local_head_num_kv, seq_size_per_block, k_block_stride_bytes, v_block_stride_bytes);
@@ -76,7 +76,7 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
     rtp_llm::CacheConfig cache_config;
     cache_config.cache_specs           = {spec};
     cache_config.layer_num             = kLayerNum;
-    cache_config.block_num             = kBlockNum;
+    cache_config.block_num             = block_num;
     cache_config.dtype                 = dtype;
     cache_config.seq_size_per_block    = seq_size_per_block;
     cache_config.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;

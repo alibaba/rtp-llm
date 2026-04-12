@@ -94,6 +94,28 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 1);
 }
 
+TEST_F(BlockPoolTest, ClampUsableBlockIdsToSafeInt32Range) {
+    auto config = createTestConfig(/*k_block_stride_bytes=*/512,
+                                   /*v_block_stride_bytes=*/512,
+                                   /*k_scale_stride_bytes=*/0,
+                                   /*v_scale_stride_bytes=*/0,
+                                   /*dtype=*/rtp_llm::DataType::TYPE_FP16,
+                                   /*local_head_num_kv=*/1,
+                                   /*seq_size_per_block=*/1,
+                                   /*block_num=*/40000);
+    block_pool_ = std::make_shared<BlockPool>(config);
+    ASSERT_TRUE(block_pool_->init());
+
+    EXPECT_EQ(block_pool_->totalBlocksNum(), 32767u);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), 32767u);
+
+    auto blocks = block_pool_->malloc(32767);
+    ASSERT_EQ(blocks.size(), 32767u);
+    EXPECT_EQ(blocks.front(), 1);
+    EXPECT_EQ(blocks.back(), 32767);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), 0u);
+}
+
 TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     // Use createSpConfig logic so that global_layer_ids is filled for main + sub-model layers.
     // main(2 layers) + mtp1(1 layer) + mtp2(1 layer)
