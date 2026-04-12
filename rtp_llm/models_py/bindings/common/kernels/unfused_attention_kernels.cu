@@ -2976,8 +2976,8 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
                         dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                     k_cache[inKBlockIdx] = reinterpret_cast<T*>(&k)[vec_i];
 
-                    const int inVBlockIdx =
-                        kv_block_array.getVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
+                    const int inVBlockIdx = kv_block_array.getVLocalIdx<KvCacheDataType::BASE>(
+                        dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                     v_cache[inVBlockIdx] = reinterpret_cast<T*>(&v)[vec_i];
                 }
             }
@@ -3521,8 +3521,8 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
                         dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                     k_cache[inKBlockIdx] = reinterpret_cast<T*>(&k)[vec_i];
 
-                    const int inVBlockIdx =
-                        kv_block_array.getVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
+                    const int inVBlockIdx = kv_block_array.getVLocalIdx<KvCacheDataType::BASE>(
+                        dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                     v_cache[inVBlockIdx] = reinterpret_cast<T*>(&v)[vec_i];
                 }
             }
@@ -3670,8 +3670,10 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
                     const int inKBlockIdx = kv_block_array.getKLocalIdx<KvCacheDataType::FP8>(
                         dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
 
-                    const int inVBlockIdx = kv_block_array.getVLocalIdx<KvCacheDataType::FP8>(
-                        dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
+                    // Use non-template getVLocalIdx for linear layout [heads, D, TPB],
+                    // consistent with V1 prefill kernel and decode attention reader.
+                    const int inVBlockIdx =
+                        kv_block_array.getVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
 
                     k_cache[inKBlockIdx] =
                         Tcache(float(reinterpret_cast<T*>(&k)[vec_i]) * (float(1 << (8 - 1)) / s_max[0]));
@@ -3690,8 +3692,10 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
                         dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                     k_cache[inKBlockIdx] = reinterpret_cast<T*>(&k)[vec_i];
 
-                    const int inVBlockIdx = kv_block_array.getVLocalIdx<KvCacheDataType::BASE>(
-                        dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
+                    // Use non-template getVLocalIdx for linear layout [heads, D, TPB],
+                    // consistent with V1 prefill kernel and decode attention reader.
+                    const int inVBlockIdx =
+                        kv_block_array.getVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
 
                     v_cache[inVBlockIdx] = reinterpret_cast<T*>(&v)[vec_i];
                 }

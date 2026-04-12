@@ -1,9 +1,11 @@
 import logging
-import math
 from typing import Any, List, Optional
 
 import aiter
 import torch
+from aiter.ops.triton.attention.mha import (
+    flash_attn_with_kvcache as triton_flash_attn_with_kvcache,
+)
 from aiter_meta.csrc.cpp_itfs.pa_gluon_aot.pa_decode_gluon_aot import (
     pa_decode_gluon_aot,
 )
@@ -19,7 +21,6 @@ from rtp_llm.ops.compute_ops import (
     LayerKVCache,
     ParamsBase,
     PyAttentionInputs,
-    paged_attention_atrex,
 )
 
 
@@ -80,6 +81,7 @@ class FMHAParams(ParamsBase):
             self.prefix_lengths = prefix_lengths
             self.token_q_num = input_lengths.sum().item()
             self.token_kv_num = kv_lengths.sum().item()
+
         # Decode mode
         else:
             input_lengths = attn_inputs.input_lengths
@@ -121,13 +123,12 @@ class FMHAParams(ParamsBase):
 
 
 class AiterPrefillAttnOp:
-    def __init__(self, attn_configs: AttentionConfigs, v1_kv_layout: bool = False):
+    def __init__(self, attn_configs: AttentionConfigs):
         self.head_num = attn_configs.head_num
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
         self.is_causal = attn_configs.is_causal
-        self.v1_kv_layout = v1_kv_layout
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -138,42 +139,6 @@ class AiterPrefillAttnOp:
             is_prefill=True,
         )
         return self.fmha_params
-
-    def _reshape_kv_cache_vectorized(self, kv_cache_base):
-        """Reshape kv_cache_base into 5D VECTORIZED_LAYOUT for mha_batch_prefill.
-
-        Returns (k_cache_5d, v_cache_5d):
-            K: [num_blocks, num_kv_heads, head_dim/vs, page_size, vs]
-            V: [num_blocks, num_kv_heads, page_size/vs, head_dim, vs]
-        """
-        block_num = kv_cache_base.shape[0]
-        hk = self.head_num_kv
-        ps = self.tokens_per_block
-        hd = self.head_dim
-        vs = 16 // kv_cache_base.element_size()
-        expected_elems = 2 * hk * ps * hd
-
-        flat = kv_cache_base[:, :expected_elems].reshape(block_num, 2, hk, ps * hd)
-
-        # K: V1 kernel writes via getKLocalIdx<BASE> → vectorized [hd//vs, ps, vs].
-        # This matches the target 5D shape directly via view.
-        k_cache = flat[:, 0, :, :].view(block_num, hk, hd // vs, ps, vs)
-
-        if self.v1_kv_layout:
-            # V1 kernel writes V via non-template getVLocalIdx → linear [hd, ps].
-            # Target layout for mha_batch_prefill: [ps//vs, hd, vs].
-            # Permute [hd, ps] → [hd, ps//vs, vs] → [ps//vs, hd, vs].
-            v_linear = flat[:, 1, :, :].view(block_num, hk, hd, ps)
-            v_cache = (
-                v_linear.reshape(block_num, hk, hd, ps // vs, vs)
-                .permute(0, 1, 3, 2, 4)
-                .contiguous()
-            )
-        else:
-            # ASM kernel writes V via getVLocalIdx<BASE> → vectorized [ps//vs, hd, vs].
-            v_cache = flat[:, 1, :, :].view(block_num, hk, ps // vs, hd, vs)
-
-        return k_cache, v_cache
 
     def _split_qkv_fp8(self, qkv_fp8):
         """Split FP8 QKV buffer into separate Q, K, V tensors."""
@@ -258,30 +223,57 @@ class AiterPrefillAttnOp:
         if kv_cache is None:
             return self._forward_varlen(qkv, fmha_params)
 
-        # Unified path: always use mha_batch_prefill from paged KV cache
-        k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
+        # Unified paged path: reshape raw 2D buffer if needed, then select K/V and
+        # view into 5D vectorized layout for mha_batch_prefill_func.
+        kv_cache_base = common.reshape_paged_kv_cache(
+            kv_cache.kv_cache_base,
+            self.head_num_kv,
+            self.tokens_per_block,
+            self.head_dim,
+        )
+        # kv_cache_base: [num_blocks, 2, num_kv_heads, tokens_per_block, head_dim]
+        k_cache = kv_cache_base.select(1, 0)
+        v_cache = kv_cache_base.select(1, 1)
+        x = 16 // k_cache.element_size()
+        kv_sizes = k_cache.shape
+        # K: [num_blocks, num_kv_heads, hd//x, ps, x]
+        k_cache = k_cache.view(
+            kv_sizes[0], kv_sizes[1], kv_sizes[3] // x, kv_sizes[2], x
+        )
+        # V: [num_blocks, num_kv_heads, ps//x, hd, x]
+        v_cache = v_cache.view(
+            kv_sizes[0], kv_sizes[1], kv_sizes[2] // x, kv_sizes[3], x
+        )
+
+        device = q_tensor.device
         block_table = fmha_params.kv_cache_block_id_device
-        cu_seqlens_q = fmha_params.cu_seqlens_q.to(q_tensor.device)
 
-        # prefix_lengths: default to zeros when no prefix (unified logic)
+        cu_seqlens_q = fmha_params.cu_seqlens_q.to(device)
         batch_size = cu_seqlens_q.shape[0] - 1
-        if (
-            fmha_params.prefix_lengths is not None
-            and fmha_params.prefix_lengths.numel() > 0
-        ):
-            prefix_lengths_device = fmha_params.prefix_lengths.to(q_tensor.device)
-        else:
-            prefix_lengths_device = torch.zeros(
-                batch_size, dtype=torch.int32, device=q_tensor.device
-            )
 
-        input_lengths = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        seqlen_k = (prefix_lengths_device + input_lengths).to(torch.int32)
+        cu_seqlens_k = fmha_params.cu_seqlens_k.to(device)
+        seqlen_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).to(torch.int32)
 
-        softmax_scale = 1.0 / math.sqrt(self.head_dim)
-        kv_indptr = cu_seqlens_q
-        kv_page_indices = torch.empty(0, dtype=torch.int32, device=q_tensor.device)
+        # Build CSR-format paging metadata (SGLANG_PAGE_TABLE_1D) from block_table.
+        # The CK batch_prefill kernel is compiled with SGLANG mode, so kv_indptr and
+        # kv_page_indices must be correctly populated — passing them as zeros causes
+        # the kernel to compute seqlen_k=0 and return all-zero output.
+        ps = self.tokens_per_block
+        pages_per_seq = (seqlen_k + ps - 1) // ps  # [batch_size], int32
+        kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+        torch.cumsum(pages_per_seq, dim=0, out=kv_indptr[1:])
+        total_pages = kv_indptr[-1].item()
+        kv_page_indices = torch.zeros(total_pages, dtype=torch.int32, device=device)
+        if block_table is not None:
+            for b in range(batch_size):
+                start = kv_indptr[b].item()
+                end = kv_indptr[b + 1].item()
+                kv_page_indices[start:end] = block_table[b, : end - start]
 
+        kv_last_page_lens = (seqlen_k % ps).to(torch.int32)
+        kv_last_page_lens[kv_last_page_lens == 0] = ps
+
+        torch.cuda.synchronize()
         res = aiter.mha_batch_prefill_func(
             q_tensor,
             k_cache,
@@ -291,13 +283,11 @@ class AiterPrefillAttnOp:
             kv_page_indices,
             fmha_params.max_seqlen_q,
             fmha_params.max_seqlen_k,
-            dropout_p=0.0,
-            softmax_scale=softmax_scale,
             causal=self.is_causal,
-            window_size=(-1, 0),
-            block_table=block_table,
-            seqlen_k=seqlen_k,
+            kv_last_page_lens=kv_last_page_lens,
         )
+        torch.cuda.synchronize()
+
         return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
 
 
@@ -364,6 +354,7 @@ class AiterPrefillAttnOpPaged:
             k_descale = torch.ones(1, dtype=torch.float32, device=device)
             v_descale = torch.ones(1, dtype=torch.float32, device=device)
 
+        torch.cuda.synchronize()
         res = aiter.mha_batch_prefill_func(
             q_tensor,
             key_cache,
@@ -380,6 +371,7 @@ class AiterPrefillAttnOpPaged:
             k_descale=k_descale,
             v_descale=v_descale,
         )
+        torch.cuda.synchronize()
 
         token_num = fmha_params.token_q_num
         return res.reshape(token_num, self.head_num * self.head_dim)
@@ -522,7 +514,8 @@ class AiterPrefillAttnOpTriton:
         self.head_num = attn_configs.head_num
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
-        self.context_partition_size = 256
+        self.tokens_per_block = attn_configs.kernel_tokens_per_block
+        self.is_causal = attn_configs.is_causal
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         has_prefix = (
@@ -544,9 +537,17 @@ class AiterPrefillAttnOpTriton:
         num_seqs = (
             block_tables_id_device.shape[0] if block_tables_id_device is not None else 1
         )
-        query = qkv[0]
+        query = qkv[0] if isinstance(qkv, (tuple, list)) else qkv
         token_num = query.shape[0]
         device = query.device
+        paged_kv_cache = common.reshape_paged_kv_cache(
+            kv_cache.kv_cache_base,
+            self.head_num_kv,
+            self.tokens_per_block,
+            self.head_dim,
+        )
+        key_cache = paged_kv_cache.select(1, 0).permute(0, 2, 1, 3).contiguous()
+        value_cache = paged_kv_cache.select(1, 1).permute(0, 2, 1, 3).contiguous()
 
         cu_seqlens_q = fmha_params.cu_seqlens_q.to(device)
         q_lens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(torch.int32)
@@ -554,30 +555,39 @@ class AiterPrefillAttnOpTriton:
         real_token_num = cu_seqlens_q[-1].item()
 
         cu_seqlens_k = fmha_params.cu_seqlens_k.to(device)
-        seq_lens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+        seq_lens = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).to(torch.int32)
+        block_table = block_tables_id_device.to(dtype=torch.int32, device=device)
 
-        output = _run_triton_paged_attention(
-            query,
-            kv_cache.kv_cache_base,
-            kv_cache.kv_scale_base,
-            num_seqs,
-            max_q_len,
-            seq_lens,
-            block_tables_id_device,
-            fmha_params.max_seqlen_k,
-            self.head_num_kv,
-            self.context_partition_size,
+        seq_ids = torch.arange(num_seqs, device=device).repeat_interleave(q_lens)
+        within_seq_pos = (
+            torch.arange(real_token_num, device=device) - cu_seqlens_q[seq_ids]
         )
+        dst_indices = (
+            seq_ids * max_q_len + (max_q_len - q_lens[seq_ids]) + within_seq_pos
+        )
+        if token_num == real_token_num:
+            padded_query = torch.zeros(
+                (num_seqs, max_q_len, self.head_num, self.head_dim),
+                dtype=query.dtype,
+                device=device,
+            )
+            padded_query.view(num_seqs * max_q_len, self.head_num, self.head_dim)[
+                dst_indices
+            ] = query
+        else:
+            padded_query = query.view(num_seqs, max_q_len, self.head_num, self.head_dim)
 
-        if token_num != real_token_num:
-            seq_ids = torch.arange(num_seqs, device=device).repeat_interleave(q_lens)
-            within_seq_pos = (
-                torch.arange(real_token_num, device=device) - cu_seqlens_q[seq_ids]
-            )
-            dst_indices = (
-                seq_ids * max_q_len + (max_q_len - q_lens[seq_ids]) + within_seq_pos
-            )
-            output = output[dst_indices]
+        output = triton_flash_attn_with_kvcache(
+            padded_query,
+            key_cache,
+            value_cache,
+            cache_seqlens=seq_lens,
+            causal=self.is_causal,
+            block_table=block_table,
+        )
+        output = output.view(num_seqs * max_q_len, self.head_num, self.head_dim)[
+            dst_indices
+        ]
 
         return output.view(real_token_num, -1)
 
@@ -618,6 +628,8 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
     ) -> torch.Tensor:
         seq_lens = fmha_params.seq_lens
 
+        # Materialize compact K/V views so paged_attention_rocm does not inherit
+        # the packed [K, V] block stride from the shared cache buffer.
         key_cache = kv_cache.kv_cache_base.select(1, 0)
         value_cache = kv_cache.kv_cache_base.select(1, 1)
         block_tables_id_device = fmha_params.kv_cache_block_id_device
@@ -661,14 +673,12 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
 
         K_QScale = None
         V_QScale = None
-        using_fp8_kvcache = False
         if (
             key_cache.dtype == torch.float8_e4m3fnuz
             and value_cache.dtype == torch.float8_e4m3fnuz
         ):
             K_QScale = kv_cache.kv_scale_base.select(1, 0)
             V_QScale = kv_cache.kv_scale_base.select(1, 1)
-            using_fp8_kvcache = True
 
         block_tables_id_device = fmha_params.kv_cache_block_id_device
 
@@ -677,106 +687,74 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         alibi_slopes = None
         num_kv_heads = self.head_num_kv
         num_seqs, num_heads, head_size = query.shape
-        block_size = value_cache.shape[2]
+
+        # V1 kernel now writes V via getVLocalIdx<BASE> → vectorized [heads, ps/x, D, x].
+        # Reshape K/V into 5D layout for paged_attention_rocm (V-shuffle auto-detected).
+        # After select(1, 0/1), shape is [num_blocks, num_kv_heads, tokens_per_block, head_dim].
+        x = 16 // key_cache.element_size()
+        num_blocks = key_cache.shape[0]
+        block_size = self.tokens_per_block
+
+        # K: vectorized layout [num_blocks, num_kv_heads, hd//x, block_size, x]
+        key_cache = key_cache.view(
+            num_blocks, num_kv_heads, self.head_dim // x, block_size, x
+        )
+        # V: vectorized layout [num_blocks, num_kv_heads, block_size//x, hd, x]
+        # paged_attention_rocm auto-detects 5D as V-shuffle
+        value_cache = value_cache.view(
+            num_blocks, num_kv_heads, block_size // x, self.head_dim, x
+        )
+
+        _PARTITION_SIZE_ROCM = 256
+        max_num_partitions = (
+            max_seq_len + _PARTITION_SIZE_ROCM - 1
+        ) // _PARTITION_SIZE_ROCM
+
         output = torch.empty_like(query).view((num_seqs, num_heads, head_size))
-        if max_seq_len <= 16384 and (not using_fp8_kvcache):
-            _PARTITION_SIZE_ROCM = 512
-            max_num_partitions = (
-                max_seq_len + _PARTITION_SIZE_ROCM - 1
-            ) // _PARTITION_SIZE_ROCM
-            x = 16 // key_cache.element_size()
-            grp_size = num_heads // num_kv_heads
-            kv_sizes = value_cache.shape
-            exp_sums = torch.empty(
-                size=(num_seqs, num_kv_heads, max_num_partitions, grp_size),
-                dtype=torch.float32,
-                device=output.device,
-            )
-            max_logits = torch.empty_like(exp_sums)
-            # init tmp_output
-            tmp_output = torch.empty(
-                size=(num_seqs, num_kv_heads, max_num_partitions, grp_size, head_size),
-                dtype=output.dtype,
-                device=output.device,
-            )
-            query = query.view((num_seqs, num_heads, head_size))
-            key_cache = key_cache.view(
-                (kv_sizes[0], kv_sizes[1], kv_sizes[3] // x, kv_sizes[2], x)
-            )
-            value_cache = value_cache.view(
-                (kv_sizes[0], kv_sizes[1], kv_sizes[3], kv_sizes[2])
-            )
-            paged_attention_atrex(
-                output,
-                exp_sums,
-                max_logits,
-                tmp_output,
-                query,
-                key_cache,
-                value_cache,
-                seq_lens,
-                block_tables_id_device,
-                scale,
-                max_seq_len,
-                alibi_slopes,
-            )
-        else:
-            _PARTITION_SIZE_ROCM = 256
+        tmp_output = torch.empty(
+            size=(num_seqs, num_heads, max_num_partitions, head_size),
+            dtype=output.dtype,
+            device=output.device,
+        )
+        exp_sums = torch.empty(
+            size=(num_seqs, num_heads, max_num_partitions),
+            dtype=torch.float32,
+            device=output.device,
+        )
+        max_logits = torch.ones_like(exp_sums)
 
-            max_num_partitions = (
-                max_seq_len + _PARTITION_SIZE_ROCM - 1
-            ) // _PARTITION_SIZE_ROCM
-            assert _PARTITION_SIZE_ROCM % block_size == 0
-            # init tmp_output
-            tmp_output = torch.empty(
-                size=(num_seqs, num_heads, max_num_partitions, head_size),
-                dtype=output.dtype,
-                device=output.device,
-            )
-
-            # init exp_sums
-            exp_sums = torch.empty(
-                size=(num_seqs, num_heads, max_num_partitions),
-                dtype=torch.float32,
-                device=output.device,
-            )
-            fp8_out_scale = None
-            cpa_fp8_out = False
-            # init max_logits
-            max_logits = torch.ones_like(exp_sums)
-
-            kv_cache_dtype = "auto"
-            k_scale = (
-                K_QScale
-                if kv_cache and K_QScale is not None
-                else torch.tensor(1.0, device=query.device, dtype=query.dtype)
-            )
-            v_scale = (
-                V_QScale
-                if kv_cache and V_QScale is not None
-                else torch.tensor(1.0, device=query.device, dtype=query.dtype)
-            )
-            aiter.paged_attention_rocm(
-                output,
-                exp_sums,
-                max_logits,
-                tmp_output,
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                float(scale),
-                block_tables_id_device,
-                seq_lens,
-                block_size,
-                max_seq_len,
-                alibi_slopes,
-                kv_cache_dtype,  # kv_cache_dtype
-                k_scale,
-                v_scale,
-                fp8_out_scale if cpa_fp8_out else None,
-                _PARTITION_SIZE_ROCM,
-            )
+        kv_cache_dtype = "auto"
+        k_scale = (
+            K_QScale
+            if kv_cache and K_QScale is not None
+            else torch.tensor(1.0, device=query.device, dtype=query.dtype)
+        )
+        v_scale = (
+            V_QScale
+            if kv_cache and V_QScale is not None
+            else torch.tensor(1.0, device=query.device, dtype=query.dtype)
+        )
+        aiter.paged_attention_rocm(
+            output,
+            exp_sums,
+            max_logits,
+            tmp_output,
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            float(scale),
+            block_tables_id_device,
+            seq_lens,
+            block_size,
+            max_seq_len,
+            alibi_slopes,
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+            None,  # fp8_out_scale
+            _PARTITION_SIZE_ROCM,
+        )
 
         output_reshaped = output.view(output.shape[0], -1)
         return output_reshaped
@@ -874,7 +852,7 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = AiterPrefillAttnOp(attn_configs, v1_kv_layout=True)
+        self.fmha_impl = AiterPrefillAttnOp(attn_configs)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpNonAsm(attn_configs)
 
         # Store input info
