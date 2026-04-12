@@ -1,8 +1,25 @@
 #include "hip_host_utils.h"
 #include "rtp_llm/cpp/core/OpData.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
+#include <atomic>
 namespace rtp_llm {
 namespace rocm {
+
+namespace {
+std::atomic<bool> in_hip_graph_capture{false};
+}
+
+void setHipGraphCaptureEnabled(bool enabled) {
+    in_hip_graph_capture.store(enabled, std::memory_order_relaxed);
+}
+
+bool isHipGraphCaptureEnabled() {
+    return in_hip_graph_capture.load(std::memory_order_relaxed);
+}
+
+void* getHipGraphTpNcclComm() {
+    return nullptr;
+}
 
 static const char* _hipGetErrorEnum(hipError_t error) {
     return hipGetErrorString(error);
@@ -70,6 +87,9 @@ void check(T result, const char* const file, int const line) {
 
 void syncAndCheckInDebug(const char* const file, int const line) {
     if (rtp_llm::Logger::getEngineLogger().isDebugMode()) {
+        if (isHipGraphCaptureEnabled()) {
+            return;
+        }
         ROCM_CHECK(hipDeviceSynchronize());
         check(hipGetLastError(), file, line);
         RTP_LLM_LOG_DEBUG(rtp_llm::fmtstr("run syncAndCheckInDebug at %s:%d", file, line));

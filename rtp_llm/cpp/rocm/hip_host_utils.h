@@ -30,8 +30,11 @@ namespace rocm {
 
 void throwRocmError(const char* const file, int const line, std::string const& info = "");
 template<typename T>
-void check(T result, const char* const file, int const line);
-void syncAndCheckInDebug(const char* const file, int const line);
+void  check(T result, const char* const file, int const line);
+void  syncAndCheckInDebug(const char* const file, int const line);
+void  setHipGraphCaptureEnabled(bool enabled);
+bool  isHipGraphCaptureEnabled();
+void* getHipGraphTpNcclComm();
 
 int get_sm();
 int getDevice();

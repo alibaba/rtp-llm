@@ -6,7 +6,7 @@
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
 #include "rtp_llm/models_py/bindings/rocm/TrtllmAllReduceFusion.h"
-
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 namespace py = pybind11;
 
 namespace rtp_llm {
@@ -97,6 +97,10 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
                   py::arg("hidden_size"),
                   py::arg("cu_seq_len"));
 
+    rtp_ops_m.def("is_hipgraph_capture_enabled",
+                 &rtp_llm::rocm::isHipGraphCaptureEnabled,
+                 "Return whether HIP graph capture mode is currently enabled");
+  
     // TRT-LLM AllReduce Fusion — registered as a pybind11 class
     registerTrtllmArFusionHandle(rtp_ops_m);
 }

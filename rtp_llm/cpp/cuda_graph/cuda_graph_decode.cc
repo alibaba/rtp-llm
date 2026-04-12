@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cuda/CudaGraph/CudaGraphRunner.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 
 namespace rtp_llm {
 void CudaGraphRunner::replayDecode(int bs) {
