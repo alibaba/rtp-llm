@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cuda/CudaGraph/CudaGraphUtils.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include <iostream>
 
 namespace rtp_llm {
@@ -47,7 +47,7 @@ void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int m
 }
 
 // Helper function to print all PyModelInputs content
-void debugPrintPyModelInputs(const PyModelInputs& inputs) {
+void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs) {
     std::cout << "========== PyModelInputs Debug Info ==========" << std::endl;
 
     std::cout << "--- input_ids ---" << std::endl;

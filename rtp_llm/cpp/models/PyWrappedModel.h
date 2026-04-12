@@ -10,10 +10,11 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/embed.h>
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
-#include "rtp_llm/cpp/cuda/CudaGraph/GraphBase.h"
-#if USING_CUDA
-#include <c10/cuda/CUDAStream.h>
-#include "rtp_llm/cpp/cuda/CudaGraph/CudaGraphRunner.h"
+// cuda_graph_base.h is platform-agnostic (only defines GraphParams/CudaGraphState structs),
+// safe to include unconditionally. cuda_graph_runner.h requires CUDA/ROCm runtime.
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
+#if USING_CUDA || USING_ROCM
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #endif
 
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
@@ -166,7 +167,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     auto py_initialize_method = py_model_.attr("initialize");
     py_init_result            = py_initialize_method(init_resources);
     if (enable_cuda_graph_) {
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
 
         // Create GraphParams from ExecInitParams
@@ -224,8 +225,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         graph_runner_ = new CudaGraphRunner(graph_params, py_instance);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
+        {
+            void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
+            cuda_graph::register_graph_capture_nccl_comm(
+                nccl_comm, static_cast<int>(device_params.tp_size), static_cast<int>(device_params.tp_rank));
+        }
 #else
-        RTP_LLM_CHECK_WITH_INFO(false, "CUDA Graph is only supported on CUDA platform for now");
+        RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP Graph is only supported on CUDA/ROCm platform");
 #endif
         if (weights_.position_encoding) {
             graph_runner_->setPositionEncoding(weights_.position_encoding->kernel.cuda());

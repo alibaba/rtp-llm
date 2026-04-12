@@ -6,11 +6,11 @@ from typing import List
 import torch
 
 import rtp_llm.models
-from rtp_llm.cpp.cuda.CudaGraph.tests.cuda_graph_test_utils import (
+from rtp_llm.cpp.cuda_graph.tests.cuda_graph_test_utils import (
     CudaGraphTestModelBuilder,
     ModelBuildConfig,
 )
-from rtp_llm.cpp.cuda.CudaGraph.tests.libtest_cuda_graph_runner import CudaGraphRunner
+from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, get_typemeta
 

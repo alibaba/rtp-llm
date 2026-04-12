@@ -10,6 +10,7 @@ from typing import Dict, Optional, Union
 import torch
 import torch.distributed
 
+from rtp_llm.models_py.distributed import rocm_rccl
 from rtp_llm.models_py.distributed.symm_mem import (
     get_symm_mem_communicator,
     init_symm_mem_communicator,
@@ -20,7 +21,6 @@ from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 _CPP_PARALLEL_MODE_TP = 0
 _CPP_PARALLEL_MODE_DP = 1
 _CPP_PARALLEL_MODE_DP_AND_TP = 2
-_CPP_PARALLEL_MODE_FFN_TP = 3
 
 
 class Group(Enum):
@@ -73,6 +73,8 @@ def init_distributed_environment(
                 parallelism_config, backend, timedelta(seconds=timeout)
             )
             _register_process_groups_to_cpp(nccl_comm_config.nccl_ip)
+        if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
+            rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         return
 
     assert backend in ["nccl"], "backend current only supports nccl"
@@ -82,6 +84,7 @@ def init_distributed_environment(
     world_size = parallelism_config.world_size
     local_rank = parallelism_config.local_rank
 
+    rocm_rccl.configure_process_groups(parallelism_config)
     os.environ["TORCH_DIST_INIT_BARRIER"] = "1"
 
     # If torch.distributed is already initialized (e.g., by external code),
@@ -92,6 +95,8 @@ def init_distributed_environment(
         _parallelism_config = parallelism_config
         _initialized = True
         _register_process_groups_to_cpp(ip)
+        if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
+            rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         return
 
     logging.info(
@@ -124,6 +129,8 @@ def init_distributed_environment(
     _parallelism_config = parallelism_config
     _initialized = True
     _register_process_groups_to_cpp(ip)
+    if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
+        rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
 
 
@@ -213,32 +220,23 @@ def _get_free_port():
 
 
 def _register_process_groups_to_cpp(master_addr: str):
-    """Register ProcessGroups with C++ DistributedComm layer.
-
-    Since pybind11 cannot cast ProcessGroup across .so module boundaries,
-    we pass store connection info and let C++ create its own ProcessGroups
-    with independent NCCL communicators.
-
-    Args:
-        master_addr: The master node address (IP) for C++ TCPStore creation.
-    """
+    """Register ProcessGroups with C++ DistributedComm layer."""
     try:
         import librtp_compute_ops
 
         if not hasattr(librtp_compute_ops, "register_process_group_from_store"):
             logging.debug(
-                "register_process_group_from_store not available, skipping C++ ProcessGroup registration"
+                "register_process_group_from_store not available, skip C++ ProcessGroup registration"
             )
             return
         _register = librtp_compute_ops.register_process_group_from_store
     except ImportError:
         logging.debug(
-            "librtp_compute_ops not available, skipping C++ ProcessGroup registration"
+            "librtp_compute_ops not available, skip C++ ProcessGroup registration"
         )
         return
 
     def _register_for_pg(cpp_mode, pg):
-        """Register a C++ ProcessGroup matching the given Python PG's ranks."""
         ranks = list(range(pg.size()))
         try:
             ranks = torch.distributed.get_process_group_ranks(pg)
@@ -261,7 +259,6 @@ def _register_process_groups_to_cpp(master_addr: str):
         )
 
     registered_modes = set()
-
     for group_key, pg in _group_map.items():
         if group_key == Group.DP_AND_TP:
             if _CPP_PARALLEL_MODE_DP_AND_TP not in registered_modes:
@@ -291,7 +288,7 @@ def _register_process_groups_to_cpp(master_addr: str):
                         _register_for_pg(_CPP_PARALLEL_MODE_DP, pg)
                         registered_modes.add(_CPP_PARALLEL_MODE_DP)
 
-    # If world_size == tp_size, DP_AND_TP is also the TP group
+    # If world_size == tp_size, WORLD is also TP group.
     if (
         _parallelism_config is not None
         and _parallelism_config.tp_size > 1
@@ -301,7 +298,6 @@ def _register_process_groups_to_cpp(master_addr: str):
         pg_world = _group_map.get(Group.DP_AND_TP)
         if pg_world is not None:
             _register_for_pg(_CPP_PARALLEL_MODE_TP, pg_world)
-            registered_modes.add(_CPP_PARALLEL_MODE_TP)
             logging.info(
                 "Registered WORLD as TP ProcessGroup to C++ (tp_size == world_size)"
             )
@@ -367,6 +363,12 @@ def destroy_distributed_environment():
             librtp_compute_ops.clear_process_groups()
     except ImportError:
         pass
+
+    # Clean up ROCm RCCL capture comm before destroying process groups,
+    # so that re-init will bootstrap a fresh communicator instead of
+    # reusing the stale one from the destroyed environment.
+    if rocm_rccl.is_available_runtime():
+        rocm_rccl.destroy_capture_comm()
 
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
@@ -485,6 +487,11 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     Returns:
         All-reduced tensor (same as input tensor)
     """
+    rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
+    if rocm_rccl.should_use_capture_collectives(group == Group.TP):
+        rocm_rccl.capture_all_reduce(tensor)
+        return tensor
+
     if group == Group.TP:
         symm_mem_comm = get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
@@ -510,6 +517,10 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
         Concatenated tensor containing all gathered tensors
         (shape: [world_size * tensor.shape[0]] + list(tensor.shape)[1:])
     """
+    rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
+    if rocm_rccl.should_use_capture_collectives(group == Group.TP):
+        return rocm_rccl.capture_all_gather(tensor)
+
     if group == Group.TP:
         symm_mem_comm = get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allgather(

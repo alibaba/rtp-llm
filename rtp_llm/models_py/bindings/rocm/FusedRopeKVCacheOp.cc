@@ -6,6 +6,7 @@
 #include <string>
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include "rtp_llm/models_py/bindings/common/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/models_py/bindings/common/kernels/kv_cache_kernels.h"
 #include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 
@@ -21,6 +22,24 @@ static at::ScalarType get_fp8_dtype() {
         return torch::kFloat8_e4m3fn;
     }
     return torch::kFloat8_e4m3fnuz;  // gfx942 and default
+}
+
+void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_device) {
+    if (!params.kv_cache_offset.defined() || !kv_cache_block_id_device.defined()
+        || kv_cache_block_id_device.numel() == 0) {
+        return;
+    }
+    TORCH_CHECK(kv_cache_block_id_device.scalar_type() == at::kInt,
+                "kv_cache_block_id_device must be int32, got ",
+                kv_cache_block_id_device.scalar_type());
+    const int   batch_size        = kv_cache_block_id_device.size(0);
+    const int   max_blocks_per_bs = kv_cache_block_id_device.size(1);
+    hipStream_t stream            = GET_CURRENT_STREAM();
+    invokeConvertOffsetToBlockArrayData(params.kv_cache_offset.data_ptr<int>(),
+                                        kv_cache_block_id_device.data_ptr<int>(),
+                                        batch_size,
+                                        max_blocks_per_bs,
+                                        stream);
 }
 
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
@@ -409,7 +428,9 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
 
 void registerFusedRopeKVCacheOp(const py::module& m) {
     pybind11::class_<KVBlockArray>(m, "KVBlockArray").def(pybind11::init<>());
-    pybind11::class_<CKAttn, std::shared_ptr<CKAttn>>(m, "CKAttn").def(pybind11::init<>());
+    pybind11::class_<CKAttn, std::shared_ptr<CKAttn>>(m, "CKAttn")
+        .def(pybind11::init<>())
+        .def("update_kv_cache_offset", &updateKvCacheOffset, py::arg("kv_cache_block_id_device"));
 
     // Prefill ASM
     pybind11::class_<FusedRopeKVCachePrefillOpAsm>(m, "FusedRopeKVCachePrefillOpAsm")

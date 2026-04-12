@@ -80,39 +80,39 @@ cc_test(
     ] + torch_deps(),
 )
 
-# Aliases: CudaGraph tests at //rtp_llm/cpp/cuda/CudaGraph/tests/
+# Aliases: CudaGraph tests at //rtp_llm/cpp/cuda_graph/tests/
 alias(
     name = "test_cuda_graph_runner_libs",
-    actual = "//rtp_llm/cpp/cuda/CudaGraph/tests:test_cuda_graph_runner_libs",
+    actual = "//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner_libs",
     visibility = ["//visibility:public"],
 )
 
 alias(
     name = "test_cuda_graph_runner",
-    actual = "//rtp_llm/cpp/cuda/CudaGraph/tests:test_cuda_graph_runner",
+    actual = "//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner",
     visibility = ["//visibility:public"],
 )
 
 alias(
     name = "cuda_graph_test_utils",
-    actual = "//rtp_llm/cpp/cuda/CudaGraph/tests:cuda_graph_test_utils",
+    actual = "//rtp_llm/cpp/cuda_graph/tests:cuda_graph_test_utils",
     visibility = ["//visibility:public"],
 )
 
 alias(
-    name = "CudaGraphDecodePadding",
-    actual = "//rtp_llm/cpp/cuda/CudaGraph/tests:CudaGraphDecodePadding",
+    name = "cuda_graph_decode_padding",
+    actual = "//rtp_llm/cpp/cuda_graph/tests:cuda_graph_decode_padding",
     visibility = ["//visibility:public"],
 )
 
 alias(
-    name = "CudaGraphPrefill",
-    actual = "//rtp_llm/cpp/cuda/CudaGraph/tests:CudaGraphPrefill",
+    name = "cuda_graph_prefill",
+    actual = "//rtp_llm/cpp/cuda_graph/tests:cuda_graph_prefill",
     visibility = ["//visibility:public"],
 )
 
 alias(
-    name = "CudaGraphCopyKernelTest",
-    actual = "//rtp_llm/cpp/cuda/CudaGraph/tests:CudaGraphCopyKernelTest",
+    name = "cuda_graph_copy_kernel_test",
+    actual = "//rtp_llm/cpp/cuda_graph/tests:cuda_graph_copy_kernel_test",
     visibility = ["//visibility:public"],
 )

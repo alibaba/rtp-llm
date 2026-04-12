@@ -26,7 +26,7 @@ cc_library(
     name = "gpu_base",
     hdrs = [
         "CudaFlashInfer.h",
-    ] + ["//rtp_llm/cpp/cuda/CudaGraph:cuda_graph_hdrs"] + select({
+    ] + select({
         "@//:using_cuda12": [
             "CudaXqa.h"
         ],
@@ -34,7 +34,7 @@ cc_library(
     }),
     srcs = [
         "CudaFlashInfer.cc",
-    ] + ["//rtp_llm/cpp/core:devices_base_srcs"] + ["//rtp_llm/cpp/cuda/CudaGraph:cuda_graph_srcs"] + select({
+    ] + ["//rtp_llm/cpp/core:devices_base_srcs"] + select({
         "@//:using_cuda12": [
             "CudaXqa.cc"
         ],

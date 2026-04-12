@@ -32,9 +32,11 @@ class FMHAParams(ParamsBase):
         attn_inputs: PyAttentionInputs,
         is_prefill: bool = True,
         enable_cuda_graph: bool = True,
+        graph_max_seq_len: Optional[int] = None,
     ):
         super().__init__()
         self.enable_cuda_graph = enable_cuda_graph
+        self.graph_max_seq_len = graph_max_seq_len
 
         # Prefill mode
         if is_prefill:
@@ -91,8 +93,12 @@ class FMHAParams(ParamsBase):
             self.sequence_lengths = sequence_lengths
             self.kv_cache_block_id_device = kv_cache_block_id_device
 
-            if self.enable_cuda_graph:
-                self.max_seq_len = 8192
+            if (
+                self.enable_cuda_graph
+                and self.graph_max_seq_len is not None
+                and self.graph_max_seq_len > 0
+            ):
+                self.max_seq_len = self.graph_max_seq_len
             else:
                 self.max_seq_len = input_lengths.max().item() + 1
 
@@ -107,13 +113,29 @@ class FMHAParams(ParamsBase):
             else:
                 self.seq_lens = None
 
-    def fillParams(self, sequence_lengths, input_lengths, kv_cache_block_id_host):
+    def fillParams(
+        self,
+        sequence_lengths,
+        input_lengths,
+        kv_cache_block_id_host=None,
+        kv_cache_block_id_device=None,
+    ):
         self.sequence_lengths = sequence_lengths
         self.input_lengths = input_lengths
         self.kv_cache_block_id_host = kv_cache_block_id_host
+        if kv_cache_block_id_device is not None:
+            self.kv_cache_block_id_device = kv_cache_block_id_device
         if self.seq_lens is not None and self.sequence_lengths is not None:
             self.seq_lens.copy_((self.sequence_lengths + 1).to(torch.device("cuda")))
-            self.max_seq_len = 8192
+            if (
+                self.enable_cuda_graph
+                and self.graph_max_seq_len is not None
+                and self.graph_max_seq_len > 0
+            ):
+                self.max_seq_len = self.graph_max_seq_len
+            else:
+                self.max_seq_len = self.sequence_lengths.max().item() + 1
+            self.max_seqlen_k = self.max_seq_len
 
     def check_recycle(self) -> bool:
         """Check whether the params can be recycled automatically."""
@@ -590,19 +612,47 @@ class AiterDecodeAttnOpBase:
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
-        self.enable_cuda_graph = True
+        self.max_seq_len = attn_configs.max_seq_len
+        # Updated per-request in prepare(); keep default false to avoid stale state
+        # before first input is prepared.
+        self.enable_cuda_graph = False
+        # Pre-allocated output tensor for CUDA graph capture/replay stability.
+        # Allocated once in prepare() when enable_cuda_graph is True, then reused
+        # in every forward() call so that graph replay always writes to the same
+        # device address captured during graph recording.
+        self._graph_output: Optional[torch.Tensor] = None
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
 
     def prepare(self, attn_inputs: PyAttentionInputs):
+        self.enable_cuda_graph = attn_inputs.is_cuda_graph
+        if not self.enable_cuda_graph:
+            self._graph_output = None
         # Create decode parameters using pure Python implementation
         fmha_params = FMHAParams(
             attn_inputs=attn_inputs,
             is_prefill=False,
             enable_cuda_graph=self.enable_cuda_graph,
+            graph_max_seq_len=self.max_seq_len,
         )
+        fmha_params.max_seqlen_k = fmha_params.max_seq_len
+
         return fmha_params
+
+    def _get_output(self, query: torch.Tensor) -> torch.Tensor:
+        """Return a pre-allocated output tensor when running under CUDA graph,
+        or a freshly allocated one otherwise.
+
+        On the first call under graph mode the tensor is lazily allocated so
+        that dtype/device are derived from the actual query tensor.  Subsequent
+        calls reuse the same storage so that graph replay always writes to the
+        address captured during recording."""
+        if self.enable_cuda_graph:
+            if self._graph_output is None or self._graph_output.shape != query.shape:
+                self._graph_output = torch.empty_like(query)
+            return self._graph_output
+        return torch.empty_like(query)
 
     def reshape_kv_cache(self, paged_kv_cache):
         return common.reshape_paged_kv_cache(
@@ -630,7 +680,7 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
         ):
             K_QScale = kv_cache.kv_scale_base.select(1, 0)
             V_QScale = kv_cache.kv_scale_base.select(1, 1)
-        out_ = torch.empty_like(query)
+        out_ = self._get_output(query)
         output = aiter.pa_fwd_asm(
             query,  # [num_seqs, num_heads, head_size]
             key_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
@@ -678,7 +728,7 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         num_kv_heads = self.head_num_kv
         num_seqs, num_heads, head_size = query.shape
         block_size = value_cache.shape[2]
-        output = torch.empty_like(query).view((num_seqs, num_heads, head_size))
+        output = self._get_output(query).view((num_seqs, num_heads, head_size))
         if max_seq_len <= 16384 and (not using_fp8_kvcache):
             _PARTITION_SIZE_ROCM = 512
             max_num_partitions = (
@@ -727,6 +777,7 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
                 max_seq_len + _PARTITION_SIZE_ROCM - 1
             ) // _PARTITION_SIZE_ROCM
             assert _PARTITION_SIZE_ROCM % block_size == 0
+            # output already allocated above via _get_output(query); reuse it here.
             # init tmp_output
             tmp_output = torch.empty(
                 size=(num_seqs, num_heads, max_num_partitions, head_size),
@@ -1000,7 +1051,31 @@ class AiterPrefillImplPaged(FMHAImplBase):
             )
 
 
-class AiterDecodeImplAsm(FMHAImplBase):
+class AiterDecodeImplBase(FMHAImplBase):
+    fmha_params: Any
+    rope_params: Any
+
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        # Replay path must reuse capture-time FMHA params object to keep graph memory stable.
+        self.fmha_params.fillParams(
+            attn_inputs.sequence_lengths,
+            attn_inputs.input_lengths,
+            attn_inputs.kv_cache_kernel_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id_device,
+        )
+        if attn_inputs.kv_cache_kernel_block_id_device is not None:
+            update_kv_cache_offset = getattr(
+                self.rope_params, "update_kv_cache_offset", None
+            )
+            if not callable(update_kv_cache_offset):
+                raise TypeError(
+                    "AiterDecodeImplBase.prepare_cuda_graph expects rope_params to provide "
+                    "update_kv_cache_offset(kv_cache_kernel_block_id_device)"
+                )
+            update_kv_cache_offset(attn_inputs.kv_cache_kernel_block_id_device)
+
+
+class AiterDecodeImplAsm(AiterDecodeImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -1047,7 +1122,7 @@ class AiterDecodeImplAsm(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
 
-class AiterDecodeImplNonAsm(FMHAImplBase):
+class AiterDecodeImplNonAsm(AiterDecodeImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -1094,7 +1169,7 @@ class AiterDecodeImplNonAsm(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
 
-class AiterDecodeImplTriton(FMHAImplBase):
+class AiterDecodeImplTriton(AiterDecodeImplBase):
     """Aiter decode attention implementation using Triton."""
 
     def __init__(

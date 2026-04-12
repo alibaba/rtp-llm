@@ -1,18 +1,9 @@
-#include <algorithm>
-#include <chrono>
-#include <cstring>
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 
-#include <cuda_runtime_api.h>
-#include <torch/torch.h>
-#include "ATen/core/TensorBody.h"
-#include "ATen/ops/zeros.h"
-#include "c10/cuda/CUDACachingAllocator.h"
-#include "rtp_llm/cpp/cuda/CudaGraph/CudaGraphRunner.h"
-#include "rtp_llm/cpp/cuda/ops/CudaFlashInfer.h"
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
-#include "rtp_llm/models_py/bindings/OpDefsUtils.h"
+#include <algorithm>
+#include <cstring>
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include "torch/csrc/autograd/generated/variable_factories.h"
 using namespace torch_ext;
 namespace rtp_llm {
 
@@ -37,17 +28,16 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
     if (!src.defined() || src.numel() <= 0) {
         return;
     }
-    // Get current CUDA stream from PyTorch
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
+    void* stream = reinterpret_cast<void*>(cuda_graph::graphGetCurrentStream().stream());
     if (src.is_cuda() && dst.is_cuda()) {
-        check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToDevice, stream));
+        cuda_graph::graphMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cuda_graph::GraphMemcpyKind::D2D, stream);
     } else if (!src.is_cuda() && !dst.is_cuda()) {
-        memcpy(dst.data_ptr(), src.data_ptr(), size);
+        std::memcpy(dst.data_ptr(), src.data_ptr(), size);
     } else if (src.is_cuda() && !dst.is_cuda()) {
-        check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToHost, stream));
+        cuda_graph::graphMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cuda_graph::GraphMemcpyKind::D2H, stream);
     } else {
-        check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyHostToDevice, stream));
+        cuda_graph::graphMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cuda_graph::GraphMemcpyKind::H2D, stream);
     }
 }
 
@@ -156,6 +146,9 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         optimizedCopyAsync(inputs.attention_inputs.decode_cu_seqlens_d,
                            py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
                            (state.current_batch_size + 1) * sizeof(int));
+        auto attn_pyobj = graph_instances_[state.current_real_graph_bs].mem_hold_.attn_pyobj_;
+        // decode padding
+        attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs_.attention_inputs);
     } else {
         optimizedCopyAsync(inputs.attention_inputs.padding_offset,
                            py_model_inputs_.attention_inputs.padding_offset,
@@ -224,7 +217,6 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
 
 PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphState& state) {
     PyModelOutputs outputs;
-    auto           stream = at::cuda::getCurrentCUDAStream();
 
     // decode or embedding model only
     RTP_LLM_LOG_DEBUG("Replay Start");
@@ -246,11 +238,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.seq_len_sum);
     }
-
     // record forward done event
-    forward_event_.record(stream);
+    forward_event_.record(cuda_graph::graphGetCurrentStream());
     RTP_LLM_LOG_DEBUG("Replay End");
-
     return outputs;
 }
 
@@ -310,8 +300,9 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
     // this is for 2.2.1
     if (is_target_verify_) {
         if (inputs.attention_inputs.is_target_verify) {
-            tryGetRealGraphDecodeBatchSize(inputs, state);
-            return true;
+            // Target-verify must also respect captured decode range.
+            // Otherwise we may replay an uncaptured graph key.
+            return tryGetRealGraphDecodeBatchSize(inputs, state);
         }
         return false;
     }
@@ -421,10 +412,6 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     }
 
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
-    // For speculative decoding warmup (num_tokens_per_bs > 1), prefix_lengths represents
-    // the existing KV cache length. FlashInfer computes positions as prefix_length + j,
-    // so we must ensure prefix_length + num_tokens_per_bs <= max_seq_len to stay within
-    // the cos_sin_cache bounds (size = max_position_embeddings = max_seq_len).
     if (num_tokens_per_bs_ > 1 && !is_prefill_cuda_graph_mode_) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cpu_int32_).pin_memory();
@@ -437,7 +424,6 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.dtype                     = model_data_type_;
     inputs.attention_inputs.is_s_padded               = true;
     inputs.attention_inputs.sequence_lengths_plus_1_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
-    // inputs.attention_inputs.decode_cu_seqlens_d       = torch::zeros({int(max_bs_)}, options_cuda_int32_);
     inputs.attention_inputs.decode_cu_seqlens_d =
         torch::arange(0, max_bs_ + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
 }
@@ -492,14 +478,14 @@ void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int 
 }
 
 void CudaGraphRunner::logCudaGraphPoolMemory(const char* phase) {
-    size_t free_bytes = 0, total_bytes = 0;
-    check_cuda_value(cudaMemGetInfo(&free_bytes, &total_bytes));
-    size_t used_bytes = total_bytes - free_bytes;
+    size_t free_bytes  = 0;
+    size_t total_bytes = 0;
+    cuda_graph::graphMemGetInfo(&free_bytes, &total_bytes);
+    const size_t used_bytes        = total_bytes - free_bytes;
+    const size_t pytorch_allocated = cuda_graph::graphAllocatedBytes();
+    const size_t pytorch_reserved  = cuda_graph::graphReservedBytes();
+    const size_t pool_overhead     = pytorch_reserved > pytorch_allocated ? pytorch_reserved - pytorch_allocated : 0;
 
-    auto   stats             = c10::cuda::CUDACachingAllocator::getDeviceStats(at::cuda::current_device());
-    size_t pytorch_allocated = stats.allocated_bytes[0].current;  // [0] = all pools
-    size_t pytorch_reserved  = stats.reserved_bytes[0].current;
-    size_t pool_overhead     = pytorch_reserved > pytorch_allocated ? pytorch_reserved - pytorch_allocated : 0;
     RTP_LLM_LOG_INFO("[CudaGraph Memory][%s] cudaMemGetInfo: used=%zu MiB, free=%zu MiB, total=%zu MiB | "
                      "PyTorch: allocated=%zu MiB, reserved=%zu MiB, pool_overhead=%zu MiB",
                      phase,
@@ -514,13 +500,11 @@ void CudaGraphRunner::logCudaGraphPoolMemory(const char* phase) {
 void CudaGraphRunner::initCapture() {
     if (enable_cuda_graph_) {
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
-        shared_graph_pool_ = at::cuda::graph_pool_handle();
+        shared_graph_pool_ = cuda_graph::graphPoolHandle();
         if (is_prefill_cuda_graph_mode_) {
             RTP_LLM_LOG_INFO("CUDA graph capture for prefill, num_tokens_per_bs_: %d", num_tokens_per_bs_);
         }
         max_num_token_ = max_bs_ * num_tokens_per_bs_;
-        // Capture
-        at::cuda::CUDAGraph graph;
         if (is_prefill_cuda_graph_mode_) {
             capture_range_ = getPrefillSequenceLengthsToCapture();
         } else {
@@ -531,7 +515,6 @@ void CudaGraphRunner::initCapture() {
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids     = torch::zeros({max_num_token_}, options_cuda_int32_);
         inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
-        // input_lengths [batch_size, int32] (decode only)
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
@@ -550,7 +533,6 @@ void CudaGraphRunner::initCapture() {
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
         initCaptureAttentionInputsPost();
-
         logCudaGraphPoolMemory("before_capture");
 
         if (is_prefill_cuda_graph_mode_) {
@@ -575,7 +557,6 @@ void CudaGraphRunner::initCapture() {
         } else {
             captureDecode();
         }
-
         logCudaGraphPoolMemory("after_capture");
     } else {
         initKernelInternalMemory();
@@ -590,27 +571,29 @@ void CudaGraphRunner::replayGraph(int key) {
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
 
-    size_t pre_capture_reserved =
-        c10::cuda::CUDACachingAllocator::getDeviceStats(at::cuda::current_device()).reserved_bytes[0].current;
+    size_t pre_capture_reserved = cuda_graph::graphReservedBytes();
 
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
-    py_forward_method_(inputs, attn_pyobj);
-    py_forward_method_(inputs, attn_pyobj);
+    try {
+        py_forward_method_(inputs, attn_pyobj);
+        py_forward_method_(inputs, attn_pyobj);
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
+        throw;
+    }
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
     {
         // sync before capture
-        check_cuda_value(cudaDeviceSynchronize());
+        cuda_graph::graphDeviceSynchronize();
 
-        CudaGraphStreamLife  stream_life(capture_stream_);
-        at::cuda::CUDAGraph& graph               = graph_instances_[key].graph_;
-        std::string          output_dot_filename = "";
+        CudaGraphStreamLife stream_life(capture_stream_);
+        auto&               graph               = graph_instances_[key].graph_;
+        std::string         output_dot_filename = "";
         if (enable_cuda_graph_debug_mode_) {
             graph.enable_debug_mode();
-            // Generate unique filename with num_tokens_per_bs, key_type and key
-            // Replace spaces with underscores for better filename compatibility
             std::string key_type_str = std::string(key_type);
             std::replace(key_type_str.begin(), key_type_str.end(), ' ', '_');
             output_dot_filename = "cuda_graph_tokens" + std::to_string(num_tokens_per_bs_) + "_" + key_type_str + "_"
@@ -620,10 +603,15 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         RTP_LLM_LOG_INFO("Capture for %s %d begin.", key_type, key);
         PyModelOutputs outputs;
         {
-            graph.capture_begin(shared_graph_pool_);
+            cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
             CudaGraphCaptureGuard capture_guard;
-            auto                  py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
-            outputs                              = py_outputs_obj.cast<PyModelOutputs>();
+            try {
+                auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
+                outputs             = py_outputs_obj.cast<PyModelOutputs>();
+            } catch (const py::error_already_set& e) {
+                RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
+                throw;
+            }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             graph.capture_end();
         }
@@ -634,8 +622,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             RTP_LLM_LOG_INFO("debug_dump completed for: %s", output_dot_filename.c_str());
         }
 
-        size_t post_capture_reserved =
-            c10::cuda::CUDACachingAllocator::getDeviceStats(at::cuda::current_device()).reserved_bytes[0].current;
+        size_t post_capture_reserved = cuda_graph::graphReservedBytes();
         size_t graph_pool_delta =
             post_capture_reserved > pre_capture_reserved ? post_capture_reserved - pre_capture_reserved : 0;
         RTP_LLM_LOG_INFO("[CudaGraph Memory] captured %s %d: pool_delta=%zu MiB, total_reserved=%zu MiB",
@@ -649,13 +636,12 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
 void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("replay start check for %s %d", key_type, key);
     replayGraph(key);
-    check_cuda_value(cudaDeviceSynchronize());
+    cuda_graph::graphDeviceSynchronize();
     RTP_LLM_LOG_INFO("replay end check for %s %d", key_type, key);
 }
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
     // Common slice operations for input_ids and padding_offset
-    // only for target model score phase, the `num_tokens_per_bs_` > 1, but this will run decode cuda graph.
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
     inputs.input_ids     = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, seq_len_or_tokens);

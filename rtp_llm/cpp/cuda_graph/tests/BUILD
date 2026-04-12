@@ -4,11 +4,11 @@ load("//bazel:arch_select.bzl", "torch_deps")
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [
-        "CudaGraphTestRunner.cc",
+        "cuda_graph_test_runner.cc",
     ],
     copts = copts(),
     deps = [
-        "//rtp_llm/cpp/cuda/ops:gpu_base",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ] + torch_deps(),
@@ -35,9 +35,9 @@ py_library(
 )
 
 py_test(
-    name = "CudaGraphDecodePadding",
+    name = "cuda_graph_decode_padding",
     srcs = [
-        "CudaGraphDecodePadding.py",
+        "cuda_graph_decode_padding.py",
     ],
     data = [
         ":test_cuda_graph_runner",
@@ -52,8 +52,6 @@ py_test(
         "NOT_USE_DEFAULT_STREAM": "1",
         "TEST_USING_DEVICE": "CUDA",
         "HACK_LAYER_NUM": "1",
-        # "CUDA_LAUNCH_BLOCKING" : "1",
-        # "CUDA_VISIBLE_DEVICES" : "7",
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
     },
     tags = ["H20"],
@@ -61,9 +59,9 @@ py_test(
 )
 
 py_test(
-    name = "CudaGraphPrefill",
+    name = "cuda_graph_prefill",
     srcs = [
-        "CudaGraphPrefill.py",
+        "cuda_graph_prefill.py",
     ],
     data = [
         ":test_cuda_graph_runner",
@@ -75,8 +73,6 @@ py_test(
     ],
     env = {
         "LOAD_METHOD": "scratch",
-        # "CUDA_LAUNCH_BLOCKING" : "1",
-        # "CUDA_VISIBLE_DEVICES" : "7",
         "TEST_USING_DEVICE": "CUDA",
         "HACK_LAYER_NUM": "1",
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
@@ -89,9 +85,9 @@ py_test(
 )
 
 py_test(
-    name = "CudaGraphCopyKernelTest",
+    name = "cuda_graph_copy_kernel_test",
     srcs = [
-        "CudaGraphCopyKernelTest.py",
+        "cuda_graph_copy_kernel_test.py",
     ],
     data = [
         "//:th_transformer",

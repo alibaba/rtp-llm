@@ -94,7 +94,10 @@ cc_library(
         "//rtp_llm/cpp/utils:signal_utils",
         "//:rtp_compute_ops",
     ] + torch_deps() + select({
-        "@//:using_cuda12": ["//rtp_llm/cpp/cuda/ops:gpu_base"],
+        "//:using_cuda": [
+            "//rtp_llm/cpp/cuda/ops:gpu_base",
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        ],
         # libth_transformer.so does NOT contain its own copy of
         # globalRuntime() / globalPgState().  Those symbols are
         # resolved at load-time from librtp_compute_ops.so.
@@ -102,6 +105,7 @@ cc_library(
             "//rtp_llm/cpp/core:exec_ctx_ops",
             "//rtp_llm/cpp/core:exec_ops_hdr",
             "//rtp_llm/cpp/core:distributed_comm_hdr",
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "//conditions:default": [],
     }),
