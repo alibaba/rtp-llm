@@ -27,10 +27,9 @@ struct GraphParams {
     int                  kernel_tokens_per_block      = 0;  // must be explicitly configured
     int                  num_tokens_per_bs = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
     int                  sp_steps          = 0;
-    size_t               max_context_batch_size = 1;    // for prefill mode
-    size_t               concurrency_limit      = 128;  // for decode mode
-    std::size_t          hidden_size            = 0;
-    c10::ScalarType      model_data_type        = c10::ScalarType::Float;
+    size_t               concurrency_limit = 128;
+    std::size_t          hidden_size       = 0;
+    c10::ScalarType      model_data_type   = c10::ScalarType::Float;
     std::vector<int>     prefill_capture_seq_lens;
     std::vector<int>     decode_capture_batch_sizes;
     std::vector<int32_t> kv_cache_layer_to_group;  // layer index -> group id for hybrid kv cache
