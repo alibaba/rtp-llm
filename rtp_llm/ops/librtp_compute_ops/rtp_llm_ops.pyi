@@ -204,6 +204,39 @@ class SparseMlaParams(FlashInferMlaAttnParams):
     def topk_indices_offset(self) -> torch.Tensor:
         ...
 
+    def fill_cp_plan_params(
+        self,
+        padding_mask: torch.Tensor,
+        kv_restore_indices: torch.Tensor,
+        q0_idx: list[int],
+        q1_idx: list[int],
+        cp_rank: int,
+        local_tokens: int,
+        actual_input_lengths: torch.Tensor,
+        prefix_lengths: torch.Tensor,
+    ) -> None:
+        ...
+
+    @property
+    def cp_kv_restore_unpad_indices(self) -> torch.Tensor:
+        ...
+
+    @property
+    def cp_total_global_ids(self) -> torch.Tensor:
+        ...
+
+    @property
+    def cp_total_local_ids(self) -> torch.Tensor:
+        ...
+
+    @property
+    def cp_cu_kv_seqlens_global(self) -> torch.Tensor:
+        ...
+
+    @property
+    def cp_total_kv_len(self) -> int:
+        ...
+
 
 class TRTAttn(librtp_compute_ops.ParamsBase):
     kv_cache_offset: torch.Tensor

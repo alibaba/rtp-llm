@@ -87,6 +87,9 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
 
         os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
 
+        from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
+            generate_q_indices,
+        )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
             SparseMlaFp8CPOp,
         )
@@ -216,10 +219,12 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
         )
         op.kv_cache_write_op = MlaKVCacheWriteOp(kv_cache_dtype=KvCacheDataType.FP8)
         op.write_cache_store_impl = None
-        op.attn_inputs = ai
-        op.plan(mla, bt, ai)
-        t0 = torch.index_select(g_topk, 0, op.q0_idx).contiguous()
-        t1 = torch.index_select(g_topk, 0, op.q1_idx).contiguous()
+        op.plan(mla, bt, attn_inputs=ai)
+        q0_idx_list, q1_idx_list = generate_q_indices(chunks)
+        q0_t = torch.tensor(q0_idx_list, device=dev, dtype=torch.long)
+        q1_t = torch.tensor(q1_idx_list, device=dev, dtype=torch.long)
+        t0 = torch.index_select(g_topk, 0, q0_t).contiguous()
+        t1 = torch.index_select(g_topk, 0, q1_t).contiguous()
         out = op.forward(g_q, ck, kp, torch.cat([t0, t1], dim=0), bid, kvc, layer_id=0)
         torch.cuda.synchronize()
         lids = op.total_local_ids
@@ -279,6 +284,9 @@ class SparseMlaFp8CPOpTest(TestCase):
         With tp_size=1, CP path all_gather is identity.
         Run both CP op and non-CP op on same inputs and check output shape and equality.
         """
+        from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
+            generate_q_indices,
+        )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
             SparseMlaFp8CPOp,
         )
@@ -397,16 +405,18 @@ class SparseMlaFp8CPOpTest(TestCase):
         )
         cp_op.kv_cache_write_op = MlaKVCacheWriteOp(kv_cache_dtype=KvCacheDataType.FP8)
         cp_op.write_cache_store_impl = None
-        cp_op.attn_inputs = attn_inputs
 
-        cp_op.plan(mla_params, block_table_device, attn_inputs)
+        cp_op.plan(mla_params, block_table_device, attn_inputs=attn_inputs)
 
         # With tp_size=1, all_gather is identity; mock it to avoid requiring distributed init
         def _identity_all_gather(tensor, group=None):
             return tensor
 
-        topk0 = torch.index_select(topk_indices, 0, cp_op.q0_idx).contiguous()
-        topk1 = torch.index_select(topk_indices, 0, cp_op.q1_idx).contiguous()
+        q0_idx_list, q1_idx_list = generate_q_indices(chunk_lengths)
+        q0_idx_t = torch.tensor(q0_idx_list, device=device, dtype=torch.long)
+        q1_idx_t = torch.tensor(q1_idx_list, device=device, dtype=torch.long)
+        topk0 = torch.index_select(topk_indices, 0, q0_idx_t).contiguous()
+        topk1 = torch.index_select(topk_indices, 0, q1_idx_t).contiguous()
         # CP forward expects single topk tensor aligned with total_local_ids (q0 then q1)
         topk_cat = torch.cat([topk0, topk1], dim=0)
         with patch(
@@ -449,6 +459,9 @@ class SparseMlaFp8CPOpTest(TestCase):
 
     def test_cp_op_forward_output_shape(self):
         """CP op forward returns correct shape [total_q_len, num_heads, kv_lora_rank]."""
+        from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
+            generate_q_indices,
+        )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
             SparseMlaFp8CPOp,
         )
@@ -556,14 +569,16 @@ class SparseMlaFp8CPOpTest(TestCase):
         )
         cp_op.kv_cache_write_op = MlaKVCacheWriteOp(kv_cache_dtype=KvCacheDataType.FP8)
         cp_op.write_cache_store_impl = None
-        cp_op.attn_inputs = attn_inputs
-        cp_op.plan(mla_params, block_table_device, attn_inputs)
+        cp_op.plan(mla_params, block_table_device, attn_inputs=attn_inputs)
 
         def _identity_all_gather(tensor, group=None):
             return tensor
 
-        topk0 = torch.index_select(topk_indices, 0, cp_op.q0_idx).contiguous()
-        topk1 = torch.index_select(topk_indices, 0, cp_op.q1_idx).contiguous()
+        q0_idx_list, q1_idx_list = generate_q_indices(chunk_lengths)
+        q0_idx_t = torch.tensor(q0_idx_list, device=device, dtype=torch.long)
+        q1_idx_t = torch.tensor(q1_idx_list, device=device, dtype=torch.long)
+        topk0 = torch.index_select(topk_indices, 0, q0_idx_t).contiguous()
+        topk1 = torch.index_select(topk_indices, 0, q1_idx_t).contiguous()
         topk_cat = torch.cat([topk0, topk1], dim=0)
         with patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",

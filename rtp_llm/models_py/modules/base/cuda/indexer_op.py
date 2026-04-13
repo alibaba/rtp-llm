@@ -171,11 +171,11 @@ class IndexerOp(nn.Module):
         q_pe = q[:, :, :pe_dim]
         k_pe = k[:, :pe_dim]
 
-        if self.cos_sin_cache is not None and self.total_local_ids.size(0) > 0:
-            q_pe_local = q_pe[self.total_local_ids]  # element wise
-            k_pe_local = k_pe[self.total_local_ids]  # element wise
+        if self.cos_sin_cache is not None and total_local_ids.size(0) > 0:
+            q_pe_local = q_pe[total_local_ids]  # element wise
+            k_pe_local = k_pe[total_local_ids]  # element wise
             k_rope = k_pe_local.unsqueeze(1)
-            pos_ids_q0_global = positions[self.total_global_ids]  # element wise
+            pos_ids_q0_global = positions[total_global_ids]  # element wise
             rope._apply_rope_pos_ids_cos_sin_cache(
                 q=q_pe_local,
                 k=k_rope,
