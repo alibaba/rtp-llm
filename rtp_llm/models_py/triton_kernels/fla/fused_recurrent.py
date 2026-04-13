@@ -119,7 +119,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             read_block_id = tl.load(
                 block_map + i_n * max_block_size + load_block_offset
             ).to(tl.int64)
-            if read_block_id <= 0:
+            if read_block_id < 0:
                 return
             p_h0 = h0 + read_block_id * stride_init_state_token
         else:
