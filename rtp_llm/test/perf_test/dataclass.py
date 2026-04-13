@@ -143,6 +143,15 @@ class MetricState(object):
         self.metrics = metrics
 
 
+class DistributionMetricState(object):
+    def __init__(
+        self, batch_size: int, seq_len_list: List[int], metrics: TestResultMetrics
+    ):
+        self.batch_size = batch_size
+        self.seq_len_list = seq_len_list
+        self.metrics = metrics
+
+
 class TableType(Enum):
     Prefill = "prefill"
     Decode = "decode"
@@ -158,6 +167,7 @@ def create_metrics_table(
 ) -> str:
     json_result: Dict[str, Any] = {
         "title": title,
+        "mode": "grid",
         "metrics": [],
         "model_info": model_info,
         "generate_config": generate_config,
@@ -207,6 +217,69 @@ def create_metrics_table(
                     metrics_item.batch_size,
                     f"0/{metrics.total_requests}",
                     "N/A",
+                    "N/A",
+                    "N/A",
+                ]
+            )
+    os.makedirs(dump_json_path, exist_ok=True)
+    with open(f"{dump_json_path}/{title.replace(' ', '_')}.json", "w") as f:
+        json.dump(json_result, f, indent=4)
+    main_table.align = "l"
+    return main_table.get_string()
+
+
+def create_distribution_metrics_table(
+    metrics_list: List[DistributionMetricState],
+    dump_json_path: str,
+    distribution_source: str,
+    title: str,
+    generate_config: Dict[str, Any] = {},
+) -> str:
+    json_result: Dict[str, Any] = {
+        "title": title,
+        "mode": "distribution",
+        "distribution_source": distribution_source,
+        "test_cases": [],
+        "generate_config": generate_config,
+    }
+    main_table = PrettyTable()
+    main_table.title = title
+    main_table.field_names = [
+        "Batch Size",
+        "Seq Lens (min/max)",
+        "Success/Total Req",
+        "Avg Seq Len",
+        "Avg Decode Time(ms)",
+    ]
+    for item in metrics_list:
+        m = item.metrics
+        if m.success_requests > 0:
+            main_table.add_row(
+                [
+                    item.batch_size,
+                    f"{min(item.seq_len_list)}/{max(item.seq_len_list)}",
+                    f"{m.success_requests}/{m.total_requests}",
+                    f"{m.avg_input_len:.0f}",
+                    f"{m.avg_decode_time:.2f}",
+                ]
+            )
+            json_result["test_cases"].append(
+                {
+                    "batch_size": item.batch_size,
+                    "seq_len_list": item.seq_len_list,
+                    "success_rate": m.success_requests / m.total_requests,
+                    "avg_seq_len": m.avg_input_len,
+                    "avg_decode_time_per_token": m.avg_decode_time,
+                    "max_decode_time_per_token": m.max_decode_time,
+                    "avg_wait_time": m.avg_wait_time,
+                }
+            )
+        else:
+            main_table.add_row(
+                [
+                    item.batch_size,
+                    f"{min(item.seq_len_list)}/{max(item.seq_len_list)}",
+                    f"0/{m.total_requests}",
                     "N/A",
                     "N/A",
                 ]

@@ -4,392 +4,267 @@ import logging
 import os
 from typing import Any, Dict, List
 
-import torch
-from pydantic import BaseModel
-from tqdm import tqdm
-
-from rtp_llm.test.perf_test.batch_perf_impl import BatchPerfImpl
-from rtp_llm.test.perf_test.dataclass import (
-    MetricState,
-    TableType,
-    create_metrics_table,
+from rtp_llm.test.perf_test.dataset import KNOWN_DATASETS, extract_arg
+from rtp_llm.test.perf_test.distribution_runner import DistributionRunner
+from rtp_llm.test.perf_test.grid_runner import GridRunner
+from rtp_llm.test.perf_test.hub_download import (
+    needs_perf_hub_resolve,
+    resolve_checkpoint_or_tokenizer_for_perf,
 )
-from rtp_llm.test.perf_test.test_util import create_query, write_odps
-from rtp_llm.test.utils.maga_server_manager import MagaServerManager
-from rtp_llm.utils.util import check_with_info
-
-
-class RunningConfig(BaseModel):
-    batch_size_list: List[int]
-    input_len_list: List[int]
-    input_query_dict: Dict[int, str]
-    env: Dict[str, Any]
-    result_dir: str
-    decode_test_length: int
-    is_speculative: bool
-    propose_step: int = 0
-    generate_config: Dict[str, Any]
-
-
-def write_odps_wrapper(
-    device_name: str,
-    model_name: str,
-    model_size: float,
-    prec: str,
-    dp_size: int,
-    tp_size: int,
-    metrics_list: List[MetricState],
-):
-    table_name = os.environ.get("ODPS_TABLE", "perf_test_2")
-    fields = [
-        "model",
-        "size",
-        "weight_type",
-        "device",
-        "framework",
-        "commit",
-        "batch_size",
-        "seq_len",
-        "context_time",
-        "generate_time",
-        "tp_size",
-        "dp_size",
-    ]
-    records: List[Any] = []
-    for metrics_item in metrics_list:
-        metrics = metrics_item.metrics
-        batch_size = metrics_item.batch_size
-        input_len = metrics_item.input_len
-        if metrics.success_requests != metrics.total_requests:
-            logging.warning(
-                f"batch {batch_size} seq {input_len} not all success, {metrics.success_requests}/{metrics.total_requests}"
-            )
-            continue
-        records.append(
-            [
-                model_name,
-                model_size,
-                prec,
-                device_name,
-                "",
-                "",
-                batch_size,
-                input_len,
-                metrics.avg_prefill_time,
-                metrics.avg_decode_time,
-                tp_size,
-                dp_size,
-            ]
-        )
-    write_odps(table_name, records, fields)
+from rtp_llm.test.perf_test.sampling import prepare_distribution_config
+from rtp_llm.test.perf_test.server import EngineServer
+from rtp_llm.test.perf_test.test_util import create_query
 
 
 def run_single(
     port: int,
     dp_size: int,
-    tp_size: int,
     batch_size_list: List[int],
     input_len_list: List[int],
     input_query_dict: Dict[int, str],
     is_decode: bool = True,
     dump_json_path: str = ".",
     decode_test_length: int = 10,
-    is_speculative: bool = False,
-    propose_step: int = 0,
+    tp_size: int = 1,
     generate_config: Dict[str, Any] = {},
-) -> List[MetricState]:
-    title_prefix = f"Speculative(step={propose_step}) " if is_speculative else ""
-    title = "Decode Result" if is_decode else "Prefill Result"
-    title = f"{title_prefix}{title}"
-    batch_size_list = [1] if not is_decode else batch_size_list
-    base_port = port
-    logging.info(
-        f"in warmup, base_port: {base_port}, dp_size: {dp_size}, tp_size: {tp_size}, batch_size: {1 * dp_size}, input_len: {input_len_list[0]}"
-    )
-    _ = BatchPerfImpl(
-        base_port,
-        dp_size,
-        tp_size,
-        1 * dp_size,
-        input_len_list[0],
-        input_query_dict[input_len_list[0]],
-        is_decode,
-        1000,
-        decode_test_length,
-        False,
-        generate_config,
-    ).run()
-    logging.info(f"start to run perf test")
-    metrics_list: List[MetricState] = []
-
-    total_tests = len(batch_size_list) * len(input_len_list)
-
-    with tqdm(total=total_tests, desc=f"Running {title}", unit="test") as pbar:
-        for batch_size in batch_size_list:
-            for input_len in input_len_list:
-                # 更新进度条描述
-                pbar.set_description(
-                    f"Running {title} - batch_size: {batch_size}, input_len: {input_len}"
-                )
-
-                metric = BatchPerfImpl(
-                    base_port,
-                    dp_size,
-                    tp_size,
-                    batch_size * dp_size,
-                    input_len,
-                    input_query_dict[input_len],
-                    is_decode,
-                    500,
-                    decode_test_length,
-                    True,
-                    generate_config,
-                ).run()
-                metrics_list.append(MetricState(input_len, batch_size, metric))
-
-                # 更新进度条
-                pbar.update(1)
-
-    metrics_table = create_metrics_table(
-        TableType.Decode if is_decode else TableType.Prefill,
-        metrics_list,
-        dump_json_path,
-        {"dp_size": dp_size, "tp_size": tp_size},
-        title,
-        generate_config,
-    )
-    logging.info("metrics_table: \n" + str(metrics_table))
-    return metrics_list
-
-
-def start_server(
-    args: argparse.Namespace,
-    model_env: Dict[str, Any],
-    log_name: str,
 ):
-    current_env = os.environ.copy()
-    current_env.update(model_env)
-    server = MagaServerManager(env_args=current_env, process_file_name=log_name)
-    server.start_server(
-        model_path=args.ckpt_path,
-        model_type=args.model_type,
-        tokenizer_path=args.tokenizer_path,
-    )
-    server.wait_sever_done()
-    return server
+    """Backward-compatible wrapper — delegates to GridRunner."""
+    return GridRunner(
+        port,
+        dp_size,
+        batch_size_list,
+        input_len_list,
+        input_query_dict,
+        is_decode=is_decode,
+        dump_json_path=dump_json_path,
+        decode_test_length=decode_test_length,
+        tp_size=tp_size,
+        generate_config=generate_config,
+    ).run()
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="batch decode runner")
-    parser.add_argument("--model_type", type=str, required=True)
-    parser.add_argument("--ckpt_path", type=str, required=True)
-    parser.add_argument("--tokenizer_path", type=str, required=True)
-    parser.add_argument("--dp_size", type=int, required=True)
-    parser.add_argument("--tp_size", type=int, required=True)
-    parser.add_argument("--model_size", type=float, default=0)
-    parser.add_argument("--batch_size", type=str, default="1,2,4,8,16")
-    parser.add_argument("--input_len", type=str, default="128,1024,2048,4096,8192")
-    parser.add_argument("--test_name", type=str, default="batch_decode_test")
-    parser.add_argument("--prec", type=str, default="bf16")
-    parser.add_argument("--disaggregate", type=int, default=0)
-    # partial test, 0: test all, 1: test decode only, 2: test prefill only
-    parser.add_argument(
+    parser = argparse.ArgumentParser(
+        description="RTP-LLM batch decode performance test runner. "
+        "Unrecognized arguments are forwarded to the engine server.",
+    )
+
+    perf = parser.add_argument_group("perf test configuration")
+    perf.add_argument(
+        "--batch_size",
+        type=str,
+        default="1,8,16",
+        help="Comma-separated batch sizes for grid mode",
+    )
+    perf.add_argument(
+        "--input_len",
+        type=str,
+        default="1024,4096",
+        help="Comma-separated input lengths for grid mode",
+    )
+    dataset_group = perf.add_mutually_exclusive_group()
+    dataset_group.add_argument(
+        "--dataset_name",
+        type=str,
+        default="",
+        help="Known dataset name (auto-downloads via ModelScope / HF). "
+        f"Choices: {list(KNOWN_DATASETS.keys())}",
+    )
+    dataset_group.add_argument(
+        "--dataset_path",
+        type=str,
+        default="",
+        help="Local path to dataset JSON (conversation or prompt format).",
+    )
+    perf.add_argument(
+        "--dataset",
+        type=str,
+        default="",
+        help="Path to distribution.csv for runtime stratified sampling. "
+        "Requires --max_seq_len and --concurrency_limit.",
+    )
+    perf.add_argument(
+        "--test_json",
+        type=str,
+        default="",
+        help="Path to previously saved test config JSON for replay",
+    )
+    perf.add_argument(
         "--partial",
         type=int,
         default=0,
         choices=[0, 1, 2],
-        help="partial test, 0: test all, 1: test decode only, 2: test prefill only",
+        help="0: test all, 1: decode only, 2: prefill only",
     )
-    parser.add_argument("--result_dir", type=str, default=".")
-    parser.add_argument("--generate_config", type=str, default="{}")
-    args = parser.parse_args()
-    return args
-
-
-def merge_state(
-    decode_result: List[MetricState], prefill_result: List[MetricState]
-) -> List[MetricState]:
-    prefill_result_dict = {}
-    for prefill_item in prefill_result:
-        if prefill_item.metrics.success_requests == prefill_item.metrics.total_requests:
-            prefill_result_dict[prefill_item.input_len] = (
-                prefill_item.metrics.avg_prefill_time
-            )
-        else:
-            prefill_result_dict[prefill_item.input_len] = -1
-    for decode_item in decode_result:
-        if decode_item.input_len in prefill_result_dict:
-            decode_item.metrics.avg_prefill_time = prefill_result_dict[
-                decode_item.input_len
-            ]
-        else:
-            decode_item.metrics.avg_prefill_time = -1
-    return decode_result
-
-
-def run_normal_test(args: argparse.Namespace, running_config: RunningConfig):
-    server = start_server(args, running_config.env, "process.log")
-    decode_result = None
-    prefill_result = None
-    if args.partial == 0 or args.partial == 1:
-        decode_result = run_single(
-            server.port,
-            args.dp_size,
-            args.tp_size,
-            running_config.batch_size_list,
-            running_config.input_len_list,
-            running_config.input_query_dict,
-            True,
-            dump_json_path=running_config.result_dir,
-            decode_test_length=running_config.decode_test_length,
-            is_speculative=running_config.is_speculative,
-            propose_step=running_config.propose_step,
-            generate_config=running_config.generate_config,
-        )
-    if args.partial == 0 or args.partial == 2:
-        prefill_result = run_single(
-            server.port,
-            args.dp_size,
-            args.tp_size,
-            [1],
-            running_config.input_len_list,
-            running_config.input_query_dict,
-            False,
-            dump_json_path=running_config.result_dir,
-            decode_test_length=running_config.decode_test_length,
-            is_speculative=running_config.is_speculative,
-            propose_step=running_config.propose_step,
-            generate_config=running_config.generate_config,
-        )
-    server.stop_server()
-    return decode_result, prefill_result
-
-
-def run_disaggregate_test(args: argparse.Namespace, running_config: RunningConfig):
-    assert args.partial == 0, "disaggregate test only support test all"
-    decode_env = json.loads(os.environ.get("DECODE_CONFIG", "{}"))
-    decode_env.update(running_config.env)
-    decode_env["BATCH_DECODE_SCHEDULER_WARMUP_TYPE"] = "0"
-    decode_server = start_server(args, decode_env, "decode.log")
-    decode_result = run_single(
-        decode_server.port,
-        args.dp_size,
-        args.tp_size,
-        running_config.batch_size_list,
-        running_config.input_len_list,
-        running_config.input_query_dict,
-        True,
-        dump_json_path=running_config.result_dir,
-        decode_test_length=running_config.decode_test_length,
-        is_speculative=running_config.is_speculative,
-        propose_step=running_config.propose_step,
-        generate_config=running_config.generate_config,
+    perf.add_argument("--generate_config", type=str, default="{}")
+    perf.add_argument(
+        "--result_dir",
+        type=str,
+        default=os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "./perf_results"),
     )
-    decode_server.stop_server()
-    prefill_env = json.loads(os.environ.get("PREFILL_CONFIG", "{}"))
-    prefill_env.update(running_config.env)
-    prefill_env["BATCH_DECODE_SCHEDULER_WARMUP_TYPE"] = "1"
-    prefill_server = start_server(
-        args,
-        prefill_env,
-        "prefill.log",
+    perf.add_argument("--decode_test_length", type=int, default=10)
+
+    engine = parser.add_argument_group(
+        "engine args consumed by perf test (also forwarded to server)"
     )
-    prefill_result = run_single(
-        prefill_server.port,
-        args.dp_size,
-        args.tp_size,
-        [1],
-        running_config.input_len_list,
-        running_config.input_query_dict,
-        False,
-        dump_json_path=running_config.result_dir,
-        decode_test_length=running_config.decode_test_length,
-        is_speculative=running_config.is_speculative,
-        propose_step=running_config.propose_step,
-        generate_config=running_config.generate_config,
-    )
-    prefill_server.stop_server()
-    return decode_result, prefill_result
+    engine.add_argument("--dp_size", type=int, default=1)
+    engine.add_argument("--max_seq_len", type=int, default=8192)
+    engine.add_argument("--concurrency_limit", type=int, default=64)
+
+    args, remaining = parser.parse_known_args()
+    return args, remaining
 
 
-def create_test_env(
-    max_len: int, max_concurrency: int, partial: int, tp_size: int, dp_size: int
-):
-    return {
-        "USE_BATCH_DECODE_SCHEDULER": "1",
-        "FAKE_BALANCE_EXPERT": "1",
-        "MAX_SEQ_LEN": str(max_len + 20),
-        "CONCURRENCY_LIMIT": str(max_concurrency),
-        "TORCH_CUDA_PROFILER_DIR": os.environ.get(
-            "TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd()
-        ),
-        "BATCH_DECODE_SCHEDULER_WARMUP_TYPE": (
-            "0" if (partial == 0 or partial == 1) else "1"
-        ),
-        "TP_SIZE": str(tp_size),
-        "DP_SIZE": str(dp_size),
-        "WORLD_SIZE": str(tp_size * dp_size),
+def _replace_cli_value(argv: List[str], key: str, new_value: str) -> None:
+    flag = f"--{key}"
+    prefix = f"--{key}="
+    for i, arg in enumerate(argv):
+        if arg == flag and i + 1 < len(argv):
+            argv[i + 1] = new_value
+            return
+        if arg.startswith(prefix):
+            argv[i] = prefix + new_value
+            return
+    raise ValueError(
+        f"perf_test: missing {flag} in argv, cannot replace with local path"
+    )
+
+
+def resolve_perf_engine_paths(remaining: List[str]) -> List[str]:
+    """在转发给引擎前，将 Hub 链接 / repo id 等解析为本地路径并写回 argv（同一远程引用只下载一次）。"""
+    out = list(remaining)
+    resolved_cache: Dict[str, str] = {}
+    for k in ("checkpoint_path", "tokenizer_path"):
+        val = extract_arg(out, k)
+        if not val or not needs_perf_hub_resolve(val):
+            continue
+        if val not in resolved_cache:
+            local = resolve_checkpoint_or_tokenizer_for_perf(val)
+            logging.info(f"perf_test: resolved --{k} -> {local}")
+            resolved_cache[val] = local
+        _replace_cli_value(out, k, resolved_cache[val])
+    return out
+
+
+def _write_test_info(args: argparse.Namespace, remaining_args: List[str]) -> None:
+    """Persist test configuration to result_dir for downstream consumers."""
+    info = {
+        "model_type": os.environ.get("MODEL_TYPE"),
+        "checkpoint_path": os.environ.get("CHECKPOINT_PATH"),
+        "tokenizer_path": os.environ.get("TOKENIZER_PATH"),
+        "tp_size": extract_arg(remaining_args, "tp_size", "1"),
+        "dp_size": args.dp_size,
+        "max_seq_len": args.max_seq_len,
+        "concurrency_limit": args.concurrency_limit,
+        "decode_test_length": args.decode_test_length,
+        "dataset_name": args.dataset_name or None,
+        "dataset_path": args.dataset_path or args.dataset or None,
     }
+    path = os.path.join(args.result_dir, "test_info.json")
+    with open(path, "w") as f:
+        json.dump(info, f, indent=2)
+    logging.info(f"Wrote test info to {path}")
 
 
-def main():
+def main() -> str:
     from rtp_llm.config.log_config import setup_logging
 
     setup_logging()
-    print("current path: ", os.getcwd(), flush=True)
 
-    args = parse_args()
-    if args.partial not in [0, 1, 2]:
-        raise ValueError("partial must be 0, 1, or 2")
-    batch_size_list = [int(x) for x in args.batch_size.split(",")]
-    input_len_list = [int(x) for x in args.input_len.split(",")]
+    args, remaining = parse_args()
+    remaining = resolve_perf_engine_paths(remaining)
+    generate_config = json.loads(args.generate_config)
+    os.makedirs(args.result_dir, exist_ok=True)
+    EngineServer.propagate_engine_env(remaining)
 
-    is_speculative = bool(os.environ.get("SP_TYPE", ""))
-    decode_test_length = int(os.environ.get("DECODE_TEST_LENGTH", 10))
-    propose_step = int(os.environ.get("GEN_NUM_PER_CIRCLE", 1))
+    logging.info(f"Result directory: {args.result_dir}")
+    logging.info(f"Engine args forwarded to server: {remaining}")
 
-    test_env = create_test_env(
-        max(input_len_list) + decode_test_length,
-        max(batch_size_list),
-        args.partial,
-        args.tp_size,
-        args.dp_size,
+    distribution_mode = (
+        args.dataset_name or args.dataset_path or args.dataset or args.test_json
     )
+    if distribution_mode:
+        tokenizer_path = (
+            extract_arg(remaining, "tokenizer_path")
+            or extract_arg(remaining, "checkpoint_path")
+            or os.environ.get("TOKENIZER_PATH", "")
+        )
+        test_config = prepare_distribution_config(
+            tokenizer_path=tokenizer_path,
+            max_seq_len=args.max_seq_len,
+            max_concurrency=args.concurrency_limit * args.dp_size,
+            result_dir=args.result_dir,
+            dataset_name=args.dataset_name,
+            dataset_path=args.dataset_path,
+            dataset_csv=args.dataset,
+            test_json=args.test_json,
+        )
 
-    input_query_dict = create_query(
-        args.model_type, args.tokenizer_path, input_len_list
-    )
+        batch_seq_len_map = test_config["batch_seq_len_map"]
+        all_seq_lens = sorted(
+            set(sl for sls in batch_seq_len_map.values() for sl in sls)
+        )
 
-    running_config = RunningConfig(
-        batch_size_list=batch_size_list,
-        input_len_list=input_len_list,
-        input_query_dict=input_query_dict,
-        env=test_env,
-        result_dir=args.result_dir,
-        decode_test_length=decode_test_length,
-        is_speculative=is_speculative,
-        propose_step=propose_step,
-        generate_config=json.loads(args.generate_config),
-    )
+        needed_seq_len = max(all_seq_lens) + args.decode_test_length
+        effective_max_seq_len = max(needed_seq_len, args.max_seq_len)
 
-    if args.disaggregate == 0:
-        decode_result, prefill_result = run_normal_test(args, running_config)
+        server = EngineServer(args, remaining)
+        server.start(
+            max_seq_len=effective_max_seq_len,
+            max_concurrency=max(int(k) for k in batch_seq_len_map),
+        )
+
+        input_query_dict = create_query(input_len_list=all_seq_lens)
+        DistributionRunner(
+            server.port,
+            args.dp_size,
+            test_config,
+            input_query_dict,
+            dump_json_path=args.result_dir,
+            decode_test_length=args.decode_test_length,
+            generate_config=generate_config,
+        ).run()
+        server.stop()
     else:
-        decode_result, prefill_result = run_disaggregate_test(args, running_config)
-    if args.partial != 0:
-        return
-    metrics_list = merge_state(decode_result, prefill_result)
-    device_name = os.environ.get("DEVICE_NAME", torch.cuda.get_device_name(0))
-    # use decode parallel config as odps column for current
-    write_odps_wrapper(
-        device_name,
-        args.model_type,
-        args.model_size,
-        args.prec,
-        args.dp_size,
-        args.tp_size,
-        metrics_list,
-    )
+        batch_size_list = [int(x) for x in args.batch_size.split(",")]
+        input_len_list = [int(x) for x in args.input_len.split(",")]
+
+        server = EngineServer(args, remaining)
+        server.start(
+            max_seq_len=max(input_len_list) + args.decode_test_length,
+            max_concurrency=max(batch_size_list),
+        )
+
+        input_query_dict = create_query(input_len_list=input_len_list)
+
+        if args.partial in (0, 1):
+            GridRunner(
+                server.port,
+                args.dp_size,
+                batch_size_list,
+                input_len_list,
+                input_query_dict,
+                is_decode=True,
+                dump_json_path=args.result_dir,
+                decode_test_length=args.decode_test_length,
+                generate_config=generate_config,
+            ).run()
+        if args.partial in (0, 2):
+            GridRunner(
+                server.port,
+                args.dp_size,
+                [1],
+                input_len_list,
+                input_query_dict,
+                is_decode=False,
+                dump_json_path=args.result_dir,
+                decode_test_length=args.decode_test_length,
+                generate_config=generate_config,
+            ).run()
+        server.stop()
+
+    _write_test_info(args, remaining)
+    return args.result_dir
 
 
 if __name__ == "__main__":

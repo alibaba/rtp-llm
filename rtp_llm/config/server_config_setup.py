@@ -213,19 +213,22 @@ def set_parallelism_config(
     # 2. Pure TP:    ep_size explicitly set to 1, tp_size > 1, dp_size == 1
     # 3. EP mode:    ep_size == 0 (default), ep_size auto-derived as tp_size * dp_size
     if parallelism_config.ep_size == 1:
-        assert parallelism_config.tp_size >= 1, (
-            f"Pure TP mode (ep_size=1) requires tp_size >= 1, got tp_size={parallelism_config.tp_size}"
-        )
-        assert parallelism_config.dp_size == 1, (
-            f"Pure TP mode (ep_size=1) requires dp_size == 1, got dp_size={parallelism_config.dp_size}"
-        )
+        assert (
+            parallelism_config.tp_size >= 1
+        ), f"Pure TP mode (ep_size=1) requires tp_size >= 1, got tp_size={parallelism_config.tp_size}"
+        assert (
+            parallelism_config.dp_size == 1
+        ), f"Pure TP mode (ep_size=1) requires dp_size == 1, got dp_size={parallelism_config.dp_size}"
     elif parallelism_config.ep_size == 0:
         logging.info("parallelism_config.ep_size == 0, auto set to world size")
-        parallelism_config.ep_size = parallelism_config.tp_size * parallelism_config.dp_size
-    else:
-        assert parallelism_config.ep_size == parallelism_config.tp_size * parallelism_config.dp_size, (
-            f"ep_size must be equal to 1 or tp_size * dp_size, got ep_size={parallelism_config.ep_size}, tp_size={parallelism_config.tp_size}, dp_size={parallelism_config.dp_size}"
+        parallelism_config.ep_size = (
+            parallelism_config.tp_size * parallelism_config.dp_size
         )
+    else:
+        assert (
+            parallelism_config.ep_size
+            == parallelism_config.tp_size * parallelism_config.dp_size
+        ), f"ep_size must be equal to 1 or tp_size * dp_size, got ep_size={parallelism_config.ep_size}, tp_size={parallelism_config.tp_size}, dp_size={parallelism_config.dp_size}"
 
     ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
     parallelism_config.ffn_tp_size = ffn_tp_size
@@ -281,6 +284,28 @@ def set_parallelism_config(
     )
 
 
+def _infer_model_type(ckpt_path: str) -> Optional[str]:
+    """Infer ``model_type`` by reading config.json from a local checkpoint directory.
+
+    Importing ``rtp_llm.models`` triggers all ``register_model`` calls so that
+    the architecture / repo lookup tables are populated before we query them.
+    """
+    if not ckpt_path or not os.path.isdir(ckpt_path):
+        return None
+    config_path = os.path.join(ckpt_path, "config.json")
+    if not os.path.isfile(config_path):
+        return None
+    try:
+        import rtp_llm.models  # noqa: F401  — trigger model registrations
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        return ModelDict.get_ft_model_type_by_config(config)
+    except Exception as e:
+        logging.warning(f"Failed to infer model_type from {config_path}: {e}")
+        return None
+
+
 def setup_default_args(py_env_configs):
     set_parallelism_config(
         py_env_configs.parallelism_config,
@@ -295,7 +320,7 @@ def setup_default_args(py_env_configs):
         )
 
     if not py_env_configs.model_args.model_type:
-        py_env_configs.model_args.model_type = ModelDict.get_ft_model_type_by_config(
+        py_env_configs.model_args.model_type = _infer_model_type(
             py_env_configs.model_args.ckpt_path
         )
     if not py_env_configs.model_args.model_type:
