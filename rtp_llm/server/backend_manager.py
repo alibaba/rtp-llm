@@ -97,6 +97,7 @@ class BackendManager(object):
         ):
             from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
 
+            logging.info("initialize deepep wrapper")
             init_deepep_wrapper(engine_config, model_config)
 
         # Optional propose model config

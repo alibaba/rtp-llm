@@ -109,7 +109,6 @@ def test_main(
     run_single(
         port,
         py_env_configs.parallelism_config.dp_size,
-        py_env_configs.parallelism_config.tp_size,
         batch_size_list,
         input_len_list,
         input_query_dict,
@@ -174,18 +173,18 @@ if __name__ == "__main__":
     except Exception as e:
         logging.info(f"setpgrp error: {e}")
 
-    tokenizer_path = fetch_remote_file_to_local(
-        py_env_configs.model_args.tokenizer_path
-    )
-    if tokenizer_path is None:
+    raw_tok = py_env_configs.model_args.tokenizer_path
+    if not raw_tok:
         raise RuntimeError(
-            f"fetch tokenizer path failed, tokenizer_path: {py_env_configs.model_args.tokenizer_path}"
+            f"tokenizer_path is missing; set model_args.tokenizer_path or ckpt_path"
         )
+    tokenizer_path = fetch_remote_file_to_local(
+        os.path.expanduser(str(raw_tok).strip())
+    )
 
     input_query_dict = create_query(
-        py_env_configs.model_args.model_type,
-        tokenizer_path,
-        input_len_list,
+        tokenizer_path=tokenizer_path,
+        input_len_list=input_len_list,
     )
 
     server = MagaServerManager(port=str(port))

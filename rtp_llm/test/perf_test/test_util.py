@@ -1,77 +1,16 @@
 import logging
 import os
-import random
-import time
-from typing import Any, Dict, List
+from concurrent.futures import ProcessPoolExecutor
+from typing import Any, Dict, List, Tuple
 
-import prettytable as pt
-from odps import ODPS
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 
-def _load_tokenizer(model_type: str, tokenizer_path: str) -> PreTrainedTokenizerBase:
-    """Load tokenizer, with GLM-5 compatible path (bypass invalid tokenizer_config.json)."""
-    if model_type == "glm_5":
-        from tokenizers import Tokenizer
-        from transformers import PreTrainedTokenizerFast
-
-        tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
-        if not os.path.exists(tokenizer_file):
-            raise FileNotFoundError(
-                f"GLM-5 tokenizer requires tokenizer.json at {tokenizer_file}"
-            )
-        tokenizer = Tokenizer.from_file(tokenizer_file)
-        return PreTrainedTokenizerFast(
-            tokenizer_object=tokenizer,
-            eos_token="<|endoftext|>",
-            pad_token="<|endoftext|>",
-            unk_token="<|endoftext|>",
-        )
-    return AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-
-
-def write_odps(table_name: str, records: List[Any], fields: List[str] = []):
-    table = pt.PrettyTable(align="l")
-    table.field_names = fields
-    table.add_rows(records)
-    if "framework" in table.field_names:
-        table.del_column("framework")
-    if "commit" in table.field_names:
-        table.del_column("commit")
-    logging.info(f"records: \n{table.get_string()}")
-
-    if "ODPS_PROJECT" not in os.environ:
-        logging.warning("no odps config")
-        return
-    partition_name = os.environ["PARTITION_NAME"]
-    odps = ODPS(
-        os.getenv("ALIBABA_CLOUD_ACCESS_KEY_ID"),
-        os.getenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET"),
-        os.environ["ODPS_PROJECT"],
-        endpoint="http://service-corp.odps.aliyun-inc.com/api",
-    )
-
-    table = odps.get_table(table_name)
-    if table.exist_partition(partition_name):
-        _ = table.get_partition(partition_name)
-    else:
-        _ = table.create_partition(partition_name)
-
-    retry_limit = 10
-    retry = 1
-    while True:
-        try:
-            with table.open_writer(partition=partition_name) as writer:
-                writer.write(records)
-            break
-        except Exception as e:
-            logging.warning("%s", str(e))
-            time.sleep(random.random() * 10 * retry)
-            retry += 1
-            if retry > retry_limit:
-                raise e
+def _load_tokenizer(tokenizer_path: str) -> PreTrainedTokenizerBase:
+    local_path = fetch_remote_file_to_local(os.path.expanduser(tokenizer_path.strip()))
+    return AutoTokenizer.from_pretrained(local_path, trust_remote_code=True)
 
 
 def get_prompt(tokenizer: Any, prompt: str, seqlen: int):
@@ -83,29 +22,48 @@ def get_prompt(tokenizer: Any, prompt: str, seqlen: int):
     return prompt
 
 
+def _create_query_worker(args: Tuple[str, int]) -> Tuple[int, str]:
+    """Top-level worker for ProcessPoolExecutor (must be picklable)."""
+    tokenizer_path, input_len = args
+    tokenizer = _load_tokenizer(tokenizer_path)
+    base_query = "hello " * (input_len + 20)
+    left, right = 0, len(base_query)
+    while left < right:
+        mid = (left + right) // 2
+        current_query = base_query[:mid]
+        current_len = len(tokenizer.encode(current_query))
+        if current_len == input_len:
+            return (input_len, current_query)
+        elif current_len < input_len:
+            left = mid + 1
+        else:
+            right = mid
+    return (input_len, base_query[:left])
+
+
 def create_query(
-    model_type: str, tokenizer_path: str, input_len_list: List[int]
+    tokenizer_path: str = "",
+    input_len_list: List[int] = [],
+    max_workers: int = 8,
 ) -> Dict[int, str]:
-    tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
+    tokenizer_path = tokenizer_path or os.environ.get(
+        "TOKENIZER_PATH", os.environ.get("CHECKPOINT_PATH", "")
+    )
+    tokenizer_path = fetch_remote_file_to_local(
+        os.path.expanduser(tokenizer_path.strip())
+    )
 
-    def _create_query_single(tokenizer: PreTrainedTokenizerBase, input_len: int) -> str:
-        base_query = "hello " * (input_len + 20)
+    effective_workers = min(max_workers, len(input_len_list))
+    logging.info(
+        f"Creating queries for {len(input_len_list)} input lengths "
+        f"with {effective_workers} workers"
+    )
 
-        def get_token_length(text: str) -> int:
-            return len(tokenizer.encode(text))
+    if effective_workers <= 1:
+        return dict(_create_query_worker((tokenizer_path, x)) for x in input_len_list)
 
-        left, right = 0, len(base_query)
-        while left < right:
-            mid = (left + right) // 2
-            current_query = base_query[:mid]
-            current_len = get_token_length(current_query)
-            if current_len == input_len:
-                return current_query
-            elif current_len < input_len:
-                left = mid + 1
-            else:
-                right = mid
-        return base_query[:left]
-
-    tokenizer = _load_tokenizer(model_type, tokenizer_path)
-    return {x: _create_query_single(tokenizer, x) for x in input_len_list}
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    worker_args = [(tokenizer_path, x) for x in input_len_list]
+    with ProcessPoolExecutor(max_workers=effective_workers) as executor:
+        results = list(executor.map(_create_query_worker, worker_args))
+    return dict(results)

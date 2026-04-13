@@ -16,11 +16,6 @@ load(
 
 if_rocm = _if_rocm
 
-tensorrt = [
-    "tensorrt",
-    "tensorrt-cu12-bindings",
-    "tensorrt-cu12-libs",
-]
 
 flashinfer = [
     "apache-tvm-ffi",
@@ -133,7 +128,7 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
-] + tensorrt + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
+] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
 filegroup(
     name = "cutlass_config",
@@ -251,10 +246,6 @@ py_library(
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
         "@//:using_cuda": deep,
-        "//conditions:default": []
-    }) + select({
-        "@//:using_cuda12_9_x86": tensorrt,
-        "@//:cuda_pre_12_9": tensorrt,
         "//conditions:default": []
     }) + select({
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,

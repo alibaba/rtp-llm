@@ -11,25 +11,68 @@ For every run we use min_new_tokens and max_new_tokens to ensure that all reques
 
 Since in decode mode, we not prefill the KVCache, so hidden_states after every forward step is not real. So we also hack moe gate select for moe model and speculative accept func for mtp. In that way, we get stable result for analyse result.
 ## Single-Node Benchmark
-using commands below can start a performance benchmark, mixed prefill and decode
-```shell
-bazelisk test //rtp_llm/test/perf_test:perf_test \
-    --config=cuda12_6 \
-    --test_arg=--ckpt_path=${/PATH/TO/CKPT} \
-    --test_arg=--tokenizer_path=${/PATH/TO/TOKENIZER} \
-    --test_arg=--model_type=${MODEL_TYPE} \
-    --test_arg=--dp_size=1 \
-    --test_arg=--tp_size=1 \
-    --test_arg=--batch_size="1,2,4,8,16,32" \
-    --test_arg=--input_len="128,1024,2048,4096" \
-    --test_env=INT8_MODE=1 # optionally using --test_env to using custom env for RTP-LLM setup
-```
-specially `batch_size` states for the batch in single DP node, when `DP_SIZE` param is setted.
 
-also we support test prefill or decode only when prefill and decode not share the same config(such as prefill use deepep normal, and decode use deepep masked), in that case user should also set `--partial={0:all(default), 1:decode, 2:prefill}`, below is an example of testing decode only:
+Single-node perf tests share the same entrypoint: `rtp_llm/test/perf_test/batch_decode_test.py`. There are two **mutually exclusive** modes:
+
+1. **Grid mode** — fix a list of batch sizes and input lengths (`--batch_size`, `--input_len`, comma-separated). Do **not** pass `--dataset_name`, `--dataset_path`, `--dataset`, or `--test_json`.
+2. **Distribution mode** — load or build a length histogram from a dataset or CSV, then sample workloads. Pass one of: `--dataset_name`, `--dataset_path`, `--dataset` (distribution CSV), or `--test_json`.
+
+### Checkpoint / tokenizer and Hub
+
+For this perf entrypoint only, if `--checkpoint_path` or `--tokenizer_path` is a ModelScope/HuggingFace **repo id** (e.g. `Qwen/Qwen3.5-35B-A3B`) or an **`https://huggingface.co/...` / `https://www.modelscope.cn/...` page URL**, `batch_decode_test` resolves it to a **local directory** (ModelScope first, then HuggingFace) before starting the engine, and rewrites argv so the child process never calls `AutoTokenizer.from_pretrained` on a remote id. Ordinary `start_server` / production paths do **not** perform that automatic download; use local paths or prefetch there.
+
+Set **`--model_type`** explicitly for grid mode (and whenever `model_type` cannot be inferred from local `config.json`). Engine flags use **`--checkpoint_path`** (binds to internal `ckpt_path`), not `--ckpt_path`, for this tool.
+
+`batch_size` is the batch on **each** DP rank when `dp_size` > 1.
+
+### Bazel targets (manual)
+
+Repository defaults (see `rtp_llm/test/perf_test/BUILD`):
+
+- **`//rtp_llm/test/perf_test:grid_perf_test`** — grid example with `qwen35_moe`, small `batch_size` / `input_len`, decode-only (`--partial 1`), `seq_size_per_block=1024`.
+- **`//rtp_llm/test/perf_test:distribution_perf_test`** — distribution sampling with ShareGPT (`--dataset_name sharegpt`), tunable `max_seq_len` / `concurrency_limit`.
+
+Example (SM90; adjust configs for your stack e.g. `cuda12_9` + `sm9x`):
+
 ```shell
-    --test_arg=partial=1
+# Grid: override sizes and run decode + prefill (partial=0) or decode-only
+bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
+    --config=cuda12_9 --config=sm9x \
+    --test_arg=--batch_size=1,2,4,8 \
+    --test_arg=--input_len=128,1024,2048 \
+    --test_arg=--partial=0
+
+# Grid: custom local checkpoint and model type
+bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
+    --config=cuda12_9 --config=sm9x \
+    --test_arg=--checkpoint_path=/path/to/local/ckpt \
+    --test_arg=--tokenizer_path=/path/to/local/tokenizer \
+    --test_arg=--model_type=qwen35_moe
+
+# Distribution mode (use distribution_perf_test or pass dataset flags via test_arg)
+bazelisk test //rtp_llm/test/perf_test:distribution_perf_test \
+    --config=cuda12_9 --config=sm9x \
+    --test_arg=--model_type=qwen35_moe
 ```
+
+Optional environment for the engine, e.g. `INT8_MODE=1`:
+
+```shell
+bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
+    --config=cuda12_9 --config=sm9x \
+    --test_env=INT8_MODE=1
+```
+
+### Prefill vs decode only
+
+When prefill and decode need different engine configs, restrict phases with **`--partial`**: `0` = both (default), `1` = decode grid only, `2` = prefill only. Example decode-only:
+
+```shell
+bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
+    --config=cuda12_9 --config=sm9x \
+    --test_arg=--partial=1
+```
+
 ## Multi Node Benchmark
 We also provide a Python script to enable multi-node benchmark, but since it requires setting up the environment and starting the script on multiple machines, it still involves more steps than single-node testing.
 

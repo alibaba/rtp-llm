@@ -72,9 +72,30 @@ class MagaServerManager(object):
         # Health check uses START_PORT (self._port); when VIT_SEPARATION==1 we return True above
         result = wait_sever_done(self._server_process, int(self._port), timeout)
         if not result:
-            # Print process log when server startup fails
             self.print_process_log()
+            self._cleanup_core_files()
         return result
+
+    @staticmethod
+    def _cleanup_core_files():
+        """Remove core dump files from TEST_UNDECLARED_OUTPUTS_DIR to prevent
+        the Bazel test runner from hanging on zipping multi-GB core files."""
+        outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
+        if not outputs_dir or not os.path.isdir(outputs_dir):
+            return
+        for entry in os.listdir(outputs_dir):
+            if entry.startswith("core"):
+                path = os.path.join(outputs_dir, entry)
+                try:
+                    if os.path.isdir(path):
+                        import shutil
+
+                        shutil.rmtree(path)
+                    else:
+                        os.remove(path)
+                    logging.info(f"Removed core file: {path}")
+                except OSError as e:
+                    logging.warning(f"Failed to remove core file {path}: {e}")
 
     def start_server(
         self,
@@ -96,16 +117,18 @@ class MagaServerManager(object):
         role_log_name = self._role_name + "_logs"
         current_env: Dict[str, str] = os.environ.copy()
         for k, v in self._env_args.items():
-            current_env[k] = v
+            if v is not None:
+                current_env[k] = v
 
-        current_env[MODEL_TYPE] = model_type
-        current_env[CHECKPOINT_PATH] = model_path
+        if model_type is not None:
+            current_env[MODEL_TYPE] = model_type
+        if model_path is not None:
+            current_env[CHECKPOINT_PATH] = model_path
         current_env[LOG_PATH] = role_log_name
 
-        if tokenizer_path is not None:
-            current_env[TOKENIZER_PATH] = tokenizer_path
-        else:
-            current_env[TOKENIZER_PATH] = model_path
+        effective_tok = tokenizer_path if tokenizer_path is not None else model_path
+        if effective_tok is not None:
+            current_env[TOKENIZER_PATH] = effective_tok
         if lora_infos is not None:
             current_env[LORA_INFO] = json.dumps(lora_infos)
         if ptuning_path is not None:

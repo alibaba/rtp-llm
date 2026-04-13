@@ -2,7 +2,7 @@ import json
 import logging
 import os
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 
 import requests
 
@@ -14,7 +14,6 @@ from rtp_llm.test.perf_test.dataclass import (
 from rtp_llm.utils.util import check_with_info
 
 
-# 将 _curl_server_single 提取为独立函数，以便在 ProcessPoolExecutor 中使用
 def _curl_server_single_worker(
     i: int,
     base_port: int,
@@ -61,30 +60,25 @@ def _curl_server_single_worker(
         return ResponseInfo({}, False)
 
 
-# 修改：使用ThreadPoolExecutor调用_curl_server_single_worker
 def _curl_server_batch_worker(
     request_indices: List[int],
     base_port: int,
-    input_query: str,
+    input_queries: List[str],
     is_decode: bool,
     decode_test_length: int,
     wait_time: int,
     profile: bool = False,
     generate_config: Dict[str, Any] = {},
 ) -> List[ResponseInfo]:
-    """使用ThreadPoolExecutor并发处理多个请求"""
-    responses = []
-
-    # 创建线程池，线程数等于请求数
+    """Concurrently send requests, each with its own query string."""
     with ThreadPoolExecutor(max_workers=len(request_indices)) as executor:
-        # 提交所有请求任务
         futures = []
-        for i in request_indices:
+        for idx, i in enumerate(request_indices):
             future = executor.submit(
                 _curl_server_single_worker,
                 i,
                 base_port,
-                input_query,
+                input_queries[idx],
                 is_decode,
                 decode_test_length,
                 wait_time,
@@ -92,13 +86,7 @@ def _curl_server_batch_worker(
                 generate_config,
             )
             futures.append(future)
-
-        # 收集所有响应
-        for future in futures:
-            response = future.result()
-            responses.append(response)
-
-    return responses
+        return [f.result() for f in futures]
 
 
 class BatchPerfImpl(object):
@@ -106,10 +94,8 @@ class BatchPerfImpl(object):
         self,
         base_port: int,
         dp_size: int,
-        tp_size: int,
         batch_size: int,
-        input_len: int,
-        query: str,
+        query: Union[str, List[str]],
         is_decode: bool = True,
         wait_time: int = 100,
         decode_test_length: int = 10,
@@ -118,19 +104,21 @@ class BatchPerfImpl(object):
     ):
         self.base_port = base_port
         self.dp_size = dp_size
-        self.tp_size = tp_size
         self.batch_size = batch_size
-        self.input_len = input_len
-        self.input_query = query
+        if isinstance(query, str):
+            self.input_queries = [query] * batch_size
+        else:
+            assert (
+                len(query) == batch_size
+            ), f"query list length {len(query)} != batch_size {batch_size}"
+            self.input_queries = query
         self.is_decode = is_decode
         self.max_requests_per_process = 128
-        # 计算需要的进程数
         self.num_processes = max(
             1,
             (batch_size + self.max_requests_per_process - 1)
             // self.max_requests_per_process,
         )
-        # 使用 ProcessPoolExecutor，进程数根据每个进程处理的请求数来确定
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         self.executor = ProcessPoolExecutor(max_workers=self.num_processes)
         self.wait_time = wait_time
@@ -138,10 +126,7 @@ class BatchPerfImpl(object):
         self.profile = profile
         self.generate_config = generate_config
 
-    # 需要做3次
-    # 第一次：warmup, 预编译jit
-    # 第二次: 测量时间
-    # 第三次: dump profile json（因为torch profiler会影响测量时间精确性）
+    # 3 runs: warmup (JIT compile), measure timing, profile (optional, torch profiler affects accuracy)
     def run(self):
         self._set_concurrency()
         _ = self._curl_server()
@@ -165,11 +150,10 @@ class BatchPerfImpl(object):
         )
         if response.status_code != 200 or response.json().get("status", "ok") != "ok":
             raise Exception(
-                f"failed to set conccurrency: {response.text}, {response.status_code}"
+                f"failed to set concurrency: {response.text}, {response.status_code}"
             )
 
     def _curl_server(self, profile: bool = False) -> TestResultMetrics:
-        # 将请求分批，每个进程处理一批请求
         request_batches: List[List[int]] = []
         for i in range(0, self.batch_size, self.max_requests_per_process):
             batch_indices = list(
@@ -179,12 +163,13 @@ class BatchPerfImpl(object):
 
         futures: List[Future[List[ResponseInfo]]] = []
         for batch_indices in request_batches:
+            batch_queries = [self.input_queries[i] for i in batch_indices]
             futures.append(
                 self.executor.submit(
                     _curl_server_batch_worker,
                     batch_indices,
                     self.base_port,
-                    self.input_query,
+                    batch_queries,
                     self.is_decode,
                     self.decode_test_length,
                     self.wait_time,
@@ -193,14 +178,11 @@ class BatchPerfImpl(object):
                 )
             )
 
-        # 收集所有响应
         all_responses: List[ResponseInfo] = []
         for future in futures:
-            batch_responses = future.result()
-            all_responses.extend(batch_responses)
+            all_responses.extend(future.result())
 
-        metrics = analyze_results(all_responses)
-        return metrics
+        return analyze_results(all_responses)
 
     def dump_results(self, results: List[Dict[str, Any]]):
         for result in results:
