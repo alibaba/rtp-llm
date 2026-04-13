@@ -27,7 +27,7 @@ class TestCudaGraphPrefill(unittest.TestCase):
         # Test parameters (can be configured)
         self.max_seq_len = 64
         self.tokens_per_block = 64
-        self.max_context_batch_size = 16
+        self.concurrency_limit = 16
 
         # Generate prefill_capture_seq_lens
         self.prefill_capture_seq_lens = self._generate_prefill_capture_seq_lens()
@@ -62,7 +62,7 @@ class TestCudaGraphPrefill(unittest.TestCase):
         self.op = CudaGraphRunner()
         self.op.init_prefill(
             model,
-            self.max_context_batch_size,
+            self.concurrency_limit,
             self.max_seq_len,
             self.tokens_per_block,
             self.kernel_tokens_per_block,

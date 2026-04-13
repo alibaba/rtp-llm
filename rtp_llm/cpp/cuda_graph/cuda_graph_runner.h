@@ -43,11 +43,7 @@ public:
         if (kernel_seq_size_per_block_ <= 0) {
             throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
         }
-        if (graph_params.is_prefill_cuda_graph_mode) {
-            max_bs_ = graph_params.max_context_batch_size;
-        } else {
-            max_bs_ = graph_params.concurrency_limit;
-        }
+        max_bs_               = graph_params.concurrency_limit;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
