@@ -137,12 +137,14 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
             const size_t vocab_size      = inputs.logits.size(1);
             const size_t max_seq_len_val = inputs.token_ids.size(1);
+            auto         temperature     = inputs.temperature.narrow(0, from_batch_idx_in, batch_size_in);
 
             auto beam_indices = all_beam_indices.narrow(0, from_batch_idx_out, batch_size_out);
 
             // Reshape for beam search: [batch, beams, ...]
             auto logits_reshaped =
                 logits.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_in, (int64_t)vocab_size});
+            auto temperature_reshaped = temperature.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_in});
             auto token_ids_in_reshaped =
                 token_ids_in.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_in, (int64_t)max_seq_len_val});
             auto input_lengths_reshaped = input_lengths.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_in});
@@ -160,6 +162,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto cum_log_probs_in_t = cum_log_probs_in_reshaped.to(torch::kCUDA);
 
             auto output = execSampleBeamSearch({logits_t,
+                                                temperature_reshaped,
                                                 token_ids_in_t,
                                                 input_lengths_t,
                                                 sequence_lengths_t,
@@ -180,24 +183,23 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             beam_indices.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_out}).copy_(output.beam_indices);
 
             success.fill_(true);
+
+            // prepare for next sampling
+            from_batch_idx_in  = to_batch_idx_in;
+            from_batch_idx_out = to_batch_idx_out;
         }
 
-        // prepare for next sampling
-        from_batch_idx_in  = to_batch_idx_in;
-        from_batch_idx_out = to_batch_idx_out;
+        return SamplerOutput({std::move(all_token_ids_out),
+                              std::move(all_cum_log_probs_out),
+                              std::move(inputs.all_probs),
+                              std::move(all_beam_indices),
+                              std::move(all_success)});
     }
 
-    return SamplerOutput({std::move(all_token_ids_out),
-                          std::move(all_cum_log_probs_out),
-                          std::move(inputs.all_probs),
-                          std::move(all_beam_indices),
-                          std::move(all_success)});
-}
-
-void Sampler::preprocessLogits(const SamplerInputs& inputs) {
-    if (inputs.logits_processor_states_ptr != nullptr) {
-        inputs.logits_processor_states_ptr->batchProcess(inputs);
+    void Sampler::preprocessLogits(const SamplerInputs& inputs) {
+        if (inputs.logits_processor_states_ptr != nullptr) {
+            inputs.logits_processor_states_ptr->batchProcess(inputs);
+        }
     }
-}
 
 }  // namespace rtp_llm
