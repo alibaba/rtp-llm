@@ -2,7 +2,7 @@
 
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
-#include "rtp_llm/models_py/bindings/common/kernels/unfused_attention_kernels.h"
+#include "rtp_llm/models_py/bindings/common/kernels/debug_kernel.h"
 
 namespace rtp_llm {
 

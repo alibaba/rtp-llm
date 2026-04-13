@@ -51,10 +51,26 @@ cc_library(
 )
 
 cc_library(
+    name = "rocm_rope_kvcache",
+    srcs = ["fused_rope_kvcache_kernel.cu"],
+    hdrs = ["fused_rope_kvcache_kernel.h"],
+    deps = rocm_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:math_utils",
+        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/common/kernels:attn_utils",
+    ],
+    copts = rocm_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "rocm_cu",
     deps = [
         ":rocm_basic",
         "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
+        ":rocm_rope_kvcache",
     ],
     visibility = ["//visibility:public"],
 )

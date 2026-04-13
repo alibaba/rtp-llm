@@ -1,5 +1,5 @@
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
-#include "rtp_llm/models_py/bindings/common/kernels/unfused_attention_kernels.h"
+#include "rtp_llm/models_py/bindings/rocm/kernels/fused_rope_kvcache_kernel.h"
 #include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
 #include <stdexcept>

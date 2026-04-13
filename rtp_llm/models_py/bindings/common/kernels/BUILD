@@ -91,16 +91,11 @@ cc_library(
 )
 
 cc_library(
-    name = "kernels_attention",
-    srcs = ["unfused_attention_kernels.cu"],
-    hdrs = ["unfused_attention_kernels.h"],
+    name = "kernels_debug",
+    srcs = ["debug_kernel.cu"],
+    hdrs = ["debug_kernel.h"],
     deps = any_cuda_deps + [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:math_utils",
-        "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/cuda:cuda_utils_cu",
-        "//rtp_llm/cpp/cuda:launch_utils",
-        ":attn_utils",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -221,7 +216,7 @@ cc_library(
         ":kernels_activation",
         ":kernels_layernorm",
         ":kernels_sampling",
-        ":kernels_attention",
+        ":kernels_debug",
         ":kernels_embedding",
         ":kernels_tensor_ops",
         ":kernels_kv_cache",
