@@ -149,7 +149,6 @@ class FrontendApp(object):
         )
         try:
             server = GracefulShutdownServer(config)
-            # freeze all current tracked objects to reduce gc cost
             server.set_server(self.frontend_server)
             # freeze all current tracked objects to reduce gc cost
             gc.collect()
