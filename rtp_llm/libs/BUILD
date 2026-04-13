@@ -165,6 +165,8 @@ genrule(
         "module_gemm_a8w8.so",
         "module_moe_ck2stages.so",
         "module_deepgemm.so",
+        "module_gemm_common.so",
+        "module_hipbsolgemm.so",
     ],
     cmd = """
         cp external/aiter/aiter/jit/module_aiter_enum.so $(location module_aiter_enum.so);
@@ -187,6 +189,8 @@ genrule(
         cp external/aiter/aiter/jit/module_gemm_a8w8.so $(location module_gemm_a8w8.so);
         cp external/aiter/aiter/jit/module_moe_ck2stages.so $(location module_moe_ck2stages.so);
         cp external/aiter/aiter/jit/module_deepgemm.so $(location module_deepgemm.so);
+        cp external/aiter/aiter/jit/module_gemm_common.so $(location module_gemm_common.so);
+        cp external/aiter/aiter/jit/module_hipbsolgemm.so $(location module_hipbsolgemm.so);
 """,
     tags = [
         "local",
