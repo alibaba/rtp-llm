@@ -217,3 +217,89 @@ def store_ssm_state_to_block_map(
         CONV_STRIDE_TOKEN=token_stride_ssm_state,
         CHUNK_SIZE=chunk_size,
     )
+
+
+@triton.jit(do_not_specialize=["max_block_size"])
+def store_final_state_to_block_map_kernel(
+    final_states: tl.tensor,
+    prefix_lengths: tl.tensor,
+    cu_seqlens: tl.tensor,
+    block_map: tl.tensor,
+    ssm_states: tl.tensor,
+    max_block_size: tl.int32,
+    HEAD_NUM: tl.constexpr,
+    V: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_V: tl.constexpr,
+    SEQ_SIZE_PER_BLOCK: tl.constexpr,
+    CONV_STRIDE_TOKEN: tl.constexpr,
+):
+    """Store only final_state per sequence (no intermediate chunk states)."""
+    i_b, i_h, i_v = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+
+    SSM_PER_HEAD = K * V
+    SSM_PER_BATCH = SSM_PER_HEAD * HEAD_NUM
+    v_offset = i_v * BLOCK_V
+
+    prefix = tl.load(prefix_lengths + i_b)
+    bos = tl.load(cu_seqlens + i_b).to(tl.int32)
+    eos = tl.load(cu_seqlens + i_b + 1).to(tl.int32)
+    input_len = eos - bos
+
+    if input_len <= 0:
+        return
+
+    dest_block_pos = (prefix + input_len - 1) // SEQ_SIZE_PER_BLOCK
+    block_idx = tl.load(block_map + i_b * max_block_size + dest_block_pos).to(tl.int64)
+
+    if block_idx <= 0:
+        return
+
+    source_ptr = final_states + i_b * SSM_PER_BATCH + i_h * SSM_PER_HEAD
+    dest_ptr = ssm_states + block_idx * CONV_STRIDE_TOKEN + i_h * SSM_PER_HEAD
+
+    p_in = tl.make_block_ptr(
+        source_ptr, (V, K), (K, 1), (v_offset, 0), (BLOCK_V, K), (1, 0)
+    )
+    p_out = tl.make_block_ptr(
+        dest_ptr, (V, K), (K, 1), (v_offset, 0), (BLOCK_V, K), (1, 0)
+    )
+
+    tl.store(
+        p_out,
+        tl.load(p_in, boundary_check=(0, 1)).to(ssm_states.dtype.element_ty),
+        boundary_check=(0, 1),
+    )
+
+
+def store_final_state_only_to_block_map(
+    final_states: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    block_map: torch.Tensor,
+    ssm_states: torch.Tensor,
+    seq_size_per_block: int,
+    block_v: int = 64,
+):
+    """Store only final_state per sequence to block map (no intermediate chunk states).
+    Used when the kernel only returns final_state, not per-chunk states."""
+    assert final_states.dtype == torch.float32, "final_states must be float32"
+    batch_size = prefix_lengths.shape[0]
+    _, head_num, v, k = ssm_states.shape
+    max_block_size = block_map.shape[1]
+    token_stride = ssm_states.stride(0)
+    grid = (batch_size, head_num, triton.cdiv(v, block_v))
+    store_final_state_to_block_map_kernel[grid](
+        final_states,
+        prefix_lengths,
+        cu_seqlens,
+        block_map,
+        ssm_states,
+        max_block_size,
+        HEAD_NUM=head_num,
+        V=v,
+        K=k,
+        BLOCK_V=block_v,
+        SEQ_SIZE_PER_BLOCK=seq_size_per_block,
+        CONV_STRIDE_TOKEN=token_stride,
+    )

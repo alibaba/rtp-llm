@@ -187,6 +187,94 @@ def l2norm_fwd(
     return y.view(x_shape_og)
 
 
+@triton.jit
+def l2norm_fwd_qk_kernel(
+    x,
+    y_q,
+    y_k,
+    stride_x_row: tl.int64,
+    D,
+    BD: tl.constexpr,
+    H_K: tl.constexpr,
+    eps,
+):
+    """L2-normalize q and k heads from a packed non-contiguous input into
+    two separate contiguous outputs in a single kernel launch.
+
+    Input: packed [token0: q_h0..q_h{H_K-1}, k_h0..k_h{H_K-1}, ...][token1: ...]
+           with tokens separated by stride_x_row.
+    Output: y_q is contiguous [T*H_K, D], y_k is contiguous [T*H_K, D].
+
+    program_id(0) iterates over T * H_K * 2 rows total.
+    """
+    i_t = tl.program_id(0)
+    total_heads = H_K * 2
+    token = i_t // total_heads
+    head_in_token = i_t % total_heads
+    is_k = head_in_token >= H_K
+    head_local = tl.where(is_k, head_in_token - H_K, head_in_token)
+
+    # Input: strided by token, q+k heads adjacent within token
+    x += token * stride_x_row + head_in_token * D
+
+    # Output: separate contiguous buffers
+    out_row = token * H_K + head_local
+    y = tl.where(is_k, y_k, y_q)
+    y += out_row * D
+
+    cols = tl.arange(0, BD)
+    mask = cols < D
+    b_x = tl.load(x + cols, mask=mask, other=0.0).to(tl.float32)
+    b_var = tl.sum(b_x * b_x, axis=0)
+    b_rstd = 1 / tl.sqrt(b_var + eps)
+    b_y = b_x * b_rstd
+    tl.store(y + cols, b_y, mask=mask)
+
+
+def l2norm_fwd_qk(
+    q: torch.Tensor, k: torch.Tensor, eps: float = 1e-6
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused l2-normalize q and k in a single kernel launch.
+
+    q and k must come from the same torch.split (adjacent per-token in memory)
+    with identical strides and shapes.
+
+    Returns contiguous (q_normed, k_normed) each with shape matching input.
+    """
+    assert q.stride() == k.stride(), "q and k must have identical strides"
+    assert q.shape == k.shape, "q and k must have identical shapes"
+    assert q.stride(-1) == 1 and q.ndim >= 3, "last dim must be contiguous"
+    H_k = q.shape[-2]
+    D = q.shape[-1]
+    assert (
+        k.data_ptr() == q.data_ptr() + H_k * D * q.element_size()
+    ), "q and k must be adjacent in memory (from same torch.split)"
+
+    stride_token = q.stride(-3)
+    num_tokens = q.numel() // (H_k * D)
+    total_rows = num_tokens * H_k * 2
+
+    BD = min(65536 // q.element_size(), triton.next_power_of_2(D))
+
+    q_out = torch.empty(num_tokens * H_k, D, dtype=q.dtype, device=q.device)
+    k_out = torch.empty(num_tokens * H_k, D, dtype=k.dtype, device=k.device)
+
+    l2norm_fwd_qk_kernel[(total_rows,)](
+        q,
+        q_out,
+        k_out,
+        stride_x_row=stride_token,
+        eps=eps,
+        D=D,
+        BD=BD,
+        H_K=H_k,
+        num_warps=8,
+        num_stages=3,
+    )
+
+    return q_out.view(q.shape), k_out.view(k.shape)
+
+
 class L2NormFunction(torch.autograd.Function):
 
     @staticmethod

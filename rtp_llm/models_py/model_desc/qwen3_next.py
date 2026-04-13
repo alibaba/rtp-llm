@@ -36,6 +36,7 @@ from rtp_llm.models_py.triton_kernels.fla.blackwell_prefill import (
 )
 from rtp_llm.models_py.triton_kernels.fla.block import (
     load_initial_state_from_block_map,
+    store_final_state_only_to_block_map,
     store_ssm_state_to_block_map,
 )
 from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
@@ -43,7 +44,6 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
-from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -445,19 +445,10 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         attn_inputs: PyAttentionInputs,
         seq_size_per_block: int,
     ) -> torch.Tensor:
-        # l2norm_fwd handles non-contiguous input directly (strided kernel),
-        # producing contiguous output in a single kernel per tensor.
-        # q and k must be separate calls: downstream chunk pipeline kernels
-        # require each to be independently contiguous with stride H_qk*D.
-        query = l2norm_fwd(query)
-        key = l2norm_fwd(key)
         value = value.contiguous()
         beta = beta.float()
-        # g from fused_gdn_gating is already contiguous
 
         output_final_state = ssm_states is not None
-        # Pre-allocate output tensors so blackwell_chunk_gated_delta_rule
-        # doesn't allocate device memory internally.
         output = torch.empty_like(value)
         output_state = None
         if output_final_state:
@@ -481,6 +472,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_state=initial_states,
                 output_final_state=output_final_state,
                 cu_seqlens=cu_seqlens,
+                use_qk_l2norm_in_kernel=True,
                 output=output,
                 output_state=output_state,
             )
@@ -490,7 +482,6 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 exc_info=True,
             )
             Qwen3NextGatedDeltaNetPrefill._blackwell_available = False
-            # Re-do with Triton (q/k already l2norm-ed, so pass use_qk_l2norm_in_kernel=False)
             attn_out, h, final_state = chunk_gated_delta_rule(
                 query,
                 key,
@@ -500,7 +491,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_state=initial_states,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=False,
+                use_qk_l2norm_in_kernel=True,
             )
             if ssm_states is not None:
                 store_ssm_state_to_block_map(
@@ -518,15 +509,13 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         if output_final_state:
             attn_out, final_state = result
             final_state = final_state.transpose(-1, -2).contiguous()
-            store_ssm_state_to_block_map(
-                final_state,
+            store_final_state_only_to_block_map(
                 final_state,
                 attn_inputs.prefix_lengths_d,
                 cu_seqlens,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 seq_size_per_block,
-                chunk_size=128,
             )
         else:
             attn_out = result if not isinstance(result, tuple) else result[0]
