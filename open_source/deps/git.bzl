@@ -76,6 +76,8 @@ def git_deps():
             "echo '    module_names.append(\"module_moe_ck2stages\")' >> build_aiter_module.py",
             "echo '    module_names.append(\"module_deepgemm\")' >> build_aiter_module.py",
             "echo '    module_names.append(\"module_quick_all_reduce\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_gemm_common\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_hipbsolgemm\")' >> build_aiter_module.py",
             "echo '    with multiprocessing.Pool(processes = 64) as pool:' >> build_aiter_module.py",
             "echo '        pool.map(build_aiter_module, module_names)' >> build_aiter_module.py",
             "echo 'echo \"building mla kernel\"' >> build_mla_kernel.sh",
