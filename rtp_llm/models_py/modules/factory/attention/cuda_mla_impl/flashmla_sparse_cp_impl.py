@@ -76,13 +76,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.prefill_cp_size = parallelism_config.tp_size
         self.device = torch.cuda.current_device()
         self.kv_restore_unpad_indices = None
-
-        self.q0_idx = None
-        self.q1_idx = None
-        self.q0_idx_global = None
-        self.q1_idx_global = None
-        self.kv0_idx = None
-        self.kv1_idx = None
+        self.total_global_ids = None
+        self.total_local_ids = None
+        self.cu_kv_seqlens_global = None
+        self.total_kv_len: int = 0
         self.kv_cache_write_op = None
         self.write_cache_store_impl = None
 
@@ -102,92 +99,45 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         ), "Context parallel info is required for SparseMlaFp8CPOp"
 
         cp_info = self.cp_info
-        padding_mask = cp_info.prefill_qkv_padding_mask
-        kv_restore_indices = cp_info.prefill_qkv_restore_indice
-        self.kv_restore_unpad_indices = kv_restore_indices[padding_mask == 1]
-
         chunk_lengths = cp_info.prefill_cp_chunk_lengths
-        q0_idx, q1_idx = generate_q_indices(chunk_lengths)
-        kv0_idx, kv1_idx = generate_full_causal_kv_indices(
-            chunk_lengths,
-            self.prefill_cp_rank,
-            self.prefill_cp_size,
-        )
-
-        self.kv0_idx = kv_restore_indices[kv0_idx]
-        self.kv1_idx = kv_restore_indices[kv1_idx]
-        self.q0_idx = torch.tensor(q0_idx, device=self.device, dtype=torch.long)
-        self.q1_idx = torch.tensor(q1_idx, device=self.device, dtype=torch.long)
 
         # Zig-zag: restore_indices[global_pos] = source_flat_index → global_idx = inv_restore[cp_rank * local_tokens + local_idx]
         if isinstance(chunk_lengths, torch.Tensor):
             chunk_lengths_list = chunk_lengths.cpu().tolist()
         else:
             chunk_lengths_list = list(chunk_lengths)
+
+        # These stay in Python (pure CPU list operations)
+        q0_idx, q1_idx = generate_q_indices(chunk_lengths_list)
+
         local_tokens = sum(chunk_lengths_list)
-        restore = kv_restore_indices.to(device=self.device, dtype=torch.long)
-        inv_restore = torch.empty(restore.size(0), device=self.device, dtype=torch.long)
-        inv_restore[restore] = torch.arange(
-            restore.size(0), device=self.device, dtype=torch.long
+
+        # Ensure CPU tensors for C++ processing
+        padding_mask_cpu = cp_info.prefill_qkv_padding_mask
+        if padding_mask_cpu.is_cuda:
+            padding_mask_cpu = padding_mask_cpu.cpu()
+        kv_restore_cpu = cp_info.prefill_qkv_restore_indice
+        if kv_restore_cpu.is_cuda:
+            kv_restore_cpu = kv_restore_cpu.cpu()
+
+        # Single C++ call replaces ~26 GPU kernel launches
+        mla_params.fill_cp_plan_params(
+            padding_mask_cpu,
+            kv_restore_cpu,
+            q0_idx,
+            q1_idx,
+            self.prefill_cp_rank,
+            local_tokens,
+            cp_info.prefill_actual_input_lengths_cpu,
+            self.attn_inputs.prefix_lengths,
         )
-        source_flat_0 = self.prefill_cp_rank * local_tokens + self.q0_idx
-        source_flat_1 = self.prefill_cp_rank * local_tokens + self.q1_idx
-        self.q0_idx_global = inv_restore[source_flat_0]
-        self.q1_idx_global = inv_restore[source_flat_1]
 
-        # Keep only indices where padding_mask is 1 (valid); drop padded positions (0)
-        padding_mask_d = padding_mask.to(device=self.device)
-        valid_mask_q0 = padding_mask_d[self.q0_idx_global] == 1
-        valid_mask_q1 = padding_mask_d[self.q1_idx_global] == 1
-        self.q0_idx_global = self.q0_idx_global[valid_mask_q0]
-        self.q1_idx_global = self.q1_idx_global[valid_mask_q1]
-        self.q0_idx = self.q0_idx[valid_mask_q0]
-        self.q1_idx = self.q1_idx[valid_mask_q1]
-
-        # Convert from padded to unpadded coordinate space.
-        # inv_restore yields indices in the padded global space (0..padded_total-1),
-        # but positions_d / ks / ke / batch_indice_d are sized by unpadded_total.
-        pad_to_unpad = torch.cumsum(padding_mask_d, dim=0).long() - 1
-        self.q0_idx_global = pad_to_unpad[self.q0_idx_global]
-        self.q1_idx_global = pad_to_unpad[self.q1_idx_global]
-
-        self.total_global_ids = torch.cat(
-            [self.q0_idx_global, self.q1_idx_global], dim=0
-        )
-        self.total_local_ids = torch.cat([self.q0_idx, self.q1_idx], dim=0)
-
-        # --- Bounds checks (moved from forward hot-path to avoid device-host sync) ---
-        unpadded_total = int(padding_mask.sum().item())
-        if self.total_local_ids.numel() > 0:
-            max_lid = self.total_local_ids.max().item()
-            if max_lid >= local_tokens:
-                raise ValueError(
-                    f"[plan] total_local_ids out of range: "
-                    f"max(total_local_ids)={max_lid}, local_tokens={local_tokens}. "
-                    "Check CP plan() local chunk vs actual input size."
-                )
-        if self.total_global_ids.numel() > 0:
-            max_gid = self.total_global_ids.max().item()
-            if max_gid >= unpadded_total:
-                raise ValueError(
-                    f"[plan] total_global_ids out of range: "
-                    f"max(total_global_ids)={max_gid}, unpadded_total={unpadded_total}. "
-                    "Check padded-to-unpadded coordinate conversion."
-                )
-
-        # attention_inputs.cu_kv_seqlens is based on local CP chunk lengths
-        # (input_lengths is overwritten by ContextParallelProcessor), but the
-        # gather kernel needs cumulative lengths covering the full (global) sequence.
-        actual_input_lengths = cp_info.prefill_actual_input_lengths_cpu
-        prefix_lengths = self.attn_inputs.prefix_lengths
-        kv_lengths = actual_input_lengths.int() + prefix_lengths.int()
-        cu_kv_seqlens_cpu = torch.zeros(kv_lengths.shape[0] + 1, dtype=torch.int32)
-        cu_kv_seqlens_cpu[1:] = torch.cumsum(kv_lengths, dim=0)
-        self.total_kv_len = int(cu_kv_seqlens_cpu[-1])
-        self.cu_kv_seqlens_global = cu_kv_seqlens_cpu.to(self.device)
-
-        # get_mla_metadata: num_q_tokens_per_head_k = num_q_tokens * num_heads_q // num_heads_k (for tile scheduling).
-        # For q0 and q1 we need separate metadata since each part has different q token count (use filtered counts).
+        self.kv_restore_unpad_indices = mla_params.cp_kv_restore_unpad_indices
+        self.total_global_ids = mla_params.cp_total_global_ids
+        self.total_local_ids = mla_params.cp_total_local_ids
+        self.cu_kv_seqlens_global = mla_params.cp_cu_kv_seqlens_global
+        self.total_kv_len = mla_params.cp_total_kv_len
+        # get_mla_metadata stays in Python (external flash_mla library)
         n_q = self.total_global_ids.size(0)
         tile_sched_q0, num_splits_q0 = get_mla_metadata(  # type: ignore
             cache_seqlens=None,
