@@ -64,3 +64,15 @@ py_test(
     tags = ["H20"],
     exec_properties = {'gpu': 'H20'},
 )
+
+py_test(
+    name = "test_cp_linear_attn",
+    srcs = ["test_cp_linear_attn.py"],
+    deps = py_test_deps + [":cp_test_utils"] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["manual"],
+    exec_properties = {'gpu': 'H20'},
+)
