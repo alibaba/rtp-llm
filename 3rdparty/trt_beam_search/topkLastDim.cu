@@ -341,6 +341,21 @@ __device__ void vectorized_process(T const* in, idxT len, Func f, int sync_width
     }
 }
 
+template <bool EnableVec, typename T, typename idxT, typename Func>
+__device__ void may_vectorized_process(size_t thread_rank, size_t num_threads, T const* in, idxT len, Func f){
+    if constexpr (EnableVec)
+    {
+        vectorized_process(thread_rank, num_threads, in, len, f);
+    }
+    else
+    {
+        for (idxT i = thread_rank; i < len; i += num_threads)
+        {
+            f(in[i], i);
+        }
+    }
+}
+
 template <typename T, typename IdxT>
 struct alignas(128) Counter
 {
@@ -575,9 +590,15 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
     IdxT* p_out_back_cnt = &counter->out_back_cnt;
     IdxT* p_equal = out_idx + k - num_of_kth_needed;
     cuda::atomic_ref<IdxT, cuda::thread_scope_block> ref_last(p_equal[num_of_kth_needed - 1]);
-    for (IdxT i = threadIdx.x; i < current_len; i += blockDim.x)
+
+#ifdef USING_ROCM
+        constexpr bool ENABLE_VEC = true;
+#else
+        constexpr bool ENABLE_VEC = false;
+#endif
+    auto f = [in_idx_buf, out, out_idx, select_min, start_bit, kth_value_bits, num_of_kth_needed, k, p_out_cnt, 
+        p_out_back_cnt, p_equal, ref_last](T value, IdxT i)
     {
-        const T value = in_buf[i];
         auto const bits = (twiddle_in(value, select_min) >> start_bit) << start_bit;
         if (bits < kth_value_bits)
         {
@@ -616,7 +637,8 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
                 }
             }
         }
-    }
+    };
+    may_vectorized_process<ENABLE_VEC>(threadIdx.x, blockDim.x, in_buf, current_len, f);
 }
 
 template <typename T, typename IdxT, int BitsPerPass, bool prioritize_smaller_indice = false>
@@ -1026,31 +1048,39 @@ __device__ void filter_and_histogram_for_one_block(T const* in_buf, IdxT const* 
     }
     else if (!out_buf)
     {
-        // not use vectorized_process here because it increases #registers a lot
         auto const kth_value_bits = counter->kth_value_bits;
         int const previous_start_bit = calc_start_bit<T, BitsPerPass>(pass - 1);
 
-        for (IdxT i = threadIdx.x; i < previous_len; i += blockDim.x)
+        // Use vectorized reads on ROCm — larger register file makes this worthwhile
+#ifdef USING_ROCM
+        constexpr bool ENABLE_VEC = true;
+#else
+        constexpr bool ENABLE_VEC = false;
+#endif
+        auto f = [histogram, select_min, start_bit, mask, previous_start_bit, kth_value_bits](T value, IdxT)
         {
-            const T value = in_buf[i];
             auto const previous_bits = (twiddle_in(value, select_min) >> previous_start_bit) << previous_start_bit;
             if (previous_bits == kth_value_bits)
             {
                 int bucket = calc_bucket<T, BitsPerPass>(value, start_bit, mask, select_min);
                 atomicAdd(histogram + bucket, static_cast<IdxT>(1));
             }
-        }
+        };
+        may_vectorized_process<ENABLE_VEC>(threadIdx.x, blockDim.x, in_buf, previous_len, f);
     }
     else
     {
-        // not use vectorized_process here because it increases #registers a lot
         IdxT* p_out_cnt = &counter->out_cnt;
         auto const kth_value_bits = counter->kth_value_bits;
         int const previous_start_bit = calc_start_bit<T, BitsPerPass>(pass - 1);
-
-        for (IdxT i = threadIdx.x; i < previous_len; i += blockDim.x)
+#ifdef USING_ROCM
+        constexpr bool ENABLE_VEC = true;
+#else
+        constexpr bool ENABLE_VEC = false;
+#endif
+        auto f = [in_idx_buf, out_buf, out_idx_buf, out, out_idx, histogram, select_min,
+                     start_bit, mask, previous_start_bit, kth_value_bits, p_filter_cnt, p_out_cnt](T value, IdxT i)
         {
-            const T value = in_buf[i];
             auto const previous_bits = (twiddle_in(value, select_min) >> previous_start_bit) << previous_start_bit;
             if (previous_bits == kth_value_bits)
             {
@@ -1072,7 +1102,8 @@ __device__ void filter_and_histogram_for_one_block(T const* in_buf, IdxT const* 
                 out[pos] = value;
                 out_idx[pos] = in_idx_buf ? in_idx_buf[i] : i;
             }
-        }
+        };
+        may_vectorized_process<ENABLE_VEC>(threadIdx.x, blockDim.x, in_buf, previous_len, f);
     }
 }
 
@@ -1451,24 +1482,38 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
     constexpr int items_per_thread = 32;
     constexpr int block_dim = 512;
     constexpr bool fused_last_filter = false;
+    constexpr int topk_bits = 11;
     if (len <= block_dim * items_per_thread)
     {
-        standalone_stable_radix_topk_one_block_<T, idxT, 11, block_dim>(
+        standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(
             buf, buf_size, in, static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, stream, sorted);
     }
     else
     {
         int sm_cnt = tensorrt_llm::common::getMultiProcessorCount();
-        unsigned grid_dim = air_topk_stable::calc_grid_dim<T, idxT, 11, block_dim>(batch_size, len, sm_cnt);
+        unsigned grid_dim = air_topk_stable::calc_grid_dim<T, idxT, topk_bits, block_dim>(batch_size, len, sm_cnt);
+
+#if USING_ROCM
+        // On ROCm, the one-block kernel with vectorized reads is faster than the
+        // multi-block path for small grid_dim values, because the multi-block path
+        // has inter-block sync overhead and multiple kernel launches (3 passes +
+        // last_filter + sort). Force one-block when grid_dim is small.
+        if (grid_dim <= 4)
+        {
+            standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,
+                static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, stream, sorted);
+            return;
+        }
+#endif
 
         if (grid_dim == 1)
         {
-            standalone_stable_radix_topk_one_block_<T, idxT, 11, block_dim>(buf, buf_size, in,
+            standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,
                 static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, stream, sorted);
         }
         else
         {
-            standalone_stable_radix_topk_<T, idxT, 11, block_dim>(buf, buf_size, in, static_cast<idxT*>(nullptr),
+            standalone_stable_radix_topk_<T, idxT, topk_bits, block_dim>(buf, buf_size, in, static_cast<idxT*>(nullptr),
                 batch_size, len, k, out, out_idx, !greater, fused_last_filter, grid_dim, stream, sorted);
         }
     }
