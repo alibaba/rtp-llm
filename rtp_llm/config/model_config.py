@@ -8,6 +8,7 @@ import torch
 
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
+    W4a8Int4PerChannelQuantConfig,
     QuantizationConfig,
     init_quant_config,
 )
@@ -610,6 +611,15 @@ class ModelConfig(CppModelConfig):
                 f"Overriding data_type from {original_data_type} to {data_type} "
                 f"because {quant_config.get_method()} quantization requires FP16"
             )
+        elif quant_config and isinstance(quant_config, W4a8Int4PerChannelQuantConfig):
+            if data_type not in [WEIGHT_TYPE.BF16, WEIGHT_TYPE.FP16]:
+                original_data_type = data_type
+                data_type = WEIGHT_TYPE.BF16
+                logging.info(
+                    f"Overriding data_type from {original_data_type} to {data_type} "
+                    f"because w4a8_int4_per_channel quantization only supports BF16/FP16, "
+                    "ACT_TYPE can be configured manually."
+                )
 
         # Set attn_config.kv_cache_dtype based on kv_cache_config
         if kv_cache_config is not None:
