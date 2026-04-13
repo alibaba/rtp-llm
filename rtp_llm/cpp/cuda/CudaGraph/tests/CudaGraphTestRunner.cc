@@ -15,7 +15,7 @@ namespace rtp_llm {
 class CudaGraphTestRunner {
 public:
     void init_prefill(py::object       py_instance,
-                      int64_t          max_context_batch_size,
+                      int64_t          concurrency_limit,
                       int64_t          max_seq_len,
                       int64_t          tokens_per_block,
                       int64_t          kernel_tokens_per_block,
@@ -29,7 +29,7 @@ public:
         params.tokens_per_block             = static_cast<int>(tokens_per_block);
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
         params.num_tokens_per_bs            = static_cast<int>(max_seq_len);
-        params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
+        params.concurrency_limit            = static_cast<size_t>(concurrency_limit);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
@@ -100,7 +100,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
         .def("init_prefill",
              &CudaGraphTestRunner::init_prefill,
              py::arg("py_instance"),
-             py::arg("max_context_batch_size"),
+             py::arg("concurrency_limit"),
              py::arg("max_seq_len"),
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
