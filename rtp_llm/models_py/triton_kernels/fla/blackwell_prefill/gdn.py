@@ -182,7 +182,6 @@ class GDN:
         in_dtype: Type[cutlass.Numeric],
         out_dtype: Type[cutlass.Numeric],
         g_beta_dtype: Type[cutlass.Numeric],
-        use_qk_l2norm_in_kernel: bool = False,
     ) -> bool:
         """
         Check if the gdn can be implemented
@@ -193,10 +192,6 @@ class GDN:
         # Unpack parameters
         b, s_q, h_q, d = q_shape
         b_, _, h_v, d_ = v_shape
-
-        if use_qk_l2norm_in_kernel:
-            warnings.warn("use_qk_l2norm_in_kernel is not supported yet", stacklevel=2)
-            can_implement = False
 
         if b != b_:
             warnings.warn("q & k must have the same batch size", stacklevel=2)
@@ -4511,13 +4506,35 @@ def chunk_gated_delta_rule(
         initial_state: (B, H_v, D, D) recurrent state (f32), or None for zero init.
         output_final_state: If True, return the final state alongside output.
         cu_seqlens: Cumulative sequence lengths for variable-length batching.
-        use_qk_l2norm_in_kernel: If True, use L2 norm of QK in the kernel.(Not supported yet)
+        use_qk_l2norm_in_kernel: If True, apply L2 normalization to q and k before the kernel.
         output: Pre-allocated output tensor, or None to allocate internally.
         output_state: Pre-allocated state output tensor, or None.
 
     Returns:
         output or (output, output_state) depending on output_final_state.
     """
+
+    # Apply L2 normalization to q and k if requested
+    if use_qk_l2norm_in_kernel:
+        from rtp_llm.models_py.triton_kernels.fla.l2norm import (
+            l2norm_fwd,
+            l2norm_fwd_qk,
+        )
+
+        # Try fused qk path if q and k are adjacent in memory (from same split)
+        if (
+            q.stride() == k.stride()
+            and q.shape == k.shape
+            and not q.is_contiguous()
+            and q.stride(-1) == 1
+            and q.ndim >= 3
+            and k.data_ptr()
+            == q.data_ptr() + q.shape[-2] * q.shape[-1] * q.element_size()
+        ):
+            q, k = l2norm_fwd_qk(q, k)
+        else:
+            q = l2norm_fwd(q)
+            k = l2norm_fwd(k)
 
     # Allocate output if needed
     if output is None:
@@ -4530,7 +4547,6 @@ def chunk_gated_delta_rule(
         q.dtype,
         output.dtype,
         beta.dtype,
-        use_qk_l2norm_in_kernel,
     ):
         raise ValueError("Unsupported input shape or dtype")
     cu_seqlens_tuple = tuple(cu_seqlens.tolist()) if cu_seqlens is not None else None
