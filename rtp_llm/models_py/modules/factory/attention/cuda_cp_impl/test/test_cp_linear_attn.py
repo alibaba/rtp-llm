@@ -307,11 +307,9 @@ class TestCPLinearAttnForward(unittest.TestCase):
         inv_restore[unpad_restore.long()] = torch.arange(
             unpad_restore.shape[0], device=self.device
         )
-        local_mask = padding_mask[local_start:local_end]
-        local_ag_positions = torch.arange(local_start, local_end, device=self.device)[
-            local_mask == 1
-        ]
-        cp_local_extract_idx = inv_restore[local_ag_positions]
+        local_inv = inv_restore[local_start:local_end]
+        cp_local_valid_mask = local_inv >= 0
+        cp_local_extract_idx = local_inv[cp_local_valid_mask]
 
         actual_lengths = torch.tensor(sequence_lengths, dtype=torch.int32)
         full_cu_from_actual = torch.zeros(
@@ -330,6 +328,7 @@ class TestCPLinearAttnForward(unittest.TestCase):
             full_prefill_cu_seqlens=full_cu_from_actual,
             cp_restore_indices=restore_indices,
             cp_local_extract_indices=cp_local_extract_idx,
+            cp_local_valid_mask=cp_local_valid_mask,
         )
 
         def mock_ag(tensor, group=None):

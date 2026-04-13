@@ -550,6 +550,8 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         # b,a should be contiguous for fused_gdn_gating
         return mixed_qkv, z, b, a
 
+    # TODO: extract shared conv1d/FLA/ssm-state logic with Qwen3NextGatedDeltaNetPrefill
+    # to eliminate duplication
     def _forward_cp_prefill(
         self,
         mixed_qkv: torch.Tensor,
@@ -889,6 +891,7 @@ class Qwen3NextModel(GptModelBase):
         if cp_info is None:
             return None, None, None, None, None
 
+        # In CP mode the TP group is repurposed as the CP group, so tp_size == cp_size.
         cp_size = self.parallelism_config.tp_size
         cp_rank = self.parallelism_config.tp_rank
 
