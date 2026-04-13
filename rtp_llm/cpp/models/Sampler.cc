@@ -183,23 +183,23 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             beam_indices.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_out}).copy_(output.beam_indices);
 
             success.fill_(true);
-
-            // prepare for next sampling
-            from_batch_idx_in  = to_batch_idx_in;
-            from_batch_idx_out = to_batch_idx_out;
         }
-
-        return SamplerOutput({std::move(all_token_ids_out),
-                              std::move(all_cum_log_probs_out),
-                              std::move(inputs.all_probs),
-                              std::move(all_beam_indices),
-                              std::move(all_success)});
+        // prepare for next sampling
+        from_batch_idx_in  = to_batch_idx_in;
+        from_batch_idx_out = to_batch_idx_out;
     }
 
-    void Sampler::preprocessLogits(const SamplerInputs& inputs) {
-        if (inputs.logits_processor_states_ptr != nullptr) {
-            inputs.logits_processor_states_ptr->batchProcess(inputs);
-        }
+    return SamplerOutput({std::move(all_token_ids_out),
+                          std::move(all_cum_log_probs_out),
+                          std::move(inputs.all_probs),
+                          std::move(all_beam_indices),
+                          std::move(all_success)});
+}
+
+void Sampler::preprocessLogits(const SamplerInputs& inputs) {
+    if (inputs.logits_processor_states_ptr != nullptr) {
+        inputs.logits_processor_states_ptr->batchProcess(inputs);
     }
+}
 
 }  // namespace rtp_llm
