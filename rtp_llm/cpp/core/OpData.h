@@ -609,6 +609,7 @@ struct GreedyOutput {
 
 struct BeamSearchParams {
     const torch::Tensor& logits;            // [batch_size, num_beams_in, vocab_size]
+    torch::Tensor        temperature;       // [batch_size, num_beams_in]
     torch::Tensor        token_ids;         // [batch_size, num_beams_in, max_seq_len]
     torch::Tensor        input_lengths;     // [batch_size, num_beams_in]
     torch::Tensor        sequence_lengths;  // [batch_size, num_beams_in]

@@ -63,13 +63,11 @@ BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params) {
     } while (0)
 
     // compute log softmax for probability calculation
-    at::Tensor logits_tsr      = Buffer2torchTensor(params.logits, false);
-    at::Tensor temperature_tsr = Buffer2torchTensor(params.temperature, false);
+    at::Tensor logits_tsr = params.logits;
 
-    // temperature_tsr shape: [batch_size=1, num_beams]
-    float temperature_of_beams = 1.0f;  // 默认值
-    if (temperature_tsr.numel() > 0) {
-        temperature_of_beams = temperature_tsr.view(-1)[0].item<float>();
+    float temperature_of_beams = 1.0f;
+    if (params.temperature.numel() > 0) {
+        temperature_of_beams = params.temperature.view(-1)[0].item<float>();
     }
 
     // Stochastic Beam Search: Gumbel-Top-k Trick implementation
@@ -83,8 +81,14 @@ BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params) {
         temperature_of_beams > 0.0f && std::abs(temperature_of_beams - 1.0f) > 1e-6f ? temperature_of_beams : 0.0f;
     if (noise_scale > 0.0f) {
         RTP_LLM_LOG_DEBUG("noise_scale: %f, temperature_of_beams: %f", noise_scale, temperature_of_beams);
-        at::Tensor gumbel_noise = torch::rand_like(logits_tsr).clamp_(1e-10, 1.0 - 1e-10).log_().neg_().log_().neg_();
-        logits_tsr.add_(gumbel_noise, noise_scale);
+        auto gumbel_noise = torch::empty(logits_tsr.sizes(), logits_tsr.options().dtype(torch::kFloat32))
+                                .uniform_(1e-10, 1.0 - 1e-10)
+                                .log_()
+                                .neg_()
+                                .log_()
+                                .neg_()
+                                .to(logits_tsr.dtype());
+        logits_tsr = logits_tsr.add(gumbel_noise, noise_scale);
     }
 
     at::Tensor log_softmax_logits_tsr = logits_tsr.log_softmax(-1);
