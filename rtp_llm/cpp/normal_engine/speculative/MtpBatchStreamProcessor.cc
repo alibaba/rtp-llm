@@ -229,6 +229,9 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
     // set model_input.combo_tokens
     const size_t batch_size   = new_all_token_ids.size(0);
     const size_t token_stride = new_all_token_ids.size(1);
+    // token_ids may be a CUDA tensor; move to CPU for data_ptr access.
+    const torch::Tensor new_all_token_ids_cpu =
+        new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
 
     int* input_lengths = model_input.input_lengths.data_ptr<int>();
     int* combo_tokens  = model_input.combo_tokens.data_ptr<int>();
@@ -240,7 +243,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
         memcpy(combo_tokens + offset, combo_tokens + offset + 1, (input_length - 1) * sizeof(int));
 
         // set new token id
-        int new_token_id = new_all_token_ids.data_ptr<int>()[i * token_stride + token_stride - 1];
+        int new_token_id = new_all_token_ids_cpu.data_ptr<int>()[i * token_stride + token_stride - 1];
         combo_tokens[offset + input_length - 1] = new_token_id;
 
         offset += input_length;
@@ -353,6 +356,11 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
     RTP_LLM_CHECK(total_batch_size_out == (size_t)new_all_token_ids.size(0));
     const size_t token_stride = new_all_token_ids.size(1);
 
+    // token_ids and success may be CUDA tensors; move to CPU once before iterating.
+    const torch::Tensor new_all_token_ids_cpu =
+        new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
+    const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
+
     int batch_idx_in  = 0;
     int batch_idx_out = 0;
     int token_offset  = 0;
@@ -366,11 +374,11 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
         for (size_t i = 0; i < next_batch_size; ++i) {
             new_tokens.data_ptr<int32_t>()[i] =
-                new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
+                new_all_token_ids_cpu.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
         }
 
         for (int i = 0; i < cur_batch_size; ++i) {
-            if (sampler_output.success.defined() && !(sampler_output.success.data_ptr<bool>()[batch_idx_in + i])) {
+            if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
                 stream->setStop(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
             }
         }

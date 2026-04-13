@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/core/ExecOps.h"
 #include <unordered_set>
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 using namespace std;
 
@@ -14,7 +15,7 @@ Sampler::Sampler(const SamplerInitParams& params) {}
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-
+    RTP_LLM_PROFILE_SCOPE("sampler.forward");
     // Helper: narrow a tensor if defined, else return undefined tensor
     auto mayNarrow = [](const torch::Tensor& t, int64_t offset, int64_t size) -> torch::Tensor {
         return t.defined() ? t.narrow(0, offset, size) : torch::Tensor();
@@ -36,13 +37,21 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     bool variable_num_beams = inputs.batch_size != inputs.batch_size_out;
 
     // allocate output tensors
-    auto all_success = torch::empty({(int64_t)inputs.batch_size}, torch::kBool);
+    // Keep success on CUDA to avoid a blocking D2H copy: the GPU sampling kernel writes success
+    // directly, and callers that need CPU access should call .cpu() explicitly.
+    auto all_success =
+        torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
-    // When !variable_num_beams, share data with inputs — sampleGreedy writes in-place
+    // Move token_ids to CUDA once so sampleGreedy writes GPU→GPU (no blocking D2H sync).
+    // Callers that need CPU access should call .cpu() explicitly.
+    // Use blocking transfer: on ROCm, hipMemcpyAsync from pageable memory is truly async
+    // and can cause memory access faults if a kernel reads the buffer before transfer completes.
+    auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
     auto all_token_ids_out     = variable_num_beams ?
-                                     torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len}, torch::kInt32) :
-                                     inputs.token_ids;
+                                     torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},
+                                              torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)) :
+                                     inputs_token_ids_cuda;
     auto all_cum_log_probs_out = variable_num_beams && inputs.cum_log_probs.defined() ?
                                      torch::empty({(int64_t)inputs.batch_size_out}, torch::kFloat32) :
                                      inputs.cum_log_probs;
@@ -67,7 +76,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
         auto success           = all_success.narrow(0, from_batch_idx_in, batch_size_in);
         auto logits            = inputs.logits.narrow(0, from_batch_idx_in, batch_size_in);
-        auto token_ids_in      = inputs.token_ids.narrow(0, from_batch_idx_in, batch_size_in);
+        auto token_ids_in      = inputs_token_ids_cuda.narrow(0, from_batch_idx_in, batch_size_in);
         auto token_ids_out     = all_token_ids_out.narrow(0, from_batch_idx_out, batch_size_out);
         auto input_lengths     = inputs.input_lengths.narrow(0, from_batch_idx_in, batch_size_in);
         auto sequence_lengths  = inputs.sequence_lengths.narrow(0, from_batch_idx_in, batch_size_in);
@@ -101,6 +110,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto generator            = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
                                                                    inputs.generator.begin() + from_batch_idx_in + batch_size_in};
 
+            RTP_LLM_PROFILE_SCOPE("sampler.forward.execSampleGreedy");
             auto greedy_output = execSampleGreedy(
                 {logits,
                  input_lengths,
@@ -123,7 +133,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 success.copy_(greedy_output.success);
                 // TODO(zhangjianning.zjn): would be better to eliminate the copy
                 if (variable_num_beams) {
-                    memcpy(token_ids_out.data_ptr(), token_ids_in.data_ptr(), token_ids_in.nbytes());
+                    token_ids_out.copy_(token_ids_in);
                 }
             } else {
                 success.fill_(true);

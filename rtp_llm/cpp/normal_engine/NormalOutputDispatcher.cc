@@ -11,26 +11,37 @@
 namespace rtp_llm {
 
 absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
-                                                  const MergedOutput& merge_outputs) const {
+                                              const MergedOutput& merge_outputs) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    const auto& sampler_output    = merge_outputs.sampler_output;
-    const auto& new_all_token_ids = sampler_output.token_ids;
-    RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(new_all_token_ids).c_str());
+    const auto&  sampler_output       = merge_outputs.sampler_output;
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
-    RTP_LLM_CHECK(total_batch_size_out == (size_t)new_all_token_ids.size(0));
-    int  batch_idx_in     = 0;
-    int  batch_idx_out    = 0;
-    int  token_offset     = 0;
-    bool return_all_probs = stream_groups.needReturnAllProbs();
-    auto new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
+    RTP_LLM_CHECK(total_batch_size_out == (size_t)sampler_output.token_ids.size(0));
+    // token_ids and success may be CUDA tensors (Sampler keeps them on GPU to avoid D2H sync during sampling).
+    // Move to CPU once here so dispatchSingleStream can use data_ptr safely.
+    const torch::Tensor token_ids_cpu =
+        sampler_output.token_ids.defined() ? sampler_output.token_ids.cpu() : torch::Tensor();
+    RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
+    const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
+    int                 batch_idx_in     = 0;
+    int                 batch_idx_out    = 0;
+    int                 token_offset     = 0;
+    bool                return_all_probs = stream_groups.needReturnAllProbs();
+    auto                new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
 
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
         auto token_size      = stream->currentExecuteTokenSize();
 
-        dispatchSingleStream(
-            stream, merge_outputs, batch_idx_in, batch_idx_out, token_offset, return_all_probs, new_tokens_all);
+        dispatchSingleStream(stream,
+                             merge_outputs,
+                             batch_idx_in,
+                             batch_idx_out,
+                             token_offset,
+                             return_all_probs,
+                             new_tokens_all,
+                             token_ids_cpu,
+                             success_cpu);
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -42,16 +53,18 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
 }
 
 void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
-                                                      const MergedOutput&  merge_outputs,
-                                                      int                  batch_idx_in,
-                                                      int                  batch_idx_out,
-                                                      int                  token_offset,
-                                                      bool                 return_all_probs,
-                                                      const torch::Tensor& new_tokens_all) const {
+                                                  const MergedOutput&  merge_outputs,
+                                                  int                  batch_idx_in,
+                                                  int                  batch_idx_out,
+                                                  int                  token_offset,
+                                                  bool                 return_all_probs,
+                                                  const torch::Tensor& new_tokens_all,
+                                                  const torch::Tensor& token_ids_cpu,
+                                                  const torch::Tensor& success_cpu) const {
 
     const auto&  model_output      = merge_outputs.model_output;
     const auto&  sampler_output    = merge_outputs.sampler_output;
-    const auto&  new_all_token_ids = sampler_output.token_ids;
+    const auto&  new_all_token_ids = token_ids_cpu;
     const size_t token_stride      = new_all_token_ids.size(1);
 
     auto cur_batch_size  = stream->currentBatchSize();
@@ -136,7 +149,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     }
 
     for (int i = 0; i < cur_batch_size; ++i) {
-        if (sampler_output.success.defined() && !(sampler_output.success.data_ptr<bool>()[batch_idx_in + i])) {
+        if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
             stream->setStop(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
         }
     }
