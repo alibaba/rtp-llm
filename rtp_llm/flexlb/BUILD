@@ -17,7 +17,7 @@ genrule(
         fi
         FLEXLB_DIR=$$(dirname $(location mvnw))
         cd $$FLEXLB_DIR
-        ./mvnw package -DskipTests -q -P opensource >&2
+        ./mvnw package -DskipTests -q -P '!internal' >&2
         JAR=$$(ls flexlb-api/target/flexlb-api-*.jar | grep -v sources | head -1)
         cp $$JAR $$OUT
     """,
