@@ -83,6 +83,7 @@ class TrtllmDistEnv:
 
             barrier_handle = self.handle.get_barrier_handle()
             data_handle = self.handle.get_data_handle()
+            self.max_size_in_bytes = max_size_in_bytes
         except Exception as e:
             import logging
 

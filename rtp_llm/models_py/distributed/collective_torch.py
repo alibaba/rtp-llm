@@ -69,6 +69,10 @@ _rccl_lib: Optional[ctypes.CDLL] = None
 _rccl_comm: Optional[ctypes.c_void_p] = None
 _rccl_world_size: int = 1
 _is_rocm_runtime: bool = getattr(torch.version, "hip", None) is not None
+_enable_aiter_custom_ar: bool = os.environ.get("ENABLE_AITER_CUSTOM_AR", "0") == "1"
+_enable_quick_allreduce: bool = (
+    os.environ.get("AITER_QUICK_REDUCE_QUANTIZATION", "NONE") != "NONE"
+)
 # Thread safety: protected by GIL in CPython. If nogil builds are adopted,
 # this global must be guarded by an explicit lock or replaced with thread-local storage.
 _HipgraphAllGatherCacheKey = Tuple[Tuple[int, ...], torch.dtype, str, int]
@@ -252,6 +256,31 @@ def _pre_init_trtllm_allreduce() -> None:
         )
     except Exception as exc:
         logging.warning("Pre-init trtllm_allreduce failed (non-fatal): %s", exc)
+    # Pre-initialize quick allreduce if enabled
+    if _enable_quick_allreduce:
+        _pre_init_quick_allreduce()
+
+
+def _pre_init_quick_allreduce() -> None:
+    """Pre-initialize quick allreduce before graph capture.
+
+    Must be called outside of stream capture because init_custom_qr
+    and all_gather_object are forbidden during capture.
+    """
+    if not _is_rocm_runtime:
+        return
+    if _parallelism_config is None or _parallelism_config.tp_size <= 1:
+        return
+    try:
+        from rtp_llm.models_py.modules.base.rocm.quick_allreduce import (
+            ensure_quick_ar_initialized,
+        )
+
+        tp_group = _get_group(Group.TP)
+        device_id = _parallelism_config.tp_rank
+        ensure_quick_ar_initialized(group=tp_group, device_id=device_id)
+    except Exception as exc:
+        logging.warning("Pre-init quick_allreduce failed (non-fatal): %s", exc)
 
 
 def enter_hipgraph_capture_mode(
@@ -311,8 +340,37 @@ def _hipgraph_capture_all_reduce(
     tensor: torch.Tensor,
     process_group: torch.distributed.ProcessGroup,
 ) -> torch.Tensor:
-    # Only use trt_allreduce if already initialized and hidden_size is supported;
-    # never attempt first-time initialization during graph capture.
+    """Tiered allreduce routing for HIPGraph capture (decode) mode.
+
+    Priority order (based on benchmark results):
+      1. Quick AllReduce (if enabled via AITER_QUICK_REDUCE_QUANTIZATION)
+         - Fastest at all sizes, but has precision loss (~3e-2 for FP, ~3.75e-1 for FP8)
+         - Controlled by env var, disabled by default
+      2. trtllm allreduce
+         - Best lossless option for small tensors (≤256MB)
+         - Requires hidden_size in supported set
+      3. NCCL (fallback)
+         - Always available, best for large tensors (>256MB)
+    """
+    # Tier 1: Quick AllReduce (opt-in, fastest but lossy)
+    if _enable_quick_allreduce:
+        try:
+            from rtp_llm.models_py.modules.base.rocm.quick_allreduce import (
+                ensure_quick_ar_initialized,
+                quick_allreduce,
+                should_quick_allreduce,
+            )
+
+            if ensure_quick_ar_initialized(
+                process_group, _parallelism_config.tp_rank
+            ) and should_quick_allreduce(tensor):
+                return quick_allreduce(tensor)
+        except Exception as exc:
+            logging.warning(
+                "Quick AllReduce failed in decode mode, fallback to next tier: %s", exc
+            )
+
+    # Tier 2: trtllm allreduce (best lossless for small tensors)
     if (
         _is_hidden_size_supported_for_trtllm(tensor.shape[-1])
         and _is_trtllm_allreduce_ready()
@@ -710,8 +768,79 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
+def _should_use_trtllm_allreduce(tensor: torch.Tensor, group: Group) -> bool:
+    """Check if trtllm allreduce should be used outside of graph capture.
+
+    When HIP Graph mode is enabled, trtllm allreduce comm is pre-initialized.
+    We can reuse it for prefill (non-capture) passes as well, as long as the
+    tensor fits within the IPC shared-memory buffer.
+    """
+    if not _is_rocm_runtime or group != Group.TP:
+        return False
+    if not _is_hidden_size_supported_for_trtllm(tensor.shape[-1]):
+        return False
+    if not _is_trtllm_allreduce_ready():
+        return False
+    try:
+        from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
+            _trtllm_comm_manager,
+        )
+
+        max_size = _trtllm_comm_manager.dist_env.max_size_in_bytes
+        tensor_bytes = tensor.numel() * tensor.element_size()
+        return tensor_bytes <= max_size
+    except Exception:
+        return False
+
+
+def _should_use_aiter_custom_ar(tensor: torch.Tensor, group: Group) -> bool:
+    """Check if aiter CustomAllreduce should be used for prefill AllReduce."""
+    if not _enable_aiter_custom_ar:
+        return False
+    if not _is_rocm_runtime or group != Group.TP:
+        return False
+    if _is_hipgraph_capture_active():
+        return False
+    try:
+        from rtp_llm.models_py.modules.base.rocm.aiter_custom_allreduce import (
+            ensure_aiter_ar_initialized,
+            should_aiter_custom_ar,
+        )
+
+        if not ensure_aiter_ar_initialized(
+            _get_group(group), _parallelism_config.tp_rank
+        ):
+            return False
+        return should_aiter_custom_ar(tensor)
+    except Exception:
+        return False
+
+
+def _should_use_quick_allreduce(tensor: torch.Tensor, group: Group) -> bool:
+    """Check if aiter Quick AllReduce should be used."""
+    if not _enable_quick_allreduce:
+        return False
+    if not _is_rocm_runtime or group != Group.TP:
+        return False
+    try:
+        from rtp_llm.models_py.modules.base.rocm.quick_allreduce import (
+            ensure_quick_ar_initialized,
+            should_quick_allreduce,
+        )
+
+        if not ensure_quick_ar_initialized(
+            _get_group(group), _parallelism_config.tp_rank
+        ):
+            return False
+        return should_quick_allreduce(tensor)
+    except Exception:
+        return False
+
+
 def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
+
+    priority: quick_AR → trtllm → aiter custom AR → symm_mem → NCCL
 
     Args:
         tensor: Tensor to all-reduce (will be modified in-place)
@@ -724,6 +853,55 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
         process_group = _get_group(group)
         return _hipgraph_capture_all_reduce(tensor, process_group)
 
+    # Tier 1: Quick AllReduce (opt-in, fastest)
+    if _should_use_quick_allreduce(tensor, group):
+        try:
+            from rtp_llm.models_py.modules.base.rocm.quick_allreduce import (
+                quick_allreduce,
+            )
+
+            return quick_allreduce(tensor)
+        except Exception as e:
+            logging.warning(
+                "Quick AllReduce failed in prefill mode, fallback to next tier: %s",
+                e,
+            )
+
+    # Tier 2: trtllm allreduce
+    if _should_use_trtllm_allreduce(tensor, group):
+        try:
+            from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
+                allreduce as trtllm_allreduce,
+            )
+
+            process_group = _get_group(group)
+            return trtllm_allreduce(
+                allreduce_in=tensor,
+                group=process_group,
+                device_id=_parallelism_config.tp_rank,
+            )
+        except Exception as e:
+            logging.warning(
+                "trtllm_allreduce failed in prefill mode, " "fallback to next tier: %s",
+                e,
+            )
+
+    # Tier 3: aiter CustomAllreduce
+    if _should_use_aiter_custom_ar(tensor, group):
+        try:
+            from rtp_llm.models_py.modules.base.rocm.aiter_custom_allreduce import (
+                aiter_custom_allreduce,
+            )
+
+            return aiter_custom_allreduce(tensor)
+        except Exception as e:
+            logging.warning(
+                "aiter CustomAllreduce failed in prefill mode, "
+                "fallback to next tier: %s",
+                e,
+            )
+
+    # Tier 4: symm_mem (CUDA only)
     if group == Group.TP:
         symm_mem_comm = get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
@@ -731,6 +909,7 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
         ):
             return symm_mem_comm.all_reduce(tensor)
 
+    # Tier 5: NCCL fallback
     process_group = _get_group(group)
     torch.distributed.all_reduce(
         tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
