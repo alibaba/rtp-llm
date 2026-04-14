@@ -456,13 +456,24 @@ class Qwen3NextAttention(CausalAttention):
         weights: Dict[str, torch.Tensor],
         layernorm_eps: float,
         quant_config: Optional[object] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__(
-            attn_config, parallelism_config, weights, layernorm_eps, quant_config
+            attn_config,
+            parallelism_config,
+            weights,
+            layernorm_eps,
+            quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
         # maybe fuse gate in qkv_proj later
         self.gate = LinearFactory.create_linear_from_weights(
-            weights, W.attn_gate_w, W.attn_gate_s, None, quant_config
+            weights,
+            W.attn_gate_w,
+            W.attn_gate_s,
+            None,
+            quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
 
     def forward(
@@ -486,6 +497,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         weights: Dict[str, torch.Tensor],
         layernorm_eps: float,
         quant_config: Optional[object] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.linear_attn_config = linear_attn_config
@@ -494,11 +506,20 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self.quant_config = quant_config
         # in_proj_qkvz is bf16 / fp8
         self.in_proj_qkvz = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_qkvz_w, W.linear_attn_qkvz_s, None, quant_config
+            weights,
+            W.linear_attn_qkvz_w,
+            W.linear_attn_qkvz_s,
+            None,
+            quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
-        # in_proj_ba is bf16
         self.in_proj_ba = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_ba_w, None, None, quant_config
+            weights,
+            W.linear_attn_ba_w,
+            None,
+            None,
+            quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
         self.head_k_dim = linear_attn_config.linear_key_head_dim
         self.head_v_dim = linear_attn_config.linear_value_head_dim
@@ -522,7 +543,12 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             group_size=linear_attn_config.linear_value_head_dim,
         )
         self.out_proj = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_out_w, W.linear_attn_out_s, None, quant_config
+            weights,
+            W.linear_attn_out_w,
+            W.linear_attn_out_s,
+            None,
+            quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
 
     # mixed_qkvz, mixed_ba -> q, k, v, z, b, a
@@ -597,6 +623,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         moe_config,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -610,6 +637,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 weights,
                 config.layernorm_eps,
                 config.quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
         else:
             attn_configs = config.getAttentionConfigs(
@@ -621,6 +649,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 weights,
                 config.layernorm_eps,
                 config.quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
 
         if config.moe_style == 2:
@@ -631,10 +660,15 @@ class Qwen3NextDecoderLayer(nn.Module):
                 moe_config,
                 max_generate_batch_size,
                 enable_cuda_graph,
+                hw_kernel_config=hw_kernel_config,
             )
         elif config.moe_style == 0:
             self.mlp = DenseMLP(
-                config.activation_type, parallelism_config, weights, config.quant_config
+                config.activation_type,
+                parallelism_config,
+                weights,
+                config.quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
 
         self.input_layernorm = RMSResNorm(
@@ -710,6 +744,7 @@ class Qwen3NextModel(GptModelBase):
                     moe_config,
                     max_generate_batch_size,
                     enable_cuda_graph,
+                    hw_kernel_config=py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]

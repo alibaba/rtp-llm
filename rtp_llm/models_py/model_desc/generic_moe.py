@@ -83,7 +83,11 @@ class GenericMoeLayer(nn.Module):
         self.tp_size = parallelism_config.tp_size
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
-                config.activation_type, parallelism_config, weights, quant_config
+                config.activation_type,
+                parallelism_config,
+                weights,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
         else:
             self.shared_expert = None
