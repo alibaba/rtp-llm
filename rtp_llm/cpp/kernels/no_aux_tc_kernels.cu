@@ -442,6 +442,85 @@ __global__ void topk_with_k2_kernel(T*            output,
 #endif
 }
 
+// Fused kernel: sigmoid + bias_add + topk_with_k2 in a single kernel launch.
+// Reads raw_logits, computes sigmoid, adds bias for group score computation,
+// writes sigmoid values back to scores (for weight extraction in kernel 2).
+template<typename T>
+__global__ void topk_with_k2_fused_kernel(T*            group_scores_output,
+                                          T*            raw_logits,
+                                          T const*      bias,
+                                          T*            scores_output,
+                                          int64_t const num_tokens,
+                                          int64_t const num_cases,
+                                          int64_t const n_group,
+                                          int64_t const num_experts,
+                                          int64_t const num_experts_per_group) {
+    int32_t warp_id = threadIdx.x / WARP_SIZE;
+    int32_t lane_id = threadIdx.x % WARP_SIZE;
+
+    int32_t case_id = blockIdx.x * NUM_WARPS_PER_BLOCK + warp_id;
+    if (case_id < num_cases) {
+        int32_t token_id      = case_id / n_group;
+        int32_t group_id      = case_id % n_group;
+        int64_t expert_offset = token_id * num_experts + group_id * num_experts_per_group;
+
+        // Compute sigmoid + bias for all experts in this group, write sigmoid to scores.
+        // Also find top-2 values for group score.
+        T largest        = -INFINITY;
+        T second_largest = -INFINITY;
+
+        cg::thread_block          block = cg::this_thread_block();
+        cg::thread_block_tile<32> tile  = cg::tiled_partition<32>(block);
+
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+        asm volatile("griddepcontrol.wait;");
+#endif
+
+        if (num_experts_per_group > WARP_SIZE) {
+            for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
+                T logit       = raw_logits[expert_offset + i];
+                T sigmoid_val = T(1.0f) / (T(1.0f) + expf(-float(logit)));
+                // Write sigmoid value back for weight extraction in kernel 2
+                scores_output[expert_offset + i] = sigmoid_val;
+                T value                          = sigmoid_val + bias[group_id * num_experts_per_group + i];
+                // Also write scores_with_bias back to raw_logits (reuse as scores_with_bias buffer)
+                raw_logits[expert_offset + i] = value;
+                if (value > largest) {
+                    second_largest = largest;
+                    largest        = value;
+                } else if (value > second_largest) {
+                    second_largest = value;
+                }
+            }
+        } else {
+            for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
+                T logit                          = raw_logits[expert_offset + i];
+                T sigmoid_val                    = T(1.0f) / (T(1.0f) + expf(-float(logit)));
+                scores_output[expert_offset + i] = sigmoid_val;
+                T value                          = sigmoid_val + bias[group_id * num_experts_per_group + i];
+                raw_logits[expert_offset + i]    = value;
+                largest                          = value;
+            }
+        }
+
+        __syncwarp();
+        T    max1          = cg::reduce(tile, largest, cg::greater<T>());
+        T    max2          = max1;
+        bool equal_to_max1 = (max1 == largest);
+        int  count_max1    = __popc(__ballot_sync(FULL_WARP_MASK, equal_to_max1));
+        if (count_max1 == 1) {
+            largest = (largest == max1) ? second_largest : largest;
+            max2    = cg::reduce(tile, largest, cg::greater<T>());
+        }
+        if (lane_id == 0) {
+            group_scores_output[case_id] = max1 + max2;
+        }
+    }
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.launch_dependents;");
+#endif
+}
+
 template<typename T, typename IdxT>
 __global__ void group_idx_and_topk_idx_kernel(T*            scores,
                                               T const*      group_scores,
@@ -648,8 +727,88 @@ void invokeNoAuxTc(T*                 scores,
                                          double const       routed_scaling_factor,                                     \
                                          cudaStream_t const stream);
 
+template<typename T, typename IdxT>
+void invokeNoAuxTcFused(T*                 raw_logits,
+                        T const*           bias,
+                        T*                 scores,
+                        T*                 group_scores,
+                        T*                 topk_values,
+                        IdxT*              topk_indices,
+                        int64_t const      num_tokens,
+                        int64_t const      num_experts,
+                        int64_t const      n_group,
+                        int64_t const      topk_group,
+                        int64_t const      topk,
+                        int                norm_node,
+                        double const       routed_scaling_factor,
+                        cudaStream_t const stream) {
+    int64_t num_experts_per_group   = num_experts / n_group;
+    int64_t num_cases               = num_tokens * n_group;
+    int64_t topk_with_k2_num_blocks = (num_cases - 1) / NUM_WARPS_PER_BLOCK + 1;
+    // Fused kernel: sigmoid + bias_add + topk_with_k2 in one launch.
+    // After this kernel, raw_logits contains scores_with_bias, scores contains sigmoid values.
+    LAUNCH_KERNEL_WITH_PDL((topk_with_k2_fused_kernel<T>),
+                           topk_with_k2_num_blocks,
+                           BLOCK_SIZE,
+                           0,
+                           stream,
+                           group_scores,
+                           raw_logits,
+                           bias,
+                           scores,
+                           num_tokens,
+                           num_cases,
+                           n_group,
+                           num_experts,
+                           num_experts_per_group);
+    check_cuda_error();
+
+    int64_t topk_with_k_group_num_blocks = (num_tokens - 1) / NUM_WARPS_PER_BLOCK + 1;
+    size_t  dynamic_smem_in_bytes = warp_topk::calc_smem_size_for_block_wide<T, int32_t>(NUM_WARPS_PER_BLOCK, topk);
+    // raw_logits now contains scores_with_bias (written by fused kernel above)
+    LAUNCH_KERNEL_WITH_PDL((group_idx_and_topk_idx_kernel<T, IdxT>),
+                           topk_with_k_group_num_blocks,
+                           BLOCK_SIZE,
+                           dynamic_smem_in_bytes,
+                           stream,
+                           scores,
+                           group_scores,
+                           topk_values,
+                           topk_indices,
+                           raw_logits,
+                           num_tokens,
+                           n_group,
+                           topk_group,
+                           topk,
+                           num_experts,
+                           num_experts_per_group,
+                           norm_node,
+                           routed_scaling_factor);
+    check_cuda_error();
+
+#undef LAUNCH_KERNEL
+}
+
+#define INSTANTIATE_NOAUX_TC_FUSED(T, IdxT)                                                                            \
+    template void invokeNoAuxTcFused<T, IdxT>(T * raw_logits,                                                          \
+                                              T const*           bias,                                                 \
+                                              T*                 scores,                                               \
+                                              T*                 group_scores,                                         \
+                                              T*                 topk_values,                                          \
+                                              IdxT*              topk_indices,                                         \
+                                              int64_t const      num_tokens,                                           \
+                                              int64_t const      num_experts,                                          \
+                                              int64_t const      n_group,                                              \
+                                              int64_t const      topk_group,                                           \
+                                              int64_t const      topk,                                                 \
+                                              int                norm_node,                                            \
+                                              double const       routed_scaling_factor,                                \
+                                              cudaStream_t const stream);
+
 INSTANTIATE_NOAUX_TC(float, int32_t);
 INSTANTIATE_NOAUX_TC(float, int64_t);
+INSTANTIATE_NOAUX_TC_FUSED(float, int32_t);
+INSTANTIATE_NOAUX_TC_FUSED(float, int64_t);
 // INSTANTIATE_NOAUX_TC(half, int32_t);
 // #ifdef ENABLE_BF16
 // INSTANTIATE_NOAUX_TC(__nv_bfloat16, int32_t);

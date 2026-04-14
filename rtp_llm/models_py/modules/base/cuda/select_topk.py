@@ -46,16 +46,34 @@ class GroupTopK(nn.Module):
         renormalize: bool,
         routed_scaling_factor: float,
     ):
-        scores = scores.sigmoid()
-        scores_with_bias = scores + correction_bias.unsqueeze(0)
-        self.group_topk_op.forward(
-            topk_weights,
-            topk_ids,
-            scores,
-            scores_with_bias,
-            n_group,
-            topk_group,
-            topk,
-            renormalize,
-            routed_scaling_factor,
-        )
+        # Use fused kernel: sigmoid + bias_add + topk in one CUDA launch,
+        # avoiding 2 separate PyTorch kernel launches for sigmoid and add.
+        scores_out = torch.empty_like(scores)
+        try:
+            self.group_topk_op.forward_fused(
+                topk_weights,
+                topk_ids,
+                scores,
+                correction_bias,
+                scores_out,
+                n_group,
+                topk_group,
+                topk,
+                renormalize,
+                routed_scaling_factor,
+            )
+        except (AttributeError, TypeError):
+            # Fallback for older builds without forward_fused
+            scores = scores.sigmoid()
+            scores_with_bias = scores + correction_bias.unsqueeze(0)
+            self.group_topk_op.forward(
+                topk_weights,
+                topk_ids,
+                scores,
+                scores_with_bias,
+                n_group,
+                topk_group,
+                topk,
+                renormalize,
+                routed_scaling_factor,
+            )
