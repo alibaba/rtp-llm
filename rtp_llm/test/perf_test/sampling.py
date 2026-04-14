@@ -109,6 +109,11 @@ class DistributionSampler:
             trunc_uppers.append(u)
             trunc_counts.append(c)
         total = sum(trunc_counts)
+        if total == 0:
+            raise ValueError(
+                f"No histogram buckets within max_seq_len={max_seq_len}. "
+                f"Bucket uppers start at {uppers[0] if uppers else '(empty)'}."
+            )
         cdf: List[float] = []
         cumsum = 0
         for c in trunc_counts:

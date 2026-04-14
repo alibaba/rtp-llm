@@ -112,6 +112,7 @@ class GenerateConfig(BaseModel):
     can_use_pd_separation: bool = True
     gen_timeline: bool = False
     profile_step: int = 3
+    profile_trace_name: str = ""
     out_prefix: str = ""
     # for load balance
     role_addrs: List[RoleAddr] = []

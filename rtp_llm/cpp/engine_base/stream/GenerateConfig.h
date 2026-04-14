@@ -75,17 +75,18 @@ public:
     bool can_use_pd_separation = true;
     bool pd_separation         = false;
 
-    bool             in_think_mode       = false;
-    int              max_thinking_tokens = 0;
-    std::vector<int> end_think_token_ids;
-    bool             gen_timeline        = false;
-    int              profile_step        = 3;
-    bool             ignore_eos          = false;
-    bool             reuse_cache         = true;
-    bool             enable_device_cache = true;
-    bool             enable_memory_cache = true;
-    bool             enable_remote_cache = true;
-    std::string      trace_id;
+    bool               in_think_mode       = false;
+    int                max_thinking_tokens = 0;
+    std::vector<int>   end_think_token_ids;
+    bool               gen_timeline = false;
+    int                profile_step = 3;
+    std::string        profile_trace_name;
+    bool               ignore_eos          = false;
+    bool               reuse_cache         = true;
+    bool               enable_device_cache = true;
+    bool               enable_memory_cache = true;
+    bool               enable_remote_cache = true;
+    std::string        trace_id;
     bool               force_batch = false;  // If true, streams with same batch_group_id must be scheduled together
     std::optional<int> batch_group_timeout;
 
@@ -216,6 +217,7 @@ public:
         JSONIZE(end_think_token_ids);
         JSONIZE(gen_timeline);
         JSONIZE(profile_step);
+        JSONIZE(profile_trace_name);
         JSONIZE(reuse_cache);
         JSONIZE(enable_device_cache);
         JSONIZE(enable_memory_cache);

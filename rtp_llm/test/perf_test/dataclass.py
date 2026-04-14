@@ -2,7 +2,7 @@ import json
 import os
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from prettytable import PrettyTable
 
@@ -163,14 +163,14 @@ def create_metrics_table(
     dump_json_path: str,
     model_info: Dict[str, Any],
     title: str,
-    generate_config: Dict[str, Any] = {},
+    generate_config: Optional[Dict[str, Any]] = None,
 ) -> str:
     json_result: Dict[str, Any] = {
         "title": title,
         "mode": "grid",
         "metrics": [],
         "model_info": model_info,
-        "generate_config": generate_config,
+        "generate_config": generate_config or {},
     }
     main_table = PrettyTable()
     main_table.title = title
@@ -233,14 +233,14 @@ def create_distribution_metrics_table(
     dump_json_path: str,
     distribution_source: str,
     title: str,
-    generate_config: Dict[str, Any] = {},
+    generate_config: Optional[Dict[str, Any]] = None,
 ) -> str:
     json_result: Dict[str, Any] = {
         "title": title,
         "mode": "distribution",
         "distribution_source": distribution_source,
         "test_cases": [],
-        "generate_config": generate_config,
+        "generate_config": generate_config or {},
     }
     main_table = PrettyTable()
     main_table.title = title

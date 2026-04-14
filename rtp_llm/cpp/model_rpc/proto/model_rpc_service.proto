@@ -98,6 +98,7 @@ message GenerateConfigPB {
     string unique_key = 54;
     google.protobuf.Int32Value force_batch = 55;
     google.protobuf.Int32Value batch_group_timeout = 56;
+    string profile_trace_name = 57;
 }
 
 message MMPreprocessConfigPB {
