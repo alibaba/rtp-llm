@@ -17,10 +17,14 @@ LinearFactory.register(CudaF16Linear)
 if is_cuda():
     from .fp8_deepgemm_linear import CudaFp8DeepGEMMLinear
     from .fp8_per_tensor_linear import CudaFp8PerTensorLinear
-    major, minor = get_sm()
-    if major >= 10:
-        from .fp4_linear import CudaFp4GEMMLinear
-        LinearFactory.register(CudaFp4GEMMLinear)
-    
+
     LinearFactory.register(CudaFp8PerTensorLinear)
     LinearFactory.register(CudaFp8DeepGEMMLinear)
+
+    major, minor = get_sm()
+    if major >= 10:
+        try:
+            from .fp4_linear import CudaFp4GEMMLinear
+            LinearFactory.register(CudaFp4GEMMLinear)
+        except ImportError as e:
+            logger.warning(f"FP4 Linear not available: {e}")

@@ -19,6 +19,13 @@ namespace py = pybind11;
 using namespace rtp_llm;
 
 PYBIND11_MODULE(libth_transformer_config, m) {
+    auto reduce_ex_fn = [](py::object self, int /*protocol*/) {
+        py::object copyreg = py::module_::import("copyreg");
+        return py::make_tuple(copyreg.attr("__newobj__"),
+                              py::make_tuple(self.attr("__class__")),
+                              self.attr("__getstate__")());
+    };
+
     // Register get_block_cache_keys function
     registerCommon(m);
 
@@ -141,7 +148,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("ArpcConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     pybind11::class_<GrpcConfig>(m, "GrpcConfig")
         .def(pybind11::init<>())  // Default constructor
@@ -198,7 +206,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("GrpcConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register ConcurrencyConfig
     py::class_<ConcurrencyConfig>(m, "ConcurrencyConfig")
@@ -221,7 +230,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("ConcurrencyConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register FMHAConfig
     py::class_<FMHAConfig>(m, "FMHAConfig")
@@ -275,7 +285,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register KVCacheConfig
     py::class_<KVCacheConfig>(m, "KVCacheConfig")
@@ -378,7 +389,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ssm_state_dtype);
             },
             [](py::tuple t) {
-                if (t.size() != 44)
+                if (t.size() != 45)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -401,37 +412,38 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_block_cache                      = t[16].cast<int>();
                     c.enable_device_cache                  = t[17].cast<bool>();
                     c.enable_memory_cache                  = t[18].cast<bool>();
-                    c.enable_memory_cache_sm_copy          = t[18].cast<bool>();
-                    c.enable_remote_cache                  = t[19].cast<bool>();
-                    c.write_cache_sync                     = t[20].cast<bool>();
-                    c.enable_tiered_memory_cache           = t[21].cast<bool>();
-                    c.device_cache_min_free_blocks         = t[22].cast<int64_t>();
-                    c.reco_enable_vipserver                = t[23].cast<bool>();
-                    c.reco_vipserver_domain                = t[24].cast<std::string>();
-                    c.reco_server_address                  = t[25].cast<std::string>();
-                    c.reco_instance_group                  = t[26].cast<std::string>();
-                    c.reco_meta_channel_retry_time         = t[27].cast<uint32_t>();
-                    c.reco_meta_channel_connection_timeout = t[28].cast<uint32_t>();
-                    c.reco_meta_channel_call_timeout       = t[29].cast<uint32_t>();
-                    c.reco_storage_thread_num              = t[30].cast<uint32_t>();
-                    c.reco_storage_queue_size              = t[31].cast<uint32_t>();
-                    c.reco_put_timeout_ms                  = t[32].cast<int>();
-                    c.reco_get_timeout_ms                  = t[33].cast<int>();
-                    c.reco_model_sdk_config                = t[34].cast<std::string>();
-                    c.reco_model_user_data                 = t[35].cast<std::string>();
-                    c.reco_model_extra_info                = t[36].cast<std::string>();
-                    c.reco_instance_id_salt                = t[37].cast<std::string>();
-                    c.reco_asyncwrapper_thread_num         = t[38].cast<size_t>();
-                    c.reco_asyncwrapper_queue_size         = t[39].cast<size_t>();
-                    c.reco_get_broadcast_timeout           = t[40].cast<int>();
-                    c.reco_put_broadcast_timeout           = t[41].cast<int>();
-                    c.reco_client_config                   = t[42].cast<std::string>();
-                    c.ssm_state_dtype                      = t[43].cast<std::string>();
+                    c.enable_memory_cache_sm_copy          = t[19].cast<bool>();
+                    c.enable_remote_cache                  = t[20].cast<bool>();
+                    c.write_cache_sync                     = t[21].cast<bool>();
+                    c.enable_tiered_memory_cache           = t[22].cast<bool>();
+                    c.device_cache_min_free_blocks         = t[23].cast<int64_t>();
+                    c.reco_enable_vipserver                = t[24].cast<bool>();
+                    c.reco_vipserver_domain                = t[25].cast<std::string>();
+                    c.reco_server_address                  = t[26].cast<std::string>();
+                    c.reco_instance_group                  = t[27].cast<std::string>();
+                    c.reco_meta_channel_retry_time         = t[28].cast<uint32_t>();
+                    c.reco_meta_channel_connection_timeout = t[29].cast<uint32_t>();
+                    c.reco_meta_channel_call_timeout       = t[30].cast<uint32_t>();
+                    c.reco_storage_thread_num              = t[31].cast<uint32_t>();
+                    c.reco_storage_queue_size              = t[32].cast<uint32_t>();
+                    c.reco_put_timeout_ms                  = t[33].cast<int>();
+                    c.reco_get_timeout_ms                  = t[34].cast<int>();
+                    c.reco_model_sdk_config                = t[35].cast<std::string>();
+                    c.reco_model_user_data                 = t[36].cast<std::string>();
+                    c.reco_model_extra_info                = t[37].cast<std::string>();
+                    c.reco_instance_id_salt                = t[38].cast<std::string>();
+                    c.reco_asyncwrapper_thread_num         = t[39].cast<size_t>();
+                    c.reco_asyncwrapper_queue_size         = t[40].cast<size_t>();
+                    c.reco_get_broadcast_timeout           = t[41].cast<int>();
+                    c.reco_put_broadcast_timeout           = t[42].cast<int>();
+                    c.reco_client_config                   = t[43].cast<std::string>();
+                    c.ssm_state_dtype                      = t[44].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register ProfilingDebugLoggingConfig
     py::class_<ProfilingDebugLoggingConfig>(m, "ProfilingDebugLoggingConfig")
@@ -486,7 +498,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("ProfilingDebugLoggingConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register HWKernelConfig
     py::class_<HWKernelConfig>(m, "HWKernelConfig")
@@ -546,7 +559,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register DeviceResourceConfig
     py::class_<DeviceResourceConfig>(m, "DeviceResourceConfig")
@@ -579,7 +593,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("DeviceResourceConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register MoeConfig
     py::class_<MoeConfig>(m, "MoeConfig")
@@ -631,7 +646,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("MoeConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register ModelSpecificConfig
     py::class_<ModelSpecificConfig>(m, "ModelSpecificConfig", py::dynamic_attr())
@@ -641,7 +657,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         [](py::tuple t) {
                             ModelSpecificConfig c;
                             return c;
-                        }));
+                        }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // HybridAttentionConfig
     py::enum_<HybridAttentionType>(m, "HybridAttentionType")
@@ -723,7 +740,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register CacheStoreConfig
     py::class_<CacheStoreConfig>(m, "CacheStoreConfig")
@@ -804,7 +822,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register MiscellaneousConfig
     py::class_<MiscellaneousConfig>(m, "MiscellaneousConfig")
@@ -828,7 +847,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("MiscellaneousConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register FfnDisAggregateConfig
     py::class_<FfnDisAggregateConfig>(m, "FfnDisAggregateConfig")
@@ -865,7 +885,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("FfnDisAggregateConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register SpecialTokens
     py::class_<RoleSpecialTokens>(m, "RoleSpecialTokens")
@@ -1017,7 +1038,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register BatchDecodeSchedulerConfig
     py::class_<BatchDecodeSchedulerConfig>(m, "BatchDecodeSchedulerConfig")
@@ -1042,7 +1064,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("BatchDecodeSchedulerConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register FIFOSchedulerConfig
     py::class_<FIFOSchedulerConfig>(m, "FIFOSchedulerConfig")
@@ -1065,7 +1088,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register RuntimeConfig - only expose its own members, not sub-config members
     py::class_<RuntimeConfig> runtime_config(m, "RuntimeConfig");
@@ -1127,7 +1151,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register DataType enum
     py::enum_<DataType>(m, "DataType")
@@ -1352,7 +1377,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("EPLBConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register MMModelConfig
     py::class_<MMModelConfig>(m, "MMModelConfig")
@@ -1483,7 +1509,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                 throw std::runtime_error(std::string("VitConfig unpickle error: ") + e.what());
                             }
                             return c;
-                        }));
+                        }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register PDSepConfig
     py::class_<PDSepConfig>(m, "PDSepConfig")
@@ -1561,7 +1588,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }
                 return c;
-            }));
+            }))
+        .def("__reduce_ex__", reduce_ex_fn);
 
     // Register PrefillCPConfig
     py::class_<PrefillCPConfig>(m, "PrefillCPConfig")
@@ -1583,5 +1611,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                 throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());
                             }
                             return c;
-                        }));
+                        }))
+        .def("__reduce_ex__", reduce_ex_fn);
 }

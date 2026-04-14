@@ -208,7 +208,6 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
     //      Padding tokens at [input_length, max_input_length) of input will not be penalized.
     dim3   block(min(step, 1024));
     dim3   grid(local_batch_size);
-    size_t smem_size = step * (sizeof(float) + sizeof(int));
     batchApplyPenaltyLongSeq<T><<<grid, block, 0, stream>>>(logits,
                                                             penalty_ws,
                                                             repetition_penalty,
