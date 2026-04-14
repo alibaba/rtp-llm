@@ -98,7 +98,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     streams.emplace_back(stream4);
 
     for (const auto& stream : streams) {
-        stream->setRunning();
+        stream->generate_status_->status = StreamState::RUNNING;
     }
 
     {
@@ -160,7 +160,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     streams.emplace_back(stream1);
 
     for (const auto& stream : streams) {
-        stream->setRunning();
+        stream->generate_status_->status = StreamState::RUNNING;
     }
     cache_config.group_types = {CacheGroupType::FULL};
     NormalBatchStreamProcessor processor(
@@ -239,7 +239,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     streams.emplace_back(stream4);
 
     for (const auto& stream : streams) {
-        stream->setRunning();
+        stream->generate_status_->status = StreamState::RUNNING;
     }
     cache_config.group_types = {CacheGroupType::FULL};
     NormalBatchStreamProcessor processor(
@@ -326,7 +326,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     streams.emplace_back(stream3);
 
     for (const auto& stream : streams) {
-        stream->setRunning();
+        stream->generate_status_->status = StreamState::RUNNING;
     }
 
     {

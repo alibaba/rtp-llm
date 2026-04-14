@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -106,9 +107,7 @@ void StreamCacheResource::releaseResource() {
             RTP_LLM_LOG_ERROR("  stream id:                     %ld", stream_->streamId());
             RTP_LLM_LOG_ERROR("  stream state:                  %s",
                               StreamStateToString(stream_->generate_status_->status).c_str());
-            RTP_LLM_LOG_ERROR("  stream stopped:                %d", stream_->stoppedWithoutLock());
-            RTP_LLM_LOG_ERROR("  stream finished:               %d", stream_->finishedWithoutLock());
-            RTP_LLM_LOG_ERROR("  stream remoteRunning:          %d", stream_->isRemoteRunningWithoutLock());
+            RTP_LLM_LOG_ERROR("  stream hasError:                %d", stream_->hasError());
             RTP_LLM_LOG_ERROR("  stream hasNumBeams:            %d", stream_->hasNumBeams());
         }
         RTP_LLM_LOG_ERROR("  batch_kv_cache_resource_ use_count: %ld", batch_kv_cache_resource_.use_count());
@@ -121,9 +120,13 @@ void StreamCacheResource::releaseResource() {
         abort();
     }
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
-    if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->stoppedWithoutLock())) {
+    if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasError())) {
         return;
     }
+    RTP_LLM_LOG_DEBUG("releaseResource: stream=%ld, curBlocksNum=%d, pd_kvcache_ref=%p",
+                      stream_->streamId(),
+                      curBlocksNum(),
+                      pd_kvcache_ref_.get());
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
     resource_released_ = true;
@@ -148,7 +151,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
-        if (reuseCache() && (stream_->finishedWithoutLock() || stream_->isRemoteRunningWithoutLock())) {
+        if (reuseCache() && !stream_->hasError() && stream_->getStatus() == StreamState::FINISHED) {
+            RTP_LLM_LOG_DEBUG(
+                "tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d", stream_->streamId(), total_blocks);
             // save cache to gpu
             if (enableDeviceCache()) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
@@ -157,15 +162,22 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             storeCacheAsync(batch_kv_cache_resource_,
                             reuseCache() && enableMemoryCache() && !enableTieredMemoryCache(),
                             reuseCache() && enableRemoteCache());
+            // only evict when succeeds
+            if (enableTieredMemoryCache()) {
+                evictDeviceCacheToMemory();
+            }
+        } else {
+            RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
+                              stream_->streamId(),
+                              reuseCache(),
+                              stream_->hasError(),
+                              StreamStateToString(stream_->getStatus()).c_str());
         }
 
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
         free_info.request_id = stream_->streamId();
 
         resource_context_.cache_manager->free(free_info);
-        if (enableTieredMemoryCache()) {
-            evictDeviceCacheToMemory();
-        }
     }
 
     return total_blocks;
@@ -216,8 +228,6 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
     }
-    // load cache from connector
-    loadCacheSync();
     return absl::OkStatus();
 }
 
@@ -227,6 +237,7 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
     }
+
     MallocInfo malloc_info;
     malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
@@ -250,6 +261,89 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     }
 
     return absl::OkStatus();
+}
+
+bool StreamCacheResource::asyncLoadCache() {
+    // load cache from connector
+    if (!reuseCache() || (!enableMemoryCache() && !enableRemoteCache())) {
+        return false;
+    }
+
+    if (load_cache_context_) {
+        return true;  // 已有进行中的 load 任务（幂等）
+    }
+    assert(reuseCache());
+    auto meta              = std::make_shared<MetaImpl>(enableMemoryCache(), enableRemoteCache(), stream_->traceId());
+    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
+    load_cache_context_    = resource_context_.cache_manager->asyncLoadCache(connector_context);
+    return load_cache_context_ != nullptr;
+}
+
+bool StreamCacheResource::loadCacheDone() {
+    if (!load_cache_context_) {
+        return true;  // 没有 context，视为已完成
+    }
+    if (!load_cache_context_->done()) {
+        return false;  // coordinator 后台线程尚未处理完
+    }
+    // 加载完成（无论成功失败），更新 reuse lengths
+    waitLoadCacheDone(load_cache_context_);
+    if (!load_cache_context_->success()) {
+        // 区分匹配失败和传输失败
+        auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
+        bool      should_retry = false;
+        const int max_retry    = resource_context_.load_cache_retry_times;
+        if (read_context && read_context->fusedMatchContext()) {
+            // 检查是否有匹配到的块
+            size_t matched_blocks = 0;
+            for (const auto& match_ctx : read_context->fusedMatchContext()->contexts()) {
+                auto async_match_ctx = std::dynamic_pointer_cast<AsyncMatchContext>(match_ctx);
+                if (async_match_ctx) {
+                    matched_blocks = std::max(matched_blocks, async_match_ctx->matchedBlockCount());
+                }
+            }
+            // 如果匹配到了块（matched_blocks > 0），说明是传输失败，需要重试，否则是匹配失败，不重试
+            if (matched_blocks > 0) {
+                should_retry = true;
+                // 即使传输失败，也更新已匹配到的 reuse lengths
+                updateReuseLengthsFromContext(read_context);
+                RTP_LLM_LOG_WARNING(
+                    "load cache failed (matched %zu blocks but transfer failed), retry count: %d/%d, stream: [%ld]",
+                    matched_blocks,
+                    load_cache_retry_count_,
+                    max_retry,
+                    stream_->streamId());
+            } else {
+                RTP_LLM_LOG_WARNING("load cache failed (no blocks matched), continuing without cache, stream: [%ld]",
+                                    stream_->streamId());
+            }
+        }
+
+        load_cache_context_.reset();
+
+        if (should_retry) {
+            // 传输失败：保持重试逻辑
+            if (load_cache_retry_count_ >= max_retry) {
+                RTP_LLM_LOG_WARNING("load cache failed after %d retries (transfer error), stream: [%ld]",
+                                    load_cache_retry_count_,
+                                    stream_->streamId());
+                stream_->reportEventWithoutLock(StreamEvents::Error,
+                                                ErrorCode::LOAD_CACHE_TIMEOUT,
+                                                "load cache failed after " + std::to_string(max_retry)
+                                                    + " retries (transfer error)");
+                releaseResource();
+                return true;
+            }
+            load_cache_retry_count_++;
+            asyncLoadCache();
+            return false;  // 失败重试
+        } else {
+            // 匹配失败：不重试，继续执行
+            return true;
+        }
+    }
+    load_cache_context_.reset();
+    return true;
 }
 
 // TODO, delete it soon
@@ -337,15 +431,11 @@ void StreamCacheResource::loadCacheSync() {
         return;
     }
     RTP_LLM_PROFILE_FUNCTION();
-    assert(reuse_cache());
-    auto meta               = std::make_shared<MetaImpl>(enableMemoryCache(), enableRemoteCache(), stream_->traceId());
-    auto connector_context  = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
-    std::shared_ptr<AsyncContext> load_cache_context;
-    {
-        RTP_LLM_PROFILE_SCOPE("asyncLoadCache");
-        load_cache_context = resource_context_.cache_manager->asyncLoadCache(connector_context);
+    auto need_load = asyncLoadCache();  // 复用 asyncLoadCache 的 context 构建逻辑
+    if (need_load) {
+        waitLoadCacheDone(load_cache_context_);
+        load_cache_context_.reset();
     }
-    waitLoadCacheDone(load_cache_context);
 }
 
 void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context) {
@@ -363,6 +453,10 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
         RTP_LLM_LOG_WARNING("load cache success but cast context failed, stream: [%ld]", stream_->streamId());
         return;
     }
+    updateReuseLengthsFromContext(read_context);
+}
+
+void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
     const int total_reuse_len  = read_context->resource()->reuseBlockNum() * seqSizePerBlock();
     const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * seqSizePerBlock();
     const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * seqSizePerBlock();
@@ -451,4 +545,16 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
     }
 }
 
+void StreamCacheResource::holdKVCacheForPDSep() {
+    auto&       resource   = batch_kv_cache_resource_->cacheResource(0);
+    const auto& cache_keys = resource.cacheKeys();
+    auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
+    if (ref) {
+        pd_kvcache_ref_ = std::move(ref);
+    }
+}
+
+void StreamCacheResource::releaseKVCacheForPDSep() {
+    pd_kvcache_ref_.reset();
+}
 }  // namespace rtp_llm

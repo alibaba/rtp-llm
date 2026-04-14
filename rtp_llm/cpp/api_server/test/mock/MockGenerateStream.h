@@ -10,14 +10,15 @@ namespace rtp_llm {
 
 class MockGenerateStream: public GenerateStream {
 public:
-    MockGenerateStream(const std::shared_ptr<GenerateInput>& input, const ModelConfig& model_config, const RuntimeConfig& runtime_config):
+    MockGenerateStream(const std::shared_ptr<GenerateInput>& input,
+                       const ModelConfig&                    model_config,
+                       const RuntimeConfig&                  runtime_config):
         GenerateStream(input, model_config, runtime_config, ResourceContext{}, nullptr) {}
     ~MockGenerateStream() override = default;
 
 public:
-    MOCK_METHOD0(cancel, void());
-    MOCK_METHOD0(stopped, bool());
-    MOCK_METHOD0(finished, bool());
+    MOCK_CONST_METHOD0(getStatus, StreamState());
+    MOCK_CONST_METHOD0(hasError, bool());
     MOCK_METHOD0(nextOutput, ErrorResult<GenerateOutputs>());
     MOCK_METHOD1(updateOutput, void(const StreamUpdateInfo&));
 };

@@ -26,9 +26,16 @@ public:
 
     ~FIFOScheduler() override;
 
-    absl::Status                                 enqueue(const GenerateStreamPtr& stream) override;
-    absl::Status                                 batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
-    absl::StatusOr<std::list<GenerateStreamPtr>> schedule(size_t reserve_step = 0) override;
+    // Enqueue a single stream. Returns OkStatus on success, InvalidArgumentError if checkInputLength fails.
+    // On failure, the stream's error is reported via reportError() but the stream is NOT queued.
+    // Caller must check the return status to know whether the stream was actually enqueued.
+    absl::Status enqueue(const GenerateStreamPtr& stream) override;
+
+    // Enqueue multiple streams. Silently filters out streams that fail checkInputLength (their errors
+    // are reported via reportError()). Returns only the streams that were successfully enqueued.
+    // Caller should compare the returned vector size with the input size to detect dropped streams.
+    std::vector<std::shared_ptr<GenerateStream>> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
+    absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
     absl::Status                                 stop() override;
     bool                                         empty() override;
 
@@ -42,29 +49,25 @@ public:
     std::vector<EngineScheduleInfo::TaskInfo> runningTaskList();
     int64_t                                   onflightStreams() override;
 
-protected:
-    virtual std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step);
-
 private:
-    void    evictDoneStreams(std::list<GenerateStreamPtr>& streams);
-    bool    evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
-                              const GenerateStreamPtr&            new_stream,
-                              size_t                              reserve_step);
-    int     evaluateRunningNext(size_t reserve_step);
-    void    evaluateRunningRemote();
     int64_t lastScheduleTime() override;
-    int     runningNextBlockNum(size_t reserve_step) const;
     bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
-    void accountBatchMetrics(const std::list<GenerateStreamPtr>& new_streams,
-                             const std::list<GenerateStreamPtr>& running_streams);
+    void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate();
+    void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
+    void evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
+    void cancelStreams(std::list<GenerateStreamPtr>& streams);
+    bool checkInputLength(const GenerateStreamPtr& stream);
+
+protected:
+    void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
 
 protected:
     PDSepConfig                     pd_sep_config_;
     ModelSpecificConfig             model_specific_config_;
     std::list<GenerateStreamPtr>    waiting_streams_;
+    std::list<GenerateStreamPtr>    loading_cache_streams_;
     std::list<GenerateStreamPtr>    running_streams_;
-    std::list<GenerateStreamPtr>    remote_running_streams_;
     std::shared_ptr<KVCacheManager> cache_manager_;
     std::atomic<int64_t>            last_schedule_time_      = autil::TimeUtility::currentTimeInMilliSeconds();
     size_t                          max_seq_len_             = 0;

@@ -440,6 +440,12 @@ bool KVCacheManager::hasActiveConnectors() const {
     return coordinator_ && coordinator_->hasActiveConnectors();
 }
 
+// PD separation: increment KV cache reference count
+std::shared_ptr<KVCacheResource>
+KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector) {
+    return allocator_->incrKVCacheRef(resource, cache_keys, is_connector);
+}
+
 // 异步连接器操作
 
 std::shared_ptr<AsyncContext>

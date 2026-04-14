@@ -73,15 +73,14 @@ void PrefillGenerateContext::stopStream() {
     if (stream_) {
         // if is waiting, cancel it
         meta->dequeue(request_id, stream_);
-        stream_->cancelIfNotRunning();
+        stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
         // if is running, waiting util done
-        while (stream_->running()) {
+        while (stream_->getStatus() == StreamState::RUNNING) {
             RTP_LLM_LOG_DEBUG("waiting prefill stream [%d] running done to cancel",
                               stream_->generateInput()->request_id);
             usleep(1000);
         }
-        // make sure the cancel take effect
-        stream_->cancelIfNotRunning();
+        // stream status will only be set to finished by scheduler.
         markRequestEnd();
         stream_.reset();
     }

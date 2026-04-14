@@ -42,7 +42,8 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
             memcpy(sampler_inputs.token_ids.data_ptr<int32_t>() + ((batch_idx) * (sampler_inputs.step + 1)),
                    complete_token_ids.data_ptr<int32_t>() + cur_batch * complete_seq_len,
                    seq_len * sizeof(int));
-            reinterpret_cast<bool*>(sampler_inputs.finished_mask.data_ptr())[batch_idx] = stream->isDoneWithoutLock(i);
+            reinterpret_cast<bool*>(sampler_inputs.finished_mask.data_ptr())[batch_idx] =
+                stream->isSubGenerateDoneWithoutLock(i);
             batch_idx += 1;
         }
         need_tiling |= stream->needTilingForSampling();
