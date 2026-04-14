@@ -929,6 +929,7 @@ class RocmImpl(GpuImpl):
             W.moe_gate,
             W.multi_tokens_predict_eh_proj,
             W.linear_attn_qkvz_w,
+            W.linear_attn_ba_w,
             W.linear_attn_out_w,
         ]:
             if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
