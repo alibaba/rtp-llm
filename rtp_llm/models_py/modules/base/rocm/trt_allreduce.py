@@ -29,6 +29,14 @@ FP8_QUANT_TYPE_IDS = {
 FP8_MAX_VALUE = FP8_MAX_VALUES[FP8_DTYPE]
 FP8_QUANT_TYPE_ID = FP8_QUANT_TYPE_IDS[FP8_DTYPE]
 
+# Supported hidden_size for trtllm allreduce kernels (pure allreduce).
+# Must match the switch cases in allreduce_kernel_launcher_hd (trtllm_allreduce_fusion.cu).
+ALLREDUCE_SUPPORTED_HIDDEN_SIZES = frozenset({1024, 2048, 2560, 4096, 5120})
+
+# Supported hidden_size for fused allreduce + residual + rmsnorm kernels.
+# Must match the switch cases in allreduce_fusion_kernel_launcher_hd (trtllm_allreduce_fusion.cu).
+ALLREDUCE_FUSION_SUPPORTED_HIDDEN_SIZES = frozenset({1024, 2048, 4096})
+
 
 class TrtllmDistEnv:
     """
@@ -133,6 +141,17 @@ class TrtllmDistEnv:
             if self._is_captured:
                 self._consume_capture()
                 self._is_captured = False
+
+    def consume_capture_if_needed(self) -> None:
+        """Finalize IPC pointers after graph capture if allreduce was used.
+
+        Safe to call unconditionally — only performs the (potentially expensive)
+        IPC handle exchange when allreduce was actually invoked during capture.
+        Resets the internal capture flag afterwards.
+        """
+        if self._is_captured:
+            self._consume_capture()
+            self._is_captured = False
 
     def __del__(self):
         try:
@@ -282,8 +301,17 @@ def allreduce(
 ) -> Tensor:
     """Top-level AllReduce using the TRT-LLM fusion kernel.
 
+    Returns a **new** tensor containing the allreduced result. The input
+    tensor is not modified. Callers must use the returned tensor.
+
+    This is consistent with the CUDA symm_mem allreduce path which also
+    returns a new tensor (see ``TorchSymmMemCommunicator.all_reduce``).
+
     Automatically initializes the communication workspace on first call.
     Drop-in replacement for ``atrex.allreduce``.
+
+    Returns:
+        A new tensor with the allreduced values.
     """
     if not ensure_trtllm_comm_initialized(group, device_id):
         raise RuntimeError("TRT-LLM AllReduce workspace failed to initialize")
@@ -293,10 +321,36 @@ def allreduce(
     return allreduce_out
 
 
+def is_trt_allreduce_ready() -> bool:
+    """Check if trt_allreduce is initialized and usable.
+
+    Returns True when the TrtllmCommManager singleton has been successfully
+    initialized and the underlying TrtllmDistEnv is not disabled (e.g. due
+    to insufficient GPU memory during IPC buffer allocation).
+    """
+    return (
+        _trtllm_comm_manager is not None
+        and _trtllm_comm_manager.initialized
+        and _trtllm_comm_manager.dist_env is not None
+        and not _trtllm_comm_manager.dist_env.disabled
+    )
+
+
 def consume_capture() -> None:
-    """Notify the TRT-LLM comm manager to finalize IPC pointers after graph capture."""
-    if _trtllm_comm_manager is not None and _trtllm_comm_manager.initialized:
-        _trtllm_comm_manager.dist_env._consume_capture()
+    """Notify the TRT-LLM comm manager to finalize IPC pointers after graph capture.
+
+    Only performs the (potentially expensive) IPC handle exchange when
+    trtllm allreduce was actually used during the capture session.
+    Delegates to TrtllmDistEnv.consume_capture_if_needed() which manages
+    the internal capture flag.
+    """
+    if (
+        _trtllm_comm_manager is not None
+        and _trtllm_comm_manager.initialized
+        and _trtllm_comm_manager.dist_env is not None
+        and not _trtllm_comm_manager.dist_env.disabled
+    ):
+        _trtllm_comm_manager.dist_env.consume_capture_if_needed()
 
 
 def allreduce_residual_rmsnorm(

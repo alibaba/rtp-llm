@@ -751,8 +751,14 @@ void allreduce_kernel_launcher_hd(AllReduceFusionParams<T> const& params,
                                   CommPtrs*                       cptrs,
                                   gpuStream_t                     stream) {
     switch (params.hidden_dim) {
+        case 5120:
+            allreduce_kernel_launcher_<T, NRanks, 5120, QUANT_TYPE>(params, meta, cptrs, stream);
+            return;
         case 4096:
             allreduce_kernel_launcher_<T, NRanks, 4096, QUANT_TYPE>(params, meta, cptrs, stream);
+            return;
+        case 2560:
+            allreduce_kernel_launcher_<T, NRanks, 2560, QUANT_TYPE>(params, meta, cptrs, stream);
             return;
         case 2048:
             allreduce_kernel_launcher_<T, NRanks, 2048, QUANT_TYPE>(params, meta, cptrs, stream);

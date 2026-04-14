@@ -489,8 +489,7 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     """
     rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
     if rocm_rccl.should_use_capture_collectives(group == Group.TP):
-        rocm_rccl.capture_all_reduce(tensor)
-        return tensor
+        return rocm_rccl.capture_all_reduce(tensor, _get_group(group))
 
     if group == Group.TP:
         symm_mem_comm = get_symm_mem_communicator()
