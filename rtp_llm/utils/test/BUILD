@@ -118,6 +118,7 @@ py_test(
     deps = [
         "//rtp_llm:utils",
         "//rtp_llm:fastapi",
+        "//rtp_llm:_ft_pickler",
     ],
     data = [
         "//:th_transformer",
