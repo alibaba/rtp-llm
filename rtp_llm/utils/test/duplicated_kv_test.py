@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from rtp_llm.utils.model_weight import get_sp_tensor, sp_head_qk_norm
+from rtp_llm.utils.model_weight import get_sp_tensor, sp_head_qk_norm, get_sp_tensor_blocked
 
 
 # This test validates the Q-to-KV head mapping after tensor splitting.
@@ -72,6 +72,17 @@ class TestDuplicatedKV(unittest.TestCase):
                                 tp=tp,
                                 tp_rank=tp_rank,
                             )
+
+                            qkv_out_ = get_sp_tensor_blocked(
+                                qkv_input,
+                                head_num=q_head,
+                                head_num_kv=kv_head,
+                                size_per_head=head_dim,
+                                tp=tp,
+                                tp_rank=tp_rank,
+                            )
+
+                            assert torch.allclose(qkv_out, qkv_out_), "get_sp_tensor and get_sp_tensor_blocked outputs differ"
 
                             kv_tp = math.gcd(kv_head, tp)
                             kv_rank = tp_rank // (tp // kv_tp)
