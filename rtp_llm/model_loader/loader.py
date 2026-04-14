@@ -695,14 +695,6 @@ def get_model_loader(
             "invalid tp_size %d for config.head_num %d"
             % (weights_info.tp_size, weights_info._head_num)
         )
-    if (
-        weights_info._head_num_kv % weights_info.tp_size != 0
-        and weights_info._head_num_kv != 1
-    ):
-        raise Exception(
-            "invalid tp_size %d for config.head_num_kv %d"
-            % (weights_info.tp_size, weights_info._head_num_kv)
-        )
     return ModelLoader(
         model_config,
         weights_info,
