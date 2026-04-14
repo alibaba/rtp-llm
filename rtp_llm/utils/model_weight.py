@@ -243,6 +243,10 @@ def sp_1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
 
 
 def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
+    if t.shape[-1] % tp != 0:
+        raise ValueError(
+            f"tensor split error: the last dimension size {t.shape[-1]} is not divisible by tp size: {tp}"
+        )
     return torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
 
 
@@ -443,16 +447,6 @@ def get_sp_tensor(
         t = t.unsqueeze(0)
     qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
 
-    """
-    KV head partitioning logic for tensor parallelism:
-    Case 1: If kv_head_num % tp_size == 0,
-        then each rank gets kv_head_num / tp_size KV heads.
-
-    Case 2: If kv_head_num % tp_size != 0,
-        then we take the greatest common divisor:
-            gcd = GCD(kv_head_num, tp_size),
-        and each rank gets kv_head_num / gcd KV heads.
-    """
     _kv_tp = math.gcd(head_num_kv, tp)
     _kv_rank = tp_rank // (tp // _kv_tp)
     ks = sp_neg1(t[:, q_hidden: q_hidden + kv_hidden], _kv_tp, _kv_rank)
@@ -512,16 +506,6 @@ def sp_head_qk_norm(
     t = t.reshape(1, -1)
     qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
 
-    """
-    KV head partitioning logic for tensor parallelism:
-    Case 1: If kv_head_num % tp_size == 0,
-        then each rank gets kv_head_num / tp_size KV heads.
-
-    Case 2: If kv_head_num % tp_size != 0,
-        then we take the greatest common divisor:
-            gcd = GCD(kv_head_num, tp_size),
-        and each rank gets kv_head_num / gcd KV heads.
-    """
     _kv_tp = math.gcd(head_num_kv, tp)
     _kv_rank = tp_rank // (tp // _kv_tp)
     ks = sp_neg1(t[:, q_hidden:], _kv_tp, _kv_rank)
@@ -557,19 +541,7 @@ def get_sp_tensor_blocked(
     if len(t.shape) == 1:
         t = t.unsqueeze(0)
 
-    # TODO, Q 是不是也可以做类似的 duplicate Q 的优化？
     qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
-
-    """
-    KV head partitioning logic for tensor parallelism:
-    Case 1: If kv_head_num % tp_size == 0,
-        then each rank gets kv_head_num / tp_size KV heads.
-
-    Case 2: If kv_head_num % tp_size != 0,
-        then we take the greatest common divisor:
-            gcd = GCD(kv_head_num, tp_size),
-        and each rank gets kv_head_num / gcd KV heads.
-    """
     _kv_tp = math.gcd(head_num_kv, tp)
     _kv_rank = tp_rank // (tp // _kv_tp)
     ks = sp_neg1(t[:, q_hidden: q_hidden + kv_hidden], _kv_tp, _kv_rank)
