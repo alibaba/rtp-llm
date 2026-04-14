@@ -49,3 +49,17 @@ py_test(
     visibility = ["//visibility:public"],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "test_chunk_prefill_cp",
+    srcs = [
+        "test_chunk_prefill_cp.py"
+    ],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+        "//rtp_llm:testlib",
+    ] + [":triton", ":torch"],
+    visibility = ["//visibility:public"],
+    env = {"GPU_COUNT": "4"},
+    exec_properties = {'gpu': 'H20', 'gpu_count': '4'},
+)

@@ -560,6 +560,19 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
+def broadcast_async(tensor: torch.Tensor, src: int, group: Group):
+    """Async broadcast. Returns work handle. Call work.wait() before reading tensor.
+
+    Args:
+        tensor: Tensor to broadcast (will be modified in-place on non-source ranks)
+        src: Source global rank
+        group: Process group to use
+    """
+    process_group = _get_group(group)
+    work = torch.distributed.broadcast(tensor, src, group=process_group, async_op=True)
+    return work
+
+
 def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
@@ -630,6 +643,25 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
     # torch.distributed.all_gather(tensor_list, tensor, group=process_group)
     # return torch.cat(tensor_list, dim=0)
+
+
+def all_gather_async(tensor: torch.Tensor, group: Group):
+    """Async all-gather. Returns (output_tensor, work_handle).
+
+    Call work.wait() before reading output_tensor.
+    """
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+
+    output = torch.empty(
+        [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
+        device=tensor.device,
+        dtype=tensor.dtype,
+    )
+    work = torch.distributed.all_gather_into_tensor(
+        output, tensor, group=process_group, async_op=True
+    )
+    return output, work
 
 
 def barrier(group: Group) -> None:
