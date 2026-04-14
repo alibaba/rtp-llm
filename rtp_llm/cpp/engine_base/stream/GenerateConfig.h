@@ -75,17 +75,18 @@ public:
     bool can_use_pd_separation = true;
     bool pd_separation         = false;
 
-    bool             in_think_mode       = false;
-    int              max_thinking_tokens = 0;
-    std::vector<int> end_think_token_ids;
-    bool             gen_timeline        = false;
-    int              profile_step        = 3;
-    bool             ignore_eos          = false;
-    bool             reuse_cache         = true;
-    bool             enable_device_cache = true;
-    bool             enable_memory_cache = true;
-    bool             enable_remote_cache = true;
-    std::string      trace_id;
+    bool                     in_think_mode       = false;
+    int                      max_thinking_tokens = 0;
+    std::vector<int>         end_think_token_ids;
+    bool                     gen_timeline = false;
+    std::vector<std::string> ele_rq_ids;
+    int                      profile_step        = 3;
+    bool                     ignore_eos          = false;
+    bool                     reuse_cache         = true;
+    bool                     enable_device_cache = true;
+    bool                     enable_memory_cache = true;
+    bool                     enable_remote_cache = true;
+    std::string              trace_id;
 
     bool top1() {
         return top_k == 1;
@@ -219,6 +220,7 @@ public:
         JSONIZE(enable_memory_cache);
         JSONIZE(enable_remote_cache);
         JSONIZE(aux_info);
+        JSONIZE(ele_rq_ids);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

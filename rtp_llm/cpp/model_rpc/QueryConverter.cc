@@ -89,6 +89,10 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->enable_remote_cache = config_proto->enable_remote_cache();
     TRANS_OPTIONAL(trace_id);
 
+    for (const auto& rq_id : config_proto->ele_rq_ids()) {
+        generate_config->ele_rq_ids.push_back(rq_id);
+    }
+
     return generate_config;
 }
 
