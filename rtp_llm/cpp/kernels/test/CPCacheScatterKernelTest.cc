@@ -596,5 +596,251 @@ TEST_F(CPCacheScatterPagedKernelTest, MatchesContiguousKernel) {
     }
 }
 
+// ===================================================================
+// Tests for invokeCPCacheScatterPagedPackedScale (kernel_block_size)
+// ===================================================================
+
+class CPCacheScatterPackedScaleKernelTest: public CPCacheScatterKernelTest {
+protected:
+    /// Helper to compute the byte offset of a token's quant data within a
+    /// physical block that uses kernel-block sub-structure.
+    ///
+    /// Layout per kernel block: [kb_size × quant_bpt][kb_size × scale_bpt]
+    static size_t quantOffset(int slot, int kb_size, int quant_bpt, int scale_bpt) {
+        int    kb_idx    = slot / kb_size;
+        int    kb_off    = slot % kb_size;
+        size_t kb_stride = static_cast<size_t>(kb_size) * (quant_bpt + scale_bpt);
+        return kb_idx * kb_stride + static_cast<size_t>(kb_off) * quant_bpt;
+    }
+
+    /// Helper to compute the byte offset of a token's scale data.
+    static size_t scaleOffset(int slot, int kb_size, int quant_bpt, int scale_bpt) {
+        int    kb_idx    = slot / kb_size;
+        int    kb_off    = slot % kb_size;
+        size_t kb_stride = static_cast<size_t>(kb_size) * (quant_bpt + scale_bpt);
+        return kb_idx * kb_stride + static_cast<size_t>(kb_size) * quant_bpt + static_cast<size_t>(kb_off) * scale_bpt;
+    }
+
+    /// Run a packed-scale scatter test.
+    ///
+    /// @param kernel_block_size  Kernel block size (sub-block within physical block).
+    ///                           Must divide block_size evenly.
+    void runPackedScaleScatterTest(int virtual_block_count,
+                                   int cp_size,
+                                   int block_size,
+                                   int quant_bytes_per_token,
+                                   int scale_bytes_per_token,
+                                   int kernel_block_size,
+                                   int total_tokens = -1) {
+        const int tokens_per_vb = block_size * cp_size;
+        if (total_tokens < 0) {
+            total_tokens = virtual_block_count * tokens_per_vb;
+        }
+        const int    decode_blocks = (total_tokens + block_size - 1) / block_size;
+        const int    staging_cnt   = virtual_block_count * cp_size;
+        const size_t block_bytes   = static_cast<size_t>(block_size) * (quant_bytes_per_token + scale_bytes_per_token);
+
+        // Allocate individual src/dst blocks
+        std::vector<BufferPtr> src_block_bufs(staging_cnt);
+        std::vector<BufferPtr> dst_block_bufs(decode_blocks);
+        for (int i = 0; i < staging_cnt; ++i) {
+            src_block_bufs[i] =
+                device_->allocateBuffer({DataType::TYPE_BYTES, {block_bytes}, AllocationType::DEVICE}, {});
+        }
+        for (int i = 0; i < decode_blocks; ++i) {
+            dst_block_bufs[i] =
+                device_->allocateBuffer({DataType::TYPE_BYTES, {block_bytes}, AllocationType::DEVICE}, {});
+        }
+
+        // Use identity IDs for simplicity
+        std::vector<int> src_ids(staging_cnt);
+        std::vector<int> dst_ids(decode_blocks);
+        std::iota(src_ids.begin(), src_ids.end(), 0);
+        std::iota(dst_ids.begin(), dst_ids.end(), 0);
+
+        int addr_table_size = std::max(staging_cnt, decode_blocks);
+
+        std::vector<void*> src_addrs(addr_table_size, nullptr);
+        std::vector<void*> dst_addrs(addr_table_size, nullptr);
+        for (int i = 0; i < staging_cnt; ++i)
+            src_addrs[i] = src_block_bufs[i]->data();
+        for (int i = 0; i < decode_blocks; ++i)
+            dst_addrs[i] = dst_block_bufs[i]->data();
+
+        // Fill staging blocks with tagged data using kernel-block-aware layout.
+        // Quant tag for token t: (t & 0xFF)
+        // Scale tag for token t: ((t + 0x80) & 0xFF)
+        for (int v = 0; v < virtual_block_count; ++v) {
+            for (int p = 0; p < cp_size; ++p) {
+                int                  src_idx = v * cp_size + p;
+                std::vector<uint8_t> block_host(block_bytes, 0);
+                for (int s = 0; s < block_size; ++s) {
+                    int global_token = v * tokens_per_vb + s * cp_size + p;
+                    if (global_token >= total_tokens)
+                        continue;
+                    uint8_t quant_tag = static_cast<uint8_t>(global_token & 0xFF);
+                    uint8_t scale_tag = static_cast<uint8_t>((global_token + 0x80) & 0xFF);
+
+                    size_t q_off = quantOffset(s, kernel_block_size, quant_bytes_per_token, scale_bytes_per_token);
+                    size_t s_off = scaleOffset(s, kernel_block_size, quant_bytes_per_token, scale_bytes_per_token);
+
+                    std::memset(block_host.data() + q_off, quant_tag, quant_bytes_per_token);
+                    std::memset(block_host.data() + s_off, scale_tag, scale_bytes_per_token);
+                }
+                device_->copy({*src_block_bufs[src_idx],
+                               Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {block_bytes}, block_host.data())});
+            }
+        }
+
+        // Upload address tables and IDs to GPU
+        auto src_addrs_gpu =
+            device_->allocateBuffer({DataType::TYPE_UINT64, {(size_t)addr_table_size}, AllocationType::DEVICE}, {});
+        auto dst_addrs_gpu =
+            device_->allocateBuffer({DataType::TYPE_UINT64, {(size_t)addr_table_size}, AllocationType::DEVICE}, {});
+        auto src_ids_gpu =
+            device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)staging_cnt}, AllocationType::DEVICE}, {});
+        auto dst_ids_gpu =
+            device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)decode_blocks}, AllocationType::DEVICE}, {});
+
+        device_->copy(
+            {*src_addrs_gpu,
+             Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT64, {(size_t)addr_table_size}, src_addrs.data())});
+        device_->copy(
+            {*dst_addrs_gpu,
+             Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT64, {(size_t)addr_table_size}, dst_addrs.data())});
+        device_->copy({*src_ids_gpu,
+                       Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INT32, {(size_t)staging_cnt}, src_ids.data())});
+        device_->copy({*dst_ids_gpu,
+                       Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INT32, {(size_t)decode_blocks}, dst_ids.data())});
+
+        // Run kernel
+        invokeCPCacheScatterPagedPackedScale(reinterpret_cast<void**>(dst_addrs_gpu->data()),
+                                             dst_ids_gpu->data<int>(),
+                                             reinterpret_cast<void**>(src_addrs_gpu->data()),
+                                             src_ids_gpu->data<int>(),
+                                             virtual_block_count,
+                                             cp_size,
+                                             block_size,
+                                             total_tokens,
+                                             quant_bytes_per_token,
+                                             scale_bytes_per_token,
+                                             kernel_block_size,
+                                             addr_table_size,
+                                             nullptr);
+        device_->syncAndCheck();
+
+        // Verify: each decode block should contain contiguous tokens with
+        // correct quant and scale data at kernel-block-aware offsets.
+        for (int t = 0; t < total_tokens; ++t) {
+            int     blk_idx        = t / block_size;
+            int     slot           = t % block_size;
+            uint8_t quant_expected = static_cast<uint8_t>(t & 0xFF);
+            uint8_t scale_expected = static_cast<uint8_t>((t + 0x80) & 0xFF);
+
+            std::vector<uint8_t> block_host(block_bytes);
+            device_->copy({Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_BYTES, {block_bytes}, block_host.data()),
+                           *dst_block_bufs[blk_idx]});
+            device_->syncAndCheck();
+
+            size_t q_off = quantOffset(slot, kernel_block_size, quant_bytes_per_token, scale_bytes_per_token);
+            size_t s_off = scaleOffset(slot, kernel_block_size, quant_bytes_per_token, scale_bytes_per_token);
+
+            const uint8_t* q_ptr = block_host.data() + q_off;
+            for (int b = 0; b < quant_bytes_per_token; ++b) {
+                ASSERT_EQ(q_ptr[b], quant_expected)
+                    << "quant mismatch: token=" << t << " blk=" << blk_idx << " slot=" << slot << " byte=" << b;
+            }
+            const uint8_t* s_ptr = block_host.data() + s_off;
+            for (int b = 0; b < scale_bytes_per_token; ++b) {
+                ASSERT_EQ(s_ptr[b], scale_expected)
+                    << "scale mismatch: token=" << t << " blk=" << blk_idx << " slot=" << slot << " byte=" << b;
+            }
+        }
+    }
+};
+
+// --- kernel_block_size == block_size (legacy / no sub-structure) ---
+
+TEST_F(CPCacheScatterPackedScaleKernelTest, NoSubBlock_BS4_CP2) {
+    // quant=32 bytes, scale=1 byte (ratio 32:1), kb==bs=4
+    runPackedScaleScatterTest(1, 2, 4, 32, 1, /*kernel_block_size=*/4);
+}
+
+TEST_F(CPCacheScatterPackedScaleKernelTest, NoSubBlock_BS64_CP4) {
+    runPackedScaleScatterTest(2, 4, 64, 32, 1, /*kernel_block_size=*/64);
+}
+
+// --- kernel_block_size < block_size (the actual bug fix case) ---
+
+TEST_F(CPCacheScatterPackedScaleKernelTest, SubBlock_KB2_BS4_CP2) {
+    // Smallest interesting case: 2 kernel blocks of size 2 within block_size=4
+    runPackedScaleScatterTest(1, 2, 4, 32, 1, /*kernel_block_size=*/2);
+}
+
+TEST_F(CPCacheScatterPackedScaleKernelTest, SubBlock_KB2_BS4_CP4) {
+    runPackedScaleScatterTest(2, 4, 4, 32, 1, /*kernel_block_size=*/2);
+}
+
+TEST_F(CPCacheScatterPackedScaleKernelTest, SubBlock_KB4_BS8_CP2) {
+    runPackedScaleScatterTest(2, 2, 8, 32, 1, /*kernel_block_size=*/4);
+}
+
+TEST_F(CPCacheScatterPackedScaleKernelTest, SubBlock_KB4_BS8_CP4) {
+    runPackedScaleScatterTest(1, 4, 8, 32, 1, /*kernel_block_size=*/4);
+}
+
+// Realistic MLA indexer dimensions:
+//   block_size=128, kernel_block_size=64, cp_size=4
+//   indexer_head_dim=128 → quant_bpt = 128 bytes FP8, scale_bpt = 4 bytes (128/128*4)
+//   total per token = 132 bytes, ratio 32:1 ✓
+TEST_F(CPCacheScatterPackedScaleKernelTest, RealisticMLA_KB64_BS128_CP4) {
+    runPackedScaleScatterTest(2, 4, 128, 128, 4, /*kernel_block_size=*/64);
+}
+
+TEST_F(CPCacheScatterPackedScaleKernelTest, RealisticMLA_KB64_BS128_CP2) {
+    runPackedScaleScatterTest(4, 2, 128, 128, 4, /*kernel_block_size=*/64);
+}
+
+// Partial tokens with kernel block sub-structure
+TEST_F(CPCacheScatterPackedScaleKernelTest, SubBlock_Partial_KB2_BS4_CP2) {
+    // 1 vblock, cp=2, bs=4 → 8 tokens max, only use 5
+    runPackedScaleScatterTest(1, 2, 4, 32, 1, /*kernel_block_size=*/2, /*total_tokens=*/5);
+}
+
+TEST_F(CPCacheScatterPackedScaleKernelTest, SubBlock_Partial_KB64_BS128_CP4) {
+    // 1 vblock, cp=4, bs=128 → 512 tokens max, only use 300
+    runPackedScaleScatterTest(1, 4, 128, 128, 4, /*kernel_block_size=*/64, /*total_tokens=*/300);
+}
+
+// Edge cases
+TEST_F(CPCacheScatterPackedScaleKernelTest, CP1_NoOp) {
+    invokeCPCacheScatterPagedPackedScale(nullptr, nullptr, nullptr, nullptr, 5, 1, 4, 20, 32, 1, 4, 0, nullptr);
+}
+
+TEST_F(CPCacheScatterPackedScaleKernelTest, ZeroVB_NoOp) {
+    invokeCPCacheScatterPagedPackedScale(nullptr, nullptr, nullptr, nullptr, 0, 2, 4, 0, 32, 1, 4, 0, nullptr);
+}
+
+TEST_F(CPCacheScatterPackedScaleKernelTest, ZeroTokens_NoOp) {
+    invokeCPCacheScatterPagedPackedScale(nullptr, nullptr, nullptr, nullptr, 1, 2, 4, 0, 32, 1, 4, 0, nullptr);
+}
+
+// Multi-vblock with sub-blocks
+TEST_F(CPCacheScatterPackedScaleKernelTest, SubBlock_MultiVB_KB4_BS8_CP2) {
+    runPackedScaleScatterTest(4, 2, 8, 32, 1, /*kernel_block_size=*/4);
+}
+
+TEST_F(CPCacheScatterPackedScaleKernelTest, SubBlock_MultiVB_KB64_BS128_CP4) {
+    runPackedScaleScatterTest(8, 4, 128, 128, 4, /*kernel_block_size=*/64);
+}
+
+// Verify that kernel_block_size==block_size gives same result as legacy layout
+TEST_F(CPCacheScatterPackedScaleKernelTest, KBEqualsBS_MatchesLegacy) {
+    // With kb==bs, the kernel-block-aware offsets should produce the same
+    // result as the old code that assumed [bs×quant][bs×scale].
+    // We test this by running with kb==bs and checking correctness.
+    runPackedScaleScatterTest(3, 2, 8, 32, 1, /*kernel_block_size=*/8);
+}
+
 }  // namespace test
 }  // namespace rtp_llm

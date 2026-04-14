@@ -82,9 +82,16 @@ void invokeCPCacheScatterPaged(void**       dst_block_addrs,
                                int          addr_table_size,
                                cudaStream_t stream);
 
-/// Paged variant for indexer K cache stored in kv_scale with packed layout:
-/// [all token fp8 K][all token fp32 scales], i.e. scales live at block tail
-/// instead of being interleaved per token.
+/// Paged variant for indexer K cache stored in kv_scale with packed layout.
+///
+/// When kernel_block_size < block_size, each physical block is subdivided into
+/// kernel blocks, and within each kernel block the layout is:
+///   [kernel_block_size × quant_data][kernel_block_size × scale_data]
+/// So a physical block with 2 kernel blocks (kernel_block_size=64, block_size=128):
+///   [KB0: 64×quant][KB0: 64×scale][KB1: 64×quant][KB1: 64×scale]
+///
+/// When kernel_block_size == block_size (or 0), the layout degenerates to:
+///   [block_size × quant_data][block_size × scale_data]
 void invokeCPCacheScatterPagedPackedScale(void**       dst_block_addrs,
                                           const int*   dst_block_ids,
                                           void**       src_block_addrs,
@@ -95,6 +102,7 @@ void invokeCPCacheScatterPagedPackedScale(void**       dst_block_addrs,
                                           int          total_tokens,
                                           int          quant_bytes_per_token,
                                           int          scale_bytes_per_token,
+                                          int          kernel_block_size,
                                           int          addr_table_size,
                                           cudaStream_t stream);
 

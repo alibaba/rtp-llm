@@ -294,6 +294,7 @@ void CPCacheScatterHelper::scatterAndRelease(std::unique_ptr<StagingPlan> plan,
                     sc_src_ptr, sc_src_addrs.data(), addr_table_size * sizeof(void*), cudaMemcpyHostToDevice, stream);
 
                 if (packed_indexer_scale) {
+                    const int kernel_block_size = static_cast<int>(cache_config.kernel_seq_size_per_block);
                     invokeCPCacheScatterPagedPackedScale(reinterpret_cast<void**>(sc_dst_ptr),
                                                          reinterpret_cast<int*>(dst_ids_gpu_ptr),
                                                          reinterpret_cast<void**>(sc_src_ptr),
@@ -304,6 +305,7 @@ void CPCacheScatterHelper::scatterAndRelease(std::unique_ptr<StagingPlan> plan,
                                                          layer_total_tokens,
                                                          quant_bytes_per_token,
                                                          tail_scale_bytes_per_token,
+                                                         kernel_block_size,
                                                          addr_table_size,
                                                          stream);
                 } else {

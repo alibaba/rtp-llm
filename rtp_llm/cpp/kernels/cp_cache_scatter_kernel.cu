@@ -175,6 +175,26 @@ void invokeCPCacheScatterPaged(void**       dst_block_addrs,
                                                                                      addr_table_size);
 }
 
+// Helper: compute byte offset of a token's quant data within a physical block,
+// accounting for kernel-block sub-structure.
+//
+// Layout per kernel block: [kb_size × quant_data][kb_size × scale_data]
+// A physical block has (block_size / kb_size) consecutive kernel blocks.
+__device__ __forceinline__ size_t packedQuantOffset(int slot, int kb_size, int quant_bpt, int scale_bpt) {
+    const int    kb_idx    = slot / kb_size;
+    const int    kb_off    = slot % kb_size;
+    const size_t kb_stride = static_cast<size_t>(kb_size) * (quant_bpt + scale_bpt);
+    return kb_idx * kb_stride + static_cast<size_t>(kb_off) * quant_bpt;
+}
+
+// Helper: compute byte offset of a token's scale data within a physical block.
+__device__ __forceinline__ size_t packedScaleOffset(int slot, int kb_size, int quant_bpt, int scale_bpt) {
+    const int    kb_idx    = slot / kb_size;
+    const int    kb_off    = slot % kb_size;
+    const size_t kb_stride = static_cast<size_t>(kb_size) * (quant_bpt + scale_bpt);
+    return kb_idx * kb_stride + static_cast<size_t>(kb_size) * quant_bpt + static_cast<size_t>(kb_off) * scale_bpt;
+}
+
 __global__ void cpCacheScatterPagedPackedScaleKernel(void**     dst_block_addrs,
                                                      const int* dst_block_ids,
                                                      void**     src_block_addrs,
@@ -184,13 +204,15 @@ __global__ void cpCacheScatterPagedPackedScaleKernel(void**     dst_block_addrs,
                                                      int        total_tokens,
                                                      int        quant_bytes_per_token,
                                                      int        scale_bytes_per_token,
+                                                     int        kernel_block_size,
                                                      int        addr_table_size) {
     const int vb = blockIdx.x;
     (void)addr_table_size;
 
-    const int    tokens_per_vb      = block_size * cp_size;
-    const int    vb_token_start     = vb * tokens_per_vb;
-    const size_t scale_region_start = static_cast<size_t>(block_size) * static_cast<size_t>(quant_bytes_per_token);
+    const int kb_size = kernel_block_size;
+
+    const int tokens_per_vb  = block_size * cp_size;
+    const int vb_token_start = vb * tokens_per_vb;
 
     for (int t = 0; t < tokens_per_vb; ++t) {
         const int global_token = vb_token_start + t;
@@ -209,14 +231,16 @@ __global__ void cpCacheScatterPagedPackedScaleKernel(void**     dst_block_addrs,
         const char* src = static_cast<const char*>(src_block_addrs[src_bid]);
         char*       dst = static_cast<char*>(dst_block_addrs[dst_bid]);
 
-        const size_t src_quant_off = static_cast<size_t>(slot_in_peer) * static_cast<size_t>(quant_bytes_per_token);
-        const size_t dst_quant_off = static_cast<size_t>(dst_slot) * static_cast<size_t>(quant_bytes_per_token);
+        // Copy quant (FP8 K) data
+        const size_t src_quant_off =
+            packedQuantOffset(slot_in_peer, kb_size, quant_bytes_per_token, scale_bytes_per_token);
+        const size_t dst_quant_off = packedQuantOffset(dst_slot, kb_size, quant_bytes_per_token, scale_bytes_per_token);
         copyTokenData(dst + dst_quant_off, src + src_quant_off, quant_bytes_per_token);
 
+        // Copy scale data
         const size_t src_scale_off =
-            scale_region_start + static_cast<size_t>(slot_in_peer) * static_cast<size_t>(scale_bytes_per_token);
-        const size_t dst_scale_off =
-            scale_region_start + static_cast<size_t>(dst_slot) * static_cast<size_t>(scale_bytes_per_token);
+            packedScaleOffset(slot_in_peer, kb_size, quant_bytes_per_token, scale_bytes_per_token);
+        const size_t dst_scale_off = packedScaleOffset(dst_slot, kb_size, quant_bytes_per_token, scale_bytes_per_token);
         copyTokenData(dst + dst_scale_off, src + src_scale_off, scale_bytes_per_token);
     }
 }
@@ -231,6 +255,7 @@ void invokeCPCacheScatterPagedPackedScale(void**       dst_block_addrs,
                                           int          total_tokens,
                                           int          quant_bytes_per_token,
                                           int          scale_bytes_per_token,
+                                          int          kernel_block_size,
                                           int          addr_table_size,
                                           cudaStream_t stream) {
     if (virtual_block_count <= 0 || cp_size <= 1 || total_tokens <= 0) {
@@ -238,6 +263,9 @@ void invokeCPCacheScatterPagedPackedScale(void**       dst_block_addrs,
     }
     assert(quant_bytes_per_token > 0);
     assert(scale_bytes_per_token > 0);
+
+    // Default: kernel_block_size == block_size (no sub-structure).
+    const int kb_size = (kernel_block_size > 0 && kernel_block_size <= block_size) ? kernel_block_size : block_size;
 
     const int threads_per_block = 256;
     cpCacheScatterPagedPackedScaleKernel<<<virtual_block_count, threads_per_block, 0, stream>>>(dst_block_addrs,
@@ -249,6 +277,7 @@ void invokeCPCacheScatterPagedPackedScale(void**       dst_block_addrs,
                                                                                                 total_tokens,
                                                                                                 quant_bytes_per_token,
                                                                                                 scale_bytes_per_token,
+                                                                                                kb_size,
                                                                                                 addr_table_size);
 }
 
