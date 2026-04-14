@@ -50,7 +50,9 @@ class Qwen3NextMTPModel(GptModelBase):
             eps=model_config.layernorm_eps,
         )
         self.fc = LinearFactory.create_linear_from_weights(
-            weights.global_weights, W.multi_tokens_predict_eh_proj
+            weights.global_weights,
+            W.multi_tokens_predict_eh_proj,
+            hw_kernel_config=py_hw_kernel_config,
         )
         self.norm = RMSNorm(
             weights.global_weights[W.final_ln_gamma], eps=model_config.layernorm_eps
@@ -71,6 +73,7 @@ class Qwen3NextMTPModel(GptModelBase):
                     moe_config,
                     max_generate_batch_size,
                     enable_cuda_graph,
+                    hw_kernel_config=py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]
