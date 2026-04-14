@@ -94,7 +94,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
     logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
-        device_, generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
+        device_, generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id,vocab_size_);
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)

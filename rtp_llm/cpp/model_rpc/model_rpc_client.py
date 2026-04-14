@@ -146,6 +146,9 @@ def trans_input(input_py: GenerateInput):
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
     )
 
+    if input_py.generate_config.ele_rq_ids:
+        generate_config_pb.ele_rq_ids.extend(input_py.generate_config.ele_rq_ids)
+
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
         stop_words.values.extend(input_py.generate_config.stop_words_list[i])

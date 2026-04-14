@@ -96,6 +96,7 @@ message GenerateConfigPB {
     bool enable_device_cache = 52;
     bool enable_remote_cache = 53;
     string unique_key = 54;
+    repeated string ele_rq_ids = 55;
 }
 
 message MMPreprocessConfigPB {

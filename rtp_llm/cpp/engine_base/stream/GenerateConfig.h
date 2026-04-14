@@ -79,6 +79,7 @@ public:
     int              max_thinking_tokens = 0;
     std::vector<int> end_think_token_ids;
     bool             gen_timeline        = false;
+    std::vector<std::string> ele_rq_ids;
     int              profile_step        = 3;
     bool             ignore_eos          = false;
     bool             reuse_cache         = true;
@@ -139,7 +140,8 @@ public:
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache << "}";
+                     << ", enable_remote_cache: " << enable_remote_cache << "}"
+                     << ", ele_rq_ids: " << vectorToString(ele_rq_ids) << "}";
         return debug_string.str();
     }
 
@@ -219,6 +221,7 @@ public:
         JSONIZE(enable_memory_cache);
         JSONIZE(enable_remote_cache);
         JSONIZE(aux_info);
+        JSONIZE(ele_rq_ids);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }
