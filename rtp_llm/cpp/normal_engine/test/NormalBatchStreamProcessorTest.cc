@@ -40,7 +40,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr,false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
 
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = hostIntBuffer({1, 2});
@@ -364,11 +364,11 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsGatherBatch) {
     CacheConfig                 cache_config;
     RuntimeConfig               runtime_config;
     NormalBatchStreamProcessor  processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
 
     // 创建带有 input_embeddings 的 stream 1
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
-    query1->input_ids                     = createBuffer<int32_t>({5}, {1, 2, 3, 4, 5}, AllocationType::HOST);
+    query1->input_ids                     = hostIntBuffer({1, 2, 3, 4, 5});
     query1->generate_config               = make_shared<GenerateConfig>();
     query1->input_embeddings      = {torch::rand({2, 10}, torch::kFloat32), torch::rand({2, 10}, torch::kFloat32)};
     query1->input_embeddings_locs = {1, 3};
@@ -378,7 +378,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsGatherBatch) {
 
     // 创建带有 input_embeddings 的 stream 2
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
-    query2->input_ids                     = createBuffer<int32_t>({3}, {6, 7, 8}, AllocationType::HOST);
+    query2->input_ids                     = hostIntBuffer({6, 7, 8});
     query2->generate_config               = make_shared<GenerateConfig>();
     query2->input_embeddings              = {torch::rand({1, 10}, torch::kFloat32)};
     query2->input_embeddings_locs         = {0};
@@ -388,7 +388,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsGatherBatch) {
 
     // 创建没有 input_embeddings 的 stream 3
     std::shared_ptr<GenerateInput> query3 = make_shared<GenerateInput>();
-    query3->input_ids                     = createBuffer<int32_t>({4}, {9, 10, 11, 12}, AllocationType::HOST);
+    query3->input_ids                     = hostIntBuffer({9, 10, 11, 12});
     query3->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr stream3 =
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
@@ -420,15 +420,16 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsGatherBatch) {
     EXPECT_EQ(embeddings.size(), 3);
 
     // 验证每个 embedding 的大小
-    EXPECT_EQ(embeddings[0]->size(), 2 * 10);  // stream1 的第一个 embedding
-    EXPECT_EQ(embeddings[1]->size(), 2 * 10);  // stream1 的第二个 embedding
-    EXPECT_EQ(embeddings[2]->size(), 1 * 10);  // stream2 的 embedding
+    EXPECT_EQ(embeddings[0].numel(), 2 * 10);  // stream1 的第一个 embedding
+    EXPECT_EQ(embeddings[1].numel(), 2 * 10);  // stream1 的第二个 embedding
+    EXPECT_EQ(embeddings[2].numel(), 1 * 10);  // stream2 的 embedding
 
     // 验证位置信息
     // stream1: 原始位置 [1, 3]，reuseLength=0，token_idx=0 -> 调整后 [1, 3]
     // stream2: 原始位置 [0]，reuseLength=0，token_idx=5 -> 调整后 [5]
     // stream3: 无 input_embeddings
-    auto locs_vec = buffer2vector<int>(*locs);
+    auto*                locs_ptr = locs.data_ptr<int32_t>();
+    std::vector<int32_t> locs_vec(locs_ptr, locs_ptr + locs.numel());
     EXPECT_EQ(locs_vec.size(), 3);
     EXPECT_EQ(locs_vec[0], 1);
     EXPECT_EQ(locs_vec[1], 3);
@@ -447,11 +448,11 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsWithReuseLength) {
     CacheConfig                 cache_config;
     RuntimeConfig               runtime_config;
     NormalBatchStreamProcessor  processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
 
     // 创建带有 reuseLength 的 stream
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
-    query1->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
+    query1->input_ids                     = hostIntBuffer({1, 2, 3});
     query1->generate_config               = make_shared<GenerateConfig>();
     query1->input_embeddings      = {torch::rand({2, 10}, torch::kFloat32), torch::rand({2, 10}, torch::kFloat32)};
     query1->input_embeddings_locs = {1, 2};
@@ -471,7 +472,8 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsWithReuseLength) {
     const auto& locs       = model_input.input_embeddings_locs;
     EXPECT_EQ(embeddings.size(), 2);
     // 验证位置调整：原始位置 [1, 2] - reuseLength(1) + token_idx(0) = [0, 1]
-    auto locs_vec = buffer2vector<int>(*locs);
+    auto*                locs_ptr = locs.data_ptr<int32_t>();
+    std::vector<int32_t> locs_vec(locs_ptr, locs_ptr + locs.numel());
     EXPECT_EQ(locs_vec.size(), 2);
     EXPECT_EQ(locs_vec[0], 0);
     EXPECT_EQ(locs_vec[1], 1);
@@ -489,11 +491,11 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsMixedWithDecodeStreams
     CacheConfig                 cache_config;
     RuntimeConfig               runtime_config;
     NormalBatchStreamProcessor  processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
 
     // 创建 decode stream
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
-    query1->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->input_ids                     = hostIntBuffer({1});
     query1->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr stream1 =
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
@@ -504,7 +506,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsMixedWithDecodeStreams
 
     // 创建带有 input_embeddings 的 context stream
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
-    query2->input_ids                     = createBuffer<int32_t>({3}, {2, 3, 4}, AllocationType::HOST);
+    query2->input_ids                     = hostIntBuffer({2, 3, 4});
     query2->generate_config               = make_shared<GenerateConfig>();
     query2->input_embeddings              = {torch::rand({1, 10}, torch::kFloat32)};
     query2->input_embeddings_locs         = {1};
@@ -535,7 +537,8 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsMixedWithDecodeStreams
 
     // 验证位置调整：原始位置 [1] - reuseLength(0) + token_idx(1) = [2]
     // token_idx = 1 因为前面有一个 decode stream
-    auto locs_vec = buffer2vector<int>(*locs);
+    auto*                locs_ptr = locs.data_ptr<int32_t>();
+    std::vector<int32_t> locs_vec(locs_ptr, locs_ptr + locs.numel());
     EXPECT_EQ(locs_vec.size(), 1);
     EXPECT_EQ(locs_vec[0], 2);
 }
@@ -552,11 +555,11 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsFP16) {
     CacheConfig                 cache_config;
     RuntimeConfig               runtime_config;
     NormalBatchStreamProcessor  processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
 
     // 创建 FP16 类型的 input_embeddings
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
-    query1->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
+    query1->input_ids                     = hostIntBuffer({1, 2, 3});
     query1->generate_config               = make_shared<GenerateConfig>();
     query1->input_embeddings      = {torch::rand({2, 10}, torch::kFloat16), torch::rand({2, 10}, torch::kFloat16)};
     query1->input_embeddings_locs = {0, 1};
@@ -580,8 +583,8 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsFP16) {
     const auto& embeddings = model_input.input_embeddings.value();
 
     EXPECT_EQ(embeddings.size(), 2);
-    EXPECT_EQ(embeddings[0]->size(), 2 * 10);
-    EXPECT_EQ(embeddings[1]->size(), 2 * 10);
+    EXPECT_EQ(embeddings[0].numel(), 2 * 10);
+    EXPECT_EQ(embeddings[1].numel(), 2 * 10);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsEmpty) {
@@ -596,11 +599,11 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsEmpty) {
     CacheConfig                 cache_config;
     RuntimeConfig               runtime_config;
     NormalBatchStreamProcessor  processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
 
     // 创建没有 input_embeddings 的 stream
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
-    query1->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
+    query1->input_ids                     = hostIntBuffer({1, 2, 3});
     query1->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr stream1 =
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);

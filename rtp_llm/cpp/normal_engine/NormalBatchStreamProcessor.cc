@@ -3,11 +3,13 @@
 namespace rtp_llm {
 
 NormalBatchStreamProcessor::NormalBatchStreamProcessor(
-    const ModelConfig&                 model_config,
-    const PDSepConfig&                 pd_sep_config,
-    const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
-    const CacheConfig&                 cache_config,
-    bool                               warm_up) {
+    const ModelConfig&                         model_config,
+    const PDSepConfig&                         pd_sep_config,
+    const ProfilingDebugLoggingConfig&         profiling_debug_logging_config,
+    const CacheConfig&                         cache_config,
+    std::shared_ptr<autil::LockFreeThreadPool> thread_pool,
+    bool                                       warm_up):
+    thread_pool_(std::move(thread_pool)) {
     model_input_gatherer_config_.num_layers              = model_config.num_layers;
     model_input_gatherer_config_.vocab_size              = model_config.vocab_size;
     model_input_gatherer_config_.input_vocab_size        = model_config.input_vocab_size;

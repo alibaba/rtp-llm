@@ -56,7 +56,7 @@ def trans_input(input_py: GenerateInput):
     input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.batch_group_size = input_py.batch_group_size
-    if hasattr(input_py, 'batch_group_id') and input_py.batch_group_id != -1:
+    if hasattr(input_py, "batch_group_id") and input_py.batch_group_id != -1:
         input_pb.batch_group_id.value = input_py.batch_group_id
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
@@ -423,12 +423,15 @@ class ModelRpcClient(object):
                     reuse_len=aux_info_pb.total_reuse_len,
                     local_reuse_len=aux_info_pb.local_reuse_len,
                     remote_reuse_len=aux_info_pb.remote_reuse_len,
+                    memory_reuse_len=aux_info_pb.memory_reuse_len,
                     prefill_total_reuse_len=aux_info_pb.prefill_total_reuse_len,
                     prefill_local_reuse_len=aux_info_pb.prefill_local_reuse_len,
                     prefill_remote_reuse_len=aux_info_pb.prefill_remote_reuse_len,
+                    prefill_memory_reuse_len=aux_info_pb.prefill_memory_reuse_len,
                     decode_total_reuse_len=aux_info_pb.decode_total_reuse_len,
                     decode_local_reuse_len=aux_info_pb.decode_local_reuse_len,
                     decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
+                    decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
                     aux_string=aux_info_pb.aux_string,
                     role_addrs=input_py.generate_config.role_addrs,
                 )

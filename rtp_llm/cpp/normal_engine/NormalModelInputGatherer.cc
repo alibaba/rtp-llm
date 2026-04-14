@@ -141,16 +141,19 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
     memcpy(ctx.merged_text_mask + ctx.token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
 }
 
-void gatherInputEmbeddingsForContextBatch(
-    const GenerateStreamPtr&    stream,
-    const GatherModelInputContext& ctx,
-    std::vector<torch::Tensor>& gathered_input_embeddings,
-    std::vector<int32_t>&       gathered_input_embedding_locs) {
+void gatherInputEmbeddingsForContextBatch(const GenerateStreamPtr&       stream,
+                                          const GatherModelInputContext& ctx,
+                                          std::vector<torch::Tensor>&    gathered_input_embeddings,
+                                          std::vector<int32_t>&          gathered_input_embedding_locs) {
     if (!stream->hasInputEmbeddings()) {
         return;
     }
     for (const auto& embedding : stream->inputEmbeddings()) {
-        gathered_input_embeddings.emplace_back(embedding.clone());
+        if (embedding.is_cuda()) {
+            gathered_input_embeddings.emplace_back(embedding);
+        } else {
+            gathered_input_embeddings.emplace_back(embedding.to(torch::kCUDA));
+        }
     }
     for (int32_t loc : stream->inputEmbeddingsLocs()) {
         gathered_input_embedding_locs.push_back(loc - stream->reuseLength() + ctx.token_idx);
@@ -363,11 +366,11 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
     if (!gathered_input_embeddings.empty()) {
-        model_input.input_embeddings = std::move(gathered_input_embeddings);
-        model_input.input_embeddings_locs = torch::from_blob(
-            gathered_input_embedding_locs.data(),
-            {(int64_t)gathered_input_embedding_locs.size()},
-            torch::kInt32).clone();
+        model_input.input_embeddings      = std::move(gathered_input_embeddings);
+        model_input.input_embeddings_locs = torch::from_blob(gathered_input_embedding_locs.data(),
+                                                             {(int64_t)gathered_input_embedding_locs.size()},
+                                                             torch::kInt32)
+                                                .clone();
     }
     return absl::OkStatus();
 }
