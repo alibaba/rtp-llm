@@ -226,9 +226,10 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         hr._rccl_lib = fake_lib
 
         tensor = torch.zeros((4,), dtype=torch.float16)
-        with patch.object(hr, "_is_hipgraph_capture_active", return_value=True), patch(
-            "torch.cuda.current_stream"
-        ) as mock_stream:
+        mock_group = object()
+        with patch.object(hr, "_is_hipgraph_capture_active", return_value=True), \
+             patch("torch.cuda.current_stream") as mock_stream, \
+             patch("rtp_llm.models_py.distributed.collective_torch._get_group", return_value=mock_group):
             mock_stream.return_value.cuda_stream = 0
             result = ct.all_reduce(tensor, ct.Group.TP)
 
