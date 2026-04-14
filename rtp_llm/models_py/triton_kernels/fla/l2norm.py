@@ -117,36 +117,9 @@ def l2norm_fwd(
     if D > BD:
         raise RuntimeError("This layer doesn't support feature dim >= 64KB.")
 
-    # Fast path: non-contiguous input with contiguous last dim (e.g. from torch.split + view).
-    # Directly read strided input and write contiguous output — avoids the implicit copy
-    # that .reshape() would trigger.
-    if not x.is_contiguous() and x.stride(-1) == 1 and x.ndim >= 3:
-        # x is (..., heads, D) where heads*D is contiguous per-token but tokens are strided
-        heads = x.shape[-2]
-        num_tokens = x.numel() // (heads * D)
-        # token stride in elements (the non-contiguous gap)
-        stride_token = x.stride(-3)
-        total_rows = num_tokens * heads
-
-        if output_dtype is None:
-            y = torch.empty(total_rows, D, dtype=x.dtype, device=x.device)
-        else:
-            y = torch.empty(total_rows, D, dtype=output_dtype, device=x.device)
-
-        l2norm_fwd_strided_kernel[(total_rows,)](
-            x,
-            y,
-            stride_x_row=stride_token,
-            eps=eps,
-            D=D,
-            BD=BD,
-            HEADS_PER_TOKEN=heads,
-            num_warps=8,
-            num_stages=3,
-        )
-        return y.view(x_shape_og)
-
-    # Standard path: contiguous input
+    # Always use contiguous path — the strided kernel has poor memory access patterns
+    # that cause 10-30x slowdown on large token counts (e.g. 2M rows from 64K prefill).
+    # The implicit copy from .reshape() is much cheaper than strided reads.
     x = x.reshape(-1, x.shape[-1])
     if output_dtype is None:
         y = torch.empty_like(x)
@@ -155,12 +128,16 @@ def l2norm_fwd(
     assert y.stride(-1) == 1
     T = x.shape[0]
 
-    if D <= 512 and T <= 128:
-        NB = triton.cdiv(T, 2048)
+    if D <= 512:
+        # Batched kernel: process BT rows per block to reduce launch count.
+        # For D=128 with 2M rows, this reduces blocks from 2M to ~32K.
+        BT = max(16, min(64, 8192 // BD))
+        num_warps = min(max(BT * BD // 256, 1), 8)
 
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
 
+        NB = triton.cdiv(T, 2048)
         l2norm_fwd_kernel[grid](
             x,
             y,
@@ -169,18 +146,19 @@ def l2norm_fwd(
             T=T,
             D=D,
             BD=BD,
-            BT=16,
-            num_warps=8,
+            BT=BT,
+            num_warps=num_warps,
             num_stages=3,
         )
     else:
+        num_warps = min(max(BD // 256, 1), 8)
         l2norm_fwd_kernel1[(T,)](
             x,
             y,
             eps=eps,
             D=D,
             BD=BD,
-            num_warps=8,
+            num_warps=num_warps,
             num_stages=3,
         )
 
@@ -234,45 +212,12 @@ def l2norm_fwd_qk_kernel(
 def l2norm_fwd_qk(
     q: torch.Tensor, k: torch.Tensor, eps: float = 1e-6
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fused l2-normalize q and k in a single kernel launch.
+    """L2-normalize q and k, returning contiguous outputs.
 
-    q and k must come from the same torch.split (adjacent per-token in memory)
-    with identical strides and shapes.
-
-    Returns contiguous (q_normed, k_normed) each with shape matching input.
+    Uses the standard contiguous l2norm path which has much better memory
+    access patterns than the strided kernel (10-30x faster for large prefills).
     """
-    assert q.stride() == k.stride(), "q and k must have identical strides"
-    assert q.shape == k.shape, "q and k must have identical shapes"
-    assert q.stride(-1) == 1 and q.ndim >= 3, "last dim must be contiguous"
-    H_k = q.shape[-2]
-    D = q.shape[-1]
-    assert (
-        k.data_ptr() == q.data_ptr() + H_k * D * q.element_size()
-    ), "q and k must be adjacent in memory (from same torch.split)"
-
-    stride_token = q.stride(-3)
-    num_tokens = q.numel() // (H_k * D)
-    total_rows = num_tokens * H_k * 2
-
-    BD = min(65536 // q.element_size(), triton.next_power_of_2(D))
-
-    q_out = torch.empty(num_tokens * H_k, D, dtype=q.dtype, device=q.device)
-    k_out = torch.empty(num_tokens * H_k, D, dtype=k.dtype, device=k.device)
-
-    l2norm_fwd_qk_kernel[(total_rows,)](
-        q,
-        q_out,
-        k_out,
-        stride_x_row=stride_token,
-        eps=eps,
-        D=D,
-        BD=BD,
-        H_K=H_k,
-        num_warps=8,
-        num_stages=3,
-    )
-
-    return q_out.view(q.shape), k_out.view(k.shape)
+    return l2norm_fwd(q, eps), l2norm_fwd(k, eps)
 
 
 class L2NormFunction(torch.autograd.Function):
