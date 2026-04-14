@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 // Forward declare for opaque pointers in PyCacheStoreInputs
 namespace rtp_llm {
@@ -87,7 +88,7 @@ struct KVCache {
                     if (is_nvfp4) {
                         // NVFP4: packed 4-bit data stored as uint8, head_dim/2 bytes per head.
                         // This packed representation requires an even head_dim.
-                        FT_CHECK_WITH_INFO(
+                        RTP_LLM_CHECK_WITH_INFO(
                             head_dim % 2 == 0, "NVFP4 KV cache requires an even head_dim, got %d", head_dim);
                         const int64_t packed_head_dim = (int64_t)head_dim / 2;
                         const int64_t expected_elems  = kernel_block_num * 2 * (int64_t)num_kv_heads
