@@ -25,7 +25,7 @@ namespace rtp_llm {
 
 // Helper function for optimized tensor copy using async operations with current CUDA stream
 void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t size) {
-    if (!src.defined() || src.numel() <= 0) {
+    if (!src.defined() || src.numel() <= 0 || !dst.defined() || dst.numel() <= 0) {
         return;
     }
 
@@ -115,6 +115,13 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
     optimizedCopyAsync(inputs.attention_inputs.input_lengths,
                        py_model_inputs_.attention_inputs.input_lengths,
                        state.current_batch_size * sizeof(int));
+    // Device tensor copies for prepare_cuda_graph Triton kernels (spec-decode & prefill)
+    optimizedCopyAsync(inputs.attention_inputs.prefix_lengths_d,
+                       py_model_inputs_.attention_inputs.prefix_lengths_d,
+                       state.current_batch_size * sizeof(int));
+    optimizedCopyAsync(inputs.attention_inputs.input_lengths_d,
+                       py_model_inputs_.attention_inputs.input_lengths_d,
+                       state.current_batch_size * sizeof(int));
     optimizedCopyAsync(inputs.attention_inputs.cu_seqlens,
                        py_model_inputs_.attention_inputs.cu_seqlens,
                        (state.current_batch_size + 1) * sizeof(int));
@@ -172,6 +179,12 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         if (state.current_batch_size < max_bs_) {
             py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
             py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            if (py_model_inputs_.attention_inputs.prefix_lengths_d.defined()) {
+                py_model_inputs_.attention_inputs.prefix_lengths_d.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            }
+            if (py_model_inputs_.attention_inputs.input_lengths_d.defined()) {
+                py_model_inputs_.attention_inputs.input_lengths_d.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            }
         }
 
         int last_valid = state.current_seq_len;
@@ -368,6 +381,8 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // input_lengths [batch_size, int32] (decode only)
     inputs.attention_inputs.input_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
     inputs.attention_inputs.input_lengths = inputs.attention_inputs.input_lengths.pin_memory();
+    // input_lengths_d: device copy for Triton kernels (spec-decode prepare_cuda_graph)
+    inputs.attention_inputs.input_lengths_d = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cuda_int32_);
     // sequence_lengths [batch_size, int32] (decode only)
     // sequence_length should in pinned memory
     inputs.attention_inputs.sequence_lengths = torch::ones({int(max_bs_)}, options_cpu_int32_);
@@ -415,8 +430,13 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     if (num_tokens_per_bs_ > 1 && !is_prefill_cuda_graph_mode_) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cpu_int32_).pin_memory();
+        // prefix_lengths_d: device copy for Triton kernels (spec-decode prepare_cuda_graph)
+        inputs.attention_inputs.prefix_lengths_d =
+            torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cuda_int32_);
     } else if (is_prefill_cuda_graph_mode_) {
         inputs.attention_inputs.prefix_lengths = torch::zeros({int(max_bs_)}, options_cpu_int32_).pin_memory();
+        // prefix_lengths_d: device copy for Triton kernels (prefill prepare_cuda_graph)
+        inputs.attention_inputs.prefix_lengths_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
     }
     // padding_offset [max_num_token_, int32] (for attention padding)
     inputs.attention_inputs.padding_offset            = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
@@ -648,6 +668,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, seq_len_or_tokens);
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
+    if (capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_d.defined()) {
+        inputs.attention_inputs.input_lengths_d =
+            capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_d.slice(0, 0, batch_size);
+    }
     inputs.attention_inputs.padding_offset =
         capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, seq_len_or_tokens);
 
@@ -655,6 +679,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.defined()) {
         inputs.attention_inputs.prefix_lengths =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.slice(0, 0, batch_size);
+    }
+    if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths_d.defined()) {
+        inputs.attention_inputs.prefix_lengths_d =
+            capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths_d.slice(0, 0, batch_size);
     }
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);
