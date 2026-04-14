@@ -150,7 +150,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     for (int i = 0; i < cur_batch_size; ++i) {
         if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
-            stream->setStop(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
+            stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
         }
     }
 

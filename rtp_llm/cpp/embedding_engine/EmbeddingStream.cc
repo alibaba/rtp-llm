@@ -47,7 +47,7 @@ int64_t EmbeddingStream::inputLength() const {
 
 void EmbeddingStream::waitFinish() {
     unique_lock<mutex> lock(lock_);
-    while (stream_state_ != StreamState::FINISHED && stream_state_ != StreamState::STOPPED) {
+    while (stream_state_ != StreamState::FINISHED) {
         cond_.wait_for(lock, std::chrono::milliseconds(5));
     }
     if (!embedding_output_->error_info.ok()) {
@@ -67,7 +67,7 @@ void EmbeddingStream::reportMetrics() {
 
 void EmbeddingStream::setError(const std::string& error_info) {
     embedding_output_->setError(ErrorCode::UNKNOWN_ERROR, error_info);
-    stream_state_ = StreamState::STOPPED;
+    stream_state_ = StreamState::FINISHED;
     reportMetrics();
 }
 

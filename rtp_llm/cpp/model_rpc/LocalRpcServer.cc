@@ -80,7 +80,9 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                               WriterInterface*                 writer,
                                               std::shared_ptr<GenerateStream>& stream) {
     RTP_LLM_PROFILE_FUNCTION();
-    while (!stream->finished() || stream->hasOutput()) {
+    // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
+    // 如果流有错误，应该停止消费输出
+    while (stream->isActive() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
             if (result.status().code() != ErrorCode::FINISHED) {
@@ -98,16 +100,16 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                       maga_init_params_.misc_config.aux_string,
                                       stream->specialTokens().eos_token_id);
         if (context->IsCancelled()) {
-            stream->cancel();
+            stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
         if (!writer->Write(outputs_pb)) {
-            stream->cancel();
+            stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
         }
-        if (stream->needRemoteGenerate()) {
+        if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
             break;
         }
         if (stream->queryPdSep()) {

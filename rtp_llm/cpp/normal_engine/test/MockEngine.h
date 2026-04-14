@@ -63,6 +63,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     kv_cache_config.multi_task_prompt_tokens                    = config.multi_task_prompt_tokens;
     runtime_config.max_generate_batch_size                      = 128;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 128;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size  = 4096;
     model_config.attn_config.kv_cache_dtype =
         config.kv_cache_data_type == DataType::TYPE_INT8 ?
             KvCacheDataType::INT8 :

@@ -3,8 +3,8 @@
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
-    if (stream_ && !stream_->finished() && !stream_->stopped()) {
-        stream_->cancel();
+    if (stream_ && stream_->getStatus() != StreamState::FINISHED) {
+        stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
     }
     stopStream();
     reportTime();
@@ -63,9 +63,9 @@ void GenerateContext::stopStream() {
     if (stream_) {
         // if is waiting, cancel it
         meta->dequeue(request_id, stream_);
-        stream_->cancelIfNotRunning();
+        stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
         // if is running, waiting util done
-        while (stream_->running()) {
+        while (stream_->getStatus() == StreamState::RUNNING) {
             RTP_LLM_LOG_DEBUG("waiting stream [%d] running done to cancel", stream_->generateInput()->request_id);
             usleep(1000);
         }

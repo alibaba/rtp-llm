@@ -12,6 +12,7 @@ void ResourceContext::initCacheConfig(const KVCacheConfig&       kv_cache_config
     enable_device_cache        = kv_cache_config.enable_device_cache;
     write_cache_sync           = kv_cache_config.write_cache_sync;
     enable_tiered_memory_cache = kv_cache_config.enable_tiered_memory_cache;
+    load_cache_retry_times     = kv_cache_config.load_cache_retry_times;
 
     if (kv_cache_config.device_cache_min_free_blocks > 0) {
         device_cache_min_free_blocks = kv_cache_config.device_cache_min_free_blocks;

@@ -119,6 +119,10 @@ public:
         return coordinator_;
     }
 
+    // Increment KV cache reference count for PD separation (connector refcount)
+    std::shared_ptr<KVCacheResource>
+    incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
+
 private:
     void initConnectorCoordinator();
     void allocateAndSync();

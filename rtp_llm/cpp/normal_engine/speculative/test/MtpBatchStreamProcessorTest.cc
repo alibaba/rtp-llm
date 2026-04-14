@@ -48,7 +48,7 @@ public:
         sp_output_buffer->tokens     = torch::tensor(propose_tokens, torch::kInt32).reshape({1, 2});
         stream->setReturnAllProbs(true);
         stream->setSPOutputBuffer(sp_output_buffer);
-        stream->setRunning();
+        stream->generate_status_->status = StreamState::RUNNING;
         stream->setNeedReleaseResource(false);
 
         return stream;

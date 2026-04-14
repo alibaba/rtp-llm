@@ -128,11 +128,11 @@ std::string KVCacheConfig::to_string() const {
         << "use_block_cache: " << use_block_cache << "\n"
         << "enable_device_cache: " << enable_device_cache << "\n"
         << "enable_memory_cache: " << enable_memory_cache << "\n"
-        << "enable_memory_cache_sm_copy: " << enable_memory_cache_sm_copy << "\n"
         << "enable_remote_cache: " << enable_remote_cache << "\n"
         << "write_cache_sync: " << write_cache_sync << "\n"
         << "enable_tiered_memory_cache: " << enable_tiered_memory_cache << "\n"
-        << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n";
+        << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
+        << "load_cache_retry_times: " << load_cache_retry_times << "\n";
     return oss.str();
 }
 

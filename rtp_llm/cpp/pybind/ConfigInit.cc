@@ -304,6 +304,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
         .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
+        .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)

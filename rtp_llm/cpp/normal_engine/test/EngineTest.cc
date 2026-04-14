@@ -43,7 +43,7 @@ TEST_F(NormalEngineTest, testInt8KVCache) {
         ASSERT_EQ(output.value().generate_outputs[0].aux_info.input_len, 7);
         ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 5);
 
-        ASSERT_TRUE(stream->finished());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     } catch (const std::exception& e) {
@@ -88,7 +88,7 @@ TEST_F(NormalEngineTest, testSimple) {
         ASSERT_EQ(output3.value().generate_outputs[0].aux_info.input_len, 7);
         ASSERT_EQ(output3.value().generate_outputs[0].aux_info.iter_count, 3);
 
-        ASSERT_TRUE(stream->finished());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output4 = stream->nextOutput();
         ASSERT_TRUE(!output4.ok());
     }
@@ -110,7 +110,7 @@ TEST_F(NormalEngineTest, testSimple) {
         ASSERT_EQ(output.value().generate_outputs[0].aux_info.input_len, 7);
         ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 5);
 
-        ASSERT_TRUE(stream->finished());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
@@ -141,7 +141,7 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 2);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
-        ASSERT_TRUE(stream->finished());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
@@ -160,7 +160,7 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 0);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
-        ASSERT_TRUE(stream->finished());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
@@ -180,7 +180,7 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 6);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
-        ASSERT_TRUE(stream->finished());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
@@ -217,7 +217,7 @@ TEST_F(NormalEngineTest, testReuseCache) {
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 0);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
-        ASSERT_TRUE(stream->finished());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
@@ -237,7 +237,7 @@ TEST_F(NormalEngineTest, testReuseCache) {
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 4);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
-        ASSERT_TRUE(stream->finished());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
@@ -266,7 +266,7 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOn) {
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 0);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
-        ASSERT_TRUE(stream->finished());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
@@ -289,7 +289,7 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOn) {
                   0);  // Should be 0 because reuse_cache = false
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
-        ASSERT_TRUE(stream->finished());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
@@ -311,7 +311,7 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOn) {
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 4);  // Should be 4 because reuse_cache = true
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
-        ASSERT_TRUE(stream->finished());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
@@ -342,7 +342,7 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOff) {
                   0);  // Should be 0 because engine-level reuse_cache = false
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
-        ASSERT_TRUE(stream->finished());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
@@ -365,7 +365,7 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOff) {
                   0);  // Should be 0 because engine-level reuse_cache = false
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
-        ASSERT_TRUE(stream->finished());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }

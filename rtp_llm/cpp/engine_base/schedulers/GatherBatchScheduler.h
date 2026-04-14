@@ -14,15 +14,22 @@ struct GatherBatchSchedulerConfigLocal: public autil::legacy::Jsonizable {
 // Currently it is only used in CI with prompt_batch input, which may occur unstable result
 class GatherBatchScheduler: virtual public FIFOScheduler {
 public:
-    explicit GatherBatchScheduler(const RuntimeConfig&                 runtime_config,
-                                  const ModelConfig&                   model_config,
-                                  const PDSepConfig&                  pd_sep_config,
-                                  const ParallelismConfig&            parallelism_config,
-                                  const ModelSpecificConfig&          model_specific_config,
+    explicit GatherBatchScheduler(const RuntimeConfig&                   runtime_config,
+                                  const ModelConfig&                     model_config,
+                                  const PDSepConfig&                     pd_sep_config,
+                                  const ParallelismConfig&               parallelism_config,
+                                  const ModelSpecificConfig&             model_specific_config,
                                   const std::shared_ptr<KVCacheManager>& cache_manager,
-                                  const kmonitor::MetricsReporterPtr   metrics_reporter,
-                                  const int                            max_score_len = 1):
-        FIFOScheduler(runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager, metrics_reporter, max_score_len) {
+                                  const kmonitor::MetricsReporterPtr     metrics_reporter,
+                                  const int                              max_score_len = 1):
+        FIFOScheduler(runtime_config,
+                      model_config,
+                      pd_sep_config,
+                      parallelism_config,
+                      model_specific_config,
+                      cache_manager,
+                      metrics_reporter,
+                      max_score_len) {
         RTP_LLM_LOG_INFO("GatherBatchScheduler init");
         gather_batch_size_ = 1;
     }
@@ -38,25 +45,55 @@ public:
         RTP_LLM_LOG_INFO("GatherBatchScheduler update batch size to %d", gather_batch_size_);
     }
 
-protected:
-    std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step) override {
-        if (waiting_streams_.empty()) {
-            return {};
+    absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
+        std::unique_lock<std::mutex> lock(lock_);
+        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
+            return waiting_streams_.size() >= static_cast<size_t>(gather_batch_size_) || running_streams_.size() > 0
+                   || !loading_cache_streams_.empty();
+        });
+
+        // LOADING_CACHE -> DONE/WAITING: error / load cache done
+        evaluateAndUpdateStreams(loading_cache_streams_);
+        // RUNNING -> DONE: error / finished
+        evaluateAndUpdateStreams(running_streams_);
+
+        if (waiting_streams_.size() >= static_cast<size_t>(gather_batch_size_)) {
+            // Gather exactly gather_batch_size_ streams
+            std::list<GenerateStreamPtr> new_streams;
+            for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
+                if (!(*it)->hasError() && !(*it)->hasEvent(StreamEvents::CanRun)) {
+                    new_streams.push_back(*it);
+                }
+                if (new_streams.size() >= static_cast<size_t>(gather_batch_size_)) {
+                    break;
+                }
+            }
+            // Only schedule when we have enough streams
+            if (new_streams.size() >= static_cast<size_t>(gather_batch_size_)) {
+                for (auto& stream : new_streams) {
+                    stream->reportEvent(StreamEvents::CanRun);
+                    // busy wait for loading cache done, equivalent to to original logic.
+                    while (stream->getStatus() != StreamState::FINISHED
+                           && stream->moveToNext() != StreamState::RUNNING) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                }
+                // 过滤 FINISHED stream，仅将 RUNNING stream 加入 running_streams_
+                new_streams.remove_if([](const auto& s) { return s->getStatus() == StreamState::FINISHED; });
+                // 按 streamId 排序以保证 CI 确定性结果
+                new_streams.sort([](const GenerateStreamPtr& a, const GenerateStreamPtr& b) {
+                    return a->streamId() < b->streamId();
+                });
+                running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
+                // Remove scheduled streams from waiting_streams_
+                for (auto& stream : new_streams) {
+                    waiting_streams_.remove(stream);
+                }
+                gather_batch_size_ = 1;
+            }
         }
-        if ((int)waiting_streams_.size() < gather_batch_size_) {
-            RTP_LLM_LOG_INFO("GatherBatchScheduler scheduleNew, waiting_streams_.size() [%d] < gather_batch_size_ [%d]",
-                             waiting_streams_.size(),
-                             gather_batch_size_);
-            return {};
-        }
-        RTP_LLM_LOG_INFO(
-            "GatherBatchScheduler scheduleNew, waiting_streams_.size() [%d] >= gather_batch_size_ [%d], start run",
-            waiting_streams_.size(),
-            gather_batch_size_);
-        waiting_streams_.sort(
-            [](const GenerateStreamPtr& a, const GenerateStreamPtr& b) { return a->streamId() < b->streamId(); });
-        gather_batch_size_ = 1;
-        return FIFOScheduler::scheduleNew(reserve_step);
+
+        return running_streams_;
     }
 
 protected:

@@ -4,15 +4,15 @@ namespace rtp_llm {
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
     // TODO(xinfei.sxf) 某些case下会出现1s的等待
-    while ((!stopped()) && !finished() && generate_outputs_queue_.isEmpty()) {
+    while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
         checkTimeout();
         generate_outputs_queue_.waitNotEmpty();
     }
-    if (stopped()) {
+    if (hasError()) {
         return statusInfo();
     }
     if (generate_outputs_queue_.isEmpty()) {
-        if (finished()) {
+        if (isFinished()) {
             return ErrorInfo(ErrorCode::FINISHED, "finished");
         } else {
             return ErrorInfo(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty");
@@ -91,7 +91,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             }
         }
 
-        generate_output.finished = sub_generate_status_[i].status == StreamState::FINISHED;
+        generate_output.finished = isSubGenerateDoneWithoutLock(i);
         if (generate_input_->generate_config->aux_info) {
             generate_output.aux_info.iter_count   = iter_count_;
             generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
@@ -148,7 +148,7 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
     if (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
         /* No matter if the queue is full for any reason,
            the stream will be set to stop directly to prevent the push to queue from getting stuck. */
-        setStopWithoutLock(ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
+        reportEventWithoutLock(StreamEvents::Error, ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
     } else {
         generate_outputs_queue_.push(std::move(generate_results));
     }
@@ -175,7 +175,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
 
     finished_ = needFinish();
     if (finished_) {
-        setFinishedWithoutLock();
+        reportEventWithoutLock(StreamEvents::GenerateDone);
+        fillSubGenerateStatus(StreamState::FINISHED);
     }
     if (update_info.cum_log_probs.defined()) {
         cum_log_probs_ = update_info.cum_log_probs.cpu();
@@ -191,9 +192,11 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                       queryPdSep(),
                       isStreaming(),
                       update_info.update_remote_generate);
+
     if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
-        RTP_LLM_LOG_DEBUG("stream [%ld] set need_remote_generate", streamId());
-        setNeedRemoteGenerateWithoutLock(true);
+        holdKVCacheForPDSep();
+        reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
+        reportEventWithoutLock(StreamEvents::GenerateDone);
     }
 
     bool pd_sep_first_token = queryPdSep();
@@ -209,7 +212,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     RTP_LLM_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
 
-    if (stoppedWithoutLock()) {
+    if (hasError()) {
         return;
     }
 

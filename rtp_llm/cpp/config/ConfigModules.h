@@ -165,6 +165,7 @@ struct KVCacheConfig {
     bool    write_cache_sync             = false;
     bool    enable_tiered_memory_cache   = false;
     int64_t device_cache_min_free_blocks = 0;
+    int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;

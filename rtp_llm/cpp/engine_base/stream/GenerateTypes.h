@@ -58,7 +58,7 @@ public:
 
     // Batch grouping params
     int     batch_group_size = 1;
-    int64_t batch_group_id = -1;  // Batch group ID for force batch grouping, -1 means not set
+    int64_t batch_group_id   = -1;  // Batch group ID for force batch grouping, -1 means not set
 };
 
 struct AuxInfo {
@@ -110,35 +110,52 @@ public:
 
 enum class StreamState {
     WAITING,
+    LOADING_CACHE,  // GPU blocks allocated, waiting for connector H2D copy
     RUNNING,
-    PAUSED,
-    STOPPED,
-    FINISHED,
-    REMOTE_RUNNING
+    FINISHED
 };
 
 inline std::string StreamStateToString(StreamState state) {
     switch (state) {
         case StreamState::WAITING:
             return "WAITING";
+        case StreamState::LOADING_CACHE:
+            return "LOADING_CACHE";
         case StreamState::RUNNING:
             return "RUNNING";
-        case StreamState::PAUSED:
-            return "PAUSED";
-        case StreamState::STOPPED:
-            return "STOPPED";
         case StreamState::FINISHED:
             return "FINISHED";
-        case StreamState::REMOTE_RUNNING:
-            return "REMOTE_RUNNING";
         default:
             return "Error: Unrecognized Generate State";
     }
 }
 
-struct GenerateStatus {
-    StreamState status = StreamState::WAITING;
-    ErrorInfo   error_info;
+// 事件集合：外部通过 reportEvent() 投递事件，状态机在 moveToNext() 中统一消费。
+// 内部使用 bit flag 组合多个并发事件。
+// 所有事件均为永久事件：一旦设置即保留，不会被自动清除。
+class StreamEvents {
+public:
+    enum EventType : uint32_t {
+        None               = 0,
+        LoadInitiated      = 1 << 0,  // 已尝试加载缓存
+        CanRun             = 1 << 1,  // 调度器允许运行
+        GenerateDone       = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
+        Error              = 1 << 3,  // 出错，任何状态 -> FINISHED
+        NeedRemoteGenerate = 1 << 4,  // 需要远程生成
+    };
+
+    void append(EventType event) {
+        flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_) | static_cast<uint32_t>(event));
+    }
+
+    bool has(EventType event) const {
+        return (flags_ & event) != 0;
+    }
+
+private:
+    EventType flags_ = EventType::None;
 };
+
+class StreamCacheResource;  // forward declaration
 
 }  // namespace rtp_llm

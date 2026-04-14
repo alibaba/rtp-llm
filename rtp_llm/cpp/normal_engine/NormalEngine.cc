@@ -171,6 +171,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
         size_t reserved_blocks    = (stream->seqLength() + seq_size_per_block - 1) / seq_size_per_block + reserve_step_;
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::build_system_prompt) {
+        stream->setReserveStep(reserve_step_);
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
     };
     std::list<GenerateStreamPtr> streams{stream};
@@ -399,12 +400,14 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
+    stream->setReserveStep(reserve_step_);
     (void)scheduler_->enqueue(stream);
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    stream->setReserveStep(reserve_step_);
     (void)scheduler_->enqueue(stream);
     return stream;
 }
@@ -416,10 +419,10 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
     for (auto& inp : inputs) {
         auto stream = std::make_shared<NormalGenerateStream>(
             inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
+        stream->setReserveStep(reserve_step_);
         streams.push_back(stream);
     }
-    (void)scheduler_->batchEnqueue(streams);
-    return streams;
+    return scheduler_->batchEnqueue(streams);
 }
 
 absl::Status NormalEngine::step() {
@@ -433,7 +436,7 @@ absl::Status NormalEngine::step() {
     if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
-            CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step_));
+            CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         }
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");

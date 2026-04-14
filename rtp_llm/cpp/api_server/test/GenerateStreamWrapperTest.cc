@@ -48,7 +48,7 @@ TEST_F(GenerateStreamWrapperTest, generateResponse) {
         .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty")));
 
-    EXPECT_CALL(*mock_stream, finished()).Times(2).WillRepeatedly(Return(false));
+    EXPECT_CALL(*mock_stream, getStatus()).Times(2).WillRepeatedly(Return(StreamState::RUNNING));
 
     EXPECT_CALL(*mock_token_processor_, getTokenProcessorCtx(_, _, _)).WillOnce(Return(nullptr));
     EXPECT_CALL(*mock_token_processor_, decodeTokens(_, _, _, _)).WillOnce(Return(std::vector<std::string>()));

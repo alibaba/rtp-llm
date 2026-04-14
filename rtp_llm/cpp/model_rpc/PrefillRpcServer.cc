@@ -68,7 +68,7 @@ namespace rtp_llm {
             }                                                                                                          \
         }                                                                                                              \
         if (prefill_context.getStream()) {                                                                             \
-            prefill_context.getStream()->setStop(new_error_code, new_error_msg);                                       \
+            prefill_context.getStream()->reportEvent(StreamEvents::Error, new_error_code, new_error_msg);              \
         }                                                                                                              \
         prefill_context.error_info   = ErrorInfo(new_error_code, new_error_msg);                                       \
         prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);     \
@@ -90,17 +90,17 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
     static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
     auto       begin_time_us       = currentTimeUs();
-    while (stream->waiting()) {
+    while (stream->getStatus() == StreamState::WAITING) {
         usleep(100);
         auto current_time_us = currentTimeUs();
         auto cost_time_us    = current_time_us - begin_time_us;
         if (cost_time_us > max_wait_timeout_us) {
             string new_error_msg = "wait to run timeout, timeout is " + std::to_string(max_wait_timeout_us) + " us";
-            stream->setStop(ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
+            stream->reportEvent(StreamEvents::Error, ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
             return ErrorInfo(ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
         }
     }
-    if (stream->stopped()) {
+    if (stream->hasError()) {
         return stream->statusInfo();
     }
     return ErrorInfo::OkStatus();
@@ -260,9 +260,10 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
     }
     RTP_LLM_LOG_DEBUG("request [%ld] poll local output end", prefill_context.request_id);
 
-    if (prefill_context.getStream()->finished()) {
+    auto stream = prefill_context.getStream();
+    if (stream->hasError()) {
         prefill_context.finished     = true;
-        prefill_context.error_status = grpc::Status::OK;
+        prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, stream->statusInfo().ToString());
     }
 }
 
@@ -274,8 +275,12 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     auto error_code = transRPCErrorCode(load_response.error_info().error_code());
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
-    prefill_context.getStream()->setRemoteGenerate();
-    prefill_context.getStream()->releaseResource();
+
+    // Decode has finished loading cache, now safe to release KV cache blocks.
+    // This is called after cache store transfer is complete.
+    if (prefill_context.generate_input->generate_config->pd_separation) {
+        prefill_context.getStream()->releaseKVCacheForPDSep();
+    }
 }
 
 void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
@@ -389,7 +394,6 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     }
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.closeGrpcStream().ok(), ErrorCode::REMOTE_GENERATE_FAILED);
-    prefill_context.getStream()->setFinishedWithoutLock();
 }
 
 grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& prefill_context) {
@@ -465,7 +469,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
 }
 
 grpc::Status
-PrefillRpcServer::RemoteFinish(grpc::ServerContext* ontext, const RemoteFinishRequestPB* request, EmptyPB* response) {
+PrefillRpcServer::RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) {
     RTP_LLM_PROFILE_FUNCTION();
     auto request_id = request->request_id();
     resource_.cache_store->markRequestEnd(std::to_string(request_id));

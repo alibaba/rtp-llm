@@ -23,7 +23,9 @@ void GenerateStreamWrapper::init(GenerateStreamPtr stream, const std::shared_ptr
 }
 
 std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
-    if (stream_->finished() && stream_->hasOutput() == false) {
+    // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
+    // 如果流有错误，不应该返回"正常完成"的响应，应该让后续逻辑处理错误
+    if (!stream_->hasError() && stream_->isFinished() && stream_->hasOutput() == false) {
         RTP_LLM_LOG_INFO("stream finished.");
         return std::make_pair(MultiSeqsResponse(), true);
     }

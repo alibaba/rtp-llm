@@ -281,7 +281,7 @@ TEST_F(InferenceServiceTest, InferResponseSuccess) {
     EXPECT_CALL(*mock_stream, nextOutput())
         .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty")));
-    EXPECT_CALL(*mock_stream, finished()).Times(2);
+    EXPECT_CALL(*mock_stream, getStatus()).Times(2).WillRepeatedly(Return(StreamState::RUNNING));
 
     // writer
     EXPECT_CALL(*mock_writer_, isConnected()).WillOnce(Return(true));
