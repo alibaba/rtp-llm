@@ -243,6 +243,10 @@ def sp_1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
 
 
 def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
+    if t.shape[-1] % tp != 0:
+        raise ValueError(
+            f"tensor split error: the last dimension size {t.shape[-1]} is not divisible by tp size: {tp}"
+        )
     return torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
 
 
@@ -442,12 +446,11 @@ def get_sp_tensor(
     if len(t.shape) == 1:
         t = t.unsqueeze(0)
     qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
-    if head_num_kv == 1:
-        ks = t[:, q_hidden: q_hidden + kv_hidden]
-        vs = t[:, q_hidden + kv_hidden:]
-    else:
-        ks = sp_neg1(t[:, q_hidden: q_hidden + kv_hidden], tp, tp_rank)
-        vs = sp_neg1(t[:, q_hidden + kv_hidden:], tp, tp_rank)
+
+    _kv_tp = math.gcd(head_num_kv, tp)
+    _kv_rank = tp_rank // (tp // _kv_tp)
+    ks = sp_neg1(t[:, q_hidden: q_hidden + kv_hidden], _kv_tp, _kv_rank)
+    vs = sp_neg1(t[:, q_hidden + kv_hidden:], _kv_tp, _kv_rank)
     return torch.concat([qs, ks, vs], dim=1).contiguous()
 
 
@@ -502,10 +505,10 @@ def sp_head_qk_norm(
     q_hidden = head_num * size_per_head
     t = t.reshape(1, -1)
     qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
-    if head_num_kv == 1:
-        ks = t[:, q_hidden:]
-    else:
-        ks = sp_neg1(t[:, q_hidden:], tp, tp_rank)
+
+    _kv_tp = math.gcd(head_num_kv, tp)
+    _kv_rank = tp_rank // (tp // _kv_tp)
+    ks = sp_neg1(t[:, q_hidden:], _kv_tp, _kv_rank)
     return torch.concat([qs, ks], dim=1).contiguous()
 
 
@@ -537,13 +540,12 @@ def get_sp_tensor_blocked(
     kv_hidden = head_num_kv * size_per_head // block_size
     if len(t.shape) == 1:
         t = t.unsqueeze(0)
+
     qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
-    if head_num_kv == 1:
-        ks = t[:, q_hidden: q_hidden + kv_hidden]
-        vs = t[:, q_hidden + kv_hidden:]
-    else:
-        ks = sp_neg1(t[:, q_hidden: q_hidden + kv_hidden], tp, tp_rank)
-        vs = sp_neg1(t[:, q_hidden + kv_hidden:], tp, tp_rank)
+    _kv_tp = math.gcd(head_num_kv, tp)
+    _kv_rank = tp_rank // (tp // _kv_tp)
+    ks = sp_neg1(t[:, q_hidden: q_hidden + kv_hidden], _kv_tp, _kv_rank)
+    vs = sp_neg1(t[:, q_hidden + kv_hidden:], _kv_tp, _kv_rank)
     return torch.concat([qs, ks, vs], dim=1).contiguous()
 
 
