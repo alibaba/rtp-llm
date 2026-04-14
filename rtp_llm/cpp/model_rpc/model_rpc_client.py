@@ -51,7 +51,7 @@ def trans_input(input_py: GenerateInput):
     input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.batch_group_size = input_py.batch_group_size
-    if hasattr(input_py, 'batch_group_id') and input_py.batch_group_id != -1:
+    if hasattr(input_py, "batch_group_id") and input_py.batch_group_id != -1:
         input_pb.batch_group_id.value = input_py.batch_group_id
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
@@ -133,6 +133,7 @@ def trans_input(input_py: GenerateInput):
     )
     generate_config_pb.gen_timeline = input_py.generate_config.gen_timeline
     generate_config_pb.profile_step = input_py.generate_config.profile_step
+    generate_config_pb.profile_trace_name = input_py.generate_config.profile_trace_name
     generate_config_pb.global_request_id = input_py.generate_config.global_request_id
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache

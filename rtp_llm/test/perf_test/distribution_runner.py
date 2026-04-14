@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
 
@@ -22,7 +22,7 @@ class DistributionRunner:
         *,
         dump_json_path: str = ".",
         decode_test_length: int = 10,
-        generate_config: Dict[str, Any] = {},
+        generate_config: Optional[Dict[str, Any]] = None,
     ):
         self._port = port
         self._dp_size = dp_size
@@ -30,7 +30,7 @@ class DistributionRunner:
         self._input_query_dict = input_query_dict
         self._dump_json_path = dump_json_path
         self._decode_test_length = decode_test_length
-        self._generate_config = generate_config
+        self._generate_config = generate_config or {}
         self._title = "Distribution Decode Result"
 
     def warmup(self) -> None:
@@ -75,6 +75,9 @@ class DistributionRunner:
                 queries = [self._input_query_dict[sl] for sl in seq_len_list]
                 queries_dp = queries * self._dp_size
 
+                trace_name = (
+                    f"bs{actual_bs}_seq{min(seq_len_list)}-{max(seq_len_list)}_decode"
+                )
                 metric = BatchPerfImpl(
                     self._port,
                     self._dp_size,
@@ -85,6 +88,7 @@ class DistributionRunner:
                     self._decode_test_length,
                     True,
                     self._generate_config,
+                    trace_name,
                 ).run()
 
                 metrics_list.append(

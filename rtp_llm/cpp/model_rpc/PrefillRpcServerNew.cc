@@ -25,7 +25,8 @@ grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*        
     mutable_input->set_request_id(request_id);
     if (applyTimelineGate(std::to_string(request_id),
                           mutable_input->generate_config().gen_timeline(),
-                          mutable_input->generate_config().profile_step())) {
+                          mutable_input->generate_config().profile_step(),
+                          mutable_input->generate_config().profile_trace_name())) {
         mutable_input->mutable_generate_config()->set_gen_timeline(true);
     }
 

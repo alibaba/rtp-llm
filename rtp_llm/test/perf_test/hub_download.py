@@ -125,29 +125,36 @@ def assert_huggingface_http_reachable(
         )
 
 
-def download_model_repo(repo_id: str, timeout: int = 600) -> str:
-    assert_modelscope_http_reachable()
+from typing import Callable
 
-    class _DownloadTimeout(Exception):
-        pass
+
+class _DownloadTimeout(Exception):
+    pass
+
+
+def _download_with_fallback(
+    ms_fn: Callable[[], str],
+    hf_fn: Callable[[], str],
+    tag: str,
+    timeout: int,
+    fallback_hint: str = "provide a local path",
+) -> str:
+    """Try ModelScope then HuggingFace with SIGALRM-based timeout for each attempt."""
 
     def _alarm_handler(signum, frame):
         raise _DownloadTimeout(f"Download timed out after {timeout}s")
 
+    assert_modelscope_http_reachable()
     prev_handler = signal.signal(signal.SIGALRM, _alarm_handler)
     try:
         try:
             signal.alarm(timeout)
-            from modelscope import snapshot_download as ms_download
-
-            local_path = ms_download(repo_id)
+            result = ms_fn()
             signal.alarm(0)
-            logging.info(f"Downloaded model from ModelScope: {repo_id} -> {local_path}")
-            return local_path
+            logging.info(f"Downloaded {tag} from ModelScope: {result}")
+            return result
         except _DownloadTimeout:
-            logging.warning(
-                f"ModelScope download timed out after {timeout}s for {repo_id}"
-            )
+            logging.warning(f"ModelScope download timed out after {timeout}s for {tag}")
         except Exception as e:
             signal.alarm(0)
             logging.info(f"ModelScope download failed ({e}), trying HuggingFace")
@@ -156,26 +163,40 @@ def download_model_repo(repo_id: str, timeout: int = 600) -> str:
 
         try:
             signal.alarm(timeout)
-            from huggingface_hub import snapshot_download as hf_download
-
-            local_path = hf_download(repo_id)
+            result = hf_fn()
             signal.alarm(0)
-            logging.info(
-                f"Downloaded model from HuggingFace: {repo_id} -> {local_path}"
-            )
-            return local_path
+            logging.info(f"Downloaded {tag} from HuggingFace: {result}")
+            return result
         except _DownloadTimeout:
             raise RuntimeError(
-                f"All download attempts timed out for model '{repo_id}'. "
-                f"Check network or provide a local --checkpoint_path."
+                f"All download attempts timed out for {tag}. "
+                f"Check network or {fallback_hint}."
             ) from None
         except Exception as e:
-            raise RuntimeError(
-                f"All download attempts failed for model '{repo_id}': {e}"
-            ) from e
+            raise RuntimeError(f"All download attempts failed for {tag}: {e}") from e
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, prev_handler)
+
+
+def download_model_repo(repo_id: str, timeout: int = 600) -> str:
+    def _ms():
+        from modelscope import snapshot_download as ms_download
+
+        return ms_download(repo_id)
+
+    def _hf():
+        from huggingface_hub import snapshot_download as hf_download
+
+        return hf_download(repo_id)
+
+    return _download_with_fallback(
+        _ms,
+        _hf,
+        f"model '{repo_id}'",
+        timeout,
+        fallback_hint="provide a local --checkpoint_path",
+    )
 
 
 def download_dataset_repo_file(
@@ -186,64 +207,31 @@ def download_dataset_repo_file(
     label: str = "",
     timeout: int = 300,
 ) -> str:
-    assert_modelscope_http_reachable()
     tag = label or repo_id
 
-    class _DownloadTimeout(Exception):
-        pass
+    def _ms():
+        from modelscope import snapshot_download as ms_download
 
-    def _alarm_handler(signum, frame):
-        raise _DownloadTimeout(f"Download timed out after {timeout}s")
-
-    prev_handler = signal.signal(signal.SIGALRM, _alarm_handler)
-
-    try:
-        try:
-            signal.alarm(timeout)
-            from modelscope import snapshot_download as ms_download
-
-            local_dir = ms_download(repo_id, repo_type=repo_type)
-            signal.alarm(0)
-            path = os.path.join(local_dir, filename)
-            if not os.path.isfile(path):
-                raise FileNotFoundError(
-                    f"{filename} not found in downloaded repo at {local_dir}"
-                )
-            logging.info(f"Downloaded dataset {tag} from ModelScope: {path}")
-            return path
-        except _DownloadTimeout:
-            raise RuntimeError(
-                f"ModelScope download timed out after {timeout}s for {tag}. "
-                f"Check network or use --dataset_path with a local file."
-            ) from None
-        except Exception as e:
-            signal.alarm(0)
-            logging.info(f"ModelScope download failed ({e}), trying HuggingFace")
-
-        assert_huggingface_http_reachable()
-
-        try:
-            signal.alarm(timeout)
-            from huggingface_hub import hf_hub_download
-
-            path = hf_hub_download(
-                repo_id=repo_id, filename=filename, repo_type=repo_type
+        local_dir = ms_download(repo_id, repo_type=repo_type)
+        path = os.path.join(local_dir, filename)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"{filename} not found in downloaded repo at {local_dir}"
             )
-            signal.alarm(0)
-            logging.info(f"Downloaded dataset {tag} from HuggingFace: {path}")
-            return path
-        except _DownloadTimeout:
-            raise RuntimeError(
-                f"HuggingFace download timed out after {timeout}s for {tag}. "
-                f"Check network or use --dataset_path with a local file."
-            ) from None
-        except Exception as e:
-            raise RuntimeError(
-                f"All download attempts failed for dataset '{tag}': {e}"
-            ) from e
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, prev_handler)
+        return path
+
+    def _hf():
+        from huggingface_hub import hf_hub_download
+
+        return hf_hub_download(repo_id=repo_id, filename=filename, repo_type=repo_type)
+
+    return _download_with_fallback(
+        _ms,
+        _hf,
+        f"dataset '{tag}'",
+        timeout,
+        fallback_hint="use --dataset_path with a local file",
+    )
 
 
 def resolve_checkpoint_or_tokenizer_for_perf(path: str, timeout: int = 600) -> str:

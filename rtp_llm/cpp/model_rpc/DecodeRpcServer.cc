@@ -88,8 +88,10 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
     auto input = QueryConverter::transQuery(&decode_context.allocate_request.input());
-    if (applyTimelineGate(
-            decode_context.request_key, input->generate_config->gen_timeline, input->generate_config->profile_step)) {
+    if (applyTimelineGate(decode_context.request_key,
+                          input->generate_config->gen_timeline,
+                          input->generate_config->profile_step,
+                          input->generate_config->profile_trace_name)) {
         input->generate_config->gen_timeline = true;
     }
     auto generate_stream              = engine_->makeStream(input);

@@ -110,8 +110,10 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     auto input = QueryConverter::transQuery(prefill_context.rpc_context.request);
-    if (applyTimelineGate(
-            prefill_context.request_key, input->generate_config->gen_timeline, input->generate_config->profile_step)) {
+    if (applyTimelineGate(prefill_context.request_key,
+                          input->generate_config->gen_timeline,
+                          input->generate_config->profile_step,
+                          input->generate_config->profile_trace_name)) {
         input->generate_config->gen_timeline = true;
     }
     input->generate_config->pd_separation = true;

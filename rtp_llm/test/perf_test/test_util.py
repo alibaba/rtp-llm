@@ -1,7 +1,7 @@
 import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -43,9 +43,11 @@ def _create_query_worker(args: Tuple[str, int]) -> Tuple[int, str]:
 
 def create_query(
     tokenizer_path: str = "",
-    input_len_list: List[int] = [],
+    input_len_list: Optional[List[int]] = None,
     max_workers: int = 8,
 ) -> Dict[int, str]:
+    if input_len_list is None:
+        input_len_list = []
     tokenizer_path = tokenizer_path or os.environ.get(
         "TOKENIZER_PATH", os.environ.get("CHECKPOINT_PATH", "")
     )

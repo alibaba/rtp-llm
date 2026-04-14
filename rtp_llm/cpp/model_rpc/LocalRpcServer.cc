@@ -130,8 +130,10 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     auto input = QueryConverter::transQuery(request);
-    if (applyTimelineGate(
-            generate_context.request_key, input->generate_config->gen_timeline, input->generate_config->profile_step)) {
+    if (applyTimelineGate(generate_context.request_key,
+                          input->generate_config->gen_timeline,
+                          input->generate_config->profile_step,
+                          input->generate_config->profile_trace_name)) {
         input->generate_config->gen_timeline = true;
     }
 
@@ -159,14 +161,18 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     return generate_context.error_status;
 }
 
-bool LocalRpcServer::applyTimelineGate(const std::string& request_key, bool request_timeline, int profile_step) {
+bool LocalRpcServer::applyTimelineGate(const std::string& request_key,
+                                       bool               request_timeline,
+                                       int                profile_step,
+                                       const std::string& profile_trace_name) {
     const bool force_timeline = engine_->isTimelineProfilingEnabled();
-    RTP_LLM_LOG_DEBUG("request [%s] timeline gate, force_timeline=%d, request_timeline=%d",
+    RTP_LLM_LOG_DEBUG("request [%s] timeline gate, force_timeline=%d, request_timeline=%d, trace_name=%s",
                       request_key.c_str(),
                       int(force_timeline),
-                      int(request_timeline));
+                      int(request_timeline),
+                      profile_trace_name.c_str());
     if (!force_timeline && request_timeline) {
-        engine_->startTimelineProfiling("", 0, profile_step);
+        engine_->startTimelineProfiling(profile_trace_name, 0, profile_step);
     }
     return force_timeline;
 }

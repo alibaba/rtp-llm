@@ -99,7 +99,10 @@ public:
 
 protected:
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
-    bool         applyTimelineGate(const std::string& request_key, bool request_timeline, int profile_step);
+    bool         applyTimelineGate(const std::string& request_key,
+                                   bool               request_timeline,
+                                   int                profile_step,
+                                   const std::string& profile_trace_name = "");
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,
