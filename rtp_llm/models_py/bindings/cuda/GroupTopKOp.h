@@ -19,6 +19,18 @@ public:
                  int64_t              topk,
                  bool                 renormalize,
                  double               routed_scaling_factor);
+
+    // Fused version: computes sigmoid + bias_add internally, saving 2 kernel launches.
+    void forward_fused(torch::Tensor&       topk_values,
+                       torch::Tensor&       topk_indices,
+                       torch::Tensor&       raw_logits,
+                       torch::Tensor const& bias,
+                       torch::Tensor&       scores_out,
+                       int64_t              n_group,
+                       int64_t              topk_group,
+                       int64_t              topk,
+                       bool                 renormalize,
+                       double               routed_scaling_factor);
 };
 
 void registerGroupTopKOp(const pybind11::module& m);

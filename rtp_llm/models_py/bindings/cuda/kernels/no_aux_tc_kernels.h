@@ -34,4 +34,24 @@ void invokeNoAuxTc(T*                 scores,
                    double const       routed_scaling_factor,
                    cudaStream_t const stream = 0);
 
+// Fused version: computes sigmoid + bias_add internally, avoiding 2 extra kernel launches.
+// raw_logits: [num_tokens, num_experts] pre-sigmoid logits
+// bias: [num_experts] correction bias per expert
+// scores: [num_tokens, num_experts] output for post-sigmoid values (written by kernel)
+template<typename T, typename IdxT>
+void invokeNoAuxTcFused(T*                 raw_logits,
+                        T const*           bias,
+                        T*                 scores,
+                        T*                 group_scores,
+                        T*                 topk_values,
+                        IdxT*              topk_indices,
+                        int64_t const      num_tokens,
+                        int64_t const      num_experts,
+                        int64_t const      n_group,
+                        int64_t const      topk_group,
+                        int64_t const      topk,
+                        int                norm_node,
+                        double const       routed_scaling_factor,
+                        cudaStream_t const stream = 0);
+
 }  // namespace rtp_llm

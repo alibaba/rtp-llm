@@ -992,7 +992,56 @@ class Qwen3NextModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
+    _profile_dir = os.environ.get("SAVE_TORCH_PROFILE", "")
+    _profile_call_count = 0
+    _profile_done = False
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        input_ids: torch.Tensor = inputs.input_ids
+        num_tokens = input_ids.shape[0]
+        should_profile = (
+            self._profile_dir
+            and not Qwen3NextModel._profile_done
+            and num_tokens > 60000
+        )
+        if should_profile:
+            Qwen3NextModel._profile_call_count += 1
+        if should_profile and Qwen3NextModel._profile_call_count >= 2:
+            import torch.profiler
+
+            trace_path = os.path.join(
+                self._profile_dir, f"profile_{num_tokens}tok.json"
+            )
+            logger.info(f"Profiling {num_tokens} tokens, saving to {trace_path}")
+            # Use schedule with warmup to avoid CUPTI lazy kernel loading overhead.
+            # warmup=1: first forward instruments all Triton/CUDA kernels (70ms+ overhead).
+            # active=1: second forward records clean timings without instrumentation gaps.
+            schedule = torch.profiler.schedule(wait=0, warmup=1, active=1, repeat=1)
+            prof = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                schedule=schedule,
+            )
+            prof.start()
+            prof.step()  # step 0: warmup starts
+            self._forward_impl(inputs, fmha_impl)
+            torch.cuda.synchronize()
+            prof.step()  # step 1: active recording starts
+            result = self._forward_impl(inputs, fmha_impl)
+            torch.cuda.synchronize()
+            prof.step()  # step 2: recording ends
+            prof.stop()
+            prof.export_chrome_trace(trace_path)
+            Qwen3NextModel._profile_done = True
+            logger.info(f"Profile saved: {trace_path}")
+            return result
+        return self._forward_impl(inputs, fmha_impl)
+
+    def _forward_impl(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds

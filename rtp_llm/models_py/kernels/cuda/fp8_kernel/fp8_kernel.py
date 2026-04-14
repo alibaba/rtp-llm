@@ -133,23 +133,22 @@ def sgl_per_token_group_quant_fp8(
         scale_ue8m0=scale_ue8m0,
     )
     if x.shape[0] > 0:
-        if masked_m is not None:
-            per_token_group_quant_fp8_v2(
-                x,
-                x_q,
-                x_s,
-                group_size,
-                eps,
-                fp8_min,
-                fp8_max,
-                scale_ue8m0,
-                fuse_silu_and_mul,
-                masked_m,
-            )
-        else:
-            per_token_group_quant_fp8(
-                x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
-            )
+        # Always use v2: single-pass reads (vs v1's two-pass), vectorized 128-bit stores.
+        # v2 requires eps == 1e-10 (hardcoded as LOCAL_ABSMAX_ABS in the kernel).
+        # This is safe because eps is only used to prevent division by zero in absmax
+        # computation, and 1e-10 serves this purpose for all practical inputs.
+        per_token_group_quant_fp8_v2(
+            x,
+            x_q,
+            x_s,
+            group_size,
+            1e-10,  # v2 requires eps == LOCAL_ABSMAX_ABS == 1e-10
+            fp8_min,
+            fp8_max,
+            scale_ue8m0,
+            fuse_silu_and_mul,
+            masked_m,
+        )
 
     return x_q, x_s
 
