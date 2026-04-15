@@ -50,6 +50,8 @@ cc_library(
         "logits_processor/LogitsProcessorStates.h",
         "logits_processor/ThinkModeLogitsProcessor.h",
         "logits_processor/TreeLogitsProcessor.h",
+        "logits_processor/TreeLogitsProcessorCSR.h",
+        "logits_processor/csr_utils.h",
         "logits_processor/LogitsProcessorFactory.h",
     ],
     srcs = [
@@ -58,6 +60,9 @@ cc_library(
         "logits_processor/LogitsProcessorStates.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",
         "logits_processor/TreeLogitsProcessor.cc",
+        "logits_processor/TreeLogitsProcessorCSR.cc",
+        "logits_processor/TreeLogitsProcessorCSRGpu.cc",
+        "logits_processor/csr_utils.cpp",
         "logits_processor/LogitsProcessorFactory.cc",
     ],
     deps = [
@@ -67,6 +72,8 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//rtp_llm/cpp/pybind:py_utils",
+        "//rtp_llm/cpp/kernels:kernels_sampling",
+        "//rtp_llm/cpp/devices/cuda_impl:gpu_base",
     ],
     visibility = ["//visibility:public"],
 )
