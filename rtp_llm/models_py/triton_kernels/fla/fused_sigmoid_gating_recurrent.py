@@ -22,7 +22,6 @@ def _get_autotune_configs():
             triton.Config({"BV": 8}, num_stages=3, num_warps=1),
         ]
     else:
-        # ROCm/HIP: larger BV and different launch params for better occupancy
         return [
             triton.Config({"BV": 64}, num_stages=1, num_warps=4),
         ]
@@ -105,8 +104,17 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         h += k[:, None] * v[None, :]
         o = sum(h * q, dim=0)
     """
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    i_n, i_hv = i_nh // HV, i_nh % HV
+    # Grid layout: (NV * HV, N, NK)
+    # HIP grid dimensions are limited to 65535 per axis.
+    # Original layout (NK, NV, N*HV) would exceed z-limit when N*HV > 65535
+    # (e.g. N=4096, HV=24 → N*HV=98304 > 65535).
+    # Splitting into (NV*HV, N, NK) keeps all dimensions within limits.
+    i_v_hv = tl.program_id(0)
+    i_n = tl.program_id(1)
+    i_k = tl.program_id(2)
+    NV: tl.constexpr = tl.cdiv(V, BV)
+    i_v = i_v_hv % NV
+    i_hv = i_v_hv // NV
     i_h = i_hv // (HV // H)
 
     if IS_VARLEN:
@@ -322,7 +330,11 @@ def fused_sigmoid_gating_delta_rule_update(
         assert block_map.ndim == 2, "block_map must be a 2D tensor"
         max_block_size = block_map.shape[1]
 
-    grid = lambda META: (NK, triton.cdiv(V, META["BV"]), N * HV)
+    # HIP grid dimensions are limited to 65535 per axis.
+    # Original layout (NK, NV, N*HV) would exceed z-limit when N*HV > 65535
+    # (e.g. N=4096, HV=24 → N*HV=98304 > 65535).
+    # Split into: x=NV*HV, y=N, z=NK — all within limits.
+    grid = lambda META: (triton.cdiv(V, META["BV"]) * HV, N, NK)
 
     fused_sigmoid_gating_delta_rule_update_kernel[grid](
         A_log=A_log,
