@@ -19,6 +19,7 @@ public:
 
 public:
     MOCK_METHOD(bool, hasActiveConnectors, (), (const, override));
+    MOCK_METHOD(bool, hasP2PConnector, (), (const, override));
     MOCK_METHOD(std::shared_ptr<AsyncContext>,
                 asyncRead,
                 (const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context),

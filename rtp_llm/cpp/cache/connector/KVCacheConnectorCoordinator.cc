@@ -68,6 +68,10 @@ bool KVCacheConnectorCoordinator::hasActiveConnectors() const {
     return !connectors_.empty();
 }
 
+bool KVCacheConnectorCoordinator::hasP2PConnector() const {
+    return p2p_connector_ != nullptr;
+}
+
 bool KVCacheConnectorCoordinator::init() {
     RTP_LLM_LOG_INFO("connector coordinator init, cache config: [%s], kv cache config: [%s], runtime config: [%s]",
                      cache_config_.debugString().c_str(),
@@ -84,8 +88,7 @@ bool KVCacheConnectorCoordinator::init() {
     }
 #endif
     if (!initP2PConnectorInternal()) {
-        RTP_LLM_LOG_ERROR("init P2P connector failed");
-        return false;
+        RTP_LLM_LOG_WARNING("init P2P connector failed, P2P path disabled — engine continues without it");
     }
     initUpdateThread();
     return true;
@@ -332,8 +335,10 @@ bool KVCacheConnectorCoordinator::isPdInvertMode() const {
 }
 
 bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
-    // TODO: disable p2p connector for now, will enable after scheduler enable async load cache
-    if (true || !isPdInvertMode()) {
+    // TODO: P2P connector initialization is disabled until the next PR enables
+    // scheduler async load cache support. Change to `#if 1` to activate.
+#if 0
+    if (!isPdInvertMode()) {
         return true;
     }
     const uint32_t layer_all_num         = static_cast<uint32_t>(cache_config_.layer_all_num);
@@ -353,6 +358,7 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
         connectors_.emplace_back(p2p_connector_);
     }
     RTP_LLM_LOG_INFO("P2PConnector initialized successfully, total connectors: %zu", connectors_.size());
+#endif
     return true;
 }
 

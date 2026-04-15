@@ -54,7 +54,7 @@ bool P2PConnector::init() {
 
 std::shared_ptr<AsyncMatchContext> P2PConnector::asyncMatch(const KVCacheResourcePtr&    resource,
                                                             const std::shared_ptr<Meta>& meta) {
-    if (!meta || !resource || !meta->generateStreamOpaque()) {
+    if (!meta || !resource || !meta->generateStream()) {
         RTP_LLM_LOG_WARNING("asyncMatch failed, meta is null or resource is null or generate_stream is null");
         return nullptr;
     }
@@ -79,7 +79,7 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
                                                       const std::shared_ptr<AsyncMatchContext>& match_context,
                                                       int                                       start_read_block_index,
                                                       int                                       read_block_num) {
-    if (!meta || !resource || !meta->generateStreamOpaque()) {
+    if (!meta || !resource || !meta->generateStream()) {
         RTP_LLM_LOG_WARNING("asyncRead failed, meta is null");
         return nullptr;
     }
@@ -176,11 +176,11 @@ void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourc
                                        std::function<bool()>                             is_cancelled) {
     // Wait for side-channel data to be ready (notified by prefill engine when first token / SP data is produced)
     // Note: resource_entry has already been stolen from resource_map_, so we wait on it directly
-    const std::string& unique_key = resource_entry->unique_key;
-    int64_t deadline_ms = resource_entry->deadline_ms;
+    const std::string& unique_key  = resource_entry->unique_key;
+    int64_t            deadline_ms = resource_entry->deadline_ms;
 
     std::unique_lock<std::mutex> lock(resource_entry->side_channel_mutex);
-    const int64_t remaining_us  = deadline_ms * 1000 - currentTimeUs();
+    const int64_t                remaining_us = deadline_ms * 1000 - currentTimeUs();
     if (remaining_us <= 0) {
         RTP_LLM_LOG_WARNING("waitAndFillResponse: past deadline, unique_key: %s", unique_key.c_str());
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
@@ -377,7 +377,7 @@ grpc::Status P2PConnector::fillResponseWithStreamInfo(const std::shared_ptr<P2PC
 
     if (!data.propose_tokens.empty()) {
         auto& propose_tensor = (*payload->mutable_tensors())["propose_tokens"];
-        auto* tokens_pb = propose_tensor.mutable_tensor();
+        auto* tokens_pb      = propose_tensor.mutable_tensor();
         tokens_pb->set_data_type(TensorPB::INT32);
         tokens_pb->add_shape(data.propose_tokens.size());
         std::vector<int32_t> int32_tokens(data.propose_tokens.begin(), data.propose_tokens.end());
@@ -399,15 +399,18 @@ grpc::Status P2PConnector::fillResponseWithStreamInfo(const std::shared_ptr<P2PC
     }
     if (!data.position_ids.empty()) {
         auto& pos_tensor = (*payload->mutable_tensors())["position_ids"];
-        auto* pos_pb = pos_tensor.mutable_tensor();
+        auto* pos_pb     = pos_tensor.mutable_tensor();
         pos_pb->set_data_type(TensorPB::INT32);
         pos_pb->add_shape(data.position_ids.size());
         pos_pb->set_int32_data(data.position_ids.data(), data.position_ids.size() * sizeof(int32_t));
     }
 
     RTP_LLM_LOG_DEBUG("fill response from entry: first_token: %ld, total_reuse: %d, local: %d, remote: %d, memory: %d",
-                      data.first_token_id, data.total_reuse_len, data.local_reuse_len,
-                      data.remote_reuse_len, data.memory_reuse_len);
+                      data.first_token_id,
+                      data.total_reuse_len,
+                      data.local_reuse_len,
+                      data.remote_reuse_len,
+                      data.memory_reuse_len);
 
     return grpc::Status::OK;
 }

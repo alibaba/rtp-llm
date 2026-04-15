@@ -528,10 +528,13 @@ message P2PConnectorStartLoadResponsePB {
     reserved 1 to 8;
     reserved "first_generate_token_id", "total_reuse_len", "local_reuse_len", "remote_reuse_len", "propose_token_ids", "propose_probs", "propose_hidden", "position_ids";
 
+    // Error handling - preserve field numbers 9, 10 for backward compatibility with deployed nodes
+    ErrorCodePB error_code = 9;
+    string error_message = 10;
+
     // New side-channel payload: all data carried as structured map + scalars
-    SideChannelPayloadPB payload = 9;
-    ErrorCodePB error_code = 10;
-    string error_message = 11;
+    // Field number 12+ to avoid conflict with legacy error_code (was field 9 in old proto)
+    SideChannelPayloadPB payload = 12;
 }
 
 enum RemoteOpType {

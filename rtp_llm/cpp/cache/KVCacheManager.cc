@@ -440,6 +440,10 @@ bool KVCacheManager::hasActiveConnectors() const {
     return coordinator_ && coordinator_->hasActiveConnectors();
 }
 
+bool KVCacheManager::hasP2PConnector() const {
+    return coordinator_ && coordinator_->hasP2PConnector();
+}
+
 // 异步连接器操作
 
 std::shared_ptr<AsyncContext>
