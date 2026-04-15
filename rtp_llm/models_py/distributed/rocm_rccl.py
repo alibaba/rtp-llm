@@ -204,7 +204,9 @@ def _get_rccl_runtime(
         raise RuntimeError(
             "RCCL library is not available for HIPGraph capture collectives"
         )
-    if (_rccl_comm is None or _rccl_comm.value is None) and not _is_hipgraph_capture_active():
+    if (
+        _rccl_comm is None or _rccl_comm.value is None
+    ) and not _is_hipgraph_capture_active():
         _ensure_rccl_comm_from_process_group(process_group)
     if _rccl_comm is None or _rccl_comm.value is None:
         raise RuntimeError(
@@ -266,36 +268,140 @@ def set_hipgraph_capture_nccl_comm(
     # enter/exit capture should not clear this cache because replay relies on
     # stable addresses recorded during capture.
     _hipgraph_allgather_outputs.clear()
-    if _is_hipgraph_capture_active():
-        return
-    _pre_init_trtllm_allreduce()
+    # NOTE: Do NOT pre-init allreduce strategies here.
+    # The C++ comm-handle registration path doesn't know which torch
+    # ProcessGroup corresponds to the TP comm; pre-initializing with
+    # torch.distributed.group.WORLD is incorrect when TP < WORLD (multi-node)
+    # and would force a redundant re-init (with IPC-buffer churn) the moment
+    # `prepare_hipgraph_capture_rccl_comm_if_needed` runs with the right
+    # tp_group. Pre-init is the sole responsibility of the latter path.
 
-def _pre_init_trtllm_allreduce(
+
+# ---------------------------------------------------------------------------
+# ROCm AllReduce strategy flags (single source of truth — read once at import).
+#
+# ROCM_ALLREDUCE_STRATEGY is an *enable-set*, not a priority list. The env
+# value is parsed as a comma-separated set of tokens; token order is ignored.
+# Dispatch always uses a fixed precision/speed priority:
+#
+#     quick → trtllm → aiter → symm_mem → NCCL
+#
+# Valid tokens: quick, trtllm, aiter, none (default: none)
+#   quick  — aiter Quick AllReduce (quantised, fastest, lossy)
+#   trtllm — trtllm allreduce kernel (lossless, hidden-size restricted)
+#   aiter  — aiter P2P custom allreduce (lossless, most general)
+#   none   — no accelerated kernel, fall through to symm_mem / NCCL
+#
+# To opt out of a tier, omit it from the env value.
+# ---------------------------------------------------------------------------
+_VALID_STRATEGIES = {"quick", "trtllm", "aiter", "none"}
+
+
+def _parse_enabled_strategies() -> set:
+    """Parse ROCM_ALLREDUCE_STRATEGY into a set of enabled tier tokens.
+
+    Order of tokens in the env string is intentionally ignored — dispatch
+    priority is fixed by the call sites (quick → trtllm → aiter).
+    """
+    raw = os.environ.get("ROCM_ALLREDUCE_STRATEGY", "none").lower()
+    tokens = {s.strip() for s in raw.split(",") if s.strip()}
+    invalid = tokens - _VALID_STRATEGIES
+    if invalid:
+        logging.warning(
+            "ROCM_ALLREDUCE_STRATEGY: ignoring unknown strategies: %s", invalid
+        )
+        tokens -= invalid
+    return tokens if tokens else {"none"}
+
+
+_rocm_allreduce_strategies: set = (
+    _parse_enabled_strategies() if _is_rocm_runtime else {"none"}
+)
+_enable_quick_allreduce: bool = "quick" in _rocm_allreduce_strategies
+_enable_trtllm_allreduce: bool = "trtllm" in _rocm_allreduce_strategies
+_enable_aiter_custom_ar: bool = "aiter" in _rocm_allreduce_strategies
+
+if _is_rocm_runtime and _rocm_allreduce_strategies != {"none"}:
+    logging.info(
+        "ROCm AllReduce enabled tiers (dispatch order is fixed "
+        "quick→trtllm→aiter→symm_mem→NCCL): %s",
+        sorted(_rocm_allreduce_strategies - {"none"}),
+    )
+
+
+def _pre_init_allreduce_strategies(
     tp_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> None:
-    """Pre-initialize trt_allreduce before graph capture.
+    """Pre-initialize allreduce backends before graph capture.
 
-    Must be called before entering graph capture mode so that
-    TrtllmDistEnv.__init__ (which does hipMalloc and dist.all_gather_object)
-    runs outside of stream capture where those operations are forbidden.
+    Must be called before entering graph capture mode so that operations
+    like hipMalloc, all_gather_object, and init_custom_qr run outside of
+    stream capture where they are forbidden.
+
+    Pre-initializes every strategy enabled via ROCM_ALLREDUCE_STRATEGY,
+    including aiter custom AR (even though it is not used during capture)
+    so that the first eager-mode prefill doesn't pay the IPC-handshake
+    cost on the critical path.
+
+    Each manager owns its own intra-init dist.barrier(); calling them in
+    sequence yields N barriers when N strategies are enabled. Acceptable
+    one-time cost — kept in the manager so lazy-init paths stay correct.
     """
     if not _is_rocm_runtime:
         return
     if _rccl_world_size <= 1:
         return
-    try:
-        from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
-            ensure_trtllm_comm_initialized,
-        )
-        if not torch.distributed.is_initialized():
-            return
-        if tp_group is None:
-            tp_group = torch.distributed.group.WORLD
-        device_id = torch.cuda.current_device()
-        ensure_trtllm_comm_initialized(group=tp_group, device_id=device_id)
-        logging.info("Pre-init trtllm_allreduce succeeded (device_id=%s)", device_id)
-    except Exception as exc:
-        logging.warning("Pre-init trtllm_allreduce failed (non-fatal): %s", exc)
+    if not torch.distributed.is_initialized():
+        return
+    if tp_group is None:
+        tp_group = torch.distributed.group.WORLD
+    device_id = torch.cuda.current_device()
+
+    if _enable_trtllm_allreduce:
+        try:
+            from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
+                ensure_trtllm_comm_initialized,
+            )
+
+            ensure_trtllm_comm_initialized(group=tp_group, device_id=device_id)
+            logging.info(
+                "Pre-init trtllm_allreduce succeeded (device_id=%s)", device_id
+            )
+        except Exception as exc:
+            logging.warning("Pre-init trtllm_allreduce failed (non-fatal): %s", exc)
+
+    if _enable_quick_allreduce:
+        try:
+            from rtp_llm.models_py.modules.base.rocm.quick_allreduce import (
+                quick_ar_manager,
+            )
+
+            quick_ar_manager.ensure_initialized(group=tp_group, device_id=device_id)
+            logging.info("Pre-init quick_allreduce succeeded (device_id=%s)", device_id)
+        except Exception as exc:
+            logging.warning("Pre-init quick_allreduce failed (non-fatal): %s", exc)
+
+    if _enable_aiter_custom_ar:
+        # aiter custom AR is not used during graph capture, but pre-initializing
+        # here keeps the first-iteration latency predictable (avoids running
+        # all_gather_into_tensor + cudaSynchronize on the critical path of the
+        # first eager-mode prefill).
+        try:
+            from rtp_llm.models_py.modules.base.rocm.aiter_custom_allreduce import (
+                aiter_ar_manager,
+            )
+
+            aiter_ar_manager.ensure_initialized(group=tp_group, device_id=device_id)
+            logging.info(
+                "Pre-init aiter_custom_allreduce succeeded (device_id=%s)",
+                device_id,
+            )
+        except Exception as exc:
+            logging.warning(
+                "Pre-init aiter_custom_allreduce failed (non-fatal): %s",
+                exc,
+            )
+
 
 def _warmup_rccl_collectives(
     lib: ctypes.CDLL, comm: ctypes.c_void_p, world_size: int
@@ -310,23 +416,30 @@ def _warmup_rccl_collectives(
         nccl_float = _get_nccl_dtype(dummy_in)
 
         res = lib.ncclAllGather(
-            dummy_in.data_ptr(), ag_out.data_ptr(),
-            dummy_in.numel(), nccl_float, comm, stream,
+            dummy_in.data_ptr(),
+            ag_out.data_ptr(),
+            dummy_in.numel(),
+            nccl_float,
+            comm,
+            stream,
         )
         if res != _NCCL_SUCCESS:
             logging.warning("RCCL AllGather warmup returned error %d", res)
 
         res = lib.ncclAllReduce(
-            ar_out.data_ptr(), ar_out.data_ptr(),
-            ar_out.numel(), nccl_float, _NCCL_SUM, comm, stream,
+            ar_out.data_ptr(),
+            ar_out.data_ptr(),
+            ar_out.numel(),
+            nccl_float,
+            _NCCL_SUM,
+            comm,
+            stream,
         )
         if res != _NCCL_SUCCESS:
             logging.warning("RCCL AllReduce warmup returned error %d", res)
 
         torch.cuda.synchronize(device)
-        logging.info(
-            "RCCL collective warmup succeeded (world_size=%d)", world_size
-        )
+        logging.info("RCCL collective warmup succeeded (world_size=%d)", world_size)
     except Exception as e:
         logging.warning("RCCL collective warmup failed (non-fatal): %s", e)
 
@@ -411,9 +524,9 @@ def prepare_hipgraph_capture_rccl_comm_if_needed(
         return
     # IMPORTANT: bootstrap must happen before graph capture begins.
     bootstrap_hipgraph_capture_rccl_comm_from_tp_group(tp_group)
-    # Pre-initialize trt_allreduce with the correct TP group so that
-    # hipgraph_capture_all_reduce can use it during graph capture.
-    _pre_init_trtllm_allreduce(tp_group)
+    # Pre-initialize enabled allreduce strategies with the correct TP group
+    # so that hipgraph_capture_all_reduce can use them during graph capture.
+    _pre_init_allreduce_strategies(tp_group)
 
 
 def enter_hipgraph_capture_mode(
@@ -468,11 +581,7 @@ def finish_hipgraph_capture_session() -> None:
 
 
 def should_use_hipgraph_capture_rccl(is_tp_group: bool) -> bool:
-    return (
-        _is_rocm_runtime
-        and is_tp_group
-        and _is_hipgraph_capture_active()
-    )
+    return _is_rocm_runtime and is_tp_group and _is_hipgraph_capture_active()
 
 
 def ensure_tp_rccl_comm_for_capture(is_tp_group: bool) -> None:
@@ -494,37 +603,81 @@ def _is_hidden_size_supported_for_trtllm(hidden_size: int) -> bool:
         from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
             ALLREDUCE_SUPPORTED_HIDDEN_SIZES,
         )
+
         return hidden_size in ALLREDUCE_SUPPORTED_HIDDEN_SIZES
     except Exception:
         return False
 
+
 def _is_trtllm_allreduce_ready() -> bool:
     try:
-        from rtp_llm.models_py.modules.base.rocm.trt_allreduce import is_trt_allreduce_ready
+        from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
+            is_trt_allreduce_ready,
+        )
+
         return is_trt_allreduce_ready()
     except ImportError:
         return False
 
+
 _trtllm_fallback_warned: bool = False
+_quick_fallback_warned: bool = False
 
 
 def hipgraph_capture_all_reduce(
     tensor: torch.Tensor,
     process_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> torch.Tensor:
-    """Allreduce during HIPGraph capture. Tries trt_allreduce first, falls back to ncclAllReduce."""
-    global _trtllm_fallback_warned
+    """Allreduce during HIPGraph capture.
 
+    Priority: quick_AR -> trtllm_AR -> ncclAllReduce.
+
+    Both quick_AR and trtllm_AR must have been pre-initialized via
+    _pre_init_allreduce_strategies() before capture begins, since their
+    init paths call hipMalloc/all_gather_object which are forbidden under
+    stream capture. ``should_use`` is therefore safe to call here because
+    it only triggers lazy init when ``initialized`` is False — which
+    cannot happen if pre-init ran for the enabled strategies.
+
+    Note: aiter P2P custom AR is intentionally skipped in capture mode
+    (its handshake/buffer-registration path is not graph-capture safe).
+    """
+    global _trtllm_fallback_warned, _quick_fallback_warned
+
+    # Tier 1: Quick AllReduce (opt-in, fastest)
+    if _enable_quick_allreduce and process_group is not None:
+        try:
+            from rtp_llm.models_py.modules.base.rocm.quick_allreduce import (
+                quick_ar_manager,
+            )
+
+            device_id = torch.cuda.current_device()
+            if quick_ar_manager.should_use(tensor, process_group, device_id):
+                return quick_ar_manager.allreduce(tensor, inplace=True)
+        except Exception as exc:
+            if not _quick_fallback_warned:
+                logging.warning(
+                    "quick_allreduce failed in graph capture mode, "
+                    "fallback to next tier (further warnings suppressed): %s",
+                    exc,
+                )
+                _quick_fallback_warned = True
+
+    # Tier 2: trtllm allreduce
     if (
-        process_group is not None
+        _enable_trtllm_allreduce
+        and process_group is not None
         and _is_hidden_size_supported_for_trtllm(tensor.shape[-1])
         and _is_trtllm_allreduce_ready()
     ):
         try:
             from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
                 _trtllm_comm_manager,
+            )
+            from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
                 allreduce as trtllm_allreduce,
             )
+
             # Size guard: fall through to NCCL when input exceeds the
             # workspace `data_` capacity. Without this check,
             # CommWorkspace::get_comm_data's gpuMemcpyAsync would write
@@ -544,7 +697,8 @@ def hipgraph_capture_all_reduce(
             if not _trtllm_fallback_warned:
                 logging.warning(
                     "trtllm_allreduce import failed in graph capture mode, "
-                    "fallback to ncclAllReduce (further warnings suppressed): %s", exc,
+                    "fallback to ncclAllReduce (further warnings suppressed): %s",
+                    exc,
                 )
                 _trtllm_fallback_warned = True
         except RuntimeError as exc:
@@ -552,11 +706,12 @@ def hipgraph_capture_all_reduce(
                 logging.warning(
                     "trtllm_allreduce failed in graph capture mode, "
                     "fallback to ncclAllReduce (further warnings suppressed): %s",
-                    exc, exc_info=True,
+                    exc,
+                    exc_info=True,
                 )
                 _trtllm_fallback_warned = True
 
-    # Fallback to raw RCCL ncclAllReduce.
+    # Fallback to lib.ncclAllReduce (in-place, returns original tensor)
     lib, rccl_comm = _get_rccl_runtime(process_group)
     nccl_result = lib.ncclAllReduce(
         tensor.data_ptr(),
@@ -667,6 +822,42 @@ def capture_all_gather(
     return hipgraph_capture_all_gather(tensor, process_group)
 
 
+def _close_allreduce_strategies() -> None:
+    """Release IPC buffers held by enabled allreduce strategies.
+
+    Idempotent — safe to call when nothing was initialized. Wraps each
+    strategy in its own try/except so one failure cannot prevent the
+    others from cleaning up.
+    """
+    if _enable_quick_allreduce:
+        try:
+            from rtp_llm.models_py.modules.base.rocm.quick_allreduce import (
+                quick_ar_manager,
+            )
+
+            quick_ar_manager.close()
+        except Exception as exc:
+            logging.warning("quick_ar_manager.close() failed: %s", exc)
+    if _enable_aiter_custom_ar:
+        try:
+            from rtp_llm.models_py.modules.base.rocm.aiter_custom_allreduce import (
+                aiter_ar_manager,
+            )
+
+            aiter_ar_manager.close()
+        except Exception as exc:
+            logging.warning("aiter_ar_manager.close() failed: %s", exc)
+    if _enable_trtllm_allreduce:
+        try:
+            from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
+                _trtllm_comm_manager,
+            )
+
+            _trtllm_comm_manager.cleanup()
+        except Exception as exc:
+            logging.warning("trtllm_comm_manager.cleanup() failed: %s", exc)
+
+
 def destroy_capture_comm() -> None:
     """Clean up RCCL capture comm state during distributed environment teardown.
 
@@ -675,6 +866,7 @@ def destroy_capture_comm() -> None:
     fresh communicator instead of reusing the stale one from the destroyed
     process group.
     """
+    _close_allreduce_strategies()
     _clear_hipgraph_capture_nccl_comm()
 
 
