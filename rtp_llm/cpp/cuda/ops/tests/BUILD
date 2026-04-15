@@ -80,6 +80,34 @@ cc_test(
     ] + torch_deps(),
 )
 
+cc_test(
+    name = "cuda_check_and_reset_nan_test",
+    srcs = [
+        "CudaCheckAndResetNANTest.cc",
+    ],
+    data = [],
+    env = test_envs,
+    copts = copts(),
+    deps = test_deps + [
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_nan_check",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "cuda_block_zero_kernel_test",
+    srcs = [
+        "CudaBlockZeroKernelTest.cc",
+    ],
+    data = [],
+    env = test_envs,
+    copts = copts(),
+    deps = test_deps + [
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_block_zero",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
 # Aliases: CudaGraph tests at //rtp_llm/cpp/cuda_graph/tests/
 alias(
     name = "test_cuda_graph_runner_libs",

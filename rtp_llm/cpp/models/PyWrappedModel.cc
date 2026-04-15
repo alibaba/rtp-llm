@@ -2,8 +2,10 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "rtp_llm/cpp/models/NanCheckRunner.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/cpp/core/OpData.h"
 #include <cstdint>
 #include <stdexcept>
 #include <mutex>
@@ -206,16 +208,45 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
                                                       bool                  skip_final_layernorm,
                                                       size_t                num_valid_tokens) {
     RTP_LLM_PROFILE_SCOPE("py_model.callForwardPostLayers");
+
+    torch::Tensor nan_flag;
+    // NaN check performs per-forward dynamic allocation (torch::zeros) which is
+    // incompatible with CUDA Graph capture/replay.  The current design ensures
+    // nan_check_enabled is never set during CUDA Graph mode; guard defensively.
+    RTP_LLM_CHECK_WITH_INFO(!(inputs.nan_check_enabled && enable_cuda_graph_),
+                            "nan_check_enabled must be false when CUDA Graphs are active");
+    if (inputs.nan_check_enabled && inputs.kv_cache_block_id.defined() && layer_base_addr_buffer_.defined()) {
+        int64_t batch_size = inputs.input_lengths.size(0);
+        nan_flag = torch::zeros({batch_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+        bool did_run_nan_check = KvCacheNanCheckRunner::run(description_.attention_conf,
+                                                            cache_dtype_,
+                                                            cache_element_size_,
+                                                            layer_num_,
+                                                            layer_base_addr_buffer_,
+                                                            inputs,
+                                                            nan_flag);
+        // After AllReduce(Sum) across TP ranks, nan_flag values may exceed 1.0f
+        // when multiple ranks detect NaN simultaneously.  Downstream consumers
+        // use "> 0" checks, so the exact magnitude does not matter — any non-zero
+        // value correctly indicates that at least one rank observed NaN/Inf.
+        if (did_run_nan_check && device_props_.tp_size > 1) {
+            nan_flag = execAllReduce({nan_flag, ReduceOp::Sum, false, ParallelMode::TP}).buffer;
+        }
+    }
+
     size_t num_input_tokens = num_valid_tokens != -1 ? num_valid_tokens : inputs.combo_tokens.size(0);
-    return forwardPostLayers(hidden_states,
-                             inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0),
-                             inputs.need_all_logits,
-                             inputs.lm_output_indexes,
-                             false,
-                             num_input_tokens,
-                             inputs,
-                             torch::Tensor(),
-                             skip_final_layernorm);
+    auto   outputs          = forwardPostLayers(hidden_states,
+                                     inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0),
+                                     inputs.need_all_logits,
+                                     inputs.lm_output_indexes,
+                                     false,
+                                     num_input_tokens,
+                                     inputs,
+                                     torch::Tensor(),
+                                     skip_final_layernorm);
+    outputs.nan_flag        = nan_flag;
+    return outputs;
 }
 
 std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
@@ -417,7 +448,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }
         return callForwardPostLayers(hidden_states, inputs, true);
-
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());

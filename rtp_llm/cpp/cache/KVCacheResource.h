@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -54,15 +55,10 @@ public:
     void resize(size_t new_size, BlockIdxType value = NULL_BLOCK_IDX);
 
 private:
-    // Update the kernel slots that correspond to physical block position `pos`.
     void updateKernelSlotAt(size_t pos, BlockIdxType val);
-    // Update all kernel slots
     void syncKernelBlocks();
 
     BlockIndicesType block_indices;
-    // Kernel-granularity block IDs, always maintained.
-    // Size is always block_indices.size() * kernel_blocks_per_kv_block_.
-    // When kernel_blocks_per_kv_block_ == 1, kernel_block_indices_ mirrors block_indices.
     BlockIndicesType kernel_block_indices_;
     size_t           kernel_blocks_per_kv_block_ = 1;
 };

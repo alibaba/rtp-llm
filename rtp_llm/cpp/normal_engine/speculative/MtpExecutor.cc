@@ -195,6 +195,14 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                               params.sp_config,
                                                               warm_up_));
 
+    if (cache_manager && BlockZeroRunner::needsBlockZero(cache_config.group_types)) {
+        block_zero_runner_ = BlockZeroRunner::create(
+            target_cache_layer_layout.layers_to_kv_buffer_ptrs,
+            cache_config.kv_block_stride_bytes,
+            cache_config.seq_size_per_block);
+        RTP_LLM_LOG_INFO("BlockZeroRunner enabled: mixed attention groups detected (MTP)");
+    }
+
     LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
     cudaProfilerBegin();
 
@@ -312,7 +320,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(tp_sync_input)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.skip_run           = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.nan_check_enabled = model_->isNanCheckEnabled();
         tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
             return absl::OkStatus();
@@ -321,6 +330,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     metrics_collector.not_skip = true;
+
+    if (block_zero_runner_) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(zero_incomplete_blocks)");
+        block_zero_runner_->run(model_input);
+    }
 
     // release model input before forward
     model_->releaseBuffers();
@@ -531,7 +545,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_input_rank0)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.skip_run           = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.nan_check_enabled = model_->isNanCheckEnabled();
         if (model_input.skip_run) {
             tpSyncModelInputs(model_input, parallelism_config_);
             return absl::OkStatus();
@@ -556,6 +571,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         if (model_input.skip_run) {
             return absl::OkStatus();
         }
+    }
+
+    if (block_zero_runner_) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(zero_incomplete_blocks)");
+        block_zero_runner_->run(model_input);
     }
 
     // release hold buffers before draft model forward
@@ -696,9 +716,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // dispatch
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output)");
-        auto result = batch_stream_processor_->dispatchDecode(
+        MergedOutput target_model_merged_output{std::move(model_output), std::move(sampler_output)};
+        auto         result = batch_stream_processor_->dispatchDecode(
             stream_groups,
             speculative_sampler_output,
+            target_model_merged_output,
             {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)});
         // clean holder tensors from grpc
         for (auto& stream : streams) {

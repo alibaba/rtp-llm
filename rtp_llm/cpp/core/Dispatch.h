@@ -162,6 +162,12 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
         break;                                                                                                         \
     }
 
+#define DP_FUNCTION_CALL_CASE_DIRECT(data_type, T, func_name, ...)                                                     \
+    case data_type: {                                                                                                  \
+        func_name<T>(__VA_ARGS__);                                                                                     \
+        break;                                                                                                         \
+    }
+
 #define DP_TWO_TYPE_FUNCTION_CALL_CASE(data_type, T1, T2, ...)                                                         \
     case data_type: {                                                                                                  \
         ARG_CASTED_FUNC_CALL_TWO_TYPE(T1, T2, __VA_ARGS__);                                                            \

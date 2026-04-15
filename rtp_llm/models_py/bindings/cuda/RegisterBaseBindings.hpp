@@ -21,6 +21,7 @@
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
 #include "rtp_llm/models_py/bindings/cuda/UserBuffersOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
+#include "rtp_llm/models_py/bindings/cuda/CheckAndResetNanKvCacheOp.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
 
@@ -272,6 +273,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {
     registerBasicCudaOps(rtp_ops_m);
+    registerCheckAndResetNanKvCacheOp(rtp_ops_m);
     registerFusedMoEOp(rtp_ops_m);
     registerSelectTopkOp(rtp_ops_m);
     registerGroupTopKOp(rtp_ops_m);

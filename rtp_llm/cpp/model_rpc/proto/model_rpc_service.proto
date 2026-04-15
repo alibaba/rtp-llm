@@ -366,6 +366,10 @@ message StartProfileInternalRequestPB {
     int32 num_steps = 3;
 }
 
+message SetNanCheckRequestPB {
+    bool enabled = 1;
+}
+
 message CheckHealthResponsePB {
     string health = 1;
 }
@@ -578,6 +582,7 @@ service RpcService {
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
     rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
     rpc StartProfileInternal(StartProfileInternalRequestPB) returns (EmptyPB);
+    rpc SetNanCheck(SetNanCheckRequestPB) returns (EmptyPB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);

@@ -42,6 +42,8 @@ protected:
                                 size_t                        propose_step = 0) const {
         fillSamplerCommonInputs(sampler_inputs, all_streams, score_batch, propose_step);
     }
+    // Check nan_flag and set stream status to failed if NaN detected
+    void checkNanFlagAndSetFailed(const StreamGroups& stream_groups, const torch::Tensor& nan_flag) const;
 
     void fillSamplerCommonInputs(SamplerInputs&                sampler_inputs,
                                  std::list<GenerateStreamPtr>& all_streams,

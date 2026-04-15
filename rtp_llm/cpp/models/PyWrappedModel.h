@@ -80,6 +80,9 @@ private:
     const GptModelDescription                description_;
     std::optional<rtp_llm::CacheLayerLayout> kv_cache_layer_layout_;
     std::shared_ptr<KVCacheManager>          cache_manager_;  // For cache_store access
+    rtp_llm::DataType                        cache_dtype_        = DataType::TYPE_INVALID;
+    size_t                                   cache_element_size_ = 0;
+    torch::Tensor                            layer_base_addr_buffer_;
     torch::Tensor                            residual_scale_fp32_;
     torch::Tensor                            residual_scale_;
     ModelBufferHolder                        buffer_holder_;
@@ -115,6 +118,24 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     weights_               = params.weights;
     model_id_              = params.model_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
+    if (kv_cache_layer_layout_) {
+        auto& layers_to_kv = kv_cache_layer_layout_.value().layers_to_kv_buffer_ptrs;
+        auto  num_layers   = layers_to_kv.size();
+        if (num_layers > 0 && layers_to_kv[0].defined()) {
+            cache_dtype_        = torchDTypeToDataType(layers_to_kv[0].dtype());
+            cache_element_size_ = layers_to_kv[0].element_size();
+            auto  layer_addrs   = torch::empty({static_cast<int64_t>(num_layers)}, torch::kInt64);
+            auto* addr_data     = layer_addrs.data_ptr<int64_t>();
+            for (size_t i = 0; i < num_layers; ++i) {
+                if (!layers_to_kv[i].defined()) {
+                    RTP_LLM_LOG_WARNING("layers_to_kv_buffer_ptrs[%zu] is undefined", i);
+                    break;
+                }
+                addr_data[i] = reinterpret_cast<int64_t>(layers_to_kv[i].data_ptr());
+            }
+            layer_base_addr_buffer_ = layer_addrs.cuda();
+        }
+    }
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         auto residual_tensor = torch::tensor({(float)description_.residual_scalar}, torch::kFloat32).cuda();
 #if USING_CUDA

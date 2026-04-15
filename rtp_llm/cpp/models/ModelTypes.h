@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include "rtp_llm/cpp/core/OpData.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
@@ -66,6 +67,7 @@ enum GptModelInputIndex : size_t {
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
+    nanCheckEnabled,
     gptModelInputLength,
 };
 
@@ -111,10 +113,15 @@ public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
+    virtual void            setNanCheckEnabled(bool enabled) { nan_check_enabled_ = enabled; }
+    bool                    isNanCheckEnabled() const { return nan_check_enabled_; }
 
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;
     size_t                      model_id_ = 0;
+
+protected:
+    std::atomic<bool> nan_check_enabled_{false};
 };
 
 }  // namespace rtp_llm

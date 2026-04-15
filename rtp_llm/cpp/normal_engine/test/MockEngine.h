@@ -50,18 +50,18 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
                                                  rtp_llm::ModelConfig&   model_config,
                                                  rtp_llm::RuntimeConfig& runtime_config,
                                                  rtp_llm::KVCacheConfig& kv_cache_config) {
-    model_config.attn_config.head_num                           = 2;
-    model_config.attn_config.size_per_head                      = 64;
-    model_config.num_layers                                     = 2;
-    model_config.max_seq_len                                    = 20;
-    model_config.vocab_size                                     = 100;
-    model_config.hidden_size                                    = 128;
-    model_config.attn_config.kv_head_num                        = 2;
-    model_config.activation_type                                = ActivationType::Silu;
-    kv_cache_config.test_block_num                              = 100;
-    kv_cache_config.reuse_cache                                 = config.reuse_cache;
-    kv_cache_config.multi_task_prompt_tokens                    = config.multi_task_prompt_tokens;
-    runtime_config.max_generate_batch_size                      = 128;
+    model_config.attn_config.head_num        = 2;
+    model_config.attn_config.size_per_head   = 64;
+    model_config.num_layers                  = model_config.num_layers != 0 ? model_config.num_layers : 2;
+    model_config.max_seq_len                 = 20;
+    model_config.vocab_size                  = 100;
+    model_config.hidden_size                 = 128;
+    model_config.attn_config.kv_head_num     = 2;
+    model_config.activation_type             = ActivationType::Silu;
+    kv_cache_config.test_block_num           = 100;
+    kv_cache_config.reuse_cache              = config.reuse_cache;
+    kv_cache_config.multi_task_prompt_tokens = config.multi_task_prompt_tokens;
+    runtime_config.max_generate_batch_size   = 128;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 128;
     model_config.attn_config.kv_cache_dtype =
         config.kv_cache_data_type == DataType::TYPE_INT8 ?

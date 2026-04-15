@@ -108,18 +108,54 @@ cc_library(
 )
 
 cc_library(
+    name = "nan_check_runner",
+    srcs = [
+        "NanCheckRunner.cc",
+    ],
+    hdrs = [
+        "NanCheckRunner.h",
+    ],
+    deps = [
+        "//:rtp_compute_ops",
+        "//rtp_llm/models_py/bindings/common/kernels:nan_check_torch_op",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "block_zero_runner",
+    srcs = [
+        "BlockZeroRunner.cc",
+    ],
+    hdrs = [
+        "BlockZeroRunner.h",
+    ],
+    deps = [
+        "//:rtp_compute_ops",
+        "//rtp_llm/cpp/cache:cache_group_type",
+        "//rtp_llm/models_py/bindings/common/kernels:block_zero_torch_op",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "models",
     hdrs = glob([
         "*.h",
     ]),
     srcs = glob([
         "*.cc",
+    ], exclude = [
+        "NanCheckRunner.cc",
+        "BlockZeroRunner.cc",
     ]),
     deps = [
         ":sample_infos",
         ":logits_processor",
         ":dfa_utils",
         ":context_parallel",
+        ":nan_check_runner",
+        ":block_zero_runner",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/core:exec_ops_hdr",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",

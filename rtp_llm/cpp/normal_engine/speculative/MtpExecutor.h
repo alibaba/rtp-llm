@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/core/DeviceData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
+#include "rtp_llm/cpp/models/BlockZeroRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
@@ -51,6 +52,10 @@ public:
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
+    void         setNanCheckEnabled(bool enabled) override {
+        if (model_) model_->setNanCheckEnabled(enabled);
+        if (draft_model_) draft_model_->setNanCheckEnabled(enabled);
+    }
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {
         model_ = std::move(model);
@@ -136,5 +141,7 @@ private:
     // group id tensors
     torch::Tensor target_kv_cache_layer_to_group;
     torch::Tensor draft_kv_cache_layer_to_group;
+
+    std::unique_ptr<BlockZeroRunner> block_zero_runner_;
 };
 };  // namespace rtp_llm

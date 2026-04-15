@@ -211,6 +211,57 @@ cc_library(
 )
 
 cc_library(
+    name = "kernels_nan_check",
+    srcs = ["nan_check_kernels.cu"],
+    hdrs = ["nan_check_kernels.h"],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:math_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "nan_check_torch_op",
+    srcs = ["nan_check_torch_op.cc"],
+    hdrs = ["nan_check_torch_op.h"],
+    deps = any_cuda_deps + [
+        ":kernels_nan_check",
+        "//rtp_llm/cpp/core:types_hdr",
+    ] + torch_deps(),
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_block_zero",
+    srcs = ["block_zero_kernels.cu"],
+    hdrs = ["block_zero_kernels.h"],
+    deps = any_cuda_deps,
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "block_zero_torch_op",
+    srcs = ["block_zero_torch_op.cc"],
+    hdrs = ["block_zero_torch_op.h"],
+    deps = torch_deps() + select({
+        "@//:using_cuda": [":kernels_block_zero"],
+        "@//:using_rocm": [":kernels_block_zero"],
+        "//conditions:default": [],
+    }),
+    copts = any_cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kernels_cu",
     deps = [
         ":kernels_activation",

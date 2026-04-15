@@ -58,7 +58,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::skipRun] = inputs.skip_run;
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
-    shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints_ptr[GptModelInputIndex::isFakeStream]    = inputs.is_fake_stream;
+    shape_hints_ptr[GptModelInputIndex::nanCheckEnabled] = inputs.nan_check_enabled;
     execBroadcast({{shape_hints_t}, 0});
     execSyncCommunication(false);
     cudaSyncAndCheck();
@@ -69,6 +70,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.need_all_logits              = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.skip_run                     = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream               = shape_hints_ptr[GptModelInputIndex::isFakeStream];
+    inputs.nan_check_enabled            = shape_hints_ptr[GptModelInputIndex::nanCheckEnabled];
     if (inputs.skip_run) {
         return;
     }

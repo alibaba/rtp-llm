@@ -56,6 +56,7 @@ enum class ErrorCode {
     CACHE_STORE_LOAD_BUFFER_TIMEOUT      = 8307,
     CACHE_STORE_LOAD_UNKNOWN_ERROR       = 8308,
     CACHE_STORE_STORE_FAILED             = 8309,
+    NAN_DETECTED                         = 8326,
 
     // p2p connector error
     P2P_CONNECTOR_CALL_PREFILL_FAILED                 = 8310,
@@ -192,6 +193,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "P2P_CONNECTOR_WORKER_READ_TIMEOUT";
         case ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE:
             return "P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE";
+        case ErrorCode::NAN_DETECTED:
+            return "NAN_DETECTED";
         case ErrorCode::MM_LONG_PROMPT_ERROR:
             return "MM_LONG_PROMPT_ERROR";
         case ErrorCode::MM_WRONG_FORMAT_ERROR:

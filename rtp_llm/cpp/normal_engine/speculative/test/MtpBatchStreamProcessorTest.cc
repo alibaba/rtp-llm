@@ -159,6 +159,13 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     spec_decode_output.accept_tokens = {torch::tensor({{2, 3, 1, 3, 2}}, torch::kInt32),
                                         torch::tensor({{2}}, torch::kInt32)};
 
+    MergedOutput target_model_output;
+    target_model_output.model_output.all_hidden_states =
+        torch::tensor({0.1f, 0.01f, 0.2f, 0.02f, 0.3f, 0.03f, 0.4f, 0.04f, 0.5f, 0.05f, 1.2f, 0.12f}).reshape({6, 2});
+    target_model_output.sampler_output.token_ids = torch::tensor({1, 2}, torch::kInt32).reshape({2, 1});
+    target_model_output.sampler_output.all_probs =
+        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.2f, 0.3f, 0.4f, 0.1f}).reshape({2, 4});
+
     MergedOutput draft_prefill_output;
     draft_prefill_output.model_output.all_hidden_states =
         torch::tensor({0.2f, 0.02f, 0.3f, 0.03f, 0.4f, 0.04f, 0.5f, 0.05f, 0.6f, 0.06f, 1.3f, 0.13f}, torch::kFloat32)
@@ -171,7 +178,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
 
-    auto status = processor.dispatchDecode(stream_groups, spec_decode_output, std::move(draft_prefill_output));
+    auto status = processor.dispatchDecode(
+        stream_groups, spec_decode_output, std::move(target_model_output), std::move(draft_prefill_output));
     EXPECT_TRUE(status.ok());
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
