@@ -360,7 +360,6 @@ void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
 }
 
 void GenerateStream::setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory) {
-    std::lock_guard<std::mutex> lock(*output_mutex_);
     prefill_total_reuse_len_  = total;
     prefill_local_reuse_len_  = local;
     prefill_remote_reuse_len_ = remote;
@@ -368,22 +367,18 @@ void GenerateStream::setPrefillReuseLength(int64_t total, int64_t local, int64_t
 }
 
 int64_t GenerateStream::prefillTotalReuseLen() const {
-    std::lock_guard<std::mutex> lock(*output_mutex_);
     return prefill_total_reuse_len_;
 }
 
 int64_t GenerateStream::prefillLocalReuseLen() const {
-    std::lock_guard<std::mutex> lock(*output_mutex_);
     return prefill_local_reuse_len_;
 }
 
 int64_t GenerateStream::prefillRemoteReuseLen() const {
-    std::lock_guard<std::mutex> lock(*output_mutex_);
     return prefill_remote_reuse_len_;
 }
 
 int64_t GenerateStream::prefillMemoryReuseLen() const {
-    std::lock_guard<std::mutex> lock(*output_mutex_);
     return prefill_memory_reuse_len_;
 }
 

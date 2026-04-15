@@ -128,8 +128,7 @@ cc_library(
         "//rtp_llm/cpp/core:cache_store_async_writer",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
-        "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
-        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
     ],
     visibility = ["//visibility:public"],
 )

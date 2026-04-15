@@ -27,6 +27,7 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/cpp/cache/connector:connector",
+        "//rtp_llm/cpp/engine_base/stream:stream",
     ],
     copts = test_copts,
 )
@@ -65,6 +66,7 @@ cc_test(
         ":mock_generate_stream",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/engine_base/stream:stream",
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
     ] + device_impl_target(),

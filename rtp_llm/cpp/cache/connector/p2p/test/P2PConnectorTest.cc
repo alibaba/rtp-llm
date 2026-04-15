@@ -35,55 +35,6 @@ public:
     }
 };
 
-/// Wraps MockGenerateStream for P2PConnector::asyncMatch (requires Meta::generateStream() and Meta::p2pRouting()).
-class P2PMetaForConnectorTest final: public Meta {
-public:
-    explicit P2PMetaForConnectorTest(std::shared_ptr<MockGenerateStream> mock_stream):
-        mock_stream_(std::move(mock_stream)) {}
-
-    bool enableMemoryCache() const override {
-        return false;
-    }
-    bool enableRemoteCache() const override {
-        return false;
-    }
-    const std::string& trace_id() const override {
-        static const std::string kEmpty;
-        return kEmpty;
-    }
-    const std::string& unique_id() const override {
-        static const std::string kEmpty;
-        return kEmpty;
-    }
-    const std::vector<int64_t>& tokens() const override {
-        static const std::vector<int64_t> kEmpty;
-        return kEmpty;
-    }
-    GenerateStream* generateStream() const override {
-        return mock_stream_.get();  // Return raw pointer as opaque handle
-    }
-    void setStop(ErrorCode, const std::string&) override {
-        // No-op for mock
-    }
-
-    // P2P routing context: extract from MockGenerateStream
-    std::optional<P2PRoutingContext> p2pRouting() const override {
-        if (!mock_stream_) {
-            return std::nullopt;
-        }
-        P2PRoutingContext ctx;
-        ctx.request_id      = mock_stream_->requestId();
-        ctx.unique_key      = mock_stream_->uniqueKey();
-        ctx.deadline_ms     = mock_stream_->deadlineMs();
-        ctx.prefill_addr    = mock_stream_->getPrefillAddr();
-        ctx.prefill_tp_size = mock_stream_->getPrefillTpSize();
-        return ctx;
-    }
-
-private:
-    std::shared_ptr<MockGenerateStream> mock_stream_;
-};
-
 class P2PConnectorTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -163,6 +114,37 @@ protected:
         return request;
     }
 
+    /// 构造一个最小可用的 GenerateStream，通过 GenerateInput/GenerateConfig 直接设置
+    /// P2P 路由所需字段（unique_key, request_id, deadline_ms），返回 owning shared_ptr。
+    /// timeout_ms 是超时毫秒数（相对值），begin_time_us 是当前微秒时间戳，
+    /// deadlineMs() = timeout_ms + begin_time_us/1000。
+    std::shared_ptr<GenerateStream> createGenerateStream(const std::string& unique_key,
+                                                         int64_t            request_id,
+                                                         int64_t            timeout_ms) {
+        auto config         = std::make_shared<GenerateConfig>();
+        config->unique_key  = unique_key;
+        config->timeout_ms  = static_cast<int>(timeout_ms);  // timeout in milliseconds (relative)
+
+        auto input                 = std::make_shared<GenerateInput>();
+        input->request_id          = request_id;
+        input->generate_config     = config;
+        input->input_ids           = torch::zeros({1}, torch::kInt32);
+        input->begin_time_us       = currentTimeUs();  // Set begin_time_us to current time
+
+        return std::make_shared<MockGenerateStream>(input);
+    }
+
+    /// 构造 MockMeta，路由信息从 GenerateStream 中读取（与生产路径一致）。
+    std::shared_ptr<MockMeta> createMockMeta(GenerateStream* stream, int prefill_tp_size = 1) {
+        auto meta = std::make_shared<MockMeta>();
+        meta->setRequestId(stream->streamId());
+        meta->setUniqueKey(stream->uniqueKey());
+        meta->setDeadlineMs(stream->deadlineMs());
+        meta->setPrefillTpSize(prefill_tp_size);
+        meta->setGenerateStream(stream);
+        return meta;
+    }
+
 protected:
     P2PConnectorConfig                          config_;
     std::shared_ptr<MockLayerBlockConverter>    mock_layer_block_converter_;
@@ -226,15 +208,13 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnCancelled_WhenWaitResourceEntryCancell
 TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenSchedulerHandleReadFailed) {
     // 1. 创建并初始化 P2PConnector（已在 SetUp 中完成）
     // 2. 添加有效的 resource entry
-    std::string unique_key      = "test_scheduler_handle_read_failed";
-    int64_t     request_id      = 5003;
-    int64_t     deadline_ms     = currentTimeMs() + 5000;
-    auto        resource        = createValidKVCacheResource(2, 2);
-    auto        generate_stream = std::make_shared<MockGenerateStream>();
-    generate_stream->setUniqueKey(unique_key);
-    generate_stream->setRequestId(request_id);
-    generate_stream->setDeadlineMs(deadline_ms);
-    auto meta = std::make_shared<P2PMetaForConnectorTest>(generate_stream);
+    std::string unique_key  = "test_scheduler_handle_read_failed";
+    int64_t     request_id  = 5003;
+    int64_t     timeout_ms  = 5000;  // timeout in milliseconds (relative)
+    int64_t     deadline_ms = currentTimeMs() + timeout_ms;  // absolute deadline for request
+    auto        resource    = createValidKVCacheResource(2, 2);
+    auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
+    auto        meta        = createMockMeta(stream.get());
     connector_->asyncMatch(resource, meta);
 
     // 3. 设置 TestRpcServer 返回失败（用于 scheduler_->sendKVCache）
@@ -254,16 +234,13 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenSchedulerHandleReadFailed
 // 测试: waitSideChannelReady 超时（first token not found），返回 INTERNAL 错误
 TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
     // 1. 添加有效的 resource entry
-    std::string unique_key      = "test_wait_side_channel_timeout";
-    int64_t     request_id      = 5004;
-    int64_t     deadline_ms     = currentTimeMs() + 5000;
-    auto        resource        = createValidKVCacheResource(2, 2);
-    auto        generate_stream = std::make_shared<MockGenerateStream>();
-
-    generate_stream->setUniqueKey(unique_key);
-    generate_stream->setRequestId(request_id);
-    generate_stream->setDeadlineMs(deadline_ms);
-    auto meta = std::make_shared<P2PMetaForConnectorTest>(generate_stream);
+    std::string unique_key  = "test_wait_side_channel_timeout";
+    int64_t     request_id  = 5004;
+    int64_t     timeout_ms  = 5000;  // timeout in milliseconds (relative)
+    int64_t     deadline_ms = currentTimeMs() + timeout_ms;  // absolute deadline for request
+    auto        resource    = createValidKVCacheResource(2, 2);
+    auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
+    auto        meta        = createMockMeta(stream.get());
     connector_->asyncMatch(resource, meta);
 
     // 2. 设置 TestRpcServer 返回成功（用于 scheduler_->sendKVCache）
@@ -289,16 +266,13 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
 // 4. waitAndFillResponse 检查 side_channel_ready，发现已经是 true，立即返回
 TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     // 1. 创建有效的 resource entry
-    std::string unique_key      = "test_notify_side_channel_success";
-    int64_t     request_id      = 5001;
-    int64_t     deadline_ms     = currentTimeMs() + 5000;
-    auto        resource        = createValidKVCacheResource(2, 2);
-    auto        generate_stream = std::make_shared<MockGenerateStream>();
-
-    generate_stream->setUniqueKey(unique_key);
-    generate_stream->setRequestId(request_id);
-    generate_stream->setDeadlineMs(deadline_ms);
-    auto meta = std::make_shared<P2PMetaForConnectorTest>(generate_stream);
+    std::string unique_key  = "test_notify_side_channel_success";
+    int64_t     request_id  = 5001;
+    int64_t     timeout_ms  = 5000;  // timeout in milliseconds (relative)
+    int64_t     deadline_ms = currentTimeMs() + timeout_ms;  // absolute deadline for request
+    auto        resource    = createValidKVCacheResource(2, 2);
+    auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
+    auto        meta        = createMockMeta(stream.get());
     connector_->asyncMatch(resource, meta);
 
     // 2. 设置 TestRpcServer 返回成功（用于 scheduler_->sendKVCache）

@@ -98,11 +98,14 @@ private:
                                        const std::string&                         unique_key) const;
 
 private:
+    // IMPORTANT: Declaration order determines initialization order in the constructor
+    // initializer list. config_ MUST be declared before asymmetric_tp_util_ because
+    // the constructor reads config_.tp_size/tp_rank to initialize asymmetric_tp_util_.
     P2PConnectorWorkerConfig                                            config_;
     std::shared_ptr<LayerBlockConverter>                                layer_block_converter_;
     kmonitor::MetricsReporterPtr                                        metrics_reporter_;
     transfer::IKVCacheSenderPtr                                         sender_;
-    std::shared_ptr<AsymmetricTpUtil>                                   asymmetric_tp_util_;
+    std::shared_ptr<AsymmetricTpUtil>                                   asymmetric_tp_util_;  // depends on config_
     std::shared_ptr<ComputedLayerCacheBufferStore>                      computed_buffers_;
     int64_t                                                             store_wait_timeout_ms_ = 10 * 1000;
     std::shared_ptr<StoreWaitContextChecker>                            store_wait_context_checker_;

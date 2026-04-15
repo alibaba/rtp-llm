@@ -64,11 +64,6 @@ public:
     GenerateStream* generateStream() const override {
         return generate_stream_;
     }
-    void setStop(ErrorCode error_code, const std::string& error_msg) override {
-        if (generate_stream_) {
-            generate_stream_->setStop(error_code, error_msg);
-        }
-    }
 
     // P2P routing context: cached at construction time, read-only access thereafter
     std::optional<P2PRoutingContext> p2pRouting() const override {
@@ -396,16 +391,28 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
 }
 
 bool StreamCacheResource::asyncLoadCache() {
-    // load cache from connector
-    if (!reuseCache() || (!enableMemoryCache() && !enableRemoteCache())) {
+    RTP_LLM_PROFILE_FUNCTION();
+    if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
         return false;
     }
-
+    // Memory/remote connectors require reuseCache(); P2P connector does not.
+    // Skip when only memory/remote connectors are active and reuseCache is disabled.
+    const bool has_reuse_path = reuseCache() && (enableMemoryCache() || enableRemoteCache());
+    const bool has_p2p_path   = resource_context_.cache_manager->hasP2PConnector();
+    if (!has_reuse_path && !has_p2p_path) {
+        return false;
+    }
     if (load_cache_context_) {
         return true;  // 已有进行中的 load 任务（幂等）
     }
-    assert(reuseCache());
-    auto meta              = std::make_shared<MetaImpl>(enableMemoryCache(), enableRemoteCache(), stream_->traceId());
+    // Second+ initKVBlock (same stream): skip — reuse lengths already set on first load.
+    if (load_cache_once_.exchange(true)) {
+        return true;
+    }
+    auto meta = std::make_shared<MetaImpl>(
+        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
+    meta->generate_stream_ = stream_;
+    meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
     load_cache_context_    = resource_context_.cache_manager->asyncLoadCache(connector_context);
     return load_cache_context_ != nullptr;
@@ -559,6 +566,7 @@ bool StreamCacheResource::enableTieredMemoryCache() const {
 }
 
 void StreamCacheResource::loadCacheSync() {
+    RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
         return;
     }
@@ -569,7 +577,6 @@ void StreamCacheResource::loadCacheSync() {
     if (!has_reuse_path && !has_p2p_path) {
         return;
     }
-    RTP_LLM_PROFILE_FUNCTION();
     // Second+ initKVBlock (same stream): skip — reuse lengths already set on first load.
     if (load_cache_once_.exchange(true)) {
         return;
@@ -599,7 +606,7 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
         RTP_LLM_LOG_WARNING(
             "load cache done but not success, stream: [%ld], error: %s", stream_->streamId(), error.ToString().c_str());
         if (error.hasError()) {
-            stream_->setStop(error.code(), error.ToString());
+            stream_->reportError(error.code(), error.ToString());
         }
         return;
     }
