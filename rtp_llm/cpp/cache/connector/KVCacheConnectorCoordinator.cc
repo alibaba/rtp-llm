@@ -349,6 +349,7 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
     auto p2p = std::make_shared<P2PConnector>(std::move(p2p_config), layer_block_converter, metrics_reporter_);
     if (!p2p->init()) {
         RTP_LLM_LOG_ERROR("P2PConnector init failed");
+        p2p.reset();  // 显式释放，避免半初始化状态的 P2PConnector 意外使用
         return false;
     }
 
