@@ -97,9 +97,9 @@ private:
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
     // Common input preparation logic for capture
-    void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
+    void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int64_t seq_len_or_tokens);
     // Common memory hold creation logic
-    CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
+    CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int64_t tokens_count);
     void              initKernelInternalMemory();
     void              setPositionEncoding(torch::Tensor position_encoding) override;
     void              setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
@@ -114,7 +114,7 @@ private:
     /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
     bool                      tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
     void                      initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
-    void                      initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
+    void                      initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int64_t max_num_token);
     void                      initCaptureAttentionInputsPost();
     py::object                py_forward_method_;
     py::object                py_attn_pyobj_method_;
@@ -125,7 +125,7 @@ private:
     bool                      enable_cuda_graph_debug_mode_{false};
     size_t                    max_bs_{1};
     int                       num_tokens_per_bs_{1};
-    int                       max_num_token_{1};
+    int64_t                   max_num_token_{1};
     int                       max_seq_len_{0};
     int                       seq_size_per_block_{0};
     int                       kernel_seq_size_per_block_{0};
