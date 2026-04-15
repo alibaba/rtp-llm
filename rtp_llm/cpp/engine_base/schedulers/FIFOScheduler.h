@@ -68,6 +68,7 @@ protected:
     std::list<GenerateStreamPtr>    waiting_streams_;
     std::list<GenerateStreamPtr>    loading_cache_streams_;
     std::list<GenerateStreamPtr>    running_streams_;
+    std::list<GenerateStreamPtr>    new_streams_;
     std::shared_ptr<KVCacheManager> cache_manager_;
     std::atomic<int64_t>            last_schedule_time_      = autil::TimeUtility::currentTimeInMilliSeconds();
     size_t                          max_seq_len_             = 0;

@@ -272,7 +272,7 @@ void FIFOScheduler::addStreamToNewState(const GenerateStreamPtr& stream, StreamS
             break;
         case StreamState::RUNNING:
             accountBatchMetrics(stream);
-            running_streams_.push_back(stream);
+            new_streams_.push_back(stream);
             break;
         case StreamState::FINISHED:
             break;
@@ -310,6 +310,8 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     size_t prev_waiting_size = waiting_streams_.size();
     evaluateWaitingStreams(waiting_streams_);
     evaluateAndUpdateStreams(waiting_streams_);
+    running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
+    new_streams_.clear();
 
     // If streams were scheduled, trigger next scheduling round
     if (waiting_streams_.size() < prev_waiting_size) {
