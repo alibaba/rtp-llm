@@ -104,3 +104,13 @@ py_test(
     exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
 )
 
+py_test(
+    name = "test_aiter_custom_allreduce_dtype",
+    srcs = ["test_aiter_custom_allreduce_dtype.py"],
+    deps = [
+        "//rtp_llm/models_py/modules/base/rocm:rocm_base",
+    ],
+    timeout = "short",
+    tags = ["rocm"],
+)
+
