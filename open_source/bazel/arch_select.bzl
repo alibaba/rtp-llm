@@ -4,8 +4,7 @@ load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
-load("//bazel:defs.bzl", "copy_so", "copy_so_inst")
-load("//rtp_llm/cpp/cuda/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm_so_num")
+load("//bazel:defs.bzl", "copy_so")
 
 def copy_all_so():
     copy_so("//:th_transformer")
@@ -27,8 +26,6 @@ def copy_all_so():
     copy_so("@flashinfer_cpp//:flashinfer_batch_paged_decode_256")
     copy_so("@flashinfer_cpp//:flashinfer_batch_ragged_prefill_256")
     # num of so
-    copy_so_inst("//rtp_llm/cpp/cuda/deep_gemm:deepgemm_dpsk", dpsk_gemm_so_num)
-    copy_so_inst("//rtp_llm/cpp/cuda/deep_gemm:deepgemm_qwen", qwen_gemm_so_num)
     copy_so("@flashinfer_cpp//:flashinfer_sm90")
     copy_so("@deep_ep//:deep_ep_cu")
 
