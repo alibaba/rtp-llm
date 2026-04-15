@@ -90,7 +90,6 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     if (attn_inputs.context_parallel_info.has_value()
         && attn_inputs.context_parallel_info->prefill_shuffle_indices.defined()) {
         attn_params->position_ids = attn_inputs.context_parallel_info->prefill_shuffle_indices;
-        attn_params->store_cache  = false;
     } else {
         attn_params->position_ids = attn_inputs.combo_position_ids;
     }

@@ -79,8 +79,6 @@ class Qwen3VLMoeModel(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        if fmha_impl is None:
-            fmha_impl = AttnImplFactory.get_fmha_impl(inputs)
 
         position_ids = inputs.combo_position_ids
         token_type_ids = inputs.embedding_inputs.combo_tokens_type_ids

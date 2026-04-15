@@ -166,9 +166,9 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         }
 
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_kernel_block_id_device,
-            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
+                              py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_kernel_block_id_host,
-            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host);
+                              py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host);
         optimizedCopyAsync(inputs.attention_inputs.sequence_lengths_plus_1_d,
                            py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
                            state.current_batch_size * sizeof(int));
@@ -411,6 +411,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     if (need_combo_position_ids_) {
         inputs.combo_position_ids = torch::ones({int(max_bs_) * position_id_len_factor_}, options_cpu_int32_);
         inputs.combo_position_ids = inputs.combo_position_ids.pin_memory();
+        inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
     }
 
     const int64_t max_blocks = max_kv_blocks * seq_size_per_block_ / kernel_seq_size_per_block_;
@@ -710,6 +711,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     if (need_combo_position_ids_ && capture_mem_hold_.py_model_inputs_.combo_position_ids.defined()) {
         inputs.combo_position_ids =
             capture_mem_hold_.py_model_inputs_.combo_position_ids.slice(0, 0, batch_size * position_id_len_factor_);
+        inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
     }
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
         capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.slice(0, 0, batch_size);
