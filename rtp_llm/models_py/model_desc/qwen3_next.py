@@ -748,7 +748,15 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         qkvz_w = weights[W.linear_attn_qkvz_w]
         ba_w = weights[W.linear_attn_ba_w]
         has_qkvz_scale = weights.get(W.linear_attn_qkvz_s) is not None
-        self._use_merged_proj = not has_qkvz_scale and qkvz_w.dtype == ba_w.dtype
+        # Merge qkvz and ba projections if shapes are compatible and no FP8 scales
+        can_merge = (
+            not has_qkvz_scale
+            and qkvz_w.dtype == ba_w.dtype
+            and qkvz_w.ndim == 2
+            and ba_w.ndim == 2
+            and qkvz_w.shape[1] == ba_w.shape[1]
+        )
+        self._use_merged_proj = can_merge
         if self._use_merged_proj:
             self._qkvz_dim = qkvz_w.shape[0]
             merged_w = torch.cat([qkvz_w, ba_w], dim=0)
