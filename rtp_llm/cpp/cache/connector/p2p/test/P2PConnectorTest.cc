@@ -38,7 +38,8 @@ public:
 /// Wraps MockGenerateStream for P2PConnector::asyncMatch (requires Meta::generateStream() and Meta::p2pRouting()).
 class P2PMetaForConnectorTest final: public Meta {
 public:
-    explicit P2PMetaForConnectorTest(std::shared_ptr<MockGenerateStream> mock_stream): mock_stream_(std::move(mock_stream)) {}
+    explicit P2PMetaForConnectorTest(std::shared_ptr<MockGenerateStream> mock_stream):
+        mock_stream_(std::move(mock_stream)) {}
 
     bool enableMemoryCache() const override {
         return false;
@@ -58,7 +59,7 @@ public:
         static const std::vector<int64_t> kEmpty;
         return kEmpty;
     }
-    void* generateStreamOpaque() const override {
+    GenerateStream* generateStream() const override {
         return mock_stream_.get();  // Return raw pointer as opaque handle
     }
     void setStop(ErrorCode, const std::string&) override {

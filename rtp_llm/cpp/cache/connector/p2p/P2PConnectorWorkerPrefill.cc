@@ -22,6 +22,8 @@ P2PConnectorWorkerPrefill::P2PConnectorWorkerPrefill(P2PConnectorWorkerConfig   
     layer_block_converter_(layer_block_converter),
     metrics_reporter_(metrics_reporter),
     sender_(sender),
+    // Note: config_ is already initialized (declared before asymmetric_tp_util_ in the class),
+    // so reading config_.tp_size/tp_rank here is safe.
     asymmetric_tp_util_(std::make_shared<AsymmetricTpUtil>(config_.tp_size, config_.tp_rank)),
     computed_buffers_(std::make_shared<ComputedLayerCacheBufferStore>()) {}
 

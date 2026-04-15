@@ -15,6 +15,7 @@ public:
     virtual ~IKVCacheConnectorCoordinator() = default;
 
     virtual bool hasActiveConnectors() const = 0;
+    virtual bool hasP2PConnector() const     = 0;
 
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check before use).
     virtual uint32_t convertToGlobalLayerId(int model_id, int layer_id) const = 0;

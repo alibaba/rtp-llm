@@ -12,10 +12,6 @@ namespace rtp_llm {
 
 PrefillLoadCaller::PrefillLoadCaller(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {
     rpc_pool_ = std::make_shared<RPCPool>();
-    if (!rpc_pool_) {
-        RTP_LLM_LOG_ERROR("PrefillLoadCaller init failed: rpc_pool is null");
-        return;
-    }
 
     // worker_addrs 每项为 ip:cache_store_port:grpc_port（三段），解析 ip 与 cache_store_port 写入 tp_worker_infos_
     for (const auto& worker_addr : worker_addrs_) {

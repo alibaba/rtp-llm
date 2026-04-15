@@ -114,6 +114,7 @@ public:
                     std::function<bool()>                 is_cancelled = nullptr);
 
     bool hasActiveConnectors() const;
+    bool hasP2PConnector() const;
 
     std::shared_ptr<KVCacheConnectorCoordinator> connectorCoordinator() const {
         return coordinator_;

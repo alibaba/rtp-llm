@@ -15,6 +15,39 @@ std::chrono::system_clock::time_point deadlineToTimeoutPoint(int64_t deadline_ms
     return std::chrono::system_clock::now() + std::chrono::microseconds(remaining_us);
 }
 
+// Generic backoff wait: polls `predicate` under `lock`, using `cv` with exponential backoff (capped at 8ms).
+//
+// Returns true if either `predicate()` or `is_cancelled()` became true before timeout.
+// IMPORTANT: Caller must re-check `is_cancelled()` when this function returns true to distinguish
+// between "predicate satisfied" vs "operation cancelled". Return value `false` always means timeout.
+template<typename Lock>
+bool waitWithBackoff(Lock&                                 lock,
+                     std::condition_variable&              cv,
+                     std::chrono::system_clock::time_point timeout_tp,
+                     const std::function<bool()>&          predicate,
+                     const std::function<bool()>&          is_cancelled) {
+    int           sleep_ms    = 1;
+    constexpr int kBackoffCap = 8;
+    while (true) {
+        if (is_cancelled && is_cancelled()) {
+            return true;
+        }
+        if (predicate()) {
+            return true;
+        }
+        const auto now = std::chrono::system_clock::now();
+        if (now >= timeout_tp) {
+            return false;
+        }
+        auto next_wake = now + std::chrono::milliseconds(std::min(sleep_ms, kBackoffCap));
+        if (next_wake > timeout_tp) {
+            next_wake = timeout_tp;
+        }
+        cv.wait_until(lock, next_wake);
+        sleep_ms = std::min(sleep_ms * 2, kBackoffCap);
+    }
+}
+
 }  // namespace
 
 namespace rtp_llm {
@@ -42,8 +75,8 @@ bool P2PConnectorResourceStore::init() {
     return true;
 }
 
-bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>&    meta,
-                                            const KVCacheResourcePtr& kv_cache_resource) {
+bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
+                                            const KVCacheResourcePtr&    kv_cache_resource) {
     // Extract routing from Meta::p2pRouting()
     auto routing = meta->p2pRouting();
     if (!routing.has_value()) {
@@ -61,7 +94,6 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>&    meta
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         auto                        entry = std::make_shared<P2PConnectorResourceEntry>();
         entry->request_id                 = routing->request_id;
-        entry->generate_stream            = static_cast<GenerateStream*>(meta->generateStreamOpaque());
         entry->unique_key                 = unique_key;
         entry->kv_cache_resource          = kv_cache_resource;
         entry->deadline_ms                = routing->deadline_ms;
@@ -77,33 +109,12 @@ bool P2PConnectorResourceStore::waitForResourceOrCancellation(std::unique_lock<s
                                                               const std::string&                    unique_key,
                                                               std::chrono::system_clock::time_point timeout_tp,
                                                               const std::function<bool()>&          is_cancelled) {
-    // is_cancelled 由外部线程设置时不会 notify resource_cv_；用带退避、有上界的 wait_until 轮询
-    // （与 prefill waitForBroadcastCompletion 类似），addResource 仍会 notify_all。
-    bool          satisfied   = false;
-    int           sleep_ms    = 1;
-    constexpr int kBackoffCap = 8;
-    while (true) {
-        if (is_cancelled && is_cancelled()) {
-            satisfied = true;
-            break;
-        }
-        if (resource_map_.find(unique_key) != resource_map_.end()) {
-            satisfied = true;
-            break;
-        }
-        const auto now = std::chrono::system_clock::now();
-        if (now >= timeout_tp) {
-            satisfied = false;
-            break;
-        }
-        auto next_wake = now + std::chrono::milliseconds(std::min(sleep_ms, kBackoffCap));
-        if (next_wake > timeout_tp) {
-            next_wake = timeout_tp;
-        }
-        resource_cv_.wait_until(lock, next_wake);
-        sleep_ms = std::min(sleep_ms * 2, kBackoffCap);
-    }
-    return satisfied;
+    return waitWithBackoff(
+        lock,
+        resource_cv_,
+        timeout_tp,
+        [&]() { return resource_map_.find(unique_key) != resource_map_.end(); },
+        is_cancelled);
 }
 
 std::shared_ptr<P2PConnectorResourceEntry>
@@ -186,12 +197,12 @@ void P2PConnectorResourceStore::reportMetrics(bool timeout, bool cancelled, int6
     }
 }
 
-void P2PConnectorResourceStore::notifySideChannelReady(const std::string& unique_key,
+void P2PConnectorResourceStore::notifySideChannelReady(const std::string&                                unique_key,
                                                        const P2PConnectorResourceEntry::SideChannelData& data) {
     std::shared_ptr<P2PConnectorResourceEntry> entry;
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
-        auto it = resource_map_.find(unique_key);
+        auto                        it = resource_map_.find(unique_key);
         if (it == resource_map_.end()) {
             RTP_LLM_LOG_WARNING("notifySideChannelReady: entry not found, unique_key: %s", unique_key.c_str());
             return;
@@ -207,8 +218,8 @@ void P2PConnectorResourceStore::notifySideChannelReady(const std::string& unique
         entry->side_channel_ready = true;
     }
     entry->side_channel_cv.notify_all();
-    RTP_LLM_LOG_DEBUG("notifySideChannelReady: unique_key: %s, first_token: %ld",
-                      unique_key.c_str(), data.first_token_id);
+    RTP_LLM_LOG_DEBUG(
+        "notifySideChannelReady: unique_key: %s, first_token: %ld", unique_key.c_str(), data.first_token_id);
 }
 
 bool P2PConnectorResourceStore::waitSideChannelReady(const std::string&    unique_key,
@@ -217,7 +228,7 @@ bool P2PConnectorResourceStore::waitSideChannelReady(const std::string&    uniqu
     std::shared_ptr<P2PConnectorResourceEntry> entry;
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
-        auto it = resource_map_.find(unique_key);
+        auto                        it = resource_map_.find(unique_key);
         if (it != resource_map_.end()) {
             entry = it->second;
         }
@@ -228,28 +239,24 @@ bool P2PConnectorResourceStore::waitSideChannelReady(const std::string&    uniqu
     }
 
     std::unique_lock<std::mutex> lock(entry->side_channel_mutex);
-    const int64_t start_time_us = currentTimeUs();
-    const int64_t remaining_us  = deadline_ms * 1000 - start_time_us;
+    const int64_t                start_time_us = currentTimeUs();
+    const int64_t                remaining_us  = deadline_ms * 1000 - start_time_us;
     if (remaining_us <= 0) {
         RTP_LLM_LOG_WARNING("waitSideChannelReady: past deadline, unique_key: %s", unique_key.c_str());
         return false;
     }
 
-    const auto timeout_tp = std::chrono::system_clock::now() + std::chrono::microseconds(remaining_us);
-    while (!entry->side_channel_ready) {
-        if (is_cancelled && is_cancelled()) {
-            RTP_LLM_LOG_DEBUG("waitSideChannelReady: cancelled, unique_key: %s", unique_key.c_str());
-            return false;
-        }
-        entry->side_channel_cv.wait_until(lock, timeout_tp);
-        if (!entry->side_channel_ready) {
-            if (std::chrono::system_clock::now() >= timeout_tp) {
-                RTP_LLM_LOG_WARNING("waitSideChannelReady: timeout, unique_key: %s", unique_key.c_str());
-                return false;
-            }
-        }
+    const auto timeout_tp = deadlineToTimeoutPoint(deadline_ms, start_time_us);
+    bool       ready      = waitWithBackoff(
+        lock, entry->side_channel_cv, timeout_tp, [&]() { return entry->side_channel_ready; }, is_cancelled);
+
+    if (!ready) {
+        RTP_LLM_LOG_WARNING("waitSideChannelReady: timeout, unique_key: %s", unique_key.c_str());
+    } else if (is_cancelled && is_cancelled()) {
+        RTP_LLM_LOG_DEBUG("waitSideChannelReady: cancelled, unique_key: %s", unique_key.c_str());
+        return false;
     }
-    return true;
+    return ready;
 }
 
 }  // namespace rtp_llm
