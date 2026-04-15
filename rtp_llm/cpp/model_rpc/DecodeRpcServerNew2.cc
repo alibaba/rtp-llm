@@ -72,8 +72,6 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     }
     CHECK_ERROR_STATUS(generate_context);
 
-    input->lora_id  = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
-    auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
     auto stream = engine_->makeStream(input);
     generate_context.setStream(stream);

@@ -22,12 +22,6 @@ grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                 
         RTP_LLM_LOG_WARNING("prefill rpc server new2 init failed, connector coordinator is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "connector coordinator is null");
     }
-    auto device = engine_->getDevice();
-    if (!device) {
-        RTP_LLM_LOG_WARNING("prefill rpc server new2 init failed, device is null");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "device is null");
-    }
-    device->setConnectorCoordinator(connector_coordinator);
     return grpc::Status::OK;
 }
 
@@ -67,8 +61,6 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
     }
     CHECK_ERROR_STATUS(generate_context);
 
-    input->lora_id  = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
-    auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
     auto stream = engine_->enqueue(input);
     generate_context.setStream(stream);

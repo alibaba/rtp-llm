@@ -168,7 +168,6 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                           payload->remote_reuse_len,
                           payload->memory_reuse_len);
     }
-
     // 3. Speculative proposal info
     if (!payload->propose_tokens.empty()) {
         stream->setReuseLength(stream->seqLength() - 1);
@@ -348,6 +347,11 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         stream_->setMtpTokenIndex(result.reuse_len);
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
+        // In PD-sep decode role, device cache hit means prefill-side reuse,
+        // record it as prefill reuse lengths for aux_info reporting.
+        if (is_decode_role) {
+            stream_->setPrefillReuseLength(result.reuse_len, result.reuse_len, 0, 0);
+        }
     }
     loadCacheSync();
     return absl::OkStatus();
@@ -525,6 +529,14 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
         stream_->setMtpTokenIndex(total_reuse_len);
         stream_->setMemoryReuseLength(memory_reuse_len);
         stream_->setRemoteReuseLength(remote_reuse_len);
+        // In PD-sep decode role, the cache load result comes from prefill side,
+        // so also record it as prefill reuse lengths for aux_info reporting.
+        if (resource_context_.role_type == RoleType::DECODE) {
+            stream_->setPrefillReuseLength(total_reuse_len,
+                                           device_reuse_len + memory_reuse_len,
+                                           remote_reuse_len,
+                                           memory_reuse_len);
+        }
     }
 
     // Apply P2P side-channel data (first token, reuse, SP info, position_ids) from read context
