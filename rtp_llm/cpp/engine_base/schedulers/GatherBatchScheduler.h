@@ -61,7 +61,7 @@ public:
             // Gather exactly gather_batch_size_ streams
             std::list<GenerateStreamPtr> new_streams;
             for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
-                if (!(*it)->hasError() && !(*it)->hasEvent(StreamEvents::CanRun)) {
+                if (!(*it)->hasError()) {
                     new_streams.push_back(*it);
                 }
                 if (new_streams.size() >= static_cast<size_t>(gather_batch_size_)) {
@@ -89,8 +89,8 @@ public:
                 for (auto& stream : new_streams) {
                     waiting_streams_.remove(stream);
                 }
-                gather_batch_size_ = 1;
             }
+            gather_batch_size_ = 1;
         }
 
         return running_streams_;
