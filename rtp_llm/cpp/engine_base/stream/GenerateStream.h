@@ -537,8 +537,8 @@ protected:
 protected:
     uint64_t                             stream_magic_ = STREAM_MAGIC;
     std::shared_ptr<GenerateInput>       generate_input_;
-    std::shared_ptr<GenerateStatus>      generate_status_;
-    std::vector<GenerateStatus>          sub_generate_status_;
+    std::shared_ptr<GenerateStateMachine>      generate_status_;
+    std::vector<StreamState>          sub_generate_status_;
     int                                  max_seq_len_;
     int64_t                              vocab_size_;
     std::shared_ptr<CompleteTokenIds>    complete_token_ids_;

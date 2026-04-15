@@ -521,6 +521,7 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_WithMemoryCache_SubmitsLoad) 
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
                                                                              cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 
     auto mock_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -548,6 +549,7 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_CoordinatorReturnsNull_Return
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
                                                                              cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 
     // Coordinator returns nullptr (no connector available)
@@ -578,6 +580,7 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_Pending_ReturnsFalse) {
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
                                                                              cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 
     auto mock_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -604,6 +607,7 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_Done_ReturnsTrue_ClearsContext
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
                                                                              cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 
     // Build a complete FusedAsyncReadContext that is immediately done
@@ -647,6 +651,7 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReus
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
                                                                              cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 
     auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -710,19 +715,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     auto                  load_ctx1 = std::make_shared<FusedAsyncReadContext>(fused_match1, kv_resource1, meta1);
     load_ctx1->setFusedReadContext(nullptr);
 
-    // Second call: asyncLoadCache returns 0 reuse blocks (cache already consumed)
-    auto match_child2 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
-    ON_CALL(*match_child2, done()).WillByDefault(testing::Return(true));
-    ON_CALL(*match_child2, success()).WillByDefault(testing::Return(true));
-    auto fused_match2 = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child2});
-
-    auto kv_resource2 = std::make_shared<KVCacheResource>();
-    // All reuse block nums default to 0
-
-    std::shared_ptr<Meta> meta2;
-    auto                  load_ctx2 = std::make_shared<FusedAsyncReadContext>(fused_match2, kv_resource2, meta2);
-    load_ctx2->setFusedReadContext(nullptr);
-
+    // Second call: load_cache_once_ prevents re-issue (no asyncRead call expected)
     // loadCacheSync runs once inside initKVBlock; second initKVBlock skips async read (load_cache_once_).
     EXPECT_CALL(*mock_coord, asyncRead(testing::_))
         .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(load_ctx1)));
@@ -738,7 +731,9 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
 
-    // Second initKVBlock + asyncLoadCache + loadCacheDone: returns 0 reuse — must NOT overwrite.
+    // Second initKVBlock + asyncLoadCache + loadCacheDone: load_cache_once_ prevents re-issue.
+    // The once-per-lifecycle guard means the second asyncLoadCache() returns false (skipped),
+    // which inherently preserves the reuse lengths set by the first load.
     ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
     ASSERT_TRUE(resource.asyncLoadCache());
     ASSERT_TRUE(resource.loadCacheDone());

@@ -47,6 +47,7 @@ protected:
                                                                                   cache_manager_->runtime_config_,
                                                                                   cache_manager_->allocator_,
                                                                                   nullptr);
+        ON_CALL(*mock_coord_, hasActiveConnectors()).WillByDefault(Return(true));
         cache_manager_->coordinator_ = mock_coord_;
     }
 
