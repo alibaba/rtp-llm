@@ -317,31 +317,33 @@ junit_logging = "all"
 # Markers matching Bazel tags
 markers = [
     # Device/Platform markers
-    "gpu: requires GPU (any type)",
+    "gpu(type, count): requires GPU — use @pytest.mark.gpu(type='A10', count=1)",
     "cpu: CPU-only tests (no GPU required)",
     "cuda: CUDA-specific tests (NVIDIA GPU)",
     "rocm: ROCm-specific tests (AMD GPU)",
+    "ppu: PPU-specific tests",
 
-    # GPU type markers
-    "A10: requires NVIDIA A10 GPU",
-    "GeForce_RTX_3090: requires NVIDIA GeForce RTX 3090 GPU",
-    "GeForce_RTX_4090: requires NVIDIA GeForce RTX 4090 GPU",
-    "Tesla_V100S_PCIE_32GB: Tesla V100S",
-    "L20: requires NVIDIA L20 GPU",
-    "H20: requires NVIDIA H20 GPU",
-    "SM100: requires NVIDIA SM100 GPU",
-    "SM100_ARM: requires NVIDIA SM100 ARM GPU",
-    "MI308X: requires AMD MI308X GPU",
+    # Legacy GPU type markers (deprecated — use gpu(type=...) instead)
+    "A10: (deprecated) use gpu(type='A10')",
+    "GeForce_RTX_3090: (deprecated) use gpu(type='GeForce_RTX_3090')",
+    "GeForce_RTX_4090: (deprecated) use gpu(type='GeForce_RTX_4090')",
+    "Tesla_V100S_PCIE_32GB: (deprecated) use gpu(type='Tesla_V100S_PCIE_32GB')",
+    "L20: (deprecated) use gpu(type='L20')",
+    "H20: (deprecated) use gpu(type='H20')",
+    "SM100: (deprecated) use gpu(type='SM100')",
+    "SM100_ARM: (deprecated) use gpu(type='SM100_ARM')",
+    "MI308X: (deprecated) use gpu(type='MI308X')",
+    "PPU_ZW810E: (deprecated) use gpu(type='PPU_ZW810E')",
 
     # Test type markers
-    "smoke: smoke tests - quick sanity checks",
+    "smoke: smoke tests",
     "light: light smoke test suite (quick validation)",
     "manual: manual tests - not run automatically",
-    "slow: slow tests - may take long time",
+    "slow: slow tests",
     "perf: performance tests",
-    "remote_cache: remote cache tests",
+    "timeout(timeout): per-test timeout override from pytest-timeout",
 
-    # Feature-specific markers
+    # Feature markers
     "open_skip: skip in open source build",
 ]
 
