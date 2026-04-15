@@ -20,11 +20,8 @@
 
 namespace rtp_llm {
 
-class GenerateStream;
-
 struct P2PConnectorResourceEntry {
     int64_t                      request_id;         // 请求 ID
-    GenerateStream*              generate_stream;    // GenerateStream 指针（非拥有，生命周期由引擎管理）
     std::string                  unique_key;         // 路由唯一标识（从 Meta::P2PRoutingContext 填充）
     KVCacheResourcePtr           kv_cache_resource;  // KV cache 资源引用，用于保持引用计数
     int64_t                      deadline_ms;        // 过期时间

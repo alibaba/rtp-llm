@@ -29,6 +29,12 @@ struct AsymmetricTPContext {
 };
 
 /// @brief 不对称TP工具类
+///
+/// 整除校验说明：
+/// - prefill_tp_size 在初始化时已知（config_.tp_size）
+/// - decode_tp_size 只能在请求时通过 decode_transfer_servers.size() 获取
+/// - 因此整除校验最早只能在 handleAsymmetricTP() 中进行，无法提前到 init() 阶段
+/// - 当前实现已是 fail-early 的最优解：在请求处理的最早阶段进行校验
 class AsymmetricTpUtil {
 public:
     AsymmetricTpUtil(int64_t tp_size, int64_t tp_rank);

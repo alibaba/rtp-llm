@@ -39,37 +39,31 @@ void P2PConnectorSchedulerDecode::stopChecker() {
     }
 }
 
-P2PConnectorSchedulerDecode::AsyncReadResult
-P2PConnectorSchedulerDecode::asyncRead(const KVCacheResourcePtr&    resource,
-                                       const std::shared_ptr<Meta>& meta,
-                                       const std::pair<int, int>&   block_range) {
+P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncRead(
+    const KVCacheResourcePtr& resource, const std::shared_ptr<Meta>& meta, const std::pair<int, int>& block_range) {
     if (!meta || !resource) {
         RTP_LLM_LOG_WARNING("asyncRead: meta or resource is null");
-        return {
-            nullptr,
-            ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "meta or resource is null")};
+        return {nullptr, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "meta or resource is null")};
     }
 
     // Extract routing from Meta::p2pRouting()
     auto routing = meta->p2pRouting();
     if (!routing.has_value()) {
         RTP_LLM_LOG_WARNING("asyncRead: meta->p2pRouting() returned nullopt");
-        return {nullptr,
-                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
-                          "meta->p2pRouting() returned nullopt")};
+        return {
+            nullptr,
+            ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "meta->p2pRouting() returned nullopt")};
     }
 
-    const int64_t     request_id  = routing->request_id;
-    const std::string unique_key  = routing->unique_key;
-    const int64_t     deadline_ms = routing->deadline_ms;
-    const auto&       prefill_addr = routing->prefill_addr;
+    const int64_t     request_id      = routing->request_id;
+    const std::string unique_key      = routing->unique_key;
+    const int64_t     deadline_ms     = routing->deadline_ms;
+    const auto&       prefill_addr    = routing->prefill_addr;
     const int         prefill_tp_size = routing->prefill_tp_size;
 
     if (unique_key.empty()) {
         RTP_LLM_LOG_WARNING("asyncRead: unique_key is empty");
-        return {nullptr,
-                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
-                          "unique_key is empty")};
+        return {nullptr, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "unique_key is empty")};
     }
 
     if (prefill_addr.first.empty() || prefill_addr.second == 0) {
@@ -88,7 +82,7 @@ P2PConnectorSchedulerDecode::asyncRead(const KVCacheResourcePtr&    resource,
                 ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "layer_cache_buffers is empty")};
     }
 
-    auto generate_stream = static_cast<GenerateStream*>(meta->generateStreamOpaque());
+    auto      generate_stream = meta->generateStream();
     ErrorInfo start_error;
     auto      async_calls = startAsyncReadCalls(request_id,
                                            prefill_addr.first,
@@ -115,16 +109,16 @@ P2PConnectorSchedulerDecode::asyncRead(const KVCacheResourcePtr&    resource,
 }
 
 std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSchedulerDecode::startAsyncReadCalls(
-    int64_t                                               request_id,
-    const std::string&                                    prefill_ip,
-    uint32_t                                              prefill_port,
-    const std::string&                                    unique_key,
-    int64_t                                               deadline_ms,
-    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-    GenerateStream*                                       generate_stream,
+    int64_t                                                 request_id,
+    const std::string&                                      prefill_ip,
+    uint32_t                                                prefill_port,
+    const std::string&                                      unique_key,
+    int64_t                                                 deadline_ms,
+    const std::vector<std::shared_ptr<LayerCacheBuffer>>&   layer_cache_buffers,
+    GenerateStream*                                         generate_stream,
     const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
-    ErrorInfo&                                            out_error,
-    int                                                   prefill_tp_size) {
+    ErrorInfo&                                              out_error,
+    int                                                     prefill_tp_size) {
 
     auto server_call_result =
         server_caller_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, generate_stream);

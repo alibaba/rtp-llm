@@ -41,6 +41,7 @@ public:
     bool init();
 
     bool hasActiveConnectors() const override;
+    bool hasP2PConnector() const override;
 
     // virtual for test
     virtual std::shared_ptr<AsyncContext>

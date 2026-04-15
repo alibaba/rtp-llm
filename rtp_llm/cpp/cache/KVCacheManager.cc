@@ -446,6 +446,10 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
     return allocator_->incrKVCacheRef(resource, cache_keys, is_connector);
 }
 
+bool KVCacheManager::hasP2PConnector() const {
+    return coordinator_ && coordinator_->hasP2PConnector();
+}
+
 // 异步连接器操作
 
 std::shared_ptr<AsyncContext>
