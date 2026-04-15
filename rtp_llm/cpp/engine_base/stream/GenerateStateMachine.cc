@@ -59,8 +59,9 @@ void GenerateStateMachine::handleWaiting() {
         reportEvent(StreamEvents::LoadInitiated);
         if (ret) {
             status.store(StreamState::LOADING_CACHE, std::memory_order_release);
-        } else {
+        } else if (stream_cache_resource_->resourceContext().role_type != RoleType::DECODE) {
             // Loading cache 失败或不需要loading，直接触发重计算
+            // 当前decodeRpcServer会调用moveToNext，判断role type避免decodeRpcServer在enqueue前提早走到running状态
             status.store(StreamState::RUNNING, std::memory_order_release);
         }
         return;

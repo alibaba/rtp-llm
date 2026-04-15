@@ -104,7 +104,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     // WAITING -> LOADING_CACHE -> WAITING, 直到load cache完成并移动到 WAITING 状态
     // NOTE: 此处的 busy-wait 是安全的，因为 stream 尚未 enqueue 到 scheduler，
     // 不会与其他线程并发调用 moveToNext()。gRPC 线程独占驱动状态机直到 WAITING。
-    while (!generate_stream->hasError() && generate_stream->moveToNext() != StreamState::WAITING) {
+    while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
         this_thread::sleep_for(chrono::milliseconds(1));
     }
     if (generate_stream->hasError()) {
