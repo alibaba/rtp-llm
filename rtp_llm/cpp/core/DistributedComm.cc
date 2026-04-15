@@ -121,7 +121,11 @@ void c10dBroadcast(const BroadcastParams& params) {
         c10d::BroadcastOptions  opts;
         opts.rootRank = params.root;
         auto work     = entry.pg->broadcast(tensors, opts);
-        work->wait();
+        if (params.no_timeout) {
+            work->wait(std::chrono::milliseconds::max());
+        } else {
+            work->wait();
+        }
         if (on_cpu) {
             buffer.copy_(tensors[0]);
         }

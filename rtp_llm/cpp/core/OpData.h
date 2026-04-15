@@ -629,6 +629,7 @@ struct BroadcastParams {
     const int64_t                     root;
     ParallelMode                      mode       = ParallelMode::TP;
     bool                              overlapped = false;
+    bool                              no_timeout = false;
 };
 
 enum class ReduceOp {

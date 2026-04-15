@@ -59,7 +59,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
-    execBroadcast({{shape_hints_t}, 0});
+    // no_timeout=true: in pure TP mode, non-rank-0 workers may block here indefinitely
+    // waiting for rank-0 to finish scheduling, so disable the c10d default timeout to
+    // avoid spurious timeout errors.
+    execBroadcast({{shape_hints_t}, 0, ParallelMode::TP, false, /*no_timeout=*/true});
     execSyncCommunication(false);
     cudaSyncAndCheck();
 
