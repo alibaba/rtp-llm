@@ -18,25 +18,26 @@ torch::Tensor genBaseCache(const int   rope_dim,
                            const float rope_scale,
                            const int   max_position_embeddings,
                            const bool  interleave) {
+    // Compute on GPU to avoid CPU multi-threading non-determinism
+    // (CPU torch.cos/sin can produce different float32 results across processes
+    //  due to MKL/SIMD thread scheduling, causing ~2% cross-rank divergence)
+    auto gpu_opts = torch::TensorOptions(torch::kInt64).device(torch::kCUDA);
     auto inv_freq =
-        1.f / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
-    auto t = torch::arange(max_position_embeddings * rope_scale, torch::kInt64).to(torch::kFloat32);
+        1.f / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, gpu_opts).to(torch::kFloat32) / rope_dim);
+    auto t = torch::arange(max_position_embeddings * rope_scale, gpu_opts).to(torch::kFloat32);
     t.div_(rope_scale);
     auto freqs = torch::outer(t, inv_freq);
-    auto cos   = freqs.cos().to(torch::kFloat32);
-    auto sin   = freqs.sin().to(torch::kFloat32);
+    auto cos   = freqs.cos();
+    auto sin   = freqs.sin();
 
     torch::Tensor cos_sin;
     if (interleave) {
-        // Interleaved format: [cos[0], sin[0], cos[1], sin[1], cos[2], sin[2], ...]
         cos_sin = torch::stack({cos, sin}, 0).permute({1, 2, 0}).reshape({cos.size(0), -1}).contiguous();
     } else {
-        // Non-interleaved format (flashinfer compatible): [cos[0], cos[1], ..., sin[0], sin[1], ...]
-        // Cosine is the first half and Sine is the second half on rotary_dim
         cos_sin = torch::cat({cos, sin}, 1).contiguous();
     }
 
-    return cos_sin.cuda();
+    return cos_sin;
 }
 
 torch::Tensor genYarnCache(const int   rope_dim,
@@ -48,8 +49,8 @@ torch::Tensor genYarnCache(const int   rope_dim,
                            const float extrapolation_factor,
                            const float mscale,
                            const bool  interleave) {
-    auto pos_freqs =
-        torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
+    auto  gpu_opts  = torch::TensorOptions(torch::kInt64).device(torch::kCUDA);
+    auto  pos_freqs = torch::pow(rope_theta, torch::arange(0, rope_dim, 2, gpu_opts).to(torch::kFloat32) / rope_dim);
     auto  inv_freq_extrapolation = 1.f / pos_freqs;
     auto  inv_freq_interpolation = 1.f / (rope_scale * pos_freqs);
     float low                    = static_cast<float>(std::max(
@@ -61,26 +62,23 @@ torch::Tensor genYarnCache(const int   rope_dim,
     if (std::fabs(low - high) < 1e-6) {
         high += 0.001f;
     }
-    auto linear        = (torch::arange(rope_dim / 2, torch::kInt64).to(torch::kFloat32) - low) / (high - low);
+    auto linear        = (torch::arange(rope_dim / 2, gpu_opts).to(torch::kFloat32) - low) / (high - low);
     auto ramp          = torch::clamp(linear, 0, 1);
     auto inv_freq_mask = (1.f - ramp) * extrapolation_factor;
     auto inv_freq      = inv_freq_interpolation * (1.f - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask;
-    auto t             = torch::arange(max_position_embeddings * rope_scale, torch::kInt64).to(torch::kFloat32);
+    auto t             = torch::arange(max_position_embeddings * rope_scale, gpu_opts).to(torch::kFloat32);
     auto freqs         = torch::outer(t, inv_freq);
-    auto cos           = freqs.cos().to(torch::kFloat32) * mscale;
-    auto sin           = freqs.sin().to(torch::kFloat32) * mscale;
+    auto cos           = freqs.cos() * mscale;
+    auto sin           = freqs.sin() * mscale;
 
     torch::Tensor cos_sin;
     if (interleave) {
-        // Interleaved format: [cos[0], sin[0], cos[1], sin[1], cos[2], sin[2], ...]
         cos_sin = torch::stack({cos, sin}, 0).permute({1, 2, 0}).reshape({cos.size(0), -1}).contiguous();
     } else {
-        // Non-interleaved format (flashinfer compatible): [cos[0], cos[1], ..., sin[0], sin[1], ...]
-        // Cosine is the first half and Sine is the second half on rotary_dim
         cos_sin = torch::cat({cos, sin}, 1).contiguous();
     }
 
-    return cos_sin.cuda();
+    return cos_sin;
 }
 
 torch::Tensor getRopeCache(const RopeConfig& rope_config, const int max_position_embeddings, const bool interleave) {
