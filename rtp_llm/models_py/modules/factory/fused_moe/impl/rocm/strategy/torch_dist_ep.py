@@ -1,5 +1,6 @@
 """Torch distributed-based EP strategy (no DeepEP dependency)."""
 
+import os
 from typing import Any
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -19,7 +20,9 @@ class TorchDistEpNormalStrategy(MoeStrategy):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        """Only applicable when DeepEP is NOT available."""
+        """Applicable when DeepEP is NOT available, or USE_TORCH_DIST_EP=1 is set."""
+        if os.environ.get('USE_TORCH_DIST_EP', '0') == '1':
+            return
         try:
             import deep_ep  # noqa: F401
 
