@@ -91,36 +91,4 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-cc_test(
-    name = "deep_gemm_plugin_test",
-    srcs = [
-        "test/deep_gemm_plugin_test.cpp",
-    ],
-    copts = copts(),
-    deps = [
-        ":deep_gemm_plugins_impl",
-        "@com_google_googletest//:gtest",
-        "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/cpp/cuda/ops:cuda_impl",
-    ] + torch_deps(),
-    timeout = "long",
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
-    name = "config_utils_test",
-    srcs = [
-        "test/config_utils_test.cpp",
-    ],
-    copts = copts(),
-    deps = [
-        ":deep_gemm_plugins_impl",
-        "@com_google_googletest//:gtest",
-        "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/cpp/cuda/ops:cuda_impl",
-    ] + torch_deps(),
-    timeout = "long",
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
-)
+# deep_gemm_plugin_test and config_utils_test removed (require H20 hardware)

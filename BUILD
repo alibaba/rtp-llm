@@ -1,6 +1,7 @@
 load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
 load("//:def.bzl", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps", "flashinfer_deps", "select_py_bindings")
+load("//bazel:defs.bzl", "pip_rpath_linkopts")
 load("@bazel_skylib//lib:selects.bzl", "selects")
 flashinfer_deps()
 
@@ -94,9 +95,7 @@ config_setting(
 cc_binary(
     name = "th_transformer_config",
     copts = copts(),
-    linkopts = [
-        "-Wl,-rpath='$$ORIGIN'",
-    ],
+    linkopts = pip_rpath_linkopts(),
     linkshared = 1,
     visibility = ["//visibility:public"],
     deps = [
@@ -107,8 +106,7 @@ cc_binary(
 cc_binary(
     name = "rtp_compute_ops",
     copts = copts(),
-    linkopts = [
-        "-Wl,-rpath='$$ORIGIN'",
+    linkopts = pip_rpath_linkopts() + [
         "-Wl,-rpath=$(NVSHMEM_DIR)/lib",
         "-L$(NVSHMEM_DIR)/lib",
     ],
@@ -130,10 +128,7 @@ cc_binary(
         ":rtp_compute_ops",
     ],
     copts = copts(),
-    linkopts = [
-        "-Wl,-rpath='$$ORIGIN'",
-        # "-Wl,--exclude-libs,ALL",  # 添加这行，隐藏静态库符号
-    ],
+    linkopts = pip_rpath_linkopts(),
     linkshared = 1,
     visibility = ["//visibility:public"],
     deps = [
@@ -141,15 +136,7 @@ cc_binary(
     ],
 )
 
-exports_files(["cc_test_wrapper.sh"])
-
-py_runtime(
-    name = "python310",
-    interpreter_path = "/opt/conda310/bin/python",
-    python_version = "PY3",
-    stub_shebang = "#!/opt/conda310/bin/python",
-    visibility = ["//visibility:public"],
-)
+exports_files(["cc_test_wrapper.sh", "pyproject.toml"])
 
 refresh_compile_commands(
     name = "refresh_compdb",

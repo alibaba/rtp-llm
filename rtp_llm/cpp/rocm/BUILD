@@ -15,12 +15,12 @@ cc_library(
     srcs = glob([
         "*.cc",
         "int4_gemm_kernels/*.cc",
-    ], exclude=["rocmMoeWrapper.cc"]),
+    ], exclude=["rocmMoeWrapper.cc", "rocmFmhaWrapper.cc"]),
     hdrs = glob([
         "*.h",
         "int4_gemm_kernels/*.h",
         "*.cuh",
-    ], exclude=["rocmMoeWrapper.h"]),
+    ], exclude=["rocmMoeWrapper.h", "rocmFmhaWrapper.h"]),
     deps = [
         "@local_config_rocm//rocm:rocm",
         "@local_config_rocm//rocm:rocm_headers",
@@ -40,7 +40,7 @@ cc_library(
         "@//:using_aiter_src": [
             "@aiter_src//:module_mha_fwd",
         ],
-        "//conditions:default": ["@aiter//:module_mha_fwd",],
+        "//conditions:default": [],
     }),
     copts = rocm_copts(),
     include_prefix = "src",

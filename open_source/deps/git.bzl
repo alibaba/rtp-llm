@@ -98,17 +98,6 @@ def git_deps():
         commit = "1477dbab59b401daa94acedbeaefe79bf9112167",
     )
 
-    git_repository(
-        name = "rules_python",
-        remote = "https://github.com/bazelbuild/rules_python.git",
-        commit = "084b877c98b580839ceab2b071b02fc6768f3de6",
-        patches = [
-            "//patches/rules_python:0001-add-extra-data.patch",
-            "//patches/rules_python:0002-remove-import-from-rules_cc.patch",
-            "//patches/rules_python:0001-xx.patch",
-        ],
-    )
-
     new_git_repository(
         name = "cutlass_fa",
         remote = "https://github.com/NVIDIA/cutlass.git",
