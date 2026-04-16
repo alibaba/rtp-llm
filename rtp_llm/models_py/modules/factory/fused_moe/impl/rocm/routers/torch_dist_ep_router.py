@@ -8,17 +8,17 @@ all_to_all provides sufficient performance.
 
 Protocol:
   Dispatch:
-    1. Flatten [tokens, topk] → [flat_total] pairs of (hidden, global_expert_id, weight)
+    1. Flatten [tokens, topk] -> [flat_total] pairs of (hidden, global_expert_id, weight)
     2. Classify each pair by destination rank (rank = global_expert_id // experts_per_rank)
     3. Build per-dst-rank send buffers, pad to max across all ranks
-    4. all_to_all hidden/weights/ids/orig_idx → each rank gets its expert's tokens
+    4. all_to_all hidden/weights/ids/orig_idx -> each rank gets its expert's tokens
        along with the original flattened index for combine
     5. Remap global expert IDs to local IDs for executor
 
   Combine:
-    1. Weight expert outputs by router weights
-    2. All-gather weighted outputs + orig_flat_idx from all ranks
-    3. Scatter into [flat_total, H] using index_add, then sum over topk
+    1. Weight expert outputs by router weights (unless apply_router_weight_on_input)
+    2. Reverse all_to_all: re-pad expert outputs, all_to_all back to source ranks
+    3. Unpad using send_counts, scatter using saved orig flat indices
 """
 
 from typing import Any, Optional
@@ -74,6 +74,7 @@ class TorchDistEpRouter(FusedMoeDataRouter):
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if TorchDistEpRouter can handle the configuration."""
+        import os
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
@@ -83,10 +84,12 @@ class TorchDistEpRouter(FusedMoeDataRouter):
         checker.check(not resolver.is_single_gpu(config))
         checker.check(not resolver.use_all_gather(config))
         checker.check(not resolver.use_low_latency(config))
+        # When USE_TORCH_DIST_EP=1, skip DeepEP check
+        if os.environ.get('USE_TORCH_DIST_EP', '0') == '1':
+            return
         # DeepEP must NOT be available (otherwise prefer DeepEP version)
         try:
             import deep_ep  # noqa: F401
-
             checker.check(False)
         except ImportError:
             pass
@@ -110,6 +113,7 @@ class TorchDistEpRouter(FusedMoeDataRouter):
 
         # Metadata cached between prepare() and finalize()
         self._dispatch_meta: dict[str, Any] = {}
+        self._debug_call_count = 0
 
     # ------------------------------------------------------------------ #
     #  Dispatch
@@ -125,15 +129,15 @@ class TorchDistEpRouter(FusedMoeDataRouter):
 
         Args:
             hidden_states: [num_tokens, hidden_size]
-            topk_ids:      [num_tokens, topk] — global expert IDs
+            topk_ids:      [num_tokens, topk] -- global expert IDs
             topk_weights:  [num_tokens, topk]
 
         Returns:
-            recv_hidden:  [recv_count, hidden_size] — tokens for our experts
-            recv_weights: [recv_count] — router weights
-            recv_lids:    [recv_count] — local expert IDs
-            recv_oids:    [recv_count] — original flat indices
-            send_counts:  per-dst-rank token counts
+            recv_hidden:  [recv_total, hidden_size] -- tokens for our experts
+            recv_weights: [recv_total] -- router weights
+            recv_lids:    [recv_total] -- local expert IDs
+            recv_oids:    [recv_total] -- original flat indices (from source rank)
+            send_counts:  per-dst-rank token counts (what THIS rank sent)
         """
         num_tokens, hidden_dim = hidden_states.shape
         topk = topk_ids.shape[1]
@@ -141,7 +145,7 @@ class TorchDistEpRouter(FusedMoeDataRouter):
         device = hidden_states.device
         dtype = hidden_states.dtype
 
-        # Flatten: [num_tokens, topk] → [flat_total]
+        # Flatten: [num_tokens, topk] -> [flat_total]
         flat_h = (
             hidden_states.unsqueeze(1)
             .expand(-1, topk, -1)
@@ -180,10 +184,27 @@ class TorchDistEpRouter(FusedMoeDataRouter):
                 send_o_chunks.append(torch.empty(0, dtype=torch.int64, device=device))
                 send_counts.append(0)
 
-        # Gather max chunk size across ranks for padding alignment
+        # Exchange send_counts via all_to_all_single to get recv_counts
+        send_counts_t = torch.tensor(send_counts, dtype=torch.int64, device=device)
+        recv_counts_t = torch.empty(self.ep_size, dtype=torch.int64, device=device)
+        dist.all_to_all_single(recv_counts_t, send_counts_t, group=self._ep_group)
+        recv_counts: list[int] = recv_counts_t.cpu().tolist()
+
+        # Gather max chunk size across all ranks for padding alignment
+        local_max = max(max(send_counts), max(recv_counts)) if (send_counts or recv_counts) else 0
         all_max_list: list[int] = [0] * self.ep_size
-        dist.all_gather_object(all_max_list, max(send_counts), group=self._ep_group)
+        dist.all_gather_object(all_max_list, local_max, group=self._ep_group)
         max_count = max(all_max_list)
+
+        if max_count == 0:
+            # No tokens to route at all
+            return (
+                torch.empty((0, hidden_dim), dtype=dtype, device=device),
+                torch.empty(0, dtype=torch.float32, device=device),
+                torch.empty(0, dtype=torch.int64, device=device),
+                torch.empty(0, dtype=torch.int64, device=device),
+                send_counts,
+            )
 
         # Pad and concatenate each buffer type
         cat_h = _pad_and_cat(send_h_chunks, send_counts, max_count, hidden_dim)
@@ -204,29 +225,42 @@ class TorchDistEpRouter(FusedMoeDataRouter):
                 group=self._ep_group,
             )
 
-        # Extract our rank's received tokens
-        recv_total = sum(send_counts)
-
-        def our_slice(t: torch.Tensor) -> torch.Tensor:
-            chunk = t.chunk(self.ep_size, dim=0)[self.ep_rank]
-            return chunk[:recv_total] if recv_total > 0 else chunk
-
+        # Extract received tokens from ALL source ranks (unpad each chunk)
+        recv_total = sum(recv_counts)
         if recv_total > 0:
-            return (
-                our_slice(r_h),
-                our_slice(r_w),
-                our_slice(r_i),
-                our_slice(r_o),
-                send_counts,
-            )
+            recv_h_parts = []
+            recv_w_parts = []
+            recv_i_parts = []
+            recv_o_parts = []
+            chunks_h = r_h.chunk(self.ep_size, dim=0)
+            chunks_w = r_w.chunk(self.ep_size, dim=0)
+            chunks_i = r_i.chunk(self.ep_size, dim=0)
+            chunks_o = r_o.chunk(self.ep_size, dim=0)
+            for src in range(self.ep_size):
+                cnt = recv_counts[src]
+                if cnt > 0:
+                    recv_h_parts.append(chunks_h[src][:cnt])
+                    recv_w_parts.append(chunks_w[src][:cnt])
+                    recv_i_parts.append(chunks_i[src][:cnt])
+                    recv_o_parts.append(chunks_o[src][:cnt])
+
+            recv_hidden = torch.cat(recv_h_parts, dim=0)
+            recv_weights = torch.cat(recv_w_parts, dim=0)
+            recv_lids = torch.cat(recv_i_parts, dim=0)
+            recv_oids = torch.cat(recv_o_parts, dim=0)
         else:
-            return (
-                torch.empty((0, hidden_dim), dtype=dtype, device=device),
-                torch.empty(0, dtype=torch.float32, device=device),
-                torch.empty(0, dtype=torch.int64, device=device),
-                torch.empty(0, dtype=torch.int64, device=device),
-                send_counts,
-            )
+            recv_hidden = torch.empty((0, hidden_dim), dtype=dtype, device=device)
+            recv_weights = torch.empty(0, dtype=torch.float32, device=device)
+            recv_lids = torch.empty(0, dtype=torch.int64, device=device)
+            recv_oids = torch.empty(0, dtype=torch.int64, device=device)
+
+        # Save metadata for combine phase
+        self._dispatch_meta["send_counts"] = send_counts
+        self._dispatch_meta["recv_counts"] = recv_counts
+        self._dispatch_meta["max_count"] = max_count
+        self._dispatch_meta["send_o_chunks"] = send_o_chunks
+
+        return recv_hidden, recv_weights, recv_lids, recv_oids, send_counts
 
     # ------------------------------------------------------------------ #
     #  Combine
@@ -236,20 +270,23 @@ class TorchDistEpRouter(FusedMoeDataRouter):
         self,
         expert_output: torch.Tensor,
         recv_weights: torch.Tensor,
-        recv_orig_flat_idx: torch.Tensor,
         num_tokens: int,
         topk: int,
         hidden_dim: int,
+        apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
         """Scatter expert results back to original token positions.
 
+        Uses reverse all_to_all to send results back to the originating ranks,
+        then scatter using the saved original flat indices.
+
         Args:
-            expert_output:      [recv_count, hidden_size]
-            recv_weights:       [recv_count]
-            recv_orig_flat_idx: [recv_count] — original flat indices
+            expert_output:      [recv_total, hidden_size]
+            recv_weights:       [recv_total]
             num_tokens:         original num_tokens
             topk:               original topk
             hidden_dim:         hidden dimension
+            apply_router_weight_on_input: if True, weights already applied in executor
 
         Returns:
             output: [num_tokens, hidden_size]
@@ -257,31 +294,50 @@ class TorchDistEpRouter(FusedMoeDataRouter):
         device = expert_output.device
         dtype = expert_output.dtype
         flat_total = num_tokens * topk
-        recv_count = expert_output.shape[0]
 
-        if recv_count == 0:
-            return torch.zeros((num_tokens, hidden_dim), dtype=dtype, device=device)
+        send_counts = self._dispatch_meta["send_counts"]
+        recv_counts = self._dispatch_meta["recv_counts"]
+        max_count = self._dispatch_meta["max_count"]
+        send_o_chunks = self._dispatch_meta["send_o_chunks"]
 
-        # Weight outputs by router scores
-        weighted = expert_output * recv_weights.to(expert_output.dtype).unsqueeze(-1)
+        recv_total = sum(recv_counts)
 
-        # All-gather weighted outputs + original flat indices from all ranks
-        all_gathered_h = [
-            torch.empty((recv_count, hidden_dim), dtype=dtype, device=device)
-            for _ in range(self.ep_size)
-        ]
-        all_gathered_o = [
-            torch.empty(recv_count, dtype=torch.int64, device=device)
-            for _ in range(self.ep_size)
-        ]
-        dist.all_gather(all_gathered_h, weighted, group=self._ep_group)
-        dist.all_gather(all_gathered_o, recv_orig_flat_idx, group=self._ep_group)
+        # Apply router weights if not already applied in executor
+        if not apply_router_weight_on_input:
+            weighted = expert_output * recv_weights.to(expert_output.dtype).unsqueeze(-1)
+        else:
+            weighted = expert_output
 
-        # Scatter into [flat_total, H] using index_add, then sum over topk
+        # Split expert outputs by source rank using recv_counts, then re-pad
+        if recv_total > 0:
+            out_chunks = torch.split(weighted, recv_counts, dim=0)
+        else:
+            out_chunks = [
+                torch.empty((0, hidden_dim), dtype=dtype, device=device)
+                for _ in range(self.ep_size)
+            ]
+
+        # Pad each chunk back to max_count for all_to_all
+        out_chunks_list = list(out_chunks)
+        cat_send = _pad_and_cat(out_chunks_list, recv_counts, max_count, hidden_dim)
+
+        # Reverse all_to_all: send results back to originating ranks
+        cat_recv = torch.empty_like(cat_send)
+        dist.all_to_all(
+            list(cat_recv.chunk(self.ep_size, dim=0)),
+            list(cat_send.chunk(self.ep_size, dim=0)),
+            group=self._ep_group,
+        )
+
+        # Unpad using send_counts and scatter using saved orig flat indices
         output = torch.zeros((flat_total, hidden_dim), dtype=dtype, device=device)
-        for src_h, src_o in zip(all_gathered_h, all_gathered_o):
-            if src_h.numel() > 0:
-                output.index_add_(0, src_o, src_h)
+        chunks_recv = cat_recv.chunk(self.ep_size, dim=0)
+        for dst in range(self.ep_size):
+            cnt = send_counts[dst]
+            if cnt > 0:
+                vals = chunks_recv[dst][:cnt]
+                idx = send_o_chunks[dst]
+                output.index_add_(0, idx, vals)
 
         return output.reshape(num_tokens, topk, hidden_dim).sum(dim=1)
 
@@ -304,13 +360,10 @@ class TorchDistEpRouter(FusedMoeDataRouter):
         )
         num_tokens, topk = topk_ids.shape
 
-        self._dispatch_meta = {
-            "num_tokens": num_tokens,
-            "topk": topk,
-            "recv_weights": recv_w,
-            "recv_orig_flat_idx": recv_oids,
-            "hidden_dim": a1.shape[-1],
-        }
+        self._dispatch_meta["num_tokens"] = num_tokens
+        self._dispatch_meta["topk"] = topk
+        self._dispatch_meta["recv_weights"] = recv_w
+        self._dispatch_meta["hidden_dim"] = a1.shape[-1]
 
         # Compute per-expert token counts from received local expert IDs
         expert_num_tokens_cpu = [0] * self.expert_num_per_rank
@@ -318,6 +371,23 @@ class TorchDistEpRouter(FusedMoeDataRouter):
             lids_cpu = recv_lids.cpu().tolist()
             for lid in lids_cpu:
                 expert_num_tokens_cpu[lid] += 1
+
+        # Debug logging (first call only, rank 0 only)
+        if self._debug_call_count == 0 and self.ep_rank == 0:
+            recv_counts = self._dispatch_meta.get("recv_counts", [])
+            print(f"[TorchDistEP DEBUG] rank={self.ep_rank} "
+                  f"num_tokens={num_tokens} topk={topk} "
+                  f"ep_size={self.ep_size} experts_per_rank={self.expert_num_per_rank}")
+            print(f"[TorchDistEP DEBUG] send_counts={send_counts} recv_counts={recv_counts}")
+            print(f"[TorchDistEP DEBUG] recv_h.shape={recv_h.shape} "
+                  f"recv_lids range=[{recv_lids.min().item() if recv_lids.numel() > 0 else 'empty'}, "
+                  f"{recv_lids.max().item() if recv_lids.numel() > 0 else 'empty'}]")
+            print(f"[TorchDistEP DEBUG] recv_w stats: mean={recv_w.float().mean().item():.4f} "
+                  f"min={recv_w.min().item():.4f} max={recv_w.max().item():.4f}")
+            print(f"[TorchDistEP DEBUG] recv_h stats: mean={recv_h.float().mean().item():.6f} "
+                  f"std={recv_h.float().std().item():.6f} "
+                  f"has_nan={recv_h.isnan().any().item()} has_inf={recv_h.isinf().any().item()}")
+            print(f"[TorchDistEP DEBUG] expert_num_tokens_cpu={expert_num_tokens_cpu}")
 
         return ExpertForwardPayload(
             expert_x=recv_h,
@@ -342,11 +412,29 @@ class TorchDistEpRouter(FusedMoeDataRouter):
     ) -> torch.Tensor:
         meta = self._dispatch_meta
 
-        return self._combine(
+        # Debug logging (first call only, rank 0 only)
+        if self._debug_call_count == 0 and self.ep_rank == 0:
+            eo = payload.fused_expert_output
+            print(f"[TorchDistEP DEBUG finalize] expert_output.shape={eo.shape} "
+                  f"apply_router_weight_on_input={apply_router_weight_on_input}")
+            print(f"[TorchDistEP DEBUG finalize] expert_output stats: "
+                  f"mean={eo.float().mean().item():.6f} std={eo.float().std().item():.6f} "
+                  f"has_nan={eo.isnan().any().item()} has_inf={eo.isinf().any().item()}")
+
+        result = self._combine(
             expert_output=payload.fused_expert_output,
             recv_weights=meta["recv_weights"],
-            recv_orig_flat_idx=meta["recv_orig_flat_idx"],
             num_tokens=meta["num_tokens"],
             topk=meta["topk"],
             hidden_dim=meta["hidden_dim"],
+            apply_router_weight_on_input=apply_router_weight_on_input,
         )
+
+        # Debug logging for output
+        if self._debug_call_count == 0 and self.ep_rank == 0:
+            print(f"[TorchDistEP DEBUG finalize] output.shape={result.shape} "
+                  f"mean={result.float().mean().item():.6f} std={result.float().std().item():.6f} "
+                  f"has_nan={result.isnan().any().item()} has_inf={result.isinf().any().item()}")
+            self._debug_call_count += 1
+
+        return result

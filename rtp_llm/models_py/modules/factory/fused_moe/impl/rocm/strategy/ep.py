@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 class RocmEpNormalStrategy(MoeStrategy):
     """ROCm EP normal mode strategy"""
 
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        # When USE_TORCH_DIST_EP=1, prefer TorchDistEpNormalStrategy over DeepEP
+        if os.environ.get('USE_TORCH_DIST_EP', '0') == '1':
+            checker.check(False)
+
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deepep_normal_fused_moe_executor import (
             FusedMoeExecutor,
@@ -112,9 +118,6 @@ class RocmEpLowLatencyStrategy(MoeStrategy):
         raise ValueError("deepep_low_latency for rocm moe is not yet supported")
 
     def get_attributes(self) -> StrategyAttributes:
-        # Not actually used, but needed for interface completeness
-        # Don't set router_class and executor_class since this strategy is not supported
-        # This will raise an error if called, which is expected since the strategy is not supported
         return StrategyAttributes(
             router_class=None,
             executor_class=None,
