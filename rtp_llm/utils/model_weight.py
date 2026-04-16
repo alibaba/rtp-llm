@@ -1180,6 +1180,19 @@ class W:
     linear_attn_out_w = "linear_attn.out_proj.weight"
     linear_attn_out_s = "linear_attn.out_proj.scale"
 
+    # KDA (Kimi Delta Attention) specific weights
+    linear_attn_qkv_w = "linear_attn.in_proj_qkv.weight"
+    # b_proj: [hidden] -> [num_heads], beta gate
+    linear_attn_b_w = "linear_attn.b_proj.weight"
+    # LoRA forget gate: f_a_proj [hidden -> lora_rank], f_b_proj [lora_rank -> num_heads*head_dim]
+    linear_attn_f_a_w = "linear_attn.f_a_proj.weight"
+    linear_attn_f_b_w = "linear_attn.f_b_proj.weight"
+    # LoRA output gate: g_a_proj [hidden -> lora_rank], g_b_proj [lora_rank -> num_heads*head_dim]
+    linear_attn_g_a_w = "linear_attn.g_a_proj.weight"
+    linear_attn_g_b_w = "linear_attn.g_b_proj.weight"
+    # KDA-specific dt_bias: shape [num_heads * head_dim] (per-dim vector)
+    linear_attn_dt_b_kda = "linear_attn.dt_bias_kda"
+
     # jina_bert
     q_ln_gamma = "self_attention_weights.q_layernorm.gamma"
     q_ln_beta = "self_attention_weights.q_layernorm.beta"

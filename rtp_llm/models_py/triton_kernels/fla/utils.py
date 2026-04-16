@@ -326,3 +326,22 @@ else:
 
     def custom_device_ctx(index: int):
         return torch.cuda.device(index)
+
+
+# Triton autotune cache support
+import inspect as _inspect
+
+try:
+    _SUPPORTS_AUTOTUNE_CACHE = (
+        "cache_results" in _inspect.signature(triton.autotune.__init__).parameters
+    )
+except Exception:
+    _SUPPORTS_AUTOTUNE_CACHE = False
+
+_FLA_CACHE_RESULTS = os.environ.get("FLA_CACHE_RESULTS", "1") == "1"
+autotune_cache_kwargs = (
+    {"cache_results": _FLA_CACHE_RESULTS} if _SUPPORTS_AUTOTUNE_CACHE else {}
+)
+
+# 1/ln(2) constant for log2-space gate computation
+RCP_LN2 = 1.0 / 0.6931471805599453

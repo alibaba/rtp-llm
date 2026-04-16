@@ -195,10 +195,18 @@ class MlaFlashInferPrefillOp(object):
         self.kv_cache_type = kv_cache_dtype
         global g_workspace_buffer
         if g_workspace_buffer is None:
+            # Find first layer that has MLA weights (hybrid models may have non-MLA layers)
+            device = None
+            for w in self.weights:
+                kv_b = w.get(W.mla_kv_b_w)
+                if kv_b is not None:
+                    device = kv_b.device
+                    break
+            assert device is not None, "No MLA weights found in any layer"
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
-                device=self.weights[0].get(W.mla_kv_b_w).device,
+                device=device,
             )
 
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
@@ -426,10 +434,18 @@ class MlaFlashInferDecodeOp(object):
         self.kv_len_arr_h = torch.ones((max_bs,), dtype=torch.int32, device="cpu")
 
         if g_workspace_buffer is None:
+            # Find first layer that has MLA weights (hybrid models may have non-MLA layers)
+            device = None
+            for w in self.weights:
+                vc = w.get(W.mla_vc)
+                if vc is not None:
+                    device = vc.device
+                    break
+            assert device is not None, "No MLA weights found in any layer"
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
-                device=self.weights[0].get(W.mla_vc).device,
+                device=device,
             )
 
         self.mla_wrapper = BatchMLAPagedAttentionWrapper(

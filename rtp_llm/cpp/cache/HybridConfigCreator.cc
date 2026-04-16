@@ -23,9 +23,21 @@ std::vector<std::vector<int>> HybridConfigCreator::splitIntoGroups(const std::ve
 }
 
 int HybridConfigCreator::calculateGroupLayerNum(int linear_layer_count, int full_layer_count) {
+    // All full attention layers must reside in one cache group (full_group_num <= 1).
+    // prepare_fmha_impl binds the block table of group 0 once; it is not re-bound per layer.
+    // group_layer_num must be >= full_layer_count to satisfy this.
+    // When gcd is already sufficient it works directly; the fallback handles all other cases
+    // (coprime gcd==1, or gcd>1 but still smaller than full_layer_count).
     int group_layer_num = 0;
     if (linear_layer_count > 0 && full_layer_count > 0) {
         group_layer_num = std::gcd(linear_layer_count, full_layer_count);
+        // Fallback: when gcd < full_layer_count, force group_layer_num = full_layer_count
+        // to guarantee all full layers fit in one group.
+        // e.g. Kimi Linear 20:7 -> gcd=1 < 7 -> group_layer_num=7, linear groups=[7,7,6],
+        // last group wastes 1 layer slot per block, negligible.
+        if (group_layer_num < full_layer_count) {
+            group_layer_num = full_layer_count;
+        }
     } else {
         group_layer_num = std::max(linear_layer_count, full_layer_count);
     }
@@ -191,6 +203,14 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
 
     // Setup cache config specs
     HybridConfigCreator::setupCacheConfigSpecs(config, linear_groups, full_groups, linear_spec, full_spec);
+
+    // Hard check: current only supports a single full attention group.
+    RTP_LLM_CHECK_WITH_INFO(
+        config.full_group_num <= 1,
+        "Multiple full attention groups (%d) are not supported in hybrid mode. "
+        "prepare_fmha_impl is called once before the layer loop, binding the block table from group 0. "
+        "To support multiple full groups, implement per-group fmha preparation.",
+        config.full_group_num);
 
     // Setup physical sizes
     HybridConfigCreator::setupPhysicalSizes(config, full_spec, linear_spec);

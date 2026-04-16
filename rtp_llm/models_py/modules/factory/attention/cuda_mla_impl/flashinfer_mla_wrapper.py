@@ -100,11 +100,12 @@ class MlaFlashInferImplBase(MlaImplBase):
         assert (
             topk_indices is None
         ), "topk_indices should be None for MlaFlashInferImplBase"
-        assert self.rope_impl is not None and self.fmha_params is not None
+        assert self.fmha_params is not None
         q_pe = q[:, :, self.fmha_impl.qk_nope_head_dim :]
 
-        # Apply RoPE to Q and K
-        self.rope_impl.forward(q_pe, k_pe, self.rope_params)
+        # Apply RoPE to Q and K (skip if rope_impl is None, e.g. Kimi Linear)
+        if self.rope_impl is not None:
+            self.rope_impl.forward(q_pe, k_pe, self.rope_params)
 
         # Write compressed KV and position-encoded K to cache
         self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
@@ -138,6 +139,8 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
+        # RoPE is skipped when cos_sin_cache is None (e.g. Kimi Linear with mla_use_nope=true)
+        _need_rope = cos_sin_cache is not None
         super().__init__(
             MlaFlashInferPrefillOp(
                 attn_configs.head_num,
@@ -152,9 +155,13 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 quant_config,
                 attn_configs.kv_cache_dtype,
             ),
-            NewMlaRotaryEmbeddingOp(
-                cos_sin_cache=cos_sin_cache,
-                is_neox_style=attn_configs.rope_config.is_neox_style,
+            (
+                NewMlaRotaryEmbeddingOp(
+                    cos_sin_cache=cos_sin_cache,
+                    is_neox_style=attn_configs.rope_config.is_neox_style,
+                )
+                if _need_rope
+                else None
             ),
             MlaKVCacheWriteOp(
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
@@ -261,11 +268,12 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         assert (
             topk_indices is None
         ), "topk_indices should be None for MlaFlashInferPrefillImpl"
-        assert self.rope_impl is not None and self.rope_params is not None
+        assert self.fmha_params is not None
         q_pe = q[:, :, self.fmha_impl.qk_nope_head_dim :]
 
-        # Apply RoPE to Q and K
-        self.rope_impl.forward(q_pe, k_pe, self.rope_params)
+        # Apply RoPE to Q and K (skip if rope_impl is None, e.g. Kimi Linear)
+        if self.rope_impl is not None:
+            self.rope_impl.forward(q_pe, k_pe, self.rope_params)
 
         # Write compressed KV and position-encoded K to cache
         self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
@@ -291,6 +299,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
+        _need_rope = cos_sin_cache is not None
         super().__init__(
             MlaFlashInferDecodeOp(
                 attn_configs.head_num,
@@ -307,9 +316,13 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
                 num_tokens=int(attn_inputs.sequence_lengths.sum().item()),
                 is_cuda_graph=is_cuda_graph,
             ),
-            NewMlaRotaryEmbeddingOp(
-                cos_sin_cache=cos_sin_cache,
-                is_neox_style=attn_configs.rope_config.is_neox_style,
+            (
+                NewMlaRotaryEmbeddingOp(
+                    cos_sin_cache=cos_sin_cache,
+                    is_neox_style=attn_configs.rope_config.is_neox_style,
+                )
+                if _need_rope
+                else None
             ),
             MlaKVCacheWriteOp(
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
