@@ -16,7 +16,6 @@
 #if USING_CUDA || USING_ROCM
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #endif
-
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
 #include "rtp_llm/cpp/core/DeviceData.h"
 #include "rtp_llm/cpp/core/ExecOps.h"
@@ -94,6 +93,13 @@ private:
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::unique_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
+
+    // Accumulated H2D copies from tensorHoldHostAndToCuda(); flushed as one kernel per forward.
+    FusedD2DCopyParams d2d_copies_;
+
+    // is_pinned() is expensive on CPU; only assert during first N forwards as a sanity check.
+    static constexpr int kPinnedCheckForwardCount = 3;
+    int                  pinned_check_remaining_{kPinnedCheckForwardCount};
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.

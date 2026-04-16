@@ -102,7 +102,6 @@ private:
     void              setInputEmbeddingScalar(float input_embedding_scalar) override;
 
 private:
-    void             copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
     std::vector<int> getDecodeBatchSizesToCapture();
     std::vector<int> getPrefillSequenceLengthsToCapture();
     /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).

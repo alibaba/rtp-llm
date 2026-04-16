@@ -103,6 +103,7 @@ void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs) {
     printTensorInfo("kv_cache_block_id_host", inputs.attention_inputs.kv_cache_block_id_host, 40);
     printTensorInfo("kv_cache_block_id_device", inputs.attention_inputs.kv_cache_block_id_device, 40);
     printTensorInfo("cu_seqlens", inputs.attention_inputs.cu_seqlens);
+    printTensorInfo("cu_seqlens_host", inputs.attention_inputs.cu_seqlens_host);
     printTensorInfo("cu_kv_seqlens", inputs.attention_inputs.cu_kv_seqlens);
     printTensorInfo("sequence_lengths_plus_1_d", inputs.attention_inputs.sequence_lengths_plus_1_d);
     printTensorInfo("decode_cu_seqlens_d", inputs.attention_inputs.decode_cu_seqlens_d);

@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/core/Event.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
+#include "rtp_llm/models_py/bindings/common/kernels/fuse_copy_util.h"
 
 #include <memory>
 #include <atomic>
@@ -91,6 +92,9 @@ void execCopy(const CopyParams& params);
 void execNoBlockCopy(const CopyParams& params);
 void execBatchCopy(const BatchCopyParams& params);
 void execMultiMergeCopy(const MultiMergeCopyParams& params);
+
+void fusedCopy(const FusedD2DCopyParams& params);
+void fusedStridedCopy(const FusedStridedCopyParams& params);
 
 // ===================================================================
 // Sample ops

@@ -211,6 +211,33 @@ cc_library(
 )
 
 cc_library(
+    name = "fuse_copy_util",
+    hdrs = [
+        "fuse_copy_util.h",
+    ],
+    deps = any_cuda_deps,
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "fuse_copy_kernel",
+    srcs = [
+        "fuse_copy_kernel.cu",
+    ],
+    hdrs = [
+        "fuse_copy_kernel.h",
+    ],
+    deps = any_cuda_deps + [
+        ":fuse_copy_util",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kernels_cu",
     deps = [
         ":kernels_activation",

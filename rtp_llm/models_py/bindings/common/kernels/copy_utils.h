@@ -3,7 +3,7 @@
 #include <assert.h>
 #include <vector>
 
-#if USEING_CUDA
+#if USING_CUDA
 #include <cuda_runtime.h>
 #endif
 
