@@ -152,8 +152,24 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self._fp8_kernel_metadata_q0 = SparseMlaFp8DecodeParams(
             tile_sched_q0, num_splits_q0
         )
+        self.precomputed_req_ids = (
+            mla_params.batch_indice_d[self.total_global_ids] if n_q > 0 else None
+        )
+
+        # Build full_rope_pos_ids so the attention-side RoPE path can run
+        # in-place on the entire buffer, consistent with create_params().
         if n_q > 0:
-            self.precomputed_req_ids = mla_params.batch_indice_d[self.total_global_ids]
+            positions_d = mla_params.positions_d
+            full_rope_pos_ids = torch.zeros(
+                positions_d.size(0),
+                dtype=positions_d.dtype,
+                device=positions_d.device,
+            )
+            precomputed_positions = positions_d[self.total_global_ids]
+            full_rope_pos_ids[self.total_local_ids] = precomputed_positions
+            self.full_rope_pos_ids = full_rope_pos_ids
+        else:
+            self.full_rope_pos_ids = None
 
     def _convert_topk_indices_to_global(
         self, topk_indices: torch.Tensor
@@ -169,6 +185,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         assert topk == self.top_k
         assert self.block_table is not None
         assert self.mla_params is not None
+        assert self.precomputed_req_ids is not None, (
+            "precomputed_req_ids must be set in plan() before _convert_topk_indices_to_global"
+        )
         req_id = self.precomputed_req_ids
         from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
             triton_convert_req_index_to_global_index,
@@ -355,15 +374,13 @@ class SparseMlaCpImpl(SparseMlaImpl):
         self.rope_params = self.fmha_params
         self.prepare(attn_inputs)
 
+        # plan() already precomputed full_rope_pos_ids and precomputed_req_ids
+        # on self.fmha_impl. Only precompute the topk-related params here
+        # (ks/ke/lengths/topk_off are only needed by the indexer path via cp_params).
         total_global_ids = self.fmha_impl.total_global_ids
         total_local_ids = self.fmha_impl.total_local_ids
         has_tokens = total_global_ids is not None and total_global_ids.size(0) > 0
 
-        # Precompute indexed values once; these indices are the same for every layer,
-        # so we avoid repeating elementwise GPU kernels per layer.
-        precomputed_positions = (
-            self.fmha_params.positions_d[total_global_ids] if has_tokens else None
-        )
         precomputed_ks = (
             self.fmha_params.ks[total_global_ids] if has_tokens else None
         )
@@ -376,27 +393,6 @@ class SparseMlaCpImpl(SparseMlaImpl):
         precomputed_topk_off = (
             self.fmha_params.topk_indices_offset[total_global_ids] if has_tokens else None
         )
-        precomputed_req_ids = (
-            self.fmha_params.batch_indice_d[total_global_ids] if has_tokens else None
-        )
-
-        # Build full-length pos_ids so RoPE can run on the entire buffer in-place,
-        # eliminating 4 EW kernels (2 index + 2 index_put) per RoPE path per layer.
-        # Padding rows get pos=0; their RoPE result is garbage but never consumed.
-        if has_tokens:
-            positions_d = self.fmha_params.positions_d
-            full_rope_pos_ids = torch.zeros(
-                positions_d.size(0),
-                dtype=positions_d.dtype,
-                device=positions_d.device,
-            )
-            full_rope_pos_ids[total_local_ids] = precomputed_positions
-        else:
-            full_rope_pos_ids = None
-
-        # Store on fmha_impl for the attention-side RoPE / topk-index paths
-        self.fmha_impl.precomputed_req_ids = precomputed_req_ids
-        self.fmha_impl.full_rope_pos_ids = full_rope_pos_ids
 
         # Pack CP indices from fmha_impl for use by indexer and others
         self.cp_params = SimpleNamespace(
@@ -405,12 +401,12 @@ class SparseMlaCpImpl(SparseMlaImpl):
             total_local_ids=total_local_ids,
             cu_kv_seqlens_global=self.fmha_impl.cu_kv_seqlens_global,
             total_kv_len=self.fmha_impl.total_kv_len,
-            full_rope_pos_ids=full_rope_pos_ids,
+            full_rope_pos_ids=self.fmha_impl.full_rope_pos_ids,
             precomputed_ks=precomputed_ks,
             precomputed_ke=precomputed_ke,
             precomputed_lengths=precomputed_lengths,
             precomputed_topk_off=precomputed_topk_off,
-            precomputed_req_ids=precomputed_req_ids,
+            precomputed_req_ids=self.fmha_impl.precomputed_req_ids,
         )
 
     @classmethod

@@ -676,6 +676,9 @@ class SparseMlaFp8CPOpTest(TestCase):
         Each CP rank holds 4 local tokens (chunks=[2,2]), all_gather doubles to 8.
         Compare CP output (rank 0) against non-CP reference on full 72 tokens.
         """
+        from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
+            generate_q_indices,
+        )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
             SparseMlaFp8CPOp,
         )
@@ -922,8 +925,11 @@ class SparseMlaFp8CPOpTest(TestCase):
         def _mock_all_gather_tp2(tensor, group=None):
             return next(_all_gather_returns)
 
-        topk0 = torch.index_select(topk_indices, 0, cp_op.q0_idx).contiguous()
-        topk1 = torch.index_select(topk_indices, 0, cp_op.q1_idx).contiguous()
+        q0_idx_list, q1_idx_list = generate_q_indices(chunk_lengths)
+        q0_idx_t = torch.tensor(q0_idx_list, device=device, dtype=torch.long)
+        q1_idx_t = torch.tensor(q1_idx_list, device=device, dtype=torch.long)
+        topk0 = torch.index_select(topk_indices, 0, q0_idx_t).contiguous()
+        topk1 = torch.index_select(topk_indices, 0, q1_idx_t).contiguous()
         topk_cat = torch.cat([topk0, topk1], dim=0)
         with patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
