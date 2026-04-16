@@ -38,6 +38,12 @@ try:
 except ImportError:
     bdist_wheel = None
 
+# Ensure source directory is on sys.path so _build can be found even when
+# setuptools exec's this file as '<string>' (prepare_metadata_for_build_*).
+_src_dir = os.path.dirname(os.path.abspath(__file__)) if os.path.isfile(__file__) else os.getcwd()
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
+
 # Platform detection and config constants — shared with prepare_venv.py
 from _build.platform import (  # noqa: E402
     CONFIG_TO_EXTRAS,
