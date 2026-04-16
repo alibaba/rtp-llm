@@ -19,6 +19,7 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     LinearFactory,
     RMSNorm,
+    RMSResNorm,
 )
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
@@ -624,7 +625,10 @@ class Qwen3NextDecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
-        self.post_attention_layernorm = RMSNorm(
+        self.input_resnorm = RMSResNorm(
+            weights[W.pre_ln_gamma], eps=config.layernorm_eps
+        )
+        self.post_attention_resnorm = RMSResNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
 
@@ -635,9 +639,14 @@ class Qwen3NextDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
-    ) -> torch.Tensor:
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        residual: Optional[torch.Tensor] = None,
+    ) -> tuple:
+        if residual is not None:
+            # Fused: residual += hidden_states; hidden_states = rmsnorm(residual)
+            hidden_states = self.input_resnorm(hidden_states, residual)
+        else:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
@@ -646,13 +655,11 @@ class Qwen3NextDecoderLayer(nn.Module):
             attention_inputs=attention_inputs,
             attn_meta=attn_meta,
         )
-        hidden_states = residual + hidden_states
+        # Fused: residual += hidden_states; hidden_states = rmsnorm(residual)
+        hidden_states = self.post_attention_resnorm(hidden_states, residual)
         # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-        return hidden_states
+        return hidden_states, residual
 
 
 class Qwen3NextModel(GptModelBase):
@@ -702,6 +709,9 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self.final_resnorm = RMSResNorm(
+            weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
+        )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -727,16 +737,19 @@ class Qwen3NextModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
+        residual = None
         for i, decoder_layer in enumerate(self.layers):
             # Switch to correct block_map for this layer in hybrid attention mode
             select_block_map_for_layer(attention_inputs, i)
-            hidden_states = decoder_layer(
+            hidden_states, residual = decoder_layer(
                 hidden_states,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
+                residual=residual,
             )
 
-        hidden_states = self.norm(hidden_states)
+        # Fused final: residual += hidden_states; hidden_states = rmsnorm(residual)
+        hidden_states = self.final_resnorm(hidden_states, residual)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)

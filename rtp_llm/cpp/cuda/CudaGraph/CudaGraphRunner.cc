@@ -51,6 +51,18 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
     }
 }
 
+void CudaGraphRunner::clearTensorAsync(torch::Tensor& tensor) {
+    if (!tensor.defined() || tensor.numel() <= 0) {
+        return;
+    }
+    if (tensor.is_cuda()) {
+        cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+        check_cuda_value(cudaMemsetAsync(tensor.data_ptr(), 0, tensor.nbytes(), stream));
+    } else {
+        memset(tensor.data_ptr(), 0, tensor.nbytes());
+    }
+}
+
 // column dimension
 void CudaGraphRunner::copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor) {
     if (!source_tensor.defined() || source_tensor.numel() <= 0) {
@@ -73,6 +85,22 @@ void CudaGraphRunner::copySmallerIntoLarger(const torch::Tensor& source_tensor, 
         }
     }
 
+    // Fast path: if trailing dimensions match and tensors are contiguous, use direct memcpy
+    if (source_tensor.is_contiguous() && target_tensor.is_contiguous()) {
+        bool trailing_dims_match = true;
+        for (int i = 1; i < source_tensor.dim(); ++i) {
+            if (source_tensor.size(i) != target_tensor.size(i)) {
+                trailing_dims_match = false;
+                break;
+            }
+        }
+        if (trailing_dims_match) {
+            optimizedCopyAsync(source_tensor, target_tensor, source_tensor.numel() * source_tensor.element_size());
+            return;
+        }
+    }
+
+    // Fallback: use slice + copy for non-contiguous or mismatched trailing dims
     torch::Tensor target_slice = target_tensor;
 
     for (int i = 0; i < source_tensor.dim(); ++i) {
@@ -104,13 +132,19 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
     auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto  attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
 
-    // Clear kv_cache block ids to prevent cache block pollution
-    py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
+    // Clear kv_cache block ids to prevent cache block pollution (use cudaMemsetAsync to avoid kernel launches)
+    clearTensorAsync(py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
+    if (is_target_verify_) {
+        // For target verify, fill_params() reads from the HOST block table to compute
+        // page metadata. Stale entries in padding rows would cause append_paged_kv_cache
+        // to write garbage K/V into pages belonging to other requests.
+        clearTensorAsync(py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host);
+    }
     if (py_model_inputs_.attention_inputs.kv_cache_block_id_device.defined()) {
-        py_model_inputs_.attention_inputs.kv_cache_block_id_device.fill_(0);
+        clearTensorAsync(py_model_inputs_.attention_inputs.kv_cache_block_id_device);
     }
     if (py_model_inputs_.attention_inputs.kv_cache_block_id_host.defined()) {
-        py_model_inputs_.attention_inputs.kv_cache_block_id_host.fill_(0);
+        clearTensorAsync(py_model_inputs_.attention_inputs.kv_cache_block_id_host);
     }
 
     // Common copies: input_ids, input_hiddens, attention lengths, kv_cache blocks
@@ -156,6 +190,22 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         optimizedCopyAsync(inputs.attention_inputs.decode_cu_seqlens_d,
                            py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
                            (state.current_batch_size + 1) * sizeof(int));
+
+        // For target-verify decode graphs: when current_batch_size < graph_batch_size,
+        // extra batch entries retain stale data from previous replays. In particular,
+        // kv_cache_kernel_block_id_host keeps stale page IDs that point to KV cache pages
+        // belonging to other requests. fill_params() generates page metadata from these
+        // stale entries, and append_paged_kv_cache() then writes garbage K/V into those
+        // pages, corrupting other requests' KV cache. Fix: zero out extra batch metadata
+        // so fill_params() generates no entries for padding batches.
+        if (is_target_verify_ && state.current_batch_size < max_bs_) {
+            py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            py_model_inputs_.attention_inputs.sequence_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            int last_offset = state.current_batch_size * num_tokens_per_bs_;
+            py_model_inputs_.attention_inputs.decode_cu_seqlens_d.slice(0, state.current_batch_size + 1, max_bs_ + 1)
+                .fill_(last_offset);
+        }
     } else {
         optimizedCopyAsync(inputs.attention_inputs.padding_offset,
                            py_model_inputs_.attention_inputs.padding_offset,
@@ -208,18 +258,14 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
             // Clear per-group block tables before copying real entries.
             // Without this, padding entries retain stale block IDs from previous calls,
             // causing linear attention (GatedDeltaNet) to corrupt SSM/conv states of stale blocks.
-            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g].fill_(0);
-            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host_by_group[g].fill_(0);
+            clearTensorAsync(py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g]);
+            clearTensorAsync(py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host_by_group[g]);
             copySmallerIntoLarger(inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group[g],
                                   py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g]);
             copySmallerIntoLarger(inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group[g],
                                   py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host_by_group[g]);
         }
     }
-
-    optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
-                       py_model_inputs_.attention_inputs.kv_cache_layer_to_group,
-                       inputs.attention_inputs.kv_cache_layer_to_group.numel() * sizeof(int32_t));
 }
 
 PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphState& state) {
@@ -437,9 +483,19 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.dtype                     = model_data_type_;
     inputs.attention_inputs.is_s_padded               = true;
     inputs.attention_inputs.sequence_lengths_plus_1_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
-    // inputs.attention_inputs.decode_cu_seqlens_d       = torch::zeros({int(max_bs_)}, options_cuda_int32_);
-    inputs.attention_inputs.decode_cu_seqlens_d =
-        torch::arange(0, max_bs_ + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    // decode_cu_seqlens_d: cumulative *query token* counts per batch (ragged qo_indptr).
+    // For MTP target verify, each batch row has num_tokens_per_bs draft tokens, so use
+    // [0, step, 2*step, ..., batch*step] instead of [0,1,...,batch] (single-token decode).
+    if (is_target_verify_ && num_tokens_per_bs > 1) {
+        inputs.attention_inputs.decode_cu_seqlens_d =
+            torch::arange(0,
+                          static_cast<int>((max_bs_ + 1) * num_tokens_per_bs),
+                          num_tokens_per_bs,
+                          torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    } else {
+        inputs.attention_inputs.decode_cu_seqlens_d =
+            torch::arange(0, max_bs_ + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    }
 }
 
 void CudaGraphRunner::initCaptureAttentionInputsPost() {

@@ -87,7 +87,7 @@ class CausalAttention(nn.Module):
         attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
-            attn_output = attn_output * torch.sigmoid(gate)
+            attn_output = attn_output.mul_(gate.sigmoid_())
         output = self.o_proj(attn_output)
         if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
