@@ -18,6 +18,7 @@ __all__ = [
     "MoriEPWrapperConfig",
     "MoriEPWrapper",
     "init_moriep_wrapper",
+    "init_moriep_wrapper_from_config",
 ]
 
 
@@ -219,6 +220,30 @@ class MoriEPWrapper:
     def _init_op(self) -> None:
         mori_config = mori.ops.EpDispatchCombineConfig(**self._config.to_mori_kwargs())
         self._op = mori.ops.EpDispatchCombineOp(mori_config)
+
+
+def init_moriep_wrapper_from_config(
+    moriep_config: MoriEPWrapperConfig,
+    shmem_group_name: str = "default",
+) -> None:
+    """初始化 MoriEP wrapper，直接接受 MoriEPWrapperConfig（无需 EngineConfig/ModelConfig）。
+
+    必须在 torch.distributed.init_process_group() 之后调用。
+    """
+    if not torch.distributed.is_initialized():
+        raise RuntimeError(
+            "Distributed environment is not initialized. "
+            "Call torch.distributed.init_process_group() first."
+        )
+
+    world_group = torch.distributed.group.WORLD
+    assert world_group is not None
+    torch._C._distributed_c10d._register_process_group(shmem_group_name, world_group)
+    mori.shmem.shmem_torch_process_group_init(shmem_group_name)
+
+    logging.info("Start initialize MoriEP wrapper (from_config)")
+    MoriEPWrapper._create(moriep_config, shmem_group_name=shmem_group_name)
+    logging.info("Finish initialize MoriEP wrapper (from_config)")
 
 
 def init_moriep_wrapper(
