@@ -81,6 +81,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.head_dim_vo = attn_configs.size_per_head
         self.page_size = attn_configs.kernel_tokens_per_block
         self.datatype = attn_configs.dtype
+        self.kv_cache_dtype = attn_configs.kv_cache_dtype
         self.max_seq_len = attn_configs.max_seq_len
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
@@ -97,6 +98,13 @@ class PyFlashinferPrefillPagedAttnOp(object):
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
+
+    def _get_kv_dtype(self, attn_inputs: PyAttentionInputs) -> torch.dtype:
+        if self.kv_cache_dtype == KvCacheDataType.INT8:
+            return torch.int8
+        elif self.kv_cache_dtype == KvCacheDataType.FP8:
+            return torch.float8_e4m3fn
+        return get_scalar_type(attn_inputs.dtype)
 
     def set_params(self, params: Any):
         """Set the params object to be used by this op."""
@@ -190,6 +198,8 @@ class PyFlashinferPrefillPagedAttnOp(object):
             )
             qo_indptr = self.qo_indptr
 
+        kv_dtype = self._get_kv_dtype(attn_inputs)
+
         self.prefill_wrapper.plan(
             qo_indptr,
             self.fmha_params.decode_page_indptr_d,
@@ -201,7 +211,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.page_size,
             causal=True,
             q_data_type=self.datatype,
-            kv_data_type=self.datatype,
+            kv_data_type=kv_dtype,
         )
         return self.fmha_params
 
@@ -344,12 +354,15 @@ class PyFlashinferPrefillAttnOp(object):
         """Set the params object to be used by this op."""
         self.params = params
 
-    def prepare(self, attn_inputs: PyAttentionInputs) -> ParamsBase:
+    def prepare(
+        self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
+    ) -> ParamsBase:
         """
         Prepare the prefill wrapper
 
         Args:
             attn_inputs: Attention inputs containing sequence information
+            forbid_realloc: Unused for ragged prefill (CUDA graph replay compatibility).
         """
         batch_size = attn_inputs.input_lengths.size(0)
         cu_seqlens = attn_inputs.cu_seqlens[: batch_size + 1]
@@ -360,6 +373,7 @@ class PyFlashinferPrefillAttnOp(object):
             attn_inputs.input_lengths,
             attn_inputs.kv_cache_kernel_block_id_host,
             self.page_size,
+            forbid_realloc,
         )
 
         self.prefill_wrapper.plan(
@@ -620,6 +634,170 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         3. MhaRotaryEmbeddingOp supports the inputs
         """
         return not is_sm_100() and PyFlashinferPrefillAttnOp.support(attn_inputs)
+
+
+class PyFlashinferPrefillPagedTargetVerifyAttnOp(object):
+    """Target verify using paged KV cache directly (no KV gather).
+
+    Uses BatchPrefillWithPagedKVCacheWrapper which reads from the paged KV
+    cache natively.  FlashInfer's causal mask with qo_len < kv_len treats Q
+    as the suffix of KV (mask = tril(diagonal=kv_len-qo_len)), which is
+    exactly what MTP verification needs.
+
+    Compared to the ragged gather approach (~27 small CUDA kernels per layer
+    for arange/searchsorted/index_select/where/copy), this launches only the
+    single BatchPrefillWithPagedKVCacheKernel.
+    """
+
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        backend: str = "fa2",
+    ) -> None:
+        backend = "fa2"
+        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
+        self.local_head_num = attn_configs.head_num
+        self.local_kv_head_num = attn_configs.kv_head_num
+        self.head_dim_qk = attn_configs.size_per_head
+        self.head_dim_vo = attn_configs.size_per_head
+        self.page_size = attn_configs.kernel_tokens_per_block
+        self.datatype = attn_configs.dtype
+        self.kv_cache_dtype = attn_configs.kv_cache_dtype
+        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self.enable_cuda_graph = getattr(attn_inputs, "is_cuda_graph", False)
+        self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+            self.g_workspace_buffer,
+            "HND",
+            backend=backend,
+        )
+
+    def __del__(self):
+        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
+
+    def _get_kv_dtype(self, attn_inputs: PyAttentionInputs) -> torch.dtype:
+        if self.kv_cache_dtype == KvCacheDataType.INT8:
+            return torch.int8
+        elif self.kv_cache_dtype == KvCacheDataType.FP8:
+            return torch.float8_e4m3fn
+        return get_scalar_type(attn_inputs.dtype)
+
+    def set_params(self, params: Any) -> None:
+        self.fmha_params = params
+
+    def _get_qo_indptr(
+        self, attn_inputs: PyAttentionInputs, batch_size: int
+    ) -> torch.Tensor:
+        """QO indptr for target verify: draft token cumulative lengths."""
+        if (
+            hasattr(attn_inputs, "decode_cu_seqlens_d")
+            and attn_inputs.decode_cu_seqlens_d is not None
+            and attn_inputs.decode_cu_seqlens_d.numel() > batch_size
+        ):
+            return attn_inputs.decode_cu_seqlens_d[: batch_size + 1]
+        return self.fmha_params.qo_indptr_d[: batch_size + 1]
+
+    def prepare(
+        self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
+    ) -> ParamsBase:
+        check_attention_inputs(attn_inputs)
+        batch_size = attn_inputs.input_lengths.size(0)
+        self.fmha_params.fill_params(
+            attn_inputs.prefix_lengths,
+            attn_inputs.sequence_lengths,
+            attn_inputs.input_lengths,
+            attn_inputs.kv_cache_kernel_block_id_host,
+            self.page_size,
+            forbid_realloc,
+        )
+
+        qo_indptr = self._get_qo_indptr(attn_inputs, batch_size)
+        kv_dtype = self._get_kv_dtype(attn_inputs)
+
+        if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
+            self.prefill_wrapper._use_cuda_graph = True
+            self.prefill_wrapper._qo_indptr_buf = qo_indptr
+            self.prefill_wrapper._paged_kv_indptr_buf = (
+                self.fmha_params.decode_page_indptr_d
+            )
+            self.prefill_wrapper._paged_kv_last_page_len_buf = (
+                self.fmha_params.paged_kv_last_page_len_d
+            )
+            self.prefill_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
+            self.prefill_wrapper._fixed_batch_size = batch_size
+
+        self.prefill_wrapper.plan(
+            qo_indptr,
+            self.fmha_params.decode_page_indptr_d,
+            self.fmha_params.page_indice_d,
+            self.fmha_params.paged_kv_last_page_len_d,
+            self.local_head_num,
+            self.local_kv_head_num,
+            self.head_dim_qk,
+            self.page_size,
+            causal=True,
+            q_data_type=self.datatype,
+            kv_data_type=kv_dtype,
+        )
+        return self.fmha_params
+
+    @staticmethod
+    def support(attn_inputs: PyAttentionInputs) -> bool:
+        return True
+
+    def forward(
+        self, q: torch.Tensor, kv_cache: Optional[LayerKVCache]
+    ) -> torch.Tensor:
+        assert kv_cache is not None, "kv_cache is required for target verify"
+        assert q.dim() == 3, f"Expected q [total_tokens, H, D], got shape {q.shape}"
+        paged_kv_cache = kv_cache.kv_cache_base
+        if paged_kv_cache.dim() == 2:
+            paged_kv_cache = common.reshape_paged_kv_cache(
+                paged_kv_cache,
+                self.local_kv_head_num,
+                self.page_size,
+                self.head_dim_qk,
+            )
+        return self.prefill_wrapper.run(q, paged_kv_cache)
+
+
+class PyFlashinferTargetVerifyPrefillImpl(PyFlashinferPrefillImplBase):
+    """FA2 paged batch prefill for MTP target verify.
+
+    Uses BatchPrefillWithPagedKVCacheWrapper (FA2 backend) which reads from
+    the paged KV cache directly, avoiding the ~27 small gather kernels per
+    layer that the ragged approach requires.
+    """
+
+    def _create_fmha_impl(
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> Any:
+        return PyFlashinferPrefillPagedTargetVerifyAttnOp(
+            attn_configs, attn_inputs, backend="fa2"
+        )
+
+    def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
+        if attn_configs.rope_config.style == RopeStyle.No:
+            return None
+        return MhaRotaryEmbeddingOp(attn_configs)
+
+    def _prepare_fmha_input(
+        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
+    ) -> torch.Tensor:
+        return query
+
+    def support_cuda_graph(self) -> bool:
+        return True
+
+    @staticmethod
+    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
+        if not attn_inputs.is_prefill:
+            return False
+        if not getattr(attn_inputs, "is_target_verify", False):
+            return False
+        if attn_configs.use_mla:
+            return False
+        return True
 
 
 def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bool:

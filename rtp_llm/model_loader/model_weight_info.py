@@ -427,15 +427,15 @@ class ModelDeployWeightInfo:
                     attn_q_weight_info = weight.weights[0]
                     break
 
-            assert attn_q_weight_info is not None
-            weights.append(
-                AtomicWeight(
-                    W.attention_output_static_quant_reciprocal,
-                    [attn_q_weight_info],
-                    create_scalar_ones,
-                    torch.float32,
+            if attn_q_weight_info is not None:
+                weights.append(
+                    AtomicWeight(
+                        W.attention_output_static_quant_reciprocal,
+                        [attn_q_weight_info],
+                        create_scalar_ones,
+                        torch.float32,
+                    )
                 )
-            )
             logging.info(
                 f"append attention_output_static_quant_reciprocal {weights[-1]}"
             )
