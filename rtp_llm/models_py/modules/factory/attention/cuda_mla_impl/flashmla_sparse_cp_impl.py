@@ -82,6 +82,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.total_kv_len: int = 0
         self.kv_cache_write_op = None
         self.write_cache_store_impl = None
+        self.precomputed_positions = None
+        self.precomputed_req_ids = None
 
     def plan(
         self,
@@ -165,8 +167,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         assert topk == self.top_k
         assert self.block_table is not None
         assert self.mla_params is not None
-        # req_id[i] = request id for global token total_global_ids[i]
-        req_id = self.mla_params.batch_indice_d[self.total_global_ids]
+        req_id = self.precomputed_req_ids
         from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
             triton_convert_req_index_to_global_index,
         )
@@ -351,13 +352,48 @@ class SparseMlaCpImpl(SparseMlaImpl):
         self.fmha_params = rtp_llm_ops.SparseMlaParams()
         self.rope_params = self.fmha_params
         self.prepare(attn_inputs)
+
+        total_global_ids = self.fmha_impl.total_global_ids
+        has_tokens = total_global_ids is not None and total_global_ids.size(0) > 0
+
+        # Precompute indexed values once; these indices are the same for every layer,
+        # so we avoid repeating ~6 elementwise GPU kernels per layer.
+        precomputed_positions = (
+            self.fmha_params.positions_d[total_global_ids] if has_tokens else None
+        )
+        precomputed_ks = (
+            self.fmha_params.ks[total_global_ids] if has_tokens else None
+        )
+        precomputed_ke = (
+            self.fmha_params.ke[total_global_ids] if has_tokens else None
+        )
+        precomputed_lengths = (
+            self.fmha_params.expanded_seq_lens[total_global_ids] if has_tokens else None
+        )
+        precomputed_topk_off = (
+            self.fmha_params.topk_indices_offset[total_global_ids] if has_tokens else None
+        )
+        precomputed_req_ids = (
+            self.fmha_params.batch_indice_d[total_global_ids] if has_tokens else None
+        )
+
+        # Also store on fmha_impl for the attention-side RoPE / topk-index paths
+        self.fmha_impl.precomputed_positions = precomputed_positions
+        self.fmha_impl.precomputed_req_ids = precomputed_req_ids
+
         # Pack CP indices from fmha_impl for use by indexer and others
         self.cp_params = SimpleNamespace(
             kv_restore_unpad_indices=self.fmha_impl.kv_restore_unpad_indices,
-            total_global_ids=self.fmha_impl.total_global_ids,
+            total_global_ids=total_global_ids,
             total_local_ids=self.fmha_impl.total_local_ids,
             cu_kv_seqlens_global=self.fmha_impl.cu_kv_seqlens_global,
             total_kv_len=self.fmha_impl.total_kv_len,
+            precomputed_positions=precomputed_positions,
+            precomputed_ks=precomputed_ks,
+            precomputed_ke=precomputed_ke,
+            precomputed_lengths=precomputed_lengths,
+            precomputed_topk_off=precomputed_topk_off,
+            precomputed_req_ids=precomputed_req_ids,
         )
 
     @classmethod
@@ -409,7 +445,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
                 q_pe_local,
                 k_pe_local,
                 self.rope_params,
-                q_total_pos_ids=self.fmha_impl.total_global_ids,
+                precomputed_pos_ids=self.fmha_impl.precomputed_positions,
             )
             k_pe[self.fmha_impl.total_local_ids] = k_pe_local
             q_pe[self.fmha_impl.total_local_ids] = q_pe_local

@@ -123,17 +123,16 @@ class Indexer(nn.Module):
         k = self.wk(x)
         k = self.k_norm(k)
 
-        positions = flashmla_params.positions_d
         if self._prefill_cp_enabled():
             assert cp_params is not None
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
                 q,
                 k,
-                positions,
                 cp_params.total_local_ids,
-                cp_params.total_global_ids,
+                cp_params.precomputed_positions,
             )
         else:
+            positions = flashmla_params.positions_d
             query, key = self.indexer_op.apply_rope_and_rotate_q_k(q, k, positions)
 
         return query, key
@@ -189,9 +188,12 @@ class Indexer(nn.Module):
                 fmha_params,
                 attention_inputs,
                 cp_params.total_local_ids,
-                cp_params.total_global_ids,
                 cp_params.cu_kv_seqlens_global,
                 cp_params.total_kv_len,
+                cp_params.precomputed_ks,
+                cp_params.precomputed_ke,
+                cp_params.precomputed_lengths,
+                cp_params.precomputed_topk_off,
             )
         return self.indexer_op._get_topk_ragged(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs
