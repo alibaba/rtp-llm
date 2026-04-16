@@ -182,8 +182,11 @@ struct PyAttentionInputs {
     std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
     caffe2::TypeMeta           dtype;
-    // for `FusedRopeKVCacheDecodeOp`.
+    // Cumulative sequence lengths for attention kernels (e.g. FusedRopeKVCacheDecodeOp).
+    // cu_seqlens lives on CUDA device; cu_seqlens_host is its pinned-memory CPU mirror
+    // used for CUDA graph replay (write host → async copy to device, avoiding GPU-side fills).
     torch::Tensor cu_seqlens;
+    torch::Tensor cu_seqlens_host;
     torch::Tensor cu_kv_seqlens;
     torch::Tensor decode_cu_seqlens_host;
 
@@ -197,7 +200,7 @@ struct PyAttentionInputs {
 
     std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;
     bool                                       is_s_padded = false;
-    // deivce tensor
+    // Device-side mirrors of host tensors, managed by C++ for fused D2D copy in CUDA graph.
     torch::Tensor prefix_lengths_d;
     torch::Tensor sequence_lengths_plus_1_d;
     torch::Tensor input_lengths_d;

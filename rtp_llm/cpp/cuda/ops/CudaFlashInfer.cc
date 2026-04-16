@@ -76,7 +76,10 @@ FlashInferAttnParams::allocateManyBuffer(const std::vector<std::vector<int64_t>>
     auto buf_options = torch::TensorOptions(torch::kInt32);
     if (atype == AllocationType::DEVICE) {
         buf_options = buf_options.device(torch::kCUDA);
+    } else {
+        buf_options = buf_options.device(torch::kCPU).pinned_memory(true);
     }
+
     auto buf = torch::empty({(int64_t)total_size}, buf_options);
 
     size_t offset = 0;
@@ -104,7 +107,8 @@ FlashInferAttnParams* FlashInferAttnParams::create(int batch_size, int input_tok
     params->float_workspace_ =
         torch::empty({128 * 1024 * 1024}, torch::TensorOptions(torch::kInt8).device(torch::kCUDA));
     params->int_workspace_ = torch::empty({8 * 1024 * 1024}, torch::TensorOptions(torch::kInt8).device(torch::kCUDA));
-    params->int_host_workspace_ = torch::empty({8 * 1024 * 1024}, torch::kInt8);
+    params->int_host_workspace_ =
+        torch::empty({8 * 1024 * 1024}, torch::TensorOptions(torch::kInt8).device(torch::kCPU).pinned_memory(true));
 
     params->float_workspace_d = params->float_workspace_;
     params->int_workspace_d   = params->int_workspace_;

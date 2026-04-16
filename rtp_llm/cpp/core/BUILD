@@ -184,6 +184,7 @@ cc_library(
         ":event",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/models:stats",
+        "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util",
     ] + torch_deps() + select({
         "@//:using_rocm": ["@local_config_rocm//rocm:rocm_headers"],
         "//conditions:default": [],

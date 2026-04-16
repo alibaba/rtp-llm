@@ -810,7 +810,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
     // update TP > 0 batch_size
     size_t batch_size   = model_input.combo_tokens.size(0);
-    spec_prefix_lengths = model_input.sequence_lengths.cpu().clone();
+    spec_prefix_lengths = model_input.sequence_lengths.cpu().clone().pin_memory();
 
     auto pre_propose_token_t_raw = model_input.combo_tokens.to(torch::kCUDA).clone();
 
@@ -864,8 +864,11 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         draft_token_ids_t =
             torch::cat(draft_token_ids_list, 1).reshape({(int)batch_size, (int)(propose_step_ + 1)}).contiguous();
 
-        auto lm_output_indexes = torch::empty({(int64_t)(batch_size * (propose_step_ + 1))}, torch::kInt32);
-        auto input_lengths     = torch::empty({(int64_t)batch_size}, torch::kInt32);
+        auto lm_output_indexes =
+            torch::empty({(int64_t)(batch_size * (propose_step_ + 1))},
+                         torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
+        auto input_lengths = torch::empty({(int64_t)batch_size},
+                                          torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
 
         for (int i = 0; i < batch_size; i++) {
             input_lengths.data_ptr<int>()[i] = propose_step_ + 1;
@@ -874,11 +877,12 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             lm_output_indexes.data_ptr<int>()[i] = i;
         }
 
-        model_input.input_lengths      = std::move(input_lengths);
-        model_input.lm_output_indexes  = std::move(lm_output_indexes);
-        model_input.prefix_lengths     = spec_prefix_lengths;
-        model_input.combo_tokens       = draft_token_ids_t.reshape({(int64_t)(batch_size * (propose_step_ + 1))});
-        model_input.sequence_lengths   = torch::empty({0}, torch::kInt32);
+        model_input.input_lengths     = std::move(input_lengths);
+        model_input.lm_output_indexes = std::move(lm_output_indexes);
+        model_input.prefix_lengths    = spec_prefix_lengths;
+        model_input.combo_tokens      = draft_token_ids_t.reshape({(int64_t)(batch_size * (propose_step_ + 1))});
+        model_input.sequence_lengths =
+            torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
         model_input.last_hidden_states = torch::Tensor();
 
         // Since other tp ranks don't have streams, its combo_tokens' first token is not correct.

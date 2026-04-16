@@ -141,7 +141,7 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
 
         # cu_seqlens
         cu_len = batch_size + 1
-        cu_seqlens = torch.zeros(cu_len, dtype=torch.int32, device="cpu").pin_memory()
+        cu_seqlens = torch.zeros(cu_len, dtype=torch.int32, device="cuda")
 
         attention_inputs.cu_seqlens = cu_seqlens
         attention_inputs.cu_kv_seqlens = cu_seqlens.clone()

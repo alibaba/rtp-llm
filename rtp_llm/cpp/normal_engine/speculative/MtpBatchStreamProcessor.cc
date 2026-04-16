@@ -166,7 +166,7 @@ void MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput(const StreamGro
     size_t batch_size = stream_groups.size();
 
     // prepare target model input buffer
-    auto target_prefix_lengths = model_input.sequence_lengths.cpu().clone();
+    auto target_prefix_lengths = model_input.sequence_lengths.cpu().clone().pin_memory();
 
     // allocate target_combo_tokens shape [batch_size, propose_step_ + 1]
     auto target_combo_tokens =
