@@ -148,7 +148,7 @@ class IndexerOp(nn.Module):
         self,
         q: torch.Tensor,
         k: torch.Tensor,
-        full_rope_pos_ids: torch.Tensor,
+        full_rope_pos_ids: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         CP variant of apply_rope_and_rotate_q_k.
@@ -163,6 +163,7 @@ class IndexerOp(nn.Module):
             k: Key tensor [num_tokens, index_head_dim]
             full_rope_pos_ids: Full-length position IDs [num_tokens], built
                 in plan() via ``full[total_local_ids] = positions_d[total_global_ids]``.
+                None when no valid tokens exist (n_q == 0).
 
         Returns:
             Tuple of (rotated_query, rotated_key)
@@ -170,7 +171,7 @@ class IndexerOp(nn.Module):
         q_pe = q[:, :, : self.index_head_dim - self.rope_head_dim]
         k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
-        if self.cos_sin_cache is not None:
+        if self.cos_sin_cache is not None and full_rope_pos_ids is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(
                 q=q_pe,
                 k=k_pe.unsqueeze(1),

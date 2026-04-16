@@ -238,14 +238,25 @@ void SparseMlaParams::ensureCpTensorSize(int max_idx_count, int batch_size) {
 void SparseMlaParams::refreshCpBuffer(int kv_restore_count, int total_ids_count, int batch_size) {
     cudaStream_t stream = GET_CURRENT_STREAM();
 
-    if (cp_buf_h_i64_.defined() && cp_buf_d_i64_.defined()) {
-        size_t i64_bytes = cp_buf_h_i64_.numel() * sizeof(int64_t);
-        cudaMemcpyAsync(cp_buf_d_i64_.data_ptr(), cp_buf_h_i64_.data_ptr(),
-                        i64_bytes, cudaMemcpyHostToDevice, stream);
+    // Copy only the actually-filled portion of each buffer, not the full
+    // pre-allocated capacity (which is at least 1024 * 3 int64 elements).
+    // Buffer layout (i64): [kv_restore | global_ids | local_ids] — contiguous
+    // with 32-element alignment between sub-tensors.
+    if (cp_buf_h_i64_.defined() && cp_buf_d_i64_.defined()
+        && (kv_restore_count > 0 || total_ids_count > 0)) {
+        auto* buf_start = cp_buf_h_i64_.data_ptr<int64_t>();
+        const int64_t* last_data_end;
+        if (total_ids_count > 0) {
+            last_data_end = cp_total_local_ids_h_.data_ptr<int64_t>() + total_ids_count;
+        } else {
+            last_data_end = cp_kv_restore_unpad_indices_h_.data_ptr<int64_t>() + kv_restore_count;
+        }
+        size_t i64_bytes = static_cast<size_t>(last_data_end - buf_start) * sizeof(int64_t);
+        cudaMemcpyAsync(cp_buf_d_i64_.data_ptr(), buf_start, i64_bytes, cudaMemcpyHostToDevice, stream);
     }
 
     if (cp_buf_h_i32_2_.defined() && cp_buf_d_i32_2_.defined()) {
-        size_t i32_bytes = cp_buf_h_i32_2_.numel() * sizeof(int32_t);
+        size_t i32_bytes = static_cast<size_t>(batch_size + 1) * sizeof(int32_t);
         cudaMemcpyAsync(cp_buf_d_i32_2_.data_ptr(), cp_buf_h_i32_2_.data_ptr(),
                         i32_bytes, cudaMemcpyHostToDevice, stream);
     }
@@ -347,7 +358,22 @@ void SparseMlaParams::fillCpPlanParams(const torch::Tensor&         padding_mask
     process_q_indices(q0_idx);
     process_q_indices(q1_idx);
 
+    if (total_ids_count == 0 && !q0_idx.empty()) {
+        RTP_LLM_LOG_WARNING(
+            "[SparseMlaParams::fillCpPlanParams] All q indices were filtered out "
+            "(total_ids_count=0, q0_idx.size=%zu, q1_idx.size=%zu, "
+            "cp_rank=%d, local_tokens=%d, padded_total=%d). "
+            "This may indicate a data mismatch between CP chunking and padding mask.",
+            q0_idx.size(), q1_idx.size(), cp_rank, local_tokens, padded_total);
+    }
+
     // Step 5: cu_kv_seqlens_global = [0, cumsum(actual_input_lengths + prefix_lengths)]
+    TORCH_CHECK(actual_input_lengths.scalar_type() == torch::kInt32,
+                "fillCpPlanParams: actual_input_lengths must be int32, got ",
+                actual_input_lengths.scalar_type());
+    TORCH_CHECK(prefix_lengths.scalar_type() == torch::kInt32,
+                "fillCpPlanParams: prefix_lengths must be int32, got ",
+                prefix_lengths.scalar_type());
     const auto* ail_ptr = actual_input_lengths.data_ptr<int32_t>();
     const auto* pl_ptr  = prefix_lengths.data_ptr<int32_t>();
     cu_kv_out[0] = 0;
