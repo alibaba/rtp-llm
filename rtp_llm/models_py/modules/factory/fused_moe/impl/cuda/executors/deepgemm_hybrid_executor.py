@@ -3,11 +3,14 @@
 # Licensed under the Apache License, Version 2.0
 import logging
 import math
-from typing import Any, Dict, Optional
+import os
+from typing import Any, Dict, List, Optional
 
 import torch
 
 logger = logging.getLogger(__name__)
+
+TRITON_MOE_THRESHOLD = int(os.environ.get("TRITON_MOE_THRESHOLD", "4096"))
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     configure_deep_gemm_num_sms,
@@ -119,6 +122,15 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         assert self.w2_weight.size(1) == self.K
         assert self.w2_weight.size(2) == self.N // 2
 
+        # Save triton-compatible weights (float32 scales) before UE8M0 packing
+        self.triton_threshold = TRITON_MOE_THRESHOLD
+        if self.triton_threshold > 0:
+            self._triton_w1_scale = weights[W.moe_s1].clone()
+            self._triton_w2_scale = weights[W.moe_s2].clone()
+            logger.info(
+                f"Triton MoE fallback enabled for token_num < {self.triton_threshold}"
+            )
+
         # Pre-pack weight scales once at init time (avoids per-forward packing)
         self.w13_weight_scale_inv = pre_pack_weight_ue8m0_scale(
             self.w13_weight, self.w13_weight_scale_inv
@@ -176,6 +188,46 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         self.w13_fp4_scale = torch.stack(scale_list)
         self.w13_weight_fp4 = (self.w13_fp4, self.w13_fp4_scale)
         del w13_bf16, fp4_list, scale_list
+
+    def execute_triton_e2e(
+        self,
+        hidden_states_bf16: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+    ) -> CombineForwardPayload:
+        """Small-batch triton FP8 per-block path (bypasses Router FP8 quant).
+
+        For token_num < triton_threshold, the triton fused MoE kernel is faster
+        than DeepGemm because it avoids the fixed overhead of grouped GEMM setup.
+        """
+        from .triton_fused_moe import fused_experts_impl
+        from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+            recompute_topk_ids_sum_expert_count,
+        )
+
+        adjusted_topk_ids, _ = recompute_topk_ids_sum_expert_count(
+            topk_ids, self.start_expert_id, self.num_experts_per_partition
+        )
+
+        act_map = {"SiGLU": "silu", "silu": "silu", "GeGLU": "gelu", "gelu": "gelu"}
+        triton_act = act_map.get(activation, "silu")
+
+        output = fused_experts_impl(
+            hidden_states_bf16,
+            self.w13_weight,
+            self.w2_weight,
+            topk_weights,
+            adjusted_topk_ids.to(torch.int32),
+            inplace=False,
+            use_fp8_w8a8=True,
+            w1_scale=self._triton_w1_scale,
+            w2_scale=self._triton_w2_scale,
+            block_shape=self.DEEPGEMM_BLOCK_SHAPE,
+            activation=triton_act,
+            filter_expert=self.ep_size > 1,
+        )
+        return CombineForwardPayload(fused_expert_output=output)
 
     def execute(
         self,

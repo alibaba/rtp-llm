@@ -643,7 +643,7 @@ class FlashInferTRTLLMPrefillOp(object):
             q = q.to(dtype)
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
 
-        kv_block_scales = None
+        kv_cache_sf = None
         if is_nvfp4:
             k_global_scale, v_global_scale = fmha_params.kv_global_scale
             bmm1_scale = k_global_scale * self.scaling
@@ -665,13 +665,14 @@ class FlashInferTRTLLMPrefillOp(object):
                 kv_scale_base = kv_cache.kv_scale_base
                 if kv_scale_base.dtype == torch.uint8:
                     kv_scale_base = kv_scale_base.view(torch.float8_e4m3fn)
-                kv_block_scales = kv_scale_base.view(
+                kv_scales = kv_scale_base.view(
                     kv_cache.kv_scale_base.shape[0],
                     2,
                     self.local_head_kv_num,
                     self.seq_size_per_block,
                     self.head_dim // 16,
                 )
+                kv_cache_sf = (kv_scales[:, 0], kv_scales[:, 1])
             else:
                 kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
                     kv_cache.kv_cache_base.shape[0],
@@ -697,7 +698,7 @@ class FlashInferTRTLLMPrefillOp(object):
             window_left=-1,
             sinks=None,
             out_dtype=o_type,
-            kv_block_scales=kv_block_scales,
+            kv_cache_sf=kv_cache_sf,
         )
 
         return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
@@ -788,7 +789,7 @@ class FlashInferTRTLLMDecodeOp(object):
             q = q.to(dtype)
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
 
-        kv_block_scales = None
+        kv_cache_sf = None
         if is_nvfp4:
             k_global_scale, v_global_scale = fmha_params.kv_global_scale
             bmm1_scale = k_global_scale * self.scaling
@@ -810,13 +811,14 @@ class FlashInferTRTLLMDecodeOp(object):
                 kv_scale_base = kv_cache.kv_scale_base
                 if kv_scale_base.dtype == torch.uint8:
                     kv_scale_base = kv_scale_base.view(torch.float8_e4m3fn)
-                kv_block_scales = kv_scale_base.view(
+                kv_scales = kv_scale_base.view(
                     kv_cache.kv_scale_base.shape[0],
                     2,
                     self.local_head_kv_num,
                     self.seq_size_per_block,
                     self.head_dim // 16,
                 )
+                kv_cache_sf = (kv_scales[:, 0], kv_scales[:, 1])
             else:
                 kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
                     kv_cache.kv_cache_base.shape[0],
@@ -840,7 +842,7 @@ class FlashInferTRTLLMDecodeOp(object):
             sinks=None,
             out_dtype=o_type,
             q_len_per_req=q.shape[0] // fmha_params.seq_lens.shape[0],
-            kv_block_scales=kv_block_scales,
+            kv_cache_sf=kv_cache_sf,
         )
         return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
 
