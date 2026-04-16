@@ -96,6 +96,33 @@ def _register_stub_module(full_name: str, **attrs: Any) -> None:
     sys.modules[full_name] = mod
 
 
+def _to_torch_dtype_stub(maybe_str_dtype):
+    """Minimal stub for rtp_llm.utils.util.to_torch_dtype."""
+    import torch as _torch
+    if isinstance(maybe_str_dtype, _torch.dtype):
+        return maybe_str_dtype
+    if hasattr(maybe_str_dtype, "name"):
+        maybe_str_dtype = maybe_str_dtype.name
+    elif not isinstance(maybe_str_dtype, str):
+        maybe_str_dtype = str(maybe_str_dtype)
+    if maybe_str_dtype.startswith("TYPE_"):
+        maybe_str_dtype = maybe_str_dtype[5:]
+    _map = {
+        "bf16": _torch.bfloat16,
+        "fp16": _torch.float16,
+        "fp32": _torch.float32,
+        "bfloat16": _torch.bfloat16,
+        "float16": _torch.float16,
+        "float32": _torch.float32,
+        "int8": _torch.int8,
+        "int32": _torch.int32,
+    }
+    key = maybe_str_dtype.lower()
+    if key in _map:
+        return _map[key]
+    raise ValueError(f"Unknown dtype: {maybe_str_dtype}")
+
+
 def _install_rtp_llm_stubs_for_moriep_wrapper() -> None:
     """满足 moriep_wrapper.py 顶层 `from rtp_llm... import ...`，无需安装 rtp_llm。"""
     _register_stub_module(
@@ -109,6 +136,10 @@ def _install_rtp_llm_stubs_for_moriep_wrapper() -> None:
     _register_stub_module(
         "rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter",
         MoEConfigAdapter=type("MoEConfigAdapter", (), {}),
+    )
+    _register_stub_module(
+        "rtp_llm.utils.util",
+        to_torch_dtype=_to_torch_dtype_stub,
     )
 
 
