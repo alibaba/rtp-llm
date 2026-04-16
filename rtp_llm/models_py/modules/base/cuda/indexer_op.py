@@ -148,44 +148,39 @@ class IndexerOp(nn.Module):
         self,
         q: torch.Tensor,
         k: torch.Tensor,
-        total_local_ids: torch.Tensor,
-        precomputed_positions: Optional[torch.Tensor],
+        full_rope_pos_ids: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Apply RoPE and Hadamard transform to query and key tensors.
-        Split by q0_idx/q1_idx so only valid (unpadded) tokens get RoPE; write back in-place to q's PE part.
+        CP variant of apply_rope_and_rotate_q_k.
+
+        Uses ``full_rope_pos_ids`` (length = num_tokens) so RoPE runs on the
+        entire buffer in-place, eliminating the per-layer gather/scatter EW
+        kernels.  Padding rows receive pos=0 and produce garbage, but they are
+        never consumed downstream (everything selects by ``total_local_ids``).
 
         Args:
             q: Query tensor [num_tokens, index_n_heads, index_head_dim]
             k: Key tensor [num_tokens, index_head_dim]
-            total_local_ids: Local row indices into ``q``/``k`` for this CP rank.
-            precomputed_positions: Precomputed ``positions[total_global_ids]`` from plan().
+            full_rope_pos_ids: Full-length position IDs [num_tokens], built
+                in plan() via ``full[total_local_ids] = positions_d[total_global_ids]``.
 
         Returns:
             Tuple of (rotated_query, rotated_key)
         """
-        pe_dim = self.index_head_dim - self.rope_head_dim
-        q_pe = q[:, :, :pe_dim]
-        k_pe = k[:, :pe_dim]
+        q_pe = q[:, :, : self.index_head_dim - self.rope_head_dim]
+        k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
-        if self.cos_sin_cache is not None and total_local_ids.size(0) > 0:
-            q_pe_local = q_pe[total_local_ids]
-            k_pe_local = k_pe[total_local_ids]
-            k_rope = k_pe_local.unsqueeze(1)
+        if self.cos_sin_cache is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(
-                q=q_pe_local,
-                k=k_rope,
-                q_rope=q_pe_local,
-                k_rope=k_rope,
+                q=q_pe,
+                k=k_pe.unsqueeze(1),
+                q_rope=q_pe,
+                k_rope=k_pe.unsqueeze(1),
                 cos_sin_cache=self.cos_sin_cache,
-                pos_ids=precomputed_positions,
+                pos_ids=full_rope_pos_ids,
                 interleave=not self.is_neox_style,
             )
-            k_rope = k_rope.squeeze(1)
-            k_pe[total_local_ids] = k_rope
-            q_pe[total_local_ids] = q_pe_local
 
-        # Apply Hadamard transform (activation rotation)
         query = _rotate_activation(q)
         key = _rotate_activation(k)
 

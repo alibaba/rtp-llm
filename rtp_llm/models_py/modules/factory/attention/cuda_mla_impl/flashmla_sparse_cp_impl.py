@@ -82,8 +82,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.total_kv_len: int = 0
         self.kv_cache_write_op = None
         self.write_cache_store_impl = None
-        self.precomputed_positions = None
         self.precomputed_req_ids = None
+        self.full_rope_pos_ids = None
 
     def plan(
         self,
@@ -152,6 +152,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self._fp8_kernel_metadata_q0 = SparseMlaFp8DecodeParams(
             tile_sched_q0, num_splits_q0
         )
+        if n_q > 0:
+            self.precomputed_req_ids = mla_params.batch_indice_d[self.total_global_ids]
 
     def _convert_topk_indices_to_global(
         self, topk_indices: torch.Tensor
@@ -354,10 +356,11 @@ class SparseMlaCpImpl(SparseMlaImpl):
         self.prepare(attn_inputs)
 
         total_global_ids = self.fmha_impl.total_global_ids
+        total_local_ids = self.fmha_impl.total_local_ids
         has_tokens = total_global_ids is not None and total_global_ids.size(0) > 0
 
         # Precompute indexed values once; these indices are the same for every layer,
-        # so we avoid repeating ~6 elementwise GPU kernels per layer.
+        # so we avoid repeating elementwise GPU kernels per layer.
         precomputed_positions = (
             self.fmha_params.positions_d[total_global_ids] if has_tokens else None
         )
@@ -377,18 +380,32 @@ class SparseMlaCpImpl(SparseMlaImpl):
             self.fmha_params.batch_indice_d[total_global_ids] if has_tokens else None
         )
 
-        # Also store on fmha_impl for the attention-side RoPE / topk-index paths
-        self.fmha_impl.precomputed_positions = precomputed_positions
+        # Build full-length pos_ids so RoPE can run on the entire buffer in-place,
+        # eliminating 4 EW kernels (2 index + 2 index_put) per RoPE path per layer.
+        # Padding rows get pos=0; their RoPE result is garbage but never consumed.
+        if has_tokens:
+            positions_d = self.fmha_params.positions_d
+            full_rope_pos_ids = torch.zeros(
+                positions_d.size(0),
+                dtype=positions_d.dtype,
+                device=positions_d.device,
+            )
+            full_rope_pos_ids[total_local_ids] = precomputed_positions
+        else:
+            full_rope_pos_ids = None
+
+        # Store on fmha_impl for the attention-side RoPE / topk-index paths
         self.fmha_impl.precomputed_req_ids = precomputed_req_ids
+        self.fmha_impl.full_rope_pos_ids = full_rope_pos_ids
 
         # Pack CP indices from fmha_impl for use by indexer and others
         self.cp_params = SimpleNamespace(
             kv_restore_unpad_indices=self.fmha_impl.kv_restore_unpad_indices,
             total_global_ids=total_global_ids,
-            total_local_ids=self.fmha_impl.total_local_ids,
+            total_local_ids=total_local_ids,
             cu_kv_seqlens_global=self.fmha_impl.cu_kv_seqlens_global,
             total_kv_len=self.fmha_impl.total_kv_len,
-            precomputed_positions=precomputed_positions,
+            full_rope_pos_ids=full_rope_pos_ids,
             precomputed_ks=precomputed_ks,
             precomputed_ke=precomputed_ke,
             precomputed_lengths=precomputed_lengths,
@@ -435,20 +452,19 @@ class SparseMlaCpImpl(SparseMlaImpl):
         assert kv_cache is not None, "kv_cache is required for sparse MLA"
         assert self.fmha_impl is not None, "fmha_impl is not initialized"
 
-        # Apply RoPE to q_pe and k_pe (CP: only valid token rows; global positions via rope_impl)
+        # Apply RoPE in-place to full q_pe/k_pe using full_rope_pos_ids.
+        # Padding rows get pos=0 (garbage RoPE), but they are never consumed:
+        #   - q goes through _apply_input_bmm then q[total_local_ids] in fmha_impl
+        #   - k_pe goes through all_gather then kv_restore_unpad_indices
         q_pe = q[:, :, self.nope_head_dim :]
 
-        if self.fmha_impl.total_local_ids.size(0) > 0:
-            q_pe_local = q_pe[self.fmha_impl.total_local_ids]
-            k_pe_local = k_pe[self.fmha_impl.total_local_ids]
+        if self.fmha_impl.full_rope_pos_ids is not None:
             self.rope_impl.forward(
-                q_pe_local,
-                k_pe_local,
+                q_pe,
+                k_pe,
                 self.rope_params,
-                precomputed_pos_ids=self.fmha_impl.precomputed_positions,
+                precomputed_pos_ids=self.fmha_impl.full_rope_pos_ids,
             )
-            k_pe[self.fmha_impl.total_local_ids] = k_pe_local
-            q_pe[self.fmha_impl.total_local_ids] = q_pe_local
 
         # Apply input BMM to transform query
         q_transformed = self._apply_input_bmm(q, layer_id)
