@@ -40,7 +40,7 @@ def get_mla_impl(
         if not impl.support(attn_configs, attn_inputs):
             continue
 
-        cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
+        cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
         # TODO: support fast path for cp prefill
         use_fast_path = (
             attn_inputs.is_prefill

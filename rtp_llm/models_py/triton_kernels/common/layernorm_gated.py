@@ -34,6 +34,7 @@ def _layer_norm_fwd_1pass_kernel(
     HAS_Z: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
+    ACTIVATION: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
     row = tl.program_id(0)
@@ -53,7 +54,10 @@ def _layer_norm_fwd_1pass_kernel(
     x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
     if HAS_Z and not NORM_BEFORE_GATE:
         z = tl.load(Z + cols, mask=cols < N).to(tl.float32)
-        x *= z * tl.sigmoid(z)
+        if ACTIVATION == "sigmoid":
+            x *= tl.sigmoid(z)
+        else:
+            x *= z * tl.sigmoid(z)
     if not IS_RMS_NORM:
         mean = tl.sum(x, axis=0) / N
         tl.store(Mean + row, mean)
@@ -73,7 +77,10 @@ def _layer_norm_fwd_1pass_kernel(
     y = x_hat * w + b if HAS_BIAS else x_hat * w
     if HAS_Z and NORM_BEFORE_GATE:
         z = tl.load(Z + cols, mask=mask).to(tl.float32)
-        y *= z * tl.sigmoid(z)
+        if ACTIVATION == "sigmoid":
+            y *= tl.sigmoid(z)
+        else:
+            y *= z * tl.sigmoid(z)
     # Write output
     tl.store(Y + cols, y, mask=mask)
 
@@ -88,6 +95,7 @@ def layer_norm_fwd(
     group_size=None,
     norm_before_gate=True,
     is_rms_norm=False,
+    activation="silu",
 ):
     M, N = x.shape
     if group_size is None:
@@ -141,6 +149,7 @@ def layer_norm_fwd(
             BLOCK_N=BLOCK_N,
             NORM_BEFORE_GATE=norm_before_gate,
             IS_RMS_NORM=is_rms_norm,
+            ACTIVATION=activation,
             num_warps=num_warps,
         )
     return out, mean, rstd
@@ -153,11 +162,13 @@ class RmsNormGated(torch.nn.Module):
         bias: Optional[torch.Tensor] = None,
         group_size: Optional[int] = None,
         eps: float = 1e-6,
+        activation: str = "silu",
     ):
         super().__init__()
         self.weight = weight
         self.bias = bias
         self.eps = eps
+        self.activation = activation
         if group_size is None:
             self.group_size = self.weight.shape[-1]
         else:
@@ -191,4 +202,5 @@ class RmsNormGated(torch.nn.Module):
             group_size=self.group_size,
             norm_before_gate=True,
             is_rms_norm=True,
+            activation=self.activation,
         )[0]

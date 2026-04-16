@@ -36,6 +36,7 @@ from rtp_llm.utils.import_util import has_internal_source
 from .bert import Bert
 from .glm4_moe import Glm4Moe
 from .jina_bert.jina_bert import JinaBert
+from .kimi_linear.kimi_linear import KimiLinear
 from .megatron_bert import MegatronBert
 from .mixtral import Mixtral
 from .qwen3_next.qwen3_next import Qwen3Next

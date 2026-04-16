@@ -301,6 +301,47 @@ def h20_oss_suites():
     )
 
 
+    # H20 Kimi Linear (KDA hybrid linear attention)
+    native.test_suite(
+        name = "smoke_h20_kimi_linear",
+        tests = [
+            smoke_test(
+                name="kimi_bf16_basic",
+                task_info="data/model/kimi_linear/q_r_bf16_tp2.json",
+                smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="kimi_kernel_block",
+                task_info="data/model/kimi_linear/q_r_bf16_tp2_kernel_block_size_64.json",
+                smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --kernel_seq_size_per_block 64 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="kimi_cudagraph",
+                task_info="data/model/kimi_linear/q_r_cuda_graph.json",
+                smoke_args="--act_type BF16 --seq_size_per_block 2048 --max_seq_len 128 --enable_cuda_graph 1 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --tp_size 2 --ssm_state_dtype fp32",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="kimi_long_reuse_memcache",
+                task_info="data/model/kimi_linear/q_r_bf16_tp2_long_input_reuse_cache.json",
+                smoke_args="--tp_size 2 --act_type BF16 --max_seq_len 16384 --seq_size_per_block 2048 --linear_step 2 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 2048 --write_cache_sync 1 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="kimi_pd",
+                task_info="data/model/kimi_linear/q_r_bf16_tp2_pd_sep.json",
+                smoke_args= {
+                    "prefill": "--seq_size_per_block 2048 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
+                    "decode": "--seq_size_per_block 2048 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192"
+                },
+                gpu_type=["H20"],
+            ),
+        ],
+    )
+
+
     # H20 Eagle (Qwen2-14B + draft model)
     native.test_suite(
         name = "smoke_h20_eagle",
