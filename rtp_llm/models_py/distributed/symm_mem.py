@@ -64,6 +64,8 @@ class TorchSymmMemCommunicator:
         """
 
         self.disabled = True
+        self.buffer = None
+        self._group_name = None
 
         if not torch_symm_mem_available:
             return
@@ -104,7 +106,8 @@ class TorchSymmMemCommunicator:
             dtype=self.dtype,
         )
         # Try ProcessGroup object first, fallback to group_name if needed
-        handle = torch_symm_mem.rendezvous(self.buffer, group=self.group.group_name)
+        self._group_name = self.group.group_name
+        handle = torch_symm_mem.rendezvous(self.buffer, group=self._group_name)
         if handle.multicast_ptr == 0:
             logging.warning(
                 "TorchSymmMemCommunicator: torch symmetric memory "
@@ -239,6 +242,36 @@ class TorchSymmMemCommunicator:
         )
         out.copy_(buf_out.view(self.world_size, *shard.shape))
         return out
+
+    def close(self):
+        """Release symmetric memory resources to prevent CUDA IPC state leakage.
+
+        Must be called before destroy_process_group() because PyTorch's
+        destroy_process_group does NOT clean up _symmetric_memory globals
+        (_group_name_to_store, _group_name_to_workspace_tensor), leaving
+        stale IPC handles that corrupt the CUDA address space for subsequent
+        allocations in the same process.
+        """
+        if self.buffer is not None:
+            del self.buffer
+            self.buffer = None
+
+        if self._group_name is not None:
+            try:
+                from torch.distributed._symmetric_memory import (
+                    _group_name_to_store,
+                    _group_name_to_workspace_tensor,
+                )
+                _group_name_to_store.pop(self._group_name, None)
+                _group_name_to_workspace_tensor.pop(self._group_name, None)
+            except (ImportError, AttributeError):
+                pass
+            self._group_name = None
+
+        self.disabled = True
+
+    def __del__(self):
+        self.close()
 
 
 # Use lazy initialization instead of module-level initialization

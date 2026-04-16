@@ -4,6 +4,10 @@ import unittest
 from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,

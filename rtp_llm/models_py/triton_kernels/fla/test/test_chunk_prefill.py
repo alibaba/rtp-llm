@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import logging
 import os
 from typing import List
@@ -145,6 +149,10 @@ def chunk_gated_delta_rule_ref(
     return o, S
 
 
+@pytest.mark.parametrize("H,D,mask_p,cu_seqlens,dtype", [
+    pytest.param(4, 64, 0, [0, 15], torch.bfloat16, id="short_seq"),
+    pytest.param(4, 64, 0, [0, 256, 500, 1000], torch.bfloat16, id="multi_seg"),
+])
 def test_chunk_varlen(
     H: int,
     D: int,

@@ -7,7 +7,10 @@ import unittest
 from typing import Callable, Optional
 
 import matplotlib.pyplot as plt
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_mul_bf16_deep_gemm_masked,
@@ -102,10 +105,8 @@ class SiluMulMaskedTest(unittest.TestCase):
             return masked_m, up_gate_output, test_new_output
 
     def _clean_test_data_cache(self, index: int):
-        if index % 1 == 0:
-            torch.cuda.empty_cache()
-        if index % 2 == 0:
-            gc.collect()
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def _compare_output_diff(
         self,

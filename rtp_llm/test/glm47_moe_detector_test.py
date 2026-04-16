@@ -17,6 +17,7 @@ import json
 import unittest
 from typing import List
 
+import pytest
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import (
     Function,
     Tool,
@@ -29,6 +30,8 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.glm47_moe_detector im
     get_argument_type,
     parse_arguments,
 )
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 def create_basic_tools() -> List[Tool]:

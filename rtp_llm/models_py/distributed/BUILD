@@ -1,7 +1,3 @@
-load("//bazel:arch_select.bzl", "deep_ep_py_deps")
-
-deep_ep_py_deps()
-
 py_library(
     name = "collective_torch",
     srcs = [

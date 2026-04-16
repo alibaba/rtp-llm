@@ -1,11 +1,14 @@
 import itertools
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 import torch.nn.functional as F
 from torch import dtype as _dtype
 
 from rtp_llm.models_py.modules import AddBiasResLayerNorm
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 
 class AddBiasResLayerNormROCmTorch(torch.nn.Module):
@@ -96,7 +99,7 @@ class LayerNormTest(TestCase):
             self.DTYPES,
         ):
             with self.subTest(
-                num_tokens=params[0], hidden_size=params[1], dtype=params[2]
+                num_tokens=params[0], hidden_size=params[1], dtype=str(params[2])
             ):
                 self._run_res_layernorm_test(*params)
 

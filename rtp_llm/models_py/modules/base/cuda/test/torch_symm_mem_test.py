@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Optional
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -14,6 +15,8 @@ from torch.distributed import ProcessGroup
 
 from rtp_llm.models_py.distributed.symm_mem import TorchSymmMemCommunicator
 from rtp_llm.test.utils.port_util import PortsContext
+
+pytestmark = [pytest.mark.gpu(type="H20", count=2)]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -75,10 +78,15 @@ class TorchSymmMemTest(TestCase):
     def setUp(self) -> None:
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
+        self._prev_default_device = torch.get_default_device()
         torch.set_default_device(device)
         set_seed(42)
 
     def tearDown(self) -> None:
+        # CRITICAL: Reset default device to avoid polluting subsequent tests.
+        # torch.set_default_device("cuda") in setUp persists globally and causes
+        # downstream tests (e.g. CP attention tests) to crash or hang.
+        torch.set_default_device(self._prev_default_device or "cpu")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -168,6 +176,10 @@ class TorchSymmMemTest(TestCase):
                 if dist.is_initialized():
                     dist.barrier(group)
             finally:
+                # Force GC to trigger TorchSymmMemCommunicator.__del__/close()
+                # BEFORE destroy_process_group, so CUDA IPC state is cleaned up.
+                import gc
+                gc.collect()
                 test.tearDown()
                 cleanup_distributed()
         except Exception as e:
@@ -178,43 +190,22 @@ class TorchSymmMemTest(TestCase):
             raise
 
     def test_all_reduce_correctness(self):
-        """Test all_reduce correctness using multiprocessing spawn."""
+        """Test all_reduce correctness using subprocess (isolated process)."""
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
 
-        # Get TP_SIZE from environment or use default
-        tp_size = int(os.environ.get("TP_SIZE", "2"))
+        tp_size = min(int(os.environ.get("TP_SIZE", "2")), torch.cuda.device_count())
         if tp_size < 2:
             self.skipTest(f"TP_SIZE={tp_size} is too small, need at least 2")
 
-        # Limit to available GPUs
-        num_gpus = torch.cuda.device_count()
-        if tp_size > num_gpus:
-            logging.warning(
-                f"TP_SIZE={tp_size} > available GPUs={num_gpus}, using {num_gpus}"
-            )
-            tp_size = num_gpus
-
-        with PortsContext(None, 1) as ports:
-            master_port = str(ports[0])
-            master_addr = "127.0.0.1"
-
-            try:
-                mp.spawn(
-                    TorchSymmMemTest._run_all_reduce_correctness_test,
-                    args=(tp_size, master_addr, master_port),
-                    nprocs=tp_size,
-                    join=True,
-                )
-            except Exception as e:
-                logging.error(f"Test failed: {e}")
-                raise
+        self._run_in_subprocess("_run_all_reduce_correctness_test", tp_size)
 
     @staticmethod
     def _run_all_reduce_different_sizes_test(
         rank: int, world_size: int, master_addr: str, master_port: str
     ):
         """Worker function for all_reduce with different sizes test."""
+        comm = None
         try:
             group, rank, world_size = init_distributed_for_test(
                 rank, world_size, master_addr, master_port
@@ -254,6 +245,8 @@ class TorchSymmMemTest(TestCase):
                 if dist.is_initialized():
                     dist.barrier(group)
             finally:
+                if comm is not None:
+                    comm.close()
                 test.tearDown()
                 cleanup_distributed()
         except Exception as e:
@@ -264,35 +257,50 @@ class TorchSymmMemTest(TestCase):
             raise
 
     def test_all_reduce_with_different_sizes(self):
-        """Test all_reduce with different tensor sizes using multiprocessing spawn."""
+        """Test all_reduce with different tensor sizes using subprocess (isolated process)."""
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
 
-        tp_size = int(os.environ.get("TP_SIZE", "2"))
+        tp_size = min(int(os.environ.get("TP_SIZE", "2")), torch.cuda.device_count())
         if tp_size < 2:
             self.skipTest(f"TP_SIZE={tp_size} is too small, need at least 2")
 
-        num_gpus = torch.cuda.device_count()
-        if tp_size > num_gpus:
-            logging.warning(
-                f"TP_SIZE={tp_size} > available GPUs={num_gpus}, using {num_gpus}"
-            )
-            tp_size = num_gpus
+        self._run_in_subprocess("_run_all_reduce_different_sizes_test", tp_size)
+
+    def _run_in_subprocess(self, worker_func_name: str, tp_size: int):
+        """Run a test worker function in a fully isolated subprocess.
+
+        Uses subprocess.run instead of mp.spawn to avoid CUDA IPC state
+        leakage into the pytest main process, which can corrupt the CUDA
+        context and cause subsequent tests to hang or crash.
+        """
+        import subprocess
+        import textwrap
 
         with PortsContext(None, 1) as ports:
             master_port = str(ports[0])
-            master_addr = "127.0.0.1"
-
-            try:
+            script = textwrap.dedent(f"""\
+                import torch.multiprocessing as mp
+                from rtp_llm.models_py.modules.base.cuda.test.torch_symm_mem_test import TorchSymmMemTest
                 mp.spawn(
-                    TorchSymmMemTest._run_all_reduce_different_sizes_test,
-                    args=(tp_size, master_addr, master_port),
-                    nprocs=tp_size,
+                    getattr(TorchSymmMemTest, "{worker_func_name}"),
+                    args=({tp_size}, "127.0.0.1", "{master_port}"),
+                    nprocs={tp_size},
                     join=True,
                 )
-            except Exception as e:
-                logging.error(f"Test failed: {e}")
-                raise
+            """)
+            result = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                self.fail(
+                    f"Subprocess exited with code {result.returncode}\n"
+                    f"stdout: {result.stdout[-2000:]}\n"
+                    f"stderr: {result.stderr[-2000:]}"
+                )
 
 
 class TorchSymmMemBenchmark:

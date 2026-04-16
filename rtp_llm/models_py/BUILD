@@ -1,23 +1,9 @@
-load("//bazel:arch_select.bzl", "requirement")
-
 py_library(
     name = "utils",
     srcs = glob([
         "utils/*.py",
     ]),
 )
-
-# flashinfer-python is only available for CUDA12
-flashinfer = ["flashinfer-python"]
-deep = ["deep_gemm", "deep_ep"]
-flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
-rtp_kernel = ["rtp-kernel"]
-flashattn = ["flash_attn","flash-attn-3"]
-requirement(flashinfer)
-requirement(deep)
-requirement(flashmla)
-requirement(rtp_kernel)
-requirement(flashattn)
 
 
 filegroup(

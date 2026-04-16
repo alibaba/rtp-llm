@@ -1,5 +1,6 @@
 import unittest
 
+import pytest
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import (
     Function,
     Tool,
@@ -7,6 +8,8 @@ from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import 
 from rtp_llm.openai.renderers.sglang_helpers.function_call.glm4_moe_detector import (
     Glm4MoeDetector,
 )
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 def create_tools():

@@ -7,7 +7,10 @@ Tests two scenarios:
 """
 
 import contextlib
+import pytest
 import unittest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 from unittest.mock import patch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.allgather_overlap_impl import (

@@ -4,16 +4,23 @@
 import itertools
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 
-from rtp_kernel.w4a8_group_gemm import (
-    w4a8_group_gemm_ptpc,
-    unified_encode_int4b,
-    pack_scale_fp8,
-    initialize_tensor,
-    dequantize_int4b_to_fp8,
-    block_compare_relative,
-)
+try:
+    from rtp_kernel.w4a8_group_gemm import (
+        w4a8_group_gemm_ptpc,
+        unified_encode_int4b,
+        pack_scale_fp8,
+        initialize_tensor,
+        dequantize_int4b_to_fp8,
+        block_compare_relative,
+    )
+except (ImportError, AssertionError, RuntimeError) as e:
+    pytest.skip(f"rtp_kernel.w4a8_group_gemm unavailable: {e}", allow_module_level=True)
 
 
 def torch_ref(
@@ -139,7 +146,7 @@ class W4A8GroupGemmOpTest(TestCase):
                 num_expert=params[0],
                 m=params[1],
                 group_size=params[2],
-                output_dtype=params[3]
+                output_dtype=str(params[3])
             ):
                 self._run_w4a8_group_gemm_op_test(*params)
 

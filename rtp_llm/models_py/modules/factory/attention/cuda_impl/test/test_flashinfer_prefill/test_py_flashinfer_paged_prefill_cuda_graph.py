@@ -6,7 +6,10 @@ identical results to forward() without copy_params.
 
 import logging
 import math
+import pytest
 import unittest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 import torch
 

@@ -29,7 +29,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_full_causal_kv_indices,
     generate_q_indices,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
 from .flashmla_sparse_impl import (
@@ -390,11 +390,6 @@ class SparseMlaCpImpl(SparseMlaImpl):
         attn_for_prepare = copy.copy(attn_inputs)
         attn_for_prepare.input_lengths = cp_info.prefill_actual_input_lengths_cpu
         super().prepare(attn_for_prepare, forbid_realloc=forbid_realloc)
-
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        """Return FMHA type."""
-        return FMHAType.CP_SPARSE_FLASHMLA
 
     def create_params(self, attn_inputs: PyAttentionInputs):
         """Create FMHA parameters and pack CP indices into cp_params."""

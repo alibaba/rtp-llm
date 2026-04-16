@@ -8,8 +8,12 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 import deep_gemm
-import tilelang
-import tilelang.language as T
+try:
+    import tilelang
+    import tilelang.language as T
+except Exception:
+    tilelang = None
+    T = None
 import torch
 import torch.nn.functional as F
 from fastsafetensors.frameworks import K
@@ -22,11 +26,22 @@ from rtp_llm.ops import AttentionConfigs, HWKernelConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
-pass_configs = {
-    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-}
+if tilelang is not None:
+    pass_configs = {
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
+    }
+else:
+    pass_configs = {}
+    # Provide no-op decorator so module can be imported without tilelang
+    class _FakeTilelang:
+        @staticmethod
+        def jit(*args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+    tilelang = _FakeTilelang()
 block_size = 128
 
 FP8 = "float8_e4m3"

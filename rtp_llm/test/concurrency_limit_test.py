@@ -4,11 +4,13 @@ import os
 import random
 import time
 import unittest
+import unittest.mock
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 from typing import Any
 from unittest import TestCase, main
 
+import pytest
 import requests
 from pydantic import BaseModel
 
@@ -20,6 +22,8 @@ from rtp_llm.server.backend_manager import BackendManager
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 def fake_init(self, *args, **kwargs):
@@ -61,19 +65,19 @@ def fake_inference(*args, **kwargs):
     )
 
 
-FrontendWorker.__init__ = fake_init
-FrontendWorker.inference = fake_inference
-
-BackendManager.start = fake_start
-BackendManager.ready = fake_ready
-
-OpenaiEndpoint.__init__ = fake_init
-OpenaiEndpoint.chat_completion = fake_inference
-
-
 class ConcurrencyLimitTest(TestCase):
-    def __init__(self, *args: Any, **kwargs: Any):
-        super().__init__(*args, **kwargs)
+    def setUp(self):
+        self._patches = [
+            unittest.mock.patch.object(FrontendWorker, "__init__", fake_init),
+            unittest.mock.patch.object(FrontendWorker, "inference", fake_inference),
+            unittest.mock.patch.object(BackendManager, "start", fake_start),
+            unittest.mock.patch.object(BackendManager, "ready", fake_ready),
+            unittest.mock.patch.object(OpenaiEndpoint, "__init__", fake_init),
+            unittest.mock.patch.object(OpenaiEndpoint, "chat_completion", fake_inference),
+        ]
+        for p in self._patches:
+            p.start()
+
         self.port = random.randint(20000, 30000)
         os.environ["CONCURRENCY_LIMIT"] = "16"
         os.environ["START_PORT"] = str(self.port)
@@ -85,6 +89,10 @@ class ConcurrencyLimitTest(TestCase):
         self.py_env_configs = py_env_configs
         self.frontend_app = FrontendApp(py_env_configs)
         self.backend_manager = BackendManager(py_env_configs)
+
+    def tearDown(self):
+        for p in reversed(self._patches):
+            p.stop()
 
     def start_frontend_server(self):
         t = Thread(target=self.frontend_app.start, daemon=True)

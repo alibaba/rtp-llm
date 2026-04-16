@@ -4,9 +4,15 @@ import random
 from typing import Optional
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 import torch.nn.functional as F
-from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
+try:
+    from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
+except ImportError as e:
+    pytest.skip(f"rtp_kernel.fp8_group_gemm unavailable: {e}", allow_module_level=True)
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 
 def to_fp8(tensor: torch.Tensor):

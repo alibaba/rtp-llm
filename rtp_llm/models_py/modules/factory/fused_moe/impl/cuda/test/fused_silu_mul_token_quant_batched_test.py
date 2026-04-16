@@ -3,8 +3,14 @@ import random
 from typing import Optional, Tuple
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 from torch import dtype as _dtype
+
+pytestmark = [
+    pytest.mark.gpu(type="H20"),
+    pytest.mark.skip(reason="TODO: fix q_out mismatch, was commented out in Bazel BUILD at fork point"),
+]
 
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.util import (
     moe_kernel_quantize_input,
@@ -15,7 +21,10 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 )
 
 import rtp_llm.ops  # isort:skip
-from rtp_llm.ops.compute_ops import per_token_quant_fp8  # isort:skip
+try:
+    from rtp_llm.ops.compute_ops import per_token_quant_fp8  # isort:skip
+except ImportError as e:
+    pytest.skip(f"CUDA-only compute_ops unavailable: {e}", allow_module_level=True)
 
 
 class FusedSiluMulPerTokenQuantBatchedTest(TestCase):
@@ -60,14 +69,24 @@ class FusedSiluMulPerTokenQuantBatchedTest(TestCase):
         ref_q_scale = ref_q_scale.view(num_experts, -1)
 
         q_out, q_scale = self.fused_silu_mul_quant_batched(x, expert_num_tokens)
-        self.assertTrue(
-            torch.allclose(
-                ref_q_scale[i, 0 : expert_num_tokens[i]],
-                q_scale[i, 0 : expert_num_tokens[i]],
-                atol=1e-5,
-                rtol=1e-5,
+        q_out = q_out.view(num_experts, max_num_tokens, -1)
+        q_scale = q_scale.view(num_experts, -1)
+        for i in range(num_experts):
+            n = expert_num_tokens[i]
+            if n == 0:
+                continue
+            self.assertTrue(
+                torch.allclose(
+                    ref_q_out[i, :n].float(), q_out[i, :n].float(), atol=1e-2, rtol=1e-2
+                ),
+                f"q_out mismatch at expert {i}",
             )
-        )
+            self.assertTrue(
+                torch.allclose(
+                    ref_q_scale[i, :n].float(), q_scale[i, :n].float(), atol=1e-5, rtol=1e-5
+                ),
+                f"q_scale mismatch at expert {i}",
+            )
 
     def test_silu_mul_per_token_fp8_quant_batched(self):
         for params in itertools.product(

@@ -32,5 +32,7 @@ def get_num_device_sms() -> int:
 
 
 def get_sm(device_id: int = 0) -> Tuple[int, int]:
+    if not torch.cuda.is_available():
+        return (0, 0)
     major, minor = torch.cuda.get_device_capability(device_id)
     return major, minor

@@ -8,8 +8,11 @@ exercise the stream / event synchronization logic.
 
 import contextlib
 import math
+import pytest
 import time
 import unittest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 from typing import List
 from unittest.mock import patch
 
