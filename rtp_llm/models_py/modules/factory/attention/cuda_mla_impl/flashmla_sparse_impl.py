@@ -36,7 +36,6 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
-    FMHAType,
     KvCacheDataType,
     ParallelismConfig,
 )
@@ -310,6 +309,7 @@ class SparseMlaImpl(MlaImplBase):
     Unified Sparse MLA implementation for both prefill and decode stages.
     Uses the same operator (SparseMlaOp) for both stages with triton-based index conversion.
     """
+    NAME = "sparse_mla"
 
     def __init__(
         self,
@@ -390,11 +390,6 @@ class SparseMlaImpl(MlaImplBase):
         self.fmha_params = rtp_llm_ops.SparseMlaParams()
         self.rope_params = self.fmha_params
         self.prepare(attn_inputs)
-
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        """Return FMHA type."""
-        return FMHAType.SPARSE_FLASHMLA
 
     @staticmethod
     def is_sparse() -> bool:

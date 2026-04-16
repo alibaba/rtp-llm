@@ -9,7 +9,6 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplB
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
-    FMHAType,
     KvCacheDataType,
     ParallelismConfig,
 )
@@ -57,6 +56,7 @@ class XQAParams:
 
 
 class XQAImpl(FMHAImplBase):
+    NAME = "xqa"
 
     def __init__(
         self,
@@ -109,6 +109,7 @@ class XQAImpl(FMHAImplBase):
 
 
 class XQADecodeImpl(FMHAImplBase):
+    NAME = "xqa"
 
     def __init__(
         self,

@@ -50,31 +50,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("UNKNOWN", CPRotateMethod::UNKNOWN)
         .export_values();
 
-    py::enum_<FMHAType>(m, "FMHAType")
-        .value("FLASH_INFER", FMHAType::FLASH_INFER)
-        .value("NONE", FMHAType::NONE)
-        .value("OPEN_SOURCE", FMHAType::OPEN_SOURCE)
-        .value("PAGED_OPEN_SOURCE", FMHAType::PAGED_OPEN_SOURCE)
-        .value("PAGED_TRT_V2", FMHAType::PAGED_TRT_V2)
-        .value("TRT_V1", FMHAType::TRT_V1)
-        .value("TRT_V2", FMHAType::TRT_V2)
-        .value("XQA", FMHAType::XQA)
-        .value("AITER_PREFILL", FMHAType::AITER_PREFILL)
-        .value("AITER_ASM_PREFILL", FMHAType::AITER_ASM_PREFILL)
-        .value("AITER_PAGED_PREFILL", FMHAType::AITER_PAGED_PREFILL)
-        .value("AITER_DECODE", FMHAType::AITER_DECODE)
-        .value("AITER_ASM_DECODE", FMHAType::AITER_ASM_DECODE)
-        .value("AITER_TRITON_DECODE", FMHAType::AITER_TRITON_DECODE)
-        .value("PY_FLASHINFER_PREFILL_PAGED", FMHAType::PY_FLASHINFER_PREFILL_PAGED)
-        .value("PY_FLASHINFER_PREFILL_RAGGED", FMHAType::PY_FLASHINFER_PREFILL_RAGGED)
-        .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE)
-        .value("CP_FLASH_INFER", FMHAType::CP_FLASH_INFER)
-        .value("FLASHINFER_MLA_PREFILL", FMHAType::FLASHINFER_MLA_PREFILL)
-        .value("FLASHINFER_MLA_DECODE", FMHAType::FLASHINFER_MLA_DECODE)
-        .value("SPARSE_FLASHMLA", FMHAType::SPARSE_FLASHMLA)
-        .value("CP_SPARSE_FLASHMLA", FMHAType::CP_SPARSE_FLASHMLA)
-        .value("HEADWISE", FMHAType::HEADWISE);
-
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
         .value("MHA", MlaOpsType::MHA)
@@ -226,12 +201,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register FMHAConfig
     py::class_<FMHAConfig>(m, "FMHAConfig")
         .def(py::init<>())
+        .def_readwrite("attn_backend", &FMHAConfig::attn_backend)
+        .def_readwrite("prefill_attn_backend", &FMHAConfig::prefill_attn_backend)
+        .def_readwrite("decode_attn_backend", &FMHAConfig::decode_attn_backend)
+        .def_readwrite("disable_attn_backends", &FMHAConfig::disable_attn_backends)
         .def_readwrite("enable_fmha", &FMHAConfig::enable_fmha)
         .def_readwrite("enable_trt_fmha", &FMHAConfig::enable_trt_fmha)
         .def_readwrite("enable_paged_trt_fmha", &FMHAConfig::enable_paged_trt_fmha)
         .def_readwrite("enable_open_source_fmha", &FMHAConfig::enable_open_source_fmha)
-        .def_readwrite("enable_paged_open_source_fmha", &FMHAConfig::enable_paged_open_source_fmha)
-        .def_readwrite("enable_trtv1_fmha", &FMHAConfig::enable_trtv1_fmha)
         .def_readwrite("disable_flash_infer", &FMHAConfig::disable_flash_infer)
         .def_readwrite("enable_xqa", &FMHAConfig::enable_xqa)
         .def_readwrite("use_aiter_pa", &FMHAConfig::use_aiter_pa)
@@ -241,12 +218,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("to_string", &FMHAConfig::to_string)
         .def(py::pickle(
             [](const FMHAConfig& self) {
-                return py::make_tuple(self.enable_fmha,
+                return py::make_tuple(self.attn_backend,
+                                      self.prefill_attn_backend,
+                                      self.decode_attn_backend,
+                                      self.disable_attn_backends,
+                                      self.enable_fmha,
                                       self.enable_trt_fmha,
                                       self.enable_paged_trt_fmha,
                                       self.enable_open_source_fmha,
-                                      self.enable_paged_open_source_fmha,
-                                      self.enable_trtv1_fmha,
                                       self.disable_flash_infer,
                                       self.enable_xqa,
                                       self.use_aiter_pa,
@@ -255,22 +234,24 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.absorb_opt_len);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 FMHAConfig c;
                 try {
-                    c.enable_fmha                   = t[0].cast<bool>();
-                    c.enable_trt_fmha               = t[1].cast<bool>();
-                    c.enable_paged_trt_fmha         = t[2].cast<bool>();
-                    c.enable_open_source_fmha       = t[3].cast<bool>();
-                    c.enable_paged_open_source_fmha = t[4].cast<bool>();
-                    c.enable_trtv1_fmha             = t[5].cast<bool>();
-                    c.disable_flash_infer           = t[6].cast<bool>();
-                    c.enable_xqa                    = t[7].cast<bool>();
-                    c.use_aiter_pa                  = t[8].cast<bool>();
-                    c.use_asm_pa                    = t[9].cast<bool>();
-                    c.use_triton_pa                 = t[10].cast<bool>();
-                    c.absorb_opt_len                = t[11].cast<int64_t>();
+                    c.attn_backend                  = t[0].cast<std::string>();
+                    c.prefill_attn_backend          = t[1].cast<std::string>();
+                    c.decode_attn_backend           = t[2].cast<std::string>();
+                    c.disable_attn_backends         = t[3].cast<std::string>();
+                    c.enable_fmha                   = t[4].cast<bool>();
+                    c.enable_trt_fmha               = t[5].cast<bool>();
+                    c.enable_paged_trt_fmha         = t[6].cast<bool>();
+                    c.enable_open_source_fmha       = t[7].cast<bool>();
+                    c.disable_flash_infer           = t[8].cast<bool>();
+                    c.enable_xqa                    = t[9].cast<bool>();
+                    c.use_aiter_pa                  = t[10].cast<bool>();
+                    c.use_asm_pa                    = t[11].cast<bool>();
+                    c.use_triton_pa                 = t[12].cast<bool>();
+                    c.absorb_opt_len                = t[13].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }
