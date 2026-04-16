@@ -154,7 +154,7 @@ class TorchSymmMemCommunicator:
 
         Args:
             inp: Input tensor on the target CUDA device (bfloat16).
-            out: Optional output tensor; if omitted, a new tensor is allocated.
+            out: Optional output tensor; if omitted, result is written back to inp.
 
         Returns:
             The reduced tensor (same shape as inp), or None if disabled.
@@ -162,10 +162,10 @@ class TorchSymmMemCommunicator:
         Implementation details:
             - Stages 'inp' into the symmetric buffer.
             - Selects 'multimem' or 'two_shot' kernel based on topology.
-            - Writes the result into 'out' and returns it.
+            - Writes the result into 'out' (defaults to inp) and returns it.
         """
         if out is None:
-            out = torch.empty_like(inp)
+            out = inp
         self.buffer[: inp.numel()].copy_(inp.view(-1))
         if self.world_size in self._WORLD_SIZES_MULTIMEM[self.device_capability]:
             torch.ops.symm_mem.multimem_all_reduce_(

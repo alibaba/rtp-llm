@@ -11,7 +11,13 @@ from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen3NextDecoderLayer,
     Qwen3NextMetadata,
 )
-from rtp_llm.models_py.modules import AttnImplFactory, Embedding, LinearFactory, RMSNorm
+from rtp_llm.models_py.modules import (
+    AttnImplFactory,
+    Embedding,
+    LinearFactory,
+    RMSNorm,
+    RMSResNorm,
+)
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -78,6 +84,9 @@ class Qwen3NextMTPModel(GptModelBase):
         self.norm = RMSNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self.final_resnorm = RMSResNorm(
+            weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
+        )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -93,15 +102,18 @@ class Qwen3NextMTPModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
+        residual = None
         for i, decoder_layer in enumerate(self.layers):
             select_block_map_for_layer(attention_inputs, i)
 
-            hidden_states = decoder_layer(
+            hidden_states, residual = decoder_layer(
                 hidden_states,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=inputs.attention_inputs,
                 attn_meta=Qwen3NextMetadata(),
+                residual=residual,
             )
-        hidden_states = self.norm(hidden_states)
+        # Fused final: residual += hidden_states; hidden_states = rmsnorm(residual)
+        hidden_states = self.final_resnorm(hidden_states, residual)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)

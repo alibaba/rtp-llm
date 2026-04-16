@@ -666,6 +666,8 @@ class PyFlashinferPrefillPagedTargetVerifyAttnOp(object):
         self.kv_cache_dtype = attn_configs.kv_cache_dtype
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = getattr(attn_inputs, "is_cuda_graph", False)
+        self._qo_indptr_buf: Optional[torch.Tensor] = None
+        self._cuda_graph_initialized = False
         self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
             self.g_workspace_buffer,
             "HND",
@@ -714,9 +716,10 @@ class PyFlashinferPrefillPagedTargetVerifyAttnOp(object):
         qo_indptr = self._get_qo_indptr(attn_inputs, batch_size)
         kv_dtype = self._get_kv_dtype(attn_inputs)
 
-        if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
+        if self.enable_cuda_graph and not self._cuda_graph_initialized:
             self.prefill_wrapper._use_cuda_graph = True
-            self.prefill_wrapper._qo_indptr_buf = qo_indptr
+            self._qo_indptr_buf = qo_indptr.clone()
+            self.prefill_wrapper._qo_indptr_buf = self._qo_indptr_buf
             self.prefill_wrapper._paged_kv_indptr_buf = (
                 self.fmha_params.decode_page_indptr_d
             )
@@ -725,6 +728,10 @@ class PyFlashinferPrefillPagedTargetVerifyAttnOp(object):
             )
             self.prefill_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
             self.prefill_wrapper._fixed_batch_size = batch_size
+            self._cuda_graph_initialized = True
+        elif self.enable_cuda_graph:
+            self._qo_indptr_buf.copy_(qo_indptr, non_blocking=True)
+            qo_indptr = self._qo_indptr_buf
 
         self.prefill_wrapper.plan(
             qo_indptr,

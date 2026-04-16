@@ -107,6 +107,7 @@ private:
 
 private:
     void             copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
+    static void      clearTensorAsync(torch::Tensor& tensor);
     std::vector<int> getDecodeBatchSizesToCapture();
     std::vector<int> getPrefillSequenceLengthsToCapture();
     /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).
