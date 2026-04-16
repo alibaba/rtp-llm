@@ -129,6 +129,7 @@ cc_library(
     ],
     hdrs = [
         "BlockZeroRunner.h",
+        "KvCacheAddrUtils.h",
     ],
     deps = [
         "//:rtp_compute_ops",

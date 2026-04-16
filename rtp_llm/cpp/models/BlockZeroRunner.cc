@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/BlockZeroRunner.h"
+#include "rtp_llm/cpp/models/KvCacheAddrUtils.h"
 
 #include "rtp_llm/models_py/bindings/common/kernels/block_zero_torch_op.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -18,37 +19,34 @@ bool BlockZeroRunner::needsBlockZero(const std::vector<CacheGroupType>& group_ty
 BlockZeroRunner::BlockZeroRunner(torch::Tensor layer_base_addr_buffer,
                                  size_t        kv_block_stride_bytes,
                                  size_t        seq_size_per_block,
-                                 size_t        layer_num):
+                                 size_t        layer_num,
+                                 int64_t       max_batch_size):
     layer_base_addr_buffer_(std::move(layer_base_addr_buffer)),
     kv_block_stride_bytes_(kv_block_stride_bytes),
     seq_size_per_block_(seq_size_per_block),
-    layer_num_(layer_num) {}
+    layer_num_(layer_num) {
+    if (max_batch_size > 0) {
+        token_counts_buffer_ = torch::empty({max_batch_size},
+                                            torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    }
+}
 
 std::unique_ptr<BlockZeroRunner> BlockZeroRunner::create(const std::vector<torch::Tensor>& layer_kv_buffer_ptrs,
                                                          size_t                            kv_block_stride_bytes,
-                                                         size_t                            seq_size_per_block) {
+                                                         size_t                            seq_size_per_block,
+                                                         int64_t                           max_batch_size) {
     if (layer_kv_buffer_ptrs.empty() || kv_block_stride_bytes == 0 || seq_size_per_block == 0) {
         return nullptr;
     }
 
-    // GPU addresses are stored as int64_t because PyTorch lacks an unsigned 64-bit
-    // tensor dtype.  The bit pattern is preserved through matching reinterpret_casts
-    // on both store and load sides; no pointer arithmetic is performed on the int64_t
-    // representation, so the signedness does not affect correctness.
-    static_assert(sizeof(void*) <= sizeof(int64_t), "GPU pointer must fit in int64_t");
-    auto  num_layers = layer_kv_buffer_ptrs.size();
-    auto  layer_addrs = torch::empty({static_cast<int64_t>(num_layers)}, torch::kInt64);
-    auto* addr_data   = layer_addrs.data_ptr<int64_t>();
-    for (size_t i = 0; i < num_layers; ++i) {
-        if (!layer_kv_buffer_ptrs[i].defined()) {
-            RTP_LLM_LOG_WARNING("BlockZeroRunner: layer_kv_buffer_ptrs[%zu] is undefined", i);
-            return nullptr;
-        }
-        addr_data[i] = reinterpret_cast<int64_t>(layer_kv_buffer_ptrs[i].data_ptr());
+    auto addr_buffer = buildLayerAddrBuffer(layer_kv_buffer_ptrs);
+    if (!addr_buffer.defined()) {
+        return nullptr;
     }
 
     return std::unique_ptr<BlockZeroRunner>(new BlockZeroRunner(
-        layer_addrs.cuda(), kv_block_stride_bytes, seq_size_per_block, num_layers));
+        std::move(addr_buffer), kv_block_stride_bytes, seq_size_per_block,
+        layer_kv_buffer_ptrs.size(), max_batch_size));
 }
 
 void BlockZeroRunner::run(const GptModelInputs& inputs) {
@@ -72,15 +70,26 @@ void BlockZeroRunner::run(const GptModelInputs& inputs) {
         return;
     }
 
-    std::vector<torch::Tensor> parts;
-    parts.reserve(2);
-    if (decode_bs > 0) {
-        parts.push_back(inputs.sequence_lengths.slice(0, 0, decode_bs));
+    torch::Tensor token_counts;
+    auto build_token_counts = [&]() {
+        std::vector<torch::Tensor> parts;
+        parts.reserve(2);
+        if (decode_bs > 0) {
+            parts.push_back(inputs.sequence_lengths.slice(0, 0, decode_bs));
+        }
+        if (context_bs > 0) {
+            parts.push_back(inputs.input_lengths.slice(0, decode_bs, total_bs));
+        }
+        return torch::cat(parts).to(torch::kInt32).contiguous();
+    };
+
+    auto counts_host = build_token_counts();
+    if (token_counts_buffer_.defined() && token_counts_buffer_.size(0) >= total_bs) {
+        token_counts_buffer_.slice(0, 0, total_bs).copy_(counts_host, /*non_blocking=*/true);
+        token_counts = token_counts_buffer_.slice(0, 0, total_bs);
+    } else {
+        token_counts = counts_host.cuda();
     }
-    if (context_bs > 0) {
-        parts.push_back(inputs.input_lengths.slice(0, decode_bs, total_bs));
-    }
-    auto token_counts = torch::cat(parts).to(torch::kInt32).contiguous().cuda();
 
     auto layer_to_group_opt =
         (inputs.kv_cache_layer_to_group.defined()

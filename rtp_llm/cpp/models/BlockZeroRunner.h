@@ -17,15 +17,12 @@ namespace rtp_llm {
 /// appear as NaN/Inf when reinterpreted by full attention (fp16/bf16).
 class BlockZeroRunner {
 public:
-    /// Returns true when the cache configuration has both LINEAR and FULL groups,
-    /// meaning block zeroing is required to prevent NaN propagation across group types.
     static bool needsBlockZero(const std::vector<CacheGroupType>& group_types);
 
-    /// Factory: caller extracts layer pointers and config values — Runner never sees cache types.
-    /// Returns nullptr if inputs are invalid.
     static std::unique_ptr<BlockZeroRunner> create(const std::vector<torch::Tensor>& layer_kv_buffer_ptrs,
                                                    size_t                            kv_block_stride_bytes,
-                                                   size_t                            seq_size_per_block);
+                                                   size_t                            seq_size_per_block,
+                                                   int64_t                           max_batch_size = 0);
 
     void run(const GptModelInputs& inputs);
 
@@ -33,9 +30,11 @@ private:
     BlockZeroRunner(torch::Tensor layer_base_addr_buffer,
                     size_t        kv_block_stride_bytes,
                     size_t        seq_size_per_block,
-                    size_t        layer_num);
+                    size_t        layer_num,
+                    int64_t       max_batch_size);
 
     torch::Tensor layer_base_addr_buffer_;
+    torch::Tensor token_counts_buffer_;
     size_t        kv_block_stride_bytes_;
     size_t        seq_size_per_block_;
     size_t        layer_num_;

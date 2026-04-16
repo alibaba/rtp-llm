@@ -210,14 +210,16 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
     RTP_LLM_PROFILE_SCOPE("py_model.callForwardPostLayers");
 
     torch::Tensor nan_flag;
-    // NaN check performs per-forward dynamic allocation (torch::zeros) which is
-    // incompatible with CUDA Graph capture/replay.  The current design ensures
-    // nan_check_enabled is never set during CUDA Graph mode; guard defensively.
     RTP_LLM_CHECK_WITH_INFO(!(inputs.nan_check_enabled && enable_cuda_graph_),
                             "nan_check_enabled must be false when CUDA Graphs are active");
     if (inputs.nan_check_enabled && inputs.kv_cache_block_id.defined() && layer_base_addr_buffer_.defined()) {
         int64_t batch_size = inputs.input_lengths.size(0);
-        nan_flag = torch::zeros({batch_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        if (nan_flag_buffer_.defined() && nan_flag_buffer_.size(0) >= batch_size) {
+            nan_flag_buffer_.slice(0, 0, batch_size).zero_();
+            nan_flag = nan_flag_buffer_.slice(0, 0, batch_size);
+        } else {
+            nan_flag = torch::zeros({batch_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        }
 
         bool did_run_nan_check = KvCacheNanCheckRunner::run(description_.attention_conf,
                                                             cache_dtype_,
