@@ -63,6 +63,7 @@ else:
             PyFlashinferDecodeImpl,
             PyFlashinferPagedPrefillImpl,
             PyFlashinferPrefillImpl,
+            PyFlashinferTargetVerifyPrefillImpl,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
             TRTMHAImpl,
@@ -86,6 +87,7 @@ else:
                 FlashInferFA3PrefillImpl,
                 FlashInferTRTLLMSpecDecodeImpl,
                 FlashInferTRTLLMPrefillImpl,
+                PyFlashinferTargetVerifyPrefillImpl,
                 XQASpecImpl,
                 TRTMHAImpl,
                 PyFlashinferPrefillImpl,

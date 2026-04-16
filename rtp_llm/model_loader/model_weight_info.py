@@ -252,7 +252,9 @@ class ModelDeployWeightInfo:
         )
 
         # for moe
-        self._moe_pure_tp_mode = (self.tp_size > 1 and self.dp_size == 1 and self.ep_size == 1)
+        self._moe_pure_tp_mode = (
+            self.tp_size > 1 and self.dp_size == 1 and self.ep_size == 1
+        )
 
         self.gen_dummy_reciprocal = (
             model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
@@ -420,15 +422,15 @@ class ModelDeployWeightInfo:
                     attn_q_weight_info = weight.weights[0]
                     break
 
-            assert attn_q_weight_info is not None
-            weights.append(
-                AtomicWeight(
-                    W.attention_output_static_quant_reciprocal,
-                    [attn_q_weight_info],
-                    create_scalar_ones,
-                    torch.float32,
+            if attn_q_weight_info is not None:
+                weights.append(
+                    AtomicWeight(
+                        W.attention_output_static_quant_reciprocal,
+                        [attn_q_weight_info],
+                        create_scalar_ones,
+                        torch.float32,
+                    )
                 )
-            )
             logging.info(
                 f"append attention_output_static_quant_reciprocal {weights[-1]}"
             )
