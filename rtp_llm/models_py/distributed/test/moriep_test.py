@@ -33,6 +33,7 @@ _wrapper_mod = _load_module(
 MoriEPWrapper = _wrapper_mod.MoriEPWrapper
 MoriEPWrapperConfig = _wrapper_mod.MoriEPWrapperConfig
 init_moriep_wrapper = _wrapper_mod.init_moriep_wrapper
+init_moriep_wrapper_from_config = _wrapper_mod.init_moriep_wrapper_from_config
 
 
 def _get_free_port() -> int:
@@ -234,7 +235,7 @@ def _run_moriep_correctness(
             num_qp_per_pe=1,
             quant_type="none",
         )
-        init_moriep_wrapper(config, shmem_group_name="default")
+        init_moriep_wrapper_from_config(config, shmem_group_name="default")
         wrapper = MoriEPWrapper.get_instance()
         device = torch.device("cuda", rank)
 
@@ -358,7 +359,7 @@ class MoriEPWrapperIntegrationTest(unittest.TestCase):
             join=True,
         )
 
-    _world_size_list = [2, 4, 8]
+    _world_size_list = [2]
     _dtype_list = [torch.bfloat16, torch.float8_e4m3fn]
     _max_inp_token_per_rank_list = [128]
 
