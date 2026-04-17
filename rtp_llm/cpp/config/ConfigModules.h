@@ -228,10 +228,13 @@ struct HWKernelConfig {
     // Decode CUDA Graph capture configuration
     // Comma-separated list of batch sizes, e.g., "1,2,4,8,16,32"
     std::vector<int> decode_capture_batch_sizes;
-    bool             disable_dpc_random     = false;
-    bool             rocm_disable_custom_ag = true;
-    bool             deterministic_gemm     = false;
-    bool             deterministic_attn     = false;
+    bool             disable_dpc_random                  = false;
+    bool             rocm_disable_custom_ag              = true;
+    bool             deterministic_gemm                  = false;
+    bool             deterministic_attn                  = false;
+    bool             disable_sp_draft_prefill_cuda_graph = false;
+    bool             disable_sp_draft_decode_cuda_graph  = false;
+    bool             disable_sp_target_verify_cuda_graph = false;
     std::string      to_string() const;
 };
 
