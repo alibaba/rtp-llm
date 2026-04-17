@@ -305,6 +305,7 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1
         )
+
     @property
     def local_num_experts(self) -> int:
         return self.w1.size(0)
@@ -378,7 +379,8 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(
-            quant_method in (
+            quant_method
+            in (
                 "FP4_PER_GROUP",
                 "FP4_PER_GROUP_QUARK",
                 "modelopt_fp4",
@@ -413,12 +415,16 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
         self.w2_scale = weights[W.moe_s2]
 
         self.hidden_size_raw = config.hidden_size
-        self.intermediate_size_raw = config.model_config.moe_inter_size // config.tp_size
+        self.intermediate_size_raw = (
+            config.model_config.moe_inter_size // config.tp_size
+        )
         packed_factor = 2 if self.w1.dtype == torch.uint8 else 1
         self.hidden_size_padded = self.w1.size(2) * packed_factor
         self.intermediate_size_padded = self.w2.size(1)
         self.hidden_pad = max(0, self.hidden_size_padded - self.hidden_size_raw)
-        self.intermediate_pad = max(0, self.intermediate_size_padded - self.intermediate_size_raw)
+        self.intermediate_pad = max(
+            0, self.intermediate_size_padded - self.intermediate_size_raw
+        )
 
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1
@@ -466,7 +472,7 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
             ), "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
-        
+
         # view w1 and w2 to float4_e2m1fn_x2 if they are uint8
         w1 = self.w1
         w2 = self.w2
@@ -476,6 +482,18 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
         if w2.dtype == torch.uint8:
             w2 = w2.view(torch.float4_e2m1fn_x2)
             w2.is_shuffled = True
+
+        # EP mode: topk_ids are already local, no expert_mask needed.
+        # Also skip kernel-side weight application — the EP router's
+        # combine step applies router weights.
+        if self.ep_size > 1:
+            mask = None
+            topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
+        else:
+            mask = expert_map if expert_map is not None else self.expert_mask
+
+        # CK moe_sorting kernel requires int32 topk_ids
+        topk_ids = topk_ids.to(torch.int32)
 
         output = fused_moe(
             hidden_states,
@@ -487,7 +505,7 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),
-            expert_mask=expert_map if expert_map is not None else self.expert_mask,
+            expert_mask=mask,
             doweight_stage1=apply_router_weight_on_input,
         )
 
