@@ -140,7 +140,6 @@ std::string KVCacheConfig::to_string() const {
 std::string ProfilingDebugLoggingConfig::to_string() const {
     std::ostringstream oss;
     oss << "trace_memory: " << trace_memory << "\n"
-        << "trace_malloc_stack: " << trace_malloc_stack << "\n"
         << "enable_device_perf: " << enable_device_perf << "\n"
         << "ft_core_dump_on_exception: " << ft_core_dump_on_exception << "\n"
         << "ft_alog_conf_path: " << ft_alog_conf_path << "\n"
@@ -151,8 +150,7 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "hack_layer_num: " << hack_layer_num << "\n"
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "enable_detail_log: " << enable_detail_log << "\n"
-        << "check_nan: " << check_nan << "\n"
-        << "enable_torch_alloc_profile: " << enable_torch_alloc_profile << "\n";
+        << "check_nan: " << check_nan << "\n";
     return oss.str();
 }
 
@@ -230,7 +228,7 @@ std::string MoeConfig::to_string() const {
 // ModelSpecificConfig
 std::string ModelSpecificConfig::to_string() const {
     std::ostringstream oss;
-    oss << "load_python_model:" << load_python_model << "\n";
+    // Empty struct — no fields remaining.
     return oss.str();
 }
 
@@ -343,14 +341,6 @@ std::string MiscellaneousConfig::to_string() const {
     return oss.str();
 }
 
-// SchedulerConfig
-std::string SchedulerConfig::to_string() const {
-    std::ostringstream oss;
-    oss << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
-        << "use_gather_batch_scheduler: " << use_gather_batch_scheduler;
-    return oss.str();
-}
-
 // BatchDecodeSchedulerConfig
 std::string BatchDecodeSchedulerConfig::to_string() const {
     std::ostringstream oss;
@@ -371,7 +361,6 @@ std::string FIFOSchedulerConfig::to_string() const {
 std::string RuntimeConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_generate_batch_size: " << max_generate_batch_size << "\n"
-        << "pre_allocate_op_mem: " << pre_allocate_op_mem << "\n"
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
         << "reserve_runtime_mem_mb: " << reserve_runtime_mem_mb << "\n"
         << "warm_up: " << warm_up << "\n"
@@ -397,8 +386,7 @@ std::string RuntimeConfig::to_string() const {
             oss << ", ";
     }
     oss << "]\n"
-        << "specify_gpu_arch: " << specify_gpu_arch << "\n"
-        << "acext_gemm_config_dir: " << acext_gemm_config_dir;
+        << "specify_gpu_arch: " << specify_gpu_arch;
     return oss.str();
 }
 

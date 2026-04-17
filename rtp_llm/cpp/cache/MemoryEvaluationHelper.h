@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/cache/WarmUpResult.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
-#include "rtp_llm/cpp/core/DeviceData.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 
 namespace rtp_llm {
 

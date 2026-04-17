@@ -7,14 +7,17 @@ import psutil
 import torch
 
 from rtp_llm.device.device_base import DeviceBase, MemInfo
-from rtp_llm.ops.compute_ops import ExecCtxExporter
+from rtp_llm.ops.compute_ops import (
+    preprocess_gemm_weight_by_key,
+    preprocess_weight_scale,
+)
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
 
 class CpuImpl(DeviceBase):
-    def __init__(self, exported_device: ExecCtxExporter):
-        super().__init__(exported_device)
+    def __init__(self):
+        super().__init__()
 
     def _get_mem_info(self) -> MemInfo:
         vmem = psutil.virtual_memory()
@@ -22,8 +25,8 @@ class CpuImpl(DeviceBase):
 
 
 class ArmCpuImpl(CpuImpl):
-    def __init__(self, exported_device: ExecCtxExporter):
-        super().__init__(exported_device)
+    def __init__(self):
+        super().__init__()
         self.gemm_rewrite_list = [
             W.attn_qkv_w,
             W.attn_o_w,
@@ -35,7 +38,7 @@ class ArmCpuImpl(CpuImpl):
     def maybe_rewrite_weight_by_key(
         self, key: str, weight: torch.Tensor
     ) -> torch.Tensor:
-        return self.exported_device.preprocess_gemm_weight_by_key(
+        return preprocess_gemm_weight_by_key(
             key, weight, self.py_env_configs.py_hw_kernel_config.arm_gemm_use_kai
         )
 
@@ -73,7 +76,6 @@ class ArmCpuImpl(CpuImpl):
         qzeros = qzeros_int32.reshape(qzeros_int32.shape[0], -1).cpu()
         scales_fp16 = scales_fp16.reshape(scales_fp16.shape[0], -1).cpu()
         packer = self.pack_int8_tensor_to_packed_int4
-        preprocess_weight_scale = self.exported_device.preprocess_weight_scale
         is_int8 = weight_bits == 8
         if is_int8:
             zero_shift = 128
@@ -120,8 +122,8 @@ class ArmCpuImpl(CpuImpl):
 
 
 class GpuImpl(DeviceBase):
-    def __init__(self, exported_device: ExecCtxExporter):
-        super().__init__(exported_device)
+    def __init__(self):
+        super().__init__()
 
     def get_device_id(self) -> int:
         return torch.cuda.current_device()
@@ -328,8 +330,8 @@ class GpuImpl(DeviceBase):
 
 
 class CudaImpl(GpuImpl):
-    def __init__(self, exported_device: ExecCtxExporter):
-        super().__init__(exported_device)
+    def __init__(self):
+        super().__init__()
         try:
             import pynvml
 
@@ -675,8 +677,8 @@ class PpuImpl(CudaImpl):
 
 
 class RocmImpl(GpuImpl):
-    def __init__(self, exported_device: ExecCtxExporter):
-        super().__init__(exported_device)
+    def __init__(self):
+        super().__init__()
         try:
             from pyrsmi import rocml
 
@@ -956,10 +958,7 @@ class RocmImpl(GpuImpl):
             W.multi_tokens_predict_eh_proj,
         ]:
             if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
-                if (
-                    self.py_env_configs.model_specific_config.load_python_model
-                    and weight.dtype != torch.float8_e4m3fn
-                ):
+                if weight.dtype != torch.float8_e4m3fn:
                     weight = swizzle_tensor(weight.t(), False).t()
                 else:
                     weight = swizzle_tensor(weight, weight.dtype != torch.float8_e4m3fn)

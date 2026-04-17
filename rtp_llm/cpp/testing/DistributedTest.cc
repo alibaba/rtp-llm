@@ -4,16 +4,15 @@
 
 #include <torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
 #include <torch/csrc/distributed/c10d/TCPStore.hpp>
-#include "rtp_llm/cpp/core/DistributedComm.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 
 using namespace std;
 using namespace rtp_llm;
 
-static c10::intrusive_ptr<c10d::ProcessGroup> createNcclPG(
-    c10::intrusive_ptr<c10d::Store> store, int rank, int world_size) {
+static c10::intrusive_ptr<c10d::ProcessGroup>
+createNcclPG(c10::intrusive_ptr<c10d::Store> store, int rank, int world_size) {
     auto nccl_backend = c10::make_intrusive<c10d::ProcessGroupNCCL>(store, rank, world_size);
-    auto pg = c10::make_intrusive<c10d::ProcessGroup>(store, rank, world_size);
+    auto pg           = c10::make_intrusive<c10d::ProcessGroup>(store, rank, world_size);
     pg->setBackend(c10::DeviceType::CUDA, c10d::ProcessGroup::BackendType::NCCL, nccl_backend);
     return pg;
 }
@@ -29,8 +28,8 @@ public:
         opts.port       = static_cast<uint16_t>(port);
         opts.isServer   = (rank == 0);
         opts.numWorkers = world_size;
-        auto store = c10::make_intrusive<c10d::TCPStore>("127.0.0.1", opts);
-        auto pg    = createNcclPG(store, static_cast<int>(rank), static_cast<int>(world_size));
+        auto store      = c10::make_intrusive<c10d::TCPStore>("127.0.0.1", opts);
+        auto pg         = createNcclPG(store, static_cast<int>(rank), static_cast<int>(world_size));
 
         auto buf1_t = torch::empty({10}, torch::dtype(torch::kInt64).device(torch::kCUDA));
         auto buf2_t = torch::empty({100}, torch::dtype(torch::kHalf).device(torch::kCUDA));
@@ -71,7 +70,7 @@ public:
 
         auto buf4_t = torch::zeros({4 * (int64_t)world_size, 128}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
         buf4_t.slice(0, rank * 4, (rank + 1) * 4) = (int32_t)rank + 1;
-        auto send_t = buf4_t.narrow(0, rank * 4, 4).contiguous();
+        auto send_t                               = buf4_t.narrow(0, rank * 4, 4).contiguous();
         pg->_allgather_base(buf4_t, send_t)->wait();
 
         auto out4 = buf4_t.cpu();
@@ -87,37 +86,14 @@ public:
         const auto                port = getFreePort();
         RTP_LLM_LOG_INFO("Direct PG test: world_size=%zu, port=%zu\n", world_size, port);
         for (size_t i = 0; i < world_size; i++) {
-            futures.push_back(async(launch::async, [this, i, world_size, port]() {
-                runDirectPGTest(i, world_size, port);
-            }));
+            futures.push_back(
+                async(launch::async, [this, i, world_size, port]() { runDirectPGTest(i, world_size, port); }));
         }
         for (auto& f : futures) {
             f.get();
         }
     }
 };
-
-TEST_F(DistributedTest, testRegistrationAPI) {
-    if (getenv("SKIP_DISTRIBUTED_TEST")) {
-        RTP_LLM_LOG_INFO("DistributedTest skipped\n");
-        return;
-    }
-
-    c10d::TCPStoreOptions opts;
-    opts.port       = static_cast<uint16_t>(getFreePort());
-    opts.isServer   = true;
-    opts.numWorkers = 1;
-    auto store = c10::make_intrusive<c10d::TCPStore>("127.0.0.1", opts);
-    auto pg    = createNcclPG(store, 0, 1);
-
-    EXPECT_FALSE(hasProcessGroup(ParallelMode::TP));
-    registerProcessGroup(ParallelMode::TP, pg);
-    EXPECT_TRUE(hasProcessGroup(ParallelMode::TP));
-    EXPECT_EQ(getProcessGroup(ParallelMode::TP)->getRank(), 0);
-    EXPECT_EQ(getProcessGroup(ParallelMode::TP)->getSize(), 1);
-    clearProcessGroups();
-    EXPECT_FALSE(hasProcessGroup(ParallelMode::TP));
-}
 
 TEST_F(DistributedTest, testDeviceCommunication) {
     if (getenv("SKIP_DISTRIBUTED_TEST")) {

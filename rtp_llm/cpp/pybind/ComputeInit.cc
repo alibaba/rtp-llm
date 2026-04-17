@@ -1,7 +1,7 @@
 #include <torch/library.h>
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/core/ExecCtxExport.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/RegisterOps.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "pybind11/pybind11.h"
@@ -12,6 +12,7 @@
 #endif
 
 namespace rtp_llm {
+void registerExecCtxOps(pybind11::module& m);
 using namespace torch_ext;
 
 PYBIND11_MODULE(librtp_compute_ops, m) {

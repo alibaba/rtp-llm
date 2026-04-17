@@ -1,8 +1,4 @@
 
-test_envs = {
-    "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
-}
-
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
@@ -17,7 +13,6 @@ py_test (
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
     timeout = "eternal",
-    env = test_envs,
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )
@@ -37,7 +32,6 @@ py_test (
     name = "test_pure_tp_router",
     srcs = ["test_pure_tp_router.py"],
     deps = py_test_deps,
-    env = test_envs,
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )

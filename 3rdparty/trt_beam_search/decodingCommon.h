@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "rtp_llm/cpp/cuda/trt_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/trt_utils.h"
 #include "common.h"
 #include <cstdint>
 #include <curand_kernel.h>

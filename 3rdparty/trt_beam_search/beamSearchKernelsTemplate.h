@@ -23,7 +23,7 @@
 #endif
 
 #include "beamSearchKernels.h"
-#include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
+#include "rtp_llm/models_py/bindings/cuda/reduce_kernel_utils.cuh"
 #include "decodingCommon.h"
 
 using namespace tensorrt_llm::common;

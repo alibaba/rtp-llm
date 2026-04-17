@@ -1,13 +1,13 @@
 #pragma once
 
-#include "rtp_llm/cpp/core/OpData.h"
+#include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/core/DeviceData.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include <string>
 #include <utility>
 #include <memory>
@@ -37,8 +37,26 @@ struct GptModelInitParams {
     const std::optional<CacheLayerLayout> kv_cache_layer_layout;
     size_t                                model_id;
     ParallelismConfig                     parallelism_config;
-    ExecInitParams                        exec_init_params;
-    std::shared_ptr<KVCacheManager>       cache_manager;  // For cache_store access during forward
+    // Individual configs (replacing ExecInitParams god-object)
+    HWKernelConfig              hw_kernel_config;
+    ProfilingDebugLoggingConfig profile_debug_logging_config;
+    RuntimeConfig               runtime_config;
+    ConcurrencyConfig           concurrency_config;
+    SpeculativeExecutionConfig  sp_config;
+    DeviceResourceConfig        device_resource_config;
+    MoeConfig                   moe_config;
+    // Derived scalars
+    MlaOpsType                      mla_ops_type            = MlaOpsType::AUTO;
+    int64_t                         max_seq_len             = 0;
+    int64_t                         hidden_size             = 0;
+    size_t                          tokens_per_block        = 0;
+    size_t                          kernel_tokens_per_block = 0;
+    int32_t                         kv_cache_group_num      = 1;
+    std::vector<int32_t>            kv_cache_layer_to_group;
+    bool                            is_mtp    = false;
+    bool                            is_eagle3 = false;
+    size_t                          device_id = 0;
+    std::shared_ptr<KVCacheManager> cache_manager;  // For cache_store access during forward
 };
 
 enum GptModelInputIndex : size_t {

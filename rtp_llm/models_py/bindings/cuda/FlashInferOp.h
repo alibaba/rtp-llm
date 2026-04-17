@@ -2,7 +2,7 @@
 
 #include <memory>
 #include <torch/extension.h>
-#include "rtp_llm/cpp/cuda/ops/CudaFlashInfer.h"
+#include "rtp_llm/models_py/bindings/cuda/ops/CudaFlashInfer.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"

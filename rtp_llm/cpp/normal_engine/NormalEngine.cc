@@ -118,10 +118,21 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
     if (propose_params_) {
-        executor_.reset(new MtpExecutor(params, propose_params, resource_context_.cache_manager, exec_init_params_));
+        executor_.reset(new MtpExecutor(params,
+                                        propose_params,
+                                        resource_context_.cache_manager,
+                                        mla_ops_type_,
+                                        kv_cache_group_num_,
+                                        kv_cache_layer_to_group_));
     } else {
-        executor_.reset(
-            new NormalExecutor(params, resource_context_.cache_manager, false, false, 0, exec_init_params_));
+        executor_.reset(new NormalExecutor(params,
+                                           resource_context_.cache_manager,
+                                           false,
+                                           false,
+                                           0,
+                                           mla_ops_type_,
+                                           kv_cache_group_num_,
+                                           kv_cache_layer_to_group_));
     }
 }
 
@@ -223,7 +234,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, exec_init_params_));
+    executor_.reset(new NormalExecutor(
+        params, nullptr, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -255,7 +267,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, exec_init_params_));
+    executor_.reset(new NormalExecutor(
+        params, cache_manager, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -314,9 +327,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
             RTP_LLM_FAIL("init kv cache manager failed");
         }
 
-        const auto& cache_cfg                     = resource_context_.cache_manager->cacheConfig();
-        exec_init_params_.kv_cache_group_num      = cache_cfg.groupNums();
-        exec_init_params_.kv_cache_layer_to_group = cache_cfg.layer_to_group_id;
+        const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
+        kv_cache_group_num_      = cache_cfg.groupNums();
+        kv_cache_layer_to_group_ = cache_cfg.layer_to_group_id;
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
@@ -331,9 +344,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
-        const auto& cache_cfg                     = resource_context_.cache_manager->cacheConfig();
-        exec_init_params_.kv_cache_group_num      = cache_cfg.groupNums();
-        exec_init_params_.kv_cache_layer_to_group = cache_cfg.layer_to_group_id;
+        const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
+        kv_cache_group_num_      = cache_cfg.groupNums();
+        kv_cache_layer_to_group_ = cache_cfg.layer_to_group_id;
     }
 }
 
@@ -379,7 +392,7 @@ absl::Status NormalEngine::stop() {
 void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
-    cudaPreRun(exec_init_params_.device_id);
+    cudaPreRun(getDeviceId());
     while (running_) {
         auto status = step();
         if (!status.ok()) {

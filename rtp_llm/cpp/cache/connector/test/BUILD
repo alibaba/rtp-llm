@@ -8,7 +8,7 @@ test_copts = [
 ] + copts()
 
 test_deps = [
-    "//rtp_llm/cpp/cuda/ops:cuda_impl",
+    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/utils:core_utils",
@@ -30,7 +30,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory/test/mock:mock_memory_connector_lib",
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
-        "//rtp_llm/cpp/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},

@@ -19,13 +19,13 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include <assert.h>
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #endif
 
 #if USING_ROCM
-#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/models_py/bindings/cuda/cuda_type_utils.cuh"
 #endif
 
 namespace rtp_llm {

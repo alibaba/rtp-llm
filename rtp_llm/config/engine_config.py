@@ -48,7 +48,7 @@ class EngineConfig:
     # Parallelism and runtime configs
     parallelism_config: ParallelismConfig
     runtime_config: RuntimeConfig
-    # C++ initExecCtx uses this for NCCL ip/ports
+    # C++ uses this for NCCL ip/ports
     nccl_comm_config: NcclCommConfig
     # C++ reads rpc_server_port, embedding_rpc_server_port, http_port from this
     server_config: ServerConfig

@@ -140,11 +140,6 @@ struct PyCacheStoreInputs {
     rtp_llm::CacheStoreAsyncWriter*      cache_store_async_writer = nullptr;
 };
 
-// for cuda grpah capture
-struct PyCaptureMetaData {
-    int capture_batch_size{1};
-};
-
 struct PyPrefillCudaGaphCopyParams {
     // for embedding model cuda graph capture, the attenton batch size is padded to max_batch_size,
     // so we can't get the real batch size for `copy kernel` using `input_lengths.size(0)`(which is max_batch_size).

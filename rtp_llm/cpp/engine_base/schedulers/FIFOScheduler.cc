@@ -129,11 +129,9 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
             return true;
         }
     }
-    if (model_specific_config_.load_python_model) {
-        // new model py not support prefill and decode togather now
-        if (!running_streams_.empty()) {
-            return false;
-        }
+    // prefill and decode not mixed together
+    if (!running_streams_.empty()) {
+        return false;
     }
     if (running_streams_.size() + streams.size() + 1 > max_generate_batch_size_) {
         return false;

@@ -5,8 +5,8 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
-#include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/core/DeviceData.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
@@ -46,8 +46,10 @@ public:
     explicit MtpExecutor(const EngineInitParams&                        params,
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
-                         const ExecInitParams&                          exec_init_params = ExecInitParams{},
-                         bool                                           warm_up          = false);
+                         MlaOpsType                                     mla_ops_type            = MlaOpsType::AUTO,
+                         int32_t                                        kv_cache_group_num      = 1,
+                         const std::vector<int32_t>&                    kv_cache_layer_to_group = {},
+                         bool                                           warm_up                 = false);
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;

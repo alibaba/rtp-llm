@@ -1,9 +1,9 @@
-#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
-#include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
+#include "rtp_llm/models_py/bindings/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/models_py/bindings/cuda/reduce_kernel_utils.cuh"
 #include "rtp_llm/models_py/bindings/rocm/kernels/fused_qk_rmsnorm.h"
 
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
 
 namespace rtp_llm {

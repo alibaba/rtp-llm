@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
-#include "rtp_llm/cpp/core/OpData.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <numeric>

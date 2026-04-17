@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"

@@ -6,13 +6,13 @@
 #include <cuda_runtime.h>
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
-#include "rtp_llm/cpp/rocm/hip_host_utils.h"
+#include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
 #endif
 
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
 
 namespace rtp_llm {

@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/model_utils/MlaConfig.h"
 #include "rtp_llm/cpp/model_utils/QuantInfo.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/SpecialTokens.h"

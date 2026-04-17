@@ -33,18 +33,18 @@ cc_library(
     deps = [
         ":fuse_copy_op",
         "//rtp_llm/models_py/bindings:op_defs",
-        "//rtp_llm/cpp/core:op_data",
-        "//rtp_llm/cpp/core:exec_ops_hdr",
-        "//rtp_llm/cpp/core:cache_store_async_writer",
+        "//rtp_llm/models_py/bindings/core:op_data",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_kernel",
     ] + torch_deps() + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/common/kernels:kernels_cu",
-            "//rtp_llm/cpp/cuda/ops:cuda_impl",
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         ],
         "//:using_rocm": [
             "//rtp_llm/models_py/bindings/common/kernels:kernels_cu",
-            "//rtp_llm/cpp/core:exec_ctx_rocm",
+            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
         ],
         "//conditions:default": [],
     }),

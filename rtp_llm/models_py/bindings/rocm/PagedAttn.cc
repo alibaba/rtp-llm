@@ -1,10 +1,10 @@
 
-#include "rtp_llm/cpp/core/CommonDefines.h"
-#include "rtp_llm/cpp/core/Dispatch.h"
+#include "rtp_llm/models_py/bindings/core/CommonDefines.h"
+#include "rtp_llm/models_py/bindings/core/Dispatch.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
-#include "rtp_llm/cpp/rocm/hip_host_utils.h"
-#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/rocm/atrexPA.h"
 #include "rtp_llm/models_py/bindings/rocm/PagedAttn.h"
 

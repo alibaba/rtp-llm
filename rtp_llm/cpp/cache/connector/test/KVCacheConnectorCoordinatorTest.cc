@@ -11,7 +11,7 @@
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 
@@ -128,24 +128,10 @@ protected:
 
 private:
     void createDevice() const {
-        DeviceResourceConfig device_resource_config;
-        ModelSpecificConfig  model_specific_config;
-
-        initExecCtx(ParallelismConfig{},
-                    ModelConfig{},
-                    EPLBConfig{},
-                    FMHAConfig{},
-                    device_resource_config,
-                    MoeConfig{},
-                    SpeculativeExecutionConfig{},
-                    MiscellaneousConfig{},
-                    ProfilingDebugLoggingConfig{},
-                    HWKernelConfig{},
-                    ConcurrencyConfig{},
-                    FfnDisAggregateConfig{},
-                    RuntimeConfig{},
-                    model_specific_config,
-                    rtp_llm::NcclCommConfig{});
+        initRuntime(/*device_id=*/0,
+                    /*trace_memory=*/false,
+                    /*enable_comm_overlap=*/false,
+                    MlaOpsType::AUTO);
     }
 
     std::shared_ptr<FusedAsyncReadContext> makeFusedReadContextAndExpectAsyncRead() {

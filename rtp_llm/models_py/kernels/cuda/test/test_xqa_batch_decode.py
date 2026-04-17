@@ -10,24 +10,7 @@ from packaging import version
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import (
-    AttentionConfigs,
-    ConcurrencyConfig,
-    DeviceResourceConfig,
-    EPLBConfig,
-    FfnDisAggregateConfig,
-    FMHAConfig,
-    HWKernelConfig,
-    KvCacheDataType,
-    MiscellaneousConfig,
-    ModelConfig,
-    ModelSpecificConfig,
-    MoeConfig,
-    ParallelismConfig,
-    ProfilingDebugLoggingConfig,
-    RuntimeConfig,
-    SpeculativeExecutionConfig,
-)
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ModelConfig
 
 # RTP-LLM imports
 from rtp_llm.ops.compute_ops import (
@@ -336,20 +319,10 @@ class TestXQABatchDecode(unittest.TestCase):
         model_config.max_seq_len = 2048
 
         init_exec_ctx(
-            parallelism_config=ParallelismConfig(),
-            model_config=model_config,
-            eplb_config=EPLBConfig(),
-            fmha_config=FMHAConfig(),
-            device_resource_config=DeviceResourceConfig(),
-            moe_config=MoeConfig(),
-            sp_config=SpeculativeExecutionConfig(),
-            misc_config=MiscellaneousConfig(),
-            profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
-            hw_kernel_config=HWKernelConfig(),
-            concurrency_config=ConcurrencyConfig(),
-            ffn_disaggregate_config=FfnDisAggregateConfig(),
-            runtime_config=RuntimeConfig(),
-            model_specific_config=ModelSpecificConfig(),
+            device_id=0,
+            trace_memory=False,
+            enable_comm_overlap=False,
+            mla_ops_type=int(model_config.mla_ops_type),
         )
 
     def _test_xqa_decode_impl(

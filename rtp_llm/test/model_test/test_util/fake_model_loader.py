@@ -134,7 +134,6 @@ class FakeModelLoader(object):
             kv_cache_config=kv_cache_config,
             fmha_config=fmha_config,
             moe_config=moe_config,
-            load_python_model=self.load_py_model,
             max_generate_batch_size=0,
             vit_config=None,
             merge_lora=False,

@@ -53,7 +53,6 @@ void registerPyOpDefs(pybind11::module& m) {
         "Convert TypeMeta to scalar type");
 
     pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs").def(pybind11::init<>());
-    pybind11::class_<PyCaptureMetaData>(m, "PyCaptureMetaData").def(pybind11::init<>());
 
     pybind11::class_<rtp_llm::ParamsBase, std::shared_ptr<rtp_llm::ParamsBase>>(m, "ParamsBase")
         .def(pybind11::init<>())

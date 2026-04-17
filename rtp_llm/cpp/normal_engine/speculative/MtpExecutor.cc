@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
@@ -112,7 +112,9 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
 MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
-                         const ExecInitParams&                          exec_init_params,
+                         MlaOpsType                                     mla_ops_type,
+                         int32_t                                        kv_cache_group_num,
+                         const std::vector<int32_t>&                    kv_cache_layer_to_group,
                          bool                                           warm_up):
     Executor(),
     cache_manager_(cache_manager),
@@ -166,13 +168,33 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     auto target_cache_layer_layout = cache_manager->getMainModelCacheLayerLayout();
     auto draft_cache_layer_layout  = cache_manager->getMTPModuleCacheLayerLayout(0);
 
+    size_t device_id = params.parallelism_config.world_rank % params.parallelism_config.local_world_size;
+    bool   is_mtp    = params.sp_config.type == SP_TYPE_MTP || params.sp_config.type == SP_TYPE_EAGLE;
+    bool   is_eagle3 = params.sp_config.type == SP_TYPE_EAGLE3;
+
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
          cache_manager ? std::make_optional(target_cache_layer_layout) : std::nullopt,
          params.model_id,
          params.parallelism_config,
-         exec_init_params,
+         params.hw_kernel_config,
+         params.profiling_debug_logging_config,
+         params.runtime_config,
+         params.concurrency_config,
+         params.sp_config,
+         params.device_resource_config,
+         params.moe_config,
+         mla_ops_type,
+         params.model_config_.max_seq_len,
+         params.model_config_.hidden_size,
+         params.model_config_.attn_config.tokens_per_block,
+         params.model_config_.attn_config.kernel_tokens_per_block,
+         kv_cache_group_num,
+         kv_cache_layer_to_group,
+         is_mtp,
+         is_eagle3,
+         device_id,
          cache_manager});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
@@ -208,7 +230,23 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 cache_manager ? std::make_optional(draft_cache_layer_layout) : std::nullopt,
                                 mtp_params->model_id,
                                 mtp_params->parallelism_config,
-                                exec_init_params,
+                                params.hw_kernel_config,
+                                params.profiling_debug_logging_config,
+                                params.runtime_config,
+                                params.concurrency_config,
+                                params.sp_config,
+                                params.device_resource_config,
+                                params.moe_config,
+                                mla_ops_type,
+                                mtp_params->model_config_.max_seq_len,
+                                mtp_params->model_config_.hidden_size,
+                                mtp_params->model_config_.attn_config.tokens_per_block,
+                                mtp_params->model_config_.attn_config.kernel_tokens_per_block,
+                                kv_cache_group_num,
+                                kv_cache_layer_to_group,
+                                is_mtp,
+                                is_eagle3,
+                                device_id,
                                 cache_manager});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");

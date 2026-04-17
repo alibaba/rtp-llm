@@ -16,10 +16,10 @@
 
 #include <assert.h>
 #include <type_traits>
-#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
-#include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/models_py/bindings/cuda/cuda_fp8_utils.h"
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
 #elif (CUDART_VERSION >= 11050)

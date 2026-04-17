@@ -1,9 +1,9 @@
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
-#include "rtp_llm/cpp/rocm/hip_host_utils.h"
+#include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
 #include <hipblas/hipblas.h>
 #include <hipblaslt/hipblaslt.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
-#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 
 namespace rtp_llm {
 

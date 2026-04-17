@@ -1,19 +1,6 @@
 import argparse
-import warnings
 
 from rtp_llm.server.server_args.util import str2bool
-
-
-def _deprecated_noop(name):
-    class _DeprecatedAction(argparse.Action):
-        def __call__(self, parser, namespace, values, option_string=None):
-            warnings.warn(
-                f"{option_string} is deprecated and has no effect. It will be removed in a future release.",
-                FutureWarning,
-                stacklevel=2,
-            )
-
-    return _DeprecatedAction
 
 
 def init_device_resource_group_args(parser, device_resource_config, runtime_config):
@@ -86,30 +73,4 @@ def init_device_resource_group_args(parser, device_resource_config, runtime_conf
         type=str,
         default="",
         help="测试时使用的指定GPU架构",
-    )
-    device_resource_group.add_argument(
-        "--acext_gemm_config_dir",
-        env_name="ACEXT_GEMM_CONFIG_DIR",
-        bind_to=(runtime_config, "acext_gemm_config_dir"),
-        type=str,
-        default="",
-        help="ACEXT GEMM配置目录",
-    )
-
-    # Deprecated: kept for backward compatibility so existing scripts don't fail
-    device_resource_group.add_argument(
-        "--device_reserve_memory_bytes",
-        type=int,
-        default=None,
-        action=_deprecated_noop("device_reserve_memory_bytes"),
-        nargs="?",
-        help="[DEPRECATED] No longer used. Use --reserver_runtime_mem_mb instead.",
-    )
-    device_resource_group.add_argument(
-        "--host_reserve_memory_bytes",
-        type=int,
-        default=None,
-        action=_deprecated_noop("host_reserve_memory_bytes"),
-        nargs="?",
-        help="[DEPRECATED] No longer used.",
     )

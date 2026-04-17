@@ -52,7 +52,7 @@ filegroup(
 copy_files(
     name = "copy_acclep_libs",
     srcs = select({
-        "//rtp_llm/cpp/cuda/ops:use_accl_ep": ["//3rdparty/accl_ep:accl_ep_shared"],
+        "//rtp_llm/models_py/bindings/cuda/ops:use_accl_ep": ["//3rdparty/accl_ep:accl_ep_shared"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

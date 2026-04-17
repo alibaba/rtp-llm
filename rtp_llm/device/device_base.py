@@ -3,7 +3,12 @@ import logging
 import torch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.ops.compute_ops import DeviceType, ExecCtxExporter
+from rtp_llm.device.device_type import DeviceType, get_device_type
+from rtp_llm.ops.compute_ops import (
+    get_device_id,
+    preprocess_gemm_weight_by_key,
+    preprocess_weight_scale,
+)
 
 
 class MemInfo:
@@ -16,8 +21,7 @@ class MemInfo:
 
 
 class DeviceBase:
-    def __init__(self, exported_device: ExecCtxExporter):
-        self.exported_device = exported_device
+    def __init__(self):
         from rtp_llm.config.server_config_setup import auto_configure_deepep
         from rtp_llm.server.server_args.server_args import setup_args
 
@@ -30,10 +34,10 @@ class DeviceBase:
         )
 
     def get_device_type(self) -> DeviceType:
-        return self.exported_device.get_device_type()
+        return get_device_type()
 
     def get_device_id(self) -> int:
-        return self.exported_device.get_device_id()
+        return get_device_id()
 
     @property
     def support_dio_load(self) -> bool:

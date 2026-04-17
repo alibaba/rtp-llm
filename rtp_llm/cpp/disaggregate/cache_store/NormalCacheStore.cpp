@@ -74,7 +74,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
                 auto& [buffer, item]   = *it;
                 auto& [callback, task] = item;
                 auto event             = buffer->getEvent();
-                if ((event && event->checkReadiness()) || event == nullptr) {
+                if ((event && event->query()) || event == nullptr) {
                     if (this->thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
                         RTP_LLM_LOG_WARNING("normal cache store push store task to thread pool failed");
                         callback(false, CacheStoreErrorCode::PushWorkerItemFailed);

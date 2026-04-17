@@ -1,7 +1,7 @@
 
 #pragma once
 
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
 

@@ -1,5 +1,5 @@
 #include "rtp_llm/models_py/bindings/common/kernels/moe/ep_utils.h"
-#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/moe_gemm/moe_kernels.inl"
+#include "rtp_llm/models_py/bindings/cuda/cutlass/cutlass_kernels/moe_gemm/moe_kernels.inl"
 
 namespace trt = tensorrt_llm::kernels;
 namespace rtp_llm {
