@@ -15,16 +15,18 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     int prefill_cp_size = parallelism_config_.tp_size;
     int cp_align_size   = prefill_cp_size * 2;
 
+    static const auto pinned_i32 = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+
     auto& total_input_tokens       = model_input.combo_tokens;
     auto& input_lengths            = model_input.input_lengths;
     auto& sequence_lengths         = model_input.sequence_lengths;
-    auto  input_lengths_cpu_tensor = input_lengths.clone();
+    auto  input_lengths_cpu_tensor = input_lengths.clone().pin_memory();
 
     size_t num_decode_stream  = sequence_lengths.size(0);
     size_t num_prefill_stream = input_lengths.size(0) - num_decode_stream;
 
-    auto prefill_cp_padding_lengths = torch::empty({(int64_t)num_prefill_stream}, torch::kInt32);
-    auto prefill_cp_chunk_lengths   = torch::empty({(int64_t)num_prefill_stream}, torch::kInt32);
+    auto prefill_cp_padding_lengths = torch::empty({(int64_t)num_prefill_stream}, pinned_i32);
+    auto prefill_cp_chunk_lengths   = torch::empty({(int64_t)num_prefill_stream}, pinned_i32);
     int* padding_lengths            = prefill_cp_padding_lengths.data_ptr<int>();
     int* chunk_lengths              = prefill_cp_chunk_lengths.data_ptr<int>();
 
@@ -42,8 +44,8 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     }
 
     auto cp_split_input_tokens =
-        torch::empty({(int64_t)(num_decode_stream + prefill_cp_split_tokens_size)}, torch::kInt32);
-    auto prefill_shuffle_indices = torch::empty({(int64_t)prefill_cp_split_tokens_size}, torch::kInt32);
+        torch::empty({(int64_t)(num_decode_stream + prefill_cp_split_tokens_size)}, pinned_i32);
+    auto prefill_shuffle_indices = torch::empty({(int64_t)prefill_cp_split_tokens_size}, pinned_i32);
 
     int* input_token_ptr             = cp_split_input_tokens.data_ptr<int>();
     int* input_length_ptr            = input_lengths.data_ptr<int32_t>();
