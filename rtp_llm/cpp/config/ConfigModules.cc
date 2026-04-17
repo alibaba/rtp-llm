@@ -196,7 +196,10 @@ std::string HWKernelConfig::to_string() const {
         << "disable_dpc_random: " << disable_dpc_random << "\n"
         << "rocm_disable_custom_ag: " << rocm_disable_custom_ag << "\n"
         << "deterministic_gemm: " << deterministic_gemm << "\n"
-        << "deterministic_attn: " << deterministic_attn;
+        << "deterministic_attn: " << deterministic_attn << "\n"
+        << "disable_sp_draft_prefill_cuda_graph: " << disable_sp_draft_prefill_cuda_graph << "\n"
+        << "disable_sp_draft_decode_cuda_graph: " << disable_sp_draft_decode_cuda_graph << "\n"
+        << "disable_sp_target_verify_cuda_graph: " << disable_sp_target_verify_cuda_graph;
     return oss.str();
 }
 

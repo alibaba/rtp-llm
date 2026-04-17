@@ -176,6 +176,33 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         "保证多次运行结果确定性一致。默认 False，使用性能最优算法。",
     )
 
+    hw_kernel_group.add_argument(
+        "--disable_sp_draft_prefill_cuda_graph",
+        env_name="DISABLE_SP_DRAFT_PREFILL_CUDA_GRAPH",
+        bind_to=(hw_kernel_config, "disable_sp_draft_prefill_cuda_graph"),
+        type=str2bool,
+        default=False,
+        help="设置为 `True` 时，禁用投机解码中 draft model prefill 阶段的 CUDA Graph（调试用）。",
+    )
+
+    hw_kernel_group.add_argument(
+        "--disable_sp_draft_decode_cuda_graph",
+        env_name="DISABLE_SP_DRAFT_DECODE_CUDA_GRAPH",
+        bind_to=(hw_kernel_config, "disable_sp_draft_decode_cuda_graph"),
+        type=str2bool,
+        default=False,
+        help="设置为 `True` 时，禁用投机解码中 draft model decode 阶段的 CUDA Graph（调试用）。",
+    )
+
+    hw_kernel_group.add_argument(
+        "--disable_sp_target_verify_cuda_graph",
+        env_name="DISABLE_SP_TARGET_VERIFY_CUDA_GRAPH",
+        bind_to=(hw_kernel_config, "disable_sp_target_verify_cuda_graph"),
+        type=str2bool,
+        default=False,
+        help="设置为 `True` 时，禁用投机解码中 target model verify 阶段的 CUDA Graph（调试用）。",
+    )
+
 
 def _parse_comma_separated_ints(
     config: str, config_name: str, item_name: str, raise_on_empty: bool = True
