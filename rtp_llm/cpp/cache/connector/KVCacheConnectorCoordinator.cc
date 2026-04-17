@@ -337,7 +337,6 @@ bool KVCacheConnectorCoordinator::isPdInvertMode() const {
 bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
     // TODO: P2P connector initialization is disabled until the next PR enables
     // scheduler async load cache support. Change to `#if 1` to activate.
-#if 0
     if (!isPdInvertMode()) {
         return true;
     }
@@ -359,7 +358,6 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
         connectors_.emplace_back(p2p_connector_);
     }
     RTP_LLM_LOG_INFO("P2PConnector initialized successfully, total connectors: %zu", connectors_.size());
-#endif
     return true;
 }
 

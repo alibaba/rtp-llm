@@ -114,8 +114,9 @@ public:
         return debug_string.str();
     }
 
+    void loadCacheSync();
+
 private:
-    void                          loadCacheSync();
     void                          waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
     std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
                                                   bool                                         enable_memory_cache,
