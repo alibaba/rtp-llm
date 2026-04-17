@@ -324,8 +324,8 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "--reco_client_config",
         env_name="RECO_CLIENT_CONFIG",
         bind_to=(kv_cache_config, "reco_client_config"),
-        type=int,
-        default=2000,
+        type=str,
+        default="",
     )
     kv_cache_group.add_argument(
         "--enable_tiered_memory_cache",
