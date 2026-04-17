@@ -2,8 +2,6 @@ from typing import Optional
 
 import torch
 from flashinfer.cute_dsl.blockscaled_gemm import grouped_gemm_nt_masked
-from flashinfer import (scaled_fp4_grouped_quantize,
-                        silu_and_mul_scaled_nvfp4_experts_quantize)
 
 try:
     from rtp_llm.ops.compute_ops import (
@@ -13,6 +11,7 @@ try:
 except ImportError:
     scaled_fp4_experts_quant = None
     silu_and_mul_scaled_fp4_experts_quant = None
+
 
 def scaled_fp4_grouped_quant(
     input_tensor: torch.Tensor,
@@ -40,7 +39,7 @@ def scaled_fp4_grouped_quant(
     """
     if silu_and_mul_scaled_fp4_experts_quant is None:
         raise ImportError("silu_and_mul_scaled_fp4_experts_quant is not available")
-    
+
     device = input_tensor.device
     l, m, k = input_tensor.shape
     sf_vec_size = 16
@@ -50,8 +49,11 @@ def scaled_fp4_grouped_quant(
     padded_k = (scale_k + (4 - 1)) // 4 * 4
     padded_k_int32 = padded_k // 4
     padded_m = (m + (128 - 1)) // 128 * 128
-    output = torch.empty(l, m, k // 2, device=device, dtype=torch.uint8)
-    output_scales = torch.empty(
+    # NOTE: kernel only writes rows [0, mask[l]); under CUDA Graph capture the
+    # remaining rows inside each padded 128-row tile must be zero to avoid
+    # garbage SFs polluting Blackwell tcgen05 mma accumulators. Use zeros().
+    output = torch.zeros(l, m, k // 2, device=device, dtype=torch.uint8)
+    output_scales = torch.zeros(
         l, padded_m, padded_k_int32, device=device, dtype=torch.int32
     )
 
@@ -105,7 +107,7 @@ def silu_and_mul_scaled_fp4_grouped_quant(
     """
     if silu_and_mul_scaled_fp4_experts_quant is None:
         raise ImportError("silu_and_mul_scaled_fp4_experts_quant is not available")
-    
+
     device = input_tensor.device
     l, m, k_by_2 = input_tensor.shape
     k = k_by_2 // 2
@@ -116,8 +118,10 @@ def silu_and_mul_scaled_fp4_grouped_quant(
     padded_k = (scale_k + (4 - 1)) // 4 * 4
     padded_k_int32 = padded_k // 4
     padded_m = (m + (128 - 1)) // 128 * 128
-    output = torch.empty(l, m, k // 2, device=device, dtype=torch.uint8)
-    output_scales = torch.empty(
+    # NOTE: kernel only writes rows [0, mask[l]); zero-init to avoid CUDA Graph
+    # replay garbage inside padded/masked-out rows within each 128-row tile.
+    output = torch.zeros(l, m, k // 2, device=device, dtype=torch.uint8)
+    output_scales = torch.zeros(
         l, padded_m, padded_k_int32, device=device, dtype=torch.int32
     )
 
@@ -231,10 +235,11 @@ def flashinfer_cutedsl_moe_masked(
             num_experts,
         ), f"input_global_scale must be (l,), got {input_global_scale.shape}"
 
-        a_q, a_q_sf = scaled_fp4_grouped_quantize(
+        # Use RTP-LLM local wrapper which zero-inits outputs (CUDA Graph safe).
+        a_q, a_q_sf = scaled_fp4_grouped_quant(
             hidden_states[0],
-            masked_m,
             input_global_scale,
+            masked_m,
         )
 
     assert w1.shape[-2] == 2 * n, f"w1 last-2 dim must be 2*n, got {w1.shape}"
@@ -256,7 +261,10 @@ def flashinfer_cutedsl_moe_masked(
     ), f"w2_alpha must be (l,), got {w2_alpha.shape}"
 
     # TODO(kaixih@nvidia): dtype should be based on inputs.
-    gateup_output = torch.empty(
+    # NOTE: zero-init so that rows beyond masked_m within a 128-row tile are 0;
+    # these rows are fed into silu_and_mul+quant and then GEMM2 as garbage SFs
+    # under CUDA Graph replay otherwise (see Blackwell tcgen05 behavior).
+    gateup_output = torch.zeros(
         (num_experts, m, n * 2), dtype=torch.bfloat16, device=a_q.device
     )
     gateup_output = gateup_output.permute(1, 2, 0)  # requirement of kernel
@@ -281,18 +289,20 @@ def flashinfer_cutedsl_moe_masked(
         alpha_dtype=get_cute_dtype(w1_alpha),
     )  # in logical [m, n, l]
 
-    # SILU and quantization
-    diq, diq_sf = silu_and_mul_scaled_nvfp4_experts_quantize(
+    # SILU and quantization -- use RTP-LLM local wrapper (zero-inits outputs,
+    # CUDA Graph safe).
+    diq, diq_sf = silu_and_mul_scaled_fp4_grouped_quant(
         gateup_output.permute(2, 0, 1),
-        masked_m,
         a2_global_scale,
+        masked_m,
     )
 
     if down_start_event is not None:
         down_start_event.record()
 
     # Gemm2
-    out = torch.empty((num_experts, m, k), dtype=torch.bfloat16, device=a_q.device)
+    # NOTE: zero-init to keep rows beyond masked_m deterministic under CUDA Graph.
+    out = torch.zeros((num_experts, m, k), dtype=torch.bfloat16, device=a_q.device)
     out = out.permute(1, 2, 0)  # requirement of kernel
     grouped_gemm_nt_masked(
         (diq, diq_sf),

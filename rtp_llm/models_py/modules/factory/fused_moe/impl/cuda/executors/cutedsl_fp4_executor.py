@@ -5,10 +5,14 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+from rtp_llm.device.device_impl import CudaImpl
 from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
     flashinfer_cutedsl_moe_masked,
+    scaled_fp4_grouped_quant,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
@@ -19,9 +23,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.utils.model_weight import W
-
-from flashinfer import scaled_fp4_grouped_quantize
-from rtp_llm.device.device_impl import CudaImpl
 
 
 class CutedslFp4Executor(FusedMoeExpertExecutor):
@@ -42,7 +43,10 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         checker.check(resolver.is_bf16(config))
         # Check if quantization is enabled and uses FP4 (uint8 dtype)
         # FP4 weights are packed as uint8, so we check for quant_config with uint8 dtype
-        checker.check(resolver.has_quantization(config) and resolver.get_quant_method(config) == "modelopt_fp4")        
+        checker.check(
+            resolver.has_quantization(config)
+            and resolver.get_quant_method(config) == "modelopt_fp4"
+        )
 
     def __init__(
         self,
@@ -76,16 +80,26 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         input_global_scale = self._weights.get(W.moe_w1_i_s, None)
         a2_global_scale = self._weights.get(W.moe_w2_i_s, None)
 
-        assert self._w1 is not None and self._w2 is not None, "FP4 MoE weights w1 and w2 must be provided"
-        assert self._w1_blockscale is not None and self._w2_blockscale is not None, "FP4 MoE blockscale weights must be provided"
-        assert _w1_alpha is not None and _w2_alpha is not None, "FP4 MoE alpha weights must be provided"
-        assert input_global_scale is not None and a2_global_scale is not None, "FP4 MoE input scale must be provided"
-        
+        assert (
+            self._w1 is not None and self._w2 is not None
+        ), "FP4 MoE weights w1 and w2 must be provided"
+        assert (
+            self._w1_blockscale is not None and self._w2_blockscale is not None
+        ), "FP4 MoE blockscale weights must be provided"
+        assert (
+            _w1_alpha is not None and _w2_alpha is not None
+        ), "FP4 MoE alpha weights must be provided"
+        assert (
+            input_global_scale is not None and a2_global_scale is not None
+        ), "FP4 MoE input scale must be provided"
+
         self._w1_alpha = input_global_scale * _w1_alpha
         self._w2_alpha = a2_global_scale * _w2_alpha
         self.input_global_scale = 1 / input_global_scale
         self.a2_global_scale = 1 / a2_global_scale
-        self.input_global_scale = self.clamp_inf(self.input_global_scale, "input_global_scale")
+        self.input_global_scale = self.clamp_inf(
+            self.input_global_scale, "input_global_scale"
+        )
         self.a2_global_scale = self.clamp_inf(self.a2_global_scale, "a2_global_scale")
 
         # Check FP4 quantization
@@ -193,23 +207,30 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         assert self._w1.size(0) == E
         assert self._w1.size(1) % 2 == 0  # w1 should be 2*N
         N = self._w1.size(1) // 2  # intermediate_size
-        assert self._w1.size(2) == K // 2, f"w1 last dim should be K//2={K//2}, got {self._w1.size(2)}"
+        assert (
+            self._w1.size(2) == K // 2
+        ), f"w1 last dim should be K//2={K//2}, got {self._w1.size(2)}"
         assert self._w2.size(0) == E
-        assert self._w2.size(1) == K, f"w2 second dim should be K={K}, got {self._w2.size(1)}"
-        assert self._w2.size(2) == N // 2, f"w2 last dim should be N//2={N//2}, got {self._w2.size(2)}"
+        assert (
+            self._w2.size(1) == K
+        ), f"w2 second dim should be K={K}, got {self._w2.size(1)}"
+        assert (
+            self._w2.size(2) == N // 2
+        ), f"w2 last dim should be N//2={N//2}, got {self._w2.size(2)}"
 
         if payload.expert_x.dtype is torch.bfloat16:
-            hidden_states, hidden_states_scale = scaled_fp4_grouped_quantize(
+            # Use RTP-LLM local wrapper (zero-inits outputs, CUDA Graph safe).
+            hidden_states, hidden_states_scale = scaled_fp4_grouped_quant(
                 payload.expert_x,
+                self.input_global_scale,
                 expert_num_tokens,
-                self.input_global_scale
             )
             hidden_states = (hidden_states, hidden_states_scale)
         else:
             assert payload.expert_x.dtype is torch.uint8
             assert payload.expert_x_scale is not None
             hidden_states = (payload.expert_x, payload.expert_x_scale)
-        
+
         # Call the CuteDSL FP4 MoE kernel
         output = flashinfer_cutedsl_moe_masked(
             hidden_states=hidden_states,
@@ -225,4 +246,3 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         )
 
         return CombineForwardPayload(fused_expert_output=output)
-
