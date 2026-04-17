@@ -85,6 +85,15 @@ class CkptDatabase(BaseDatabase):
             f"CkptDatabase all tensor names = {self.get_pretrain_tensor_names()}"
         )
 
+        # Build tensor_name -> CkptFileInfo index for O(1) lookup
+        self._tensor_index: Dict[str, CkptFileInfo] = {}
+        for ckpt_file in self.pretrain_file_list:
+            for tname in ckpt_file.metadata.keys():
+                self._tensor_index[tname] = ckpt_file
+        for ckpt_file in self.finetune_file_list:
+            for tname in ckpt_file.metadata.keys():
+                self._tensor_index[tname] = ckpt_file
+
     @property
     def is_ft_style(self) -> bool:
         return self._is_ft_style
@@ -157,25 +166,21 @@ class CkptDatabase(BaseDatabase):
     def load_tensor(
         self, name: str, data_type: Optional[torch.dtype] = torch.float16
     ) -> List[torch.Tensor]:
-        tensors = []
-        for ckpt_file in self.pretrain_file_list:
-            if name in ckpt_file.get_tensor_names():
-                tensors.append(ckpt_file.load_tensor(name, data_type))
+        ckpt_file = self._tensor_index.get(name)
+        if ckpt_file is not None:
+            return [ckpt_file.load_tensor(name, data_type)]
+        return []
 
-        for ckpt_file in self.finetune_file_list:
-            if name in ckpt_file.get_tensor_names():
-                tensors.append(ckpt_file.load_tensor(name, data_type))
-
-        return tensors
+    def load_tensor_thread_safe(
+        self, name: str, data_type: Optional[torch.dtype] = torch.float16
+    ) -> List[torch.Tensor]:
+        ckpt_file = self._tensor_index.get(name)
+        if ckpt_file is not None:
+            return [ckpt_file.load_tensor_thread_safe(name, data_type)]
+        return []
 
     def has_tensor(self, name: str) -> bool:
-        for ckpt_file in self.pretrain_file_list:
-            if name in ckpt_file.get_tensor_names():
-                return True
-        for ckpt_file in self.finetune_file_list:
-            if name in ckpt_file.get_tensor_names():
-                return True
-        return False
+        return name in self._tensor_index
 
     def get_tensor_type(self, name: str) -> torch.dtype:
         return self.pretrain_file_list[0].get_tensor_type(name)
