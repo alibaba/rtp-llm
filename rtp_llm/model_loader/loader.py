@@ -533,7 +533,6 @@ class ModelLoader:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
                 weights.set_global_weight(name, tensor)
-            gc.collect()
         return weights
 
     def _load_layer_weights(self, layer_id: int, device: str):
