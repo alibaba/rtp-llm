@@ -23,7 +23,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutputs,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
-from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
+from rtp_llm.utils.grpc_util import trans_from_tensor, trans_option, trans_option_cast, trans_tensor
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 
@@ -53,6 +53,11 @@ def trans_input(input_py: GenerateInput):
     input_pb.batch_group_size = input_py.batch_group_size
     if hasattr(input_py, "batch_group_id") and input_py.batch_group_id != -1:
         input_pb.batch_group_id.value = input_py.batch_group_id
+
+    if input_py.input_embeddings is not None:
+        input_pb.input_embeddings.CopyFrom(trans_from_tensor(input_py.input_embeddings))
+    if input_py.input_embedding_locs is not None:
+        input_pb.input_embedding_locs.extend(input_py.input_embedding_locs)
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
     # check generate config is valid before enter into engine

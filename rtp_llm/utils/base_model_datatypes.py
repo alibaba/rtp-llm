@@ -36,6 +36,8 @@ class GenerateInput:
     token_type_ids: List[int] = field(default_factory=list)
     batch_group_size: int = 1
     batch_group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
+    input_embeddings: Optional[torch.Tensor] = None
+    input_embedding_locs: Optional[List[int]] = None
 
     class Config:
         arbitrary_types_allowed = True

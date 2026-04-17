@@ -271,6 +271,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&     model_input,
                                                              const StreamGroups& stream_groups) const {
     std::vector<torch::Tensor> gathered_mm_features;
+    std::vector<torch::Tensor> gathered_input_embeddings;
+    std::vector<int>           gathered_input_embedding_locs;
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
 
     for (const auto& stream : stream_groups.contextStreams()) {
@@ -310,6 +312,23 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             gatherMultimodalFeaturesForContextBatch(stream, ctx, gathered_mm_features);
 
+            if (stream->hasInputEmbeddings()) {
+                torch::Tensor emb      = stream->inputEmbeddings();
+                torch::Tensor emb_locs = stream->inputEmbeddingLocs();
+                if (emb.defined() && emb_locs.defined()) {
+                    if (!emb.is_cuda()) {
+                        gathered_input_embeddings.emplace_back(emb.to(torch::kCUDA));
+                    } else {
+                        gathered_input_embeddings.emplace_back(emb);
+                    }
+                    auto* locs_data = emb_locs.data_ptr<int>();
+                    for (int loc_idx = 0; loc_idx < emb_locs.numel(); ++loc_idx) {
+                        gathered_input_embedding_locs.push_back(
+                            locs_data[loc_idx] + ctx.token_idx - stream->reuseLength());
+                    }
+                }
+            }
+
             if (ctx.need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds();
                 int  reuse_offset    = stream->reuseLength() * config_.position_id_len_factor;
@@ -342,6 +361,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
+    }
+    if (!gathered_input_embeddings.empty()) {
+        model_input.input_embeddings      = std::move(gathered_input_embeddings);
+        model_input.input_embeddings_locs = torch::tensor(gathered_input_embedding_locs, torch::kInt32);
     }
     return absl::OkStatus();
 }
