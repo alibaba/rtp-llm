@@ -56,6 +56,16 @@ def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
 def concat_1(ts: List[torch.Tensor]) -> torch.Tensor:
     if len(ts) == 1:
         return ts[0]
+    # torch.concat() does not support fp8 in current rocm torch version
+    if ts[0].dtype in [
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2,
+        torch.float8_e5m2fnuz,
+    ]:
+        dtype = ts[0].dtype
+        out_u8 = torch.concat([x.view(torch.uint8) for x in ts], dim=1).contiguous()
+        return out_u8.view(dtype)
     return torch.concat(ts, dim=1).contiguous()
 
 

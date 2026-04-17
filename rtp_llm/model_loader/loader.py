@@ -469,18 +469,24 @@ class ModelLoader:
         if database is None:
             return
 
-        # 清理 CkptFileInfo 的元数据
+        # 清理 CkptFileInfo 的元数据和缓存的 safetensors 句柄
         if database.pretrain_file_list is not None:
             for ckpt_file in database.pretrain_file_list:
+                ckpt_file.close_safetensor_handle()
                 if ckpt_file.metadata is not None:
                     ckpt_file.metadata = None
             database.pretrain_file_list.clear()
 
         if database.finetune_file_list is not None:
             for ckpt_file in database.finetune_file_list:
+                ckpt_file.close_safetensor_handle()
                 if ckpt_file.metadata is not None:
                     ckpt_file.metadata = None
             database.finetune_file_list.clear()
+
+        # 清理 tensor 索引
+        if hasattr(database, "_tensor_index"):
+            database._tensor_index.clear()
 
         # 清理 LoRA 缓存
         if database.lora_ckpt is not None:
