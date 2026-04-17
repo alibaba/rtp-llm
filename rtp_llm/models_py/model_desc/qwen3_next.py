@@ -368,14 +368,17 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         )
 
         ssm_states = self._get_ssm_states(kv_cache_tensor)
-        core_attn_out, _ = fused_sigmoid_gating_delta_rule_update(
-            A_log=self.alog,
-            a=a,
-            dt_bias=self.dt_bias,
+        # Workaround: fused_sigmoid_gating_delta_rule_update_kernel produces
+        # incorrect results on ROCm when batch_size >= 3. Use the non-fused
+        # path (gating + recurrent) which is numerically equivalent but avoids
+        # the ROCm Triton compiler issue in the fused kernel.
+        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
+        core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
             k=key,
             v=value,
-            b=b,
+            g=g,
+            beta=beta,
             scale=None,
             initial_state=ssm_states,
             inplace_final_state=True,
@@ -383,8 +386,6 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
             use_qk_l2norm_in_kernel=True,
-            softplus_beta=1.0,
-            softplus_threshold=20.0,
         )
         res = core_attn_out.reshape(
             [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
