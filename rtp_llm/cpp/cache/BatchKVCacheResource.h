@@ -101,6 +101,11 @@ public:
         return batch_resource[batch_id].cacheKeys();
     }
 
+    CacheKeysType localCacheKeys(int batch_id, int cp_rank, int cp_size) const {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        return batch_resource[batch_id].localCacheKeys(cp_rank, cp_size);
+    }
+
     void popBackCacheKey(int batch_id = 0) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         auto& keys = batch_resource[batch_id].cacheKeys();

@@ -103,7 +103,18 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         return nullptr;
     }
 
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys(), true);
+    // TODO(CP): Currently only rank0 (controller) executes asyncRead/asyncWrite via
+    // the scheduler path (initKVBlock → loadCacheSync, releaseKVBlock → storeCacheAsync).
+    // In CP mode each rank holds different KV data with different cache keys, so the
+    // memory/remote connector only manages rank0's portion.  To fully support CP:
+    //   1. All ranks need to run connector store/load (not just rank0).
+    //   2. Each rank uses localCacheKeys(cp_rank, cp_size) for its own key space.
+    //   3. Match results must be consistent across ranks (guaranteed by deterministic
+    //      cache key derivation from the same complete_token_ids).
+    // Until then, memory/remote cache reuse is incomplete under CP — rank0 can reload
+    // its KV from connector but other ranks cannot, causing data inconsistency.
+    auto ref_keys = kvcache_resource.cacheKeys();
+    auto resource = allocator_->incrKVCacheRef(kvcache_resource, ref_keys, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -141,7 +152,10 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         return nullptr;
     }
 
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys(), true);
+    // TODO(CP): Same limitation as asyncRead — only rank0 runs this path.
+    // See asyncRead comment for details on CP + connector support.
+    auto ref_keys = kvcache_resource.cacheKeys();
+    auto resource = allocator_->incrKVCacheRef(kvcache_resource, ref_keys, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async write failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());

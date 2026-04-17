@@ -22,6 +22,8 @@
 
 using namespace std;
 
+#include <iostream>
+
 namespace rtp_llm {
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
@@ -251,6 +253,10 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                                   && mla_ops_type_ != rtp_llm::MlaOpsType::MHA,
                                               cache_manager_ ? cache_manager_->getCacheStore() : nullptr,
                                               cache_store_async_writer_.get()};
+        if (device_props_.cp_kv_cache_sharded && device_props_.tp_size > 1) {
+            cache_store_inputs.cp_slot_mapper = std::make_shared<rtp_llm::CPSlotMapper>(
+                device_props_.tp_rank, device_props_.tp_size, inputs.seq_size_per_block);
+        }
         params = cache_store_inputs;
     }
     return params;
@@ -351,7 +357,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp) {
-            context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
+            context_parallel_processor_->handleInputs(
+                const_cast<GptModelInputs&>(inputs), cp_params, device_props_.tp_rank, device_props_.tp_size);
         }
 
         torch::Tensor token_ids;

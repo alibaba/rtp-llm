@@ -40,7 +40,7 @@ from rtp_llm.ops import (
     KvCacheDataType,
     ParallelismConfig,
 )
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 from .rope_emb_new import NewMlaRotaryEmbeddingOp
@@ -60,6 +60,7 @@ class SparseMlaOp(object):
         softmax_extra_scale: float,
         top_k: int,
         parallelism_config: Optional[ParallelismConfig] = None,
+        physical_block_size: int = 0,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -68,6 +69,7 @@ class SparseMlaOp(object):
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.token_per_block = page_size
+        self.physical_block_size = physical_block_size or page_size
         self.softmax_extra_scale = softmax_extra_scale
         self.scale = (self.qk_head_dim**-0.5) * softmax_extra_scale
         self.top_k = top_k
@@ -190,6 +192,7 @@ class SparseMlaFp8Op(SparseMlaOp):
         softmax_extra_scale: float,
         top_k: int,
         parallelism_config: Optional[ParallelismConfig] = None,
+        physical_block_size: int = 0,
     ):
         super().__init__(
             num_heads=num_heads,
@@ -199,6 +202,7 @@ class SparseMlaFp8Op(SparseMlaOp):
             page_size=page_size,
             softmax_extra_scale=softmax_extra_scale,
             top_k=top_k,
+            physical_block_size=physical_block_size,
         )
         self._fp8_kernel_metadata = None
 
@@ -338,6 +342,7 @@ class SparseMlaImpl(MlaImplBase):
             parallelism_config=parallelism_config,
         )
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
+        self.physical_tokens_per_block = attn_configs.tokens_per_block
         self.num_heads = attn_configs.head_num
         self.kv_lora_rank = attn_configs.kv_lora_rank
         self.rope_head_dim = attn_configs.rope_head_dim
@@ -369,6 +374,7 @@ class SparseMlaImpl(MlaImplBase):
             attn_configs.softmax_extra_scale,
             attn_configs.indexer_topk,
             parallelism_config=parallelism_config,
+            physical_block_size=attn_configs.tokens_per_block,
         )
 
         self.rope_impl = NewMlaRotaryEmbeddingOp(
@@ -485,7 +491,7 @@ class SparseMlaImpl(MlaImplBase):
         q: torch.Tensor,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         layer_id: int,
         topk_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:

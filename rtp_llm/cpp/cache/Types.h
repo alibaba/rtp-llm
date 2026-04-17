@@ -1,11 +1,13 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 #include <cstdint>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -48,12 +50,13 @@ struct KVPartitionBytes {
 };
 
 struct MallocInfo {
-    BatchKVCacheResourcePtr batch_kv_cache_resource;
-    CompleteTokenIdsPtr     complete_token_ids;
-    int64_t                 request_id          = 0;
-    bool                    verbose             = true;  // for failed log
-    bool                    reuse_cache         = true;
-    bool                    enable_device_cache = true;
+    BatchKVCacheResourcePtr       batch_kv_cache_resource;
+    CompleteTokenIdsPtr           complete_token_ids;
+    int64_t                       request_id          = 0;
+    bool                          verbose             = true;  // for failed log
+    bool                          reuse_cache         = true;
+    bool                          enable_device_cache = true;
+    std::shared_ptr<CPSlotMapper> cp_slot_mapper;  // nullptr = redundant (default)
 };
 
 struct MallocResult {
@@ -71,9 +74,10 @@ struct FreeInfo {
 };
 
 struct InsertInfo {
-    BatchKVCacheResourcePtr batch_kv_cache_resource;
-    CompleteTokenIdsPtr     complete_token_ids;
-    bool                    is_resident;
+    BatchKVCacheResourcePtr       batch_kv_cache_resource;
+    CompleteTokenIdsPtr           complete_token_ids;
+    bool                          is_resident;
+    std::shared_ptr<CPSlotMapper> cp_slot_mapper;  // nullptr = redundant (default)
 };
 
 }  // namespace rtp_llm

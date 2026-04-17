@@ -32,9 +32,13 @@ class MlaAttention(nn.Module):
         super().__init__()
         self.attn_config = attn_config
         self.parallelism_config = parallelism_config
-        self.num_heads = (
-            attn_config.head_num // self.parallelism_config.get_attn_tp_size()
-        )
+        cp = self.parallelism_config.prefill_cp_config
+        if not cp.is_enabled():
+            self.num_heads = (
+                attn_config.head_num // self.parallelism_config.get_attn_tp_size()
+            )
+        else:
+            self.num_heads = attn_config.head_num
         self.qk_nope_head_dim = attn_config.nope_head_dim
         self.qk_rope_head_dim = attn_config.rope_head_dim
         self.q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim

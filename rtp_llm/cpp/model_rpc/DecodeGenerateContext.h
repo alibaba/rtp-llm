@@ -69,6 +69,7 @@ public:
     GenerateRequestPB        allocate_request;
     DecodeStatInfo           stat_info;
     int64_t                  loading_cache_requests = 0;
+    int32_t                  prefill_cp_size        = 1;  // CP size used by prefill; >1 means sharded KV cache
 
     // for debug, will delete in future
     TimeInfo time_info;

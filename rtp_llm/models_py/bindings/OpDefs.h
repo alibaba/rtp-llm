@@ -6,6 +6,7 @@
 #include <torch/extension.h>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -138,6 +139,8 @@ struct PyCacheStoreInputs {
     // Opaque cache_store reference (C++ only; passes through Python without inspection)
     std::shared_ptr<rtp_llm::CacheStore> cache_store;
     rtp_llm::CacheStoreAsyncWriter*      cache_store_async_writer = nullptr;
+
+    std::shared_ptr<rtp_llm::CPSlotMapper> cp_slot_mapper;
 };
 
 // for cuda grpah capture

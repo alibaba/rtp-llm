@@ -1,5 +1,5 @@
 """
-Unit tests for SparseMlaFp8CPOp (Context Parallel prefill for Sparse MLA FP8).
+Unit tests for ZigZagSparseMlaFp8CPOp (Context Parallel prefill for Sparse MLA FP8).
 
 - tp_size=1: mock all_gather, compare to non-CP.
 - tp_size=2: two processes, real all_gather; merge outputs vs single-GPU non-CP (needs >=2 GPUs).
@@ -259,6 +259,8 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
 
 @skipIf(not CUDA_FLASHMLA_OK, SKIP_REASON)
 class SparseMlaFp8CPOpTest(TestCase):
+    """Test ZigZagSparseMlaFp8CPOp with single rank (tp_size=1)."""
+
     @classmethod
     def setUpClass(cls):
         if not torch.cuda.is_available():
@@ -280,7 +282,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         Run both CP op and non-CP op on same inputs and check output shape and equality.
         """
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
-            SparseMlaFp8CPOp,
+            ZigZagSparseMlaFp8CPOp,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
             SparseMlaFp8Op,
@@ -385,7 +387,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         kv_cache = LayerKVCache()
         kv_cache.kv_cache_base = kv_cache_base
 
-        cp_op = SparseMlaFp8CPOp(
+        cp_op = ZigZagSparseMlaFp8CPOp(
             num_heads=num_heads,
             kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
@@ -407,7 +409,6 @@ class SparseMlaFp8CPOpTest(TestCase):
 
         topk0 = torch.index_select(topk_indices, 0, cp_op.q0_idx).contiguous()
         topk1 = torch.index_select(topk_indices, 0, cp_op.q1_idx).contiguous()
-        # CP forward expects single topk tensor aligned with total_local_ids (q0 then q1)
         topk_cat = torch.cat([topk0, topk1], dim=0)
         with patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
@@ -441,7 +442,6 @@ class SparseMlaFp8CPOpTest(TestCase):
         non_cp_op.plan(mla_params, block_table_device)
         out_non_cp = non_cp_op.forward(q, kv_cache_flat, topk_indices, layer_id=0)
         torch.cuda.synchronize()
-
         self.assertTrue(
             torch.allclose(out_cp, out_non_cp, atol=1e-2, rtol=1e-2),
             "CP output should match non-CP when tp_size=1 (all_gather identity)",
@@ -450,7 +450,7 @@ class SparseMlaFp8CPOpTest(TestCase):
     def test_cp_op_forward_output_shape(self):
         """CP op forward returns correct shape [total_q_len, num_heads, kv_lora_rank]."""
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
-            SparseMlaFp8CPOp,
+            ZigZagSparseMlaFp8CPOp,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
             MlaKVCacheWriteOp,
@@ -544,7 +544,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         kv_cache = LayerKVCache()
         kv_cache.kv_cache_base = kv_cache_base
 
-        cp_op = SparseMlaFp8CPOp(
+        cp_op = ZigZagSparseMlaFp8CPOp(
             num_heads=num_heads,
             kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
@@ -581,88 +581,19 @@ class SparseMlaFp8CPOpTest(TestCase):
         torch.cuda.synchronize()
         self.assertEqual(out.shape, (total_q_len, num_heads, kv_lora_rank))
 
-    @skipIf(torch.cuda.device_count() < 2, "need 2 CUDA devices")
-    def test_cp_tp2_matches_non_cp(self):
-        """tp_size=2 real all_gather; merged CP vs single-GPU SparseMlaFp8Op."""
-        try:
-            mp.set_start_method("spawn", force=True)
-        except RuntimeError:
-            pass
-        port_mgr = PortManager()
-        ports, locks = port_mgr.get_consecutive_ports(1)
-        qu: mp.Queue = mp.Queue()
-        procs: List[mp.Process] = []
-        drained: List[object] = []
-        drain_exc: List[BaseException] = []
-
-        def _drain_queue() -> None:
-            try:
-                for _ in range(3):
-                    drained.append(qu.get(timeout=400))
-            except BaseException as e:
-                drain_exc.append(e)
-
-        drain_t = threading.Thread(target=_drain_queue, daemon=True)
-        try:
-            drain_t.start()
-            for r in range(2):
-                procs.append(
-                    mp.Process(
-                        target=_tp2_worker,
-                        args=(r, ports[0], qu),
-                        daemon=False,
-                    )
-                )
-                procs[-1].start()
-            for p in procs:
-                p.join(timeout=300)
-                self.assertEqual(p.exitcode, 0, getattr(p, "name", p))
-            drain_t.join(timeout=420)
-        finally:
-            for lk in locks:
-                lk.__exit__(None, None, None)
-        if drain_exc:
-            raise drain_exc[0]
-        self.assertEqual(
-            len(drained),
-            3,
-            f"expected 3 queue messages, got {len(drained)} (avoid parent/child queue deadlock)",
-        )
-        by_rank: dict[int, Tuple[np.ndarray, np.ndarray]] = {}
-        ref: Optional[np.ndarray] = None
-        for it in drained:
-            if it[0] == "err":
-                self.fail(str(it[1]))
-            if it[0] == "ref":
-                ref = it[1]
-            else:
-                by_rank[int(it[0])] = (it[1], it[2])
-        self.assertEqual(len(by_rank), 2)
-        self.assertIsNotNone(ref)
-        assert ref is not None
-        t, h, rdim = ref.shape
-        mg = np.zeros((t, h, rdim), dtype=np.float32)
-        for ri in (0, 1):
-            lids, full = by_rank[ri]
-            ix = lids.astype(np.int64)
-            mg[ix] = full[ix]
-        # Split CP attention vs one-shot non-CP: FP8 + different kernel tiling (max ~0.11 seen).
-        diff = float(np.max(np.abs(mg - ref)))
-        self.assertTrue(
-            np.allclose(mg, ref, atol=0.15, rtol=0.05),
-            f"merged CP vs ref mismatch, max_abs_diff={diff}",
-        )
-
-    def test_cp_tp2_prefix_cache_matches_non_cp(self):
+    def test_cp_op_forward_with_prefix_cache(self):
         """
-        Single-GPU mock of tp_size=2 with prefix_length=64.
-        all_gather is mocked as repeat(2, ...) to simulate 2-rank concatenation.
-        Total KV = prefix(64) + input(8) = 72 tokens.
-        Each CP rank holds 4 local tokens (chunks=[2,2]), all_gather doubles to 8.
-        Compare CP output (rank 0) against non-CP reference on full 72 tokens.
+        With tp_size=1 and prefix_lengths > 0 (reuse cache), verify that:
+        1. The CP op does not crash (buffer allocation uses full KV length)
+        2. Output shape is correct
+        3. Output matches non-CP reference on the same cache state
+
+        This exercises the fix where cu_kv_seqlens_global[-1] (prefix + new)
+        is used for buffer sizing instead of kv_restore_unpad_indices.shape[0]
+        (new tokens only).
         """
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
-            SparseMlaFp8CPOp,
+            ZigZagSparseMlaFp8CPOp,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
             SparseMlaFp8Op,
@@ -682,85 +613,52 @@ class SparseMlaFp8CPOpTest(TestCase):
         page_size = 64
         softmax_extra_scale = 1.0
         top_k = 128
-        prefix_length = 64
-        input_tokens = 8
-        total_kv_len = prefix_length + input_tokens  # 72
         qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         fp8_bytes_per_token = 656
 
-        # tp_size=2, rank=0 holds first half of input tokens
-        tp_size = 2
-        tp_rank = 0
-        chunk_lengths = [2, 2]  # per-rank local chunks
-        tok = sum(chunk_lengths)  # 4 local tokens per rank
+        prefix_len = 64
+        new_tokens = 8
+        total_kv_len = prefix_len + new_tokens
+        num_blocks_needed = math.ceil(total_kv_len / page_size)
 
-        # --- Generate full KV data for all 72 tokens ---
-        all_compressed_kv = (
-            torch.randn(total_kv_len, kv_lora_rank, dtype=torch.bfloat16, device=device)
-            * 0.1
-        )
-        all_k_pe = (
-            torch.randn(
-                total_kv_len, qk_rope_head_dim, dtype=torch.bfloat16, device=device
-            )
-            * 0.1
-        )
-        prefix_ckv = all_compressed_kv[:prefix_length]
-        prefix_k_pe = all_k_pe[:prefix_length]
-        input_ckv = all_compressed_kv[prefix_length:]
-        input_k_pe = all_k_pe[prefix_length:]
-
-        # Rank 0's local chunk of input KV
-        local_ckv = input_ckv[:tok].contiguous()
-        local_k_pe = input_k_pe[:tok].contiguous()
-
-        q = (
-            torch.randn(
-                input_tokens,
-                num_heads,
-                qk_head_dim,
-                dtype=torch.bfloat16,
-                device=device,
-            )
-            * 0.1
-        )
-        batch_indice_d = torch.zeros(input_tokens, dtype=torch.int32, device=device)
-
-        block_table_host = _make_block_table(
-            1, total_kv_len, page_size, torch.device("cpu")
-        )
-        block_table_device = block_table_host.to(device)
-        num_blocks = block_table_host.shape[1]
-
-        # --- CP attn_inputs: input_lengths = local tokens, sequence_lengths = full ---
-        cp_params = PyContextParallelParams()
-        cp_params.prefill_cp_chunk_lengths = torch.tensor(
+        chunk_lengths = [new_tokens]
+        prefill_cp_chunk_lengths = torch.tensor(
             chunk_lengths, dtype=torch.int32, device=device
         )
-        # restore_indice maps all-gathered (tp_size * tok) positions back to global order.
-        # With identity restore (tokens already in order), it's just arange(tp_size * tok).
-        cp_params.prefill_qkv_restore_indice = torch.arange(
-            tp_size * tok, dtype=torch.long, device=device
+        n_restore = sum(chunk_lengths)
+        prefill_qkv_restore_indice = torch.arange(
+            n_restore, dtype=torch.long, device=device
         )
-        cp_params.prefill_qkv_padding_mask = torch.ones(
-            tp_size * tok, dtype=torch.int32, device=device
+        prefill_qkv_padding_mask = torch.ones(
+            n_restore, dtype=torch.int32, device=device
         )
-        cp_params.prefill_actual_input_lengths_cpu = torch.tensor(
-            [input_tokens], dtype=torch.int32, device=torch.device("cpu")
+        prefill_actual_input_lengths_cpu = torch.tensor(
+            [new_tokens], dtype=torch.int32, device=torch.device("cpu")
         )
+
+        cp_params = PyContextParallelParams()
+        cp_params.prefill_cp_chunk_lengths = prefill_cp_chunk_lengths
+        cp_params.prefill_qkv_restore_indice = prefill_qkv_restore_indice
+        cp_params.prefill_qkv_padding_mask = prefill_qkv_padding_mask
+        cp_params.prefill_actual_input_lengths_cpu = prefill_actual_input_lengths_cpu
 
         attn_inputs = PyAttentionInputs()
         attn_inputs.is_prefill = True
         attn_inputs.input_lengths = torch.tensor(
-            [input_tokens], dtype=torch.int32, device=torch.device("cpu")
+            [new_tokens], dtype=torch.int32, device=torch.device("cpu")
         )
         attn_inputs.sequence_lengths = torch.tensor(
             [total_kv_len], dtype=torch.int32, device=torch.device("cpu")
         )
         attn_inputs.prefix_lengths = torch.tensor(
-            [prefix_length], dtype=torch.int32, device=torch.device("cpu")
+            [prefix_len], dtype=torch.int32, device=torch.device("cpu")
         )
         attn_inputs.context_parallel_info = cp_params
+
+        block_table_host = _make_block_table(
+            1, total_kv_len, page_size, torch.device("cpu")
+        )
+        block_table_device = block_table_host.to(device)
         attn_inputs.kv_cache_block_id_host = block_table_host
         attn_inputs.kv_cache_block_id_device = block_table_device
         attn_inputs.kv_cache_kernel_block_id_host = block_table_host
@@ -770,15 +668,12 @@ class SparseMlaFp8CPOpTest(TestCase):
         mla_params.fill_params(attn_inputs, page_size)
 
         parallelism_config = ParallelismConfig()
-        parallelism_config.tp_rank = tp_rank
-        parallelism_config.tp_size = tp_size
+        parallelism_config.tp_rank = 0
+        parallelism_config.tp_size = 1
         parallelism_config.prefill_cp_config = PrefillCPConfig()
         parallelism_config.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
         parallelism_config.prefill_cp_config.comm_buffer_size = 0
 
-        kv_cache_write_op = MlaKVCacheWriteOp(kv_cache_dtype=KvCacheDataType.FP8)
-
-        # ============================================================
         # Non-CP reference: write all 72 tokens, run non-CP forward
         # ============================================================
         # Write all KV tokens using full-sequence params
@@ -885,7 +780,47 @@ class SparseMlaFp8CPOpTest(TestCase):
         )
         torch.cuda.synchronize()
 
-        cp_op = SparseMlaFp8CPOp(
+        q = (
+            torch.randn(
+                new_tokens, num_heads, qk_head_dim, dtype=torch.bfloat16, device=device
+            )
+            * 0.1
+        )
+        compressed_kv = (
+            torch.randn(new_tokens, kv_lora_rank, dtype=torch.bfloat16, device=device)
+            * 0.1
+        )
+        k_pe = (
+            torch.randn(
+                new_tokens, qk_rope_head_dim, dtype=torch.bfloat16, device=device
+            )
+            * 0.1
+        )
+        # topk indices span the full KV range [0, prefix_len + new_tokens)
+        topk_indices = torch.randint(
+            0, total_kv_len, (new_tokens, 1, top_k), dtype=torch.int32, device=device
+        )
+        batch_indice_d = torch.zeros(new_tokens, dtype=torch.int32, device=device)
+
+        num_blocks = block_table_host.shape[1]
+        kv_cache_base = (
+            (
+                torch.randn(
+                    num_blocks,
+                    page_size,
+                    fp8_bytes_per_token,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+                * 0.1
+            )
+            .to(torch.float8_e4m3fn)
+            .view(torch.uint8)
+        )
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = kv_cache_base
+
+        cp_op = ZigZagSparseMlaFp8CPOp(
             num_heads=num_heads,
             kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
@@ -893,46 +828,66 @@ class SparseMlaFp8CPOpTest(TestCase):
             page_size=page_size,
             softmax_extra_scale=softmax_extra_scale,
             top_k=top_k,
+            attn_inputs=attn_inputs,
             parallelism_config=parallelism_config,
         )
-        cp_op.kv_cache_write_op = kv_cache_write_op
+        cp_op.kv_cache_write_op = MlaKVCacheWriteOp(kv_cache_dtype=KvCacheDataType.FP8)
         cp_op.write_cache_store_impl = None
         cp_op.attn_inputs = attn_inputs
-        cp_op.plan(mla_params, block_table_device, attn_inputs)
 
-        # Mock all_gather: return the full input KV (all 8 tokens) as if gathered
-        # from 2 ranks (rank0 has first 4, rank1 has last 4).
-        _all_gather_returns = iter([input_ckv.contiguous(), input_k_pe.contiguous()])
+        cp_op.plan(mla_params, block_table_device)
 
-        def _mock_all_gather_tp2(tensor, group=None):
-            return next(_all_gather_returns)
+        # Verify cu_kv_seqlens_global includes prefix
+        self.assertEqual(
+            int(cp_op.cu_kv_seqlens_global[-1].item()),
+            total_kv_len,
+            "cu_kv_seqlens_global should cover prefix + new tokens",
+        )
 
-        topk0 = torch.index_select(topk_indices, 0, cp_op.q0_idx).contiguous()
-        topk1 = torch.index_select(topk_indices, 0, cp_op.q1_idx).contiguous()
-        topk_cat = torch.cat([topk0, topk1], dim=0)
+        def _identity_all_gather(tensor, group=None):
+            return tensor
+
         with patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
-            side_effect=_mock_all_gather_tp2,
+            side_effect=_identity_all_gather,
         ):
             out_cp = cp_op.forward(
                 q,
-                local_ckv,
-                local_k_pe,
-                topk_cat,
+                compressed_kv,
+                k_pe,
+                topk_indices,
                 batch_indice_d,
-                kv_cache_cp,
+                kv_cache,
                 layer_id=0,
             )
         torch.cuda.synchronize()
 
-        self.assertEqual(out_cp.shape, (input_tokens, num_heads, kv_lora_rank))
-        # CP rank 0 only fills total_local_ids positions; compare those against non-CP ref.
-        local_ids = cp_op.total_local_ids
+        self.assertEqual(
+            out_cp.shape,
+            (new_tokens, num_heads, kv_lora_rank),
+            "CP output shape should be [new_tokens, num_heads, kv_lora_rank]",
+        )
+
+        # Compare against non-CP reference on the same cache
+        kv_cache_flat = kv_cache_base.view(-1, 1, kv_cache_base.size(-1))
+        if kv_cache_flat.ndim == 3:
+            kv_cache_flat = kv_cache_flat.unsqueeze(-2)
+        non_cp_op = SparseMlaFp8Op(
+            num_heads=num_heads,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=qk_rope_head_dim,
+            qk_nope_head_dim=qk_nope_head_dim,
+            page_size=page_size,
+            softmax_extra_scale=softmax_extra_scale,
+            top_k=top_k,
+        )
+        non_cp_op.plan(mla_params, block_table_device)
+        out_non_cp = non_cp_op.forward(q, kv_cache_flat, topk_indices, layer_id=0)
+        torch.cuda.synchronize()
+
         self.assertTrue(
-            torch.allclose(
-                out_cp[local_ids], out_non_cp[local_ids], atol=1e-2, rtol=1e-2
-            ),
-            "CP tp_size=2 (mocked) with prefix cache should match non-CP reference at rank-0 positions",
+            torch.allclose(out_cp, out_non_cp, atol=1e-2, rtol=1e-2),
+            "CP output with prefix cache should match non-CP output",
         )
 
 

@@ -1,5 +1,9 @@
-from rtp_llm.ops import CPRotateMethod
-from rtp_llm.server.server_args.util import str2_cp_rotate_method, str2bool
+from rtp_llm.ops import CPProcessorType, CPRotateMethod
+from rtp_llm.server.server_args.util import (
+    str2_cp_processor_type,
+    str2_cp_rotate_method,
+    str2bool,
+)
 
 
 def init_parallel_group_args(
@@ -99,4 +103,20 @@ def init_parallel_group_args(
         type=str2bool,
         default=False,
         help="启用 CUDA IPC user-buffer 通信器用于上下文并行。仅支持单机场景，需要 CP 已启用且非 ALL_GATHER 方法。",
+    )
+    parallel_group.add_argument(
+        "--cp_kv_cache_sharded",
+        env_name="CP_KV_CACHE_SHARDED",
+        bind_to=(prefill_cp_config, "kv_cache_sharded"),
+        type=str2bool,
+        default=False,
+        help="启用 CP KV Cache 分片模式。每个 rank 只存储其拥有的 KV 块，减少冗余存储。仅在 PD 分离场景下使用。",
+    )
+    parallel_group.add_argument(
+        "--cp_processor_type",
+        env_name="CP_PROCESSOR_TYPE",
+        bind_to=(prefill_cp_config, "processor_type"),
+        type=str2_cp_processor_type,
+        default=CPProcessorType.ZIG_ZAG,
+        help="指定 CP token 分配策略。ZIG_ZAG: 锯齿形分配（默认），ROUND_ROBIN: 轮询分配。",
     )

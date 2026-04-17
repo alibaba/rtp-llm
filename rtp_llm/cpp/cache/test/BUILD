@@ -181,3 +181,34 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "cp_slot_mapper_test",
+    srcs = [
+        "CPSlotMapperTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
+    name = "kv_cache_manager_cp_test",
+    srcs = [
+        "KVCacheManagerCPSlotMapperTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)

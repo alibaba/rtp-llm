@@ -94,6 +94,21 @@ public:
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
 
+    // Return rank-local cache keys: every cp_size-th key starting from cp_rank.
+    // localCacheKeys(r, s)[i] == cacheKeys()[i * s + r]
+    // Note: when cacheKeys().size() % cp_size != 0 (e.g. 1 real block, cp_size=2),
+    // localCacheKeys may return fewer entries than blocks().size().  This is
+    // intentional — padding blocks carry no real data and must NOT participate in
+    // device cache insert, PD transfer, or connector operations.  Downstream code
+    // (e.g. insertIntoCache) already uses min(keys, blocks) to handle this.
+    CacheKeysType localCacheKeys(int cp_rank, int cp_size) const {
+        CacheKeysType local;
+        for (int i = cp_rank; i < static_cast<int>(cache_keys.size()); i += cp_size) {
+            local.push_back(cache_keys[i]);
+        }
+        return local;
+    }
+
     size_t reuseBlockNum() const;
 
     size_t deviceReuseBlockNum() const;

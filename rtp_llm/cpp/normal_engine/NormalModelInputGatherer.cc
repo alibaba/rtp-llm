@@ -191,7 +191,10 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
         model_input.kv_cache_layer_to_group = torch::empty({(int64_t)config_.num_layers}, pinned_i32);
         model_input.kv_cache_group_types    = torch::empty({(int64_t)config_.kv_cache_group_nums}, pinned_i32);
         model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 2}, pinned_i32);
-        model_input.cache_keys = torch::empty({(int64_t)total_context_batch_size, (int64_t)max_blocks_num}, pinned_i64);
+        const size_t max_cache_keys_num =
+            stream_groups.maxCacheKeysNum() > 0 ? stream_groups.maxCacheKeysNum() : max_blocks_num;
+        model_input.cache_keys =
+            torch::empty({(int64_t)total_context_batch_size, (int64_t)max_cache_keys_num}, pinned_i64);
     }
 
     if (need_cal_position_id) {

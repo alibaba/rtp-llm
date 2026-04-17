@@ -228,15 +228,44 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             continue;
         }
 
+        // Map local block index → cache key index.
+        // Normal: identity (block i uses cache_keys[i]).
+        // CP sharded: page-level RR, block i uses cache_keys[i * cp_size + cp_rank].
+        const bool cp_sharded  = param.cp_slot_mapper && param.cp_slot_mapper->isSharded();
+        const int  cp_rank     = cp_sharded ? param.cp_slot_mapper->cpRank() : 0;
+        const int  cp_size_val = cp_sharded ? param.cp_slot_mapper->cpSize() : 1;
+
+        auto toKeyIndex = [cp_rank, cp_size_val](int block_idx) { return block_idx * cp_size_val + cp_rank; };
+
+        // Determine iteration range.
+        int num_blocks = total_blocks;
+        int start      = 0;
+        if (cp_sharded) {
+            int prefix_len = param.prefix_lengths_host.data_ptr<int>()[batch_id];
+            int input_len  = param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id];
+            num_blocks     = param.cp_slot_mapper->localBlockCount(prefix_len + input_len);
+        }
+        if (group_type == CacheGroupType::LINEAR) {
+            start = num_blocks - 1;  // LINEAR only writes the last block
+        }
+
+        // Total cache keys available — guard against trailing unused blocks in CP mode.
+        const size_t ck_stride =
+            param.max_cache_keys_per_batch > 0 ? param.max_cache_keys_per_batch : max_blocks_per_batch;
+        const int total_cache_keys = static_cast<int>(ck_stride);
+
         auto addBlock = [&](int index, CacheGroupType group_type) {
+            int key_index = toKeyIndex(index);
+            if (key_index >= total_cache_keys) {
+                return;  // trailing unused block in CP mode
+            }
             RTP_LLM_CHECK_WITH_INFO(index >= 0 && index < static_cast<int>(max_blocks_per_batch),
                                     "invalid block index=%d (max_blocks_per_batch=%zu)",
                                     index,
                                     max_blocks_per_batch);
             auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
-            std::string cache_key;
-            cache_key =
-                makeCacheKey(param.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
+            auto cache_key =
+                makeCacheKey(param.model_id, param.cache_keys[batch_id * ck_stride + key_index], param.layer_id);
 
             void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
             std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
@@ -271,12 +300,8 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
         };
 
-        if (group_type == CacheGroupType::LINEAR) {
-            addBlock(total_blocks - 1, group_type);
-        } else {
-            for (int index = 0; index < total_blocks; ++index) {
-                addBlock(index, group_type);
-            }
+        for (int i = start; i < num_blocks; ++i) {
+            addBlock(i, group_type);
         }
 
         auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
@@ -538,16 +563,18 @@ ExecInitParams initExecCtx(const ParallelismConfig&           parallelism_config
 #elif USING_ROCM
         params.device_type = DeviceType::ROCm;
 #endif
-        params.tp_size           = parallelism_config.tp_size;
-        params.dp_size           = parallelism_config.dp_size;
-        params.ep_size           = parallelism_config.ep_size;
-        params.ep_rank           = parallelism_config.ep_rank;
-        params.tp_rank           = parallelism_config.tp_rank;
-        params.dp_rank           = parallelism_config.dp_rank;
-        params.ffn_tp_size       = parallelism_config.ffn_tp_size;
-        params.ffn_tp_rank       = parallelism_config.ffn_tp_rank;
-        params.enable_sp         = parallelism_config.enable_sp;
-        params.enable_prefill_cp = parallelism_config.prefill_cp_config.is_enabled();
+        params.tp_size             = parallelism_config.tp_size;
+        params.dp_size             = parallelism_config.dp_size;
+        params.ep_size             = parallelism_config.ep_size;
+        params.ep_rank             = parallelism_config.ep_rank;
+        params.tp_rank             = parallelism_config.tp_rank;
+        params.dp_rank             = parallelism_config.dp_rank;
+        params.ffn_tp_size         = parallelism_config.ffn_tp_size;
+        params.ffn_tp_rank         = parallelism_config.ffn_tp_rank;
+        params.enable_sp           = parallelism_config.enable_sp;
+        params.enable_prefill_cp   = parallelism_config.prefill_cp_config.is_enabled();
+        params.cp_processor_type   = parallelism_config.prefill_cp_config.processor_type;
+        params.cp_kv_cache_sharded = parallelism_config.prefill_cp_config.kv_cache_sharded;
 
         params.use_all_gather             = moe_config.use_all_gather && !moe_config.use_deepep_low_latency;
         params.device_id                  = parallelism_config.world_rank % parallelism_config.local_world_size;

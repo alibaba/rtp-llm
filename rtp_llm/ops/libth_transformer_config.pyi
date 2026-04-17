@@ -212,6 +212,45 @@ class CPRotateMethod:
         ...
 
 
+class CPProcessorType:
+    """
+    Members:
+
+      ZIG_ZAG
+
+      ROUND_ROBIN
+    """
+    ZIG_ZAG: typing.ClassVar[CPProcessorType]  # value = <CPProcessorType.ZIG_ZAG: 0>
+    ROUND_ROBIN: typing.ClassVar[CPProcessorType]  # value = <CPProcessorType.ROUND_ROBIN: 1>
+    __members__: typing.ClassVar[dict[str, CPProcessorType]]
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+
+
 class CacheStoreConfig:
     cache_store_rdma_mode: bool
     messager_io_thread_count: int
@@ -1357,7 +1396,9 @@ class ParallelismConfig:
 
 class PrefillCPConfig:
     comm_buffer_size: int
+    kv_cache_sharded: bool
     method: CPRotateMethod
+    processor_type: CPProcessorType
 
     def __getstate__(self) -> tuple:
         ...
@@ -1373,6 +1414,7 @@ class PrefillCPConfig:
 
     def is_prefill_enabled(self) -> bool:
         ...
+
 
     def to_string(self) -> str:
         ...
@@ -2047,5 +2089,5 @@ ALLTOALL: CPRotateMethod  # value = <CPRotateMethod.ALLTOALL: 3>
 ALL_GATHER: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER: 1>
 ALL_GATHER_WITH_OVERLAP: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 2>
 DISABLED: CPRotateMethod  # value = <CPRotateMethod.DISABLED: 0>
-PREFILL_CP: CPRotateMethod  # value = <CPRotateMethod.PREFILL_CP: 4>
+: CPRotateMethod  # value = <CPRotateMethod.PREFILL_CP: 4>
 UNKNOWN: CPRotateMethod  # value = <CPRotateMethod.UNKNOWN: 5>

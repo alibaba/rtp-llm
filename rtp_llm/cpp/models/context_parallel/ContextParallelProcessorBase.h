@@ -12,19 +12,16 @@ namespace rtp_llm {
 
 struct GptModelInputs;
 
-enum class ProcessorType {
-    ZIG_ZAG,
-    // Future extensions: ROUND_ROBIN, BLOCK_WISE, etc.
-};
-
 class IContextParallelProcessor {
 public:
-    explicit IContextParallelProcessor(const ParallelismConfig& parallelism_config):
-        parallelism_config_(parallelism_config) {}
+    IContextParallelProcessor()          = default;
     virtual ~IContextParallelProcessor() = default;
 
     /// @brief Prepare context parallel inputs: split and shuffle tokens, compute restore indices and masks.
-    void handleInputs(GptModelInputs& model_input, torch_ext::PyContextParallelParams& cp_params);
+    void handleInputs(GptModelInputs&                     model_input,
+                      torch_ext::PyContextParallelParams& cp_params,
+                      int                                 tp_rank = 0,
+                      int                                 tp_size = 1);
 
     /// @brief Gather outputs from all CP ranks and restore original token order.
     virtual size_t handleOutputs(torch::Tensor&                            hidden_states,
@@ -52,13 +49,16 @@ protected:
                                                  const torch::Tensor& prefill_cp_padding_lengths,
                                                  int                  cp_size) = 0;
 
-    ParallelismConfig parallelism_config_;
+    /// @brief Return the alignment granularity for padding.
+    /// Zigzag requires 2 * cp_size; round-robin only needs cp_size.
+    virtual int cpAlignSize(int cp_size) const {
+        return cp_size * 2;
+    }
 };
 
 class ContextParallelProcessorFactory {
 public:
-    static std::unique_ptr<IContextParallelProcessor> create(ProcessorType            type,
-                                                             const ParallelismConfig& parallelism_config);
+    static std::unique_ptr<IContextParallelProcessor> create(CPProcessorType type, int page_size = 1);
 };
 
 }  // namespace rtp_llm
