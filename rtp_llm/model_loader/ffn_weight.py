@@ -366,9 +366,14 @@ class MoeAtomicWeight(AtomicWeight):
         num_ckpt_weights = len(ckpt_weights)
 
         # Try GPU pre-allocate + direct copy path for large MoE weights
+        # Only when CUDA is available and target device is GPU
+        target_device = (
+            device if isinstance(device, torch.device) else torch.device(device)
+        )
         if (
             num_experts > 1
             and torch.cuda.is_available()
+            and target_device.type == "cuda"
             and self.process_fun.__name__
             in ("stack_moe_w1", "stack_", "stack_moe_w1_s2")
         ):
@@ -421,7 +426,9 @@ class MoeAtomicWeight(AtomicWeight):
         Avoids expensive CPU stack of thousands of small tensors."""
         num_experts = len(selected_experts)
         num_ckpt_weights = len(ckpt_weights)
-        gpu_device = "cuda:0"
+        gpu_device = (
+            device if isinstance(device, torch.device) else torch.device(device)
+        )
 
         # Peek at first tensor to get shape
         first_name = ckpt_weights[0].name.format(
@@ -495,25 +502,28 @@ class MoeAtomicWeight(AtomicWeight):
             return {self.name: out}
         else:
             # stack_: simple stack → [512, *expert_shape]
+            assert (
+                num_ckpt_weights == 1
+            ), f"stack_ fast path expects 1 ckpt_weight, got {num_ckpt_weights}"
             out = torch.empty(
                 [num_experts] + list(expert_shape),
                 dtype=convert_type,
                 device=gpu_device,
             )
-            for cw_idx, ckpt_weight in enumerate(ckpt_weights):
-                for local_idx, expert_id in enumerate(selected_experts):
-                    name = ckpt_weight.name.format(
-                        i=str(layer_id),
-                        i_1=str(layer_id + 1),
-                        expert_id=str(expert_id),
+            ckpt_weight = ckpt_weights[0]
+            for local_idx, expert_id in enumerate(selected_experts):
+                name = ckpt_weight.name.format(
+                    i=str(layer_id),
+                    i_1=str(layer_id + 1),
+                    expert_id=str(expert_id),
+                )
+                if name == first_name:
+                    t = first_tensor
+                else:
+                    t = ckpt_weight.merge_fun(
+                        tensor_source.load_tensor(name, convert_type)
                     )
-                    if name == first_name:
-                        t = first_tensor
-                    else:
-                        t = ckpt_weight.merge_fun(
-                            tensor_source.load_tensor(name, convert_type)
-                        )
-                    out[local_idx].copy_(t)
+                out[local_idx].copy_(t)
 
         return {self.name: out}
 

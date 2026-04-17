@@ -70,7 +70,10 @@ class DatabaseTensorSource(TensorSource):
         return self._database.load_tensor(name, data_type)
 
     def load_tensor_thread_safe(self, name, data_type=torch.float16):
-        return self._database.load_tensor_thread_safe(name, data_type)
+        fn = getattr(self._database, "load_tensor_thread_safe", None)
+        if callable(fn):
+            return fn(name, data_type)
+        return self._database.load_tensor(name, data_type)
 
     def has_tensor(self, name: str) -> bool:
         return self._database.has_tensor(name)
