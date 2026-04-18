@@ -925,7 +925,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
         // Since other tp ranks don't have streams, its combo_tokens' first token is not correct.
         // Thus, we need to broadcast the combo_tokens to other tp ranks.
-        execBroadcast({{model_input.combo_tokens}, 0});
+        if (parallelism_config_.tp_size > 1) {
+            execBroadcast({{model_input.combo_tokens}, 0});
+        }
 
         const auto& cache_cfg             = cache_manager_->cacheConfig();
         model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
