@@ -282,45 +282,42 @@ class AiterPrefillAttnOp:
         if kv_cache is None:
             return self._forward_varlen(qkv, fmha_params)
 
-        # Unified path: always use mha_batch_prefill from paged KV cache
-        k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
-        block_table = fmha_params.kv_cache_block_id_device
+        # Use flash_attn_varlen_func with K/V from C++ RoPE output.
+        # qkv is a tuple: (q_output, k_output, v_output) from FusedRopeKVCachePrefillOp.
+        # k_output/v_output shape: [batch_size, num_kv_heads, max_seqlen_k, head_dim]
+        k_padded = qkv[1]
+        v_padded = qkv[2]
+
         cu_seqlens_q = fmha_params.cu_seqlens_q.to(q_tensor.device)
+        cu_seqlens_k = fmha_params.cu_seqlens_k.to(q_tensor.device)
 
-        # prefix_lengths: default to zeros when no prefix (unified logic)
+        # Unpad K/V from [batch_size, num_kv_heads, max_seqlen_k, head_dim]
+        # to packed [total_kv_tokens, num_kv_heads, head_dim]
         batch_size = cu_seqlens_q.shape[0] - 1
-        if (
-            fmha_params.prefix_lengths is not None
-            and fmha_params.prefix_lengths.numel() > 0
-        ):
-            prefix_lengths_device = fmha_params.prefix_lengths.to(q_tensor.device)
-        else:
-            prefix_lengths_device = torch.zeros(
-                batch_size, dtype=torch.int32, device=q_tensor.device
+        kv_lengths = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).cpu()
+        key_packed_list = []
+        value_packed_list = []
+        for i in range(batch_size):
+            seq_len_i = kv_lengths[i].item()
+            key_packed_list.append(
+                k_padded[i, :, :seq_len_i, :].transpose(0, 1).contiguous()
             )
-
-        input_lengths = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        seqlen_k = (prefix_lengths_device + input_lengths).to(torch.int32)
-
-        softmax_scale = 1.0 / math.sqrt(self.head_dim)
-        kv_indptr = cu_seqlens_q
-        kv_page_indices = torch.empty(0, dtype=torch.int32, device=q_tensor.device)
-
-        res = aiter.mha_batch_prefill_func(
+            value_packed_list.append(
+                v_padded[i, :, :seq_len_i, :].transpose(0, 1).contiguous()
+            )
+        key_packed = torch.cat(key_packed_list, dim=0)
+        value_packed = torch.cat(value_packed_list, dim=0)
+        print("flash attn varlen func----------",flush=True)
+        res = aiter.flash_attn_varlen_func(
             q_tensor,
-            k_cache,
-            v_cache,
+            key_packed,
+            value_packed,
             cu_seqlens_q,
-            kv_indptr,
-            kv_page_indices,
+            cu_seqlens_k,
             fmha_params.max_seqlen_q,
             fmha_params.max_seqlen_k,
             dropout_p=0.0,
-            softmax_scale=softmax_scale,
             causal=self.is_causal,
-            window_size=(-1, 0),
-            block_table=block_table,
-            seqlen_k=seqlen_k,
         )
         return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
 

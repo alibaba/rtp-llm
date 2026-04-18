@@ -160,7 +160,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     // Non-FP8 path: paged layout only (Q packed-token, K/V in paged cache)
     bool store_qkv   = use_fmha_fp8 ? !use_paged_fmha : false;
     bool store_q     = true;
-    bool store_kv    = use_fmha_fp8 ? !use_paged_fmha : false;
+    bool store_kv    = true;  // Always store K/V for flash_attn_varlen_func
     bool store_cache = kv_cache.has_value();
 
     // int8
@@ -179,8 +179,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
             torchDTypeToDataType(qkv.dtype()),
             invokeAddFusedQKVBiasTransposePrefill,
             q_output.data_ptr(),
-            use_fmha_fp8 ? k_output.data_ptr() : nullptr,
-            use_fmha_fp8 ? v_output.data_ptr() : nullptr,
+            k_output.data_ptr(),
+            v_output.data_ptr(),
             &prefix_prompt_param,
             qkv.data_ptr(),
             paged_fp8 ? q_fp8_buf.data_ptr() :
@@ -244,12 +244,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     if (use_fmha_fp8) {
         return std::make_tuple(qkv_buf_fp8, torch::Tensor(), torch::Tensor());
     }
-    // Non-FP8 paged path: return packed-token Q only (K/V in paged cache)
-    if (use_paged_fmha) {
-        return std::make_tuple(q_output, torch::Tensor(), torch::Tensor());
-    }
-
-    return std::make_tuple(q_output, torch::Tensor(), torch::Tensor());
+    // Non-FP8 path: return Q, K, V for flash_attn_varlen_func
+    return std::make_tuple(q_output, k_output, v_output);
 }
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
