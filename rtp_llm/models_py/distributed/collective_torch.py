@@ -69,9 +69,7 @@ def init_distributed_environment(
         )
         # Still need to create groups if they don't exist
         if not _group_map:
-            _create_process_groups(
-                parallelism_config, backend, timedelta(seconds=timeout)
-            )
+            _create_process_groups(parallelism_config, backend, timedelta.max)
             _register_process_groups_to_cpp()
         if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
@@ -91,7 +89,7 @@ def init_distributed_environment(
     # we still need to create our process groups
     if torch.distributed.is_initialized():
         logging.info("torch.distributed already initialized, creating process groups")
-        _create_process_groups(parallelism_config, backend, timedelta(seconds=timeout))
+        _create_process_groups(parallelism_config, backend, timedelta.max)
         _parallelism_config = parallelism_config
         _initialized = True
         _register_process_groups_to_cpp()
@@ -104,10 +102,9 @@ def init_distributed_environment(
         f"local_rank: {local_rank}, backend: {backend}, timeout: {timeout}",
     )
 
-    if timeout is not None:
-        assert isinstance(timeout, (int)), "timeout must be a number"
-        assert timeout > 0, "timeout must be positive"
-        timeout = timedelta(seconds=timeout)  # pyright: ignore[reportAssignmentType]
+    # Always use infinite timeout for NCCL so that workers simply block
+    # until rank 0 has real work, instead of crashing with a timeout.
+    infinite_timeout = timedelta.max
 
     # DP_AND_TP (global group) - initialized via init_process_group
     torch.distributed.init_process_group(
@@ -116,7 +113,7 @@ def init_distributed_environment(
         world_size=world_size,
         rank=world_rank,
         # device_id=torch.device(f"cuda:{local_rank}"), # https://github.com/pytorch/pytorch/pull/149144
-        timeout=timeout,  # pyright: ignore[reportArgumentType]
+        timeout=infinite_timeout,
     )
     torch.distributed.barrier(group=torch.distributed.group.WORLD)
     _group_map[Group.DP_AND_TP] = torch.distributed.group.WORLD
@@ -125,7 +122,7 @@ def init_distributed_environment(
     )
 
     # Create DP and TP groups
-    _create_process_groups(parallelism_config, backend, timeout)
+    _create_process_groups(parallelism_config, backend, timedelta.max)
     _parallelism_config = parallelism_config
     _initialized = True
     _register_process_groups_to_cpp()
@@ -166,7 +163,7 @@ def _create_process_groups(
                 dp_group = torch.distributed.new_group(
                     ranks=dp_ranks,
                     backend=backend,
-                    timeout=timeout,  # pyright: ignore[reportArgumentType]
+                    timeout=timedelta.max,
                 )
                 # Only store the group if this rank is part of it
                 if world_rank in dp_ranks:
@@ -191,7 +188,7 @@ def _create_process_groups(
                 tp_group = torch.distributed.new_group(
                     ranks=tp_ranks,
                     backend=backend,
-                    timeout=timeout,  # pyright: ignore[reportArgumentType]
+                    timeout=timedelta.max,
                 )
                 # Only store the group if this rank is part of it
                 if world_rank in tp_ranks:
