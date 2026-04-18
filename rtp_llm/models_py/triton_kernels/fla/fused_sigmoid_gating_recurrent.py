@@ -22,9 +22,11 @@ def _get_autotune_configs():
             triton.Config({"BV": 8}, num_stages=3, num_warps=1),
         ]
     else:
-        # ROCm/HIP: larger BV and different launch params for better occupancy
+        # ROCm/HIP: num_warps must be 1 to avoid incorrect results when
+        # batch_size >= 3. num_warps=4 triggers a ROCm Triton compiler bug
+        # that causes cross-batch state corruption in the recurrent loop.
         return [
-            triton.Config({"BV": 64}, num_stages=1, num_warps=4),
+            triton.Config({"BV": 64}, num_stages=1, num_warps=1),
         ]
 
 
