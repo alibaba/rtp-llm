@@ -41,6 +41,7 @@ py_library(
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         "@//:using_cuda12": flashinfer + deep,
+        "//internal_source/RTP_LLM-PPU:use_ppu": deep,
         "@//:using_rocm": [
             "//rtp_llm/models_py/modules/base/rocm:rocm_base",
             "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",

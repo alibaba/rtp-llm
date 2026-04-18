@@ -53,8 +53,8 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
     // Reserve at least 5% of total GPU memory for runtime (forward pass intermediates, cublas workspace, etc.)
     // with a minimum floor of 2048 MiB. This is needed because KV cache is pre-allocated as a fixed block,
     // and the remaining GPU memory must be sufficient for model forward passes.
-    size_t total_gpu_bytes = 0;
-    size_t free_gpu_bytes  = 0;
+    size_t                  total_gpu_bytes = 0;
+    [[maybe_unused]] size_t free_gpu_bytes  = 0;
 #if USING_CUDA
     check_cuda_value(cudaMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
 #elif USING_ROCM

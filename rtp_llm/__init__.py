@@ -1,7 +1,10 @@
 import time
 
 st = time.time()
-import triton
+try:
+    import triton
+except ImportError:
+    pass
 
 # load th_transformer.so
 # Import internal models to register them
