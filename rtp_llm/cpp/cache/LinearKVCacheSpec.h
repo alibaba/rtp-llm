@@ -62,9 +62,11 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     }
 
     size_t ssm_state_size() const {
-        // Python: ssm_state_size = local_num_v_heads * head_k_dim * head_v_dim
+        // SSM state is stored in fp32 for numerical stability (mamba_ssm_dtype=float32),
+        // but kv_cache uses bf16/fp16. Each fp32 element occupies 2 bf16 elements,
+        // so we double the element count to reserve enough space.
         return static_cast<size_t>(local_num_v_heads) * static_cast<size_t>(head_k_dim)
-               * static_cast<size_t>(head_v_dim);
+               * static_cast<size_t>(head_v_dim) * 2;
     }
 
     size_t qkv_size() const {

@@ -96,8 +96,11 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         self.linear_conv_kernel_dim: int = (
             self.linear_attn_config.linear_conv_kernel_dim
         )
+        # SSM state is stored in fp32 for numerical stability (mamba_ssm_dtype=float32).
+        # Since kv_cache uses bf16, each fp32 element occupies 2 bf16 slots,
+        # so ssm_state_size (in bf16 element count) is doubled.
         self.ssm_state_size: int = (
-            self.local_num_v_heads * self.head_k_dim * self.head_v_dim
+            self.local_num_v_heads * self.head_k_dim * self.head_v_dim * 2
         )
         self.qkv_size: int = (
             self.head_k_dim * self.local_num_k_heads * 2
@@ -134,26 +137,28 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         return conv_states
 
     def _get_ssm_states(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
-        # maybe should support smsm cahe with difference dtype(fp32/bf16/fp16)
+        # SSM state is stored as fp32 in the kv_cache (which is bf16/fp16).
+        # The ssm_state_size is already doubled to account for fp32 storage.
+        # We view the raw bf16 bytes as fp32 to get the correct values.
         _, block_size = kv_cache_tensor.view(kv_cache_tensor.shape[0], -1).shape
         assert (
             block_size >= self.ssm_state_size + self.conv_state_size
         ), "block_size is too small, please check seq_size_per_block"
-        ssm_states = torch.as_strided(
+        # First get the raw bf16 region (2x elements for fp32 storage)
+        ssm_region_bf16 = torch.as_strided(
             kv_cache_tensor,
-            (
-                kv_cache_tensor.shape[0],
-                self.local_num_v_heads,
-                self.head_v_dim,
-                self.head_k_dim,
-            ),
-            (
-                kv_cache_tensor.stride()[0],
-                self.head_k_dim * self.head_v_dim,
-                self.head_k_dim,
-                1,
-            ),
+            (kv_cache_tensor.shape[0], self.ssm_state_size),
+            (kv_cache_tensor.stride()[0], 1),
             storage_offset=kv_cache_tensor.storage_offset(),
+        )
+        # View as fp32: each 2 bf16 elements -> 1 fp32 element
+        ssm_region_fp32 = ssm_region_bf16.view(torch.float32)
+        # Reshape to [num_blocks, local_num_v_heads, head_v_dim, head_k_dim]
+        ssm_states = ssm_region_fp32.view(
+            kv_cache_tensor.shape[0],
+            self.local_num_v_heads,
+            self.head_v_dim,
+            self.head_k_dim,
         )
         return ssm_states
 
@@ -223,7 +228,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 self.head_v_dim,
                 self.head_k_dim,
                 device=mixed_qkv.device,
-                dtype=mixed_qkv.dtype,
+                dtype=torch.float32,
             )
 
             load_initial_state_from_block_map(
@@ -259,7 +264,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         if ssm_states is not None:
             store_ssm_state_to_block_map(
                 h,
-                final_state.to(h.dtype),
+                final_state,
                 attn_inputs.prefix_lengths_d,
                 cu_seqlens_without_padding,
                 attn_inputs.kv_cache_kernel_block_id_device,

@@ -307,7 +307,6 @@ class AiterPrefillAttnOp:
             )
         key_packed = torch.cat(key_packed_list, dim=0)
         value_packed = torch.cat(value_packed_list, dim=0)
-        print("flash attn varlen func----------",flush=True)
         res = aiter.flash_attn_varlen_func(
             q_tensor,
             key_packed,
