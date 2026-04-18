@@ -9,6 +9,7 @@ cc_library(
     ]),
     hdrs = glob([
         "*.h",
+        "**/*.hpp",
     ]),
     deps = [
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
@@ -39,6 +40,7 @@ cc_library(
     hdrs = glob([
         "*.h",
         "**/*.h",
+        "**/*.hpp",
         "**/*.cuh",
     ]),
     deps = select({

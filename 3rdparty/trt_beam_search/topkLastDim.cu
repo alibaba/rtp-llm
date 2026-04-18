@@ -1501,7 +1501,7 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
         if (grid_dim <= 4)
         {
             standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,
-                static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, stream, sorted);
+                static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, mask_val, stream, sorted);
             return;
         }
 #endif
@@ -1523,10 +1523,47 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
 
 ///////////////
 
+#if USING_ROCM
+#include "efficient_topk/warp_topk.hpp"
+
+template <typename T>
+size_t rocm_efficient_topk_workspace_size(int batch_size, SizeType32 len, SizeType32 k, bool is_largest) {
+    size_t buf_size = 0;
+    if (is_largest) {
+        HipKernels::WarpSortTopk<true, T, SizeType32>(
+            nullptr, buf_size, static_cast<T const*>(nullptr),
+            batch_size, len, k, static_cast<T*>(nullptr), static_cast<SizeType32*>(nullptr), 0);
+    } else {
+        HipKernels::WarpSortTopk<false, T, SizeType32>(
+            nullptr, buf_size, static_cast<T const*>(nullptr),
+            batch_size, len, k, static_cast<T*>(nullptr), static_cast<SizeType32*>(nullptr), 0);
+    }
+    return buf_size;
+}
+
+template <typename T>
+void rocm_efficient_topk(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest,
+    T const* in, T* out_val, SizeType32* out_idx, void* workspace, hipStream_t stream) {
+    size_t buf_size = 0;
+    if (is_largest) {
+        HipKernels::WarpSortTopk<true, T, SizeType32>(
+            workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, stream);
+    } else {
+        HipKernels::WarpSortTopk<false, T, SizeType32>(
+            workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, stream);
+    }
+}
+#endif // USING_ROCM
+
 template <typename T>
 size_t invokeComputeTopkLastDimWorkspaceSize(
     SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest)
 {
+#if USING_ROCM
+    if (k <= 512) {
+        return rocm_efficient_topk_workspace_size<T>(batchSize, inputLength, k, is_largest);
+    }
+#endif
     size_t buf_size = 0;
     void* workspace = nullptr;
     T const* in = nullptr;
@@ -1558,10 +1595,16 @@ void invokeTopkLastDim(SizeType32 batchSize, SizeType32 inputLength, SizeType32 
     void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx, void* workspace,
     cudaStream_t stream)
 {
-    size_t buf_size = 0; // will be overwritten by the kernel
     T const* in = reinterpret_cast<T const*>(input);
     T* out_val_ = reinterpret_cast<T*>(out_val);
     SizeType32* out_idx_ = reinterpret_cast<SizeType32*>(out_idx);
+#if USING_ROCM
+    if (k <= 512) {
+        rocm_efficient_topk<T>(batchSize, inputLength, k, is_largest, in, out_val_, out_idx_, workspace, stream);
+        return;
+    }
+#endif
+    size_t buf_size = 0;
     standalone_stable_radix_11bits<T, SizeType32, true>(
         workspace, buf_size, in, batchSize, inputLength, k, out_val_, out_idx_, is_largest, stream);
 }
