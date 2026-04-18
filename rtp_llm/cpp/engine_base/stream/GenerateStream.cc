@@ -467,6 +467,11 @@ void GenerateStream::checkTimeout() {
 }
 
 void GenerateStream::setStopWithoutLock(ErrorCode error_code, const std::string& error_msg) {
+    if (generate_status_->status == StreamState::STOPPED) {
+        RTP_LLM_LOG_DEBUG("stream [%ld] already stopped, discarding error: [%s]", streamId(), error_msg.c_str());
+        cv_->notify_one();
+        return;
+    }
     auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     RTP_LLM_LOG_WARNING("stop stream [%ld], error msg: [%s], current state [%s], "
                         "input len [%d], seq len [%d], timeout [%ld] ms, running [%ld] ms",

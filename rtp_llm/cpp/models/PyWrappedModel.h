@@ -21,12 +21,14 @@
 #include "rtp_llm/cpp/core/DeviceData.h"
 #include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/core/CacheStoreAsyncWriter.h"
+#include "rtp_llm/cpp/models/KvCacheAddrUtils.h"
+#include "rtp_llm/cpp/models/NanCheckRunner.h"
 
 namespace py = pybind11;
 
 namespace rtp_llm {
 
-class KVCacheManager;  // Forward declaration
+class KVCacheManager;
 
 class PyWrappedModel: public ModelBase {
 public:
@@ -80,6 +82,10 @@ private:
     const GptModelDescription                description_;
     std::optional<rtp_llm::CacheLayerLayout> kv_cache_layer_layout_;
     std::shared_ptr<KVCacheManager>          cache_manager_;  // For cache_store access
+    torch::Tensor                            layer_base_addr_buffer_;
+    torch::Tensor                            nan_flag_buffer_;
+    int64_t                                  max_batch_size_ = 0;
+    std::unique_ptr<KvCacheNanCheckRunner>   nan_check_runner_;
     torch::Tensor                            residual_scale_fp32_;
     torch::Tensor                            residual_scale_;
     ModelBufferHolder                        buffer_holder_;
@@ -115,6 +121,22 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     weights_               = params.weights;
     model_id_              = params.model_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
+    max_batch_size_ = device_init_params_.concurrency_config.concurrency_limit;
+    if (max_batch_size_ > 0) {
+        nan_flag_buffer_ = torch::zeros({max_batch_size_},
+                                        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    }
+    if (kv_cache_layer_layout_) {
+        auto& layers_to_kv = kv_cache_layer_layout_.value().layers_to_kv_buffer_ptrs;
+        if (!layers_to_kv.empty() && layers_to_kv[0].defined()) {
+            auto cache_dtype        = torchDTypeToDataType(layers_to_kv[0].dtype());
+            auto cache_element_size = layers_to_kv[0].element_size();
+            layer_base_addr_buffer_ = buildLayerAddrBuffer(layers_to_kv);
+            nan_check_runner_ = KvCacheNanCheckRunner::create(
+                description_.attention_conf, cache_dtype, cache_element_size,
+                layer_num_, layer_base_addr_buffer_, max_batch_size_);
+        }
+    }
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         auto residual_tensor = torch::tensor({(float)description_.residual_scalar}, torch::kFloat32).cuda();
 #if USING_CUDA

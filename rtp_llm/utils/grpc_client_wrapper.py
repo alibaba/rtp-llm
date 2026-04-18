@@ -168,6 +168,23 @@ class GrpcClientWrapper:
             logging.error(f"Start profile failed: {e}")
             return {"error": f"Failed to start profile: {str(e)}"}
 
+    async def set_nan_check(self, req: Any) -> Dict[str, Any]:
+        """Toggle KV cache NaN check in backend process"""
+        try:
+            await self._ensure_connection()
+            if isinstance(req, str):
+                req = json.loads(req)
+            if req is None:
+                req = {}
+            request = pb2.SetNanCheckRequestPB(
+                enabled=bool(req.get("enabled", False)),
+            )
+            await self.stub.SetNanCheck(request, timeout=3)
+            return {"status": "ok", "enabled": request.enabled}
+        except Exception as e:
+            logging.error(f"Set nan check failed: {e}")
+            return {"error": f"Failed to set nan check: {str(e)}"}
+
     async def update_eplb_config(self, req: Any) -> Dict[str, Any]:
         """Update EPLB config - this would need to be implemented based on your requirements"""
         try:
@@ -231,6 +248,8 @@ class GrpcClientWrapper:
                 return await self.set_log_level(req)
             elif uri == "start_profile":
                 return await self.start_profile(req)
+            elif uri == "set_nan_check":
+                return await self.set_nan_check(req)
             elif uri == "update_eplb_config":
                 return await self.update_eplb_config(req)
             elif uri == "update_scheduler_info":

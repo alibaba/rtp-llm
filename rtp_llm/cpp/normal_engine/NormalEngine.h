@@ -47,6 +47,8 @@ public:
     bool updateEplbConfig(const EPLBConfig& config) override;
     void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
     bool isTimelineProfilingEnabled() const override;
+    void setNanCheckEnabled(bool enabled) override;
+    bool isNanCheckEnabled() const override;
 
 private:
     void                            initScheduler();
@@ -85,6 +87,7 @@ private:
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
     int                                           reserve_step_ = 0;
+    bool                                          nan_check_enabled_ = false;
 };
 
 }  // namespace rtp_llm

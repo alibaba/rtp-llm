@@ -82,6 +82,8 @@ public:
         return false;
     }
 
+    virtual void setNanCheckEnabled(bool enabled) {}
+
 public:
 };
 

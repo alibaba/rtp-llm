@@ -90,6 +90,10 @@ public:
     virtual bool isTimelineProfilingEnabled() const {
         return false;
     }
+    virtual void setNanCheckEnabled(bool enabled) {}
+    virtual bool isNanCheckEnabled() const {
+        return false;
+    }
 
     std::shared_ptr<KVCacheManager> getCacheManager() const;
 

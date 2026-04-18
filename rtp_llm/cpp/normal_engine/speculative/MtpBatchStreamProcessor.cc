@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include <numeric>
 #include <cstring>
 
@@ -12,6 +14,16 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream
                                                       const MergedOutput& prefill_output,
                                                       const MergedOutput& propose_output) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+
+    const auto& model_output = prefill_output.model_output;
+    if (model_output.nan_flag.defined()) {
+        checkNanFlagAndSetFailed(stream_groups, model_output.nan_flag);
+    }
+
+    const auto& draft_model_output = propose_output.model_output;
+    if (draft_model_output.nan_flag.defined()) {
+        checkNanFlagAndSetFailed(stream_groups, draft_model_output.nan_flag);
+    }
 
     const size_t                      total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     auto                              new_tokens_all = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
@@ -31,12 +43,24 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream
 
 absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
                                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                                     const MergedOutput&                          target_model_output,
                                                      const MergedOutput& draft_prefill_output) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+
+    // Check for NaN in target model output (target model output will be accepted, so check immediately)
+    const auto& model_output = target_model_output.model_output;
+    if (model_output.nan_flag.defined()) {
+        checkNanFlagAndSetFailed(stream_groups, model_output.nan_flag);
+    }
 
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
 
     prepareDecodeSpecUpdateInfo(stream_groups, spec_decode_output, draft_prefill_output, spec_update_infos);
+
+    const auto& draft_model_output = draft_prefill_output.model_output;
+    if (draft_model_output.nan_flag.defined()) {
+        checkDraftModelNanFlagWithAcceptance(stream_groups, draft_model_output, spec_decode_output);
+    }
 
     // to avoid cuda sync, we need to set propose token in extra loop
     updateProposeTokens(stream_groups, draft_prefill_output, spec_update_infos);
@@ -506,6 +530,43 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
     }
 
     model_input.last_hidden_states = all_hidden_states;
+}
+
+void MtpBatchStreamProcessor::checkDraftModelNanFlagWithAcceptance(
+    const StreamGroups&                          stream_groups,
+    const GptModelOutputs&                       draft_model_output,
+    const speculative::SpeculativeSamplerOutput& spec_decode_output) const {
+    if (!draft_model_output.nan_flag.defined()) {
+        return;
+    }
+
+    auto         nan_flag_cpu  = draft_model_output.nan_flag.cpu().contiguous();
+    const float* nan_flag_data = nan_flag_cpu.data_ptr<float>();
+    int64_t      flag_size     = nan_flag_cpu.size(0);
+
+    const auto& accept_lens = spec_decode_output.accept_len;
+    RTP_LLM_CHECK_WITH_INFO(accept_lens.size() == stream_groups.size(),
+                            "accept_lens size mismatch: got=%zu, expected=%zu",
+                            accept_lens.size(),
+                            stream_groups.size());
+
+    int batch_idx = 0;
+    for (auto& stream : stream_groups.allStreams()) {
+        bool batch_has_nan = false;
+        if (batch_idx < flag_size && nan_flag_data[batch_idx] > 0) {
+            batch_has_nan = true;
+        }
+
+        if (batch_has_nan && accept_lens[batch_idx] > 1) {
+            std::ostringstream error_msg;
+            error_msg << "NaN detected in draft model forward pass"
+                      << " for stream [" << stream->streamId() << "] at batch index " << batch_idx << " (accepted "
+                      << (accept_lens[batch_idx] - 1) << " draft tokens)";
+            RTP_LLM_LOG_ERROR("%s", error_msg.str().c_str());
+            stream->setStop(ErrorCode::NAN_DETECTED, error_msg.str());
+        }
+        batch_idx += 1;
+    }
 }
 
 }  // namespace rtp_llm

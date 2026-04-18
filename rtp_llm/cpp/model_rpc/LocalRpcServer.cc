@@ -434,6 +434,14 @@ grpc::Status LocalRpcServer::StartProfileInternal(grpc::ServerContext*          
 }
 
 grpc::Status
+LocalRpcServer::SetNanCheck(grpc::ServerContext* context, const SetNanCheckRequestPB* request, EmptyPB* response) {
+    (void)context;
+    engine_->setNanCheckEnabled(request->enabled());
+    RTP_LLM_LOG_INFO("set_nan_check enabled=%d", request->enabled());
+    return grpc::Status::OK;
+}
+
+grpc::Status
 LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
     response->set_health("OK");

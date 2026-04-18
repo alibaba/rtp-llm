@@ -58,6 +58,8 @@ public:
 
     grpc::Status StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response);
 
+    grpc::Status SetNanCheck(grpc::ServerContext* context, const SetNanCheckRequestPB* request, EmptyPB* response);
+
     grpc::Status
     StartProfileInternal(grpc::ServerContext* context, const StartProfileInternalRequestPB* request, EmptyPB* response);
 

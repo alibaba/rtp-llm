@@ -297,6 +297,13 @@ class FrontendApp(object):
             result = await self.grpc_client.post_request("start_profile", req)
             return result
 
+        # request format: {"enabled": true} or {"enabled": false}
+        @app.post("/rtp_llm/set_nan_check")
+        @app.post("/set_nan_check")
+        async def set_nan_check(req: Union[str, Dict[Any, Any]] = Body(default={})):
+            result = await self.grpc_client.post_request("set_nan_check", req)
+            return result
+
         # request format: {"mode": "NONE", "update_time": 5000}
         @app.post("/update_eplb_config")
         async def update_eplb_config(req: Union[str, Dict[Any, Any]]):

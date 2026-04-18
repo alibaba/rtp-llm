@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/core/DeviceData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
+#include "rtp_llm/cpp/models/BlockZeroRunner.h"
 
 namespace rtp_llm {
 
@@ -45,6 +46,9 @@ public:
     static ModelFactory test_model_factory;
 
     bool updateEplbConfig(const EPLBConfig& config) override;
+    void setNanCheckEnabled(bool enabled) override {
+        if (model_) model_->setNanCheckEnabled(enabled);
+    }
 
 private:
     std::unique_ptr<ModelBase>                                               model_;
@@ -63,6 +67,8 @@ private:
     int               propose_model_index_ = 0;
     int               tp_rank_             = 0;
     ParallelismConfig parallelism_config_;
+
+    std::unique_ptr<BlockZeroRunner> block_zero_runner_;
 };
 
 }  // namespace rtp_llm

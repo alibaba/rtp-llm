@@ -98,6 +98,17 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
+
+    if (cache_manager && BlockZeroRunner::needsBlockZero(cache_config.group_types)) {
+        auto layout = is_propose_ ? cache_manager->getMTPModuleCacheLayerLayout(propose_model_index_)
+                                  : cache_manager->getMainModelCacheLayerLayout();
+        block_zero_runner_ = BlockZeroRunner::create(
+            layout.layers_to_kv_buffer_ptrs,
+            cache_config.kv_block_stride_bytes,
+            cache_config.seq_size_per_block);
+        RTP_LLM_LOG_INFO("BlockZeroRunner enabled: mixed attention groups detected");
+    }
+
     LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
     cudaProfilerBegin();
 }
@@ -121,12 +132,18 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.skip_run           = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.nan_check_enabled = model_->isNanCheckEnabled();
         tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
             return absl::OkStatus();
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
+    if (block_zero_runner_) {
+        RTP_LLM_PROFILE_SCOPE("executor.zero_incomplete_blocks");
+        block_zero_runner_->run(model_input);
     }
 
     // make sure last model input is released before forward
