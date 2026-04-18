@@ -35,6 +35,8 @@ private:
 
     torch::Tensor layer_base_addr_buffer_;
     torch::Tensor token_counts_buffer_;
+    torch::Tensor layer_to_group_d_;
+    bool          layer_to_group_cached_ = false;
     size_t        kv_block_stride_bytes_;
     size_t        seq_size_per_block_;
     size_t        layer_num_;

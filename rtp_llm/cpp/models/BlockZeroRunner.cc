@@ -91,11 +91,13 @@ void BlockZeroRunner::run(const GptModelInputs& inputs) {
         token_counts = counts_host.cuda();
     }
 
+    if (!layer_to_group_cached_ && inputs.kv_cache_layer_to_group.defined()
+        && inputs.kv_cache_layer_to_group.size(0) >= static_cast<int64_t>(layer_num_)) {
+        layer_to_group_d_      = inputs.kv_cache_layer_to_group.cuda();
+        layer_to_group_cached_ = true;
+    }
     auto layer_to_group_opt =
-        (inputs.kv_cache_layer_to_group.defined()
-         && inputs.kv_cache_layer_to_group.size(0) >= static_cast<int64_t>(layer_num_))
-            ? std::optional<torch::Tensor>(inputs.kv_cache_layer_to_group.cuda())
-            : std::nullopt;
+        layer_to_group_d_.defined() ? std::optional<torch::Tensor>(layer_to_group_d_) : std::nullopt;
 
     zero_incomplete_kv_cache_blocks(layer_base_addr_buffer_,
                              inputs.kv_cache_block_id,

@@ -2,7 +2,6 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
-#include "rtp_llm/cpp/models/NanCheckRunner.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/core/OpData.h"
@@ -212,7 +211,7 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
     torch::Tensor nan_flag;
     RTP_LLM_CHECK_WITH_INFO(!(inputs.nan_check_enabled && enable_cuda_graph_),
                             "nan_check_enabled must be false when CUDA Graphs are active");
-    if (inputs.nan_check_enabled && inputs.kv_cache_block_id.defined() && layer_base_addr_buffer_.defined()) {
+    if (inputs.nan_check_enabled && nan_check_runner_) {
         int64_t batch_size = inputs.input_lengths.size(0);
         if (nan_flag_buffer_.defined() && nan_flag_buffer_.size(0) >= batch_size) {
             nan_flag_buffer_.slice(0, 0, batch_size).zero_();
@@ -221,17 +220,7 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
             nan_flag = torch::zeros({batch_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
         }
 
-        bool did_run_nan_check = KvCacheNanCheckRunner::run(description_.attention_conf,
-                                                            cache_dtype_,
-                                                            cache_element_size_,
-                                                            layer_num_,
-                                                            layer_base_addr_buffer_,
-                                                            inputs,
-                                                            nan_flag);
-        // After AllReduce(Sum) across TP ranks, nan_flag values may exceed 1.0f
-        // when multiple ranks detect NaN simultaneously.  Downstream consumers
-        // use "> 0" checks, so the exact magnitude does not matter — any non-zero
-        // value correctly indicates that at least one rank observed NaN/Inf.
+        bool did_run_nan_check = nan_check_runner_->run(inputs, nan_flag);
         if (did_run_nan_check && device_props_.tp_size > 1) {
             nan_flag = execAllReduce({nan_flag, ReduceOp::Sum, false, ParallelMode::TP}).buffer;
         }
