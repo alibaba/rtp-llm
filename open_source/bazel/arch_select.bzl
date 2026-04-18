@@ -25,7 +25,7 @@ def copy_all_so():
     copy_so("@flashinfer_cpp//:flashinfer_batch_paged_prefill_256")
     copy_so("@flashinfer_cpp//:flashinfer_batch_paged_decode_256")
     copy_so("@flashinfer_cpp//:flashinfer_batch_ragged_prefill_256")
-    # num of so
+    # flashinfer SM90 kernel (hopper-specific fused attention)
     copy_so("@flashinfer_cpp//:flashinfer_sm90")
     copy_so("@deep_ep//:deep_ep_cu")
 

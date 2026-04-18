@@ -183,13 +183,21 @@ def _rocm_include_path(repository_ctx, rocm_config):
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/hip/include")
 
     # Add HIP-Clang headers
+    # Include both the realpath-resolved path and the default /opt/rocm symlink path
+    # to handle symlink mismatch: hipcc may output paths using the versioned directory
+    # (e.g. /opt/rocm-7.2.0/...) in .d files while cxx_builtin_include_directory
+    # only has the symlink path, or vice versa
     print("rocm_config.rocm_toolkit_path: ", rocm_config.rocm_toolkit_path)
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/17/include")
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/lib/llvm/lib/clang/18/include")
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/lib/llvm/lib/clang/19/include")
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/lib/llvm/lib/clang/20/include")
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/lib/llvm/lib/clang/21/include")
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/lib/llvm/lib/clang/22/include")
+    clang_include_prefixes = [rocm_config.rocm_toolkit_path]
+    if rocm_config.rocm_toolkit_path != _DEFAULT_ROCM_TOOLKIT_PATH:
+        clang_include_prefixes.append(_DEFAULT_ROCM_TOOLKIT_PATH)
+    for prefix in clang_include_prefixes:
+        inc_dirs.append(prefix + "/llvm/lib/clang/17/include")
+        inc_dirs.append(prefix + "/lib/llvm/lib/clang/18/include")
+        inc_dirs.append(prefix + "/lib/llvm/lib/clang/19/include")
+        inc_dirs.append(prefix + "/lib/llvm/lib/clang/20/include")
+        inc_dirs.append(prefix + "/lib/llvm/lib/clang/21/include")
+        inc_dirs.append(prefix + "/lib/llvm/lib/clang/22/include")
 
     # Add rocrand and hiprand headers
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/rocrand/include")
