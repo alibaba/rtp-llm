@@ -48,6 +48,7 @@ if device_type == DeviceType.ROCm:
         RocmEpNormalStrategy,
         RocmFp8PerChannelPureTPStrategy,
     )
+
     registry = StrategyRegistry()
     registry.register(RocmEpLowLatencyStrategy())
     registry.register(RocmEpNormalStrategy())
@@ -71,6 +72,9 @@ else:
         CudaNoQuantCppStrategy,
         CudaNoQuantDpNormalStrategy,
         CudaNoQuantEpLowLatencyStrategy,
+        CudaTritonFp8PerBlockStrategy,
+        CudaTritonFp8PerTensorStrategy,
+        CudaTritonNoQuantStrategy,
         CudaW4a8Int4PerChannelEpLowLatencyStrategy,
         CudaW4a8Int4PerChannelEpNormalStrategy,
         CudaW4a8Int4PerChannelNoDPStrategy,
@@ -87,6 +91,10 @@ else:
     registry.register(CudaNoQuantEpLowLatencyStrategy())
     registry.register(CudaNoQuantDpNormalStrategy())
     registry.register(CudaNoQuantCppStrategy())
+    # sglang TritonRunnerCore port (no DeepEP). Gated by explicit moe_strategy.
+    registry.register(CudaTritonNoQuantStrategy())
+    registry.register(CudaTritonFp8PerTensorStrategy())
+    registry.register(CudaTritonFp8PerBlockStrategy())
     registry.register(BatchedTritonStrategy())
     registry.register(CudaW4a8Int4PerChannelEpLowLatencyStrategy())
     registry.register(CudaW4a8Int4PerChannelEpNormalStrategy())

@@ -1,5 +1,6 @@
 import copy
 import functools
+import os
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -776,7 +777,10 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            if is_deep_gemm_e8m0_used():
+            if (
+                is_deep_gemm_e8m0_used()
+                and os.environ.get("RTP_LLM_DISABLE_UE8M0_REQUANT", "0") != "1"
+            ):
                 kernel_weight, scale_weight = requant_weight_ue8m0(
                     kernel_weight, scale_weight
                 )

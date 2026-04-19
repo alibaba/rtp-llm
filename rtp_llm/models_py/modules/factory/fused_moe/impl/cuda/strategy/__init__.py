@@ -1,5 +1,10 @@
 """CUDA MOE strategies"""
 
+from .fp4 import (
+    CudaFp4EpLowLatencyStrategy,
+    CudaFp4EpNormalStrategy,
+    CudaFp4NoDPStrategy,
+)
 from .fp8_per_block import (
     CudaFp8PerBlockEpLowLatencyStrategy,
     CudaFp8PerBlockEpNormalStrategy,
@@ -11,26 +16,31 @@ from .fp8_per_tensor import (
     CudaFp8PerTensorEpNormalStrategy,
     CudaFp8PerTensorNoDPStrategy,
 )
-from .w4a8_int4_per_channel import (
-    CudaW4a8Int4PerChannelEpLowLatencyStrategy,
-    CudaW4a8Int4PerChannelEpNormalStrategy,
-    CudaW4a8Int4PerChannelNoDPStrategy,
-)
 from .no_quant import (
     CudaNoQuantCppStrategy,
     CudaNoQuantDpNormalStrategy,
     CudaNoQuantEpLowLatencyStrategy,
 )
-from .fp4 import (CudaFp4EpLowLatencyStrategy,
-                  CudaFp4EpNormalStrategy,
-                  CudaFp4NoDPStrategy)
-
+from .triton import (
+    CudaTritonFp8PerBlockStrategy,
+    CudaTritonFp8PerTensorStrategy,
+    CudaTritonNoQuantStrategy,
+)
+from .w4a8_int4_per_channel import (
+    CudaW4a8Int4PerChannelEpLowLatencyStrategy,
+    CudaW4a8Int4PerChannelEpNormalStrategy,
+    CudaW4a8Int4PerChannelNoDPStrategy,
+)
 
 __all__ = [
     # No quantization
     "CudaNoQuantEpLowLatencyStrategy",
     "CudaNoQuantCppStrategy",
     "CudaNoQuantDpNormalStrategy",
+    # Triton fused MoE (sglang TritonRunnerCore port)
+    "CudaTritonNoQuantStrategy",
+    "CudaTritonFp8PerTensorStrategy",
+    "CudaTritonFp8PerBlockStrategy",
     # FP8 PerBlock
     "CudaFp8PerBlockNoDPMaskedStrategy",
     "CudaFp8PerBlockNoDPStrategy",
@@ -46,5 +56,5 @@ __all__ = [
     "CudaW4a8Int4PerChannelNoDPStrategy",
     "CudaFp4EpLowLatencyStrategy",
     "CudaFp4EpNormalStrategy",
-    "CudaFp4NoDPStrategy"
+    "CudaFp4NoDPStrategy",
 ]

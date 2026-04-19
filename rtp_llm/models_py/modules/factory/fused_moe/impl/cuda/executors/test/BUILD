@@ -8,6 +8,19 @@ py_library(
 )
 
 py_test (
+    name = "triton_fused_moe_executor_test",
+    srcs = ["triton_fused_moe_executor_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["open_skip", "L20"],
+    exec_properties = {'gpu': 'L20', 'gpu_count': '1'},
+)
+
+py_test (
     name = "deepgemm_masked_executor_test",
     srcs = ["deepgemm_masked_executor_test.py"],
     deps = [
