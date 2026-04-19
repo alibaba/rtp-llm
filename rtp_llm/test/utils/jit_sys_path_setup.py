@@ -216,28 +216,7 @@ def setup_jit_cache(cache_dir=None, packages=None):
     if packages is None:
         packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
 
-    logging.info("=" * 80)
-    logging.info("[Package Setup] Starting JIT cache setup")
-    logging.info("=" * 80)
-
     runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
-    if runfiles_dir and os.path.exists(runfiles_dir):
-        logging.info(f"[Package Setup] RUNFILES_DIR: {runfiles_dir}")
-        logging.info("[Package Setup] Listing runfiles directory contents:")
-        try:
-            items = sorted(os.listdir(runfiles_dir))
-            for item in items:
-                item_path = os.path.join(runfiles_dir, item)
-                if os.path.isdir(item_path):
-                    logging.info(f"  [DIR]  {item}")
-                else:
-                    logging.info(f"  [FILE] {item}")
-            logging.info(f"[Package Setup] Total items in runfiles: {len(items)}")
-        except Exception as e:
-            logging.info(f"[Package Setup] Failed to list runfiles: {e}")
-    else:
-        logging.info("[Package Setup] RUNFILES_DIR not found or doesn't exist")
-    logging.info("=" * 80)
 
     # Copy packages to cache with file locking
     copied_paths = []
