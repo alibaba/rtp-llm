@@ -202,6 +202,18 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
             py_model_inputs_.attention_inputs.decode_cu_seqlens_d.slice(0, state.current_batch_size + 1, max_bs_ + 1)
                 .fill_(last_offset);
         }
+        // Normal decode CG: `_prepare_cg_decode_kernel` reads sequence_lengths_plus_1_d
+        // for the FULL captured batch size to fill `_cg.seq_lens`. The above copy only
+        // refreshes the first current_batch_size entries; padding rows retain whatever
+        // stale lengths the previous (larger) replay wrote, causing FlashInfer to read
+        // wrong KV ranges for those rows. Although padding rows aren't part of the
+        // current request, the captured graph still computes attention/cache writes for
+        // them, which can corrupt KV cache pages mapped via stale block_ids. Zero them
+        // out for safety.
+        if (state.current_batch_size < max_bs_) {
+            py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d.slice(0, state.current_batch_size, max_bs_)
+                .fill_(0);
+        }
         auto attn_pyobj = graph_instances_[state.current_real_graph_bs].mem_hold_.attn_pyobj_;
         // decode padding
         attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs_.attention_inputs);
@@ -242,6 +254,42 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
             .fill_(last_valid);
         py_model_inputs_.attention_inputs.cu_kv_seqlens.slice(0, state.current_batch_size + 1, max_bs_ + 1)
             .fill_(last_valid);
+    }
+
+    // Refresh device versions of prefix_lengths/input_lengths on the captured
+    // attention_inputs so that prepare_cuda_graph (called below, OUTSIDE the
+    // captured graph) reads the live request lengths instead of stale/undefined
+    // device pointers. These tensors are consumed by Triton kernels
+    // `_prepare_cg_spec_decode_kernel` (target verify) and
+    // `_prepare_cg_prefill_kernel` (draft prefill) to fill `_cg.seq_lens`,
+    // which is then read by the captured graph during replay. Without this
+    // refresh, both target_verify and draft_prefill CG paths consume stale
+    // device data and corrupt KV cache offsets, producing non-deterministic
+    // and garbled outputs under concurrency. The kernels iterate over the
+    // full captured batch size, so we copy live data into the pre-allocated
+    // captured device buffers (which already have padding rows zeroed at init).
+    const int valid_bs = state.current_batch_size;
+    if (inputs.attention_inputs.prefix_lengths_d.defined()
+        && py_model_inputs_.attention_inputs.prefix_lengths_d.defined()) {
+        // Clear padding rows first to ensure no stale data remains, then copy
+        // valid entries from the live device tensor. The Triton prepare kernels
+        // iterate over the full captured batch size, so padding rows must be
+        // valid (zero seq length) to avoid bogus KV cache offsets.
+        if (valid_bs < max_bs_) {
+            py_model_inputs_.attention_inputs.prefix_lengths_d.slice(0, valid_bs, max_bs_).fill_(0);
+        }
+        optimizedCopyAsync(inputs.attention_inputs.prefix_lengths_d,
+                           py_model_inputs_.attention_inputs.prefix_lengths_d,
+                           valid_bs * sizeof(int));
+    }
+    if (inputs.attention_inputs.input_lengths_d.defined()
+        && py_model_inputs_.attention_inputs.input_lengths_d.defined()) {
+        if (valid_bs < max_bs_) {
+            py_model_inputs_.attention_inputs.input_lengths_d.slice(0, valid_bs, max_bs_).fill_(0);
+        }
+        optimizedCopyAsync(inputs.attention_inputs.input_lengths_d,
+                           py_model_inputs_.attention_inputs.input_lengths_d,
+                           valid_bs * sizeof(int));
     }
 
     attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs_.attention_inputs);
@@ -490,8 +538,17 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.dtype                     = model_data_type_;
     inputs.attention_inputs.is_s_padded               = true;
     inputs.attention_inputs.sequence_lengths_plus_1_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
-    // inputs.attention_inputs.decode_cu_seqlens_d =
-    //     torch::arange(0, max_bs_ + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    // Pre-allocate stable device buffers for prefix_lengths_d / input_lengths_d.
+    // These are consumed (outside the captured graph) by Triton kernels
+    // `_prepare_cg_spec_decode_kernel` and `_prepare_cg_prefill_kernel` which
+    // iterate over the full captured batch size. `prepareInputs` will copy
+    // live request lengths into these buffers and zero padding rows before
+    // calling `prepare_cuda_graph`. Without these stable buffers, the kernels
+    // would dereference stale/undefined device pointers from capture time and
+    // produce wrong KV cache offsets, causing the well-known target_verify /
+    // draft_prefill CUDA graph corruption under concurrency.
+    inputs.attention_inputs.prefix_lengths_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+    inputs.attention_inputs.input_lengths_d  = torch::zeros({int(max_bs_)}, options_cuda_int32_);
     // decode_cu_seqlens_d: cumulative *query token* counts per batch (ragged qo_indptr).
     // For MTP target verify, each batch row has num_tokens_per_bs draft tokens, so use
     // [0, step, 2*step, ..., batch*step] instead of [0,1,...,batch] (single-token decode).
@@ -797,6 +854,16 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         capture_mem_hold_.py_model_inputs_.attention_inputs.decode_cu_seqlens_d.slice(0, 0, batch_size + 1);
     inputs.attention_inputs.sequence_lengths_plus_1_d =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d.slice(0, 0, batch_size);
+    // Propagate the stable captured device buffers for prefix_lengths_d /
+    // input_lengths_d to each per-instance py_model_inputs_. These are read by
+    // `prepare_cuda_graph` (called outside the captured graph in prepareInputs)
+    // to fill `_cg.seq_lens` for target_verify and draft_prefill paths.
+    if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths_d.defined()) {
+        inputs.attention_inputs.prefix_lengths_d = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths_d;
+    }
+    if (capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_d.defined()) {
+        inputs.attention_inputs.input_lengths_d = capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_d;
+    }
 
     const auto& cap_attn = capture_mem_hold_.py_model_inputs_.attention_inputs;
     inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.clear();
