@@ -165,16 +165,9 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
             gcd = GCD(kv_head_num, tp_size),
         and each rank gets kv_head_num / gcd KV heads.
     */
-    if (config.head_num % config.kv_head_num != 0) {
-        throw std::runtime_error("head_num must be divisible by kv_head_num for attention config");
-    }
-    if (config.kv_head_num % tp_size == 0) {
-        config.kv_head_num = config.kv_head_num / tp_size;
-    } else {
-        int64_t gcd = std::gcd(config.kv_head_num, tp_size);
-        config.kv_head_num = config.kv_head_num / gcd;
-    }
-    config.head_num = config.head_num / tp_size;
+
+    config.head_num    = config.head_num / tp_size;
+    config.kv_head_num = config.kv_head_num / tp_size;
 
     if (config.kernel_tokens_per_block == 0) {
         config.kernel_tokens_per_block = config.tokens_per_block;
