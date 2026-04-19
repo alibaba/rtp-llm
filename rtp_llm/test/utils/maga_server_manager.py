@@ -73,7 +73,6 @@ class MagaServerManager(object):
         result = wait_sever_done(self._server_process, int(self._port), timeout)
         if not result:
             self.print_process_log()
-            self._cleanup_core_files()
         return result
 
     @staticmethod
