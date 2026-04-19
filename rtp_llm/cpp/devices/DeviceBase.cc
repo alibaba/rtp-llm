@@ -153,6 +153,7 @@ void DeviceBase::setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store)
 
 void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
     if (params.cache_store_inputs.has_value() && params.kv_cache.has_value()) {
+    RTP_LLM_LOG_WARNING("writeCacheStore called: has_cache_store=%d, has_kv_cache=%d", params.cache_store_inputs.has_value(), params.kv_cache.has_value());
         writeCacheStore(params.cache_store_inputs.value(), params.kv_cache.value(), params.mla_kvcache);
     }
 }
@@ -161,6 +162,7 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
                                  const KvCacheInfo&      kv_cache,
                                  bool                    mla_kvcache) {
     auto& param = cache_store_inputs;
+    RTP_LLM_LOG_WARNING("writeCacheStore body: pd_separation=%d, context_batch_size=%ld, warmup=%d", param.pd_separation, param.context_batch_size, param.warmup);
     if (param.warmup) {
         RTP_LLM_LOG_DEBUG("is warmup, so ignore writeCacheStore");
         return;
@@ -179,14 +181,11 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
     const bool     is_hybrid            = group_num > 1;
 
     int gid = 0;
+    if (param.kv_cache_layer_to_group_host && param.layer_id >= 0
+        && static_cast<size_t>(param.layer_id) < param.kv_cache_layer_to_group_host->size()) {
+        gid = param.kv_cache_layer_to_group_host->data<int32_t>()[param.layer_id];
+    }
     if (param.host_kv_cache_offset->shape().size() == 3) {
-        gid = -1;
-        if (param.kv_cache_layer_to_group_host && param.layer_id >= 0
-            && static_cast<size_t>(param.layer_id) < param.kv_cache_layer_to_group_host->size()) {
-            gid = param.kv_cache_layer_to_group_host->data<int32_t>()[param.layer_id];
-        }
-        RTP_LLM_CHECK_WITH_INFO(
-            gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
         const auto group_offset_view = (*param.host_kv_cache_offset)[static_cast<size_t>(gid)];  // [B, M]
         max_blocks_per_batch         = group_offset_view.shape()[1];
         offset_addr                  = group_offset_view.data<int32_t>();
@@ -297,6 +296,7 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
             }
         };
         cache_store_->store(request_blocks, storeCallback);
+        RTP_LLM_LOG_WARNING("store cache: request_id=%ld, layer_id=%d, blocks=%d", request_id, param.layer_id, request_blocks->getBlocksCount());
     }
 }
 

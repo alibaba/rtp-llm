@@ -2,7 +2,7 @@
 #include <pybind11/stl.h>
 
 #include "rtp_llm/cpp/devices/GraphBase.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
+#include "rtp_llm/cpp/devices/GraphBaseRunner.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace py = pybind11;

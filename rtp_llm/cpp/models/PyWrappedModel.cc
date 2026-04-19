@@ -1,3 +1,6 @@
+#ifndef RTP_LLM_PROFILE_SCOPE
+#define RTP_LLM_PROFILE_SCOPE(name) do {} while(0)
+#endif
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
@@ -14,7 +17,6 @@
 #include <cstdlib>
 #include <iostream>
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
-#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 

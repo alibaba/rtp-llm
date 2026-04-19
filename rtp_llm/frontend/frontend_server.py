@@ -310,6 +310,8 @@ class FrontendServer(object):
             return ORJSONResponse(format_exception(e), status_code=500)
 
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
+        if not isinstance(request, dict):
+            request = {"raw_request": str(request)[:200]}
         exception_json = format_exception(e)
         error_code_str = exception_json.get("error_code_str", "")
         if isinstance(e, ConcurrencyException):
