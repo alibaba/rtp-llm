@@ -24,13 +24,11 @@ class RMSResNormTest(TestCase):
         rms_res_norm_torch = RMSResNormTorch(w)
         x = torch.randn(num_tokens, hidden_size, dtype=dtype)
         residual = torch.randn(num_tokens, hidden_size, dtype=dtype)
+        normed_torch, residual_torch = rms_res_norm_torch(x.clone(), residual.clone())
+        normed_cuda, residual_cuda = rms_res_norm(x.clone(), residual.clone())
+        self.assertTrue(torch.allclose(normed_torch, normed_cuda, atol=3e-2, rtol=3e-2))
         self.assertTrue(
-            torch.allclose(
-                rms_res_norm_torch(x, residual),
-                rms_res_norm(x, residual),
-                atol=3e-2,
-                rtol=3e-2,
-            )
+            torch.allclose(residual_torch, residual_cuda, atol=3e-2, rtol=3e-2)
         )
 
     def test_rms_res_norm(self):
