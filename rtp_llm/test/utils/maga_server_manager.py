@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import shlex
+import signal as signal_mod
 import socket
 import subprocess
 import sys
@@ -45,6 +46,7 @@ class MagaServerManager(object):
         self._process_file_name = process_file_name
         self._port = port
         self._smoke_args_str = smoke_args_str
+        self._exit_code: Optional[int] = None
         if self._port is None:
             self._port = MagaServerManager.get_free_port()
 
@@ -62,6 +64,20 @@ class MagaServerManager(object):
     def port(self) -> int:
         return int(self._port)
 
+    @property
+    def exit_code(self) -> Optional[int]:
+        return self._exit_code
+
+    @property
+    def log_file_path(self) -> Optional[str]:
+        return self._log_file
+
+    @property
+    def server_pid(self) -> Optional[int]:
+        if self._server_process is not None:
+            return self._server_process.pid
+        return None
+
     def wait_sever_done(self, timeout: int = 1600):
         # currently we can not check vit server health, assume it is ready, xieshui will fix it
         if int(self._env_args.get("VIT_SEPARATION", "0")) == 1:
@@ -72,29 +88,25 @@ class MagaServerManager(object):
         # Health check uses START_PORT (self._port); when VIT_SEPARATION==1 we return True above
         result = wait_sever_done(self._server_process, int(self._port), timeout)
         if not result:
+            rc = self._server_process.poll() if self._server_process else None
+            self._exit_code = rc
+            if rc is not None:
+                if rc < 0:
+                    sig = -rc
+                    sig_name = signal_mod.Signals(sig).name if sig in signal_mod.Signals._value2member_map_ else f"signal {sig}"
+                    logging.warning(
+                        f"Server process pid={self._server_process.pid} killed by {sig_name} (exit code {rc})"
+                    )
+                else:
+                    logging.warning(
+                        f"Server process pid={self._server_process.pid} exited with code {rc}"
+                    )
+            else:
+                logging.warning(
+                    f"Server process pid={self._server_process.pid} still alive, health check timed out after {timeout}s"
+                )
             self.print_process_log()
         return result
-
-    @staticmethod
-    def _cleanup_core_files():
-        """Remove core dump files from TEST_UNDECLARED_OUTPUTS_DIR to prevent
-        the Bazel test runner from hanging on zipping multi-GB core files."""
-        outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
-        if not outputs_dir or not os.path.isdir(outputs_dir):
-            return
-        for entry in os.listdir(outputs_dir):
-            if entry.startswith("core"):
-                path = os.path.join(outputs_dir, entry)
-                try:
-                    if os.path.isdir(path):
-                        import shutil
-
-                        shutil.rmtree(path)
-                    else:
-                        os.remove(path)
-                    logging.info(f"Removed core file: {path}")
-                except OSError as e:
-                    logging.warning(f"Failed to remove core file {path}: {e}")
 
     def start_server(
         self,
@@ -262,10 +274,10 @@ class MagaServerManager(object):
         self.print_process_log()
         return False, None
 
-    def print_process_log(self):
+    def print_process_log(self, max_lines: int = 0):
+        """Print server process log. If max_lines > 0, only print last N lines."""
         if self._log_file is None:
             return
-        # Flush file stream before reading to ensure all logs are written
         if self._file_stream is not None:
             try:
                 self._file_stream.flush()
@@ -274,7 +286,13 @@ class MagaServerManager(object):
         try:
             if os.path.exists(self._log_file):
                 with open(self._log_file, "r") as f:
-                    content = f.read()
+                    if max_lines > 0:
+                        all_lines = f.readlines()
+                        content = "".join(all_lines[-max_lines:])
+                        if len(all_lines) > max_lines:
+                            content = f"... ({len(all_lines) - max_lines} lines truncated)\n" + content
+                    else:
+                        content = f.read()
                 if content:
                     logging.warning("=" * 80)
                     logging.warning(f"Server process log ({self._log_file}):")
