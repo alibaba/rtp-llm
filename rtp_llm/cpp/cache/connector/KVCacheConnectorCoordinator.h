@@ -64,6 +64,7 @@ private:
     void                                    processReadContexts();
     void                                    processWriteContexts();
     void asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context);
+    int  cpSize() const;
 
 private:
     const CacheConfig                 cache_config_;

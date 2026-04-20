@@ -421,11 +421,6 @@ bool StreamCacheResource::enableRemoteCache() const {
 }
 
 bool StreamCacheResource::enableMemoryCache() const {
-    // TODO(CP): same as enableRemoteCache — disabled under CP sharding.
-    auto mapper = resource_context_.cache_manager->cpSlotMapper();
-    if (mapper && mapper->isSharded()) {
-        return false;
-    }
     return resource_context_.enable_memory_cache && stream_->enableMemoryCache();
 }
 
