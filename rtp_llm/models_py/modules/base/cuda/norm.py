@@ -32,12 +32,14 @@ class RMSResNorm(BaseResNorm):
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, eps)
 
-    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+    def forward(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         stream_id = torch.cuda.current_stream().cuda_stream
         rtp_llm_ops.fused_add_rmsnorm(
             hidden_states, residual, self.weight.data, self.variance_epsilon, stream_id
         )
-        return hidden_states
+        return hidden_states, residual
 
 
 class QKRMSNorm(nn.Module):
@@ -103,11 +105,17 @@ class FusedQKRMSNorm(nn.Module):
     def forward(self, hidden_states: torch.Tensor):
         assert hidden_states.dim() == 2
         m, n = hidden_states.shape
-        qkv = hidden_states.reshape(m, (self.head_num + self.kv_head_num * 2), self.size_per_head)
-        q = qkv[:, :self.head_num, :]
-        k = qkv[:, self.head_num:self.head_num + self.kv_head_num, :]
-        flashinfer.norm.rmsnorm(q, self.q_weight, eps=self.eps, out=q, enable_pdl=self.enable_pdl)
-        flashinfer.norm.rmsnorm(k, self.k_weight, eps=self.eps, out=k, enable_pdl=self.enable_pdl)
+        qkv = hidden_states.reshape(
+            m, (self.head_num + self.kv_head_num * 2), self.size_per_head
+        )
+        q = qkv[:, : self.head_num, :]
+        k = qkv[:, self.head_num : self.head_num + self.kv_head_num, :]
+        flashinfer.norm.rmsnorm(
+            q, self.q_weight, eps=self.eps, out=q, enable_pdl=self.enable_pdl
+        )
+        flashinfer.norm.rmsnorm(
+            k, self.k_weight, eps=self.eps, out=k, enable_pdl=self.enable_pdl
+        )
         return qkv.reshape(m, n)
 
 

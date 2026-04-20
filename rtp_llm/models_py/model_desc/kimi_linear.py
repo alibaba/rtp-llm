@@ -700,7 +700,7 @@ class KimiLinearDecoderLayer(nn.Module):
         attn_meta: KimiLinearMetadata = KimiLinearMetadata(),
     ) -> DecodeLayerOutput:
         # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
-        hidden_states = self.input_layernorm(hidden_states, residual)
+        hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         # Self Attention (KDA or MLA)
         if self.layer_type == HybridAttentionType.LINEAR:
@@ -719,7 +719,7 @@ class KimiLinearDecoderLayer(nn.Module):
             )
 
         # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
-        hidden_states = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         # MLP (Dense or MoE)
         hidden_states = self.mlp(hidden_states)
@@ -809,6 +809,6 @@ class KimiLinearModel(GptModelBase):
             hidden_states = output.hidden_states
             residual = output.residual
 
-        hidden_states = self.norm(hidden_states, residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
 
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
