@@ -17,6 +17,16 @@ class BaseNorm(nn.Module):
 
 
 class BaseResNorm(nn.Module):
+    """Fused residual-add + RMSNorm base class.
+
+    .. note:: Breaking change — ``forward`` now returns ``(normed, residual)``
+        rather than a single ``Tensor``. Callers must unpack both values; the
+        returned ``residual`` is the post-add residual to feed into the next
+        layer. The prior single-Tensor return would silently bind the tuple
+        to one variable on older callsites, so any un-migrated consumer will
+        hit an obvious shape/type mismatch at use site.
+    """
+
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__()
         self.weight = weight
