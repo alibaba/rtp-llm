@@ -285,6 +285,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
+        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         """
         Combines expert outputs back to all original ranks.

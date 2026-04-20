@@ -65,6 +65,16 @@ class FusedMoeDataRouter(ABC):
         self.config = config
         self.quant_config = quant_config
 
+    @property
+    def supports_skip_allreduce(self) -> bool:
+        """Whether this router's finalize() truly suppresses its internal
+        collective (e.g. all-reduce / all-gather) when *skip_allreduce=True*.
+
+        Routers that accept but silently ignore the flag must keep the default
+        ``False`` so that callers do not rely on a skip that never happens.
+        """
+        return False
+
     @classmethod
     def router_type(cls) -> RouterType:
         raise NotImplementedError
@@ -100,6 +110,7 @@ class FusedMoeDataRouter(ABC):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
+        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -169,6 +180,11 @@ class FusedMoe(torch.nn.Module):
         self.expert_num = expert_num
 
     @property
+    def supports_skip_allreduce(self) -> bool:
+        """Delegates to the underlying router's capability flag."""
+        return self.router.supports_skip_allreduce
+
+    @property
     def topk_ids_dtype(self) -> torch.dtype:
         return self.fused_experts.topk_ids_dtype
 
@@ -185,6 +201,7 @@ class FusedMoe(torch.nn.Module):
         apply_router_weight_on_input: bool = False,
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[Dict[str, Any]] = None,
+        skip_allreduce: bool = False,
     ) -> torch.Tensor:
 
         a1 = hidden_states
@@ -238,6 +255,7 @@ class FusedMoe(torch.nn.Module):
             expert_payload.expert_topk_ids,
             apply_router_weight_on_input,
             extra_finalize_args,
+            skip_allreduce=skip_allreduce,
         )
 
         assert (

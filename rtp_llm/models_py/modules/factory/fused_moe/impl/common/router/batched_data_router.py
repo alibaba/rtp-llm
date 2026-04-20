@@ -72,6 +72,10 @@ class TopKWeightAndReduceNaiveBatched(object):
 
 
 class BatchedDataRouter(FusedMoeDataRouter):
+    @property
+    def supports_skip_allreduce(self) -> bool:
+        return True
+
     @classmethod
     def router_type(cls):
         return RouterType.BATCHED_DATA
@@ -165,6 +169,7 @@ class BatchedDataRouter(FusedMoeDataRouter):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[dict[str, Any]],
+        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         weight_and_reduce_impl = TopKWeightAndReduceNaiveBatched(self.ep_rank)
         output = weight_and_reduce_impl.apply(
@@ -173,6 +178,6 @@ class BatchedDataRouter(FusedMoeDataRouter):
             topk_ids=topk_ids,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
-        if self.tp_size > 1:
+        if not skip_allreduce and self.tp_size > 1:
             output = all_reduce(output, Group.TP)
         return output
