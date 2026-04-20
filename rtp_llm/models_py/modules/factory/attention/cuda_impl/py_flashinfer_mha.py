@@ -171,20 +171,23 @@ class PyFlashinferPrefillPagedAttnOp(object):
             assert attn_inputs.prefill_cuda_graph_copy_params is not None
             assert self.input_lengths is not None
             assert self.cu_seq_lens is not None
-            self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size[0] = (
+            batch_size = attn_inputs.input_lengths.size(0)
+            max_batch_size = self.prefill_cuda_graph_copy_params.max_batch_size
+            self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size.copy_(
                 attn_inputs.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size
             )
-            self.input_lengths[: attn_inputs.input_lengths.size(0)] = (
-                attn_inputs.input_lengths
-            )
-            self.cu_seq_lens[: attn_inputs.cu_seqlens.size(0)] = attn_inputs.cu_seqlens
+            self.input_lengths[:batch_size] = attn_inputs.input_lengths
+            self.cu_seq_lens[: batch_size + 1] = attn_inputs.cu_seqlens
+            if batch_size < max_batch_size:
+                self.input_lengths[batch_size:max_batch_size] = 0
+                last_cu_seqlen = attn_inputs.cu_seqlens[batch_size]
+                self.cu_seq_lens[batch_size + 1 : max_batch_size + 1] = last_cu_seqlen
             # Build qo_indptr matching the padded Q layout produced by small2large copy.
             # Each batch's Q tokens sit at [i*max_seq_len, i*max_seq_len + input_len_i)
             # in the padded buffer, so qo_indptr[i] = i*max_seq_len, but we set
             # qo_indptr[i+1] = i*max_seq_len + input_len_i to tell FlashInfer the
             # exact number of real tokens per batch (avoiding padding token processing
             # which causes numerical differences).
-            batch_size = attn_inputs.input_lengths.size(0)
             max_sl = self.prefill_cuda_graph_copy_params.max_seq_len
             offsets = (
                 torch.arange(
@@ -196,6 +199,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.qo_indptr[1 : batch_size + 1] = offsets + attn_inputs.input_lengths.to(
                 self.qo_indptr.device
             )
+            if batch_size < max_batch_size:
+                self.qo_indptr[batch_size + 1 : max_batch_size + 1] = self.qo_indptr[
+                    batch_size
+                ]
             qo_indptr = self.qo_indptr
 
         kv_dtype = self._get_kv_dtype(attn_inputs)

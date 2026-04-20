@@ -143,6 +143,15 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
     optimizedCopyAsync(inputs.input_hiddens,
                        py_model_inputs_.input_hiddens,
                        inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
+    if (!is_prefill_cuda_graph_mode_ && token_num < py_model_inputs_.input_ids.size(0)) {
+        // Decode replay always executes the full captured token shape. When the
+        // current request is served by a larger captured graph (common for
+        // target-verify MTP), untouched tail token slots would otherwise retain
+        // input_ids / hidden states from the previous replay and get consumed as
+        // fake padding rows, leading to cross-request corruption under concurrency.
+        py_model_inputs_.input_ids.slice(0, token_num, py_model_inputs_.input_ids.size(0)).fill_(0);
+        py_model_inputs_.input_hiddens.slice(0, token_num, py_model_inputs_.input_hiddens.size(0)).fill_(0);
+    }
     optimizedCopyAsync(inputs.attention_inputs.prefix_lengths,
                        py_model_inputs_.attention_inputs.prefix_lengths,
                        state.current_batch_size * sizeof(int));
@@ -206,13 +215,13 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         // for the FULL captured batch size to fill `_cg.seq_lens`. The above copy only
         // refreshes the first current_batch_size entries; padding rows retain whatever
         // stale lengths the previous (larger) replay wrote, causing FlashInfer to read
-        // wrong KV ranges for those rows. Although padding rows aren't part of the
-        // current request, the captured graph still computes attention/cache writes for
-        // them, which can corrupt KV cache pages mapped via stale block_ids. Zero them
-        // out for safety.
+        // wrong KV ranges for those rows. For target-verify Qwen3-Next, the linear
+        // attention kernels use `sequence_lengths_plus_1_d - 1` to locate the current
+        // cache block and explicitly assume the value is >= 1. So padding rows must use
+        // 1 (pointing at reserved block 0), not 0.
         if (state.current_batch_size < max_bs_) {
             py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d.slice(0, state.current_batch_size, max_bs_)
-                .fill_(0);
+                .fill_(is_target_verify_ ? 1 : 0);
         }
         auto attn_pyobj = graph_instances_[state.current_real_graph_bs].mem_hold_.attn_pyobj_;
         // decode padding
