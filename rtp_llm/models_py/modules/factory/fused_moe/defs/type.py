@@ -12,6 +12,7 @@ class RouterType(Enum):
     DEEPEP_NORMAL = 2  # DeepEP normal mode
     DEEPEP_LOW_LATENCY = 4  # DeepEP low latency mode (best communication)
     PURE_TP = 5  # optimize when EP=TP, use all_reduce as gather
+    MEGA_MOE = 6  # Passthrough router for mega_moe (kernel handles EP internally)
 
 
 class ExecutorType(Enum):
@@ -30,3 +31,4 @@ class ExecutorType(Enum):
     CUTLASS_BATCHED_W4A8_INT4_PER_CHANNEL = 6  # Cutlass batched W4A8 INT4 PER CHANNEL (most optimized)
     TRTLLM_FP4 = 7  # TRTLLM FP4 executor (specialized)
     CUTEDSL_FP4 = 8  # CuteDSL FP4 executor (FP4 optimized)
+    MEGA_MOE = 9  # DeepGEMM fp8_fp4_mega_moe fused EP+GEMM+SwiGLU kernel (SM100 only)
