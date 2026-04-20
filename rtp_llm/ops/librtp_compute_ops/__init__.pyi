@@ -10,8 +10,6 @@ from . import rtp_llm_ops
 __all__: list[str] = [
     "BertEmbeddingInputs",
     "CacheGroupType",
-    "DeviceType",
-    "ExecCtxExporter",
     "LayerKVCache",
     "KVCache",
     "ParamsBase",
@@ -24,7 +22,9 @@ __all__: list[str] = [
     "PyModelOutputs",
     "PyPrefillCudaGaphCopyParams",
     "TypeMeta",
-    "get_exec_ctx",
+    "get_device_id",
+    "preprocess_gemm_weight_by_key",
+    "preprocess_weight_scale",
     "get_scalar_type",
     "get_typemeta",
     "init_exec_ctx",
@@ -84,57 +84,6 @@ class BertEmbeddingInputs:
 
     @token_type_embedding.setter
     def token_type_embedding(self, arg0: torch.Tensor) -> None: ...
-
-class ExecCtxExporter:
-    def get_device_id(self) -> int: ...
-    def get_device_type(self) -> DeviceType: ...
-    def preprocess_gemm_weight_by_key(
-        self, key: str, weight: torch.Tensor, user_arm_gemm_use_kai: bool
-    ) -> torch.Tensor: ...
-    def preprocess_weight_scale(
-        self, weight: torch.Tensor, scale: torch.Tensor
-    ) -> torch.Tensor: ...
-
-class DeviceType:
-    """
-    Members:
-
-      Cpu
-
-      Cuda
-
-      Yitian
-
-      ArmCpu
-
-      ROCm
-
-      Ppu
-    """
-
-    ArmCpu: typing.ClassVar[DeviceType]  # value = <DeviceType.ArmCpu: 3>
-    Cpu: typing.ClassVar[DeviceType]  # value = <DeviceType.Cpu: 0>
-    Cuda: typing.ClassVar[DeviceType]  # value = <DeviceType.Cuda: 1>
-    Ppu: typing.ClassVar[DeviceType]  # value = <DeviceType.Ppu: 5>
-    ROCm: typing.ClassVar[DeviceType]  # value = <DeviceType.ROCm: 4>
-    Yitian: typing.ClassVar[DeviceType]  # value = <DeviceType.Yitian: 2>
-    __members__: typing.ClassVar[
-        dict[str, DeviceType]
-    ]  # value = {'Cpu': <DeviceType.Cpu: 0>, 'Cuda': <DeviceType.Cuda: 1>, 'Yitian': <DeviceType.Yitian: 2>, 'ArmCpu': <DeviceType.ArmCpu: 3>, 'ROCm': <DeviceType.ROCm: 4>, 'Ppu': <DeviceType.Ppu: 5>}
-    def __eq__(self, other: typing.Any) -> bool: ...
-    def __getstate__(self) -> int: ...
-    def __hash__(self) -> int: ...
-    def __index__(self) -> int: ...
-    def __init__(self, value: int) -> None: ...
-    def __int__(self) -> int: ...
-    def __ne__(self, other: typing.Any) -> bool: ...
-    def __repr__(self) -> str: ...
-    def __setstate__(self, state: int) -> None: ...
-    def __str__(self) -> str: ...
-    @property
-    def name(self) -> str: ...
-    @property
-    def value(self) -> int: ...
 
 class CacheGroupType:
     """
@@ -375,7 +324,9 @@ class PyPrefillCudaGaphCopyParams:
 class TypeMeta:
     def __init__(self) -> None: ...
 
-def get_exec_ctx() -> ExecCtxExporter: ...
+def get_device_id() -> int: ...
+def preprocess_gemm_weight_by_key(key: str, weight: torch.Tensor, user_arm_gemm_use_kai: bool) -> torch.Tensor: ...
+def preprocess_weight_scale(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor: ...
 def get_scalar_type(arg0: TypeMeta) -> torch.dtype:
     """
     Convert TypeMeta to scalar type
@@ -387,19 +338,12 @@ def get_typemeta(arg0: torch.Tensor) -> TypeMeta:
     """
 
 def init_exec_ctx(
-    parallelism_config: libth_transformer_config.ParallelismConfig,
-    model_config: libth_transformer_config.ModelConfig,
-    eplb_config: libth_transformer_config.EPLBConfig,
-    fmha_config: libth_transformer_config.FMHAConfig,
-    device_resource_config: libth_transformer_config.DeviceResourceConfig,
-    moe_config: libth_transformer_config.MoeConfig,
-    sp_config: libth_transformer_config.SpeculativeExecutionConfig,
-    misc_config: libth_transformer_config.MiscellaneousConfig,
-    profiling_debug_logging_config: libth_transformer_config.ProfilingDebugLoggingConfig,
-    hw_kernel_config: libth_transformer_config.HWKernelConfig,
-    concurrency_config: libth_transformer_config.ConcurrencyConfig,
-    ffn_disaggregate_config: libth_transformer_config.FfnDisAggregateConfig,
-    runtime_config: libth_transformer_config.RuntimeConfig,
-    model_specific_config: libth_transformer_config.ModelSpecificConfig,
-    nccl_comm_config: libth_transformer_config.NcclCommConfig = ...,
+    device_id: int,
+    trace_memory: bool,
+    enable_comm_overlap: bool,
+    mla_ops_type: int,
 ) -> None: ...
+
+def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None: ...
+
+def clear_comm_ops() -> None: ...

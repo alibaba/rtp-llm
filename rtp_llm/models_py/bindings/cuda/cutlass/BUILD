@@ -217,10 +217,8 @@ cc_library(
 cc_library(
     name = "cutlass_interface",
     hdrs = [
-        "interface.h",
         "cutlass_kernels/moe_gemm/moe_kernels.h",
         "cutlass_kernels/moe_gemm/moe_kernels.inl",
-        "cutlass_kernels/moe_gemm/moe_fp8_kernels.h",
         "cutlass_kernels/moe_gemm/moe_gemm_kernels.h",
         "cutlass_kernels/weight_only_quant_op.h",
         "cutlass_kernels/gemm_configs.h",

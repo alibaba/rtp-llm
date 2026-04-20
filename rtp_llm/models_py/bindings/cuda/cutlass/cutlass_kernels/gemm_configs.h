@@ -30,16 +30,6 @@ enum class CutlassTileConfig {
     // SiMT config
     CtaShape128x128x8_WarpShape64x64x8,
 
-    // TensorCore configs CTA_N = 64, CTA_K = 256
-    CtaShape16x64x256_WarpShape16x16x256,
-    CtaShape32x64x256_WarpShape16x32x256,
-
-    // TensorCore configs CTA_N = 32, CTA_K = 256
-    CtaShape32x32x256_WarpShape16x16x256,
-
-    // TensorCore configs CTA_N = 128, CTA_K = 128
-    CtaShape32x128x128_WarpShape32x32x128,
-
     // TensorCore configs CTA_N = 128, CTA_K = 64
     // Warp configs for M=16
     CtaShape16x128x64_WarpShape16x32x64,
@@ -61,11 +51,9 @@ enum class CutlassTileConfig {
     CtaShape128x128x64_WarpShape64x64x64,
     CtaShape128x128x64_WarpShape128x32x64,
     CtaShape128x256x64_WarpShape64x64x64,
-    CtaShape128x256x128_WarpShape64x64x128,
 
     // Warp configs for M=256
     CtaShape256x128x64_WarpShape64x64x64,
-    CtaShape256x128x128_WarpShape64x64x128,
 };
 
 enum class SplitKStyle {
@@ -97,8 +85,6 @@ enum class CutlassTileConfigSM90 {
 
     // CTA configs for M=128
     CtaShape256x128x128B,
-
-    CtaShape128x16x256B,
 };
 
 enum class MainloopScheduleType {
@@ -116,9 +102,7 @@ enum class ClusterShape {
     ClusterShape_1x1x1,
     ClusterShape_2x1x1,
     ClusterShape_1x2x1,
-    ClusterShape_2x2x1,
-    ClusterShape_1x8x1,
-    ClusterShape_8x1x1
+    ClusterShape_2x2x1
 };
 
 struct CutlassGemmConfig {
@@ -126,7 +110,6 @@ struct CutlassGemmConfig {
         NONE         = 0,
         WEIGHT_ONLY  = 1u << 0,
         SIMT_ONLY    = 1u << 1,
-        INT8_ONLY    = 1u << 2,
         HOPPER       = 1u << 3,
         GROUPED_GEMM = 1u << 4,
         FP8_ONLY     = 1u << 5,
@@ -147,12 +130,6 @@ struct CutlassGemmConfig {
 
     CutlassGemmConfig(CutlassTileConfig tile_config, SplitKStyle split_k_style, int split_k_factor, int stages):
         tile_config(tile_config), split_k_style(split_k_style), split_k_factor(split_k_factor), stages(stages) {}
-
-    CutlassGemmConfig(CutlassTileConfig tile_config, int split_k_factor, int stages):
-        tile_config(tile_config),
-        split_k_style(split_k_factor > 1 ? SplitKStyle::SPLIT_K_SERIAL : SplitKStyle::NO_SPLIT_K),
-        split_k_factor(split_k_factor),
-        stages(stages) {}
 
     CutlassGemmConfig(CutlassTileConfigSM90 tile_config_sm90,
                       MainloopScheduleType  mainloop_schedule,

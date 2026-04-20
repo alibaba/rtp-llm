@@ -34,62 +34,16 @@
 namespace tensorrt_llm {
 namespace cutlass_extensions {
 
-struct EpilogueOpBiasSilu {};
-
-struct EpilogueOpBiasReLU {};
-
-struct EpilogueOpBiasFtGelu {};
-
 struct EpilogueOpDefaultSilu {};
 
 struct EpilogueOpDefaultReLU {};
 
 struct EpilogueOpDefaultFtGelu {};
 
-struct EpilogueOpBias {};
-
 struct EpilogueOpDefault {};
 
 template<typename ElementType, int ElementsPerVectorAccess, typename ElementAccumulator, typename Op>
 struct Epilogue {};
-
-constexpr auto BiasScaleMode = cutlass::epilogue::thread::ScaleType::NoBetaScaling;
-
-template<typename ElementType, int ElementsPerVectorAccess, typename ElementAccumulator>
-struct Epilogue<ElementType, ElementsPerVectorAccess, ElementAccumulator, EpilogueOpBiasSilu> {
-    using Op = cutlass::epilogue::thread::LinearCombinationSilu<ElementType,
-                                                                ElementsPerVectorAccess,
-                                                                ElementAccumulator,
-                                                                ElementAccumulator,
-                                                                BiasScaleMode>;
-};
-
-template<typename ElementType, int ElementsPerVectorAccess, typename ElementAccumulator>
-struct Epilogue<ElementType, ElementsPerVectorAccess, ElementAccumulator, EpilogueOpBiasReLU> {
-    using Op = cutlass::epilogue::thread::LinearCombinationRelu<ElementType,
-                                                                ElementsPerVectorAccess,
-                                                                ElementAccumulator,
-                                                                ElementAccumulator,
-                                                                BiasScaleMode>;
-};
-
-template<typename ElementType, int ElementsPerVectorAccess, typename ElementAccumulator>
-struct Epilogue<ElementType, ElementsPerVectorAccess, ElementAccumulator, EpilogueOpBiasFtGelu> {
-    using Op = cutlass::epilogue::thread::LinearCombinationGeneric<cutlass::epilogue::thread::GELU_taylor,
-                                                                   ElementType,
-                                                                   ElementsPerVectorAccess,
-                                                                   ElementAccumulator,
-                                                                   ElementAccumulator,
-                                                                   BiasScaleMode,
-                                                                   cutlass::FloatRoundStyle::round_to_nearest,
-                                                                   true>;
-};
-
-template<typename ElementType, int ElementsPerVectorAccess, typename ElementAccumulator>
-struct Epilogue<ElementType, ElementsPerVectorAccess, ElementAccumulator, EpilogueOpBias> {
-    using Op = cutlass::epilogue::thread::
-        LinearCombination<ElementType, ElementsPerVectorAccess, ElementAccumulator, ElementAccumulator, BiasScaleMode>;
-};
 
 constexpr auto DefaultScaleMode = cutlass::epilogue::thread::ScaleType::Default;
 

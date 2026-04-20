@@ -23,7 +23,6 @@
 #include "rtp_llm/models_py/bindings/cuda/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
 #include "rtp_llm/models_py/bindings/cuda/cutlass/cutlass_kernels/weight_only_quant_op.h"
 #include <optional>
-#include <random>
 
 namespace tensorrt_llm::kernels {
 
@@ -321,7 +320,6 @@ public:
 
     virtual size_t getGemmWorkspaceSize(int num_experts) const = 0;
 
-    bool is_profiler                      = false;
     bool use_deterministic_hopper_reduce_ = true;
 };
 
@@ -690,84 +688,6 @@ private:
     };
 
     HostLoraWorkspace host_lora_workspace_;
-};
-
-void makeLoadBalancedRoutingConfiguration(
-    void* data_void, int num_experts, int num_tokens, int k, nvinfer1::DataType type, cudaStream_t stream);
-
-struct GemmProfilerBackend {
-public:
-    using Config = cutlass_extensions::CutlassGemmConfig;
-    enum class GemmToProfile {
-        Undefined = 0,
-        GEMM_1,
-        GEMM_2
-    };
-
-    void init(CutlassMoeFCRunnerInterface& runner,
-              GemmToProfile                gemm_to_profile,
-              nvinfer1::DataType           dtype,
-              nvinfer1::DataType           wtype,
-              nvinfer1::DataType           otype,
-              int                          num_experts,
-              int                          k,
-              int64_t                      hidden_size,
-              int64_t                      inter_size,
-              ActivationType               activation_type,
-              bool                         bias,
-              bool                         use_lora,
-              MOEParallelismConfig         parallelism_config) {
-        mInterface         = &runner;
-        mGemmToProfile     = gemm_to_profile;
-        mDType             = dtype;
-        mWType             = wtype;
-        mOType             = otype;
-        mNumExperts        = num_experts;
-        mNumExpertsPerNode = num_experts / parallelism_config.ep_size;
-        mK                 = k;
-        mExpertHiddenSize  = hidden_size;
-        mExpertInterSize   = inter_size;
-        mActivationType    = activation_type;
-        mBias              = bias;
-        mUseLora           = false;
-        mParallelismConfig = parallelism_config;
-        mSM                = rtp_llm::get_sm();
-        mSorter.updateNumExperts(mNumExperts);
-    }
-
-    void prepare(int num_tokens, char* workspace, cudaStream_t stream);
-
-    std::vector<size_t>    getProfilerWorkspaces(int maxM, bool is_hopper);
-    std::function<void*()> getWorkspacePointerGenerator(char* ws, int maxM, bool is_hopper);
-    size_t                 getWorkspaceSize(int maxM);
-
-    void runProfiler(int num_tokens, Config const& tactic, char* workspace_ptr_char, cudaStream_t const& stream);
-
-    CutlassMoeFCRunnerInterface* mInterface;
-    CubKeyValueSorter            mSorter;
-
-    GemmToProfile        mGemmToProfile = GemmToProfile::Undefined;
-    std::vector<Config>  mAllTacticsSaved;
-    int                  mSM{};
-    int64_t              mNumExperts{};
-    int64_t              mNumExpertsPerNode{};
-    int64_t              mK{};
-    int64_t              mExpertHiddenSize{};
-    int64_t              mExpertInterSize{};
-    ActivationType       mActivationType{};
-    MOEParallelismConfig mParallelismConfig{};
-
-    int mSampleIndex = 0;
-
-    nvinfer1::DataType mDType{};
-    nvinfer1::DataType mWType{};
-    nvinfer1::DataType mOType{};
-
-    // This will be a unique value for every iteration of warmup and actual bench
-    constexpr static int64_t NUM_ROUTING_SAMPLES = 16;
-
-    bool mBias{};
-    bool mUseLora{};
 };
 
 template<typename TOPK_T>

@@ -19,7 +19,6 @@
 
 #include "rtp_llm/cpp/model_utils/quantization.h"
 #include "rtp_llm/models_py/bindings/cuda/cutlass/cutlass_kernels/moe_gemm/moe_kernels.h"
-#include "rtp_llm/models_py/bindings/cuda/cutlass/cutlass_kernels/moe_gemm/moe_fp8_kernels.h"
 #include "rtp_llm/models_py/bindings/cuda/trt_utils.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "cutlass/numeric_types.h"

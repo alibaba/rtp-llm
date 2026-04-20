@@ -23,13 +23,6 @@ namespace tensorrt_llm {
 namespace kernels {
 namespace cutlass_kernels {
 
-std::vector<tensorrt_llm::cutlass_extensions::CutlassGemmConfig>
-get_candidate_configs(int        sm,
-                      const bool is_weight_only,
-                      const bool simt_configs_only,
-                      const bool int8_configs_only = false,
-                      const int  max_split_k       = 1);
-
 std::vector<tensorrt_llm::cutlass_extensions::CutlassGemmConfig> get_valid_config_from_occupancies(
     const std::vector<tensorrt_llm::cutlass_extensions::CutlassGemmConfig>& candidate_configs,
     const std::vector<int>&                                                 occupancies);
@@ -51,7 +44,6 @@ struct TileConfig {
     int warp_k;
 };
 
-void       print_config(tensorrt_llm::cutlass_extensions::CutlassGemmConfig config);
 bool       is_valid_split_k_factor(const int64_t                                             m,
                                    const int64_t                                             n,
                                    const int64_t                                             k,
@@ -79,18 +71,6 @@ constexpr static bool should_filter_sm90_gemm_problem_shape_v =
 
 std::vector<tensorrt_llm::cutlass_extensions::CutlassGemmConfig> get_candidate_configs(
     int sm, int const max_split_k, tensorrt_llm::cutlass_extensions::CutlassGemmConfig::CandidateConfigTypeParam const);
-
-tensorrt_llm::cutlass_extensions::CutlassGemmConfig estimate_best_config_from_occupancies(
-    std::vector<tensorrt_llm::cutlass_extensions::CutlassGemmConfig> const& candidate_configs,
-    std::vector<int> const&                                                 occupancies,
-    int64_t const                                                           m,
-    int64_t const                                                           n,
-    int64_t const                                                           k,
-    int64_t const                                                           num_experts,
-    int const                                                               split_k_limit,
-    size_t const                                                            workspace_bytes,
-    int const                                                               multi_processor_count,
-    int const                                                               is_weight_only);
 
 }  // namespace cutlass_kernels
 }  // namespace kernels
