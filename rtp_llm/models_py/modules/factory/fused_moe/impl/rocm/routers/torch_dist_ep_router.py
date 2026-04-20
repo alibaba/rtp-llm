@@ -380,33 +380,6 @@ class TorchDistEpRouter(FusedMoeDataRouter):
             for lid in lids_cpu:
                 expert_num_tokens_cpu[lid] += 1
 
-        # Debug logging (first call only, rank 0 only)
-        if self._debug_call_count == 0 and self.ep_rank == 0:
-            recv_counts = self._dispatch_meta.get("recv_counts", [])
-            print(
-                f"[TorchDistEP DEBUG] rank={self.ep_rank} "
-                f"num_tokens={num_tokens} topk={topk} "
-                f"ep_size={self.ep_size} experts_per_rank={self.expert_num_per_rank}"
-            )
-            print(
-                f"[TorchDistEP DEBUG] send_counts={send_counts} recv_counts={recv_counts}"
-            )
-            print(
-                f"[TorchDistEP DEBUG] recv_h.shape={recv_h.shape} "
-                f"recv_lids range=[{recv_lids.min().item() if recv_lids.numel() > 0 else 'empty'}, "
-                f"{recv_lids.max().item() if recv_lids.numel() > 0 else 'empty'}]"
-            )
-            print(
-                f"[TorchDistEP DEBUG] recv_w stats: mean={recv_w.float().mean().item():.4f} "
-                f"min={recv_w.min().item():.4f} max={recv_w.max().item():.4f}"
-            )
-            print(
-                f"[TorchDistEP DEBUG] recv_h stats: mean={recv_h.float().mean().item():.6f} "
-                f"std={recv_h.float().std().item():.6f} "
-                f"has_nan={recv_h.isnan().any().item()} has_inf={recv_h.isinf().any().item()}"
-            )
-            print(f"[TorchDistEP DEBUG] expert_num_tokens_cpu={expert_num_tokens_cpu}")
-
         return ExpertForwardPayload(
             expert_x=recv_h,
             expert_x_origin_dtype=a1.dtype,
@@ -430,19 +403,6 @@ class TorchDistEpRouter(FusedMoeDataRouter):
     ) -> torch.Tensor:
         meta = self._dispatch_meta
 
-        # Debug logging (first call only, rank 0 only)
-        if self._debug_call_count == 0 and self.ep_rank == 0:
-            eo = payload.fused_expert_output
-            print(
-                f"[TorchDistEP DEBUG finalize] expert_output.shape={eo.shape} "
-                f"apply_router_weight_on_input={apply_router_weight_on_input}"
-            )
-            print(
-                f"[TorchDistEP DEBUG finalize] expert_output stats: "
-                f"mean={eo.float().mean().item():.6f} std={eo.float().std().item():.6f} "
-                f"has_nan={eo.isnan().any().item()} has_inf={eo.isinf().any().item()}"
-            )
-
         result = self._combine(
             expert_output=payload.fused_expert_output,
             recv_weights=meta["recv_weights"],
@@ -451,14 +411,5 @@ class TorchDistEpRouter(FusedMoeDataRouter):
             hidden_dim=meta["hidden_dim"],
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
-
-        # Debug logging for output
-        if self._debug_call_count == 0 and self.ep_rank == 0:
-            print(
-                f"[TorchDistEP DEBUG finalize] output.shape={result.shape} "
-                f"mean={result.float().mean().item():.6f} std={result.float().std().item():.6f} "
-                f"has_nan={result.isnan().any().item()} has_inf={result.isinf().any().item()}"
-            )
-            self._debug_call_count += 1
 
         return result
