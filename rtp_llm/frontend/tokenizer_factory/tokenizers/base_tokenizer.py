@@ -1,7 +1,10 @@
 import functools
+import logging
 from typing import Any, Dict, List, Union
 
 from transformers import AutoTokenizer
+
+logger = logging.getLogger(__name__)
 
 
 class BaseTokenizer:
@@ -21,16 +24,28 @@ class BaseTokenizer:
     def decode(self, token_id: Union[int, List[int]], **kwargs):
         if isinstance(token_id, List) and len(token_id) == 0:
             return ""
-        return self.tokenizer.decode(token_id, **kwargs)
+        # [DEBUG] Log decode
+        if isinstance(token_id, list) and len(token_id) > 0:
+            logger.info(f"[DEBUG-TOKEN] decode called with {len(token_id)} token_ids: {token_id[:10]}...")
+        result = self.tokenizer.decode(token_id, **kwargs)
+        if result and "<" in result:
+            logger.info(f"[DEBUG-TOKEN] decode result contains '<': {result[:200]}")
+        return result
 
     def batch_decode(self, token_ids: Union[List[int], List[List[int]]], **kwargs):
-        return [
-            self.tokenizer._decode(
-                seq,
-                **kwargs,
-            )
-            for seq in token_ids
-        ]
+        # [DEBUG] Log batch_decode
+        if isinstance(token_ids, list) and len(token_ids) > 0:
+            logger.info(f"[DEBUG-TOKEN] batch_decode called with {len(token_ids)} sequences")
+        results = []
+        for i, seq in enumerate(token_ids):
+            logger.info(f"[DEBUG-TOKEN] batch_decode seq[{i}]: {seq}")
+            result = self.tokenizer._decode(seq, **kwargs)
+            results.append(result)
+        # [DEBUG] Log results with special tokens
+        for i, result in enumerate(results):
+            if result and "<" in result:
+                logger.info(f"[DEBUG-TOKEN] batch_decode result[{i}] contains '<': {result[:200]}")
+        return results
 
     def apply_chat_template(self, messages, **kwargs):
         return self.tokenizer.apply_chat_template(messages, **kwargs)
@@ -108,7 +123,15 @@ class BaseTokenizer:
     def convert_ids_to_tokens(
         self, ids: Union[int, List[int]], skip_special_tokens: bool = False
     ):
-        return self.tokenizer.convert_ids_to_tokens(ids, skip_special_tokens)
+        # [DEBUG] Log token conversion
+        if isinstance(ids, list) and len(ids) > 0:
+            logger.info(f"[DEBUG-TOKEN] convert_ids_to_tokens called with {len(ids)} ids: {ids[:10]}...")
+        result = self.tokenizer.convert_ids_to_tokens(ids, skip_special_tokens)
+        if isinstance(result, list) and len(result) > 0:
+            special_tokens = [t for t in result if isinstance(t, str) and t.startswith("<")]
+            if special_tokens:
+                logger.info(f"[DEBUG-TOKEN] special tokens found: {special_tokens}")
+        return result
 
     @property
     def is_fast(self):

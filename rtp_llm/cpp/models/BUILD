@@ -73,7 +73,6 @@ cc_library(
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/kernels:kernels_sampling",
-        "//rtp_llm/cpp/devices/cuda_impl:gpu_base",
     ],
     visibility = ["//visibility:public"],
 )

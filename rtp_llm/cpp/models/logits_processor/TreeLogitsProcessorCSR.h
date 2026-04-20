@@ -23,8 +23,8 @@ struct StreamTreeInfo {
     bool    is_beam_search        = false;
     int32_t current_state         = 0;  // CPU 侧当前状态（与 d_current_state 保持同步）
 
-    // CPU 侧 CSRIndex（各 beam 通过拷贝共享，初始化后只读）
-    CSRIndex<token_num> csr_index;
+    // CPU 侧 CSRIndex（各 beam 共享同一份只读数据，通过 shared_ptr 避免重复拷贝）
+    std::shared_ptr<CSRIndex<token_num>> csr_index;
 
     // ---------------------------------------------------------------------------
     // 只读共享 GPU buffer（同一请求所有 beam 共享，通过 shared_ptr 引用计数）
@@ -41,17 +41,17 @@ struct StreamTreeInfo {
 
     StreamTreeInfo() = default;
 
-    StreamTreeInfo(bool                in_tree_mode_,
-                   int32_t             input_length_,
-                   int32_t             current_output_length_,
-                   bool                is_beam_search_,
-                   int32_t             current_state_,
-                   CSRIndex<token_num> csr_index_,
-                   rtp_llm::BufferPtr  d_indptr_,
-                   rtp_llm::BufferPtr  d_packed_csr_tokens_,
-                   rtp_llm::BufferPtr  d_packed_csr_states_,
-                   rtp_llm::BufferPtr  d_start_mask_,
-                   rtp_llm::BufferPtr  d_current_state_):
+    StreamTreeInfo(bool                                   in_tree_mode_,
+                   int32_t                                input_length_,
+                   int32_t                                current_output_length_,
+                   bool                                   is_beam_search_,
+                   int32_t                                current_state_,
+                   std::shared_ptr<CSRIndex<token_num>>   csr_index_,
+                   rtp_llm::BufferPtr                     d_indptr_,
+                   rtp_llm::BufferPtr                     d_packed_csr_tokens_,
+                   rtp_llm::BufferPtr                     d_packed_csr_states_,
+                   rtp_llm::BufferPtr                     d_start_mask_,
+                   rtp_llm::BufferPtr                     d_current_state_):
         in_tree_mode(in_tree_mode_),
         input_length(input_length_),
         current_output_length(current_output_length_),
@@ -65,7 +65,7 @@ struct StreamTreeInfo {
         d_current_state(std::move(d_current_state_)) {}
 
     // 拷贝语义：
-    //   - 只读共享 GPU buffer 用 shared_ptr 共享（引用计数 +1，零拷贝）
+    //   - 只读共享数据（csr_index, GPU buffers）用 shared_ptr 共享（引用计数 +1，零拷贝）
     //   - d_current_state 是每个 beam 私有的，需要深拷贝（由调用方负责分配并初始化）
     //   - current_state（CPU 侧镜像）和 current_output_length 各 beam 独立
     StreamTreeInfo copy() const {
@@ -75,7 +75,7 @@ struct StreamTreeInfo {
         info.current_output_length = current_output_length;
         info.is_beam_search        = is_beam_search;
         info.current_state         = current_state;        // 每个 beam 从相同起始状态出发
-        info.csr_index             = csr_index;            // CPU 只读副本，共享即可
+        info.csr_index             = csr_index;            // shared_ptr 共享，零拷贝
         info.d_indptr              = d_indptr;             // 共享只读 GPU buffer
         info.d_packed_csr_tokens   = d_packed_csr_tokens;
         info.d_packed_csr_states   = d_packed_csr_states;
