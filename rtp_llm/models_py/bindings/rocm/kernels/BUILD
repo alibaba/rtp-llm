@@ -58,7 +58,7 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:math_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
         "//rtp_llm/models_py/bindings/common/kernels:attn_utils",
     ],
     copts = rocm_copts(),

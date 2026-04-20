@@ -18,11 +18,11 @@
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/utils/math_utils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/kv_cache/kv_cache_utils.h"
-#include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
+#include "rtp_llm/models_py/bindings/cuda/reduce_kernel_utils.cuh"
 #include "rtp_llm/models_py/bindings/common/kernels/rotary_position_embedding.h"
 #include "rtp_llm/models_py/bindings/rocm/kernels/fused_rope_kvcache_kernel.h"
-#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #include <cstdlib>
 
 namespace rtp_llm {
