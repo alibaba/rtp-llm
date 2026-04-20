@@ -258,10 +258,14 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
 
 GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forwardMicroBatched");
-    py::object py_forward_method = py_model_.attr("forward_micro_batch");
-    if (device_props_.ffn_as_service) {
-        py::object py_outputs_obj = py_forward_method(std::vector<PyModelInputs>{});
-        return GptModelOutputs();
+
+    {
+        py::gil_scoped_acquire gil;
+        if (device_props_.ffn_as_service) {
+            py::object py_forward_method = py_model_.attr("forward_micro_batch");
+            py::object py_outputs_obj    = py_forward_method(std::vector<PyModelInputs>{});
+            return GptModelOutputs();
+        }
     }
 
     auto micro_batch_plan  = planMicroBatches(inputs);
@@ -292,12 +296,19 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         cache_store_async_writer_->init();
     }
 
-    py::object py_outputs_obj   = py_forward_method(input_list);
-    auto       py_model_outputs = py_outputs_obj.cast<std::vector<PyModelOutputs>>();
+    std::vector<PyModelOutputs> py_model_outputs;
+    {
+        py::gil_scoped_acquire gil;
+        py::object             py_forward_method = py_model_.attr("forward_micro_batch");
+        py::object             py_outputs_obj    = py_forward_method(input_list);
+        py_model_outputs                         = py_outputs_obj.cast<std::vector<PyModelOutputs>>();
+    }
+
     RTP_LLM_CHECK_WITH_INFO(py_model_outputs.size() == input_list.size(),
                             "py_model_outputs.size:%d != micro_batch_inputs.size:%d",
                             py_model_outputs.size(),
                             input_list.size());
+
     if (!inputs.warmup && inputs.pd_separation) {
         cache_store_async_writer_->waitAllDone();
     }
@@ -342,7 +353,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
     holdInputsHostBuffers(inputs);
-    py::gil_scoped_acquire gil;
+
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
@@ -383,6 +394,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // Cast the Python object to PyModelOutputs and extract hidden states
         CudaGraphState graph_state;
         if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state)) {
+            py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
             RTP_LLM_LOG_DEBUG(
@@ -395,6 +407,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
         } else {
+            py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
