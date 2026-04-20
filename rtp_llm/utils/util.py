@@ -337,10 +337,26 @@ def wait_sever_done(server_process, port: int, timeout: int = 1600):
         # 等待一段时间后重试
         time.sleep(retry_interval)
 
-        if not psutil.pid_exists(server_process.pid) or server_process.poll():
-            logging.warning(
-                f"进程:[{server_process.pid}] 状态异常, 服务启动失败,请查看日志文件"
-            )
+        rc = server_process.poll()
+        if not psutil.pid_exists(server_process.pid) or rc is not None:
+            if rc is not None and rc < 0:
+                import signal as signal_mod
+                sig = -rc
+                try:
+                    sig_name = signal_mod.Signals(sig).name
+                except ValueError:
+                    sig_name = f"signal {sig}"
+                logging.warning(
+                    f"Server pid={server_process.pid} killed by {sig_name} (exit code {rc})"
+                )
+            elif rc is not None:
+                logging.warning(
+                    f"Server pid={server_process.pid} exited with code {rc}"
+                )
+            else:
+                logging.warning(
+                    f"Server pid={server_process.pid} no longer exists"
+                )
             return False
         # 如果等待时间超过预设的超时时间，则放弃等待
         if time.time() - start_time > timeout:
