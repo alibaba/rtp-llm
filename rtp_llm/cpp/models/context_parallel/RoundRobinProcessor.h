@@ -24,8 +24,7 @@ public:
     explicit RoundRobinProcessor(int page_size = 1): page_size_(page_size) {}
     ~RoundRobinProcessor() override = default;
 
-    size_t handleOutputs(DeviceBase*                               device,
-                         BufferPtr&                                hidden_states,
+    size_t handleOutputs(torch::Tensor&                            hidden_states,
                          const GptModelInputs&                     inputs,
                          const torch_ext::PyContextParallelParams& cp_params) override;
 

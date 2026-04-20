@@ -54,6 +54,8 @@ protected:
     virtual int cpAlignSize(int cp_size) const {
         return cp_size * 2;
     }
+
+    int tp_size_ = 1;
 };
 
 class ContextParallelProcessorFactory {

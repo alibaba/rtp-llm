@@ -15,6 +15,7 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
 #else
     int prefill_cp_rank = tp_rank;
     int prefill_cp_size = tp_size;
+    tp_size_            = tp_size;
     int cp_align_size   = cpAlignSize(prefill_cp_size);
 
     auto& total_input_tokens       = model_input.combo_tokens;
@@ -113,7 +114,7 @@ size_t IContextParallelProcessor::handleOutputs(torch::Tensor&                  
     RTP_LLM_FAIL("Context parallel not supported on ROCm");
     return 0;
 #else
-    int prefill_cp_size = parallelism_config_.tp_size;
+    int prefill_cp_size = tp_size_;
 
     auto all_hidden_t =
         torch::empty({hidden_states.size(0) * prefill_cp_size, hidden_states.size(1)}, hidden_states.options());

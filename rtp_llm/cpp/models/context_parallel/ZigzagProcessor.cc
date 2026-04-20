@@ -131,7 +131,7 @@ size_t ZigZagProcessor::handleOutputs(torch::Tensor&                            
     RTP_LLM_FAIL("Context parallel not supported on ROCm");
     return 0;
 #else
-    int prefill_cp_size = parallelism_config_.tp_size;
+    int prefill_cp_size = tp_size_;
 
     auto all_hidden_t =
         torch::empty({hidden_states.size(0) * prefill_cp_size, hidden_states.size(1)}, hidden_states.options());
