@@ -13,8 +13,21 @@ jobs:
         working-directory: .github/scripts
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout repository (attempt 1)
+        id: checkout1
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Checkout repository (attempt 2)
+        if: steps.checkout1.outcome == 'failure'
+        id: checkout2
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Checkout repository (attempt 3)
+        if: steps.checkout2.outcome == 'failure'
+        id: checkout3
+        uses: actions/checkout@v4
 
       - name: Make scripts executable
         run: chmod +x trigger-merge.sh get-merge-result.sh
