@@ -99,6 +99,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
+        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         # Mori expects int32 for topk_ids
         if topk_ids.dtype != torch.int32:
