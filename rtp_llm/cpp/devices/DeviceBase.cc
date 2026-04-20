@@ -179,14 +179,11 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
     const bool     is_hybrid            = group_num > 1;
 
     int gid = 0;
+    if (param.kv_cache_layer_to_group_host && param.layer_id >= 0
+        && static_cast<size_t>(param.layer_id) < param.kv_cache_layer_to_group_host->size()) {
+        gid = param.kv_cache_layer_to_group_host->data<int32_t>()[param.layer_id];
+    }
     if (param.host_kv_cache_offset->shape().size() == 3) {
-        gid = -1;
-        if (param.kv_cache_layer_to_group_host && param.layer_id >= 0
-            && static_cast<size_t>(param.layer_id) < param.kv_cache_layer_to_group_host->size()) {
-            gid = param.kv_cache_layer_to_group_host->data<int32_t>()[param.layer_id];
-        }
-        RTP_LLM_CHECK_WITH_INFO(
-            gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
         const auto group_offset_view = (*param.host_kv_cache_offset)[static_cast<size_t>(gid)];  // [B, M]
         max_blocks_per_batch         = group_offset_view.shape()[1];
         offset_addr                  = group_offset_view.data<int32_t>();

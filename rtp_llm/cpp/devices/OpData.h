@@ -161,6 +161,12 @@ struct GptModelInputs {
     bool is_fake_stream  = false;
 
     // not sync to other tp rank
+    // Linear attention target verify should write draft tokens mamba states
+    // to extra kv_cache blocks when normal inference only write last token mamba state.
+    // So, the model has different inference logic for target verify and normal inference.
+    // To select correct inference mode, we need to set this flag manually.
+    bool is_target_verify = false;
+
     std::vector<std::string> trace_ids;
 
 public:
