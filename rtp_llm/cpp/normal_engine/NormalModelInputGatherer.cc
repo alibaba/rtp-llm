@@ -313,19 +313,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             gatherMultimodalFeaturesForContextBatch(stream, ctx, gathered_mm_features);
 
             if (stream->hasInputEmbeddings()) {
-                torch::Tensor emb      = stream->inputEmbeddings();
-                torch::Tensor emb_locs = stream->inputEmbeddingLocs();
-                if (emb.defined() && emb_locs.defined()) {
-                    if (!emb.is_cuda()) {
-                        gathered_input_embeddings.emplace_back(emb.to(torch::kCUDA));
-                    } else {
-                        gathered_input_embeddings.emplace_back(emb);
-                    }
-                    auto* locs_data = emb_locs.data_ptr<int>();
-                    for (int loc_idx = 0; loc_idx < emb_locs.numel(); ++loc_idx) {
-                        gathered_input_embedding_locs.push_back(
-                            locs_data[loc_idx] + ctx.token_idx - stream->reuseLength());
-                    }
+                torch::Tensor emb = stream->inputEmbeddings();
+                if (emb.defined()) {
+                    gathered_input_embeddings.emplace_back(emb.cpu());
+                    gathered_input_embedding_locs.push_back(ctx.token_idx);
                 }
             }
 
@@ -364,7 +355,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     }
     if (!gathered_input_embeddings.empty()) {
         model_input.input_embeddings      = std::move(gathered_input_embeddings);
-        model_input.input_embeddings_locs = torch::tensor(gathered_input_embedding_locs, torch::kInt32);
+        model_input.input_embeddings_locs = torch::from_blob(gathered_input_embedding_locs.data(),
+                                                             {(int64_t)gathered_input_embedding_locs.size()},
+                                                             torch::kInt32)
+                                                .clone();
     }
     return absl::OkStatus();
 }
