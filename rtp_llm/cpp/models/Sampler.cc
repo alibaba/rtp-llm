@@ -16,28 +16,6 @@ Sampler::Sampler(const SamplerInitParams& params)
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    // [DEBUG] Log input token_ids
-    RTP_LLM_LOG_INFO("[DEBUG-SAMPLER] Sampler input token_ids shape: [%zu, %zu]",
-                     inputs.token_ids->shape()[0], inputs.token_ids->shape()[1]);
-    {
-        size_t batch_size = inputs.token_ids->shape()[0];
-        size_t seq_len = inputs.token_ids->shape()[1];
-        const int32_t* data = inputs.token_ids->data<int32_t>();
-        for (size_t i = 0; i < batch_size && i < 10; ++i) {
-            std::string tokens_str_first;
-            for (size_t j = 0; j < seq_len && j < 10; ++j) {
-                tokens_str_first += std::to_string(data[i * seq_len + j]) + " ";
-            }
-            RTP_LLM_LOG_INFO("[DEBUG-SAMPLER] Sampler input token_ids[%zu] first 10: %s", i, tokens_str_first.c_str());
-            
-            std::string tokens_str_last;
-            size_t start_j = seq_len > 10 ? seq_len - 10 : 0;
-            for (size_t j = start_j; j < seq_len; ++j) {
-                tokens_str_last += std::to_string(data[i * seq_len + j]) + " ";
-            }
-            RTP_LLM_LOG_INFO("[DEBUG-SAMPLER] Sampler input token_ids[%zu] last 10: %s", i, tokens_str_last.c_str());
-        }
-    }
 
 #define MAY_GET_BUFFER_VIEW(buffer_ptr, offset, size)                                                                  \
     (buffer_ptr.get() ? buffer_ptr->view((offset), (size)) : Buffer::emptyBuffer())
@@ -152,9 +130,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 std::fill(success.data<bool>(), success.data<bool>() + batch_size_in, true);
             }
         } else {
-            RTP_LLM_LOG_DEBUG("current_num_beams_in is %d", cur_num_beams_in);
-            RTP_LLM_LOG_DEBUG("current_num_beams_out is %d", cur_num_beams_out);
-            RTP_LLM_LOG_DEBUG("current_beam_batch is %d", beam_batch_size);
             RTP_LLM_CHECK_WITH_INFO((batch_size_in % cur_num_beams_in == 0),
                                     "sample_batch_size[%d] must devide by current_num_beams_in[%d]");
 
@@ -188,13 +163,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             device_->copy({cum_log_probs_out, *output.cum_log_probs});
             device_->copy({beam_indices, *output.beam_indices});
 
-            // [DEBUG] Log beam_indices
-            std::string beam_idx_str;
-            for (size_t i = 0; i < batch_size_out; ++i) {
-                beam_idx_str += std::to_string(beam_indices.data<int32_t>()[i]) + " ";
-            }
-            RTP_LLM_LOG_INFO("[DEBUG-SAMPLER] beam_indices: %s", beam_idx_str.c_str());
-
             std::fill(success.data<bool>(), success.data<bool>() + batch_size_in, true);
         }
 
@@ -203,23 +171,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         from_batch_idx_out = to_batch_idx_out;
     }
     // TODO(xinfei.sxf) 优化copy token_ids
-    // [DEBUG] Log output token_ids
-    RTP_LLM_LOG_INFO("[DEBUG-SAMPLER] Sampler output token_ids shape: [%zu, %zu]",
-                     all_token_ids_out->shape()[0], all_token_ids_out->shape()[1]);
-    {
-        size_t batch_size = all_token_ids_out->shape()[0];
-        size_t seq_len = all_token_ids_out->shape()[1];
-        const int32_t* data = all_token_ids_out->data<int32_t>();
-        for (size_t i = 0; i < batch_size && i < 10; ++i) {
-            std::string tokens_str;
-            // Print last few tokens (newly generated) instead of first few
-            size_t start_j = (seq_len > 15) ? seq_len - 15 : 0;
-            for (size_t j = start_j; j < seq_len && j < start_j + 10; ++j) {
-                tokens_str += std::to_string(data[i * seq_len + j]) + " ";
-            }
-            RTP_LLM_LOG_INFO("[DEBUG-SAMPLER] Sampler output token_ids[%zu] last tokens: %s", i, tokens_str.c_str());
-        }
-    }
     return SamplerOutput({std::move(all_token_ids_out),
                           std::move(all_cum_log_probs_out),
                           std::move(inputs.all_probs),

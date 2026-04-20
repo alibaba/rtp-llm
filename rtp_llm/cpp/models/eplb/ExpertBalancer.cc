@@ -176,8 +176,6 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     ep_size_(ep_size),
     metrics_reporter_(metrics_reporter),
     eplb_python_wrapper_(py_eplb) {
-    cout << "ExpertBalancer constructed with " << log_exp_num << " logical experts" << endl;
-    printf("DEBUG: ExpertBalancer constructor called for linker debug\n");
     eplb_control_data_ = eplb_config;
 
     // init memory

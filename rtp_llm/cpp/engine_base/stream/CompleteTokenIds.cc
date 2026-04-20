@@ -57,33 +57,11 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
         {rtp_llm::DataType::TYPE_INT32, {(size_t)max_batch_size_, max_token_num}, rtp_llm::AllocationType::HOST}, {});
 
     memset(complete_token_ids_->data(), 0, complete_token_ids_->sizeBytes());
-    // [DEBUG] Log init
-    RTP_LLM_LOG_INFO("[DEBUG-INIT] batch_size_=%d max_token_num=%zu input_ids size=%zu",
-                     batch_size_, max_token_num, generate_input->input_ids->size());
-    std::string input_tokens;
-    for (size_t k = 0; k < generate_input->input_ids->size() && k < 10; ++k) {
-        input_tokens += std::to_string(generate_input->input_ids->data<int32_t>()[k]) + " ";
-    }
-    RTP_LLM_LOG_INFO("[DEBUG-INIT] input_ids first 10 tokens: %s", input_tokens.c_str());
-    
-    std::string input_tokens_last;
-    size_t start_idx = generate_input->input_ids->size() > 10 ? generate_input->input_ids->size() - 10 : 0;
-    for (size_t k = start_idx; k < generate_input->input_ids->size(); ++k) {
-        input_tokens_last += std::to_string(generate_input->input_ids->data<int32_t>()[k]) + " ";
-    }
-    RTP_LLM_LOG_INFO("[DEBUG-INIT] input_ids last 10 tokens: %s", input_tokens_last.c_str());
     for (int i = 0; i < batch_size_; ++i) {
         memcpy(complete_token_ids_->dataWithOffset<int32_t>(i * max_token_num),
                generate_input->input_ids->data(),
                generate_input->input_ids->sizeBytes());
     }
-
-    // [DEBUG] Log after init
-    std::string after_init_tokens;
-    for (size_t k = 0; k < 10; ++k) {
-        after_init_tokens += std::to_string(complete_token_ids_->data<int32_t>()[k]) + " ";
-    }
-    RTP_LLM_LOG_INFO("[DEBUG-INIT] after init, complete_token_ids_[0..9]: %s", after_init_tokens.c_str());
 
     RTP_LLM_LOG_DEBUG("complete tokenids init done, %s", showStatus(0).c_str());
 }
@@ -201,16 +179,6 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens,
         }
     };
 
-    // [DEBUG] Log new_tokens content
-    RTP_LLM_LOG_INFO("[DEBUG-UPDATE] new_tokens shape: [%d, %zu], num_new_tokens=%d, seq_length_=%d",
-                     new_batch_size, max_num_new_tokens, num_new_tokens, seq_length_);
-    // Print all beams, not just first 3
-    std::string all_new_tokens_str;
-    for (size_t i = 0; i < new_batch_size; ++i) {
-        all_new_tokens_str += std::to_string(get_token_id(i, 0)) + " ";
-    }
-    RTP_LLM_LOG_INFO("[DEBUG-UPDATE] new_tokens all beams: %s", all_new_tokens_str.c_str());
-    
     for (size_t i = 0; i < new_batch_size; ++i) {
         for (size_t j = 0; j < num_new_tokens; ++j) {
             auto current_token_id = get_token_id(i, j);
@@ -275,14 +243,6 @@ void CompleteTokenIds::copyTokensTo(int batch_id, void* dst, int offset, size_t 
 
 void CompleteTokenIds::appendTokens(int batch_id, size_t token_num, const rtp_llm::Buffer& src) {
     int token_dim2 = complete_token_ids_->shape()[1];
-    // [DEBUG] Log append tokens
-    RTP_LLM_LOG_INFO("[DEBUG-APPEND] batch_id=%d token_num=%zu seq_length_=%d token_dim2=%d",
-                     batch_id, token_num, seq_length_, token_dim2);
-    std::string src_tokens;
-    for (size_t k = 0; k < token_num && k < 10; ++k) {
-        src_tokens += std::to_string(src.data<int>()[k]) + " ";
-    }
-    RTP_LLM_LOG_INFO("[DEBUG-APPEND] src tokens: %s", src_tokens.c_str());
     if (src.dim() == 2 && src.shape()[0] == 1) {
         std::memcpy(complete_token_ids_->dataWithOffset<int>(batch_id * token_dim2 + seq_length_),
                     src.data<int>(),

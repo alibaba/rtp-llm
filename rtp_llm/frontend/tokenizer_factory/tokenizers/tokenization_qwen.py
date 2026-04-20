@@ -237,12 +237,8 @@ class QWenTokenizer(PreTrainedTokenizer):
     def _convert_id_to_token(self, index: int) -> Union[bytes, str]:
         """Converts an id to a token, special tokens included"""
         if index in self.decoder:
-            token = self.decoder[index]
-            # [DEBUG] Log special token mapping
-            if isinstance(token, str) and (token.startswith("<") or token.startswith("|")):
-                logger.info(f"[DEBUG-TOKEN] id={index} -> token='{token}'")
-            return token
-        raise ValueError(f"unknown id: {index}")
+            return self.decoder[index]
+        raise ValueError("unknown ids")
 
     def _convert_token_to_id(self, token: Union[bytes, str]) -> int:
         """Converts a token to an id using the vocab, special tokens included"""
