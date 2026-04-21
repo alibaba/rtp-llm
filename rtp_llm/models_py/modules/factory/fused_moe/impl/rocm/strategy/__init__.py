@@ -6,6 +6,7 @@ from .fp4_per_group import RocmFp4PerGroupPureTPStrategy
 from .fp8_per_block import RocmFp8PerBlockPureTPStrategy
 from .fp8_per_channel import RocmFp8PerChannelPureTPStrategy
 from .torch_dist_ep import TorchDistEpNormalStrategy
+from .mori_ep_fp4 import MoriEpFp4Strategy
 from .torch_dist_ep_fp4 import TorchDistEpFp4Strategy
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "RocmFp4PerGroupPureTPStrategy",
     "TorchDistEpNormalStrategy",
     "TorchDistEpFp4Strategy",
+    "MoriEpFp4Strategy",
 ]
