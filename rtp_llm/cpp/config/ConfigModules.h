@@ -293,8 +293,17 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool    cache_store_rdma_mode               = false;
-    int     wrr_available_ratio                 = 80;
+    bool        cache_store_rdma_mode                     = false;
+    bool        cache_store_mooncake_mode                 = false;
+    std::string cache_store_mooncake_metadata_conn_string = "";
+    std::string cache_store_mooncake_local_server_name    = "";
+    std::string cache_store_mooncake_ip_or_host_name      = "";
+    int64_t     cache_store_mooncake_rpc_port             = 12345;
+    int64_t     cache_store_mooncake_control_plane_port   = 0;
+    std::string cache_store_mooncake_location             = "*";
+    bool        cache_store_mooncake_remote_accessible    = true;
+    bool        cache_store_mooncake_update_metadata      = true;
+    int         wrr_available_ratio                       = 80;
     int     rank_factor                         = 0;
     int     thread_count                        = 16;
     int     rdma_connect_timeout_ms             = 250;

@@ -91,6 +91,11 @@ config_setting(
     define_values = {"use_remote_kv_cache": "true"},
 )
 
+config_setting(
+    name = "enable_mooncake_te",
+    values = {"define": "enable_mooncake_te=true"},
+)
+
 cc_binary(
     name = "th_transformer_config",
     copts = copts(),
