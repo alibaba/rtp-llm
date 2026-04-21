@@ -276,7 +276,7 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                params.output_token_ids_d,
                                params.output_accepted_token_num_d,
                                params.output_emitted_token_num_d,
-                               false,
+                               true,
                                int64_t(stream));
 }
 
@@ -523,7 +523,7 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                  params.output_token_ids_d,
                                  params.output_accepted_token_num_d,
                                  params.output_emitted_token_num_d,
-                                 false,
+                                 true,
                                  int64_t(stream));
 }
 

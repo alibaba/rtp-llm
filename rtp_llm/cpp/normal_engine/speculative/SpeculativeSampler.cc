@@ -57,8 +57,21 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto          draft_token_ids_d_t    = draft_token_ids.to(target_device).clone();
     auto          draft_token_probs_d_t  = draft_token_probs;
     auto          target_token_probs_d_t = target_token_probs;
-    torch::Tensor uniform_samples_d      = torch::rand({(long)batch_size, (long)propose_step_ + 1},
-                                                  torch::TensorOptions().device(target_device).dtype(torch::kFloat));
+    auto          rand_options           = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
+    torch::Tensor uniform_samples_d      = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
+
+    // Override per-stream uniform samples with seeded generator when random_seed is set,
+    // ensuring deterministic acceptance for reproducible iter_count.
+    {
+        int idx = 0;
+        for (const auto& stream : streams) {
+            auto gen = stream->getGenerator();
+            if (gen.defined()) {
+                uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options);
+            }
+            idx++;
+        }
+    }
     torch::Tensor output_token_ids_d     = torch::zeros({(long)batch_size, (long)propose_step_ + 1},
                                                     torch::TensorOptions().device(target_device).dtype(torch::kInt32));
     torch::Tensor output_accepted_token_num_d =
