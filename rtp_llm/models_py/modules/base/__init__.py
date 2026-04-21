@@ -1,7 +1,9 @@
 """
 Base modules - independent modules without dependencies on other modules.
-Different architectures may have different implementations.
+Device-specific ops are loaded via device routing.
 """
+
+from rtp_llm.device import get_current_device
 
 # Import common base modules (architecture-independent)
 from rtp_llm.models_py.modules.base.common.embedding import Embedding, EmbeddingBert
@@ -13,64 +15,40 @@ from rtp_llm.models_py.modules.base.common.norm import (
     RMSNormTorch,
     RMSResNormTorch,
 )
-from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
 
-# Determine device type and import architecture-specific modules
-device_type = get_exec_ctx().get_device_type()
+# Device-specific ops (routed via device.get_base_ops())
+_ops = get_current_device().get_base_ops()
 
-if device_type == DeviceType.ROCm:
-    from rtp_llm.models_py.modules.base.rocm.activation import FusedSiluAndMul
-    from rtp_llm.models_py.modules.base.rocm.moe_gating import SigmoidGateScaleAdd
-    from rtp_llm.models_py.modules.base.rocm.norm import (
-        AddBiasResLayerNorm,
-        FusedQKRMSNorm,
-        QKRMSNorm,
-        RMSNorm,
-        RMSResNorm,
-    )
+FusedSiluAndMul = _ops.FusedSiluAndMul
+RMSNorm = _ops.RMSNorm
+RMSResNorm = _ops.RMSResNorm
+AddBiasResLayerNorm = _ops.AddBiasResLayerNorm
+FusedQKRMSNorm = _ops.FusedQKRMSNorm
+QKRMSNorm = _ops.QKRMSNorm
+SelectTopk = _ops.SelectTopk
+GroupTopK = _ops.GroupTopK
+FakeBalanceExpert = _ops.FakeBalanceExpert
+IndexerOp = _ops.IndexerOp
+SigmoidGateScaleAdd = _ops.SigmoidGateScaleAdd
 
-    # Import NotImplementedOp placeholders for ROCm
-    from rtp_llm.models_py.modules.base.rocm.not_implemented_ops import (
-        FakeBalanceExpert,
-        GroupTopK,
-        IndexerOp,
-    )
-    from rtp_llm.models_py.modules.base.rocm.select_topk import SelectTopk
-else:
-    from rtp_llm.models_py.modules.base.cuda.activation import FusedSiluAndMul
-    from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
-    from rtp_llm.models_py.modules.base.cuda.moe_gating import SigmoidGateScaleAdd
-    from rtp_llm.models_py.modules.base.cuda.norm import (
-        AddBiasResLayerNorm,
-        FusedQKRMSNorm,
-        QKRMSNorm,
-        RMSNorm,
-        RMSResNorm,
-    )
-    from rtp_llm.models_py.modules.base.cuda.select_topk import (
-        FakeBalanceExpert,
-        GroupTopK,
-        SelectTopk,
-    )
-
-    __all__ = [
-        "Embedding",
-        "EmbeddingBert",
-        "WriteCacheStoreOp",
-        "AddBiasResLayerNorm",
-        "AddBiasResLayerNormTorch",
-        "LayerNorm",
-        "LayerNormTorch",
-        "RMSNormTorch",
-        "RMSResNormTorch",
-        "FusedQKRMSNorm",
-        "QKRMSNorm",
-        "RMSNorm",
-        "RMSResNorm",
-        "SelectTopk",
-        "GroupTopK",
-        "FakeBalanceExpert",
-        "FusedSiluAndMul",
-        "IndexerOp",
-        "SigmoidGateScaleAdd",
-    ]
+__all__ = [
+    "Embedding",
+    "EmbeddingBert",
+    "WriteCacheStoreOp",
+    "AddBiasResLayerNorm",
+    "AddBiasResLayerNormTorch",
+    "LayerNorm",
+    "LayerNormTorch",
+    "RMSNormTorch",
+    "RMSResNormTorch",
+    "FusedQKRMSNorm",
+    "QKRMSNorm",
+    "RMSNorm",
+    "RMSResNorm",
+    "SelectTopk",
+    "GroupTopK",
+    "FakeBalanceExpert",
+    "FusedSiluAndMul",
+    "IndexerOp",
+    "SigmoidGateScaleAdd",
+]

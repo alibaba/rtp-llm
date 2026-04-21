@@ -127,6 +127,10 @@ class CPFlashInferImpl(FMHAImplBase):
     Reference: https://github.com/pytorch/pytorch/blob/main/torch/distributed/tensor/experimental/_context_parallel/_attention.py
     """
 
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or not fmha_config.disable_flash_infer
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,

@@ -405,6 +405,10 @@ class PyFlashinferPrefillAttnOp(object):
 class PyFlashinferPrefillImplBase(FMHAImplBase):
     """Base class for FlashInfer prefill implementations (Ragged and Paged)."""
 
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or not fmha_config.disable_flash_infer
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -702,6 +706,11 @@ class PyFlashinferDecodeAttnOp(object):
 
 
 class PyFlashinferDecodeImpl(FMHAImplBase):
+
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or not fmha_config.disable_flash_infer
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,

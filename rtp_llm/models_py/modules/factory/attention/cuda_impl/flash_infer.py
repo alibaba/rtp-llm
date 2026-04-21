@@ -18,6 +18,10 @@ from rtp_llm.ops.compute_ops import (
 
 class FlashInferPrefillImpl(FMHAImplBase):
 
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or not fmha_config.disable_flash_infer
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -73,6 +77,10 @@ class FlashInferPrefillImpl(FMHAImplBase):
 
 
 class FlashInferDecodeImpl(FMHAImplBase):
+
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or not fmha_config.disable_flash_infer
 
     def __init__(
         self,

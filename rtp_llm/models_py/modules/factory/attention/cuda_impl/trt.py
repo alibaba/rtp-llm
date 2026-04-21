@@ -19,6 +19,10 @@ from rtp_llm.ops.compute_ops import (
 
 class TRTMHAImpl(FMHAImplBase):
 
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or fmha_config.enable_trt_fmha
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -121,6 +125,10 @@ class TRTMHAImpl(FMHAImplBase):
 
 
 class TRTPagedMHAImpl(FMHAImplBase):
+
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or fmha_config.enable_paged_trt_fmha
 
     def __init__(
         self,

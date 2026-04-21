@@ -59,6 +59,12 @@ class MlaImplBase(object):
     def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
         return False
 
+    @classmethod
+    def is_available(cls, fmha_config: Optional[FMHAConfig]) -> bool:
+        """检查该实现是否被用户配置禁用。默认返回 True。
+        子类 override 此方法来关联具体的 fmha_config 开关。"""
+        return True
+
     def support_cuda_graph(self) -> bool:
         """Check if CUDA graph is supported."""
         return callable(getattr(self, "prepare_cuda_graph", None))
@@ -134,6 +140,12 @@ class FMHAImplBase(ABC):
             bool: 如果支持则返回 True，否则返回 False
         """
         return False
+
+    @classmethod
+    def is_available(cls, fmha_config: Optional[FMHAConfig]) -> bool:
+        """检查该实现是否被用户配置禁用。默认返回 True。
+        子类 override 此方法来关联具体的 fmha_config 开关。"""
+        return True
 
     @classmethod
     def support_parallelism_config(
