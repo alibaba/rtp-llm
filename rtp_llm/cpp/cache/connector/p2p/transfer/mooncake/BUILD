@@ -23,27 +23,17 @@ cc_library(
         "//conditions:default": ["MooncakeTransferEngineAdapterStub.cc"],
     }),
     copts = select({
-        "//:enable_mooncake_te": [
-            "-I/data0/qiongshi.gb/mooncake/Mooncake/mooncake-common/include",
-            "-I/data0/qiongshi.gb/mooncake/Mooncake/mooncake-transfer-engine/include",
-        ],
-        "//conditions:default": [],
-    }),
-    linkopts = select({
-        "//:enable_mooncake_te": [
-            "-L/data0/qiongshi.gb/mooncake/Mooncake/build-rtp/install/lib",
-            "-Wl,-rpath,/data0/qiongshi.gb/mooncake/Mooncake/build-rtp/install/lib",
-            "-lasio",
-            "-lmooncake_common",
-            "-ltransfer_engine",
-        ],
+        "//:enable_mooncake_te": ["-std=c++20"],
         "//conditions:default": [],
     }),
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_config",
         "//rtp_llm/cpp/utils:core_utils",
-    ],
+    ] + select({
+        "//:enable_mooncake_te": ["@mooncake_transfer_engine_local//:transfer_engine"],
+        "//conditions:default": [],
+    }),
 )
 
 cc_library(

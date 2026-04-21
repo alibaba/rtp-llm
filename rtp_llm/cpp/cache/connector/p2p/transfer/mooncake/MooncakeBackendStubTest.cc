@@ -52,6 +52,11 @@ public:
         return 7;
     }
 
+    void freeBatchID(uint64_t batch_id) override {
+        last_freed_batch_id = batch_id;
+        ++free_batch_count;
+    }
+
     bool submitTransfer(uint64_t batch_id, const std::vector<MooncakeWriteRequest>& requests) override {
         last_batch_id = batch_id;
         last_submit_requests = requests.size();
@@ -77,8 +82,10 @@ public:
     uint64_t    last_reg_aligned_size    = 0;
     size_t      last_batch_request_count = 0;
     uint64_t    last_batch_id            = 0;
+    uint64_t    last_freed_batch_id      = 0;
     uint64_t    last_status_batch_id     = 0;
     size_t      last_submit_requests     = 0;
+    int         free_batch_count         = 0;
     std::string last_submit_segment_name;
     std::string last_segment_name;
     std::string last_location;
@@ -263,8 +270,10 @@ TEST(MooncakeKVCacheSenderTest, SendBuildsWriteRequestsAndFinishesOnSuccess) {
     EXPECT_EQ(adapter->last_submit_segment_name, "segment_a");
     EXPECT_EQ(adapter->last_batch_request_count, 2u);
     EXPECT_EQ(adapter->last_batch_id, 7u);
+    EXPECT_EQ(adapter->last_freed_batch_id, 7u);
     EXPECT_EQ(adapter->last_status_batch_id, 7u);
     EXPECT_EQ(adapter->last_submit_requests, 2u);
+    EXPECT_EQ(adapter->free_batch_count, 1);
     EXPECT_TRUE(control_plane_client->finish_called);
     EXPECT_TRUE(control_plane_client->last_finish_success);
 }

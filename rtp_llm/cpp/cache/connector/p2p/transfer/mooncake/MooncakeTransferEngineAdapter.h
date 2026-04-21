@@ -38,6 +38,8 @@ public:
 
     virtual uint64_t allocateBatchID(size_t request_count) = 0;
 
+    virtual void freeBatchID(uint64_t batch_id) = 0;
+
     virtual bool submitTransfer(uint64_t batch_id, const std::vector<MooncakeWriteRequest>& requests) = 0;
 
     // 查询 batch 状态；finished=false 表示仍在传输中，调用方应继续轮询。

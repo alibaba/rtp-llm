@@ -49,3 +49,6 @@ pip_gpu_rocm_torch_install_deps()
 
 load("//:def.bzl", "read_release_version")
 read_release_version(name = "release_version")
+
+load("//deps:mooncake_local.bzl", "mooncake_transfer_engine_local")
+mooncake_transfer_engine_local(name = "mooncake_transfer_engine_local")

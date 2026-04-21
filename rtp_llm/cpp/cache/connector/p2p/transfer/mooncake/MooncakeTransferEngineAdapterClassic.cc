@@ -6,6 +6,10 @@
 #include "transfer_engine.h"
 #include "transfer_metadata.h"
 
+#ifdef LOG_EVERY_N_VARNAME_CONCAT
+#undef LOG_EVERY_N_VARNAME_CONCAT
+#endif
+
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -19,6 +23,12 @@ std::string resolveLocalServerName(const MooncakeTransferEngineInitConfig& confi
     }
     const auto host = config.ip_or_host_name.empty() ? std::string("127.0.0.1") : config.ip_or_host_name;
     return host + ":" + std::to_string(config.rpc_port);
+}
+
+constexpr ::mooncake::SegmentHandle kInvalidSegmentHandle = static_cast<::mooncake::SegmentHandle>(-1);
+
+bool isValidSegmentHandle(::mooncake::SegmentHandle handle) {
+    return static_cast<int64_t>(handle) >= 0;
 }
 
 class MooncakeClassicTransferEngineAdapter : public IMooncakeTransferEngineAdapter {
@@ -91,7 +101,7 @@ public:
 
     bool openSegment(const std::string& segment_name) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return getOrOpenSegmentLocked(segment_name) != 0;
+        return isValidSegmentHandle(getOrOpenSegmentLocked(segment_name));
     }
 
     uint64_t allocateBatchID(size_t request_count) override {
@@ -101,6 +111,14 @@ public:
         }
         const auto batch_id = engine_->allocateBatchID(request_count);
         return batch_id == ::mooncake::INVALID_BATCH_ID ? kInvalidMooncakeBatchId : batch_id;
+    }
+
+    void freeBatchID(uint64_t batch_id) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!engine_ || batch_id == kInvalidMooncakeBatchId) {
+            return;
+        }
+        engine_->freeBatchID(batch_id);
     }
 
     bool submitTransfer(uint64_t batch_id, const std::vector<MooncakeWriteRequest>& requests) override {
@@ -113,7 +131,7 @@ public:
         te_requests.reserve(requests.size());
         for (const auto& request : requests) {
             const auto handle = getOrOpenSegmentLocked(request.segment_name);
-            if (handle == 0 || !request.source_addr || request.target_addr == 0 || request.length == 0) {
+            if (!isValidSegmentHandle(handle) || !request.source_addr || request.target_addr == 0 || request.length == 0) {
                 RTP_LLM_LOG_ERROR("MooncakeClassicTransferEngineAdapter submitTransfer invalid request, segment=%s, source=%p, target=%lu, length=%lu",
                                   request.segment_name.c_str(),
                                   request.source_addr,
@@ -212,7 +230,7 @@ public:
 private:
     ::mooncake::SegmentHandle getOrOpenSegmentLocked(const std::string& segment_name) {
         if (!engine_ || segment_name.empty()) {
-            return 0;
+            return kInvalidSegmentHandle;
         }
         auto it = segment_handles_.find(segment_name);
         if (it != segment_handles_.end()) {
@@ -220,11 +238,11 @@ private:
         }
 
         const auto handle = engine_->openSegment(segment_name);
-        if (static_cast<int64_t>(handle) < 0) {
+        if (!isValidSegmentHandle(handle)) {
             RTP_LLM_LOG_ERROR("MooncakeClassicTransferEngineAdapter openSegment failed, segment=%s, handle=%ld",
                               segment_name.c_str(),
                               static_cast<int64_t>(handle));
-            return 0;
+            return kInvalidSegmentHandle;
         }
         segment_handles_[segment_name] = handle;
         return handle;

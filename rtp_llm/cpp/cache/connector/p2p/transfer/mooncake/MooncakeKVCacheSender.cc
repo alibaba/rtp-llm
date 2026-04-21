@@ -462,6 +462,7 @@ void MooncakeKVCacheSender::send(const SendRequest& request,
     if (!adapter_->submitTransfer(batch_id, write_requests)) {
         error_code = TransferErrorCode::UNKNOWN;
         error_message = "Mooncake send failed: submitTransfer failed";
+        adapter_->freeBatchID(batch_id);
         TransferErrorCode finish_error_code = TransferErrorCode::OK;
         std::string finish_error_message;
         control_plane_client_->finish(request.ip,
@@ -477,6 +478,7 @@ void MooncakeKVCacheSender::send(const SendRequest& request,
     }
 
     (void)waitTransferDone(batch_id, request.deadline_ms, &error_code, &error_message);
+    adapter_->freeBatchID(batch_id);
 
     TransferErrorCode finish_error_code = TransferErrorCode::OK;
     std::string       finish_error_message;
