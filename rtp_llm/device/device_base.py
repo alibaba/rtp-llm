@@ -97,3 +97,55 @@ class DeviceBase:
         **kwargs,
     ):
         return kernel, scale
+
+    # ===== Attention 优先级路由 =====
+
+    def get_prefill_mha_priorities(self) -> list:
+        """返回该设备 prefill MHA 实现的优先级列表（高优先级在前）。"""
+        return []
+
+    def get_decode_mha_priorities(self) -> list:
+        """返回该设备 decode MHA 实现的优先级列表（高优先级在前）。"""
+        return []
+
+    def get_prefill_mla_priorities(self) -> list:
+        """返回该设备 prefill MLA 实现的优先级列表（高优先级在前）。"""
+        return []
+
+    def get_decode_mla_priorities(self) -> list:
+        """返回该设备 decode MLA 实现的优先级列表（高优先级在前）。"""
+        return []
+
+    # ===== Base Ops 分派 =====
+
+    def get_base_ops(self):
+        """返回 BaseOps NamedTuple，包含该设备的基础算子类。"""
+        raise NotImplementedError("get_base_ops is not implemented")
+
+    # ===== Linear 分派 =====
+
+    def register_linear_impl(self):
+        """导入该设备的 linear 实现模块，触发策略注册。"""
+        pass
+
+    # ===== MoE 策略路由 =====
+
+    def get_moe_strategy_candidates(self) -> list:
+        """返回该设备支持的 MoE 策略候选列表。"""
+        return []
+
+    # ===== 能力查询 =====
+
+    def is_cuda(self) -> bool:
+        return self.get_device_type() == DeviceType.Cuda
+
+    def is_rocm(self) -> bool:
+        return self.get_device_type() == DeviceType.ROCm
+
+    @property
+    def supports_fp4(self) -> bool:
+        return False
+
+    @property
+    def supports_fp8(self) -> bool:
+        return False

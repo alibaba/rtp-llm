@@ -17,7 +17,7 @@ from flashinfer.fused_moe.core import (
 from torch.nn import functional as F
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.device.device_impl import CudaImpl
+from rtp_llm.device.cuda_device import CudaImpl
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )

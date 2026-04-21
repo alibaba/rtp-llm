@@ -58,6 +58,10 @@ class XQAParams:
 
 class XQAImpl(FMHAImplBase):
 
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or fmha_config.enable_xqa
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -109,6 +113,10 @@ class XQAImpl(FMHAImplBase):
 
 
 class XQADecodeImpl(FMHAImplBase):
+
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or fmha_config.enable_xqa
 
     def __init__(
         self,

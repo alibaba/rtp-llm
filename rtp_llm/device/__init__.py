@@ -1,8 +1,10 @@
 import logging
 from typing import Optional, Type
 
+from rtp_llm.device.cpu_device import ArmCpuImpl, CpuImpl
+from rtp_llm.device.cuda_device import CudaImpl, PpuImpl
 from rtp_llm.device.device_base import DeviceBase
-from rtp_llm.device.device_impl import ArmCpuImpl, CpuImpl, CudaImpl, PpuImpl, RocmImpl
+from rtp_llm.device.rocm_device import RocmImpl
 from rtp_llm.ops.compute_ops import DeviceType, ExecCtxExporter, get_exec_ctx
 
 _current_device: Optional[DeviceBase] = None

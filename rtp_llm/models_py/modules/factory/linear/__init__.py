@@ -1,11 +1,12 @@
 """Linear factory module
 
 Uses strategy pattern for creating Linear layers.
+Device-specific registration is driven by device.register_linear_impl().
 """
 
 import logging
 
-from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
+from rtp_llm.device import get_current_device
 
 from .factory import LinearFactory
 from .linear_base import LinearBase
@@ -16,12 +17,7 @@ __all__ = ["LinearFactory", "LinearBase"]
 # Device-specific Linear implementation registration
 # ============================================================================
 
-device_type = get_exec_ctx().get_device_type()
 try:
-    if device_type == DeviceType.ROCm:
-        # Import to trigger ROCm Linear strategy registration
-        import rtp_llm.models_py.modules.factory.linear.impl.rocm  # noqa: F401
-    else:
-        import rtp_llm.models_py.modules.factory.linear.impl.cuda  # noqa: F401
+    get_current_device().register_linear_impl()
 except Exception as e:
-    logging.warning(f"Failed to import Linear implementation: {e}")
+    logging.warning(f"Failed to register Linear implementation: {e}")

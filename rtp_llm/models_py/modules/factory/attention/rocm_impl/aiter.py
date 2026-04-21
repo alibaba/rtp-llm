@@ -865,6 +865,10 @@ class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
 class AiterPrefillImplAsm(FMHAImplBase):
     """Aiter prefill attention implementation using ASM."""
 
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or fmha_config.use_asm_pa
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -916,6 +920,10 @@ class AiterPrefillImplAsm(FMHAImplBase):
 
 class AiterPrefillImplNonAsm(FMHAImplBase):
     """Aiter prefill attention implementation using non-ASM."""
+
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or fmha_config.use_aiter_pa
 
     def __init__(
         self,
@@ -972,6 +980,10 @@ class AiterPrefillImplPaged(FMHAImplBase):
     - seq_len <= 4: Triton PA (short query optimization)
     - Otherwise: CK batch-prefill (general paged prefill)
     """
+
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or fmha_config.use_asm_pa
 
     def __init__(
         self,
@@ -1076,6 +1088,11 @@ class AiterDecodeImplBase(FMHAImplBase):
 
 
 class AiterDecodeImplAsm(AiterDecodeImplBase):
+
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or fmha_config.use_asm_pa
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -1123,6 +1140,11 @@ class AiterDecodeImplAsm(AiterDecodeImplBase):
 
 
 class AiterDecodeImplNonAsm(AiterDecodeImplBase):
+
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or fmha_config.use_aiter_pa
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -1171,6 +1193,10 @@ class AiterDecodeImplNonAsm(AiterDecodeImplBase):
 
 class AiterDecodeImplTriton(AiterDecodeImplBase):
     """Aiter decode attention implementation using Triton."""
+
+    @classmethod
+    def is_available(cls, fmha_config):
+        return fmha_config is None or fmha_config.use_triton_pa
 
     def __init__(
         self,
