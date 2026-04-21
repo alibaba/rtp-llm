@@ -1217,27 +1217,26 @@ class BazelTest(Command):
             raise SystemExit(result.returncode)
 
 
-if __name__ == "__main__":
-    # Get all dependencies (base + platform-specific)
-    all_deps = get_all_dependencies()
+# Get all dependencies (base + platform-specific)
+all_deps = get_all_dependencies()
 
-    # Get dynamic version
-    version = get_version_with_platform()
-    print(f"Building rtp-llm version: {version}")
+# Get dynamic version
+version = get_version_with_platform()
+print(f"Building rtp-llm version: {version}")
 
-    cmdclass = {"build_ext": BuildBazelExtension, "test": BazelTest}
-    if BdistWheelWithPlatform is not None:
-        cmdclass["bdist_wheel"] = BdistWheelWithPlatform
+cmdclass = {"build_ext": BuildBazelExtension, "test": BazelTest}
+if BdistWheelWithPlatform is not None:
+    cmdclass["bdist_wheel"] = BdistWheelWithPlatform
 
-    setup(
-        version=version,
-        install_requires=all_deps if all_deps else None,
-        ext_modules=[BazelExtension()],
-        cmdclass=cmdclass,
-        entry_points={
-            "pytest11": [
-                "remote-gpu = rtp_llm.test.remote_tests.plugin",
-                "rtp-ci-profile = rtp_llm.test.ci_profile_plugin",
-            ],
-        },
-    )
+setup(
+    version=version,
+    install_requires=all_deps if all_deps else None,
+    ext_modules=[BazelExtension()],
+    cmdclass=cmdclass,
+    entry_points={
+        "pytest11": [
+            "remote-gpu = rtp_llm.test.remote_tests.plugin",
+            "rtp-ci-profile = rtp_llm.test.ci_profile_plugin",
+        ],
+    },
+)
