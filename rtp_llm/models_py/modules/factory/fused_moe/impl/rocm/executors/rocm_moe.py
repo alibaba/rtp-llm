@@ -483,12 +483,11 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
             w2 = w2.view(torch.float4_e2m1fn_x2)
             w2.is_shuffled = True
 
-        # EP mode: topk_ids are already local, no expert_mask needed.
-        # Also skip kernel-side weight application — the EP router's
-        # combine step applies router weights.
+        # EP mode: router already remapped IDs to local and preserved
+        # original routing weights with non-local zeroed. No expert_mask
+        # needed since the FP4 kernel does not support it correctly.
         if self.ep_size > 1:
             mask = None
-            topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
         else:
             mask = expert_map if expert_map is not None else self.expert_mask
 

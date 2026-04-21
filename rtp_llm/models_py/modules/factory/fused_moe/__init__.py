@@ -51,12 +51,14 @@ if device_type == DeviceType.ROCm:
         RocmFp8PerChannelPureTPStrategy,
         TorchDistEpFp4Strategy,
         TorchDistEpNormalStrategy,
+        MoriEpFp4Strategy,
     )
 
     registry = StrategyRegistry()
     registry.register(RocmEpLowLatencyStrategy())
     registry.register(RocmEpNormalStrategy())
     registry.register(RocmFp4PerGroupPureTPStrategy())
+    registry.register(MoriEpFp4Strategy())
     registry.register(TorchDistEpFp4Strategy())
     registry.register(TorchDistEpNormalStrategy())
     registry.register(RocmFp8PerChannelPureTPStrategy())

@@ -19,6 +19,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
 
+
 class MoriEpIntranodeRouter(FusedMoeDataRouter):
     @classmethod
     def router_type(cls):
@@ -26,7 +27,6 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        """Check if MoriEpIntranodeRouter can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
@@ -56,7 +56,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         self.use_fp8 = True
         self.async_mode = False
         self.expert_alignment = 128
-    
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -65,11 +65,9 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> ExpertForwardPayload:
-        # TODO: implement fp8 quantization
         if a1_scale is not None or a2_scale is not None:
             raise ValueError("MoriEpIntranode a1_scale or a2_scale should be None")
 
-        # Mori expects int32 for topk_ids
         if topk_ids.dtype != torch.int32:
             topk_ids = topk_ids.to(torch.int32)
 
@@ -80,12 +78,28 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
             dispatch_ids,
             dispatch_recv_token_num,
         ) = self.mori_buffer_wrapper.op.dispatch(a1, topk_weights, None, topk_ids)
+
+        local_start = self.ep_rank * self.expert_num_per_rank
+        local_end = local_start + self.expert_num_per_rank
+        non_local_mask = (dispatch_ids < local_start) | (dispatch_ids >= local_end)
+
+        # Remap global expert IDs to local 0-based indices.
+        # Non-local experts get mapped to index 0 (safe fallback) so the
+        # FP4 kernel computes a valid output that is then zeroed by weight=0.
+        local_ids = dispatch_ids.clone()
+        local_ids[non_local_mask] = local_start
+        local_ids = local_ids - local_start
+
+        # Preserve original routing weights for local experts; zero non-local.
+        local_weights = dispatch_weights.to(torch.float32).clone()
+        local_weights[non_local_mask] = 0.0
+
         return ExpertForwardPayload(
             expert_x=dispatch_a1,
             expert_x_scale=dispatch_scale,
             expert_x_origin_dtype=None,
-            expert_topk_ids=dispatch_ids,
-            expert_topk_weights=dispatch_weights,
+            expert_topk_ids=local_ids,
+            expert_topk_weights=local_weights,
             expert_tokens_meta=ExpertTokensMetadata(
                 expert_num_tokens=None,
                 expert_num_tokens_cpu=dispatch_recv_token_num,
@@ -101,12 +115,10 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         extra_finalize_args: Optional[Dict[str, Any]],
         skip_allreduce: bool = False,
     ) -> torch.Tensor:
-        # Mori expects int32 for topk_ids
         if topk_ids.dtype != torch.int32:
             topk_ids = topk_ids.to(torch.int32)
         recv_x = self.mori_buffer_wrapper.op.combine(payload.fused_expert_output, None, topk_ids)[0]
 
-        # MoriEP returns fixed-size buffer (aligned to expert_alignment), need to slice to original size
         if extra_finalize_args is not None and "original_num_tokens" in extra_finalize_args:
             original_num_tokens = extra_finalize_args["original_num_tokens"]
             if recv_x.shape[0] > original_num_tokens:
