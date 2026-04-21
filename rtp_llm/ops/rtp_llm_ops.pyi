@@ -14,7 +14,6 @@ from rtp_llm.ops import KVCache, PyCacheStoreInputs
 __all__ = [
     "FlashInferAttnParams",
     "FlashInferOp",
-    "FusedMoEOp",
     "SelectTopkOp",
     "TRTAttn",
     "TRTAttnOp",
@@ -51,20 +50,6 @@ class FlashInferOp:
     def prepare(
         self, attn_inputs: libth_transformer.PyAttentionInputs
     ) -> FlashInferAttnParams: ...
-
-class FusedMoEOp:
-    def __init__(
-        self, attn_configs: typing.Any
-    ) -> None: ...
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        up_proj: torch.Tensor,
-        down_proj: torch.Tensor,
-        expert_scales: torch.Tensor,
-        expert_ids: torch.Tensor,
-        outputs: torch.Tensor,
-    ) -> None: ...
 
 class SelectTopkOp:
     def __init__(

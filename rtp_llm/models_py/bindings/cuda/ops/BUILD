@@ -1,9 +1,8 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "cuda_register", "trt_plugins", "flashinfer_deps", "flashmla_deps")
+load("//bazel:arch_select.bzl", "cuda_register", "flashinfer_deps", "flashmla_deps")
 load("@//bazel:arch_select.bzl", "torch_deps")
 
 cuda_register()
-trt_plugins()
 flashinfer_deps()
 flashmla_deps()
 
@@ -57,7 +56,6 @@ cc_library(
         "//rtp_llm/models_py/bindings/common/kernels:kernels_cu",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/pybind:th_utils",
-        "//rtp_llm/models_py/bindings/cuda:trt_plugins",
         "//rtp_llm/cpp/models:stats",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/cache:cache_group_type",

@@ -1,9 +1,7 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps", "fa_deps", "trt_plugins")
+load("//bazel:arch_select.bzl", "torch_deps", "fa_deps")
 
 package(default_visibility=["//rtp_llm:__subpackages__"])
-
-trt_plugins()
 
 cc_library(
     name = "cuda_host_utils",
@@ -257,7 +255,7 @@ cc_library(
     srcs = [
         "RegisterCudaOps.cc",
     ],
-    copts = copts(),
+    copts = copts() + ["-fno-strict-aliasing"],
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":cuda_bindings_base",

@@ -187,12 +187,10 @@ cc_library(
     srcs = glob(["moe/*.cu"]),
     hdrs = glob(["moe/*.h"]),
     deps = any_cuda_deps + [
-        "//rtp_llm/models_py/bindings/cuda/cutlass:cutlass_interface",
         "//rtp_llm/models_py/bindings/cuda:trt_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
         "@cutlass_h_moe//:cutlass",
         "@cutlass_h_moe//:cutlass_utils",
-        "//rtp_llm/models_py/bindings/cuda/cutlass/cutlass_extensions:cutlass_extensions",
     ] + torch_deps(),
     copts = any_cuda_copts(),
     include_prefix = "src",

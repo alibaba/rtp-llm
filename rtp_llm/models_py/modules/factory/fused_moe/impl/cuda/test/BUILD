@@ -10,14 +10,6 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
-py_test (
-    name = "fused_moe_op_test",
-    srcs = ["fused_moe_op_test.py"],
-    deps = py_test_deps,
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
-)
-
 # TODO: Fix this test
 # py_test (
 #     name = "fused_silu_mul_token_quant_batched_test",

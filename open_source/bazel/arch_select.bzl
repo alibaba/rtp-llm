@@ -11,8 +11,6 @@ def copy_all_so():
     copy_so("//:th_transformer_config")
     copy_so("//:rtp_compute_ops")
     copy_so("//rtp_llm/models_py/bindings/cuda:fa")
-    copy_so("//rtp_llm/models_py/bindings/cuda/cutlass:moe")
-    copy_so("//rtp_llm/models_py/bindings/cuda/cutlass:moe_sm90")
     copy_so("@flashinfer_cpp//:flashinfer_single_prefill")
     copy_so("@flashinfer_cpp//:flashinfer_single_decode")
     copy_so("@flashinfer_cpp//:flashinfer_batch_paged_prefill")
@@ -153,7 +151,7 @@ def deep_ep_py_deps():
 
 def kernel_so_deps():
     return select({
-        "@//:using_cuda": [":libfa_so", ":libmoe_so", ":libmoe_sm90_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libflashinfer_single_prefill_256_so", ":libflashinfer_single_decode_256_so", ":libflashinfer_batch_paged_prefill_256_so", ":libflashinfer_batch_paged_decode_256_so", ":libflashinfer_batch_ragged_prefill_256_so"],
+        "@//:using_cuda": [":libfa_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libflashinfer_single_prefill_256_so", ":libflashinfer_single_decode_256_so", ":libflashinfer_batch_paged_prefill_256_so", ":libflashinfer_batch_paged_decode_256_so", ":libflashinfer_batch_ragged_prefill_256_so"],
         "@//:using_rocm": [],
         "//conditions:default":[],
     })
@@ -164,10 +162,7 @@ def arpc_deps():
     )
 
 def trt_plugins():
-    native.alias(
-        name = "trt_plugins",
-        actual = "//rtp_llm/models_py/bindings/cuda/nv_trt_plugins:nv_trt_plugins",
-    )
+    pass
 
 def cuda_register():
     native.alias(
