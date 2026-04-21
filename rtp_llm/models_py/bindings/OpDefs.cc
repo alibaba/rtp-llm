@@ -24,23 +24,6 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_property_readonly("cp_rank", &rtp_llm::CPSlotMapper::cpRank)
         .def_property_readonly("cp_size", &rtp_llm::CPSlotMapper::cpSize)
         .def_property_readonly("block_size", &rtp_llm::CPSlotMapper::blockSize)
-        .def(
-            "is_owned",
-            [](const rtp_llm::CPSlotMapper& self, torch::Tensor positions) -> torch::Tensor {
-                if (!self.isSharded()) {
-                    return torch::ones({positions.size(0)},
-                                       torch::TensorOptions().dtype(torch::kBool).device(positions.device()));
-                }
-                // Page-level RR: block_idx = pos / block_size, owner = block_idx % cp_size
-                return torch::floor_divide(positions, self.blockSize()) % self.cpSize() == self.cpRank();
-            },
-            py::arg("positions"))
-        .def(
-            "local_block_offset",
-            [](const rtp_llm::CPSlotMapper& self, torch::Tensor positions) -> torch::Tensor {
-                return positions % self.blockSize();
-            },
-            py::arg("positions"))
         .def("local_block_count", &rtp_llm::CPSlotMapper::localBlockCount, py::arg("seq_len"))
         .def(
             "compute_slot_mapping",

@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(pwd && ls rtp_llm/cpp/cache/ 2>/dev/null || find . -path \"*/cpp/cache\" -type d 2>/dev/null | head -5)"
-    ]
-  }
-}

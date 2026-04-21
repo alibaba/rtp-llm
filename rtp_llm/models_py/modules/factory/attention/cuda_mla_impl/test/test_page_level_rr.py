@@ -27,54 +27,6 @@ class TestCPSlotMapperPageLevel(unittest.TestCase):
         m = self._make_mapper(0, 2, 4)
         self.assertTrue(m.is_sharded)
 
-    def test_ownership_block_granularity(self):
-        """Block b belongs to rank (b % cp_size)."""
-        block_size = 4
-        cp_size = 2
-        m0 = self._make_mapper(0, cp_size, block_size)
-        m1 = self._make_mapper(1, cp_size, block_size)
-
-        # positions 0-3 = block 0 -> rank 0
-        # positions 4-7 = block 1 -> rank 1
-        # positions 8-11 = block 2 -> rank 0
-        # positions 12-15 = block 3 -> rank 1
-        positions = torch.arange(16)
-        mask0 = m0.is_owned(positions)
-        mask1 = m1.is_owned(positions)
-
-        expected0 = torch.tensor([True] * 4 + [False] * 4 + [True] * 4 + [False] * 4)
-        expected1 = torch.tensor([False] * 4 + [True] * 4 + [False] * 4 + [True] * 4)
-        torch.testing.assert_close(mask0, expected0)
-        torch.testing.assert_close(mask1, expected1)
-
-    def test_every_position_owned_exactly_once(self):
-        cp_size = 3
-        block_size = 8
-        total = 96
-        owner = torch.full((total,), -1, dtype=torch.long)
-        for r in range(cp_size):
-            m = self._make_mapper(r, cp_size, block_size)
-            positions = torch.arange(total)
-            mask = m.is_owned(positions)
-            for pos in torch.where(mask)[0]:
-                self.assertEqual(
-                    owner[pos].item(),
-                    -1,
-                    f"pos {pos.item()} owned by rank {owner[pos].item()} and {r}",
-                )
-                owner[pos] = r
-        for i in range(total):
-            self.assertGreaterEqual(owner[i].item(), 0, f"pos {i} not owned")
-
-    def test_local_block_offset(self):
-        """local_block_offset = position % block_size for page-level."""
-        m = self._make_mapper(0, 2, 4)
-        # rank 0 owns block 0 (pos 0-3) and block 2 (pos 8-11)
-        positions = torch.tensor([0, 1, 2, 3, 8, 9, 10, 11])
-        offsets = m.local_block_offset(positions)
-        expected = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3], dtype=torch.long)
-        torch.testing.assert_close(offsets, expected)
-
     def test_local_block_count(self):
         """Count blocks where block_idx % cp_size == cp_rank."""
         m0 = self._make_mapper(0, 2, 4)

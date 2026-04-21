@@ -7,23 +7,6 @@ CPSlotMapper::CPSlotMapper(): cp_rank_(0), cp_size_(1), block_size_(1), virtual_
 CPSlotMapper::CPSlotMapper(int cp_rank, int cp_size, int block_size):
     cp_rank_(cp_rank), cp_size_(cp_size), block_size_(block_size), virtual_block_size_(block_size * cp_size) {}
 
-int CPSlotMapper::targetRank(int position) const {
-    // Page-level RR: entire block goes to one rank
-    return (position / block_size_) % cp_size_;
-}
-
-bool CPSlotMapper::isOwned(int position) const {
-    return targetRank(position) == cp_rank_;
-}
-
-int CPSlotMapper::localBlockOffset(int position) const {
-    return position % block_size_;
-}
-
-int CPSlotMapper::virtualBlockCount(int seq_len) const {
-    return (seq_len + virtual_block_size_ - 1) / virtual_block_size_;
-}
-
 int CPSlotMapper::localBlockCount(int seq_len) const {
     // All CP ranks keep the same block count = ceil(total_blocks / cp_size).
     // rank0 is the controller: it allocates blocks and broadcasts block_ids

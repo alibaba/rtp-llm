@@ -39,3 +39,13 @@ py_test(
     exec_properties = {'gpu': 'H20'},
 )
 
+py_test(
+    name = "test_page_level_rr",
+    srcs = ["test_page_level_rr.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {'gpu': 'H20'},
+)
+
