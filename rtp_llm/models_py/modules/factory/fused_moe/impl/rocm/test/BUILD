@@ -19,7 +19,7 @@ py_test (
     timeout = "eternal",
     env = test_envs,
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
+    exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
 # TODO: fix this test
@@ -30,7 +30,7 @@ py_test (
 #     timeout = "eternal",
 #     env = test_envs,
 #     tags = ["rocm"],
-#     exec_properties = {'gpu':'MI308X'},
+#     exec_properties = {'gpu':'MI308X-ROCM7'},
 # )
 
 py_test (
@@ -39,6 +39,6 @@ py_test (
     deps = py_test_deps,
     env = test_envs,
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
+    exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
