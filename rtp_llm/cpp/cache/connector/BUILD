@@ -36,7 +36,6 @@ cc_library(
     name = "connector_base",
     hdrs = [
         "AsyncContext.h",
-        "Event.h",
         "KVCacheConnector.h",
         "KVCacheConnectorLayerContext.h",
         "Meta.h",

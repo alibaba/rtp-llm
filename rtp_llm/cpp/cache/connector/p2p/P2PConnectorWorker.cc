@@ -55,8 +55,8 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
 bool P2PConnectorWorker::writeByLayer(int                       layer_id,
                                       const KVCacheResourcePtr& resource,
                                       int64_t                   request_id,
-                                      AsyncEventPtr             event) {
-    return prefill_->writeByLayer(layer_id, resource, request_id, event);
+                                      std::optional<c10::Event> event) {
+    return prefill_->writeByLayer(layer_id, resource, request_id, std::move(event));
 }
 
 ErrorInfo
