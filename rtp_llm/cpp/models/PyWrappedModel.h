@@ -181,7 +181,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.kernel_tokens_per_block      = device_params.kernel_tokens_per_block;
         graph_params.hidden_size                  = device_params.hidden_size;
         graph_params.model_data_type              = dtype;
-        graph_params.concurrency_limit            = device_params.concurrency_config.concurrency_limit;
+        graph_params.max_context_batch_size       = device_params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens     = device_params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = device_params.hw_kernel_config.decode_capture_batch_sizes;
         graph_params.kv_cache_group_num           = device_params.kv_cache_group_num;
