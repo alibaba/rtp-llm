@@ -50,6 +50,17 @@ cc_test(
 )
 
 cc_test(
+    name = "batch_copy_test",
+    srcs = [
+        "CudaBatchCopyTest.cc",
+    ],
+    data = [],
+    copts = copts(),
+    deps = test_deps,
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "beam_search_op_test",
     srcs = [
         "CudaBeamSearchOpTest.cc",

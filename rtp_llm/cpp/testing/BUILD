@@ -55,7 +55,10 @@ cc_library(
 
 cc_library(
     name = "base_tests",
-    hdrs = ["BeamSearchOpTest.hpp"],
+    hdrs = [
+        "BatchCopyTest.hpp",
+        "BeamSearchOpTest.hpp",
+    ],
     deps = [
         ":device_test_utils",
         "//rtp_llm/models_py/bindings/core/ops:torch_beam_search_op_impl",
