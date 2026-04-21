@@ -70,6 +70,9 @@ public:
     // Wait for side-channel data ready (called by P2PConnector when filling response)
     bool waitSideChannelReady(const std::string& unique_key, int64_t deadline_ms, std::function<bool()> is_cancelled = nullptr);
 
+    // Try to consume side-channel data from the independent map (returns true if data was found and copied)
+    bool consumeSideChannelData(const std::string& unique_key, P2PConnectorResourceEntry::SideChannelData& out_data);
+
 private:
     void checkTimeout();
     void reportMetrics(bool timeout, bool cancelled, int64_t wait_start_time_us);
@@ -85,6 +88,13 @@ private:
     mutable std::mutex                                                resource_map_mutex_;
     std::condition_variable                                           resource_cv_;
     std::map<std::string, std::shared_ptr<P2PConnectorResourceEntry>> resource_map_;
+
+    // Side-channel data stored independently from resource entries.
+    // This allows notifySideChannelReady to store data even after the entry has been stolen.
+    std::mutex                                                        side_channel_map_mutex_;
+    std::condition_variable                                           side_channel_cv_;
+    std::map<std::string, P2PConnectorResourceEntry::SideChannelData> side_channel_data_map_;
+
     kmonitor::MetricsReporterPtr                                      metrics_reporter_;
 
     autil::LoopThreadPtr check_timeout_thread_;

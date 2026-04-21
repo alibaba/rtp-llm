@@ -69,12 +69,6 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
     int64_t deadline_ms = currentTimeMs() + store_wait_timeout_ms_;
     store_wait_context_checker_->addContext(
         StoreWaitContext(request_id, event, layer_cache_buffer, deadline_ms, collector));
-    if (layer_id == 0) {
-        RTP_LLM_LOG_INFO("writeByLayer [P2P Prefill]: queued request_id=%ld, layer_id=%d, blocks=%zu",
-                         request_id,
-                         layer_id,
-                         layer_cache_buffer->blockIdMap().size());
-    }
     return true;
 }
 

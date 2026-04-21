@@ -138,7 +138,6 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         stream->step();
         auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
         new_tokens.data_ptr<int32_t>()[0] = static_cast<int32_t>(payload->first_token_id);
-        stream->incLastOutputPos();
         stream->update({.new_tokens        = new_tokens,
                         .num_new_tokens    = 1,
                         .hidden_states     = {},
@@ -156,13 +155,11 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 
     // 2. Reuse lengths
     if (payload->total_reuse_len > 0) {
-        stream->setInitialReuseLength(payload->total_reuse_len);
-        stream->setReuseLength(payload->total_reuse_len);
-        stream->setLocalReuseLength(payload->local_reuse_len + payload->memory_reuse_len);
-        stream->setMtpTokenIndex(payload->total_reuse_len);
-        stream->setMemoryReuseLength(payload->memory_reuse_len);
-        stream->setRemoteReuseLength(payload->remote_reuse_len);
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: reuse total=%d, local=%d, remote=%d, memory=%d",
+        stream->setPrefillReuseLength(payload->total_reuse_len,
+                                      payload->local_reuse_len,
+                                      payload->remote_reuse_len,
+                                      payload->memory_reuse_len);
+        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: prefill reuse total=%d, local=%d, remote=%d, memory=%d",
                           payload->total_reuse_len,
                           payload->local_reuse_len,
                           payload->remote_reuse_len,
@@ -347,13 +344,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         stream_->setMtpTokenIndex(result.reuse_len);
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
-        // In PD-sep decode role, device cache hit means prefill-side reuse,
-        // record it as prefill reuse lengths for aux_info reporting.
-        if (is_decode_role) {
-            stream_->setPrefillReuseLength(result.reuse_len, result.reuse_len, 0, 0);
-        }
     }
-    loadCacheSync();
     return absl::OkStatus();
 }
 
@@ -529,14 +520,6 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
         stream_->setMtpTokenIndex(total_reuse_len);
         stream_->setMemoryReuseLength(memory_reuse_len);
         stream_->setRemoteReuseLength(remote_reuse_len);
-        // In PD-sep decode role, the cache load result comes from prefill side,
-        // so also record it as prefill reuse lengths for aux_info reporting.
-        if (resource_context_.role_type == RoleType::DECODE) {
-            stream_->setPrefillReuseLength(total_reuse_len,
-                                           device_reuse_len + memory_reuse_len,
-                                           remote_reuse_len,
-                                           memory_reuse_len);
-        }
     }
 
     // Apply P2P side-channel data (first token, reuse, SP info, position_ids) from read context
@@ -549,6 +532,8 @@ std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
     const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
     RTP_LLM_PROFILE_FUNCTION();
     auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
+    meta->generate_stream_ = stream_;
+    meta->fillRoutingContext(stream_);
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
     auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
     if (resource_context_.write_cache_sync) {

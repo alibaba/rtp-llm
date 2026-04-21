@@ -24,6 +24,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
     auto captured_kv_cache_block_id_host = kv_cache_block_id_host;
     auto captured_cache_store            = cache_store_inputs;
     auto captured_kv_cache               = kv_cache.value();
+    auto* captured_connector_coordinator = cache_store_inputs.connector_coordinator;
 
     // Create event in main thread to avoid cudaEventRecord contention on background threads.
     auto event = runtimeCreateEvent();
@@ -33,6 +34,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 captured_kv_cache_block_id_host,
                 captured_cache_store,
                 captured_kv_cache,
+                captured_connector_coordinator,
                 event = std::move(event)]() mutable {
         CacheStoreInputs inputs{captured_input_lengths,
                                 captured_prefix_lengths,
@@ -60,7 +62,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
             (captured_kv_cache.kv_scale_base.defined() && captured_kv_cache.kv_scale_base.numel() > 0) ?
                 captured_kv_cache.kv_scale_base :
                 torch::Tensor();
-        execWriteCacheStore(inputs, kv_cache_info, captured_cache_store.mla_kvcache, captured_cache_store.cache_store);
+        execWriteCacheStore(inputs, kv_cache_info, captured_cache_store.mla_kvcache, captured_cache_store.cache_store, captured_connector_coordinator);
     };
 
     auto* async_writer = cache_store_inputs.cache_store_async_writer;

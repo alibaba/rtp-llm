@@ -9,6 +9,11 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
+#include "autil/StringUtil.h"
+#include <limits>
 #include "autil/StackTracer.h"
 #include "autil/EnvUtil.h"
 #include <unistd.h>
@@ -141,6 +146,164 @@ AsyncEventPtr runtimeCreateEvent() {
 // ============================================================
 // CacheStore (cache_store passed explicitly from KVCacheManager)
 // ============================================================
+
+// KVCacheConnectorLayerContext implementation for write-by-layer (P2P) path.
+// Holds the per-layer GPU transfer metadata: resource, request_id, attention_event.
+class WriteCacheLayerContext: public rtp_llm::KVCacheConnectorLayerContext {
+public:
+    WriteCacheLayerContext(std::shared_ptr<rtp_llm::KVCacheResource> resource,
+                           int64_t                                   request_id,
+                           rtp_llm::AsyncEventPtr                    attention_event):
+        resource_(std::move(resource)), request_id_(request_id), attention_event_(std::move(attention_event)) {}
+
+    const rtp_llm::KVCacheResource& kvCacheResource() const override {
+        return *resource_;
+    }
+    int64_t requestId() const override {
+        return request_id_;
+    }
+    rtp_llm::AsyncEventPtr attentionEvent() const override {
+        return attention_event_;
+    }
+
+private:
+    std::shared_ptr<rtp_llm::KVCacheResource> resource_;
+    int64_t                                   request_id_;
+    rtp_llm::AsyncEventPtr                    attention_event_;
+};
+
+static void writeCacheToConnector(const rtp_llm::CacheStoreInputs&                         param,
+                                   rtp_llm::IKVCacheConnectorCoordinator* connector_coordinator) {
+    if (param.warmup) {
+        RTP_LLM_LOG_DEBUG("is warmup, so ignore writeCacheToConnector");
+        return;
+    }
+
+    if (!param.pd_separation || param.context_batch_size == 0) {
+        return;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.defined(), "failed to get host_kv_cache_offset");
+
+    auto seq_size_per_block = param.tokens_per_block;
+    auto global_layer_id    = connector_coordinator->convertToGlobalLayerId(param.model_id, param.layer_id);
+    if (global_layer_id == std::numeric_limits<uint32_t>::max()) {
+        RTP_LLM_LOG_ERROR("writeCacheToConnector: convertToGlobalLayerId failed, model_id=%d, layer_id=%d",
+                          param.model_id,
+                          param.layer_id);
+        return;
+    }
+
+    bool is_hybrid = false;
+    if (param.kv_cache_group_types_host.defined() && param.kv_cache_group_types_host.size(0) > 1) {
+        is_hybrid =
+            !torch::all(param.kv_cache_group_types_host.index({param.kv_cache_layer_to_group_host}) == 1).item<bool>();
+    }
+    const int group_num = is_hybrid ? static_cast<int>(param.kv_cache_group_types_host.size(0)) : 1;
+
+    int gid = 0;
+    if (param.host_kv_cache_offset.dim() == 3) {
+        gid = -1;
+        if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
+            && static_cast<size_t>(param.layer_id)
+                   < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
+            gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
+        }
+        RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < group_num,
+                                "writeCacheToConnector: invalid group id [%d], group_num=%d, layer_id=%d",
+                                gid,
+                                group_num,
+                                param.layer_id);
+    } else if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
+               && static_cast<size_t>(param.layer_id)
+                      < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
+        gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
+    }
+
+    const int32_t* offset_addr          = nullptr;
+    size_t         max_blocks_per_batch = 0;
+    if (param.host_kv_cache_offset.dim() == 3) {
+        const auto group_offset_view = param.host_kv_cache_offset[static_cast<int64_t>(gid)];
+        max_blocks_per_batch         = group_offset_view.size(1);
+        offset_addr                  = group_offset_view.data_ptr<int32_t>();
+    } else {
+        max_blocks_per_batch = param.host_kv_cache_offset.size(1);
+        offset_addr          = param.host_kv_cache_offset.data_ptr<int32_t>();
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == static_cast<size_t>(param.request_pd_separation.numel()),
+                            "size not same");
+    RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == static_cast<size_t>(param.request_id.numel()),
+                            "context batch size and request id size is not same");
+
+    for (size_t batch_id = 0; batch_id < param.context_batch_size; batch_id++) {
+        if (*(param.request_pd_separation.data_ptr<bool>() + batch_id) == false) {
+            continue;
+        }
+        auto request_id = *(param.request_id.data_ptr<int64_t>() + batch_id);
+
+        RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.defined() && param.input_lengths_host.defined(),
+                                "failed to get prefix_length_host and input_length_host for cache store");
+        RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.data_ptr<int>()[batch_id] % seq_size_per_block == 0,
+                                "prefix_length %% seq_size_per_block != 0");
+
+        int reuse_block_num = param.prefix_lengths_host.data_ptr<int>()[batch_id] / seq_size_per_block;
+        int block_num =
+            (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id]
+             + seq_size_per_block - 1)
+            / seq_size_per_block;
+        const auto total_block_num = static_cast<size_t>(block_num + reuse_block_num);
+
+        auto kv_cache_resource = std::make_shared<rtp_llm::KVCacheResource>();
+        bool cache_keys_valid  = true;
+        for (size_t index = 0; index < total_block_num; index++) {
+            auto    str_cache_key = param.cache_keys[batch_id * max_blocks_per_batch + index];
+            int64_t cache_key     = 0;
+            if (!autil::StringUtil::strToInt64(str_cache_key.c_str(), cache_key)) {
+                RTP_LLM_LOG_WARNING(
+                    "writeCacheToConnector failed to convert cache_key to int64_t, cache_key: %s",
+                    str_cache_key.c_str());
+                cache_keys_valid = false;
+                break;
+            }
+            kv_cache_resource->cacheKeys().push_back(cache_key);
+        }
+        if (!cache_keys_valid) {
+            RTP_LLM_LOG_WARNING(
+                "writeCacheToConnector failed to convert cache_key to int64_t, request_id=%ld, batch_id=%zu",
+                request_id,
+                batch_id);
+            continue;
+        }
+
+        std::vector<int> layer_to_group_id(global_layer_id + 1, 0);
+        layer_to_group_id[global_layer_id] = gid;
+        if (global_layer_id == 0) {
+            RTP_LLM_LOG_INFO("writeCacheToConnector [P2P]: request_id=%ld, batch_id=%zu, group_num=%d, gid=%d, "
+                             "total_blocks=%zu, block_num=%d, reuse=%d, max_blocks_per_batch=%zu",
+                             request_id,
+                             batch_id,
+                             group_num,
+                             gid,
+                             total_block_num,
+                             block_num,
+                             reuse_block_num,
+                             max_blocks_per_batch);
+        }
+        kv_cache_resource->initGroups(group_num, global_layer_id + 1, layer_to_group_id);
+
+        auto& block_ids_obj = kv_cache_resource->mutableBlockIds(gid);
+        block_ids_obj.resize(total_block_num, -1);
+        for (size_t index = 0; index < total_block_num; index++) {
+            auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
+            block_ids_obj.setAt(index, block_id);
+        }
+
+        auto layer_context =
+            std::make_shared<WriteCacheLayerContext>(kv_cache_resource, request_id, rtp_llm::runtimeCreateEvent());
+        connector_coordinator->asyncWriteByLayer(global_layer_id, layer_context);
+    }
+}
 
 void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                             const KvCacheInfo&          kv_cache,
@@ -491,8 +654,12 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
 void execWriteCacheStore(const CacheStoreInputs&     inputs,
                          const KvCacheInfo&          kv_cache,
                          bool                        mla_kvcache,
-                         std::shared_ptr<CacheStore> cache_store) {
+                         std::shared_ptr<CacheStore> cache_store,
+                         IKVCacheConnectorCoordinator* connector_coordinator) {
     runtimeWriteCacheStore(inputs, kv_cache, mla_kvcache, std::move(cache_store));
+    if (connector_coordinator) {
+        writeCacheToConnector(inputs, connector_coordinator);
+    }
 }
 
 // === Misc ===

@@ -444,6 +444,13 @@ bool KVCacheManager::hasP2PConnector() const {
     return coordinator_ && coordinator_->hasP2PConnector();
 }
 
+void KVCacheManager::notifySideChannelReady(const std::string&                                unique_key,
+                                             const P2PConnectorResourceEntry::SideChannelData& data) {
+    if (coordinator_) {
+        coordinator_->notifySideChannelReady(unique_key, data);
+    }
+}
+
 // 异步连接器操作
 
 std::shared_ptr<AsyncContext>
