@@ -48,3 +48,18 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+# Stub targets for removed cutlass MOE code (now replaced by Triton fused_moe).
+# Kept as empty shared libraries so that internal arch_select.bzl copy_so() references
+# don't break the build.
+cc_library(
+    name = "moe_sm90_stub",
+    srcs = [],
+    visibility = ["//visibility:private"],
+)
+
+cc_shared_library(
+    name = "moe_sm90",
+    roots = [":moe_sm90_stub"],
+    visibility = ["//visibility:public"],
+)
