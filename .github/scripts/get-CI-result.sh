@@ -13,8 +13,11 @@ PIPELINE_ID="1346"
 PROJECT_ID="2654816"
 
 # 设置最大等待时间
-MAX_WAIT_TIME=7200
-START_TIME=$(date +%s)
+MAX_WAIT_TIME=28800          # 总超时: 8h
+MAX_WAIT_PENDING_TIME=21600  # PENDING 状态最大等待: 6h
+MAX_WAIT_RUNNING_TIME=7200   # RUNNING 后最大等待: 2h
+OVERALL_START_TIME=$(date +%s)
+RUNNING_START_TIME=""
 
 while true; do
     echo "Querying CI status for commitId: ${COMMIT_ID} ..."
@@ -36,11 +39,11 @@ while true; do
         exit 1
     fi
 
-    # 检查是否超时
+    # 检查是否超时（总超时）
     CURRENT_TIME=$(date +%s)
-    ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
-    if [ $ELAPSED_TIME -gt $MAX_WAIT_TIME ]; then
-        echo "Error: Timeout waiting for CI completion (waited ${ELAPSED_TIME} seconds)"
+    OVERALL_ELAPSED=$((CURRENT_TIME - OVERALL_START_TIME))
+    if [ $OVERALL_ELAPSED -gt $MAX_WAIT_TIME ]; then
+        echo "Error: Overall timeout waiting for CI completion (waited ${OVERALL_ELAPSED} seconds)"
         exit 1
     fi
 
@@ -91,6 +94,30 @@ while true; do
     fi
 
     echo "Current main status: $main_status"
+
+    # PENDING 状态超时检查
+    if [[ "$main_status" == "PENDING" ]]; then
+        PENDING_ELAPSED=$((CURRENT_TIME - OVERALL_START_TIME))
+        echo "PENDING elapsed: ${PENDING_ELAPSED}s / ${MAX_WAIT_PENDING_TIME}s"
+        if [ $PENDING_ELAPSED -gt $MAX_WAIT_PENDING_TIME ]; then
+            echo "Error: Timeout waiting for task to start (PENDING for ${PENDING_ELAPSED} seconds)"
+            exit 1
+        fi
+    fi
+
+    # 任务进入 RUNNING 状态后开始计时
+    if [[ "$main_status" == "RUNNING" ]]; then
+        if [ -z "$RUNNING_START_TIME" ]; then
+            RUNNING_START_TIME=$CURRENT_TIME
+            echo "Task started running, begin RUNNING timer"
+        fi
+        RUNNING_ELAPSED=$((CURRENT_TIME - RUNNING_START_TIME))
+        echo "RUNNING elapsed: ${RUNNING_ELAPSED}s / ${MAX_WAIT_RUNNING_TIME}s"
+        if [ $RUNNING_ELAPSED -gt $MAX_WAIT_RUNNING_TIME ]; then
+            echo "Error: Timeout waiting for CI to finish after RUNNING (waited ${RUNNING_ELAPSED} seconds)"
+            exit 1
+        fi
+    fi
 
     if [[ "$main_status" == "DONE" || "$main_status" == "FAILED"  ]]; then
         echo "Current status: $status_summary"
