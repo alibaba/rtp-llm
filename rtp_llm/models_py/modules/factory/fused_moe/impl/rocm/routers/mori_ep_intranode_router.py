@@ -100,6 +100,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
             expert_x_origin_dtype=None,
             expert_topk_ids=local_ids,
             expert_topk_weights=local_weights,
+            expert_ids_are_local=True,
             expert_tokens_meta=ExpertTokensMetadata(
                 expert_num_tokens=None,
                 expert_num_tokens_cpu=dispatch_recv_token_num,
