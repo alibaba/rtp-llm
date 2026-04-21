@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
-#include "rtp_llm/cpp/core/Event.h"
+#include "rtp_llm/cpp/cache/connector/Event.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <memory>
 #include <string>

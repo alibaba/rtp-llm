@@ -36,6 +36,7 @@ cc_library(
     name = "connector_base",
     hdrs = [
         "AsyncContext.h",
+        "Event.h",
         "KVCacheConnector.h",
         "KVCacheConnectorLayerContext.h",
         "Meta.h",
@@ -44,7 +45,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
-        "//rtp_llm/cpp/core:event",
         "//rtp_llm/cpp/utils:error_code",
     ],
 )
@@ -59,7 +59,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":connector_base",
-        "//rtp_llm/cpp/core:event",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/utils:error_code",
     ],

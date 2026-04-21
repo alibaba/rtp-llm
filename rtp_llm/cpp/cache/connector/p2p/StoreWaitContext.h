@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/core/Event.h"
+#include "rtp_llm/cpp/cache/connector/Event.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"

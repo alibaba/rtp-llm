@@ -2,7 +2,7 @@
 
 #include <memory>
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
-#include "rtp_llm/cpp/core/Event.h"
+#include "rtp_llm/cpp/cache/connector/Event.h"
 
 namespace rtp_llm {
 

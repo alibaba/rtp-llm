@@ -19,7 +19,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/core/Event.h"
+#include "rtp_llm/cpp/cache/connector/Event.h"
 
 namespace rtp_llm {
 
