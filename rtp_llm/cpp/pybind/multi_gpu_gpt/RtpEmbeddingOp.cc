@@ -99,6 +99,7 @@ void RtpEmbeddingOp::init(py::object model,
             params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
         }
         embedding_engine_.reset(new EmbeddingEngine(params, py_handler));
+        THROW_IF_STATUS_ERROR(embedding_engine_->start());
         if (!mm_process_engine.is_none()) {
             mm_processor_.reset(new LocalMultimodalProcessor(
                 mm_process_engine, params.model_config_.mm_model_config, params.model_config_.max_seq_len));

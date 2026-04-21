@@ -302,6 +302,10 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
+        grpc::Status start_status = model_rpc_service_->start();
+        if (!start_status.ok()) {
+            RTP_LLM_FAIL("start rpc server engine failed, error msg: %s", start_status.error_message().c_str());
+        }
 
         // NOTE: ip/ip段可自定义为所需范围。
         std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));

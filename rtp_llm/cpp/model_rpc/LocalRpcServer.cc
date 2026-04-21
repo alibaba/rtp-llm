@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "absl/status/status.h"
 
 using namespace std;
 
@@ -53,6 +54,14 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         }
     }
 
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::start() {
+    absl::Status engine_start = engine_->start();
+    if (!engine_start.ok()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, std::string(engine_start.message()));
+    }
     return grpc::Status::OK;
 }
 

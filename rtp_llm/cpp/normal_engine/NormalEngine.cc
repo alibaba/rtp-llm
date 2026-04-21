@@ -112,7 +112,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
-    (void)startLoop();
 }
 
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
@@ -356,6 +355,12 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
     return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
 }
 
+absl::Status NormalEngine::start() {
+    RTP_LLM_CHECK_WITH_INFO(!loop_started_, "NormalEngine::start must be called at most once");
+    loop_started_ = true;
+    return startLoop();
+}
+
 absl::Status NormalEngine::startLoop() {
     if (parallelism_config.tp_rank == 0) {
         RTP_LLM_LOG_INFO("start init system prompt");
@@ -372,7 +377,9 @@ absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
-    loop_thread_->join();
+    if (loop_thread_) {
+        loop_thread_->join();
+    }
     return absl::OkStatus();
 }
 

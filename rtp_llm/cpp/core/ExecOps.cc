@@ -158,7 +158,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         return;
     }
     if (!cache_store) {
-        RTP_LLM_LOG_DEBUG("cache_store is null, skip writeCacheStore");
+        RTP_LLM_LOG_INFO("cache_store is null, skip writeCacheStore");
         return;
     }
 

@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/utils/StatusUtil.h"
 
 using namespace std;
 namespace W = rtp_llm::W;
@@ -165,13 +166,14 @@ std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
     rtp_llm::RuntimeConfig runtime_config;
     rtp_llm::KVCacheConfig kv_cache_config;
     EngineInitParams rtp_llm_params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
-    // Set test model factory before engine construction so the model is available during startLoop()
+    // Set test model factory before engine construction so the model is available during start()
     size_t vocab                       = model_config.vocab_size;
     NormalExecutor::test_model_factory = [vocab](const GptModelInitParams&) {
         return std::make_unique<MockModel>(vocab);
     };
     std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params, nullptr);
     NormalExecutor::test_model_factory   = nullptr;
+    THROW_IF_STATUS_ERROR(engine->start());
     return engine;
 }
 

@@ -58,6 +58,12 @@ public:
 
     virtual absl::Status stop() = 0;
 
+    // Build resources in the subclass constructor, then call start() once the process is ready to serve
+    // (e.g. after RemoteRpcServer finishes initCacheStore). Default is a no-op for mocks/tests.
+    virtual absl::Status start() {
+        return absl::OkStatus();
+    }
+
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                      preRunMode                            mode) = 0;
 
