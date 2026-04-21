@@ -143,8 +143,7 @@ def _check_dispatch_result(
     src_token_pos = op.get_dispatch_src_token_pos()
 
     for i, pos in enumerate(src_token_pos):
-        src_rank = int(pos) // config.max_num_inp_token_per_rank
-        src_id = int(pos) % config.max_num_inp_token_per_rank
+        src_rank, src_id = op.decode_send_flat_idx(int(pos))
 
         assert torch.equal(
             all_rank_input[src_rank][src_id], dispatch_output[i]
