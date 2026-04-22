@@ -9,6 +9,10 @@
 
 #define __nv_bfloat16 amd_bfloat16
 #define __nv_bfloat162 amd_bfloat162
+// gfx950 (MI355) uses standard IEEE FP8 E4M3, while gfx942 (MI300) uses the
+// FNUZ (Finite, No Unsigned Zero) variant. This is a hardware-level difference.
+// No fat binary concern: RTP-LLM builds separate binaries per GPU architecture,
+// so this compile-time #ifdef is sufficient.
 #ifdef ROCM_GFX950
 #define __nv_fp8_e4m3 __hip_fp8_e4m3
 #else

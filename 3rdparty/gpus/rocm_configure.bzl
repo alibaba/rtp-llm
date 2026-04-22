@@ -191,6 +191,11 @@ def _rocm_include_path(repository_ctx, rocm_config):
     clang_include_prefixes = [rocm_config.rocm_toolkit_path]
     if rocm_config.rocm_toolkit_path != _DEFAULT_ROCM_TOOLKIT_PATH:
         clang_include_prefixes.append(_DEFAULT_ROCM_TOOLKIT_PATH)
+    # Enumerate known clang versions bundled with ROCm releases.
+    # ROCm 5.x uses clang 17, ROCm 6.x uses clang 18, ROCm 7.x uses clang 22.
+    # This enumeration is intentional: clang version changes are infrequent
+    # (only on major ROCm upgrades), and dynamic detection would add complexity
+    # without significant benefit. Add new versions here when upgrading ROCm.
     for prefix in clang_include_prefixes:
         inc_dirs.append(prefix + "/llvm/lib/clang/17/include")
         inc_dirs.append(prefix + "/lib/llvm/lib/clang/18/include")
