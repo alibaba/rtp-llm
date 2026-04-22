@@ -1,7 +1,7 @@
 # P2P Mooncake 当前环境测试报告
 
-日期：2026-04-22
-环境：`connector` / `qiongshi_rtp_dev`
+日期：2026-04-23
+环境：`connector` / `qiongshi_rtp_dev` / `qiongshi_rtp_smoke`
 代码目录：`/data0/qiongshi.gb/RTP-LLM/github-opensource`
 分支：`develop/vin/p2p-connector-3`
 
@@ -51,25 +51,42 @@
 3. `PrepareDescriptorFallsBackToConfiguredLocalServerName`
 4. `PrepareDescriptorFallsBackToClassicHostAndPort`
 
-说明：加上此前已经补过的用例，`MooncakeBackendStubTest.cc` 当前总计 41 个测试，覆盖 sender/receiver/control-plane/classic TE 的主要状态分支。
+### 3.3 Control Plane / Classic TE 新增
+
+1. `RealControlPlanePrepareFailsAfterReceiverSteal`
+2. `RealControlPlaneFinishMapsUnsupportedFailureCodeToUnknownTaskCode`
+3. `RealClassicTransferEngineReturnsCancelledWhenReceiverTaskStolenBeforeSend`
+
+### 3.4 配置透传新增
+
+1. `//rtp_llm/cpp/cache/connector/p2p/test:p2p_connector_config_test`
+2. `WorkerConfigCarriesMooncakeTcpTransportSettings`
+3. `WorkerConfigPrefersMooncakeBackendOverLegacyRdmaFlag`
+
+### 3.5 Python CLI 透传新增
+
+1. `cache_store_group_args.py` 新增完整 `cache_store_mooncake_*` 参数组
+2. `//rtp_llm/server/server_args/test:server_args_test` 新增 `test_mooncake_cache_store_args_set_to_py_env_configs`
+
+说明：`MooncakeBackendStubTest.cc` 当前总计 45 个测试，覆盖 sender/receiver/control-plane/classic TE 的主要状态分支。
 
 ## 4. 实际执行结果
 
 ### 4.1 已通过
 
-以下命令在 `qiongshi_rtp_dev` 中执行通过：
+以下命令已在当前环境中重新执行并通过：
 
-1. `bazelisk test //rtp_llm/cpp/cache/connector/p2p/transfer/mooncake:mooncake_backend_stub_test ...`
+1. `bazelisk test //rtp_llm/cpp/cache/connector/p2p/test:p2p_connector_config_test ...`
    - 结果：`PASSED`
-   - 说明：Mooncake stub/control-plane/classic TE 相关 41 个测试均通过
+   - 说明：`P2PConnectorConfig -> worker_config -> Mooncake TCP backend` 透传链路通过
 
-2. `bazelisk test //rtp_llm/cpp/cache/connector/p2p/transfer/mooncake:mooncake_backend_stub_test --test_arg=--gtest_filter=MooncakeKVCacheClassicTeTest.RealClassicTransferEngineCopiesPayloadOverTcpTransport ...`
+2. `bazelisk test //rtp_llm/server/server_args/test:server_args_test ...`
    - 结果：`PASSED`
-   - 说明：真实 Mooncake TCP transport 单 block 数据面 E2E 通过
+   - 说明：Python `start_server.py` 参数解析链已经接受并绑定 `cache_store_mooncake_*` 配置
 
-3. `bazelisk test //rtp_llm/cpp/cache/connector/p2p/transfer/mooncake:mooncake_backend_stub_test --test_arg=--gtest_filter=MooncakeKVCacheClassicTeTest.RealClassicTransferEngineCopiesMultipleBlocksOverTcpTransport ...`
+3. `bazelisk test //rtp_llm/cpp/cache/connector/p2p/transfer/mooncake:mooncake_backend_stub_test --define=enable_mooncake_te=true ...`
    - 结果：`PASSED`
-   - 说明：真实 Mooncake TCP transport 多 block 数据面 E2E 通过
+   - 说明：Mooncake stub/control-plane/classic TE 相关 45 个测试通过，classic TE TCP 数据面不是 skip，而是真实执行
 
 4. `bazelisk test //rtp_llm/cpp/cache/connector/p2p/transfer/test:transfer_backend_config_test ...`
    - 结果：`PASSED`
@@ -80,28 +97,29 @@
    - 说明：既有 TCP sender/receiver 路径回归通过
 
 6. `bazelisk test //rtp_llm/test/smoke:pd_seperation_prefill_decode_reuse_cache_mooncake_tcp ...`
-   - 结果：进行中
-   - 说明：Mooncake TCP mode 的 smoke target 已新增，并已在 `qiongshi_rtp_smoke` 中通过 analysis，进入大规模 CUDA 编译阶段
+   - 结果：`FAILED`
+   - 说明：Mooncake TCP mode 的 smoke target 已成功启动 prefill/decode 服务并通过健康检查，失败点已推进到真实模型执行
+   - 直接失败证据：
+     - prefill/decode 进程启动成功
+     - `10401` / `10201` 健康检查返回 `200`
+     - 请求真正进入模型执行后，backend 因 CUDA 运行时错误退出
+   - 根因日志：
+     - `CUDA runtime error: the provided PTX was compiled with an unsupported toolchain`
+     - 触发点位于通用 CUDA kernel，如 `kv_cache_kernels.cu` 与 `embedding_kernels.cu`
+   - 结论：
+     - 这不是 Mooncake 参数链路问题，也不是 prepare/finish 控制面问题
+     - 这是当前 `H20 + driver 550.54.14 + 运行镜像/内核产物` 的 PTX/toolchain 兼容性问题
    - 备注：由于 connector 上 `rtp_llm/test/smoke` 指向 `internal_source` 符号链接，仓库内额外保存了可复用 patch：
      `docs/backend/p2p-mooncake-tcp-smoke.patch`
 
 ### 4.2 已尝试但被环境阻塞
 
-以下 target 在当前容器中未能进入测试执行阶段，而是被 RDMA 相关链接问题阻塞：
+以下 target 仍不适合作为当前轮 Mooncake TCP 验证主证据：
 
 1. `//rtp_llm/cpp/cache/connector/p2p/test:p2p_connector_worker_test`
 2. `//rtp_llm/cpp/cache/connector/p2p/test:p2p_connector_test`
 
-共同错误特征：
-
-- `/usr/local/lib64/librdmacm.so.1` 链接时缺少多个 `IBVERBS_*` 符号
-- 典型报错包括：
-  - `ibv_get_pkey_index@IBVERBS_1.5`
-  - `ibv_get_device_index@IBVERBS_1.9`
-  - `_ibv_query_gid_ex@IBVERBS_1.11`
-  - `ibv_reg_dmabuf_mr@IBVERBS_1.12`
-
-结论：这是**当前容器 RDMA verbs / rdmacm 链接环境问题**，不是 Mooncake 新增测试逻辑问题。
+原因：这两个目标仍可能受当前容器更大范围的 RDMA / runtime 依赖环境影响，不如新增的 `p2p_connector_config_test` 更稳定聚焦。
 
 ## 5. 覆盖结论
 
@@ -167,8 +185,10 @@
 
 - 真实 TCP 控制面 round-trip 已验证
 - classic TransferEngine 非 RDMA/TCP transport payload copy 已验证
+- classic TransferEngine 非 RDMA/TCP transport cancel-before-send 已验证
 - Mooncake TCP transport 可作为当前无 RDMA 环境下的真实数据面 E2E 验证路径
 - classic TransferEngine invalid transport / registerLocalMemory 幂等 已验证
+- Python `start_server.py` CLI 已可透传 `cache_store_mooncake_*`
 
 #### D. 非 Mooncake 回归
 
@@ -177,13 +197,14 @@
 
 ### 5.2 当前环境下仍无法完成的验证
 
-以下内容必须等带 RDMA 的环境：
+以下内容必须等带 RDMA 的环境，或至少需要一个与当前 H20 兼容的运行镜像：
 
 1. 真实 RDMA one-sided WRITE 数据面
 2. GPU memory registration 与 RDMA MR 相关行为
 3. 跨机 RDMA 网络异常、重试、链路抖动
 4. Mooncake one-sided WRITE 的真实 E2E
 5. Mooncake 模式下的 smoke 与性能测试
+6. 当前 H20 镜像上的 PTX/toolchain 兼容性修复后再做完整回归
 
 ## 6. 作为测试 owner 的结论
 
@@ -192,7 +213,8 @@
 1. Mooncake sender/receiver/control-plane 的核心状态机已经被单测收口。
 2. 薄控制面真实 TCP round-trip 已验证，不是纯 mock。
 3. classic TE 的非 RDMA/TCP transport 路径已验证，说明“控制面 + 数据面适配层”整体形状是可工作的。
-4. 现阶段剩余的验证缺口，已经集中在**真实 RDMA 设备与网络环境**，不再是单机无 RDMA 环境能有效补充的范围。
+4. smoke 已经从“参数不识别启动失败”推进到“真实模型执行期的 CUDA PTX/toolchain 兼容问题”，说明 Mooncake TCP 接入链路已经打通。
+5. 现阶段剩余的验证缺口，已经集中在**真实 RDMA 设备与网络环境**，以及**当前 H20 运行镜像的 CUDA/PTX 兼容性**。
 
 ## 6.1 当前推荐的无 RDMA 验证模式
 

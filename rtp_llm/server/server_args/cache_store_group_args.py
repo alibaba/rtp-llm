@@ -14,6 +14,86 @@ def init_cache_store_group_args(parser, cache_store_config):
         default=False,
         help="控制 cache store 是否使用 RDMA 模式。",
     )
+    cache_store_group.add_argument(
+        "--cache_store_mooncake_mode",
+        env_name="CACHE_STORE_MOONCAKE_MODE",
+        bind_to=(cache_store_config, "cache_store_mooncake_mode"),
+        type=str2bool,
+        default=False,
+        help="控制 cache store 是否使用 Mooncake P2P backend。",
+    )
+    cache_store_group.add_argument(
+        "--cache_store_mooncake_metadata_conn_string",
+        env_name="CACHE_STORE_MOONCAKE_METADATA_CONN_STRING",
+        bind_to=(cache_store_config, "cache_store_mooncake_metadata_conn_string"),
+        type=str,
+        default="",
+        help="Mooncake metadata backend 连接串。",
+    )
+    cache_store_group.add_argument(
+        "--cache_store_mooncake_local_server_name",
+        env_name="CACHE_STORE_MOONCAKE_LOCAL_SERVER_NAME",
+        bind_to=(cache_store_config, "cache_store_mooncake_local_server_name"),
+        type=str,
+        default="",
+        help="Mooncake classic TransferEngine 的本地 server name。",
+    )
+    cache_store_group.add_argument(
+        "--cache_store_mooncake_ip_or_host_name",
+        env_name="CACHE_STORE_MOONCAKE_IP_OR_HOST_NAME",
+        bind_to=(cache_store_config, "cache_store_mooncake_ip_or_host_name"),
+        type=str,
+        default="",
+        help="Mooncake classic TransferEngine 对外暴露的 ip 或 host 名称。",
+    )
+    cache_store_group.add_argument(
+        "--cache_store_mooncake_transport",
+        env_name="CACHE_STORE_MOONCAKE_TRANSPORT",
+        bind_to=(cache_store_config, "cache_store_mooncake_transport"),
+        type=str,
+        default="tcp",
+        help="Mooncake classic TransferEngine 传输协议，当前支持 tcp / rdma。",
+    )
+    cache_store_group.add_argument(
+        "--cache_store_mooncake_rpc_port",
+        env_name="CACHE_STORE_MOONCAKE_RPC_PORT",
+        bind_to=(cache_store_config, "cache_store_mooncake_rpc_port"),
+        type=int,
+        default=12345,
+        help="Mooncake classic TransferEngine 的 rpc/listen 端口。",
+    )
+    cache_store_group.add_argument(
+        "--cache_store_mooncake_control_plane_port",
+        env_name="CACHE_STORE_MOONCAKE_CONTROL_PLANE_PORT",
+        bind_to=(cache_store_config, "cache_store_mooncake_control_plane_port"),
+        type=int,
+        default=0,
+        help="Mooncake prepare/finish 控制面的监听端口，0 表示沿用 cache_store_listen_port。",
+    )
+    cache_store_group.add_argument(
+        "--cache_store_mooncake_location",
+        env_name="CACHE_STORE_MOONCAKE_LOCATION",
+        bind_to=(cache_store_config, "cache_store_mooncake_location"),
+        type=str,
+        default="*",
+        help="Mooncake backend location 标识。",
+    )
+    cache_store_group.add_argument(
+        "--cache_store_mooncake_remote_accessible",
+        env_name="CACHE_STORE_MOONCAKE_REMOTE_ACCESSIBLE",
+        bind_to=(cache_store_config, "cache_store_mooncake_remote_accessible"),
+        type=str2bool,
+        default=True,
+        help="Mooncake backend 是否对远端可访问。",
+    )
+    cache_store_group.add_argument(
+        "--cache_store_mooncake_update_metadata",
+        env_name="CACHE_STORE_MOONCAKE_UPDATE_METADATA",
+        bind_to=(cache_store_config, "cache_store_mooncake_update_metadata"),
+        type=str2bool,
+        default=True,
+        help="Mooncake backend 是否在初始化时更新 metadata。",
+    )
 
     cache_store_group.add_argument(
         "--wrr_available_ratio",

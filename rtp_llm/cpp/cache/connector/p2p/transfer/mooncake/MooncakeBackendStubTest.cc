@@ -1615,6 +1615,119 @@ TEST(MooncakeKVCacheIntegrationTest, SenderAndReceiverRoundTripThroughRealContro
     EXPECT_EQ(after_finish_code, TransferErrorCode::OK);
 }
 
+TEST(MooncakeKVCacheIntegrationTest, RealControlPlanePrepareFailsAfterReceiverSteal) {
+    const auto control_plane_port = nextTestPort();
+    const auto local_server_name = std::string("127.0.0.1:") + std::to_string(control_plane_port);
+
+    TransferBackendConfig receiver_config;
+    receiver_config.cache_store_mooncake_mode = true;
+    receiver_config.mooncake.control_plane_port = control_plane_port;
+    receiver_config.cache_store_listen_port = control_plane_port;
+    receiver_config.messager_io_thread_count = 1;
+    receiver_config.messager_worker_thread_count = 4;
+    receiver_config.cache_store_tcp_anet_rpc_thread_num = 1;
+    receiver_config.cache_store_tcp_anet_rpc_queue_num = 8;
+    receiver_config.mooncake.classic.local_server_name = local_server_name;
+    receiver_config.mooncake.classic.ip_or_host_name = "127.0.0.1";
+    receiver_config.mooncake.classic.rpc_port = static_cast<uint16_t>(control_plane_port);
+
+    auto receiver_adapter = std::make_shared<FakeMooncakeAdapter>();
+    MooncakeKVCacheReceiver receiver(receiver_adapter);
+    ASSERT_TRUE(receiver.init(receiver_config));
+
+    char target_block[16]{};
+    auto recv_block_info = std::make_shared<KeyBlockInfo>();
+    recv_block_info->blocks.push_back(BlockInfo{false, 0, 0, target_block, sizeof(target_block)});
+
+    RecvRequest recv_request;
+    recv_request.unique_key = "round_trip_prepare_cancelled";
+    recv_request.deadline_ms = currentTimeMs() + 5000;
+    recv_request.block_info[201] = recv_block_info;
+    ASSERT_NE(receiver.recv(recv_request), nullptr);
+    receiver.stealTask(recv_request.unique_key);
+
+    auto control_plane_client = createMooncakeControlPlaneClient();
+    ASSERT_TRUE(control_plane_client->init(receiver_config.messager_io_thread_count));
+
+    MooncakeRemoteDescriptor descriptor;
+    TransferErrorCode error_code = TransferErrorCode::OK;
+    std::string error_message;
+    EXPECT_FALSE(control_plane_client->prepare("127.0.0.1",
+                                               control_plane_port,
+                                               recv_request.unique_key,
+                                               currentTimeMs() + 1000,
+                                               &descriptor,
+                                               &error_code,
+                                               &error_message));
+    EXPECT_EQ(error_code, TransferErrorCode::CANCELLED);
+    EXPECT_NE(error_message.find("task not found"), std::string::npos);
+}
+
+TEST(MooncakeKVCacheIntegrationTest, RealControlPlaneFinishMapsUnsupportedFailureCodeToUnknownTaskCode) {
+    const auto control_plane_port = nextTestPort();
+    const auto local_server_name = std::string("127.0.0.1:") + std::to_string(control_plane_port);
+
+    TransferBackendConfig receiver_config;
+    receiver_config.cache_store_mooncake_mode = true;
+    receiver_config.mooncake.control_plane_port = control_plane_port;
+    receiver_config.cache_store_listen_port = control_plane_port;
+    receiver_config.messager_io_thread_count = 1;
+    receiver_config.messager_worker_thread_count = 4;
+    receiver_config.cache_store_tcp_anet_rpc_thread_num = 1;
+    receiver_config.cache_store_tcp_anet_rpc_queue_num = 8;
+    receiver_config.mooncake.classic.local_server_name = local_server_name;
+    receiver_config.mooncake.classic.ip_or_host_name = "127.0.0.1";
+    receiver_config.mooncake.classic.rpc_port = static_cast<uint16_t>(control_plane_port);
+
+    auto receiver_adapter = std::make_shared<FakeMooncakeAdapter>();
+    MooncakeKVCacheReceiver receiver(receiver_adapter);
+    ASSERT_TRUE(receiver.init(receiver_config));
+
+    char target_block[24]{};
+    auto recv_block_info = std::make_shared<KeyBlockInfo>();
+    recv_block_info->blocks.push_back(BlockInfo{false, 0, 0, target_block, sizeof(target_block)});
+
+    RecvRequest recv_request;
+    recv_request.unique_key = "round_trip_finish_failure";
+    recv_request.deadline_ms = currentTimeMs() + 5000;
+    recv_request.block_info[202] = recv_block_info;
+    auto recv_task = receiver.recv(recv_request);
+    ASSERT_NE(recv_task, nullptr);
+
+    auto control_plane_client = createMooncakeControlPlaneClient();
+    ASSERT_TRUE(control_plane_client->init(receiver_config.messager_io_thread_count));
+
+    MooncakeRemoteDescriptor descriptor;
+    TransferErrorCode prepare_code = TransferErrorCode::UNKNOWN;
+    std::string prepare_message;
+    ASSERT_TRUE(control_plane_client->prepare("127.0.0.1",
+                                              control_plane_port,
+                                              recv_request.unique_key,
+                                              recv_request.deadline_ms,
+                                              &descriptor,
+                                              &prepare_code,
+                                              &prepare_message));
+    EXPECT_EQ(prepare_code, TransferErrorCode::OK);
+    ASSERT_EQ(descriptor.blocks.size(), 1u);
+
+    TransferErrorCode finish_response_code = TransferErrorCode::OK;
+    std::string finish_response_message;
+    EXPECT_TRUE(control_plane_client->finish("127.0.0.1",
+                                             control_plane_port,
+                                             recv_request.unique_key,
+                                             false,
+                                             TransferErrorCode::RPC_FAILED,
+                                             "rpc failed from sender",
+                                             &finish_response_code,
+                                             &finish_response_message));
+    EXPECT_EQ(finish_response_code, TransferErrorCode::OK);
+    EXPECT_TRUE(finish_response_message.empty());
+    ASSERT_TRUE(waitTaskDone(recv_task, 200));
+    EXPECT_FALSE(recv_task->success());
+    EXPECT_EQ(recv_task->errorCode(), TransferErrorCode::UNKNOWN);
+    EXPECT_EQ(recv_task->errorMessage(), "rpc failed from sender");
+}
+
 
 TEST(MooncakeKVCacheClassicTeTest, InitFailsWhenTransportProtoInvalid) {
     auto receiver_adapter = createMooncakeTransferEngineAdapter();
@@ -1852,6 +1965,193 @@ TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineCopiesMultipleBlocks
     EXPECT_EQ(std::memcmp(source_key10_block0, target_key10_block0, sizeof(source_key10_block0)), 0);
     EXPECT_EQ(std::memcmp(source_key30_block0, target_key30_block0, sizeof(source_key30_block0)), 0);
     EXPECT_EQ(std::memcmp(source_key30_block2, target_key30_block2, sizeof(source_key30_block2)), 0);
+}
+
+TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineSupportsSequentialTransfersOverTcpTransport) {
+    auto receiver_adapter = createMooncakeTransferEngineAdapter();
+    auto sender_adapter = createMooncakeTransferEngineAdapter();
+    if (!receiver_adapter || !sender_adapter) {
+        GTEST_SKIP() << "Mooncake classic TE is not enabled in this build";
+    }
+
+    const auto control_plane_port = nextTestPort();
+    const auto receiver_rpc_port = nextTestPort();
+    const auto sender_rpc_port = nextTestPort();
+    const auto receiver_server_name = std::string("127.0.0.1:") + std::to_string(receiver_rpc_port);
+    const auto sender_server_name = std::string("127.0.0.1:") + std::to_string(sender_rpc_port);
+
+    TransferBackendConfig receiver_config;
+    receiver_config.cache_store_mooncake_mode = true;
+    receiver_config.mooncake.location = "tp0";
+    receiver_config.mooncake.classic.transport = "tcp";
+    receiver_config.mooncake.control_plane_port = control_plane_port;
+    receiver_config.cache_store_listen_port = control_plane_port;
+    receiver_config.messager_io_thread_count = 1;
+    receiver_config.messager_worker_thread_count = 4;
+    receiver_config.cache_store_tcp_anet_rpc_thread_num = 1;
+    receiver_config.cache_store_tcp_anet_rpc_queue_num = 8;
+    receiver_config.mooncake.classic.local_server_name = receiver_server_name;
+    receiver_config.mooncake.classic.ip_or_host_name = "127.0.0.1";
+    receiver_config.mooncake.classic.rpc_port = static_cast<uint16_t>(receiver_rpc_port);
+
+    MooncakeKVCacheReceiver receiver(receiver_adapter);
+    ASSERT_TRUE(receiver.init(receiver_config));
+
+    TransferBackendConfig sender_config = receiver_config;
+    sender_config.mooncake.classic.local_server_name = sender_server_name;
+    sender_config.mooncake.classic.rpc_port = static_cast<uint16_t>(sender_rpc_port);
+
+    MooncakeKVCacheSender sender(sender_adapter, createMooncakeControlPlaneClient());
+    ASSERT_TRUE(sender.init(sender_config));
+
+    char target_block_first[32]{};
+    char source_block_first[32];
+    for (size_t i = 0; i < sizeof(source_block_first); ++i) {
+        source_block_first[i] = static_cast<char>('a' + (i % 26));
+    }
+
+    BlockInfo recv_mem_first{false, 0, 0, target_block_first, sizeof(target_block_first)};
+    BlockInfo send_mem_first{false, 0, 0, source_block_first, sizeof(source_block_first)};
+    ASSERT_TRUE(receiver.regMem(recv_mem_first, sizeof(target_block_first)));
+    ASSERT_TRUE(sender.regMem(send_mem_first, sizeof(source_block_first)));
+
+    auto recv_info_first = std::make_shared<KeyBlockInfo>();
+    recv_info_first->blocks.push_back(recv_mem_first);
+    RecvRequest recv_request_first;
+    recv_request_first.unique_key = "classic_tcp_round_trip_first";
+    recv_request_first.deadline_ms = currentTimeMs() + 5000;
+    recv_request_first.block_info[101] = recv_info_first;
+    auto recv_task_first = receiver.recv(recv_request_first);
+    ASSERT_NE(recv_task_first, nullptr);
+
+    auto send_info_first = std::make_shared<KeyBlockInfo>();
+    send_info_first->blocks.push_back(send_mem_first);
+    SendRequest send_request_first;
+    send_request_first.ip = "127.0.0.1";
+    send_request_first.port = 0;
+    send_request_first.unique_key = recv_request_first.unique_key;
+    send_request_first.deadline_ms = recv_request_first.deadline_ms;
+    send_request_first.block_info[101] = send_info_first;
+
+    TransferErrorCode first_code = TransferErrorCode::UNKNOWN;
+    std::string first_msg;
+    sender.send(send_request_first, [&](TransferErrorCode code, const std::string& msg) {
+        first_code = code;
+        first_msg = msg;
+    });
+
+    EXPECT_EQ(first_code, TransferErrorCode::OK) << first_msg;
+    ASSERT_TRUE(waitTaskDone(recv_task_first, 2000));
+    EXPECT_TRUE(recv_task_first->success());
+    ASSERT_TRUE(waitBufferEquals(source_block_first, target_block_first, sizeof(source_block_first), 2000));
+
+    char target_block_second[48]{};
+    char source_block_second[48];
+    for (size_t i = 0; i < sizeof(source_block_second); ++i) {
+        source_block_second[i] = static_cast<char>('A' + (i % 23));
+    }
+
+    BlockInfo recv_mem_second{false, 0, 0, target_block_second, sizeof(target_block_second)};
+    BlockInfo send_mem_second{false, 0, 0, source_block_second, sizeof(source_block_second)};
+    ASSERT_TRUE(receiver.regMem(recv_mem_second, sizeof(target_block_second)));
+    ASSERT_TRUE(sender.regMem(send_mem_second, sizeof(source_block_second)));
+
+    auto recv_info_second = std::make_shared<KeyBlockInfo>();
+    recv_info_second->blocks.push_back(recv_mem_second);
+    RecvRequest recv_request_second;
+    recv_request_second.unique_key = "classic_tcp_round_trip_second";
+    recv_request_second.deadline_ms = currentTimeMs() + 5000;
+    recv_request_second.block_info[202] = recv_info_second;
+    auto recv_task_second = receiver.recv(recv_request_second);
+    ASSERT_NE(recv_task_second, nullptr);
+
+    auto send_info_second = std::make_shared<KeyBlockInfo>();
+    send_info_second->blocks.push_back(send_mem_second);
+    SendRequest send_request_second;
+    send_request_second.ip = "127.0.0.1";
+    send_request_second.port = 0;
+    send_request_second.unique_key = recv_request_second.unique_key;
+    send_request_second.deadline_ms = recv_request_second.deadline_ms;
+    send_request_second.block_info[202] = send_info_second;
+
+    TransferErrorCode second_code = TransferErrorCode::UNKNOWN;
+    std::string second_msg;
+    sender.send(send_request_second, [&](TransferErrorCode code, const std::string& msg) {
+        second_code = code;
+        second_msg = msg;
+    });
+
+    EXPECT_EQ(second_code, TransferErrorCode::OK) << second_msg;
+    ASSERT_TRUE(waitTaskDone(recv_task_second, 2000));
+    EXPECT_TRUE(recv_task_second->success());
+    ASSERT_TRUE(waitBufferEquals(source_block_second, target_block_second, sizeof(source_block_second), 2000));
+    EXPECT_EQ(std::memcmp(source_block_first, target_block_first, sizeof(source_block_first)), 0);
+    EXPECT_EQ(std::memcmp(source_block_second, target_block_second, sizeof(source_block_second)), 0);
+}
+
+TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineReturnsCancelledWhenReceiverTaskStolenBeforeSend) {
+    auto receiver_adapter = createMooncakeTransferEngineAdapter();
+    auto sender_adapter = createMooncakeTransferEngineAdapter();
+    if (!receiver_adapter || !sender_adapter) {
+        GTEST_SKIP() << "Mooncake classic TE is not enabled in this build";
+    }
+
+    const auto control_plane_port = nextTestPort();
+    const auto receiver_rpc_port = nextTestPort();
+    const auto sender_rpc_port = nextTestPort();
+    const auto receiver_server_name = std::string("127.0.0.1:") + std::to_string(receiver_rpc_port);
+    const auto sender_server_name = std::string("127.0.0.1:") + std::to_string(sender_rpc_port);
+
+    TransferBackendConfig receiver_config;
+    receiver_config.cache_store_mooncake_mode = true;
+    receiver_config.mooncake.location = "tp0";
+    receiver_config.mooncake.classic.transport = "tcp";
+    receiver_config.mooncake.control_plane_port = control_plane_port;
+    receiver_config.cache_store_listen_port = control_plane_port;
+    receiver_config.messager_io_thread_count = 1;
+    receiver_config.messager_worker_thread_count = 4;
+    receiver_config.cache_store_tcp_anet_rpc_thread_num = 1;
+    receiver_config.cache_store_tcp_anet_rpc_queue_num = 8;
+    receiver_config.mooncake.classic.local_server_name = receiver_server_name;
+    receiver_config.mooncake.classic.ip_or_host_name = "127.0.0.1";
+    receiver_config.mooncake.classic.rpc_port = static_cast<uint16_t>(receiver_rpc_port);
+
+    MooncakeKVCacheReceiver receiver(receiver_adapter);
+    ASSERT_TRUE(receiver.init(receiver_config));
+
+    char target_block[16]{};
+    auto recv_block_info = std::make_shared<KeyBlockInfo>();
+    recv_block_info->blocks.push_back(BlockInfo{false, 0, 0, target_block, sizeof(target_block)});
+
+    RecvRequest recv_request;
+    recv_request.unique_key = "classic_tcp_cancelled_before_send";
+    recv_request.deadline_ms = currentTimeMs() + 5000;
+    recv_request.block_info[303] = recv_block_info;
+    ASSERT_NE(receiver.recv(recv_request), nullptr);
+    receiver.stealTask(recv_request.unique_key);
+
+    TransferBackendConfig sender_config = receiver_config;
+    sender_config.mooncake.classic.local_server_name = sender_server_name;
+    sender_config.mooncake.classic.rpc_port = static_cast<uint16_t>(sender_rpc_port);
+
+    MooncakeKVCacheSender sender(sender_adapter, createMooncakeControlPlaneClient());
+    ASSERT_TRUE(sender.init(sender_config));
+
+    SendRequest send_request;
+    send_request.ip = "127.0.0.1";
+    send_request.port = control_plane_port;
+    send_request.unique_key = recv_request.unique_key;
+    send_request.deadline_ms = currentTimeMs() + 1000;
+
+    TransferErrorCode actual_code = TransferErrorCode::UNKNOWN;
+    std::string actual_msg;
+    sender.send(send_request, [&](TransferErrorCode code, const std::string& msg) {
+        actual_code = code;
+        actual_msg = msg;
+    });
+
+    EXPECT_EQ(actual_code, TransferErrorCode::CANCELLED);
+    EXPECT_NE(actual_msg.find("task not found"), std::string::npos);
 }
 
 }  // namespace

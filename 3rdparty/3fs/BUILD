@@ -43,3 +43,9 @@ cc_library(
     }),
     visibility = ["//visibility:public"],
 )
+
+alias(
+    name = "hf3fs_shared",
+    actual = ":hf3fs",
+    visibility = ["//visibility:public"],
+)
