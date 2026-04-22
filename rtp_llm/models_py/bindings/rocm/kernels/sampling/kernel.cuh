@@ -269,8 +269,8 @@ DeviceSamplingFromProb(uint32_t                                                 
         }
 
         bool greater_than_u_diff[VEC_SIZE];
-#if defined(FLASHINFER_CUB_SUBTRACTLEFT_DEFINED) || defined(__HIP_PLATFORM_AMD__)
-        // hipCUB/rocPRIM only provides SubtractLeft, not FlagHeads
+#if defined(FLASHINFER_CUB_SUBTRACTLEFT_DEFINED)
+        // ROCm 7.x hipCUB/rocPRIM uses SubtractLeft instead of FlagHeads
         BlockAdjacentDifference<bool, BLOCK_THREADS>(temp_storage->block_prim.adj_diff)
             .template SubtractLeft<VEC_SIZE>(greater_than_u, greater_than_u_diff, BoolDiffOp());
 #else

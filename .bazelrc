@@ -150,6 +150,8 @@ build:rocm --copt="-DTORCH_CUDA_CPP_API=" # PyTorch 2.9 ROCm compatibility
 build:rocm --copt="-DTORCH_CUDA_CU_API=" # PyTorch 2.9 ROCm compatibility
 ## ROCm clang may emit compiler-rt builtins (e.g. __truncsfbf2) that are not
 ## pulled in automatically for shared objects in this toolchain setup.
+## NOTE: The clang version number (22) must be updated when upgrading ROCm.
+## Known mapping: ROCm 5.x → clang 17, ROCm 6.x → clang 18, ROCm 7.x → clang 22.
 build:rocm --linkopt="/opt/rocm/lib/llvm/lib/clang/22/lib/linux/libclang_rt.builtins-x86_64.a"
 build:rocm --copt="-DLEGACY_HIPBLAS_DIRECT"
 build:rocm --repo_env CK_FMHA_GEN_ARGS="--receipt 2"
@@ -214,7 +216,7 @@ build:asan --linkopt -fsanitize=address
 
 test:rocm --test_env PATH="/opt/rocm/bin:/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/opt/conda310/condabin:/usr/share/Modules/bin:/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/usr/X11R6/bin:/opt/cmake/cmake-3.26.4/bin"
 test:rocm --test_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/rocm/lib:/opt/conda310/lib/:/usr/lib64:/opt/amdgpu/lib64"
-test:cuda --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64"
+test --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64"
 test --test_env OMP_NUM_THREADS=8
 test --test_env FT_SERVER_TEST="1"
 test --test_env LOG_LEVEL="INFO"
