@@ -16,12 +16,28 @@
 
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "autil/NetUtil.h"
 
 namespace rtp_llm {
+
+namespace {
+
+const std::map<std::string, uint32_t>& logLevelNameToValue() {
+    static const std::map<std::string, uint32_t> kNameToLevel = {
+        {"TRACE", alog::LOG_LEVEL_TRACE1},
+        {"DEBUG", alog::LOG_LEVEL_DEBUG},
+        {"INFO", alog::LOG_LEVEL_INFO},
+        {"WARNING", alog::LOG_LEVEL_WARN},
+        {"ERROR", alog::LOG_LEVEL_ERROR},
+    };
+    return kNameToLevel;
+}
+
+}  // namespace
 
 std::string Logger::log_level_ = "INFO";
 
@@ -91,20 +107,13 @@ void Logger::setBaseLevel(const uint32_t base_level) {
 uint32_t Logger::getLevelfromstr(const char* s) {
     char* level_name = std::getenv(s);
     if (level_name != nullptr) {
-        std::map<std::string, uint32_t> name_to_level = {
-            {"TRACE", alog::LOG_LEVEL_TRACE1},
-            {"DEBUG", alog::LOG_LEVEL_DEBUG},
-            {"INFO", alog::LOG_LEVEL_INFO},
-            {"WARNING", alog::LOG_LEVEL_WARN},
-            {"ERROR", alog::LOG_LEVEL_ERROR},
-        };
-        auto level = name_to_level.find(level_name);
+        const auto& name_to_level = logLevelNameToValue();
+        auto        level         = name_to_level.find(level_name);
         if (level != name_to_level.end()) {
             return level->second;
         } else {
             throw std::runtime_error("[WARNING] Invalid logger level for env: " + std::string(s)
                                      + " with value: " + std::string(level_name));
-            level_name = nullptr;
         }
     }
     return base_log_level_;
