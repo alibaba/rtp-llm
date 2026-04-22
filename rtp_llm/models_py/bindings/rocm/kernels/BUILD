@@ -84,6 +84,7 @@ cc_library(
     hdrs = [
         "pa_decode_dot_kernel.h",
         "pa_decode_reduce_kernel.h",
+        "hip_warp_compat.h",
     ],
     deps = rocm_deps,
     copts = rocm_copts(),
