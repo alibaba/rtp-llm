@@ -6,7 +6,12 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.triton_kernels.fla.l2norm import L2Norm, l2norm
+from rtp_llm.models_py.triton_kernels.fla.l2norm import (
+    L2Norm,
+    fused_l2norm_qk,
+    l2norm,
+    l2norm_fwd,
+)
 
 
 def l2norm_reference(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -200,6 +205,59 @@ class TestL2Norm(unittest.TestCase):
         )
 
         print("\n多维输入测试通过")
+
+
+class TestFusedL2NormQK(unittest.TestCase):
+    """fused_l2norm_qk 测试：必须与两次独立的 l2norm_fwd 完全一致。"""
+
+    def setUp(self):
+        torch.manual_seed(42)
+        self.device = torch.device("cuda")
+        self.eps = 1e-6
+
+    def _check_parity(self, T, D, dtype):
+        # qwen3-next 实际形状: [B=1, T, H, K]
+        H = 4
+        torch.manual_seed(0)
+        q = torch.randn(1, T, H, D, device=self.device, dtype=dtype)
+        k = torch.randn(1, T, H, D, device=self.device, dtype=dtype)
+
+        q_ref = l2norm_fwd(q, eps=self.eps)
+        k_ref = l2norm_fwd(k, eps=self.eps)
+        q_fused, k_fused = fused_l2norm_qk(q, k, eps=self.eps)
+
+        self.assertEqual(q_fused.shape, q.shape)
+        self.assertEqual(k_fused.shape, k.shape)
+        # Same fp32 reduction tree → match within fma-reorder rounding.
+        if dtype == torch.float32:
+            rtol, atol = 1e-5, 1e-6
+        else:
+            rtol, atol = 1e-3, 1e-3
+        torch.testing.assert_close(q_fused, q_ref, rtol=rtol, atol=atol)
+        torch.testing.assert_close(k_fused, k_ref, rtol=rtol, atol=atol)
+
+    def test_parity_qwen3_next_shapes(self):
+        # 主要 prefill 形状：D=128, T 大变化
+        for T in [16, 64, 128, 1024, 8192, 65536]:
+            with self.subTest(T=T, D=128, dtype="bf16"):
+                self._check_parity(T, 128, torch.bfloat16)
+
+    def test_parity_dispatch_branches(self):
+        # T<=128 走 BT-tiled kernel；其余走 (T,) per-row kernel
+        for T, D in [(64, 128), (128, 256), (129, 128), (4096, 128), (256, 1024)]:
+            with self.subTest(T=T, D=D):
+                self._check_parity(T, D, torch.bfloat16)
+                self._check_parity(T, D, torch.float16)
+                self._check_parity(T, D, torch.float32)
+
+    def test_shape_dtype_assert(self):
+        q = torch.randn(1, 16, 4, 128, device=self.device, dtype=torch.bfloat16)
+        k_bad_shape = torch.randn(1, 16, 8, 128, device=self.device, dtype=torch.bfloat16)
+        with self.assertRaises(AssertionError):
+            fused_l2norm_qk(q, k_bad_shape)
+        k_bad_dtype = torch.randn(1, 16, 4, 128, device=self.device, dtype=torch.float16)
+        with self.assertRaises(AssertionError):
+            fused_l2norm_qk(q, k_bad_dtype)
 
 
 if __name__ == "__main__":
