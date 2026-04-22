@@ -174,5 +174,6 @@ class BatchedDataRouter(FusedMoeDataRouter):
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
         if self.tp_size > 1:
-            output = all_reduce(output, Group.TP)
+            prefer_ca = (extra_finalize_args or {}).get("prefer_ca", False)
+            output = all_reduce(output, Group.TP, prefer_ca=prefer_ca)
         return output

@@ -103,7 +103,9 @@ class GenericMoeLayer(nn.Module):
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, prefer_ca: bool = False
+    ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
         router_logits_fp32 = router_logits.float()
@@ -152,9 +154,10 @@ class GenericMoeLayer(nn.Module):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
+            extra_finalize_args={"prefer_ca": prefer_ca},
         )
         if self.shared_expert is not None:
-            shared_expert_output = self.shared_expert(hidden_states)
+            shared_expert_output = self.shared_expert(hidden_states, prefer_ca=prefer_ca)
             if self.shared_expert_gate is not None:
                 gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
                 # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
@@ -247,6 +250,7 @@ class GenericMoeDecoderLayer(nn.Module):
         residual: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
+        prefer_ca: bool = False,
     ) -> DecodeLayerOutput:
         # equivalent to:
         # residual = residual + hidden_states
@@ -254,14 +258,17 @@ class GenericMoeDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
-            hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
+            hidden_states=hidden_states,
+            fmha_impl=fmha_impl,
+            kv_cache=kv_cache,
+            prefer_ca=prefer_ca,
         )
 
         # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
         hidden_states = self.post_attention_layernorm(hidden_states, residual)
 
         # MLP (Dense or MoE，shared expert 逻辑已经在 GenericMoeLayer 内部处理)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, prefer_ca=prefer_ca)
 
         # 返回 mlp_output 和 residual，让下一层的 input_layernorm 来 fuse 最后的 add
         return DecodeLayerOutput(hidden_states, residual)
@@ -323,6 +330,7 @@ class GenericMoeModel(GptModelBase):
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         hidden_states = self.embed_tokens(input_ids)
+        prefer_ca = not inputs.attention_inputs.is_prefill
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
                 inputs
@@ -335,6 +343,7 @@ class GenericMoeModel(GptModelBase):
                 residual,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                prefer_ca=prefer_ca,
             )
             hidden_states = output.hidden_states
             residual = output.residual

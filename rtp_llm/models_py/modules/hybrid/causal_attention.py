@@ -79,6 +79,7 @@ class CausalAttention(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
         gate: Optional[torch.Tensor] = None,  # for qwen3 next
+        prefer_ca: bool = False,
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         qkv = self.qkv_proj(hidden_states)
@@ -90,5 +91,5 @@ class CausalAttention(nn.Module):
             attn_output = attn_output * torch.sigmoid(gate)
         output = self.o_proj(attn_output)
         if self.tp_size > 1:
-            output = all_reduce(output, group=Group.TP)
+            output = all_reduce(output, group=Group.TP, prefer_ca=prefer_ca)
         return output
