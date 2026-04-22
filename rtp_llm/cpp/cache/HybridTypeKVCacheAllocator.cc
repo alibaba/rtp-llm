@@ -174,6 +174,11 @@ MallocResult HybridTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     }
 
     if (all_success) {
+        // Sparse cleanup is only safe for incremental allocation. Prefill init keeps
+        // reused prefix slots intact because causal_conv1d still reads them by prefix_length.
+        if (!malloc_info.enable_remove_skipped_blocks) {
+            return {true, 0};
+        }
         // Decode-time memory saving for linear groups (apply after we know allocations succeeded).
         for (int b = 0; b < batch_size; ++b) {
             for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
