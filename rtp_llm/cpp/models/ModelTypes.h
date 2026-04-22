@@ -35,28 +35,22 @@ struct GptModelInitParams {
     const rtp_llm::Weights                weights;
     const GptModelDescription             description;
     const std::optional<CacheLayerLayout> kv_cache_layer_layout;
-    size_t                                model_id;
+    size_t                                model_id = 0;
     ParallelismConfig                     parallelism_config;
-    // Individual configs (replacing ExecInitParams god-object)
-    HWKernelConfig              hw_kernel_config;
-    ProfilingDebugLoggingConfig profile_debug_logging_config;
-    RuntimeConfig               runtime_config;
-    ConcurrencyConfig           concurrency_config;
-    SpeculativeExecutionConfig  sp_config;
-    DeviceResourceConfig        device_resource_config;
-    MoeConfig                   moe_config;
-    // Derived scalars
-    MlaOpsType                      mla_ops_type            = MlaOpsType::AUTO;
-    int64_t                         max_seq_len             = 0;
-    int64_t                         hidden_size             = 0;
-    size_t                          tokens_per_block        = 0;
-    size_t                          kernel_tokens_per_block = 0;
-    int32_t                         kv_cache_group_num      = 1;
-    std::vector<int32_t>            kv_cache_layer_to_group;
-    bool                            is_mtp    = false;
-    bool                            is_eagle3 = false;
-    size_t                          device_id = 0;
-    std::shared_ptr<KVCacheManager> cache_manager;  // For cache_store access during forward
+    HWKernelConfig                        hw_kernel_config;
+    ProfilingDebugLoggingConfig           profile_debug_logging_config;
+    RuntimeConfig                         runtime_config;
+    ConcurrencyConfig                     concurrency_config;
+    SpeculativeExecutionConfig            sp_config;
+    DeviceResourceConfig                  device_resource_config;
+    MlaOpsType                            mla_ops_type            = MlaOpsType::AUTO;
+    int64_t                               max_seq_len             = 0;
+    int64_t                               hidden_size             = 0;
+    size_t                                tokens_per_block        = 0;
+    size_t                                kernel_tokens_per_block = 0;
+    int32_t                               kv_cache_group_num      = 1;
+    std::vector<int32_t>                  kv_cache_layer_to_group;
+    std::shared_ptr<KVCacheManager>       cache_manager;
 };
 
 enum GptModelInputIndex : size_t {

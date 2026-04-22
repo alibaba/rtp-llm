@@ -75,7 +75,7 @@ py_library(
         "@//:using_cuda12": [
             "//rtp_llm:deep_gemm",
         ],
-        "//internal_source/RTP_LLM-PPU:use_ppu": [
+        "@//:using_ppu": [
             "//rtp_llm:deep_gemm",
         ],
         "//conditions:default": [],

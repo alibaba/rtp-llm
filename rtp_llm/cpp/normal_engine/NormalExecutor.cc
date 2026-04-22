@@ -66,10 +66,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     sampler_.reset(new Sampler(SamplerInitParams{}));
 
-    size_t device_id = params.parallelism_config.world_rank % params.parallelism_config.local_world_size;
-    bool   is_mtp    = params.sp_config.type == SP_TYPE_MTP || params.sp_config.type == SP_TYPE_EAGLE;
-    bool   is_eagle3 = params.sp_config.type == SP_TYPE_EAGLE3;
-
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
@@ -85,7 +81,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          params.concurrency_config,
          params.sp_config,
          params.device_resource_config,
-         params.moe_config,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
@@ -93,9 +88,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          params.model_config_.attn_config.kernel_tokens_per_block,
          kv_cache_group_num,
          kv_cache_layer_to_group,
-         is_mtp,
-         is_eagle3,
-         device_id,
          cache_manager});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {

@@ -9,7 +9,7 @@ namespace rtp_llm {
 CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
                                                     bool                     is_mtp) {
-    auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config, buildDeviceType());
+    auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
 
     auto layer_num = model_config.num_layers;
 

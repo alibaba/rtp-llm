@@ -95,6 +95,11 @@ config_setting(
 )
 
 config_setting(
+    name = "using_ppu",
+    define_values = {"use_ppu": "true"},
+)
+
+config_setting(
     name = "using_remote_kv_cache",
     define_values = {"use_remote_kv_cache": "true"},
 )
