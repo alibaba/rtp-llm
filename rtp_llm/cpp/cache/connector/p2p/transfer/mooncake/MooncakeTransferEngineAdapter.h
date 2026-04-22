@@ -36,6 +36,8 @@ public:
 
     virtual bool openSegment(const std::string& segment_name) = 0;
 
+    virtual std::string getLocalServerName() = 0;
+
     virtual uint64_t allocateBatchID(size_t request_count) = 0;
 
     virtual void freeBatchID(uint64_t batch_id) = 0;

@@ -211,7 +211,10 @@ MooncakeRemoteDescriptor MooncakeKVCacheReceiver::buildDescriptor(const std::str
                                                                   const KeyBlockInfoMap& block_infos) const {
     (void)unique_key;
     MooncakeRemoteDescriptor descriptor;
-    descriptor.segment_name = resolveLocalServerName(config_);
+    descriptor.segment_name = adapter_ ? adapter_->getLocalServerName() : std::string();
+    if (descriptor.segment_name.empty()) {
+        descriptor.segment_name = resolveLocalServerName(config_);
+    }
 
     std::vector<int64_t> cache_keys;
     cache_keys.reserve(block_infos.size());

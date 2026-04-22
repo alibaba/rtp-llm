@@ -104,6 +104,15 @@ public:
         return isValidSegmentHandle(getOrOpenSegmentLocked(segment_name));
     }
 
+    std::string getLocalServerName() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!engine_) {
+            return resolveLocalServerName(config_.classic);
+        }
+        const auto local_ip_and_port = engine_->getLocalIpAndPort();
+        return local_ip_and_port.empty() ? resolveLocalServerName(config_.classic) : local_ip_and_port;
+    }
+
     uint64_t allocateBatchID(size_t request_count) override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!engine_) {
