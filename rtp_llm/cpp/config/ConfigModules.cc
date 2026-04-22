@@ -315,6 +315,7 @@ std::string CacheStoreConfig::to_string() const {
         << "cache_store_mooncake_metadata_conn_string: " << cache_store_mooncake_metadata_conn_string << "\n"
         << "cache_store_mooncake_local_server_name: " << cache_store_mooncake_local_server_name << "\n"
         << "cache_store_mooncake_ip_or_host_name: " << cache_store_mooncake_ip_or_host_name << "\n"
+        << "cache_store_mooncake_transport: " << cache_store_mooncake_transport << "\n"
         << "cache_store_mooncake_rpc_port: " << cache_store_mooncake_rpc_port << "\n"
         << "cache_store_mooncake_control_plane_port: " << cache_store_mooncake_control_plane_port << "\n"
         << "cache_store_mooncake_location: " << cache_store_mooncake_location << "\n"

@@ -16,6 +16,7 @@ struct MooncakeTransferEngineInitConfig {
     std::string metadata_conn_string = "";
     std::string local_server_name    = "";
     std::string ip_or_host_name      = "";
+    std::string transport            = "tcp";
     uint16_t    rpc_port             = 12345;
 };
 

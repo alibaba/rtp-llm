@@ -770,6 +770,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &CacheStoreConfig::cache_store_mooncake_local_server_name)
         .def_readwrite("cache_store_mooncake_ip_or_host_name",
                        &CacheStoreConfig::cache_store_mooncake_ip_or_host_name)
+        .def_readwrite("cache_store_mooncake_transport", &CacheStoreConfig::cache_store_mooncake_transport)
         .def_readwrite("cache_store_mooncake_rpc_port", &CacheStoreConfig::cache_store_mooncake_rpc_port)
         .def_readwrite("cache_store_mooncake_control_plane_port",
                        &CacheStoreConfig::cache_store_mooncake_control_plane_port)
@@ -827,6 +828,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.cache_store_mooncake_metadata_conn_string,
                                       self.cache_store_mooncake_local_server_name,
                                       self.cache_store_mooncake_ip_or_host_name,
+                                      self.cache_store_mooncake_transport,
                                       self.cache_store_mooncake_rpc_port,
                                       self.cache_store_mooncake_control_plane_port,
                                       self.cache_store_mooncake_location,
@@ -834,7 +836,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.cache_store_mooncake_update_metadata);
             },
             [](py::tuple t) {
-                if (t.size() != 20 && t.size() != 29)
+                if (t.size() != 20 && t.size() != 29 && t.size() != 30)
                     throw std::runtime_error("Invalid state!");
                 CacheStoreConfig c;
                 try {
@@ -859,16 +861,25 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.p2p_cancel_broadcast_timeout_ms         = t[17].cast<int64_t>();
                     c.cache_store_tcp_anet_rpc_thread_num     = t[18].cast<int>();
                     c.cache_store_tcp_anet_rpc_queue_num      = t[19].cast<int>();
-                    if (t.size() == 29) {
+                    if (t.size() == 29 || t.size() == 30) {
                         c.cache_store_mooncake_mode = t[20].cast<bool>();
                         c.cache_store_mooncake_metadata_conn_string = t[21].cast<std::string>();
                         c.cache_store_mooncake_local_server_name = t[22].cast<std::string>();
                         c.cache_store_mooncake_ip_or_host_name = t[23].cast<std::string>();
-                        c.cache_store_mooncake_rpc_port = t[24].cast<int64_t>();
-                        c.cache_store_mooncake_control_plane_port = t[25].cast<int64_t>();
-                        c.cache_store_mooncake_location = t[26].cast<std::string>();
-                        c.cache_store_mooncake_remote_accessible = t[27].cast<bool>();
-                        c.cache_store_mooncake_update_metadata = t[28].cast<bool>();
+                        if (t.size() == 30) {
+                            c.cache_store_mooncake_transport = t[24].cast<std::string>();
+                            c.cache_store_mooncake_rpc_port = t[25].cast<int64_t>();
+                            c.cache_store_mooncake_control_plane_port = t[26].cast<int64_t>();
+                            c.cache_store_mooncake_location = t[27].cast<std::string>();
+                            c.cache_store_mooncake_remote_accessible = t[28].cast<bool>();
+                            c.cache_store_mooncake_update_metadata = t[29].cast<bool>();
+                        } else {
+                            c.cache_store_mooncake_rpc_port = t[24].cast<int64_t>();
+                            c.cache_store_mooncake_control_plane_port = t[25].cast<int64_t>();
+                            c.cache_store_mooncake_location = t[26].cast<std::string>();
+                            c.cache_store_mooncake_remote_accessible = t[27].cast<bool>();
+                            c.cache_store_mooncake_update_metadata = t[28].cast<bool>();
+                        }
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());

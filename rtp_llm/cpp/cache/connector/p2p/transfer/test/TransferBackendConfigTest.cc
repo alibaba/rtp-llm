@@ -26,6 +26,7 @@ TEST(TransferBackendConfigTest, ResolveBackendPrefersMooncakeMode) {
 
 TEST(TransferBackendConfigTest, MooncakeConfigKeepsDedicatedDefaults) {
     TransferBackendConfig config;
+    EXPECT_EQ(config.mooncake.classic.transport, "tcp");
     EXPECT_EQ(config.mooncake.location, "*");
     EXPECT_TRUE(config.mooncake.remote_accessible);
     EXPECT_TRUE(config.mooncake.update_metadata);

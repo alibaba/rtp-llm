@@ -25,6 +25,10 @@ std::string resolveLocalServerName(const MooncakeTransferEngineInitConfig& confi
     return host + ":" + std::to_string(config.rpc_port);
 }
 
+std::string resolveTransportProto(const MooncakeTransferEngineInitConfig& config) {
+    return config.transport.empty() ? std::string("tcp") : config.transport;
+}
+
 constexpr ::mooncake::SegmentHandle kInvalidSegmentHandle = static_cast<::mooncake::SegmentHandle>(-1);
 
 bool isValidSegmentHandle(::mooncake::SegmentHandle handle) {
@@ -53,6 +57,7 @@ public:
                                               ? std::string(P2PHANDSHAKE)
                                               : config.classic.metadata_conn_string;
         const auto local_server_name = resolveLocalServerName(config.classic);
+        const auto transport_proto = resolveTransportProto(config.classic);
         const auto ip_or_host_name = config.classic.ip_or_host_name.empty()
                                          ? std::string("127.0.0.1")
                                          : config.classic.ip_or_host_name;
@@ -64,9 +69,9 @@ public:
             return false;
         }
 
-        // 当前开源 P2P 接口尚未补 transport 配置，先固定 classic TE 的 tcp transport。
-        if (!engine_->installTransport("tcp", nullptr)) {
-            RTP_LLM_LOG_ERROR("MooncakeClassicTransferEngineAdapter install tcp transport failed");
+        if (!engine_->installTransport(transport_proto, nullptr)) {
+            RTP_LLM_LOG_ERROR("MooncakeClassicTransferEngineAdapter install transport failed, transport=%s",
+                              transport_proto.c_str());
             engine_->freeEngine();
             engine_.reset();
             return false;

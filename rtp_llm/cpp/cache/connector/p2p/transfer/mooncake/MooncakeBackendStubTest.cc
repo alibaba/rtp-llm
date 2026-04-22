@@ -30,6 +30,17 @@ bool waitTaskDone(const IKVCacheRecvTaskPtr& task, int64_t wait_timeout_ms) {
     return task && task->done();
 }
 
+bool waitBufferEquals(const void* expected, const void* actual, size_t length, int64_t wait_timeout_ms) {
+    const auto deadline_ms = currentTimeMs() + wait_timeout_ms;
+    while (currentTimeMs() < deadline_ms) {
+        if (std::memcmp(expected, actual, length) == 0) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return std::memcmp(expected, actual, length) == 0;
+}
+
 class FakeMooncakeAdapter : public IMooncakeTransferEngineAdapter {
 public:
     bool init(const MooncakeBackendConfig& config) override {
@@ -718,6 +729,96 @@ TEST(MooncakeKVCacheReceiverTest, PrepareDescriptorFailsAfterSteal) {
     EXPECT_EQ(error_code, TransferErrorCode::CANCELLED);
 }
 
+TEST(MooncakeKVCacheReceiverTest, FinishTransferKeepsCancelledWhenTaskCancelledDuringTransfer) {
+    auto adapter = std::make_shared<FakeMooncakeAdapter>();
+    MooncakeKVCacheReceiver receiver(adapter);
+
+    TransferBackendConfig config;
+    config.cache_store_mooncake_mode = true;
+    ASSERT_TRUE(receiver.init(config));
+
+    char block[16]{};
+    auto key_block_info = std::make_shared<KeyBlockInfo>();
+    key_block_info->blocks.push_back(BlockInfo{false, 0, 0, block, sizeof(block)});
+
+    RecvRequest request;
+    request.unique_key = "cancel_during_transfer";
+    request.deadline_ms = currentTimeMs() + 5000;
+    request.block_info[25] = key_block_info;
+    auto task = receiver.recv(request);
+    ASSERT_NE(task, nullptr);
+
+    MooncakeRemoteDescriptor descriptor;
+    TransferErrorCode prepare_code = TransferErrorCode::UNKNOWN;
+    std::string prepare_message;
+    ASSERT_TRUE(receiver.prepareDescriptor(request.unique_key,
+                                          request.deadline_ms,
+                                          &descriptor,
+                                          &prepare_code,
+                                          &prepare_message));
+    ASSERT_EQ(prepare_code, TransferErrorCode::OK);
+
+    task->cancel();
+
+    TransferErrorCode response_error_code = TransferErrorCode::UNKNOWN;
+    std::string response_error_message;
+    ASSERT_TRUE(receiver.finishTransfer(request.unique_key,
+                                        true,
+                                        TransferErrorCode::OK,
+                                        "",
+                                        &response_error_code,
+                                        &response_error_message));
+    EXPECT_TRUE(task->done());
+    EXPECT_FALSE(task->success());
+    EXPECT_EQ(task->errorCode(), TransferErrorCode::CANCELLED);
+    EXPECT_EQ(response_error_code, TransferErrorCode::CANCELLED);
+    EXPECT_NE(response_error_message.find("cancelled during transfer"), std::string::npos);
+}
+
+TEST(MooncakeKVCacheReceiverTest, FinishTransferBecomesTimeoutWhenFinishArrivesAfterDeadline) {
+    auto adapter = std::make_shared<FakeMooncakeAdapter>();
+    MooncakeKVCacheReceiver receiver(adapter);
+
+    TransferBackendConfig config;
+    config.cache_store_mooncake_mode = true;
+    ASSERT_TRUE(receiver.init(config));
+
+    char block[16]{};
+    auto key_block_info = std::make_shared<KeyBlockInfo>();
+    key_block_info->blocks.push_back(BlockInfo{false, 0, 0, block, sizeof(block)});
+
+    RecvRequest request;
+    request.unique_key = "finish_after_deadline";
+    request.deadline_ms = currentTimeMs() + 30;
+    request.block_info[26] = key_block_info;
+    auto task = receiver.recv(request);
+    ASSERT_NE(task, nullptr);
+
+    MooncakeRemoteDescriptor descriptor;
+    TransferErrorCode prepare_code = TransferErrorCode::UNKNOWN;
+    std::string prepare_message;
+    ASSERT_TRUE(receiver.prepareDescriptor(request.unique_key,
+                                          request.deadline_ms,
+                                          &descriptor,
+                                          &prepare_code,
+                                          &prepare_message));
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+
+    TransferErrorCode response_error_code = TransferErrorCode::UNKNOWN;
+    std::string response_error_message;
+    ASSERT_TRUE(receiver.finishTransfer(request.unique_key,
+                                        true,
+                                        TransferErrorCode::OK,
+                                        "",
+                                        &response_error_code,
+                                        &response_error_message));
+    EXPECT_TRUE(task->done());
+    EXPECT_FALSE(task->success());
+    EXPECT_EQ(task->errorCode(), TransferErrorCode::TIMEOUT);
+    EXPECT_EQ(response_error_code, TransferErrorCode::TIMEOUT);
+    EXPECT_NE(response_error_message.find("timed out"), std::string::npos);
+}
+
 TEST(MooncakeKVCacheReceiverTest, FinishTransferReportsCancelledWhenTaskNotFound) {
     auto adapter = std::make_shared<FakeMooncakeAdapter>();
     MooncakeKVCacheReceiver receiver(adapter);
@@ -812,6 +913,23 @@ TEST(MooncakeKVCacheIntegrationTest, SenderAndReceiverRoundTripThroughRealContro
 }
 
 
+TEST(MooncakeKVCacheClassicTeTest, InitFailsWhenTransportProtoInvalid) {
+    auto receiver_adapter = createMooncakeTransferEngineAdapter();
+    if (!receiver_adapter) {
+        GTEST_SKIP() << "Mooncake classic TE is not enabled in this build";
+    }
+
+    TransferBackendConfig config;
+    config.cache_store_mooncake_mode = true;
+    config.mooncake.location = "tp0";
+    config.mooncake.classic.transport = "invalid_proto";
+    config.mooncake.classic.ip_or_host_name = "127.0.0.1";
+    config.mooncake.classic.rpc_port = static_cast<uint16_t>(nextTestPort());
+
+    MooncakeKVCacheReceiver receiver(receiver_adapter);
+    EXPECT_FALSE(receiver.init(config));
+}
+
 TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineCopiesPayloadOverTcpTransport) {
     auto receiver_adapter = createMooncakeTransferEngineAdapter();
     auto sender_adapter = createMooncakeTransferEngineAdapter();
@@ -889,6 +1007,7 @@ TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineCopiesPayloadOverTcp
     EXPECT_EQ(actual_code, TransferErrorCode::OK) << actual_msg;
     ASSERT_TRUE(waitTaskDone(recv_task, 2000));
     EXPECT_TRUE(recv_task->success());
+    ASSERT_TRUE(waitBufferEquals(source_block, target_block, sizeof(source_block), 2000));
     EXPECT_EQ(std::memcmp(source_block, target_block, sizeof(source_block)), 0);
 }
 

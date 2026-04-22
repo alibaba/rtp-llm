@@ -298,6 +298,7 @@ struct CacheStoreConfig {
     std::string cache_store_mooncake_metadata_conn_string = "";
     std::string cache_store_mooncake_local_server_name    = "";
     std::string cache_store_mooncake_ip_or_host_name      = "";
+    std::string cache_store_mooncake_transport            = "tcp";
     int64_t     cache_store_mooncake_rpc_port             = 12345;
     int64_t     cache_store_mooncake_control_plane_port   = 0;
     std::string cache_store_mooncake_location             = "*";
