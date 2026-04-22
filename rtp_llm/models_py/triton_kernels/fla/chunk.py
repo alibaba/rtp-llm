@@ -15,7 +15,7 @@ from rtp_llm.models_py.triton_kernels.fla.chunk_scaled_dot_kkt import (
     chunk_scaled_dot_kkt_fwd,
 )
 from rtp_llm.models_py.triton_kernels.fla.cumsum import chunk_local_cumsum
-from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
+from rtp_llm.models_py.triton_kernels.fla.l2norm import fused_l2norm_qk
 from rtp_llm.models_py.triton_kernels.fla.solve_tril import solve_tril
 from rtp_llm.models_py.triton_kernels.fla.utils import (
     SUPPRESS_LEVEL,
@@ -93,8 +93,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         k_orig = k
 
         if use_qk_l2norm_in_kernel:
-            q = l2norm_fwd(q)
-            k = l2norm_fwd(k)
+            q, k = fused_l2norm_qk(q, k)
 
         g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
             q=q,
