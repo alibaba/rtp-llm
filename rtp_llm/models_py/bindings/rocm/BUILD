@@ -94,6 +94,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
         "//rtp_llm/models_py/bindings/rocm/kernels:rocm_trtllm_allreduce_fusion",
+        "//rtp_llm/cpp/kernels:kernels_moe",
     ],
 )
 
