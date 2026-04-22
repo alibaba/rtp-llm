@@ -49,3 +49,18 @@ py_test(
     visibility = ["//visibility:public"],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "test_l2norm_rocm",
+    srcs = [
+        "test_l2norm.py"
+    ],
+    main = "test_l2norm.py",
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + [":triton", ":torch"],
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)
+
