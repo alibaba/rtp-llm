@@ -54,20 +54,20 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
 
 bool P2PConnectorWorker::writeByLayer(int                       layer_id,
                                       const KVCacheResourcePtr& resource,
-                                      int64_t                   request_id,
+                                      uint64_t                  request_id,
                                       AsyncEventPtr             event) {
     return prefill_->writeByLayer(layer_id, resource, request_id, event);
 }
 
 ErrorInfo
-P2PConnectorWorker::sendKVCache(int64_t                                              request_id,
+P2PConnectorWorker::sendKVCache(uint64_t                                             request_id,
                                 const std::string&                                   unique_key,
                                 int64_t                                              deadline_ms,
                                 const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers) {
     return prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
 }
 
-ErrorInfo P2PConnectorWorker::read(int64_t                                               request_id,
+ErrorInfo P2PConnectorWorker::read(uint64_t                                              request_id,
                                    const std::string&                                    unique_key,
                                    int64_t                                               deadline_ms,
                                    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,

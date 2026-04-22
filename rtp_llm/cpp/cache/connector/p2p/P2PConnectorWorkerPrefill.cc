@@ -49,7 +49,7 @@ bool P2PConnectorWorkerPrefill::init(int64_t store_wait_timeout_ms) {
 
 bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
                                              const KVCacheResourcePtr& resource,
-                                             int64_t                   request_id,
+                                             uint64_t                  request_id,
                                              AsyncEventPtr             event) {
     auto collector = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
@@ -213,7 +213,7 @@ bool P2PConnectorWorkerPrefill::waitSendCallbacksWithTimeout(const std::shared_p
 }
 
 ErrorInfo
-P2PConnectorWorkerPrefill::sendKVCache(int64_t                                              request_id,
+P2PConnectorWorkerPrefill::sendKVCache(uint64_t                                             request_id,
                                        const std::string&                                   unique_key,
                                        int64_t                                              deadline_ms,
                                        const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers) {

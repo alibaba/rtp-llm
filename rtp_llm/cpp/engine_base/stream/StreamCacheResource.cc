@@ -144,9 +144,9 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                         .loss              = {},
                         .src_batch_indices = {},
                         .all_hidden_states = {}});
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
+        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%llu",
                           payload->first_token_id,
-                          stream->streamId());
+                          (unsigned long long)stream->streamId());
     }
 
     // 2. Reuse lengths
@@ -230,7 +230,7 @@ void StreamCacheResource::releaseResource() {
         RTP_LLM_LOG_ERROR("  stream alive (magic check):    %s",
                           stream_->isStreamAlive() ? "YES" : "NO (stream already destroyed!)");
         if (stream_->isStreamAlive()) {
-            RTP_LLM_LOG_ERROR("  stream id:                     %ld", stream_->streamId());
+            RTP_LLM_LOG_ERROR("  stream id:                     %llu", (unsigned long long)stream_->streamId());
             RTP_LLM_LOG_ERROR("  stream state:                  %s",
                               StreamStateToString(stream_->generate_status_->status).c_str());
             RTP_LLM_LOG_ERROR("  stream hasError:                %d", stream_->hasError());
@@ -249,8 +249,8 @@ void StreamCacheResource::releaseResource() {
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasError())) {
         return;
     }
-    RTP_LLM_LOG_DEBUG("releaseResource: stream=%ld, curBlocksNum=%d, pd_kvcache_ref=%p",
-                      stream_->streamId(),
+    RTP_LLM_LOG_DEBUG("releaseResource: stream=%llu, curBlocksNum=%d, pd_kvcache_ref=%p",
+                      (unsigned long long)stream_->streamId(),
                       curBlocksNum(),
                       pd_kvcache_ref_.get());
     tryReleaseKVBlock(curBlocksNum());
@@ -261,7 +261,7 @@ void StreamCacheResource::releaseResource() {
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_PROFILE_FUNCTION();
-    RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
+    RTP_LLM_LOG_DEBUG("stream [%llu] try release [%lu] blocks", (unsigned long long)stream_->streamId(), nums);
 
     if (fake_inited_) {
         int max_blocks_num = curBlocksNum();
@@ -279,8 +279,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     if (total_blocks > 0) {
         if (reuseCache() && !stream_->hasError() && stream_->getStatus() == StreamState::FINISHED) {
-            RTP_LLM_LOG_DEBUG(
-                "tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d", stream_->streamId(), total_blocks);
+            RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%llu, storing cache, curBlocksNum=%d",
+                              (unsigned long long)stream_->streamId(),
+                              total_blocks);
             // save cache to gpu
             if (enableDeviceCache()) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
@@ -294,11 +295,12 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 evictDeviceCacheToMemory();
             }
         } else {
-            RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
-                              stream_->streamId(),
-                              reuseCache(),
-                              stream_->hasError(),
-                              StreamStateToString(stream_->getStatus()).c_str());
+            RTP_LLM_LOG_DEBUG(
+                "tryReleaseKVBlock: stream=%llu, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
+                (unsigned long long)stream_->streamId(),
+                reuseCache(),
+                stream_->hasError(),
+                StreamStateToString(stream_->getStatus()).c_str());
         }
 
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
@@ -447,14 +449,14 @@ bool StreamCacheResource::loadCacheDone() {
                 // 即使传输失败，也更新已匹配到的 reuse lengths
                 updateReuseLengthsFromContext(read_context);
                 RTP_LLM_LOG_WARNING(
-                    "load cache failed (matched %zu blocks but transfer failed), retry count: %d/%d, stream: [%ld]",
+                    "load cache failed (matched %zu blocks but transfer failed), retry count: %d/%d, stream: [%llu]",
                     matched_blocks,
                     load_cache_retry_count_,
                     max_retry,
-                    stream_->streamId());
+                    (unsigned long long)stream_->streamId());
             } else {
-                RTP_LLM_LOG_WARNING("load cache failed (no blocks matched), continuing without cache, stream: [%ld]",
-                                    stream_->streamId());
+                RTP_LLM_LOG_WARNING("load cache failed (no blocks matched), continuing without cache, stream: [%llu]",
+                                    (unsigned long long)stream_->streamId());
             }
         }
 
@@ -463,9 +465,9 @@ bool StreamCacheResource::loadCacheDone() {
         if (should_retry) {
             // 传输失败：保持重试逻辑
             if (load_cache_retry_count_ >= max_retry) {
-                RTP_LLM_LOG_WARNING("load cache failed after %d retries (transfer error), stream: [%ld]",
+                RTP_LLM_LOG_WARNING("load cache failed after %d retries (transfer error), stream: [%llu]",
                                     load_cache_retry_count_,
-                                    stream_->streamId());
+                                    (unsigned long long)stream_->streamId());
                 stream_->reportEventWithoutLock(StreamEvents::Error,
                                                 ErrorCode::LOAD_CACHE_TIMEOUT,
                                                 "load cache failed after " + std::to_string(max_retry)
@@ -603,8 +605,9 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
     load_context->waitDone();
     if (!(load_context->success())) {
         auto error = load_context->errorInfo();
-        RTP_LLM_LOG_WARNING(
-            "load cache done but not success, stream: [%ld], error: %s", stream_->streamId(), error.ToString().c_str());
+        RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%llu], error: %s",
+                            (unsigned long long)stream_->streamId(),
+                            error.ToString().c_str());
         if (error.hasError()) {
             stream_->reportError(error.code(), error.ToString());
         }
@@ -612,7 +615,8 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
     }
     auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context);
     if (!read_context) {
-        RTP_LLM_LOG_WARNING("load cache success but cast context failed, stream: [%ld]", stream_->streamId());
+        RTP_LLM_LOG_WARNING("load cache success but cast context failed, stream: [%llu]",
+                            (unsigned long long)stream_->streamId());
         return;
     }
     updateReuseLengthsFromContext(read_context);
@@ -669,8 +673,8 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
     auto       evicted_resource = resource_context_.cache_manager->popBlocksFromCache(need_blocks);
     if (!evicted_resource || !evicted_resource->hasCacheKeys()) {
         RTP_LLM_LOG_INFO(
-            "tiered memory cache skip eviction, stream[%ld], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
-            stream_->streamId(),
+            "tiered memory cache skip eviction, stream[%llu], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
+            (unsigned long long)stream_->streamId(),
             not_in_use_blocks,
             min_free_blocks,
             need_blocks);
@@ -678,8 +682,8 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
     }
 
     RTP_LLM_LOG_INFO(
-        "tiered memory cache evict, stream[%ld], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu, evict_keys=%zu",
-        stream_->streamId(),
+        "tiered memory cache evict, stream[%llu], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu, evict_keys=%zu",
+        (unsigned long long)stream_->streamId(),
         not_in_use_blocks,
         min_free_blocks,
         need_blocks,

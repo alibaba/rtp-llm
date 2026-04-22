@@ -29,13 +29,13 @@ public:
     void stopChecker();
 
 public:
-    AsyncReadResult asyncRead(const KVCacheResourcePtr&       resource,
-                              const std::shared_ptr<Meta>&    meta,
-                              const std::pair<int, int>&      block_range);
+    AsyncReadResult asyncRead(const KVCacheResourcePtr&    resource,
+                              const std::shared_ptr<Meta>& meta,
+                              const std::pair<int, int>&   block_range);
 
     ErrorInfo sendKVCache(const KVCacheResourcePtr&                            resource,
                           const std::string&                                   unique_key,
-                          int64_t                                              request_id,
+                          uint64_t                                             request_id,
                           const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
                           int64_t                                              deadline_ms,
                           std::function<bool()>                                is_cancelled = nullptr);

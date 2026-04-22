@@ -16,7 +16,7 @@ grpc::Status AllEmbeddingRpcServiceImpl::decode(grpc::ServerContext*     context
     th::Tensor             token_ids      = render_result[0].cast<th::Tensor>();
     th::Tensor             token_type_ids = render_result[1].cast<th::Tensor>();
     th::Tensor             input_lengths  = render_result[2].cast<th::Tensor>();
-    int                    request_id     = 0;
+    uint64_t               request_id     = 0;
     py::gil_scoped_release release;
     th::Tensor             out = embedding_engine_->decode(token_ids, token_type_ids, input_lengths, request_id);
     RTP_LLM_CHECK_WITH_INFO(out.dim() == 3, "all embedding out should be 3-dim");

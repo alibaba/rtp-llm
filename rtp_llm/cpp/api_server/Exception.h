@@ -58,7 +58,7 @@ public:
     }
     template<typename T>
     static void handleException(const T&                                                e,
-                                int64_t                                                 request_id,
+                                uint64_t                                                request_id,
                                 std::shared_ptr<ApiServerMetricReporter>                metric_reporter,
                                 const http_server::HttpRequest&                         request,
                                 const std::unique_ptr<http_server::HttpResponseWriter>& writer) {
@@ -78,7 +78,7 @@ public:
     }
     template<typename T>
     static void handleException(const T&                                                e,
-                                int64_t                                                 request_id,
+                                uint64_t                                                request_id,
                                 kmonitor::MetricsReporterPtr                            metric_reporter,
                                 const http_server::HttpRequest&                         request,
                                 const std::unique_ptr<http_server::HttpResponseWriter>& writer) {

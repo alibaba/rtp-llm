@@ -62,7 +62,7 @@ public:
     void setUniqueKey(const std::string& key) {
         routing_ctx_.unique_key = key;
     }
-    void setRequestId(int64_t id) {
+    void setRequestId(uint64_t id) {
         routing_ctx_.request_id = id;
     }
     void setDeadlineMs(int64_t ms) {

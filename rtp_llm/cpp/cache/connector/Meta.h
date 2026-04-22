@@ -38,7 +38,7 @@ public:
     // P2P routing context: encapsulates routing metadata extracted from GenerateStream
     // Constructed once during Meta creation, then read-only for P2P connector paths
     struct P2PRoutingContext {
-        int64_t                          request_id = 0;
+        uint64_t                         request_id = 0;
         std::string                      unique_key;
         int64_t                          deadline_ms = 0;
         std::pair<std::string, uint32_t> prefill_addr;  // {ip, port}

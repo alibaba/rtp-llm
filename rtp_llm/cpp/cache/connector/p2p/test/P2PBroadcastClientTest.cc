@@ -64,7 +64,7 @@ protected:
 
 TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     std::string unique_key  = "test_broadcast_1";
-    int64_t     request_id  = 1001;
+    uint64_t    request_id  = 1001;
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
     // 创建 LayerCacheBuffer
@@ -106,7 +106,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_Timeout) {
     }
 
     std::string unique_key  = "test_broadcast_timeout";
-    int64_t     request_id  = 1002;
+    uint64_t    request_id  = 1002;
     int64_t     deadline_ms = currentTimeMs() + 10;  // 很短的超时时间
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
@@ -134,7 +134,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_PartialResponseFailed) {
     servers_[0]->service()->setP2PResponseSuccess(false);
 
     std::string unique_key  = "test_broadcast_partial_fail";
-    int64_t     request_id  = 1003;
+    uint64_t    request_id  = 1003;
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
@@ -169,7 +169,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllResponseFailed) {
     servers_[1]->service()->setP2PResponseSuccess(false);
 
     std::string unique_key  = "test_broadcast_all_fail";
-    int64_t     request_id  = 1004;
+    uint64_t    request_id  = 1004;
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
@@ -203,7 +203,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_RpcStatusFailed) {
     servers_[0]->service()->setRpcResponseStatus(::grpc::Status(grpc::StatusCode::INTERNAL, "Internal error"));
 
     std::string unique_key  = "test_broadcast_rpc_fail";
-    int64_t     request_id  = 1005;
+    uint64_t    request_id  = 1005;
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;

@@ -33,7 +33,7 @@ public:
                 int                  max_token_num,
                 int                  vocab_size,
                 bool                 is_beam_search,
-                int64_t              stream_id,
+                uint64_t             stream_id,
                 int&                 error_token_id);
     void copyTokensTo(int batch_id, void* dst, int offset, size_t token_num);
 

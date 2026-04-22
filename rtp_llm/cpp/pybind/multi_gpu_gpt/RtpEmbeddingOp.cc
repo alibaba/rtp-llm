@@ -229,7 +229,7 @@ void RtpEmbeddingOp::startRpcServer(int64_t                              model_r
 py::object RtpEmbeddingOp::decode(th::Tensor                   token_ids,
                                   th::Tensor                   token_type_ids,
                                   th::Tensor                   input_lengths,
-                                  int64_t                      request_id,
+                                  uint64_t                     request_id,
                                   std::vector<MultimodalInput> multimodal_inputs) {
     if (is_server_shutdown_) {
         throw std::runtime_error("server is shut down, can't handle request");

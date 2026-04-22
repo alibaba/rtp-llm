@@ -56,7 +56,7 @@ protected:
 
 TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_RequestSuccess) {
     std::string unique_key   = "test_load_1";
-    int64_t     request_id   = 1001;
+    uint64_t    request_id   = 1001;
     int64_t     deadline_ms  = currentTimeMs() + 5000;
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
@@ -83,7 +83,7 @@ TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_RequestFailed) {
     server_->service()->setStartLoadResponseSuccess(false);
 
     std::string unique_key   = "test_load_fail";
-    int64_t     request_id   = 1002;
+    uint64_t    request_id   = 1002;
     int64_t     deadline_ms  = currentTimeMs() + 5000;
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
@@ -108,7 +108,7 @@ TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_Timeout) {
     server_->service()->setSleepMillis(200);
 
     std::string unique_key   = "test_load_timeout";
-    int64_t     request_id   = 1003;
+    uint64_t    request_id   = 1003;
     int64_t     deadline_ms  = currentTimeMs() + 10;  // 很短的超时时间
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
@@ -128,7 +128,7 @@ TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_Timeout) {
 
 TEST_F(PrefillLoadCallerTest, Load_ReturnNull_InvalidServerAddr) {
     std::string unique_key   = "test_load_invalid_addr";
-    int64_t     request_id   = 1004;
+    uint64_t    request_id   = 1004;
     int64_t     deadline_ms  = currentTimeMs() + 5000;
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = 99999;  // 无效端口
@@ -145,7 +145,7 @@ TEST_F(PrefillLoadCallerTest, Load_ReturnNull_InvalidServerAddr) {
 
 TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_NullGenerateStream) {
     std::string unique_key   = "test_load_null_stream";
-    int64_t     request_id   = 1005;
+    uint64_t    request_id   = 1005;
     int64_t     deadline_ms  = currentTimeMs() + 5000;
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
@@ -164,7 +164,7 @@ TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_RpcStatusFailed) {
     server_->service()->setRpcResponseStatus(::grpc::Status(grpc::StatusCode::INTERNAL, "Internal error"));
 
     std::string unique_key   = "test_load_rpc_fail";
-    int64_t     request_id   = 1006;
+    uint64_t    request_id   = 1006;
     int64_t     deadline_ms  = currentTimeMs() + 5000;
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
@@ -191,7 +191,7 @@ TEST_F(PrefillLoadCallerTest, CheckDone_NotDoneInitially) {
     server_->service()->setSleepMillis(500);
 
     std::string unique_key   = "test_check_done";
-    int64_t     request_id   = 2001;
+    uint64_t    request_id   = 2001;
     int64_t     deadline_ms  = currentTimeMs() + 5000;
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
@@ -215,7 +215,7 @@ TEST_F(PrefillLoadCallerTest, CheckDone_NotDoneInitially) {
 
 TEST_F(PrefillLoadCallerTest, CheckDone_TotalCostTimeUs) {
     std::string unique_key   = "test_cost_time";
-    int64_t     request_id   = 2002;
+    uint64_t    request_id   = 2002;
     int64_t     deadline_ms  = currentTimeMs() + 5000;
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());

@@ -8,7 +8,7 @@ namespace rtp_llm {
 grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
                                                 const EmbeddingInputPB* request,
                                                 EmbeddingOutputPB*      response) {
-    int64_t                          request_id = 0;
+    uint64_t                         request_id = 0;
     std::vector<int32_t>             token_ids;
     std::vector<int32_t>             token_type_ids;
     std::vector<int32_t>             input_lengths;
@@ -18,7 +18,7 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
 
     try {
         request_id = request->request_id();
-        RTP_LLM_LOG_DEBUG("Received embedding request id: %d", request_id);
+        RTP_LLM_LOG_DEBUG("Received embedding request id: %llu", (unsigned long long)request_id);
         token_ids      = std::vector<int32_t>(request->token_ids().begin(), request->token_ids().end());
         token_type_ids = std::vector<int32_t>(request->token_type_ids().begin(), request->token_type_ids().end());
         input_lengths  = std::vector<int32_t>(request->input_lengths().begin(), request->input_lengths().end());
@@ -28,7 +28,7 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
             multimodal_inputs.emplace_back(std::move(feature));
         }
     } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("[Request Parsing] Failed for request_id %ld: %s", request_id, e.what());
+        RTP_LLM_LOG_ERROR("[Request Parsing] Failed for request_id %llu: %s", (unsigned long long)request_id, e.what());
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::string("Request parsing error: ") + e.what());
     }
 
@@ -73,10 +73,11 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
             }
         }
     } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_ERROR("[Processing] Python exception for request_id %ld: %s", request_id, e.what());
+        RTP_LLM_LOG_ERROR(
+            "[Processing] Python exception for request_id %llu: %s", (unsigned long long)request_id, e.what());
         return grpc::Status(grpc::StatusCode::INTERNAL, std::string("Processing error: ") + e.what());
     } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("[Processing] Failed for request_id %ld: %s", request_id, e.what());
+        RTP_LLM_LOG_ERROR("[Processing] Failed for request_id %llu: %s", (unsigned long long)request_id, e.what());
         return grpc::Status(grpc::StatusCode::INTERNAL, std::string("Processing error: ") + e.what());
     }
 

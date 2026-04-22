@@ -92,8 +92,8 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
                    seq_len * sizeof(int));
             batch_idx += 1;
         }
-        RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
-                          stream->streamId(),
+        RTP_LLM_LOG_DEBUG("stream [%llu], sampler inputs token ids = [%s]",
+                          (unsigned long long)stream->streamId(),
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 

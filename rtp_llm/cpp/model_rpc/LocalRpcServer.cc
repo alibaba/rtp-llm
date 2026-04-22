@@ -128,7 +128,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
     AtomicGuard request_guard(onflight_requests_);
     auto        request_id = request->request_id();
-    RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
+    RTP_LLM_LOG_DEBUG("receive request %llu", (unsigned long long)request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     auto input = QueryConverter::transQuery(request);
@@ -149,13 +149,13 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     }
     CHECK_ERROR_STATUS(generate_context);
 
-    RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
+    RTP_LLM_LOG_DEBUG("request [%llu] trans to stream success", (unsigned long long)request_id);
     {
         RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
         generate_context.setStream(engine_->enqueue(input));
     }
 
-    RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
+    RTP_LLM_LOG_DEBUG("request [%llu] enqueue success", (unsigned long long)request_id);
 
     generate_context.error_status =
         pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());

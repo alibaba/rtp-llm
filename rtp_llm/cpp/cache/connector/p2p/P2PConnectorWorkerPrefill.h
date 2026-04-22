@@ -34,9 +34,9 @@ public:
 public:
     bool init(int64_t store_wait_timeout_ms);
 
-    bool writeByLayer(int layer_id, const KVCacheResourcePtr& resource, int64_t request_id, AsyncEventPtr event);
+    bool writeByLayer(int layer_id, const KVCacheResourcePtr& resource, uint64_t request_id, AsyncEventPtr event);
 
-    ErrorInfo sendKVCache(int64_t                                              request_id,
+    ErrorInfo sendKVCache(uint64_t                                             request_id,
                           const std::string&                                   unique_key,
                           int64_t                                              deadline_ms,
                           const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers);

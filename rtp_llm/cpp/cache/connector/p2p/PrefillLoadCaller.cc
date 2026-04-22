@@ -28,12 +28,12 @@ PrefillLoadCaller::PrefillLoadCaller(const std::vector<std::string>& worker_addr
     }
 }
 
-std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t                   request_id,
-                                                                   const std::string&        prefill_ip,
-                                                                   uint32_t                  prefill_port,
-                                                                   const std::string&        unique_key,
-                                                                   int64_t                   deadline_ms,
-                                                                   GenerateStream*           generate_stream) {
+std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(uint64_t           request_id,
+                                                                   const std::string& prefill_ip,
+                                                                   uint32_t           prefill_port,
+                                                                   const std::string& unique_key,
+                                                                   int64_t            deadline_ms,
+                                                                   GenerateStream*    generate_stream) {
     if (!rpc_pool_) {
         RTP_LLM_LOG_WARNING("PrefillLoadCaller load failed: rpc_pool is null");
         return nullptr;
@@ -73,7 +73,7 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
 bool PrefillLoadCaller::buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,
                                               const std::string&             unique_key,
                                               int64_t                        deadline_ms,
-                                              int64_t                        request_id) {
+                                              uint64_t                       request_id) {
     result->request.set_unique_key(unique_key);
     result->request.set_deadline_ms(deadline_ms);
 
@@ -187,7 +187,7 @@ bool PrefillLoadCaller::Result::pollCompletionQueue() {
 }
 
 void PrefillLoadCaller::Result::updateStreamFromResponse() {
-    const auto& payload = response.payload();
+    const auto& payload                   = response.payload();
     side_channel_payload.first_token_id   = payload.first_generate_token_id();
     side_channel_payload.total_reuse_len  = payload.total_reuse_len();
     side_channel_payload.local_reuse_len  = payload.local_reuse_len();
@@ -200,8 +200,8 @@ void PrefillLoadCaller::Result::updateStreamFromResponse() {
     if (it_propose != payload.tensors().end() && it_propose->second.has_tensor()) {
         const auto& tensor_pb = it_propose->second.tensor();
         if (tensor_pb.data_type() == TensorPB::INT32 && !tensor_pb.int32_data().empty()) {
-            const auto* data = reinterpret_cast<const int*>(tensor_pb.int32_data().data());
-            size_t count = tensor_pb.int32_data().size() / sizeof(int);
+            const auto* data  = reinterpret_cast<const int*>(tensor_pb.int32_data().data());
+            size_t      count = tensor_pb.int32_data().size() / sizeof(int);
             side_channel_payload.propose_tokens.assign(data, data + count);
         }
     }
@@ -220,14 +220,15 @@ void PrefillLoadCaller::Result::updateStreamFromResponse() {
     if (it_pos != payload.tensors().end() && it_pos->second.has_tensor()) {
         const auto& tensor_pb = it_pos->second.tensor();
         if (tensor_pb.data_type() == TensorPB::INT32 && !tensor_pb.int32_data().empty()) {
-            const auto* data = reinterpret_cast<const int32_t*>(tensor_pb.int32_data().data());
-            size_t count = tensor_pb.int32_data().size() / sizeof(int32_t);
+            const auto* data  = reinterpret_cast<const int32_t*>(tensor_pb.int32_data().data());
+            size_t      count = tensor_pb.int32_data().size() / sizeof(int32_t);
             side_channel_payload.position_ids.assign(data, data + count);
         }
     }
 
     RTP_LLM_LOG_DEBUG("PrefillLoadCaller::Result: parsed side-channel payload, first_token: %ld, total_reuse: %d",
-                      side_channel_payload.first_token_id, side_channel_payload.total_reuse_len);
+                      side_channel_payload.first_token_id,
+                      side_channel_payload.total_reuse_len);
 }
 
 void PrefillLoadCaller::Result::checkDone() {

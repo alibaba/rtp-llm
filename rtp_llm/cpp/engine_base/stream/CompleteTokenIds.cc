@@ -145,7 +145,7 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
                               int                  max_token_num,
                               int                  vocab_size,
                               bool                 is_beam_search,
-                              int64_t              stream_id,
+                              uint64_t             stream_id,
                               int&                 error_token_id) {
     int new_batch_size = new_tokens.size(0);
     RTP_LLM_CHECK_WITH_INFO(

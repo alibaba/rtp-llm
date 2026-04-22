@@ -139,7 +139,7 @@ void checkMasterWorker(bool isInternal) {
 void InferenceService::inference(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                  const http_server::HttpRequest&                         request,
                                  bool                                                    isInternal) {
-    int64_t request_id = -1;
+    uint64_t request_id = 0;
     if (request_counter_ == nullptr) {
         RTP_LLM_LOG_WARNING("inference failed, request_counter is null");
         return;
@@ -153,7 +153,7 @@ void InferenceService::inference(const std::unique_ptr<http_server::HttpResponse
     }
 }
 
-void InferenceService::inferResponse(int64_t                                                 request_id,
+void InferenceService::inferResponse(uint64_t                                                request_id,
                                      const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                      const http_server::HttpRequest&                         request) {
     if (!controller_) {
@@ -207,7 +207,7 @@ void InferenceService::inferResponse(int64_t                                    
 }
 
 std::shared_ptr<GenerateInput>
-InferenceService::fillGenerateInput(int64_t                                request_id,
+InferenceService::fillGenerateInput(uint64_t                               request_id,
                                     const std::string&                     text,
                                     const std::vector<std::string>&        urls,
                                     const std::shared_ptr<GenerateConfig>& generate_config) {

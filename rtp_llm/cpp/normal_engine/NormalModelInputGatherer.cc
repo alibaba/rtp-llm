@@ -328,7 +328,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                             stream->cacheKeys(i).size() * sizeof(int64_t));
             }
 
-            *(model_input.request_id.data_ptr<int64_t>() + prefill_batch_idx) = stream->streamId();
+            *(model_input.request_id.data_ptr<int64_t>() + prefill_batch_idx) =
+                static_cast<int64_t>(stream->streamId());
             *(reinterpret_cast<bool*>(model_input.request_pd_separation.data_ptr()) + prefill_batch_idx) =
                 stream->queryPdSep();
 

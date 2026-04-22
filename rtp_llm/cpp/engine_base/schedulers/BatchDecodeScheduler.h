@@ -81,8 +81,9 @@ public:
             case StreamState::FINISHED:
                 break;
             default:
-                RTP_LLM_LOG_ERROR(
-                    "Unknown state: %d for stream [%ld]", static_cast<int>(new_state), stream->streamId());
+                RTP_LLM_LOG_ERROR("Unknown state: %d for stream [%llu]",
+                                  static_cast<int>(new_state),
+                                  (unsigned long long)stream->streamId());
                 break;
         }
     }

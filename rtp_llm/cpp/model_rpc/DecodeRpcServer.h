@@ -24,7 +24,7 @@ public:
 
     class LoadKVCacheContext {
     public:
-        LoadKVCacheContext(int64_t                          request_id,
+        LoadKVCacheContext(uint64_t                         request_id,
                            const std::string&               request_key,
                            const std::vector<std::string>&  peer_addrs,
                            const std::vector<CacheKeyType>& cache_keys,
@@ -44,7 +44,7 @@ public:
             partition_count(partition_count),
             partition_id(partition_id),
             server_context(server_context) {}
-        int64_t                          request_id;
+        uint64_t                         request_id;
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
         const std::vector<CacheKeyType>& cache_keys;

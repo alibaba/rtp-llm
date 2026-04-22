@@ -117,7 +117,7 @@ struct GptModelInputs {
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
 
-    torch::Tensor request_id;             // int64, [context_batch_size]
+    torch::Tensor request_id;             // int64 bits (kLong), [context_batch_size]; logical id is uint64_t
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
     size_t        kv_block_stride_bytes;
@@ -338,7 +338,7 @@ struct CacheStoreInputs {
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;
 
-    torch::Tensor            request_id;             // [context_batch_size]
+    torch::Tensor            request_id;             // int64 bits (kLong), [context_batch_size]; logical uint64_t
     torch::Tensor            request_pd_separation;  // [context_batch_size]
     std::vector<std::string> cache_keys;             // [context_batch_size]
     size_t                   tokens_per_block;

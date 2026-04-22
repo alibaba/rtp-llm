@@ -75,7 +75,7 @@ public:
         grpc::Status                                                                      status;
         std::string                                                                       server_addr;
         int                                                                               timeout_ms;
-        int64_t                                                                           request_id;
+        uint64_t                                                                          request_id;
         int64_t                                                                           start_time_us;
         int64_t                                                                           total_cost_time_us;
         GenerateStream*                                                                   generate_stream = nullptr;
@@ -89,18 +89,18 @@ public:
     };
 
     /// @brief 向 Prefill server 发起异步 StartLoad RPC，通知其开始向 Decode 发送 KV cache
-    std::shared_ptr<Result> load(int64_t                   request_id,
-                                 const std::string&        prefill_ip,
-                                 uint32_t                  prefill_port,
-                                 const std::string&        unique_key,
-                                 int64_t                   deadline_ms,
-                                 GenerateStream*           generate_stream);
+    std::shared_ptr<Result> load(uint64_t           request_id,
+                                 const std::string& prefill_ip,
+                                 uint32_t           prefill_port,
+                                 const std::string& unique_key,
+                                 int64_t            deadline_ms,
+                                 GenerateStream*    generate_stream);
 
 private:
     bool buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,
                                const std::string&             unique_key,
                                int64_t                        deadline_ms,
-                               int64_t                        request_id);
+                               uint64_t                       request_id);
 
     std::vector<std::string>    worker_addrs_;
     std::shared_ptr<RPCPool>    rpc_pool_;

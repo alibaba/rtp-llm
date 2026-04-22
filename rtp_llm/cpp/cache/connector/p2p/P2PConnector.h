@@ -78,13 +78,13 @@ private:
     grpc::Status fillResponseWithStreamInfo(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
                                             P2PConnectorStartLoadResponsePB&                  response);
 
-    bool executeHandleRead(int64_t                                 request_id,
+    bool executeHandleRead(uint64_t                                request_id,
                            const std::string&                      unique_key,
                            int64_t                                 deadline_ms,
                            const P2PConnectorBroadcastTpRequestPB& p2p_request,
                            FunctionResponsePB&                     response);
 
-    bool executeRead(int64_t                                 request_id,
+    bool executeRead(uint64_t                                request_id,
                      const std::string&                      unique_key,
                      int64_t                                 deadline_ms,
                      const P2PConnectorBroadcastTpRequestPB& p2p_request,

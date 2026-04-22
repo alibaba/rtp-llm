@@ -13,13 +13,13 @@
 namespace rtp_llm {
 
 struct StoreWaitContext {
-    int64_t                                             request_id;
+    uint64_t                                            request_id;
     AsyncEventPtr                                       event;
     std::shared_ptr<LayerCacheBuffer>                   layer_cache_buffer;
     int64_t                                             deadline_ms;
     std::shared_ptr<PrefillWorkerStoreMetricsCollector> collector;
 
-    StoreWaitContext(int64_t                                             request_id,
+    StoreWaitContext(uint64_t                                            request_id,
                      AsyncEventPtr                                       event,
                      std::shared_ptr<LayerCacheBuffer>                   layer_cache_buffer,
                      int64_t                                             deadline_ms,

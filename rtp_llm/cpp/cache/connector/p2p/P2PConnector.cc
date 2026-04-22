@@ -153,7 +153,7 @@ void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
         return;
     }
 
-    int64_t request_id = resource_entry->request_id;
+    uint64_t request_id = resource_entry->request_id;
     RTP_LLM_LOG_INFO("handleRead [P2P]: resource ready, unique_key=%s, request_id=%ld, sending KV cache",
                      unique_key.c_str(),
                      request_id);
@@ -245,7 +245,7 @@ void setP2PResponseOk(FunctionResponsePB& response) {
 
 }  // namespace
 
-bool P2PConnector::executeHandleRead(int64_t                                 request_id,
+bool P2PConnector::executeHandleRead(uint64_t                                request_id,
                                      const std::string&                      unique_key,
                                      int64_t                                 deadline_ms,
                                      const P2PConnectorBroadcastTpRequestPB& p2p_request,
@@ -265,7 +265,7 @@ bool P2PConnector::executeHandleRead(int64_t                                 req
     return error_info.ok();
 }
 
-bool P2PConnector::executeRead(int64_t                                 request_id,
+bool P2PConnector::executeRead(uint64_t                                request_id,
                                const std::string&                      unique_key,
                                int64_t                                 deadline_ms,
                                const P2PConnectorBroadcastTpRequestPB& p2p_request,
@@ -317,7 +317,7 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
     }
 
     const auto& p2p_request = request.p2p_request();
-    int64_t     request_id  = p2p_request.request_id();
+    uint64_t    request_id  = p2p_request.request_id();
     std::string unique_key  = p2p_request.unique_key();
     int64_t     deadline_ms = p2p_request.deadline_ms();
 
