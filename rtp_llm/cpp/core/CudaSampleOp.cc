@@ -331,10 +331,20 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // [step + 1, batch_size]
     auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
 
-    // 1. Apply temperature penalty
-    if (std::any_of(params.temperature.data_ptr<float>(),
-                    params.temperature.data_ptr<float>() + batch_size,
-                    [&](auto t) { return t != 1.0f; })) {
+    // 0. Check do_sample flag - align with CUDA path
+    bool has_not_do_sample = params.do_sample.has_value()
+                             && std::any_of(params.do_sample.value().data_ptr<bool>(),
+                                            params.do_sample.value().data_ptr<bool>() + batch_size,
+                                            [&](auto t) { return !t; });
+    bool need_do_sample = (!params.do_sample.has_value())
+                          || std::any_of(params.do_sample.value().data_ptr<bool>(),
+                                         params.do_sample.value().data_ptr<bool>() + batch_size,
+                                         [&](auto t) { return t; });
+
+    // 1. Apply temperature penalty (only when sampling is needed)
+    if (need_do_sample && std::any_of(params.temperature.data_ptr<float>(),
+                                      params.temperature.data_ptr<float>() + batch_size,
+                                      [&](auto t) { return t != 1.0f; })) {
         auto temperature_gpu = params.temperature.to(torch::kCUDA);
         invokeBatchApplyTemperaturePenalty(params.logits.data_ptr<float>(),
                                            (float*)nullptr,  // embedding_bias
@@ -345,8 +355,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                                            cur_stream);
     }
 
-    // 2. Apply repetition/presence/frequency penalty
-    if (params.repetition_penalty.has_value()) {
+    // 2. Apply repetition/presence/frequency penalty (only when sampling is needed)
+    if (need_do_sample && params.repetition_penalty.has_value()) {
         RTP_LLM_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value());
         const auto& repetition_penalty = params.repetition_penalty.value();
         const auto& presence_penalty   = params.presence_penalty.value();
@@ -448,7 +458,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         // torch::multinomial is well-tested and handles all cases correctly.
         //
         // Apply top_k filtering if needed
-        auto filtered_probs = probs_t;
+        auto filtered_probs = probs_t.clone();
         bool has_top_k      = !std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
         if (has_top_k) {
             for (int64_t b = 0; b < (int64_t)batch_size; b++) {
@@ -469,9 +479,10 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                 float p = top_p_ptr[b];
                 if (std::abs(p - 1.0f) >= 1e-7) {
                     auto row                            = filtered_probs[b];
-                    auto [sorted_probs, sorted_indices] = row.sort(/*descending=*/true);
+                    auto [sorted_probs, sorted_indices] = row.sort(/*dim=*/-1, /*descending=*/true);
                     auto cumsum                         = sorted_probs.cumsum(0);
                     auto mask                           = cumsum - sorted_probs > p;
+                    mask[0]                             = false;  // always keep top-1 token
                     sorted_probs.masked_fill_(mask, 0.0f);
                     row.scatter_(0, sorted_indices, sorted_probs);
                 }
@@ -487,10 +498,11 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         }
     }
 
-    // 7. Update cum_log_probs
+    // 6. Update cum_log_probs
     if (params.cum_log_probs.has_value()) {
         auto cum_log_probs_t = params.cum_log_probs.value();
-        cum_log_probs_t.add_(probs_t.log());
+        auto token_probs     = probs_t.gather(1, samples_t.unsqueeze(1).to(torch::kLong)).squeeze(1);
+        cum_log_probs_t.add_(token_probs.log().to(cum_log_probs_t.device()));
     }
 
     // 8. Copy results back
