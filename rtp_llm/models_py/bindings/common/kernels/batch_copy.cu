@@ -178,6 +178,48 @@ static __global__ void batchCopy(char* __restrict__ const* __restrict__ dst,
     };
 }
 
+// Block-per-entry kernel for variable-size copies.
+// Each block handles exactly one copy entry; threads within the block
+// cooperate to copy that entry's data using uint4 loads/stores.
+// This avoids the warp-scheduler while-loop overhead of the original kernel.
+template<bool IsAligned>
+static __global__ void batchCopyBlockPerEntry(char* __restrict__ const* __restrict__ dst,
+                                              char const* __restrict__ const* __restrict__ src,
+                                              size_t* __restrict__ bytes,
+                                              size_t batch_size) {
+    const size_t batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) {
+        return;
+    }
+
+    const size_t cur_bytes           = bytes[batch_idx];
+    const char* __restrict__ cur_src = src[batch_idx];
+    char* __restrict__ cur_dst       = dst[batch_idx];
+
+    const size_t num_uint4 = cur_bytes / sizeof(uint4);
+
+    // Copy uint4-aligned portion
+    for (size_t i = threadIdx.x; i < num_uint4; i += blockDim.x) {
+#if USING_CUDA
+        const auto tmp = __ldcs(reinterpret_cast<const uint4*>(cur_src) + i);
+        __stcs(reinterpret_cast<uint4*>(cur_dst) + i, tmp);
+#elif USING_ROCM
+        reinterpret_cast<uint4*>(cur_dst)[i] = reinterpret_cast<const uint4*>(cur_src)[i];
+#endif
+    }
+
+    // Handle sub-uint4 remainder bytes
+    if constexpr (!IsAligned) {
+        const size_t remainder = cur_bytes % sizeof(uint4);
+        if (remainder > 0) {
+            const size_t base = num_uint4 * sizeof(uint4);
+            for (size_t i = threadIdx.x; i < remainder; i += blockDim.x) {
+                cur_dst[base + i] = cur_src[base + i];
+            }
+        }
+    }
+}
+
 void invokeBatchCopy(void* const*           dst,
                      void const* const*     src,
                      size_t*                bytes,
@@ -196,14 +238,19 @@ void invokeBatchCopy(void* const*           dst,
     if (config.uniform_size > 0) {
         const bool has_remaining_bytes = !config.is_fully_aligned;
 
-        const int     grid_size  = batch_size;
+        const int grid_size = batch_size;
+#if USING_CUDA
         constexpr int block_size = 512;
+#elif USING_ROCM
+        constexpr int block_size = 1024;
+#endif
 
         DISPATCH_BOOL(NeedsCleanup, has_remaining_bytes, [&]() {
             batchCopyRowAlignedKernel<NeedsCleanup><<<grid_size, block_size, 0, stream>>>(
                 reinterpret_cast<char* const*>(dst), reinterpret_cast<char const* const*>(src), config.uniform_size);
         });
     } else {
+#if USING_CUDA
         int sm_count = getMultiProcessorCount();
         DISPATCH_BOOL(IsAligned, config.is_fully_aligned, [&]() {
             constexpr auto kernel           = batchCopy<IsAligned>;
@@ -215,6 +262,18 @@ void invokeBatchCopy(void* const*           dst,
             kernel<<<sm_count * block_num_per_sm, block_size, smem_size, stream>>>(
                 reinterpret_cast<char* const*>(dst), reinterpret_cast<char const* const*>(src), bytes, batch_size);
         });
+#elif USING_ROCM
+        // Variable-size path: one block per copy entry.
+        // Block size of 512 threads (8 wavefronts/block on MI308X) increases
+        // in-flight memory requests per block vs 256, improving bandwidth
+        // utilization for large entries.
+        constexpr int block_size = 512;
+        const int     grid_size  = static_cast<int>(batch_size);
+        DISPATCH_BOOL(IsAligned, config.is_fully_aligned, [&]() {
+            batchCopyBlockPerEntry<IsAligned><<<grid_size, block_size, 0, stream>>>(
+                reinterpret_cast<char* const*>(dst), reinterpret_cast<char const* const*>(src), bytes, batch_size);
+        });
+#endif
     }
 
     check_cuda_error();
