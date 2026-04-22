@@ -1,0 +1,154 @@
+{
+    "model_type": "qwen_tool",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    }
+                ],
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "max_tokens": 100
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1776595373,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "当然可以！以下是几个英语听力方法的听力测试问题，这些问题旨在评估听力技能：\n\n1. **听力理解**：\n   - 请听一段英文短文，然后回答问题。问题可能涉及短文的主题、背景信息或关键信息。\n   - 例如：“What is the main topic of the passage?”（短文的主题是什么？）\n\n2. **听力理解与词汇**：\n   - 请听一段英文短文，然后回答问题。问题可能涉及",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 37,
+                    "total_tokens": 137,
+                    "completion_tokens": 100,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 1132.307,
+                    "iter_count": 100,
+                    "prefix_len": 0,
+                    "input_len": 37,
+                    "output_len": 100,
+                    "step_output_len": 100,
+                    "first_token_cost_time": 373.364,
+                    "wait_time": 0.093,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "推荐一部好看的电影，首先需要考虑电影的类型和主题。如果您喜欢科幻、动作、冒险等类型，那么《星际穿越》可能是一个不错的选择。这部电影由克里斯托弗·诺兰执导，讲述了人类在宇宙中寻找新的居住地的故事。影片融合了科幻元素和悬疑元素，展现了人类在面对未知和挑战时的勇气和决心。\n\n如果您更喜欢剧情片或者爱情片，那么《泰坦尼克号》可能是一个不错的选择。这部电影",
+                        "partial": false
+                    },
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    }
+                ],
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "max_tokens": 100
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1776595394,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "好的，以下是一些英语听力方法的提问，旨在测试听力者的听力理解能力：\n\n1. **听录音并回答问题**：请听一段英文录音，然后回答以下问题。请确保录音清晰，以便于您准确地听到并回答问题。\n\n2. **听对话并回答问题**：请听一段英文对话，然后回答以下问题。请确保对话清晰，以便于您准确地听到并回答问题。\n\n3. **听短文并回答问题",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 155,
+                    "total_tokens": 255,
+                    "completion_tokens": 100,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": {
+                        "audio_tokens": null,
+                        "cached_tokens": 32
+                    }
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 866.047,
+                    "iter_count": 100,
+                    "prefix_len": 0,
+                    "input_len": 155,
+                    "output_len": 100,
+                    "step_output_len": 100,
+                    "first_token_cost_time": 68.293,
+                    "wait_time": 0.08,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 32,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 32,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
+        }
+    ]
+}

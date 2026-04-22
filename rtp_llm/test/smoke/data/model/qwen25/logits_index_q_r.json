@@ -1,0 +1,90 @@
+{
+    "model_type": "qwen_tool",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nwhat is CAP Theorem ?<|im_end|>\n<|im_start|>assistant\n",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_logits": true,
+                    "select_tokens_id": [
+                        1,
+                        2
+                    ],
+                    "logits_index": 2,
+                    "return_incremental": true,
+                    "is_streaming": true
+                },
+                "_prompt_source": "chat-template wrapping $prompt:s1"
+            },
+            "result": {
+                "response": "你好！很高兴能为你提供帮助。如果你有任何",
+                "finished": true,
+                "logits": [
+                    [
+                        8.303648948669434,
+                        5.785215377807617
+                    ]
+                ]
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "$prompt:s1"
+                    }
+                ],
+                "extra_configs": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_logits": true,
+                    "select_tokens_id": [
+                        1,
+                        2
+                    ],
+                    "logits_index": 2,
+                    "return_incremental": true,
+                    "is_streaming": true
+                },
+                "stream": false
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "1. How do you typically listen to a conversation",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 27,
+                    "total_tokens": 37,
+                    "completion_tokens": 10
+                },
+                "extra_outputs": {
+                    "logits": [
+                        [
+                            8.303648948669434,
+                            5.785215377807617
+                        ]
+                    ]
+                }
+            }
+        }
+    ]
+}

@@ -1,0 +1,59 @@
+{
+    "model_type": "deepseek2",
+    "model_path": "/mnt/nas1/hf/DeepSeek-V2-Lite-Chat/",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    }
+                ],
+                "max_tokens": 8,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705333930,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": " 1. 如何提高英语听力",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 17,
+                    "total_tokens": 25,
+                    "completion_tokens": 8
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": [
+                    "You are a helpful assistant.\n\nUser: 你试试不上班\n\nAssistant:"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": " 作为一个聊天机器人，我没有实体存在，所以",
+                "finished": true
+            }
+        }
+    ]
+}

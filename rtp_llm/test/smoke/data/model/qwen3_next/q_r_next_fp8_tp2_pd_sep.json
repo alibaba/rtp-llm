@@ -1,0 +1,65 @@
+{
+    "model_type": "qwen3_next",
+    "model_path": "/mnt/nas1/hf/Qwen3-Next-80B-A3B-Instruct-FP8",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    }
+                ],
+                "max_tokens": 100,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "当然可以！以下是围绕“英语听力方法”主题提出的几个有深度和实用性的问题，适合用于学习反思、教学研讨或自我提升：\n\n1. What are the most effective active listening strategies for improving English comprehension, and how can learners apply them in daily practice?\n\n2. How does shadowing (repeating what you hear immediately after the speaker) enhance listening skills, and what types of materials are best suited for this technique?\n\n3. Why is listening to authentic materials (e.g.,",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 16,
+                    "total_tokens": 116,
+                    "completion_tokens": 100
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s1",
+                    "$prompt:s1",
+                    "$prompt:s1"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": " explain in simple terms\n\nSure! Let’s break"
+                    },
+                    {
+                        "response": " explain in simple terms\n\nSure! Let’s break"
+                    },
+                    {
+                        "response": " explain in simple terms\n\nSure! Let’s break"
+                    }
+                ]
+            }
+        }
+    ]
+}

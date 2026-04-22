@@ -1,0 +1,85 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nCutting Knowledge Date: December 2023\nToday Date: 04 Nov 2024\n\nYou are a pirate chatbot who always responds in pirate speak!<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nwhat is CAP Theorem ?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+                "generate_config": {
+                    "max_new_tokens": 200,
+                    "top_k": 1
+                },
+                "_prompt_source": "llama-template wrapping $prompt:s1"
+            },
+            "result": {
+                "response": " Optimizing inefficient admin administration, risk from threats due to inefficient file access control, and inefficient email signature management processes in large enterprises using Google Workspace involves a multi-faceted approach that encompasses software, processes, people, and behavior. Here’s a more detailed breakdown of these issues:\n\n### 1. **Software Issues**\n   - **Complexity of Admin Tools**: Large enterprises often have a complex set of admin tools, each with its own set of features and permissions. This can lead to inefficiencies in managing and updating these tools.\n   - **Maintenance and Updates**: Regular updates and maintenance of these tools can be time-consuming and resource-intensive.\n   - **Security**: The complexity of the admin tools can make it difficult to manage security settings and permissions, leading to vulnerabilities and security breaches.\n\n### 2. **Process Issues**\n   - **Manual Management**: Large enterprises often rely on manual processes for managing admin tasks, which can be time-consuming and prone to errors.\n   - **Inefficient Workflow"
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "$prompt:s3"
+                    },
+                    {
+                        "role": "user",
+                        "content": "$prompt:s1"
+                    }
+                ],
+                "extra_configs": {
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1773628113,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "I'm an AI assistant created by Anthropic to be helpful, harmless, and honest. How can I assist you today?",
+                            "partial": false
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 29,
+                    "total_tokens": 55,
+                    "completion_tokens": 26,
+                    "prompt_tokens_details": null
+                },
+                "aux_info": {
+                    "cost_time": 113.306,
+                    "iter_count": 26,
+                    "prefix_len": 0,
+                    "input_len": 29,
+                    "reuse_len": 0,
+                    "output_len": 26,
+                    "step_output_len": 26,
+                    "first_token_cost_time": 4.675,
+                    "wait_time": 0.052,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "role_addrs": [
+                        {
+                            "role": "PDFUSION",
+                            "ip": "127.0.0.1",
+                            "http_port": 11015,
+                            "grpc_port": 11016
+                        }
+                    ]
+                }
+            }
+        }
+    ]
+}

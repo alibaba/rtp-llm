@@ -1,0 +1,38 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/mtp_reg/qwen2_14b_target",
+    "query_result": [
+        {
+            "query": {
+                "top_p": 0,
+                "yield_generator": false,
+                "generate_config": {
+                    "top_p": 0,
+                    "max_new_tokens": 700,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "stop_words_str": [
+                        "<|im_end|>",
+                        "<|im_start|>",
+                        "Observation:",
+                        "<|endoftext|>",
+                        "end",
+                        "</end>",
+                        "</search_target",
+                        "</search_comfort",
+                        "</search_knowledge",
+                        "</answer"
+                    ],
+                    "print_stop_words": true
+                },
+                "top_k": 1,
+                "temperature": 0,
+                "prompt": "$prompt:m2"
+            },
+            "result": {
+                "response": "根据安抚策略，用户要求转人工，需要进行情绪安抚，并说明无法转人工的原因，同时提供帮助催促商家处理的方案。因此，回复应包含安抚话术和帮助催促的选项。\n\n</think>\n<answer>亲亲，遇到这样的情况，心中肯定不是很舒服的[SEP]小蜜理解您的心情，目前无法直接转接人工客服哦[SEP]小蜜可以帮您优先催促商家处理退款，您看需要小蜜为您操作吗？</answer",
+                "finished": true
+            }
+        }
+    ]
+}

@@ -1,0 +1,14 @@
+[
+    {
+        "task_id":1,
+        "prompt": "Write a detailed analogy between mathematics and a lighthouse.\n\n"
+    },
+    {
+        "task_id":2,
+        "prompt": "and a lighthouse.\n\n"
+    },
+    {
+        "task_id":3,
+        "prompt": "ouse.\n\n"
+    }
+]

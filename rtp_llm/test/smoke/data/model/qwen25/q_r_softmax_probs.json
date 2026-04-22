@@ -1,0 +1,61 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_softmax_probs": true
+                },
+                "yield_generator": false
+            },
+            "result": {
+                "response": "1. Mathematics is like a lighthouse in the",
+                "aux_info": {
+                    "softmax_probs": [
+                        0.5087317228317261,
+                        0.9576025605201721,
+                        0.3053590953350067,
+                        0.5977334380149841,
+                        0.7367648482322693,
+                        0.8513296246528625,
+                        0.7471854090690613,
+                        0.9998385906219482,
+                        0.2119140625,
+                        0.8278324007987976
+                    ]
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "Write a detailed analogy between mathematics and a lighthouse.\n\nAnswer: ",
+                    "Write a detailed analogy between mathematics and a fish.\n\nAnswer: "
+                ],
+                "generate_config": {
+                    "max_new_tokens": 9,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_softmax_probs": true
+                },
+                "yield_generator": false
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "1. Mathematics is like a lighthouse in"
+                    },
+                    {
+                        "response": "1. Mathematics is like a fish's eyes"
+                    }
+                ]
+            }
+        }
+    ]
+}

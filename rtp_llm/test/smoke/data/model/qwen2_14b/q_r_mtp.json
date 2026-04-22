@@ -1,0 +1,38 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/mtp_reg/qwen2_14b_target",
+    "query_result": [
+        {
+            "query": {
+                "top_p": 0,
+                "yield_generator": false,
+                "generate_config": {
+                    "top_p": 0,
+                    "max_new_tokens": 100,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "stop_words_str": [
+                        "<|im_end|>",
+                        "<|im_start|>",
+                        "Observation:",
+                        "<|endoftext|>",
+                        "end",
+                        "</end>",
+                        "</search_target",
+                        "</search_comfort",
+                        "</search_knowledge",
+                        "</answer"
+                    ],
+                    "print_stop_words": true
+                },
+                "top_k": 1,
+                "temperature": 0,
+                "prompt": "$prompt:m2"
+            },
+            "result": {
+                "response": "用户之前询问了关于退款的问题，现在用户说：“我之前申请了退款，现在退款还没到账，我需要催一下。” 根据对话历史，用户之前申请了退款，现在退款还未到账，用户希望催促退款进度。首先，我需要使用业务知识查询工具，查询退款到账的相关流程和处理时间，以了解退款的正常处理时间以及催促的方法。\n\n<search_knowledge>退款到账时间 催促退款</search_knowledge",
+                "finished": true
+            }
+        }
+    ]
+}

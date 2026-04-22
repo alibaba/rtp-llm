@@ -1,0 +1,55 @@
+{
+    "model_type": "roberta",
+    "endpoint": "/v1/embeddings",
+    "model_path": "/mnt/nas1/hf/bge-m3",
+    "query_result": [
+        {
+            "query": {
+                "input": [
+                    "hello, what is your name?",
+                    "hello"
+                ],
+                "model": "xx"
+            },
+            "result": {
+                "object": "list",
+                "data": [
+                    {
+                        "object": "colbert_embedding",
+                        "embedding": "data/model/bert/colbert_roberta_expect_0.pt",
+                        "index": 0
+                    },
+                    {
+                        "object": "colbert_embedding",
+                        "embedding": "data/model/bert/colbert_roberta_expect_1.pt",
+                        "index": 1
+                    }
+                ],
+                "model": "xx"
+            }
+        },
+        {
+            "endpoint": "/v1/embeddings/similarity",
+            "query": {
+                "left": [
+                    "hello, what is your name?"
+                ],
+                "right": [
+                    "hello",
+                    "what is your name"
+                ],
+                "model": "xx"
+            },
+            "result": {
+                "type": "colbert",
+                "model": "xx",
+                "similarity": [
+                    [
+                        0.7152118682861328,
+                        0.8077244758605957
+                    ]
+                ]
+            }
+        }
+    ]
+}

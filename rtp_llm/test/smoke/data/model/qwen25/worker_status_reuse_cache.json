@@ -1,0 +1,175 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "endpoint": "/rtp_llm/worker_status",
+            "query": {},
+            "result": {
+                "role": "RoleType.PDFUSION",
+                "server_port": 8888,
+                "http_port": 8888,
+                "grpc_port": 8888,
+                "running_task_info": [],
+                "finished_task_list": [],
+                "dp_size": 1,
+                "tp_size": 1,
+                "alive": true,
+                "version": 0,
+                "status_version": 1776829623021177,
+                "precision": "FP16",
+                "latest_finished_version": 0,
+                "waiting_query_len": 0,
+                "running_query_len": 0,
+                "frontend_available_concurrency": 32
+            }
+        },
+        {
+            "query": {
+                "prompt": "Which recommended Flask alternative is most similar to Django North ",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                },
+                "_prompt_source": "$prompt:s5[:68] (11 tokens)"
+            },
+            "result": {
+                "response": "\n\nI am trying to use the screen\\_manager",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 12,
+                    "reuse_len": 0,
+                    "prefix_len": 0,
+                    "iter_count": 10,
+                    "output_len": 10
+                }
+            }
+        },
+        {
+            "endpoint": "/rtp_llm/worker_status",
+            "query": {
+                "latest_cache_version": -1
+            },
+            "result": {
+                "role": "RoleType.PDFUSION",
+                "server_port": 8888,
+                "http_port": 8888,
+                "grpc_port": 8888,
+                "running_task_info": [],
+                "finished_task_list": [
+                    {
+                        "request_id": 3338545574358503425,
+                        "prefix_length": 0,
+                        "input_length": 12,
+                        "waiting_time_ms": 0,
+                        "iterate_count": 10,
+                        "end_time_ms": 1776829624162,
+                        "dp_rank": 0
+                    }
+                ],
+                "dp_size": 1,
+                "tp_size": 1,
+                "alive": true,
+                "version": 0,
+                "status_version": 1776829624167421,
+                "precision": "FP16",
+                "latest_finished_version": 0,
+                "waiting_query_len": 0,
+                "running_query_len": 0,
+                "frontend_available_concurrency": 32
+            }
+        },
+        {
+            "query": {
+                "prompt": "Which recommended Flask alternative is most similar to Django North \n\nAnswer: ",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                },
+                "_prompt_source": "$prompt:s5[:68]+\"\\n\\nAnswer: \" (14 tokens)"
+            },
+            "result": {
+                "response": " Flask is a lightweight web framework for Python, and",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 13,
+                    "reuse_len": 0,
+                    "prefix_len": 0,
+                    "iter_count": 10,
+                    "output_len": 10
+                }
+            }
+        },
+        {
+            "endpoint": "/rtp_llm/worker_status",
+            "query": {
+                "latest_cache_version": 1
+            },
+            "result": {
+                "role": "RoleType.PDFUSION",
+                "server_port": 8888,
+                "http_port": 8888,
+                "grpc_port": 8888,
+                "running_task_info": [],
+                "finished_task_list": [
+                    {
+                        "request_id": 3338545574358503425,
+                        "prefix_length": 0,
+                        "input_length": 12,
+                        "waiting_time_ms": 0,
+                        "iterate_count": 10,
+                        "end_time_ms": 1776829624162,
+                        "dp_rank": 0
+                    },
+                    {
+                        "request_id": 3338545593559764994,
+                        "prefix_length": 0,
+                        "input_length": 13,
+                        "waiting_time_ms": 0,
+                        "iterate_count": 10,
+                        "end_time_ms": 1776829624256,
+                        "dp_rank": 0
+                    }
+                ],
+                "dp_size": 1,
+                "tp_size": 1,
+                "alive": true,
+                "version": 0,
+                "status_version": 1776829624261141,
+                "precision": "FP16",
+                "latest_finished_version": 1,
+                "waiting_query_len": 0,
+                "running_query_len": 0,
+                "frontend_available_concurrency": 32
+            }
+        },
+        {
+            "endpoint": "/rtp_llm/worker_status",
+            "query": {
+                "latest_cache_version": -1,
+                "latest_finished_version": 3
+            },
+            "result": {
+                "role": "RoleType.PDFUSION",
+                "server_port": 17961,
+                "http_port": 17966,
+                "grpc_port": 17962,
+                "running_task_info": [],
+                "finished_task_list": [],
+                "dp_size": 1,
+                "tp_size": 1,
+                "alive": true,
+                "version": 0,
+                "status_version": 1776829624264537,
+                "waiting_query_len": 0,
+                "running_query_len": 0,
+                "precision": "FP16",
+                "latest_finished_version": 3,
+                "frontend_available_concurrency": 32
+            }
+        }
+    ]
+}

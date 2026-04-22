@@ -1,0 +1,111 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "Which recommended Flask alternative is most similar to Django North ",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                },
+                "_prompt_source": "$prompt:s5[:68]"
+            },
+            "result": {
+                "response": "\n\nI am trying to use the screen\\_manager",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 12,
+                    "reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "prefix_len": 0,
+                    "iter_count": 10,
+                    "output_len": 10
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "Which recommended Flask alternative is most similar to Django North \n\nAnswer: ",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "enable_device_cache": true,
+                    "enable_memory_cache": false
+                },
+                "_prompt_source": "$prompt:s5[:68]+suffix"
+            },
+            "result": {
+                "response": " Flask is a lightweight web framework for Python, and",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 13,
+                    "reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "prefix_len": 0,
+                    "iter_count": 10,
+                    "output_len": 10
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "Which recommended Flask alternative is most similar to Django North \n\nAnswer: ",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "enable_device_cache": false,
+                    "enable_memory_cache": true
+                },
+                "_prompt_source": "$prompt:s5[:68]+suffix"
+            },
+            "result": {
+                "response": " Flask is a lightweight web framework for Python, and",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 13,
+                    "reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "prefix_len": 0,
+                    "iter_count": 10,
+                    "output_len": 10,
+                    "step_output_len": 9
+                }
+            }
+        }
+    ]
+}

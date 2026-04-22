@@ -1,0 +1,38 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/mtp_reg/qwen2_14b_target",
+    "query_result": [
+        {
+            "query": {
+                "top_p": 0,
+                "yield_generator": false,
+                "generate_config": {
+                    "top_p": 0,
+                    "max_new_tokens": 100,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "stop_words_str": [
+                        "<|im_end|>",
+                        "<|im_start|>",
+                        "Observation:",
+                        "<|endoftext|>",
+                        "end",
+                        "</end>",
+                        "</search_target",
+                        "</search_comfort",
+                        "</search_knowledge",
+                        "</answer"
+                    ],
+                    "print_stop_words": true
+                },
+                "top_k": 1,
+                "temperature": 0,
+                "prompt": "$prompt:m2"
+            },
+            "result": {
+                "response": "用户之前的问题和对话历史：用户：你好，我想问一下，我之前在淘宝买了一个商品，现在想要退货，但是商家说不给退，我该怎么办？小蜜：您好，关于商品的退换货问题，需要根据商品的实际情况和平台规则来判断。您能提供一下商品的订单编号或者商品名称吗？用户：订单号是23456789，商品是运动鞋。小蜜：好的，我这边",
+                "finished": true
+            }
+        }
+    ]
+}

@@ -1,0 +1,52 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt_batch": [
+                    "Write a detailed analogy between mathematics and a fish.\n\nAnswer: ",
+                    "Write a detailed analogy between mathematics and a fish.\n\nAnswer: "
+                ],
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 100,
+                    "random_seed": 46
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "1. Water analogy: Just as water is a"
+                    },
+                    {
+                        "response": "1. Water analogy: Just as water is a"
+                    }
+                ]
+            }
+        },
+        {
+            "query": {
+                "prompt": "Which recommended Flask alternative is most similar to Django North \n\nAnswer: ",
+                "generate_config": {
+                    "num_return_sequences": 2,
+                    "max_new_tokens": 10,
+                    "top_k": 100,
+                    "random_seed": 46
+                },
+                "yield_generator": true,
+                "_prompt_source": "$prompt:s5[:68]+\"\\n\\nAnswer: \""
+            },
+            "result": {
+                "response": [
+                    "1. Similarities between mathematics and a fish\n\n",
+                    " Mathematics can be compared to a fish swimming on its"
+                ],
+                "iter_count": 10,
+                "finished": true
+            }
+        }
+    ]
+}

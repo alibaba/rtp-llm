@@ -1,0 +1,28 @@
+{
+    "model_type": "bert",
+    "endpoint": "/v1/embeddings",
+    "model_path": "/mnt/nas1/hf/bge-large-en-v1.5",
+    "query_result": [
+        {
+            "query": {
+                "input": "hello",
+                "model": "xx"
+            },
+            "result": {
+                "object": "list",
+                "data": [
+                    {
+                        "object": "embedding",
+                        "embedding": "data/model/bert/expect.pt",
+                        "index": 0
+                    }
+                ],
+                "model": "xx",
+                "usage": {
+                    "prompt_tokens": 3,
+                    "total_tokens": 3
+                }
+            }
+        }
+    ]
+}
