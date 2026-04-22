@@ -17,7 +17,6 @@ cc_library(
         "cutlass_kernels/fp4_gemm/*.cuh",
     ]),
     deps = [
-        "//rtp_llm/models_py/bindings/cuda/cutlass/cutlass_extensions:cutlass_extensions",
         "@cutlass4.0//:cutlass",
         "@cutlass4.0//:cutlass_utils",
         "@local_config_cuda//cuda:cuda_headers",
@@ -28,23 +27,5 @@ cc_library(
         "-DCUTLASS_ARCH_MMA_SM100_SUPPORTED",
     ],
     alwayslink = True,
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "cutlass_headers",
-    deps = [
-        "@cutlass//:cutlass",
-        "@cutlass//:cutlass_utils",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "cutlass_interface",
-    hdrs = [
-        "cutlass_kernels/weight_only_quant_op.h",
-        "cutlass_kernels/gemm_configs.h",
-    ],
     visibility = ["//visibility:public"],
 )
