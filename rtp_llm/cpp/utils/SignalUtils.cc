@@ -1,64 +1,130 @@
 #include <csignal>
-#include <sstream>
+#include <cstdio>
+#include <cerrno>
+#include <ctime>
+#include <cstring>
 #include <unistd.h>
-#include <iostream>
+
 #include <execinfo.h>
-#include <dlfcn.h>
-#include <sstream>
 
 #include "rtp_llm/cpp/utils/SignalUtils.h"
-#include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/utils/StackTrace.h"
 
 namespace rtp_llm {
 
-void printSignalStackTrace(int signum, siginfo_t* siginfo, void* ucontext) {
-    std::stringstream stack_ss;
-    time_t            current_time = time(nullptr);
-    stack_ss << std::endl
-             << "*** Aborted at " << current_time << " (unix time) try \"date -d @" << current_time
-             << "\" if you are using GNU date***" << std::endl;
+namespace {
+
+constexpr int kStderrFd  = 2;
+constexpr int kMaxFrames = 64;
+
+void writeAll(int fd, const char* data, size_t len) {
+    while (len > 0) {
+        ssize_t n = write(fd, data, len);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        data += static_cast<size_t>(n);
+        len -= static_cast<size_t>(n);
+    }
+}
+
+// fdatasync/fsync 非 POSIX 异步信号安全函数；此处仍调用，仅为尽量把崩溃输出刷向存储端。
+// 失败（如对 tty/pipe 的 EINVAL）直接忽略。
+void syncFdDataAndFullBestEffort(int fd) {
+    if (fd < 0) {
+        return;
+    }
+    int r;
+    do {
+        r = fdatasync(fd);
+    } while (r < 0 && errno == EINTR);
+    do {
+        r = fsync(fd);
+    } while (r < 0 && errno == EINTR);
+}
+
+}  // namespace
+
+void printSignalStackTrace(int signum, siginfo_t* siginfo, void* /*ucontext*/) {
+    char        line[768];
+    int         len          = 0;
+    time_t      current_time = time(nullptr);
+    const void* fault_addr   = (siginfo != nullptr) ? siginfo->si_addr : nullptr;
+
+    len = snprintf(line, sizeof(line), "\n*** Aborted at %ld (unix time) ***\n", static_cast<long>(current_time));
+    if (len > 0 && static_cast<size_t>(len) < sizeof(line)) {
+        writeAll(kStderrFd, line, static_cast<size_t>(len));
+    }
 
     switch (signum) {
         case SIGSEGV:
-            stack_ss << "*** SIGSEGV (@0x" << std::hex << reinterpret_cast<uintptr_t>(siginfo->si_addr) << std::dec
-                     << ") received by PID " << getpid() << " (TID " << gettid() << "); stack trace: ***" << std::endl;
+            len = snprintf(line,
+                           sizeof(line),
+                           "*** SIGSEGV (%p) received by PID %d (TID %d); stack trace: ***\n",
+                           fault_addr,
+                           static_cast<int>(getpid()),
+                           static_cast<int>(gettid()));
             break;
         case SIGFPE:
-            stack_ss << "*** SIGFPE (@0x" << std::hex << reinterpret_cast<uintptr_t>(siginfo->si_addr) << std::dec
-                     << ") received by PID " << getpid() << " (TID " << gettid() << "); stack trace: ***" << std::endl;
+            len = snprintf(line,
+                           sizeof(line),
+                           "*** SIGFPE (%p) received by PID %d (TID %d); stack trace: ***\n",
+                           fault_addr,
+                           static_cast<int>(getpid()),
+                           static_cast<int>(gettid()));
             break;
         case SIGILL:
-            stack_ss << "*** SIGILL (@0x" << std::hex << reinterpret_cast<uintptr_t>(siginfo->si_addr) << std::dec
-                     << ") received by PID " << getpid() << " (TID " << gettid() << "); stack trace: ***" << std::endl;
+            len = snprintf(line,
+                           sizeof(line),
+                           "*** SIGILL (%p) received by PID %d (TID %d); stack trace: ***\n",
+                           fault_addr,
+                           static_cast<int>(getpid()),
+                           static_cast<int>(gettid()));
             break;
         case SIGABRT:
-            stack_ss << "*** SIGABRT (@0x" << std::hex << reinterpret_cast<uintptr_t>(siginfo->si_addr) << std::dec
-                     << ") received by PID " << getpid() << " (TID " << gettid() << "); stack trace: ***" << std::endl;
+            len = snprintf(line,
+                           sizeof(line),
+                           "*** SIGABRT (%p) received by PID %d (TID %d); stack trace: ***\n",
+                           fault_addr,
+                           static_cast<int>(getpid()),
+                           static_cast<int>(gettid()));
             break;
         case SIGBUS:
-            stack_ss << "*** SIGBUS (@0x" << std::hex << reinterpret_cast<uintptr_t>(siginfo->si_addr) << std::dec
-                     << ") received by PID " << getpid() << " (TID " << gettid() << "); stack trace: ***" << std::endl;
+            len = snprintf(line,
+                           sizeof(line),
+                           "*** SIGBUS (%p) received by PID %d (TID %d); stack trace: ***\n",
+                           fault_addr,
+                           static_cast<int>(getpid()),
+                           static_cast<int>(gettid()));
             break;
         default:
-            stack_ss << "*** Unknown signal (" << signum << ") received by PID " << getpid() << " (TID " << gettid()
-                     << "); stack trace: ***" << std::endl;
+            len = snprintf(line,
+                           sizeof(line),
+                           "*** Unknown signal (%d) received by PID %d (TID %d); stack trace: ***\n",
+                           signum,
+                           static_cast<int>(getpid()),
+                           static_cast<int>(gettid()));
             break;
     }
-    RTP_LLM_STACKTRACE_LOG_INFO("%s", stack_ss.str().c_str());
+    if (len > 0 && static_cast<size_t>(len) < sizeof(line)) {
+        writeAll(kStderrFd, line, static_cast<size_t>(len));
+    }
 
-    rtp_llm::printStackTrace();
-}
+    void* frames[kMaxFrames];
+    int   depth = backtrace(frames, kMaxFrames);
+    if (depth > 0) {
+        backtrace_symbols_fd(frames, depth, kStderrFd);
+    }
+    writeAll(kStderrFd, "\n", 1);
 
-void flushLog() {
-    Logger::getEngineLogger().flush();
-    Logger::getStackTraceLogger().flush();
-    Logger::getAccessLogger().flush();
+    // 同上：非信号安全，仅作尽力刷盘。
+    syncFdDataAndFullBestEffort(kStderrFd);
 }
 
 void getSighandler(int signum, siginfo_t* siginfo, void* ucontext) {
     printSignalStackTrace(signum, siginfo, ucontext);
-    flushLog();
     signal(signum, SIG_DFL);
     kill(getpid(), signum);
 }

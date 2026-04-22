@@ -62,11 +62,7 @@ cc_library(
     srcs = [
         "SignalUtils.cc",
     ],
-    deps = [
-        ":core_utils",
-        ":stack_trace",
-        "@havenask//aios/autil:env_util",
-    ],
+    deps = [],
     copts = copts(),
     visibility = ["//visibility:public"],
     alwayslink = True,
