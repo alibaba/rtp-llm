@@ -9,6 +9,8 @@ import torch
 from rtp_kernel.w4a8_group_gemm import (
     w4a8_group_gemm_ptpc,
     unified_encode_int4b,
+    reorder_tensor,
+    compute_reorder_stride,
     pack_scale_fp8,
     initialize_tensor,
     dequantize_int4b_to_fp8,
@@ -27,7 +29,7 @@ def torch_ref(
     return output
 
 
-class W4A8GroupGemmOpTest(TestCase):
+class W4a8GroupGemmOpTest(TestCase):
     NUM_EXPERT = [5, 128]
     M = [1, 8, 16, 32, 64, 128, 1024]
     GROUP_SIZE = [128]
@@ -64,6 +66,7 @@ class W4A8GroupGemmOpTest(TestCase):
             (num_expert, n, k // 2), dtype=torch.int8, device=self.device)
         initialize_tensor(b)
         b_unified = unified_encode_int4b(b)
+        b_unified = reorder_tensor(b_unified)
 
         b_scales = torch.empty(
             (num_expert, k // group_size, n), dtype=torch.float8_e4m3fn, device=self.device)
@@ -77,8 +80,9 @@ class W4A8GroupGemmOpTest(TestCase):
         a_out_scales = torch.ones(
             (num_expert * m, 1), dtype=torch.float32, device=self.device)
 
-        ab_strides = torch.full(
+        a_strides = torch.full(
             (num_expert,), k, dtype=torch.int64, device=self.device)
+        b_strides = compute_reorder_stride(num_expert, n, k)
         b_scales_strides = torch.tensor(
             [n, 0], dtype=torch.int64, device=self.device).unsqueeze(0).repeat(num_expert, 1, 1)
         c_strides = torch.full(
@@ -116,8 +120,8 @@ class W4A8GroupGemmOpTest(TestCase):
             a_out_scales,
             expert_offsets[:-1],
             problem_sizes,
-            ab_strides,
-            ab_strides,
+            a_strides,
+            b_strides,
             b_scales_strides,
             c_strides,
             group_size
@@ -142,6 +146,71 @@ class W4A8GroupGemmOpTest(TestCase):
                 output_dtype=params[3]
             ):
                 self._run_w4a8_group_gemm_op_test(*params)
+
+    def _run_pack_scale_fp8_gpu_test(self, m: int, n: int):
+        input = torch.rand((m, n), device=self.device).to(torch.float8_e4m3fn)
+        output = pack_scale_fp8(input)  # cuda version
+        output_ref = pack_scale_fp8(input.cpu()).to(self.device)  # cpu version
+        torch.testing.assert_close(output, output_ref)
+
+    def test_pack_scale_fp8_gpu(self):
+        for params in itertools.product(
+            [1024, 2048, 4096],
+            [1024, 2048, 4096],
+        ):
+            with self.subTest(m=params[0], n=params[1]):
+                self._run_pack_scale_fp8_gpu_test(*params)
+
+    def _run_unified_encode_int4b_gpu_test(self, m: int, n: int):
+        input = torch.rand((m, n), device=self.device).to(torch.int8)
+        output = unified_encode_int4b(input)  # cuda version
+        output_ref = unified_encode_int4b(
+            input.cpu()).to(self.device)  # cpu version
+        torch.testing.assert_close(output, output_ref)
+
+    def test_unified_encode_int4b_gpu(self):
+        for params in itertools.product(
+            [1024, 2048, 4096],
+            [1024, 2048, 4096],
+        ):
+            with self.subTest(m=params[0], n=params[1]):
+                self._run_unified_encode_int4b_gpu_test(*params)
+
+    def _run_reorder_tensor_3d_gpu_test(self, num_expert: int, n: int, k: int):
+        input = torch.rand(
+            (num_expert, n, k // 2), device=self.device).to(torch.int8)
+        output = reorder_tensor(input)  # cuda version
+        output_ref = reorder_tensor(
+            input.cpu()).to(self.device)  # cpu version
+        torch.testing.assert_close(output, output_ref)
+
+    def test_reorder_tensor_3d_gpu(self):
+        for params in itertools.product(
+            [1, 5],
+            [1024, 4096],
+            [1024, 2048],
+        ):
+            with self.subTest(num_expert=params[0], n=params[1], k=params[2]):
+                self._run_reorder_tensor_3d_gpu_test(*params)
+
+    def _run_reorder_tensor_2d_gpu_test(self, n: int, k: int):
+        input = torch.rand((n, k // 2), device=self.device).to(torch.int8)
+        output = reorder_tensor(input)  # cuda version, 2D
+        output_ref = reorder_tensor(
+            input.cpu()).to(self.device)  # cpu version, 2D
+        torch.testing.assert_close(output, output_ref)
+
+        # 2D result must match the corresponding slice of the 3D path.
+        output_3d = reorder_tensor(input.unsqueeze(0)).squeeze(0)
+        torch.testing.assert_close(output, output_3d)
+
+    def test_reorder_tensor_2d_gpu(self):
+        for params in itertools.product(
+            [1024, 4096],
+            [1024, 2048],
+        ):
+            with self.subTest(n=params[0], k=params[1]):
+                self._run_reorder_tensor_2d_gpu_test(*params)
 
 
 if __name__ == "__main__":
