@@ -161,6 +161,45 @@ anyio==4.11.0 \
     #   httpx
     #   openai
     #   starlette
+apache-tvm-ffi==0.1.7 \
+    --hash=sha256:12950ca9f9f4f4436869afe17845a6bfc85cbcd8a15dfa2b16095f7e6f49d06f \
+    --hash=sha256:150eda75d80449c43c0c633d83d55ed963c76f55910ff76aa98cee24ca8594b7 \
+    --hash=sha256:1556f4b967b4167d20822f7d1d8e60d29e6901da64718d0bca60dd6247a72ba2 \
+    --hash=sha256:18a1444f64e97d0c53d712371ab6f5194ece512c8772bb6cf53bac4b9dabeb6c \
+    --hash=sha256:20a8847f4609f1fe61015b7547bced99eba38072ed422799fc7bd15371d6d83c \
+    --hash=sha256:258a4aecc16e963def8ba0ab07f585147c7e7f586156b9496bfdf34af229443d \
+    --hash=sha256:363701589349e11a945dabce026578203bd83cb8de71af9a066beadd77af085a \
+    --hash=sha256:3e6ec4db1204581a14a114046f45f9d09bb9897770649be1ac63b9af6dca45a5 \
+    --hash=sha256:408bb2c1fa585260afd556e53d65e2735f201f358202fda2b07d08a6cbfaf91f \
+    --hash=sha256:41e50f2c8d98d706923c70ac19fd5f605bf71b8ffa43c0c2e9e1e22c2d60d4e0 \
+    --hash=sha256:5769cadc42e70522e2a523f1dfe24f48dbe3bf384e63f95df251f9d572ffcf23 \
+    --hash=sha256:57ba5918469f6d1c9efc92a049d71a3a5e87ec8c5bd418a0de9f3b29c8579593 \
+    --hash=sha256:5f7deaa48cfd720949dd1638dfbd4cc7d5285008c7f3f342887e2bf33cf1f5be \
+    --hash=sha256:688debee9a69f53cfe8cb2782f9f1e52bccf518835928ae09dddaa11b7ec7d85 \
+    --hash=sha256:6e373fc421a0ee0d649f00dc26cd47507976b0ef3542ff4efdb6652956edeb6c \
+    --hash=sha256:737cd4a067d6c6c7ad7dd909a0708eb3dc28540299039ea636f8ff5766b122be \
+    --hash=sha256:7b6444a322279cc33ada0bb2a0482e3433c31028becda106dcb0d48c30fb2de0 \
+    --hash=sha256:835bd391c6f3388e84e36f0ea2347761992241a3953be6ebb319bf1c2ac855d8 \
+    --hash=sha256:91c83b62c3e38ac63691c22ed5f4bd2f079d9a3e9fc026ae2e9016498f33c1ec \
+    --hash=sha256:9b05155b4b60ebd3642213d0489b6ef24aff17b268960dbb5f106a39899bb8b1 \
+    --hash=sha256:9ede57a6ca60f3468b226f5c4c24c7d91b1e8997b92381b3c2325f3b1a1de76b \
+    --hash=sha256:b5c7716429ce2beb0a5b00c5a3bdd90b8a5891838afb782491c576ade42ba7c4 \
+    --hash=sha256:c1fd70f6e7578eeec5e5d8ed0fb814b12280b724531487ff4d899edddd188d97 \
+    --hash=sha256:cc6334f55ad8b4cb3c084dcdf33720b47665d0ea488c36a1b4f1b99445ae5a12 \
+    --hash=sha256:cceaddc7636060231aca4ada2632814189b1169224b2b451f41984145ef615fc \
+    --hash=sha256:d0e579234ce6fb2899377335a881ecf15d0197d833e2d370c9269ea6ca578f6f \
+    --hash=sha256:d2fb56f53e33c7ddf7d6d340d44cbc440d205f7dab4bc5ed1ad20c8fc779250f \
+    --hash=sha256:d4906b591549539288483edfef2fc1560b120ec9e2993208d05eb83178a6f077 \
+    --hash=sha256:d5e9e668620ba3b78b1c1f393dee67a63850882b0713dba31972c5f854f02860 \
+    --hash=sha256:d7d8b53e94c2bc28e961934e8291a9763d7868f84f9759cbae462b77ca801e5b \
+    --hash=sha256:dc4a02e0252599d0c4eb2d2fa91b7756f0446b3bc42479b05c140e9d336b9b8b \
+    --hash=sha256:e135b70c7be8627661c5ec4a466e17e1aba260ffd7c6bccfe231c9ea975875e7 \
+    --hash=sha256:ec71c56b371d9a34f447545c2dcc850e384ec8d2cae74d4360ad8ae0b22f940f \
+    --hash=sha256:f0e010e61d1f220ec4ce3d15053db3f8c8d9c79230ea763343fc5e4acf53ef17 \
+    --hash=sha256:f69f1195ad7701b0a024a84914b934487a30d5975a9e5d5044c57eb9f9b0fcf7 \
+    --hash=sha256:f93ce14d5e4bfc91bf84bc12892f0e7bc2361aecf0a2a0dd2cfd807dc5f93b7d \
+    --hash=sha256:fbbf87df625930bafbd979c2c510d5bd989e9171098e5bb65320d0e7336d0095
+    # via -r open_source/deps/requirements_cuda12_arm.txt
 async-timeout==5.0.1 \
     --hash=sha256:39e3809566ff85354557ec2398b55e096c8364bacac9405a7a1fa429e77fe76c \
     --hash=sha256:d9321a7a3d5a6a5e187e824d2fa0793ce379a202935782d555d6e9d2735677d3
@@ -548,6 +587,12 @@ filelock==3.25.2 \
     #   transformers
 flash-mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2B47c35a7-cp310-cp310-linux_aarch64.whl \
     --hash=sha256:ea9225f2c5ebf6fa37ee41d967796d1d3d6d925c3bef187e12ace67c67baf36f
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+flashinfer-cubin @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp-kernel/flashinfer_260319/flashinfer_cubin-0.6.6-py3-none-any.whl \
+    --hash=sha256:3363511f06b0315b9267fc3976412b7f844750fdfe451c44f3f84076bffac641
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+flashinfer-jit-cache @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp-kernel/flashinfer_260319/flashinfer_jit_cache-0.6.6-cp39-abi3-manylinux_2_28_aarch64.whl \
+    --hash=sha256:d05323d7e0a766cae097e715df99e3d97d74305d699ceb95276cf98915f404a5
     # via -r open_source/deps/requirements_cuda12_arm.txt
 flashinfer-python==0.2.5 \
     --hash=sha256:990aa090ef781783e76b836696ece4efd23956f72b5696d622fc619a61162aef
@@ -3615,3 +3660,104 @@ setuptools==60.5.0 \
     # via
     #   -r open_source/deps/../../open_source/deps/requirements_base.txt
     #   grpcio-tools
+cuda-bindings==13.0.3 \
+    --hash=sha256:1769956c8d868fe16535e02201b0b9e8a485f4e83024f9010f3e9b48a4387aa1 \
+    --hash=sha256:193762306b6032c00a141fc38bcef92c6fb4d332fd2d6a550c7f950e7fd8acd8 \
+    --hash=sha256:3ab845487ca2c14accdcb393a559a3070469ea4b591d05e6ef439471f47f3e24 \
+    --hash=sha256:512d0d803a5e47a8a42d5a34ce0932802bf72fe952fdb11ac798715a35c6e5cb \
+    --hash=sha256:547959c87185ce7d0a547afa1b728bb707c9f0db38994f8b89442f3bdc379d73 \
+    --hash=sha256:6b12ccd98f447aea9589d32caf9efda0c193994080752a60f790b646d519fe8c \
+    --hash=sha256:74307cea1feee6c32a6e27b42e77beb22cd21cff4b7764fd214fa6ff89f8bd69 \
+    --hash=sha256:7c7e6e89cdfc9b34f16a065cc6ad6c4bab19ce5dcef8da3ace8ad10bda899fa0 \
+    --hash=sha256:9afede5937474864aa794eb57399dbdf5d2b05427aadcac275209b0857528a61 \
+    --hash=sha256:aaa0934e16aa20ec10fbb1ecc53a6961b8d1c06a970fe05cc6ee7d2a805a090f \
+    --hash=sha256:abd8481400f959484e48008281b2ff034ac6973881906afee1d346e11f1e1aae \
+    --hash=sha256:b899e5a513c11eaa18648f9bf5265d8de2a93f76ef66a6bfca0a2887303965cd \
+    --hash=sha256:bd2364bc49925837ce18dda259c3a36e539977ca0297799a54891cae1d5213f5 \
+    --hash=sha256:c5f797ce534a303525259be0ae7ee9cfcf4f7874b22f1f9b8e85555509dccb83 \
+    --hash=sha256:c859e326c776a47e66c50386a10c84fe34291eb6e711610c9fd7cc27d446334f \
+    --hash=sha256:cf41d9e69019939aa15296fa66ea7d3fdb8d2c6383f729f4b1156c8b37808a06 \
+    --hash=sha256:d56e46a9e984bb754e56b9d060cf027fe99f08a97651ce6d8aa1c2032476d01e \
+    --hash=sha256:dd83e8d79587e265b82d3e589ba6b061770537443dfb1bb4a74f755c8b13f62b \
+    --hash=sha256:dfd66c25a133365c4f93e3396c38c64b04400ccafd18c3a889ae251a1bfabaa1 \
+    --hash=sha256:e675dbd009fb5e66d63fd13a8ff35f849120f01bcc4dafadbced3004605c3588 \
+    --hash=sha256:e93866465e7ff4b7ebdf711cf9cd680499cd875f992058c68be08d4775ac233d \
+    --hash=sha256:ed06ef3507bd0aefb0da367e3d15676a8c7443bd68a88f298562d60b41078c20 \
+    --hash=sha256:fb16a7f769c9c67469add7a1d9f6c14dd44637f6921cb6b9eb82cb5015b35c3d \
+    --hash=sha256:fce6d6b162457475b35e1a259ab643e683d1d20a84459fea898782e2f1e10a3b
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+cuda-pathfinder==1.3.2 \
+    --hash=sha256:7bd2774bc6be93aea226d579f415a63803b2b2c062207ed06c1d6dfc9cfacc3c
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+cuda-python==13.0.3 \
+    --hash=sha256:914cd7e2dd075bd06a2d5121c1d9ccdd3d0c94b03ea5a44dbd98d24d8ed93bab
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+deep-ep @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/deep_ep-1.2.1.11%2Bunknown.pai-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:03a82135a86f125c7f02611a8c80c2a3d4ce64648f4713512defa85614a8d342
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+deep-gemm @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/deep_gemm-2.1.1%2Blocal-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:fda5ed1639253d16dafeb2de92453bb3fef286ffdc647061053b3ec1a7a656b1
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+fast-safetensors @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:a031a05cc35a9ffe47b236d92854d3e24de488343102fbbae05b8b77cc8480e4
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+fastsafetensors @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/fastsafetensors-0.1.19rc5%2Bali-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:681c5772c005032959c66ef24f7a1bd6972f2c7bc90d3d7e9a523d262f2597a1
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+flash-attn @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp-kernel/rtp_kernel_260228/flash_attn-2.8.3-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:fe4403ae9df06e38568707b777a5e03271c0218655ab63d867eadf585656c56a
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+flash-attn-3 @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp-kernel/rtp_kernel_260228/flash_attn_3-3.0.0b1-cp39-abi3-linux_aarch64.whl \
+    --hash=sha256:138c4e50f0e1e5b594a258de21552b861615002a3c8da96e6f51e46bc80c2bdc
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+markdown-it-py==4.0.0 \
+    --hash=sha256:87327c59b172c5011896038353a81343b6754500a08cd7a4973bb48c6d578147 \
+    --hash=sha256:cb0a2b4aa34f932c007117b194e945bd74e0ec24133ceb5bac59009cda1cb9f3
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+mdurl==0.1.2 \
+    --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8 \
+    --hash=sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+nvidia-cudnn-frontend==1.16.0 \
+    --hash=sha256:138de2bc4697fabb2eb2f0f601a7e31f8fe97874908e26e33d737276f335473c \
+    --hash=sha256:16efb069d4bda4d3b99134f59f376cfd4d09558298bd96af778fdc7f2851e696 \
+    --hash=sha256:5c4a8fc573d85a86e08b15d9bf37f729e2487298781867a492a59cde6ac295e2 \
+    --hash=sha256:77cb06b91877c8489363867434ba1d9936f3e10bf7ed98d82e98f5f578611920 \
+    --hash=sha256:7b7860db03767c158accbe0b4e9c9553506513cc970ff08ed28c7761681ac466 \
+    --hash=sha256:83ecbe6d1145dc208a9ae82aa0b45b2c8f74ed8a43d3a102a13eef2117e2fedd \
+    --hash=sha256:8ebe416807207b6d3283541c7a2945dfd4feba61bcbffb3adf99b33f7a326df3 \
+    --hash=sha256:a257f10a932ffde9741f644efd3611acf77e2fd89d493d81bc6a8353c48f1ec2 \
+    --hash=sha256:a77818c92a556be9287b4d53457cc6df0e01982ffaf1c1f6754bab7913f9baad \
+    --hash=sha256:b6bcb3a2fbff80538958e21e2227520f082a961164865aaeedaac527f61084f9 \
+    --hash=sha256:bb8bccde48e62363e8458f3a860ae11a11dd6a5dffef6ca987c826ef2a4a8c38 \
+    --hash=sha256:c360d5840d6eb597aade9e9c8780e24aec283b8e6bc97d52881c821a35c92aa9 \
+    --hash=sha256:cbdad88b2bec5dde837f8fa7632022334cddb4756f923b5421c06a712cb59d31 \
+    --hash=sha256:dd6fdd71c0896ff2ca1809d914cbd17f2904d55863f8881f47946e1d634c7a88 \
+    --hash=sha256:ee3f3886f107919dad48cbc905fa6ae9207c8d7d5a24165e55625ea96f0fe40f
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+nvidia-cutlass-dsl @ https://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/rtp_llm/arm_pkg/nvidia_cutlass_dsl-4.3.5-cp310-cp310-manylinux_2_28_aarch64.whl \
+    --hash=sha256:b4fcc50dbf9f9c6d1f4d6e1748e366c6835c95bea7b54f7111bfa6e66230f74b
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+pygments==2.19.2 \
+    --hash=sha256:636cb2477cec7f8952536970bc533bc43743542f70392ae026374600add5b887 \
+    --hash=sha256:86540386c03d588bb81d44bc3928634ff26449851e99741617ecb9037ee5ec0b
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+rich==14.2.0 \
+    --hash=sha256:73ff50c7c0c1c77c8243079283f4edb376f0f6442433aecb8ce7e6d0b92d1fe4 \
+    --hash=sha256:76bc51fe2e57d2b1be1f96c524b890b816e334ab4c1e45888799bfaab0021edd
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+rtp-kernel @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp-kernel/rtp_kernel_260317/rtp_kernel-0.1.0-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:54173eeed93c184cbc149d31ba5285e1da9827ec046279c8de2fdf5f132cba9b
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+shellingham==1.5.4 \
+    --hash=sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686 \
+    --hash=sha256:8dbca0739d487e5bd35ab3ca4b36e11c4078f3a234bfce294b0a0291363404de
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+tabulate==0.9.0 \
+    --hash=sha256:0095b12bf5966de529c0feb1fa08671671b3368eec77d7ef7ab114be2c068b3c \
+    --hash=sha256:024ca478df22e9340661486f85298cff5f6dcdba14f3813e8830015b9ed1948f
+    # via -r open_source/deps/requirements_cuda12_arm.txt
+typer==0.21.1 \
+    --hash=sha256:7985e89081c636b88d172c2ee0cfe33c253160994d47bdfdc302defd7d1f1d01 \
+    --hash=sha256:ea835607cd752343b6b2b7ce676893e5a0324082268b48f27aa058bdb7d2145d
+    # via -r open_source/deps/requirements_cuda12_arm.txt

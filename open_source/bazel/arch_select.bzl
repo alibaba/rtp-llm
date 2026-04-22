@@ -3,6 +3,7 @@ load("@pip_cpu_torch//:requirements.bzl", requirement_cpu="requirement")
 load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
+load("@pip_cuda12_arm_torch//:requirements.bzl", requirement_cuda12_arm="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("//bazel:defs.bzl", "copy_so")
 
@@ -35,6 +36,7 @@ def requirement(names):
             deps = select({
                 "@//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
                 "@//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+                "@//:using_cuda12_arm": [requirement_cuda12_arm(name)],
                 "@//:using_rocm": [requirement_gpu_rocm(name)],
                 "@//:using_arm": [requirement_arm(name)],
                 "//conditions:default": [requirement_cpu(name)],
@@ -108,6 +110,11 @@ def torch_deps():
             "@torch_2.8_py310_cuda//:torch_api",
             "@torch_2.8_py310_cuda//:torch",
             "@torch_2.8_py310_cuda//:torch_libs",
+        ],
+        "@//:using_cuda12_arm": [
+            "@torch_2.9_py310_cuda-aarch64//:torch_api",
+            "@torch_2.9_py310_cuda-aarch64//:torch",
+            "@torch_2.9_py310_cuda-aarch64//:torch_libs",
         ],
         "//conditions:default": [
             "@torch_2.1_py310_cpu//:torch_api",
