@@ -298,6 +298,7 @@ class GptInitModelParameters:
     max_context_batch_size: int
     max_generate_batch_size: int
     max_rpc_timeout_ms: int
+    schedule_stall_watchdog_threshold_ms: int
     max_seq_len: int
     mla_ops_type: MlaOpsType
     mm_position_ids_style: int
@@ -1091,6 +1092,13 @@ class GptInitModelParameters:
 
         self.max_rpc_timeout_ms = int(os.environ.get("MAX_RPC_TIMEOUT_MS", 0))
         logging.info(f"max_rpc_timeout_ms: {self.max_rpc_timeout_ms}")
+
+        self.schedule_stall_watchdog_threshold_ms = int(
+            os.environ.get("SCHEDULE_STALL_WATCHDOG_THRESHOLD_MS", 600000)
+        )
+        logging.info(
+            f"schedule_stall_watchdog_threshold_ms: {self.schedule_stall_watchdog_threshold_ms}"
+        )
 
         self.max_batch_tokens_size = int(
             os.environ.get(

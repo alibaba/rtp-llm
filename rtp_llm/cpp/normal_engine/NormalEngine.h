@@ -5,6 +5,8 @@
 #include <iostream>
 #include <memory>
 #include <thread>
+
+#include "autil/Thread.h"
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
@@ -55,12 +57,15 @@ private:
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;
     void                            loop();
+    void                            scheduleStallWatchdogLoop();
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
 
 private:
     autil::ThreadPtr                loop_thread_;
+    autil::ThreadPtr                schedule_watchdog_thread_;
+    std::atomic<bool>               watchdog_stop_{false};
     std::atomic<bool>               running_{false};
     std::unique_ptr<Executor>       executor_;
     const rtp_llm::GptInitParameter params_;

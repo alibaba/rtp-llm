@@ -462,6 +462,7 @@ class GptInitParameter:
     max_context_batch_size: int
     max_generate_batch_size: int
     max_rpc_timeout_ms: int
+    schedule_stall_watchdog_threshold_ms: int
     max_seq_len: int
     misc_config: MiscellaneousConfig
     mla_ops_type: MlaOpsType

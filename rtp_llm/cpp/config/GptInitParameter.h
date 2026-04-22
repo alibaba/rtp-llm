@@ -208,16 +208,16 @@ public:
     int64_t seq_size_per_block_      = 8;
     int64_t max_block_size_per_item_ = 16;
 
-    int64_t block_nums_                       = 0;
-    int64_t reserve_runtime_mem_mb_           = 0;
-    int64_t kv_cache_mem_mb_                  = 0;
-    bool    reuse_cache_                      = false;
-    bool    enable_partial_fallback_          = false;
-    bool    enable_fast_gen_                  = false;
-    bool    warm_up_                          = false;
-    bool    warm_up_with_loss_                = false;
-    int64_t fast_gen_max_context_len_         = 0;
-    bool    reverse_e_h_norm_                 = false;
+    int64_t block_nums_               = 0;
+    int64_t reserve_runtime_mem_mb_   = 0;
+    int64_t kv_cache_mem_mb_          = 0;
+    bool    reuse_cache_              = false;
+    bool    enable_partial_fallback_  = false;
+    bool    enable_fast_gen_          = false;
+    bool    warm_up_                  = false;
+    bool    warm_up_with_loss_        = false;
+    int64_t fast_gen_max_context_len_ = 0;
+    bool    reverse_e_h_norm_         = false;
 
     std::string nccl_ip_          = "";
     bool        use_all_gather_   = false;
@@ -257,8 +257,10 @@ public:
     int64_t  rdma_connect_retry_times_        = 0;
     int64_t  load_cache_timeout_ms_           = 0;
     int64_t  max_rpc_timeout_ms_              = 0;
-    int64_t  worker_port_offset_              = 0;
-    bool     decode_entrance_                 = false;
+    // NormalEngine: abort if last schedule time lags longer than this (ms). 0 disables. Default 10 minutes.
+    int64_t schedule_stall_watchdog_threshold_ms_ = 600000;
+    int64_t worker_port_offset_                   = 0;
+    bool    decode_entrance_                      = false;
 
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens_;
 

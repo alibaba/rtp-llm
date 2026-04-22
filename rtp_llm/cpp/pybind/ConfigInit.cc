@@ -708,7 +708,8 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(phy_exp_num, phy_exp_num_)                                                                            \
     DEF_PROPERTY(eplb_update_time, eplb_update_time_)                                                                  \
     DEF_PROPERTY(eplb_mode, eplb_mode_)                                                                                \
-    DEF_PROPERTY(py_eplb, py_eplb_)
+    DEF_PROPERTY(py_eplb, py_eplb_)                                                                                    \
+    DEF_PROPERTY(schedule_stall_watchdog_threshold_ms, schedule_stall_watchdog_threshold_ms_)
 
     pybind11::class_<GptInitParameter>(m, "GptInitParameter")
         .def(pybind11::init<int64_t,  // head_num

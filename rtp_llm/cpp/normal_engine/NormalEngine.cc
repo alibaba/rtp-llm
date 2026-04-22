@@ -13,9 +13,10 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "autil/TimeUtility.h"
+#include <algorithm>
 #include <memory>
-#include <thread>
 #include <random>
+#include <thread>
 
 using namespace std;
 namespace rtp_llm {
@@ -204,8 +205,15 @@ absl::Status NormalEngine::startLoop() {
     THROW_IF_STATUS_ERROR(initSystemPrompt());
     RTP_LLM_LOG_INFO("init system prompt done");
     RTP_LLM_LOG_INFO("start normal engine loop");
-    running_     = true;
-    loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
+    running_               = true;
+    watchdog_stop_         = false;
+    loop_thread_           = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
+    const int64_t stall_ms = params_.schedule_stall_watchdog_threshold_ms_;
+    if (stall_ms > 0 && device_->getDeviceProperties().tp_rank == 0) {
+        schedule_watchdog_thread_ = autil::Thread::createThread(
+            std::bind(&NormalEngine::scheduleStallWatchdogLoop, this), "normal_engine_schedule_watchdog");
+        RTP_LLM_LOG_INFO("schedule stall watchdog enabled, threshold_ms=%ld", stall_ms);
+    }
     return absl::OkStatus();
 }
 
@@ -214,7 +222,49 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    watchdog_stop_ = true;
+    if (schedule_watchdog_thread_) {
+        schedule_watchdog_thread_->join();
+        schedule_watchdog_thread_.reset();
+    }
     return absl::OkStatus();
+}
+
+void NormalEngine::scheduleStallWatchdogLoop() {
+    const int64_t threshold_ms = params_.schedule_stall_watchdog_threshold_ms_;
+    if (threshold_ms <= 0) {
+        return;
+    }
+    const int64_t period_ms = 1000;
+    while (!watchdog_stop_.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(period_ms));
+        if (watchdog_stop_.load(std::memory_order_acquire)) {
+            break;
+        }
+        if (!running_.load(std::memory_order_acquire)) {
+            continue;
+        }
+        if (device_->getDeviceProperties().tp_rank != 0) {
+            break;
+        }
+        const int64_t last_ms = getLastScheduleTime();
+        const int64_t now_ms  = autil::TimeUtility::currentTimeInMilliSeconds();
+        if (last_ms <= 0) {
+            continue;
+        }
+        if (now_ms < last_ms) {
+            continue;
+        }
+        const int64_t delta_ms = now_ms - last_ms;
+        if (delta_ms > threshold_ms) {
+            RTP_LLM_CHECK_WITH_INFO(false,
+                                    "schedule stalled: delta_ms=%ld exceeds threshold_ms=%ld (last=%ld, now=%ld)",
+                                    delta_ms,
+                                    threshold_ms,
+                                    last_ms,
+                                    now_ms);
+        }
+    }
 }
 
 void NormalEngine::loop() {
