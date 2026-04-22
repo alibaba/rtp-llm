@@ -128,6 +128,7 @@ class MlaAttention(nn.Module):
         hidden_states: torch.Tensor,
         fmha_impl: MlaImplBase,
         kv_cache: Optional[LayerKVCache] = None,
+        prefer_ca: bool = False,
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         q_c = None
@@ -180,5 +181,5 @@ class MlaAttention(nn.Module):
             )
         attn_output = self.o_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
-            attn_output = all_reduce(attn_output, group=Group.TP)
+            attn_output = all_reduce(attn_output, group=Group.TP, prefer_ca=prefer_ca)
         return attn_output

@@ -11,6 +11,10 @@ import torch
 import torch.distributed
 
 from rtp_llm.models_py.distributed import rocm_rccl
+from rtp_llm.models_py.distributed.custom_ar import (
+    get_custom_ar_communicator,
+    init_custom_ar_communicator,
+)
 from rtp_llm.models_py.distributed.symm_mem import (
     get_symm_mem_communicator,
     init_symm_mem_communicator,
@@ -36,6 +40,7 @@ class Group(Enum):
 _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
+
 
 
 def init_distributed_environment(
@@ -200,12 +205,14 @@ def _create_process_groups(
                     )
 
                 init_symm_mem_communicator(tp_group)
+                init_custom_ar_communicator(tp_group, torch.device(f"cuda:{parallelism_config.local_rank}"))
 
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
         init_symm_mem_communicator(torch.distributed.group.WORLD)
+        init_custom_ar_communicator(torch.distributed.group.WORLD, torch.device(f"cuda:{parallelism_config.local_rank}"))
 
 
 def _register_process_groups_to_cpp():
@@ -561,12 +568,17 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+def all_reduce(
+    tensor: torch.Tensor, group: Group, prefer_ca: bool = False
+) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:
         tensor: Tensor to all-reduce (will be modified in-place)
         group: Process group to use
+        prefer_ca: If True, attempt custom all-reduce (IPC+NVLink) before
+                   falling back to NCCL. Typically set during decode phase
+                   where tensors are small and custom AR is faster.
 
     Returns:
         All-reduced tensor (same as input tensor)
@@ -576,6 +588,21 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
         return rocm_rccl.capture_all_reduce(tensor, _get_group(group))
 
     if group == Group.TP:
+        if prefer_ca:
+            custom_ar_comm = get_custom_ar_communicator()
+            if custom_ar_comm is not None and custom_ar_comm.should_custom_ar(tensor):
+                try:
+                    result = custom_ar_comm.all_reduce(tensor)
+                    tensor.copy_(result)
+                    return tensor
+                except RuntimeError as e:
+                    logging.error(
+                        f"CustomAR all_reduce failed: {e}, "
+                        f"tensor shape={tensor.shape}, device={tensor.device}, "
+                        f"falling back to NCCL"
+                    )
+                    custom_ar_comm.disabled = True
+
         symm_mem_comm = get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
             tensor

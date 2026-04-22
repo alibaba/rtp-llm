@@ -80,10 +80,10 @@ class DenseMLP(nn.Module):
             input_scale_key=W.ffn_w2_i_s
         )
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, prefer_ca: bool = False):
         up = self.up_proj(x)
         activated = self.act_fn(up)
         output = self.down_proj(activated)
         if self.parallelism_config.get_ffn_tp_size() > 1:
-            output = all_reduce(output, group=Group.TP)
+            output = all_reduce(output, group=Group.TP, prefer_ca=prefer_ca)
         return output
