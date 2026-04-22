@@ -57,12 +57,16 @@ protected:
     void SetUp() override {
         rtp_llm::initLogger();
 
-        cache_config_.layer_num        = 1;
-        cache_config_.layer_all_num    = 1;
-        cache_config_.block_num        = 10;
-        cache_config_.block_size_bytes = 1024;
-        cache_config_.dtype            = rtp_llm::TYPE_FP16;
+        cache_config_.layer_all_num = 1;
         cache_config_.layer_to_group_id.assign(static_cast<size_t>(cache_config_.layer_all_num), 0);
+        {
+            KVCacheAllocatorConfig ac;
+            ac.layer_num        = 1;
+            ac.block_num        = 10;
+            ac.block_size_bytes = 1024;
+            ac.dtype            = rtp_llm::TYPE_FP16;
+            cache_config_.allocator_configs.push_back(ac);
+        }
 
         kv_cache_config_.memory_cache_size_mb         = 100;
         kv_cache_config_.memory_cache_sync_timeout_ms = 1000;
@@ -74,11 +78,13 @@ protected:
         // minimal BlockPool here to avoid crashes/hangs in tests that exercise coordinator paths.
         {
             // NOTE: use the 4-arg overload to avoid requiring cache_config_.cache_specs in unit tests.
-            const size_t block_stride_bytes =
-                cache_config_.block_size_bytes / static_cast<size_t>(std::max(1u, cache_config_.layer_all_num));
-            auto pool_config = BlockPoolConfigHelper::createConfig(
-                cache_config_.layer_all_num, cache_config_.block_num, block_stride_bytes, cache_config_.dtype);
-            auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
+            const size_t block_stride_bytes = cache_config_.getAllocatorConfig(0).block_size_bytes
+                                              / static_cast<size_t>(std::max(1u, cache_config_.layer_all_num));
+            auto pool_config = BlockPoolConfigHelper::createConfig(cache_config_.layer_all_num,
+                                                                   cache_config_.getAllocatorConfig(0).block_num,
+                                                                   block_stride_bytes,
+                                                                   cache_config_.getAllocatorConfig(0).dtype);
+            auto pool        = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
             RTP_LLM_CHECK(pool->init());
             allocator_->block_pool_ = pool;
         }
@@ -215,11 +221,15 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryConfigInvalid
     CacheConfig   cache_config;
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    cache_config.layer_num        = 1;
-    cache_config.layer_all_num    = 1;
-    cache_config.block_num        = 1;
-    cache_config.block_size_bytes = 1;
+    cache_config.layer_all_num = 1;
     cache_config.layer_to_group_id.assign(static_cast<size_t>(cache_config.layer_all_num), 0);
+    {
+        KVCacheAllocatorConfig ac;
+        ac.layer_num        = 1;
+        ac.block_num        = 1;
+        ac.block_size_bytes = 1;
+        cache_config.allocator_configs.push_back(ac);
+    }
 
     kv_cache_config.enable_memory_cache = true;
     kv_cache_config.reuse_cache = true;  // coordinator init only enables memory connector when reuse_cache is true
@@ -237,11 +247,15 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemorySkipped_AndSto
     CacheConfig   cache_config;
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    cache_config.layer_num        = 1;
-    cache_config.layer_all_num    = 1;
-    cache_config.block_num        = 1;
-    cache_config.block_size_bytes = 1;
+    cache_config.layer_all_num = 1;
     cache_config.layer_to_group_id.assign(static_cast<size_t>(cache_config.layer_all_num), 0);
+    {
+        KVCacheAllocatorConfig ac;
+        ac.layer_num        = 1;
+        ac.block_num        = 1;
+        ac.block_size_bytes = 1;
+        cache_config.allocator_configs.push_back(ac);
+    }
 
     kv_cache_config.enable_memory_cache = false;  // skip memory connector in init
 
@@ -258,11 +272,15 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryEnabledButSiz
     CacheConfig   cache_config;
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    cache_config.layer_num        = 1;
-    cache_config.layer_all_num    = 1;
-    cache_config.block_num        = 1;
-    cache_config.block_size_bytes = 1;
+    cache_config.layer_all_num = 1;
     cache_config.layer_to_group_id.assign(static_cast<size_t>(cache_config.layer_all_num), 0);
+    {
+        KVCacheAllocatorConfig ac;
+        ac.layer_num        = 1;
+        ac.block_num        = 1;
+        ac.block_size_bytes = 1;
+        cache_config.allocator_configs.push_back(ac);
+    }
 
     kv_cache_config.enable_memory_cache          = true;
     kv_cache_config.reuse_cache                  = true;
@@ -282,16 +300,20 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
     CacheConfig   cache_config;
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    cache_config.layer_num     = 1;
     cache_config.layer_all_num = 1;
-    cache_config.block_num     = 1;
-    // Keep block size reasonably large so block_num doesn't explode in createBlockPool().
-    cache_config.block_size_bytes = 1024;
-    cache_config.dtype            = rtp_llm::TYPE_FP16;
     cache_config.layer_to_group_id.assign(static_cast<size_t>(cache_config.layer_all_num), 0);
+    {
+        KVCacheAllocatorConfig ac;
+        ac.layer_num = 1;
+        ac.block_num = 1;
+        // Keep block size reasonably large so block_num doesn't explode in createBlockPool().
+        ac.block_size_bytes = 1024;
+        ac.dtype            = rtp_llm::TYPE_FP16;
+        cache_config.allocator_configs.push_back(ac);
+    }
     // Memory connector requires per-layer block stride bytes.
-    cache_config.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config.layer_num),
-                                                    cache_config.block_size_bytes);
+    cache_config.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config.getAllocatorConfig(0).layer_num),
+                                                    cache_config.getAllocatorConfig(0).block_size_bytes);
 
     kv_cache_config.enable_memory_cache          = true;
     kv_cache_config.reuse_cache                  = true;
@@ -302,11 +324,13 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
     auto allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
     // KVCacheConnectorCoordinator::init logs free/available blocks via KVCacheAllocator. Ensure block_pool_ is valid.
     {
-        const size_t block_stride_bytes =
-            cache_config.block_size_bytes / static_cast<size_t>(std::max(1u, cache_config.layer_all_num));
-        auto pool_config = BlockPoolConfigHelper::createConfig(
-            cache_config.layer_all_num, cache_config.block_num, block_stride_bytes, cache_config.dtype);
-        auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
+        const size_t block_stride_bytes = cache_config.getAllocatorConfig(0).block_size_bytes
+                                          / static_cast<size_t>(std::max(1u, cache_config.layer_all_num));
+        auto pool_config = BlockPoolConfigHelper::createConfig(cache_config.layer_all_num,
+                                                               cache_config.getAllocatorConfig(0).block_num,
+                                                               block_stride_bytes,
+                                                               cache_config.getAllocatorConfig(0).dtype);
+        auto pool        = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
         ASSERT_TRUE(pool->init());
         allocator->block_pool_ = pool;
     }
@@ -324,11 +348,15 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenStop) {
     CacheConfig cache_config;
-    cache_config.layer_num        = 1;
-    cache_config.layer_all_num    = 1;
-    cache_config.block_num        = 1;
-    cache_config.block_size_bytes = 1;
+    cache_config.layer_all_num = 1;
     cache_config.layer_to_group_id.assign(static_cast<size_t>(cache_config.layer_all_num), 0);
+    {
+        KVCacheAllocatorConfig ac;
+        ac.layer_num        = 1;
+        ac.block_num        = 1;
+        ac.block_size_bytes = 1;
+        cache_config.allocator_configs.push_back(ac);
+    }
 
     auto allocator   = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_config);
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(cache_config,
@@ -384,24 +412,26 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
     // Without this, allocator_->freeBlocksNum() / availableBlocksNum() will dereference a null BlockPool and
     // the test process can crash/hang.
     {
-        auto pool_config = BlockPoolConfigHelper::createConfig(cache_config_.layer_all_num,
-                                                               /*block_num=*/1,
-                                                               /*block_stride_bytes=*/cache_config_.block_size_bytes,
-                                                               /*dtype=*/cache_config_.dtype);
-        auto pool        = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
+        auto pool_config = BlockPoolConfigHelper::createConfig(
+            cache_config_.layer_all_num,
+            /*block_num=*/1,
+            /*block_stride_bytes=*/cache_config_.getAllocatorConfig(0).block_size_bytes,
+            /*dtype=*/cache_config_.getAllocatorConfig(0).dtype);
+        auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
         ASSERT_TRUE(pool->init());
         allocator_->block_pool_ = pool;
     }
 
     KVCacheResource resource;
     resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
-    resource.cacheKeys() = CacheKeysType{1, 2, 3};
+    CacheKeysType cache_keys{1, 2, 3};
 
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
         std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(meta));
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
+    ON_CALL(*rw_ctx, cacheKeys()).WillByDefault(testing::ReturnRef(cache_keys));
 
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::_)).WillOnce(testing::Return(nullptr));
     EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_, testing::_)).Times(0);
@@ -417,8 +447,8 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenNoMatchContexts
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config_, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
 
-    auto req_resource = KVCacheResource{};
-    req_resource.cacheKeys().assign({1, 2, 3});
+    auto          req_resource = KVCacheResource{};
+    CacheKeysType cache_keys{1, 2, 3};
 
     // No connectors registered: asyncRead() still returns a fused read context; it will contain zero match contexts
     // and will be processed/cleaned up by the coordinator update loop if enabled.
@@ -429,7 +459,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenNoMatchContexts
     // gmock actions are stored as const; use a shared holder to release the ref after first call.
     auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::_))
-        .WillOnce(testing::Invoke([resource_holder](const KVCacheResource&, const CacheKeysType&, bool is_connector) {
+        .WillOnce(testing::Invoke([resource_holder](const ModelKVResources&, const CacheKeysType&, bool is_connector) {
             auto out = *resource_holder;
             resource_holder->reset();
             return out;
@@ -437,6 +467,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenNoMatchContexts
 
     auto ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(req_resource));
+    ON_CALL(*ctx, cacheKeys()).WillByDefault(testing::ReturnRef(cache_keys));
     std::shared_ptr<Meta> meta =
         std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     ON_CALL(*ctx, meta()).WillByDefault(testing::ReturnRef(meta));
@@ -464,14 +495,14 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnContextAndEnqueue_WhenHa
     auto mock_connector      = std::make_shared<testing::NiceMock<MockKVCacheConnector>>();
     coordinator->connectors_ = {mock_connector};
 
-    auto req_resource = KVCacheResource{};
-    req_resource.cacheKeys().assign({1, 2, 3});
-    auto resource = makeResourceWithAutoDecr();
+    auto          req_resource = KVCacheResource{};
+    CacheKeysType cache_keys{1, 2, 3};
+    auto          resource = makeResourceWithAutoDecr();
 
     // Don't let gmock keep a ref to `resource` until program exit.
     auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::_))
-        .WillOnce(testing::Invoke([resource_holder](const KVCacheResource&, const CacheKeysType&, bool is_connector) {
+        .WillOnce(testing::Invoke([resource_holder](const ModelKVResources&, const CacheKeysType&, bool is_connector) {
             auto out = *resource_holder;
             resource_holder->reset();
             return out;
@@ -482,6 +513,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnContextAndEnqueue_WhenHa
 
     auto ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(req_resource));
+    ON_CALL(*ctx, cacheKeys()).WillByDefault(testing::ReturnRef(cache_keys));
     std::shared_ptr<Meta> null_meta;
     ON_CALL(*ctx, meta()).WillByDefault(testing::ReturnRef(null_meta));
 
@@ -501,11 +533,15 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnContextAndEnqueue_WhenHa
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenStop) {
     CacheConfig cache_config;
-    cache_config.layer_num        = 1;
-    cache_config.layer_all_num    = 1;
-    cache_config.block_num        = 1;
-    cache_config.block_size_bytes = 1;
+    cache_config.layer_all_num = 1;
     cache_config.layer_to_group_id.assign(static_cast<size_t>(cache_config.layer_all_num), 0);
+    {
+        KVCacheAllocatorConfig ac;
+        ac.layer_num        = 1;
+        ac.block_num        = 1;
+        ac.block_size_bytes = 1;
+        cache_config.allocator_configs.push_back(ac);
+    }
 
     auto allocator   = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_config);
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(cache_config,
@@ -559,12 +595,13 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenIncrKVCacheRef
     // Build a connector context with non-empty cache keys.
     auto ctx_resource = std::make_shared<KVCacheResource>();
     ctx_resource->initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
-    ctx_resource->cacheKeys()    = CacheKeysType{1, 2, 3};
+    CacheKeysType         cache_keys{1, 2, 3};
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
         std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(meta));
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(*ctx_resource));
+    ON_CALL(*rw_ctx, cacheKeys()).WillByDefault(testing::ReturnRef(cache_keys));
 
     // Simulate allocator refusing to create a referenced resource (e.g. no valid blocks).
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::_)).WillOnce(testing::Return(nullptr));
@@ -584,13 +621,13 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenMemory
 
     KVCacheResource resource;
     resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
-    resource.cacheKeys() = CacheKeysType{1, 2, 3};
+    CacheKeysType cache_keys{1, 2, 3};
 
     auto selected_resource        = makeResourceWithAutoDecr();
     auto selected_resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(selected_resource);
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::_))
         .WillOnce(testing::Invoke(
-            [selected_resource_holder](const KVCacheResource&, const CacheKeysType&, bool is_connector) {
+            [selected_resource_holder](const ModelKVResources&, const CacheKeysType&, bool is_connector) {
                 auto out = *selected_resource_holder;
                 selected_resource_holder->reset();
                 return out;
@@ -603,6 +640,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenMemory
         std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(meta));
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
+    ON_CALL(*rw_ctx, cacheKeys()).WillByDefault(testing::ReturnRef(cache_keys));
 
     auto async_ctx = coordinator_->asyncWrite(rw_ctx);
     ASSERT_NE(async_ctx, nullptr);
@@ -623,13 +661,13 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenConnec
 
     KVCacheResource resource;
     resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
-    resource.cacheKeys() = CacheKeysType{1, 2, 3};
+    CacheKeysType cache_keys{1, 2, 3};
 
     auto selected_resource        = makeResourceWithAutoDecr();
     auto selected_resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(selected_resource);
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::_))
         .WillOnce(testing::Invoke(
-            [selected_resource_holder](const KVCacheResource&, const CacheKeysType&, bool is_connector) {
+            [selected_resource_holder](const ModelKVResources&, const CacheKeysType&, bool is_connector) {
                 auto out = *selected_resource_holder;
                 selected_resource_holder->reset();
                 return out;
@@ -639,6 +677,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenConnec
 
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
+    ON_CALL(*rw_ctx, cacheKeys()).WillByDefault(testing::ReturnRef(cache_keys));
     std::shared_ptr<Meta> null_meta;
     ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(null_meta));
 
@@ -663,13 +702,13 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
 
     KVCacheResource resource;
     resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
-    resource.cacheKeys() = CacheKeysType{1, 2, 3};
+    CacheKeysType cache_keys{1, 2, 3};
 
     auto selected_resource        = makeResourceWithAutoDecr();
     auto selected_resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(selected_resource);
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::_))
         .WillOnce(testing::Invoke(
-            [selected_resource_holder](const KVCacheResource&, const CacheKeysType&, bool is_connector) {
+            [selected_resource_holder](const ModelKVResources&, const CacheKeysType&, bool is_connector) {
                 auto out = *selected_resource_holder;
                 selected_resource_holder->reset();
                 return out;
@@ -677,6 +716,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
 
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
+    ON_CALL(*rw_ctx, cacheKeys()).WillByDefault(testing::ReturnRef(cache_keys));
     std::shared_ptr<Meta> null_meta;
     ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(null_meta));
 
@@ -696,13 +736,13 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config_, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
 
-    auto req_resource = KVCacheResource{};
-    req_resource.cacheKeys().assign({1, 2, 3});
-    auto resource = makeResourceWithAutoDecr();
+    auto          req_resource = KVCacheResource{};
+    CacheKeysType cache_keys{1, 2, 3};
+    auto          resource = makeResourceWithAutoDecr();
 
     auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::_))
-        .WillOnce(testing::Invoke([resource_holder](const KVCacheResource&, const CacheKeysType&, bool is_connector) {
+        .WillOnce(testing::Invoke([resource_holder](const ModelKVResources&, const CacheKeysType&, bool is_connector) {
             auto out = *resource_holder;
             resource_holder->reset();
             return out;
@@ -710,6 +750,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
 
     auto ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(req_resource));
+    ON_CALL(*ctx, cacheKeys()).WillByDefault(testing::ReturnRef(cache_keys));
     std::shared_ptr<Meta> null_meta;
     ON_CALL(*ctx, meta()).WillByDefault(testing::ReturnRef(null_meta));
 
@@ -733,13 +774,13 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnContextAndEnqueue_WhenH
     auto mock_connector      = std::make_shared<testing::NiceMock<MockKVCacheConnector>>();
     coordinator->connectors_ = {mock_connector};
 
-    auto req_resource = KVCacheResource{};
-    req_resource.cacheKeys().assign({1, 2, 3});
-    auto resource = makeResourceWithAutoDecr();
+    auto          req_resource = KVCacheResource{};
+    CacheKeysType cache_keys{1, 2, 3};
+    auto          resource = makeResourceWithAutoDecr();
 
     auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::_))
-        .WillOnce(testing::Invoke([resource_holder](const KVCacheResource&, const CacheKeysType&, bool is_connector) {
+        .WillOnce(testing::Invoke([resource_holder](const ModelKVResources&, const CacheKeysType&, bool is_connector) {
             auto out = *resource_holder;
             resource_holder->reset();
             return out;
@@ -750,6 +791,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnContextAndEnqueue_WhenH
 
     auto ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(req_resource));
+    ON_CALL(*ctx, cacheKeys()).WillByDefault(testing::ReturnRef(cache_keys));
     std::shared_ptr<Meta> null_meta;
     ON_CALL(*ctx, meta()).WillByDefault(testing::ReturnRef(null_meta));
 

@@ -4,6 +4,7 @@
 
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
+#include "rtp_llm/cpp/core/DeviceData.h"
 
 namespace rtp_llm {
 
@@ -62,18 +63,8 @@ CacheConfig HybridConfigCreator::initializeConfig(const ModelConfig&      model_
     int64_t layer_num = model_config.num_layers;
 
     CacheConfig config;
-    config.layer_num          = static_cast<uint32_t>(layer_num);
-    config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = 0;
     config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    config.use_mla            = model_config.attn_config.use_mla;
-    config.dtype              = dtype;
-    config.linear_step        = 1;
-
-    config.global_layer_ids.push_back(linear_layers);
-    config.global_layer_ids.push_back(full_layers);
-    config.layer_ids.push_back(linear_layers);
-    config.layer_ids.push_back(full_layers);
+    config.layer_all_num      = static_cast<uint32_t>(layer_num);
 
     return config;
 }
@@ -112,36 +103,44 @@ std::pair<std::vector<std::vector<int>>, std::vector<std::vector<int>>> HybridCo
     return std::make_pair(std::move(linear_groups), std::move(full_groups));
 }
 
-void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                         config,
-                                                const std::vector<std::vector<int>>& linear_groups,
-                                                const std::vector<std::vector<int>>& full_groups,
-                                                const KVCacheSpecPtr&                linear_spec,
-                                                const KVCacheSpecPtr&                full_spec) {
-    config.global_layer_ids.clear();
-    config.layer_ids.clear();
-    config.cache_specs.clear();
-    config.group_types.clear();
+std::vector<std::vector<int>>
+HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                         config,
+                                           const std::vector<std::vector<int>>& linear_groups,
+                                           const std::vector<std::vector<int>>& full_groups,
+                                           const KVCacheSpecPtr&                linear_spec,
+                                           const KVCacheSpecPtr&                full_spec,
+                                           std::vector<KVCacheSpecPtr>&         out_cache_specs,
+                                           std::vector<CacheGroupType>&         out_group_types,
+                                           int&                                 out_linear_group_num,
+                                           int&                                 out_full_group_num) {
+    out_cache_specs.clear();
+    out_group_types.clear();
 
+    std::vector<std::vector<int>> layer_ids;
     // Keep order: all full groups first, then linear groups.
     for (const auto& g : full_groups) {
-        config.global_layer_ids.push_back(g);
-        config.layer_ids.push_back(g);
-        config.cache_specs.push_back(full_spec);
-        config.group_types.push_back(CacheGroupType::FULL);
+        layer_ids.push_back(g);
+        out_cache_specs.push_back(full_spec);
+        out_group_types.push_back(CacheGroupType::FULL);
     }
     for (const auto& g : linear_groups) {
-        config.global_layer_ids.push_back(g);
-        config.layer_ids.push_back(g);
-        config.cache_specs.push_back(linear_spec);
-        config.group_types.push_back(CacheGroupType::LINEAR);
+        layer_ids.push_back(g);
+        out_cache_specs.push_back(linear_spec);
+        out_group_types.push_back(CacheGroupType::LINEAR);
     }
-    config.linear_group_num = static_cast<int>(linear_groups.size());
-    config.full_group_num   = static_cast<int>(full_groups.size());
+    out_linear_group_num = static_cast<int>(linear_groups.size());
+    out_full_group_num   = static_cast<int>(full_groups.size());
+    return layer_ids;
 }
 
-void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
+void HybridConfigCreator::setupPhysicalSizes(int                   group_layer_num,
                                              const KVCacheSpecPtr& full_spec,
-                                             const KVCacheSpecPtr& linear_spec) {
+                                             const KVCacheSpecPtr& linear_spec,
+                                             size_t&               out_kv_block_stride_bytes,
+                                             size_t&               out_kv_scale_stride_bytes,
+                                             size_t&               out_kv_block_size_bytes,
+                                             size_t&               out_kv_scale_size_bytes,
+                                             size_t&               out_block_size_bytes) {
     // Decide the physical KV block/scale sizes by taking max between full and linear specs.
     const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
     const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
@@ -150,19 +149,21 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
     RTP_LLM_CHECK_WITH_INFO(full_kv_block_stride_bytes >= linear_kv_block_stride_bytes,
                             "not support full attention with padding now");
 
-    config.kv_block_stride_bytes = full_kv_block_stride_bytes;
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    out_kv_block_stride_bytes = full_kv_block_stride_bytes;
+    out_kv_block_size_bytes   = static_cast<size_t>(group_layer_num) * out_kv_block_stride_bytes;
+    out_kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
+    out_kv_scale_size_bytes   = static_cast<size_t>(group_layer_num) * out_kv_scale_stride_bytes;
+    out_block_size_bytes      = out_kv_block_size_bytes + out_kv_scale_size_bytes;
 }
 
-void HybridConfigCreator::setupLayerToGroupMapping(CacheConfig& config) {
-    config.layer_to_group_id.assign(config.layer_num, 0);
-    for (size_t gid = 0; gid < config.layer_ids.size(); ++gid) {
-        for (int layer_id : config.layer_ids[gid]) {
-            if (layer_id >= 0 && static_cast<size_t>(layer_id) < config.layer_num) {
-                config.layer_to_group_id[static_cast<size_t>(layer_id)] = static_cast<int32_t>(gid);
+void HybridConfigCreator::setupLayerToGroupMapping(uint32_t                             layer_num,
+                                                   const std::vector<std::vector<int>>& layer_ids,
+                                                   std::vector<int>&                    out_layer_to_group_id) {
+    out_layer_to_group_id.assign(layer_num, 0);
+    for (size_t gid = 0; gid < layer_ids.size(); ++gid) {
+        for (int layer_id : layer_ids[gid]) {
+            if (layer_id >= 0 && static_cast<size_t>(layer_id) < layer_num) {
+                out_layer_to_group_id[static_cast<size_t>(layer_id)] = static_cast<int32_t>(gid);
             }
         }
     }
@@ -172,6 +173,8 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
                                                     const ParallelismConfig& parallelism_config,
                                                     bool                     is_mtp) {
     auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config, buildDeviceType());
+
+    const uint32_t layer_num = static_cast<uint32_t>(model_config.num_layers);
 
     // Split layers by attention type
     auto [linear_layers, full_layers] = HybridConfigCreator::splitLayersByAttentionType(model_config);
@@ -187,30 +190,70 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     int group_layer_num = 0;
     auto [linear_groups, full_groups] =
         HybridConfigCreator::createLayerGroups(linear_layers, full_layers, group_layer_num);
-    config.group_layer_num = group_layer_num;
 
-    // Setup cache config specs
-    HybridConfigCreator::setupCacheConfigSpecs(config, linear_groups, full_groups, linear_spec, full_spec);
+    // Build per-group spec/type lists and layer_ids
+    std::vector<KVCacheSpecPtr> cache_specs;
+    std::vector<CacheGroupType> group_types;
+    int                         linear_group_num     = 0;
+    int                         full_group_num       = 0;
+    auto                        layer_ids_for_groups = HybridConfigCreator::setupCacheConfigSpecs(config,
+                                                                           linear_groups,
+                                                                           full_groups,
+                                                                           linear_spec,
+                                                                           full_spec,
+                                                                           cache_specs,
+                                                                           group_types,
+                                                                           linear_group_num,
+                                                                           full_group_num);
 
-    // Setup physical sizes
-    HybridConfigCreator::setupPhysicalSizes(config, full_spec, linear_spec);
+    // Compute physical block sizes
+    size_t kv_block_stride = 0, kv_scale_stride = 0;
+    size_t kv_block_size = 0, kv_scale_size = 0, block_size = 0;
+    HybridConfigCreator::setupPhysicalSizes(group_layer_num,
+                                            full_spec,
+                                            linear_spec,
+                                            kv_block_stride,
+                                            kv_scale_stride,
+                                            kv_block_size,
+                                            kv_scale_size,
+                                            block_size);
 
-    // Setup layer to group mapping
-    HybridConfigCreator::setupLayerToGroupMapping(config);
-
-    config.layer_attn_types.assign(config.layer_num, CacheGroupType::FULL);
-    for (size_t layer_id = 0; layer_id < config.layer_to_group_id.size(); ++layer_id) {
-        const int gid = config.layer_to_group_id[layer_id];
-        if (gid >= 0 && static_cast<size_t>(gid) < config.group_types.size()) {
-            config.layer_attn_types[layer_id] = config.group_types[static_cast<size_t>(gid)];
-        }
-    }
+    // Build layer-to-group mapping
+    std::vector<int> layer_to_group_id;
+    HybridConfigCreator::setupLayerToGroupMapping(layer_num, layer_ids_for_groups, layer_to_group_id);
 
     // Per-layer block stride (kv + scale).
-    // For hybrid attention, the physical per-layer stride follows the selected physical layout stride.
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    const size_t     per_layer_stride = kv_block_stride + kv_scale_stride;
+    std::vector<int> layer_to_block_stride(layer_num, static_cast<int>(per_layer_stride));
+
+    // Build allocator config for main model (model_id=0).
+    KVCacheAllocatorConfig alloc_config;
+    alloc_config.model_id                    = 0;
+    alloc_config.layer_num                   = layer_num;
+    alloc_config.dtype                       = dtype;
+    alloc_config.use_mla                     = model_config.attn_config.use_mla;
+    alloc_config.is_sparse                   = false;
+    alloc_config.cache_specs                 = cache_specs;
+    alloc_config.group_types                 = group_types;
+    alloc_config.layer_ids                   = layer_ids_for_groups;
+    alloc_config.layer_to_group_id           = layer_to_group_id;
+    alloc_config.layer_to_block_stride_bytes = layer_to_block_stride;
+    alloc_config.block_num                   = 0;  // filled in by createConfig()
+    alloc_config.seq_size_per_block          = config.seq_size_per_block;
+    alloc_config.kv_block_size_bytes         = kv_block_size;
+    alloc_config.kv_scale_size_bytes         = kv_scale_size;
+    alloc_config.block_size_bytes            = block_size;
+    alloc_config.kv_block_stride_bytes       = kv_block_stride;
+    alloc_config.kv_scale_stride_bytes       = kv_scale_stride;
+    alloc_config.linear_step                 = 1;
+    alloc_config.group_layer_num             = group_layer_num;
+    alloc_config.linear_group_num            = linear_group_num;
+    alloc_config.full_group_num              = full_group_num;
+
+    // Fill cross-model fields in CacheConfig.
+    config.layer_to_group_id           = layer_to_group_id;
+    config.layer_to_block_stride_bytes = layer_to_block_stride;
+    config.allocator_configs.push_back(std::move(alloc_config));
 
     return config;
 }

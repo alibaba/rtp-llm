@@ -41,6 +41,16 @@ public:
     const CacheConfig& cacheConfig() const;
     const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
 
+    // Returns the per-model KVCacheAllocatorConfig for model_id.
+    const KVCacheAllocatorConfig& getAllocatorConfig(size_t model_id = 0) const {
+        return config_.getAllocatorConfig(model_id);
+    }
+
+    // Returns the total number of models (1 for single model, 1+N for MTP).
+    size_t allocatorCount() const {
+        return allocators_.size();
+    }
+
     // 显存管理和缓存分配
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
@@ -66,16 +76,21 @@ public:
     virtual bool setKVBlockValue(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
 
     // 地址转换和缓冲区访问
-    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
+    // model_id selects the allocator: 0 = main model, 1..N = MTP sub-models.
+    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id, size_t model_id = 0) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, size_t model_id = 0) const;
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int block_index, int layer_id, int partition_count, int partition_id, size_t model_id = 0) const;
 
     CacheLayerLayout allLayerCacheBase() const;
 
-    // for main model; it's too hack for mtp module, but we need to keep it for now
+    // Unified cache layer layout query by model_id.
+    // model_id=0: main model; model_id=1..N: MTP sub-models.
+    CacheLayerLayout getCacheLayerLayout(size_t model_id = 0) const;
+
+    // Deprecated: use getCacheLayerLayout(0) instead.
     CacheLayerLayout getMainModelCacheLayerLayout() const;
-    // for mtp module
+    // Deprecated: use getCacheLayerLayout(mtp_module_id + 1) instead.
     CacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
 
     // 资源统计和信息查询
@@ -122,7 +137,7 @@ public:
 
     // Increment KV cache reference count for PD separation (connector refcount)
     std::shared_ptr<KVCacheResource>
-    incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
+    incrKVCacheRef(const ModelKVResources& model_resources, const CacheKeysType& cache_keys, bool is_connector = true);
 
 private:
     void initConnectorCoordinator();
@@ -130,8 +145,10 @@ private:
     void reportMetricsLoop();
 
     // 成员变量
-    CacheConfig         config_;
-    KVCacheAllocatorPtr allocator_;
+    CacheConfig                      config_;
+    std::vector<KVCacheAllocatorPtr> allocators_;         // [model_id]; allocators_[0] is always the main model
+    std::vector<CacheConfig>         per_model_configs_;  // [model_id]; single-allocator CacheConfig per model
+    BlockCachePtr                    shared_block_cache_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;

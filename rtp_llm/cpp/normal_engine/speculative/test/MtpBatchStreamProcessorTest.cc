@@ -84,7 +84,11 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    cache_config.group_types = {CacheGroupType::FULL};
+    {
+        KVCacheAllocatorConfig ac;
+        ac.group_types = {CacheGroupType::FULL};
+        cache_config.allocator_configs.push_back(ac);
+    }
 
     model_config.max_seq_len    = 2048;
     model_config.vocab_size     = 4;
@@ -167,7 +171,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     draft_prefill_output.sampler_output.all_probs =
         torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
 
-    cache_config.group_types = {CacheGroupType::FULL};
+    cache_config.allocator_configs[0].group_types = {CacheGroupType::FULL};
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
 
@@ -216,8 +220,8 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
-    cache_config.group_types = {CacheGroupType::FULL};
-    auto processor           = MtpBatchStreamProcessor(
+    cache_config.allocator_configs[0].group_types = {CacheGroupType::FULL};
+    auto processor                                = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     auto model_input = processor.gatherDecodeModelInput(stream_groups);
     EXPECT_TRUE(model_input.ok());
@@ -293,8 +297,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
-    cache_config.group_types = {CacheGroupType::FULL};
-    auto processor           = MtpBatchStreamProcessor(
+    cache_config.allocator_configs[0].group_types = {CacheGroupType::FULL};
+    auto processor                                = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     auto model_input_status = processor.gatherDecodeModelInput(stream_groups);
     EXPECT_TRUE(model_input_status.ok());
@@ -391,8 +395,8 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
-    cache_config.group_types = {CacheGroupType::FULL};
-    auto processor           = MtpBatchStreamProcessor(
+    cache_config.allocator_configs[0].group_types = {CacheGroupType::FULL};
+    auto processor                                = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     auto model_input_status = processor.gatherDecodeModelInput(stream_groups);
     EXPECT_TRUE(model_input_status.ok());
@@ -446,8 +450,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
-    cache_config.group_types = {CacheGroupType::FULL};
-    auto processor           = MtpBatchStreamProcessor(
+    cache_config.allocator_configs[0].group_types = {CacheGroupType::FULL};
+    auto processor                                = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     auto model_input_status = processor.gatherModelInput(stream_groups);
     EXPECT_TRUE(model_input_status.ok());
@@ -504,8 +508,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
-    cache_config.group_types = {CacheGroupType::FULL};
-    auto processor           = MtpBatchStreamProcessor(
+    cache_config.allocator_configs[0].group_types = {CacheGroupType::FULL};
+    auto processor                                = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     auto model_input_status = processor.gatherModelInput(stream_groups);
     EXPECT_TRUE(model_input_status.ok());

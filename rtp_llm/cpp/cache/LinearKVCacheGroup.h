@@ -13,9 +13,11 @@ public:
     LinearKVCacheGroup(const LayerIdsType&          layer_ids,
                        std::shared_ptr<KVCacheSpec> kvcache_spec,
                        BlockPoolPtr                 block_pool,
+                       BlockCachePtr                block_cache,
                        int                          group_id,
                        int                          linear_step = 0):
-        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id), linear_step_(linear_step) {}
+        KVCacheGroup(layer_ids, kvcache_spec, block_pool, std::move(block_cache), group_id),
+        linear_step_(linear_step) {}
 
     MatchResult match(const CacheKeysType& cache_keys) override;
     // Match a single cache key (used by Hybrid allocator to do right-to-left joint matching).

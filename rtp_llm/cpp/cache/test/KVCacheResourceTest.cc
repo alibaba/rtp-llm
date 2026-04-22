@@ -131,9 +131,10 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     batch.cacheResource(1).setLastBlockAligned(false);
     ASSERT_FALSE(batch.lastBlockAligned());
 
-    std::vector<KVCacheResource> old_resources;
+    std::vector<ModelKVResources> old_resources;
     batch.resetAndReturnOldResources(/*new_batch_size=*/1, old_resources);
     ASSERT_EQ(old_resources.size(), 2u);
+    ASSERT_EQ(old_resources[0].modelNum(), 1u);
     ASSERT_EQ(batch.batchSize(), 1);
 
     KVCacheResource moved;
@@ -143,7 +144,9 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
                      /*kernel_blocks_per_kv_block=*/2,
                      /*group_types=*/{CacheGroupType::FULL});
     moved.mutableBlockIds(0).add(BlockIndicesType{3});
-    batch.moveBatchResource(0, std::move(moved));
+    ModelKVResources moved_entry;
+    moved_entry.model_resources = {std::move(moved)};
+    batch.moveBatchResource(0, std::move(moved_entry));
     ASSERT_EQ(batch.cacheResource(0).groupNums(), 1);
     ASSERT_EQ(batch.cacheResource(0).kernelBlocks(0), (BlockIndicesType{6, 7}));
 }

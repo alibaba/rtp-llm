@@ -21,8 +21,8 @@ static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const Cac
         return;
     }
     out.split_kv_layer_num          = static_cast<int>(cfg.layer_all_num);
-    out.split_kv_cache_stride_bytes = cfg.kv_block_stride_bytes;
-    out.split_kv_scale_stride_bytes = cfg.kv_scale_stride_bytes;
+    out.split_kv_cache_stride_bytes = cfg.getAllocatorConfig(0).kv_block_stride_bytes;
+    out.split_kv_scale_stride_bytes = cfg.getAllocatorConfig(0).kv_scale_stride_bytes;
 }
 
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
@@ -114,7 +114,7 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         return nullptr;
     }
 
-    const auto& cache_keys = resource->cacheKeys();
+    const auto& cache_keys = meta->cacheKeys();
     // do not match last block, whether it is aligned or not, otherwise may cause core dump in computing ops.
     const auto cache_keys_size = cache_keys.empty() ? 0 : cache_keys.size() - 1;
     if (cache_keys_size == 0) {
@@ -191,7 +191,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
                                                                 int read_block_num) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK_WITH_INFO(resource != nullptr, "async read failed, resource is null");
-    const auto& cache_keys      = resource->cacheKeys();
+    RTP_LLM_CHECK_WITH_INFO(meta != nullptr, "async read failed, meta is null");
+    const auto& cache_keys      = meta->cacheKeys();
     const auto  cache_keys_size = cache_keys.empty() ? 0 : cache_keys.size() - 1;
     if (cache_keys_size == 0) {
         RTP_LLM_LOG_DEBUG("async read skip, cache keys is empty");
@@ -305,7 +306,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         return nullptr;
     }
 
-    const auto& cache_keys = resource->cacheKeys();
+    const auto& cache_keys = meta->cacheKeys();
     const auto  cache_keys_size =
         cache_keys.empty() ? 0 : (resource->lastBlockAligned() ? cache_keys.size() : cache_keys.size() - 1);
     if (cache_keys_size == 0) {

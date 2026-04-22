@@ -46,7 +46,7 @@ MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
     MatchResult final_result;
 
     for (const auto& cache_key : cache_keys) {
-        auto result = block_cache_->match(cache_key, group_id_);
+        auto result = block_cache_->matchSlot(cache_key, model_id_, group_id_);
         if (isNullBlockIdx(result.matched_index)) {
             break;
         }
@@ -88,12 +88,7 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
 
     const int last_index = cache_keys.size() - 1;
     for (int i = last_index; i >= 0; --i) {
-        BlockCache::CacheItem item;
-        item.cache_key   = cache_keys[i];
-        item.group_id    = group_id_;
-        item.block_index = block_indices[i];
-        item.is_resident = is_resident;
-        if (block_cache_->put(item)) {
+        if (block_cache_->putSlot(cache_keys[i], model_id_, group_id_, block_indices[i], is_resident)) {
             block_pool_->blockCacheReference(block_indices[i]);
         }
     }

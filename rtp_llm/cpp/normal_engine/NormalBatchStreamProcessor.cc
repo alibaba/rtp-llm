@@ -18,14 +18,15 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.position_id_len_factor     = model_config.attn_config.rope_config.index_factor;
     model_input_gatherer_config_.role_type                  = pd_sep_config.role_type;
     model_input_gatherer_config_.decode_entrance            = pd_sep_config.decode_entrance;
-    model_input_gatherer_config_.block_stride_bytes         = cache_config.kv_block_stride_bytes;
-    model_input_gatherer_config_.scale_stride_bytes         = cache_config.kv_scale_stride_bytes;
+    const auto& main_ac                                     = cache_config.getAllocatorConfig(0);
+    model_input_gatherer_config_.block_stride_bytes         = main_ac.kv_block_stride_bytes;
+    model_input_gatherer_config_.scale_stride_bytes         = main_ac.kv_scale_stride_bytes;
     model_input_gatherer_config_.seq_size_per_block         = cache_config.seq_size_per_block;
     model_input_gatherer_config_.kernel_seq_size_per_block  = cache_config.kernel_seq_size_per_block;
     model_input_gatherer_config_.kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     model_input_gatherer_config_.kv_cache_group_nums        = cache_config.groupNums();
     model_input_gatherer_config_.layer_to_kv_cache_group_id = cache_config.layer_to_group_id;
-    model_input_gatherer_config_.kv_cache_group_types       = cache_config.group_types;
+    model_input_gatherer_config_.kv_cache_group_types       = main_ac.group_types;
     model_input_gatherer_config_.warm_up                    = warm_up;
     model_input_gatherer_config_.enable_detail_log          = profiling_debug_logging_config.enable_detail_log;
 

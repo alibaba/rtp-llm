@@ -478,7 +478,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TieredMemoryCache_EvictsDe
     EXPECT_TRUE(captured_ctxs[0]->meta()->enableRemoteCache());
     EXPECT_TRUE(captured_ctxs[1]->meta()->enableMemoryCache());
     EXPECT_FALSE(captured_ctxs[1]->meta()->enableRemoteCache());
-    EXPECT_FALSE(captured_ctxs[1]->kvCacheResource().cacheKeys().empty());
+    EXPECT_FALSE(captured_ctxs[1]->modelKVResources().cache_keys.empty());
     EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
 }
 

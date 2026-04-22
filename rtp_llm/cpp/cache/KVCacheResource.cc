@@ -185,14 +185,6 @@ const LayerBlockIds& KVCacheResource::layerBlocks() const {
     return layer_block_ids;
 }
 
-CacheKeysType& KVCacheResource::cacheKeys() {
-    return cache_keys;
-}
-
-const CacheKeysType& KVCacheResource::cacheKeys() const {
-    return cache_keys;
-}
-
 size_t KVCacheResource::reuseBlockNum() const {
     return device_reuse_block_num_ + memory_reuse_block_num_ + remote_reuse_block_num_;
 }

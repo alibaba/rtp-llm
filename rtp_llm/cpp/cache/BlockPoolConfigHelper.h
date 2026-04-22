@@ -16,19 +16,24 @@ public:
      * @param cache_config The CacheConfig containing main model and optional MTP modules
      */
     static BlockPoolConfig createConfig(const CacheConfig& cache_config) {
-        RTP_LLM_CHECK_WITH_INFO(!cache_config.cache_specs.empty(), "cache_specs must not be empty");
+        RTP_LLM_CHECK_WITH_INFO(!cache_config.allocator_configs.empty(), "allocator_configs must not be empty");
+        const auto& main_alloc = cache_config.getAllocatorConfig(0);
+        RTP_LLM_CHECK_WITH_INFO(!main_alloc.cache_specs.empty(), "main allocator cache_specs must not be empty");
+
         BlockPoolConfig config;
-        config.block_num      = cache_config.block_num;
-        const bool  is_hybrid = cache_config.groupNums() > 1;
-        auto        layer_num = is_hybrid ? cache_config.group_layer_num : cache_config.layer_num;
-        const auto& main_spec = cache_config.cache_specs[0];
+        config.block_num      = main_alloc.block_num;
+        const bool  is_hybrid = main_alloc.groupNums() > 1;
+        auto        layer_num = is_hybrid ? static_cast<uint32_t>(main_alloc.group_layer_num) : main_alloc.layer_num;
+        const auto& main_spec = main_alloc.cache_specs[0];
+
         // linear block size is same with full block block size
         MemoryLayoutConfig main_layout = createMemoryLayoutConfig(is_hybrid,
                                                                   layer_num,
-                                                                  cache_config.kv_block_stride_bytes,
-                                                                  cache_config.kv_scale_stride_bytes,
+                                                                  main_alloc.kv_block_stride_bytes,
+                                                                  main_alloc.kv_scale_stride_bytes,
                                                                   main_spec,
-                                                                  cache_config);
+                                                                  main_alloc.block_num,
+                                                                  main_alloc);
 
         main_layout.kv_cache_offset_bytes = 0;
         main_layout.kv_scale_offset_bytes = main_layout.kv_cache_offset_bytes + main_layout.kv_block_pool_size_bytes;
@@ -38,37 +43,38 @@ public:
 
         config.memory_layouts.push_back(main_layout);
 
-        // Create MTP sub-model layouts
-        for (size_t i = 0; i < cache_config.mtp_sub_configs.size(); ++i) {
-            const auto& mtp_sub_config = cache_config.mtp_sub_configs[i];
-            RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%zu] is null", i);
+        // Create sub-model layouts for MTP modules (allocator_configs[1..N])
+        for (size_t i = 1; i < cache_config.allocator_configs.size(); ++i) {
+            const auto& alloc_cfg = cache_config.allocator_configs[i];
             RTP_LLM_CHECK_WITH_INFO(
-                !mtp_sub_config->cache_specs.empty(), "MTP module %zu cache_specs must not be empty", i);
+                !alloc_cfg.cache_specs.empty(), "allocator_configs[%zu] cache_specs must not be empty", i);
 
-            const auto mtp_layer_num = mtp_sub_config->layer_num;
+            const auto  sub_layer_num = alloc_cfg.layer_num;
+            const auto& sub_spec      = alloc_cfg.cache_specs[0];
 
-            const auto& mtp_spec = mtp_sub_config->cache_specs[0];
-            // mtp block size is not same with main model block size
-            MemoryLayoutConfig mtp_layout = createMemoryLayoutConfig(false,
-                                                                     mtp_layer_num,
-                                                                     mtp_spec->block_size_bytes(),
-                                                                     mtp_spec->scale_block_size_bytes(),
-                                                                     mtp_spec,
-                                                                     cache_config);
+            // MTP block size may differ from the main model block size
+            MemoryLayoutConfig sub_layout = createMemoryLayoutConfig(false,
+                                                                     sub_layer_num,
+                                                                     sub_spec->block_size_bytes(),
+                                                                     sub_spec->scale_block_size_bytes(),
+                                                                     sub_spec,
+                                                                     alloc_cfg.block_num,
+                                                                     alloc_cfg);
 
-            mtp_layout.kv_cache_offset_bytes = current_offset;
-            RTP_LLM_LOG_INFO("mtp_layout.kv_block_pool_size_bytes = %ld", mtp_layout.kv_block_pool_size_bytes);
-            current_offset += mtp_layout.kv_block_pool_size_bytes;
+            sub_layout.kv_cache_offset_bytes = current_offset;
+            RTP_LLM_LOG_INFO("sub_layout[%zu].kv_block_pool_size_bytes = %ld", i, sub_layout.kv_block_pool_size_bytes);
+            current_offset += sub_layout.kv_block_pool_size_bytes;
 
-            if (mtp_layout.hasScale()) {
-                mtp_layout.kv_scale_offset_bytes = current_offset;
-                RTP_LLM_LOG_INFO("mtp_layout.kv_scale_pool_size_bytes = %ld", mtp_layout.kv_scale_pool_size_bytes);
-                current_offset += mtp_layout.kv_scale_pool_size_bytes;
+            if (sub_layout.hasScale()) {
+                sub_layout.kv_scale_offset_bytes = current_offset;
+                RTP_LLM_LOG_INFO(
+                    "sub_layout[%zu].kv_scale_pool_size_bytes = %ld", i, sub_layout.kv_scale_pool_size_bytes);
+                current_offset += sub_layout.kv_scale_pool_size_bytes;
             } else {
-                mtp_layout.kv_scale_offset_bytes = current_offset;
+                sub_layout.kv_scale_offset_bytes = current_offset;
             }
 
-            config.memory_layouts.push_back(mtp_layout);
+            config.memory_layouts.push_back(sub_layout);
         }
 
         config.total_size_bytes = current_offset;
@@ -105,15 +111,16 @@ public:
     }
 
 private:
-    static MemoryLayoutConfig createMemoryLayoutConfig(bool           enable_hybrid_attention,
-                                                       uint32_t       layer_num,
-                                                       size_t         kv_block_stride_bytes,
-                                                       size_t         kv_scale_stride_bytes,
-                                                       KVCacheSpecPtr spec,
-                                                       CacheConfig    cache_config) {
+    static MemoryLayoutConfig createMemoryLayoutConfig(bool                          enable_hybrid_attention,
+                                                       uint32_t                      layer_num,
+                                                       size_t                        kv_block_stride_bytes,
+                                                       size_t                        kv_scale_stride_bytes,
+                                                       KVCacheSpecPtr                spec,
+                                                       uint32_t                      block_num,
+                                                       const KVCacheAllocatorConfig& alloc_cfg) {
         MemoryLayoutConfig cfg;
         cfg.layer_num             = layer_num;
-        cfg.block_num             = cache_config.block_num;
+        cfg.block_num             = block_num;
         cfg.kv_block_stride_bytes = kv_block_stride_bytes;
         cfg.k_block_stride_bytes  = spec->k_block_size_bytes();
         cfg.v_block_stride_bytes  = spec->v_block_size_bytes();
@@ -122,13 +129,13 @@ private:
         cfg.v_scale_stride_bytes  = spec->v_scale_block_size_bytes();
 
         cfg.enable_kv_scale         = cfg.kv_scale_stride_bytes > 0;
-        cfg.dtype                   = cache_config.dtype;
+        cfg.dtype                   = alloc_cfg.dtype;
         cfg.local_head_num_kv       = spec->local_head_num_kv;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
         // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
-        cfg.is_mla             = cache_config.use_mla || cache_config.is_sparse;
-        cfg.use_mla            = cache_config.use_mla;
-        cfg.seq_size_per_block = static_cast<size_t>(cache_config.seq_size_per_block);
+        cfg.is_mla             = alloc_cfg.use_mla || alloc_cfg.is_sparse;
+        cfg.use_mla            = alloc_cfg.use_mla;
+        cfg.seq_size_per_block = static_cast<size_t>(alloc_cfg.seq_size_per_block);
 
         cfg.kv_block_pool_size_bytes =
             static_cast<size_t>(layer_num) * static_cast<size_t>(cfg.block_num) * cfg.kv_block_stride_bytes;

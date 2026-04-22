@@ -28,11 +28,12 @@ static std::shared_ptr<LinearKVCacheSpec> makeLinearSpec(uint32_t seq_size_per_b
 class LinearKVCacheGroupTest: public ::testing::Test {};
 
 TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseDisabledCountsOnlyReserveStep) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
     // common_slots=2, seq_slots=3, total_slots=5 => when reuse disabled, common=1(tail),
@@ -44,11 +45,12 @@ TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseDisabledCountsOnlyReserveStep) 
 }
 
 TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseEnabledUsesSparseCountingAndReserveStep) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
     // common_slots=2:
@@ -60,12 +62,13 @@ TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseEnabledUsesSparseCountingAndRes
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocAllocatesStepHitsAndTailWhenReuseEnabled) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
     BlockIds blocks;
@@ -82,12 +85,13 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesStepHitsAndTailWhenReuseEnabled) {
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocAllocatesOnlyTailWhenReuseDisabled) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
     BlockIds blocks;
@@ -104,12 +108,13 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesOnlyTailWhenReuseDisabled) {
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
     // seq_len=16 => seq_slots=4; reserve_step=2 => total_slots=5
@@ -128,12 +133,13 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled
 }
 
 TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLastTwo) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
     // Start with 6 allocated blocks (no NULLs) to test the pruning logic.
@@ -159,15 +165,13 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLast
 }
 
 TEST_F(LinearKVCacheGroupTest, InsertIntoCacheSkipsNullBlocks) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/3, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/3, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
-
-    auto block_cache = block_pool->blockCache();
-    ASSERT_NE(block_cache, nullptr);
 
     BlockIndicesType blocks;
     blocks.push_back(NULL_BLOCK_IDX);
@@ -178,33 +182,26 @@ TEST_F(LinearKVCacheGroupTest, InsertIntoCacheSkipsNullBlocks) {
     CacheKeysType keys = {100, 101, 102, 103};
     group.insertIntoCache(keys, blocks, /*is_resident=*/false);
 
-    EXPECT_FALSE(block_cache->contains(100, /*group_id=*/3));
-    EXPECT_TRUE(block_cache->contains(101, /*group_id=*/3));
-    EXPECT_FALSE(block_cache->contains(102, /*group_id=*/3));
-    EXPECT_TRUE(block_cache->contains(103, /*group_id=*/3));
+    EXPECT_FALSE(block_cache->containsSlot(100, 0, /*group_id=*/3));
+    EXPECT_TRUE(block_cache->containsSlot(101, 0, /*group_id=*/3));
+    EXPECT_FALSE(block_cache->containsSlot(102, 0, /*group_id=*/3));
+    EXPECT_TRUE(block_cache->containsSlot(103, 0, /*group_id=*/3));
 }
 
 TEST_F(LinearKVCacheGroupTest, MatchSingleKeyReturnsMatchedBlockOrEmpty) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/7, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/7, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
-
-    auto block_cache = block_pool->blockCache();
-    ASSERT_NE(block_cache, nullptr);
 
     // Allocate a block, then put it into cache for group_id=7.
     auto blocks = block_pool->malloc(1);
     ASSERT_EQ(blocks.size(), 1u);
 
-    BlockCache::CacheItem item;
-    item.cache_key   = 123;
-    item.group_id    = 7;
-    item.block_index = blocks[0];
-    item.is_resident = false;
-    ASSERT_TRUE(block_cache->put(item));
+    ASSERT_TRUE(block_cache->putSlot(123, 0, 7, blocks[0], false));
 
     auto hit = group.matchSingleKey(123);
     ASSERT_EQ(hit.block_indices.size(), 1u);
@@ -215,12 +212,13 @@ TEST_F(LinearKVCacheGroupTest, MatchSingleKeyReturnsMatchedBlockOrEmpty) {
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocNoNewBlocksReturnsTrueAndKeepsState) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
     BlockIds blocks;
@@ -235,7 +233,8 @@ TEST_F(LinearKVCacheGroupTest, MallocNoNewBlocksReturnsTrueAndKeepsState) {
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocFailsWhenBlockPoolExhausted) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
@@ -244,7 +243,7 @@ TEST_F(LinearKVCacheGroupTest, MallocFailsWhenBlockPoolExhausted) {
     ASSERT_EQ(block_pool->freeBlocksNum(), 0u);
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
     BlockIds blocks;
@@ -255,12 +254,13 @@ TEST_F(LinearKVCacheGroupTest, MallocFailsWhenBlockPoolExhausted) {
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocEnsuresFreeBlocksByEvictingCache) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
     // Put one block into cache (non-resident) and release request reference so it becomes evictable.
@@ -284,12 +284,13 @@ TEST_F(LinearKVCacheGroupTest, MallocEnsuresFreeBlocksByEvictingCache) {
 }
 
 TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksWithReserveStepKeepsLastTwoAndReserveTail) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
     auto allocated = block_pool->malloc(6);
@@ -313,11 +314,12 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksWithReserveStepKeepsLastTwoAnd
 }
 
 TEST_F(LinearKVCacheGroupTest, FreeIgnoresEmptyOrAllNullBlocks) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
     const size_t free_before = block_pool->freeBlocksNum();
@@ -329,12 +331,13 @@ TEST_F(LinearKVCacheGroupTest, FreeIgnoresEmptyOrAllNullBlocks) {
 }
 
 TEST_F(LinearKVCacheGroupTest, ReferenceAppendsAndIncrementsRefCountForValidBlocks) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
     auto blocks = block_pool->malloc(1);
@@ -358,15 +361,14 @@ TEST_F(LinearKVCacheGroupTest, ReferenceAppendsAndIncrementsRefCountForValidBloc
 }
 
 TEST_F(LinearKVCacheGroupTest, InsertIntoCacheWithEmptyInputsIsNoop) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/3, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, block_cache, /*group_id=*/3, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    auto block_cache = block_pool->blockCache();
-    ASSERT_NE(block_cache, nullptr);
     ASSERT_EQ(block_cache->size(), 0u);
 
     group.insertIntoCache(CacheKeysType{}, BlockIndicesType{1, 2}, /*is_resident=*/false);

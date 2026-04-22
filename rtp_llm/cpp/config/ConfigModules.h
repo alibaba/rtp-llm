@@ -156,9 +156,13 @@ struct KVCacheConfig {
     int         seq_size_per_block        = 64;
     int         kernel_seq_size_per_block = 0;
     int         test_block_num            = 0;
-    int         use_block_cache           = -1;  // -1 means not set, use Optional<int> equivalent
-    bool        enable_device_cache       = true;
-    bool        enable_memory_cache       = false;
+    // Percentage (0–99) of KV cache memory allocated to the main model in speculative-execution (MTP) scenarios.
+    // The remaining memory is split equally among all MTP sub-models.
+    // 0 means "not set" (use proportional allocation as default).
+    int  main_model_kvcache_ratio = 0;
+    int  use_block_cache          = -1;  // -1 means not set, use Optional<int> equivalent
+    bool enable_device_cache      = true;
+    bool enable_memory_cache      = false;
     // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
     bool    enable_memory_cache_sm_copy  = false;
     bool    enable_remote_cache          = false;

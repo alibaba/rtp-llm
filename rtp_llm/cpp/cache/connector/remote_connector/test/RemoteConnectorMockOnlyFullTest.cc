@@ -116,8 +116,28 @@ private:
         for (int i = 0; i < layer_num; ++i) {
             layer_ids[i] = i;
         }
-        cache_config_.layer_ids.push_back(layer_ids);
-        cache_config_.global_layer_ids.push_back(layer_ids);
+        cache_config_.layer_to_group_id.assign(static_cast<size_t>(layer_num), 0);
+
+        KVCacheAllocatorConfig alloc;
+        alloc.model_id          = 0;
+        alloc.layer_num         = cache_config_.layer_num;
+        alloc.dtype             = cache_config_.dtype;
+        alloc.cache_specs       = cache_config_.cache_specs;
+        alloc.group_types       = {CacheGroupType::FULL};
+        alloc.layer_ids         = {layer_ids};
+        alloc.layer_to_group_id = cache_config_.layer_to_group_id;
+        alloc.layer_to_block_stride_bytes.assign(
+            static_cast<size_t>(layer_num),
+            static_cast<int>(cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes));
+        alloc.block_num             = cache_config_.block_num;
+        alloc.seq_size_per_block    = cache_config_.seq_size_per_block;
+        alloc.kv_block_size_bytes   = cache_config_.kv_block_size_bytes;
+        alloc.kv_scale_size_bytes   = cache_config_.kv_scale_size_bytes;
+        alloc.block_size_bytes      = cache_config_.block_size_bytes;
+        alloc.kv_block_stride_bytes = cache_config_.kv_block_stride_bytes;
+        alloc.kv_scale_stride_bytes = cache_config_.kv_scale_stride_bytes;
+        alloc.full_group_num        = 1;
+        cache_config_.allocator_configs.push_back(std::move(alloc));
     }
 };
 

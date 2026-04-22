@@ -122,35 +122,29 @@ private:
         linear_spec->local_head_num_kv  = 1;
         linear_spec->seq_size_per_block = seq_size_per_block;
 
+        std::vector<std::vector<int>> layer_ids_for_groups;
         for (int i = 0; i < cache_config_.full_group_num; i++) {
-            cache_config_.global_layer_ids.push_back({});
-            cache_config_.layer_ids.push_back({});
+            layer_ids_for_groups.push_back({});
             cache_config_.group_types.push_back(CacheGroupType::FULL);
             cache_config_.cache_specs.push_back(full_spec);
-            cache_config_.full_groups.push_back({});
             for (int j = 0; j < layer_num; j++) {
                 cache_config_.layer_to_group_id.push_back(full_group_ids_[i]);
-                cache_config_.global_layer_ids.back().push_back(unique_layer_id);
-                cache_config_.layer_ids.back().push_back(unique_layer_id);
+                layer_ids_for_groups.back().push_back(unique_layer_id);
                 unique_layer_id++;
             }
         }
 
         for (int i = 0; i < cache_config_.linear_group_num; i++) {
-            cache_config_.global_layer_ids.push_back({});
-            cache_config_.layer_ids.push_back({});
+            layer_ids_for_groups.push_back({});
             cache_config_.group_types.push_back(CacheGroupType::LINEAR);
             cache_config_.cache_specs.push_back(linear_spec);
-            cache_config_.linear_groups.push_back({});
             for (int j = 0; j < layer_num; j++) {
                 cache_config_.layer_to_group_id.push_back(other_group_ids_[i]);
-                cache_config_.global_layer_ids.back().push_back(unique_layer_id);
-                cache_config_.layer_ids.back().push_back(unique_layer_id);
+                layer_ids_for_groups.back().push_back(unique_layer_id);
                 unique_layer_id++;
             }
         }
 
-        cache_config_.layer_ids          = cache_config_.global_layer_ids;
         cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
         cache_config_.dtype              = rtp_llm::DataType::TYPE_FP16;
@@ -168,6 +162,27 @@ private:
         const size_t per_layer_stride_bytes = cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
         cache_config_.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config_.layer_all_num),
                                                          static_cast<int>(per_layer_stride_bytes));
+
+        KVCacheAllocatorConfig alloc;
+        alloc.model_id                    = 0;
+        alloc.layer_num                   = cache_config_.layer_num;
+        alloc.dtype                       = cache_config_.dtype;
+        alloc.cache_specs                 = cache_config_.cache_specs;
+        alloc.group_types                 = cache_config_.group_types;
+        alloc.layer_ids                   = layer_ids_for_groups;
+        alloc.layer_to_group_id           = cache_config_.layer_to_group_id;
+        alloc.layer_to_block_stride_bytes = cache_config_.layer_to_block_stride_bytes;
+        alloc.block_num                   = cache_config_.block_num;
+        alloc.seq_size_per_block          = cache_config_.seq_size_per_block;
+        alloc.kv_block_size_bytes         = cache_config_.kv_block_size_bytes;
+        alloc.kv_scale_size_bytes         = cache_config_.kv_scale_size_bytes;
+        alloc.block_size_bytes            = cache_config_.block_size_bytes;
+        alloc.kv_block_stride_bytes       = cache_config_.kv_block_stride_bytes;
+        alloc.kv_scale_stride_bytes       = cache_config_.kv_scale_stride_bytes;
+        alloc.group_layer_num             = cache_config_.group_layer_num;
+        alloc.linear_group_num            = cache_config_.linear_group_num;
+        alloc.full_group_num              = cache_config_.full_group_num;
+        cache_config_.allocator_configs.push_back(std::move(alloc));
     }
 };
 

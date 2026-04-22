@@ -23,6 +23,10 @@ public:
     virtual const std::string&          trace_id() const          = 0;
     virtual const std::string&          unique_id() const         = 0;
     virtual const std::vector<int64_t>& tokens() const            = 0;
+    virtual const std::vector<int64_t>& cacheKeys() const {
+        static const std::vector<int64_t> kEmptyCacheKeys;
+        return kEmptyCacheKeys;
+    }
 
     // P2P read extension: returns GenerateStream pointer for type safety.
     // Non-P2P scenarios can return nullptr by default.

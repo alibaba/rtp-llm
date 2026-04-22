@@ -110,13 +110,14 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         RTP_LLM_LOG_WARNING("async read failed, connector context is null");
         return nullptr;
     }
-    const auto& kvcache_resource = connector_context->kvCacheResource();
-    // empty cache keys will not handled by coordinator.
-    if (kvcache_resource.cacheKeys().empty()) {
+    const auto& model_resources  = connector_context->modelKVResources();
+    const auto& kvcache_resource = model_resources.at(0);
+    const auto& cache_keys       = model_resources.cache_keys;
+    if (cache_keys.empty()) {
         return nullptr;
     }
 
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys(), true);
+    auto resource = allocator_->incrKVCacheRef(model_resources, cache_keys, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -147,14 +148,16 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         RTP_LLM_LOG_WARNING("async write failed, connector context is null");
         return nullptr;
     }
-    const auto& kvcache_resource = connector_context->kvCacheResource();
-    if (kvcache_resource.cacheKeys().empty()) {
+    const auto& model_resources  = connector_context->modelKVResources();
+    const auto& kvcache_resource = model_resources.at(0);
+    const auto& cache_keys       = model_resources.cache_keys;
+    if (cache_keys.empty()) {
         RTP_LLM_LOG_DEBUG("async write failed, kvcache resource cache keys is empty, resource: [%s]",
                           kvcache_resource.debugString().c_str());
         return nullptr;
     }
 
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys(), true);
+    auto resource = allocator_->incrKVCacheRef(model_resources, cache_keys, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async write failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());

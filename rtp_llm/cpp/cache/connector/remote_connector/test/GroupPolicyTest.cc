@@ -70,9 +70,9 @@ public:
         return 0;
     }
 
-    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                    const CacheKeysType&   cache_keys,
-                                                    bool                   is_connector = false) override {
+    std::shared_ptr<KVCacheResource> incrKVCacheRef(const ModelKVResources& model_resources,
+                                                    const CacheKeysType&    cache_keys,
+                                                    bool                    is_connector = false) override {
         return nullptr;
     }
     void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override {

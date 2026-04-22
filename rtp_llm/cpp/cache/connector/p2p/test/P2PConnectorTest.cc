@@ -91,10 +91,6 @@ protected:
             }
         }
 
-        for (int i = 0; i < num_layers * blocks_per_layer; ++i) {
-            resource->cacheKeys().push_back(1000 + i);
-        }
-
         return resource;
     }
 
@@ -118,18 +114,17 @@ protected:
     /// P2P 路由所需字段（unique_key, request_id, deadline_ms），返回 owning shared_ptr。
     /// timeout_ms 是超时毫秒数（相对值），begin_time_us 是当前微秒时间戳，
     /// deadlineMs() = timeout_ms + begin_time_us/1000。
-    std::shared_ptr<GenerateStream> createGenerateStream(const std::string& unique_key,
-                                                         int64_t            request_id,
-                                                         int64_t            timeout_ms) {
-        auto config         = std::make_shared<GenerateConfig>();
-        config->unique_key  = unique_key;
-        config->timeout_ms  = static_cast<int>(timeout_ms);  // timeout in milliseconds (relative)
+    std::shared_ptr<GenerateStream>
+    createGenerateStream(const std::string& unique_key, int64_t request_id, int64_t timeout_ms) {
+        auto config        = std::make_shared<GenerateConfig>();
+        config->unique_key = unique_key;
+        config->timeout_ms = static_cast<int>(timeout_ms);  // timeout in milliseconds (relative)
 
-        auto input                 = std::make_shared<GenerateInput>();
-        input->request_id          = request_id;
-        input->generate_config     = config;
-        input->input_ids           = torch::zeros({1}, torch::kInt32);
-        input->begin_time_us       = currentTimeUs();  // Set begin_time_us to current time
+        auto input             = std::make_shared<GenerateInput>();
+        input->request_id      = request_id;
+        input->generate_config = config;
+        input->input_ids       = torch::zeros({1}, torch::kInt32);
+        input->begin_time_us   = currentTimeUs();  // Set begin_time_us to current time
 
         return std::make_shared<MockGenerateStream>(input);
     }
@@ -210,7 +205,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenSchedulerHandleReadFailed
     // 2. 添加有效的 resource entry
     std::string unique_key  = "test_scheduler_handle_read_failed";
     int64_t     request_id  = 5003;
-    int64_t     timeout_ms  = 5000;  // timeout in milliseconds (relative)
+    int64_t     timeout_ms  = 5000;                          // timeout in milliseconds (relative)
     int64_t     deadline_ms = currentTimeMs() + timeout_ms;  // absolute deadline for request
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
@@ -236,7 +231,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
     // 1. 添加有效的 resource entry
     std::string unique_key  = "test_wait_side_channel_timeout";
     int64_t     request_id  = 5004;
-    int64_t     timeout_ms  = 5000;  // timeout in milliseconds (relative)
+    int64_t     timeout_ms  = 5000;                          // timeout in milliseconds (relative)
     int64_t     deadline_ms = currentTimeMs() + timeout_ms;  // absolute deadline for request
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
@@ -268,7 +263,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     // 1. 创建有效的 resource entry
     std::string unique_key  = "test_notify_side_channel_success";
     int64_t     request_id  = 5001;
-    int64_t     timeout_ms  = 5000;  // timeout in milliseconds (relative)
+    int64_t     timeout_ms  = 5000;                          // timeout in milliseconds (relative)
     int64_t     deadline_ms = currentTimeMs() + timeout_ms;  // absolute deadline for request
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);

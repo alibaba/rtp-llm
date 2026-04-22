@@ -280,34 +280,38 @@ protected:
                                              torch::indexing::Slice()})
                                      .contiguous();
                     } else {
-                        kblock = kvCache
-                                     .index({torch::indexing::Slice(),
-                                             static_cast<int64_t>(i),
-                                             torch::indexing::Slice(),
-                                             torch::indexing::Slice(block_start, block_end),
-                                             torch::indexing::Slice()})
-                                     .reshape({2,
-                                               static_cast<int64_t>(cache_config.seq_size_per_block),
-                                               static_cast<int64_t>(cache_config.cache_specs[0]->local_head_num_kv),
-                                               static_cast<int64_t>(
-                                                   static_cast<rtp_llm::MHAKVCacheSpec&>(*cache_config.cache_specs[0])
-                                                       .size_per_head)})
-                                     .transpose(2, 1)
-                                     .contiguous();
+                        kblock =
+                            kvCache
+                                .index({torch::indexing::Slice(),
+                                        static_cast<int64_t>(i),
+                                        torch::indexing::Slice(),
+                                        torch::indexing::Slice(block_start, block_end),
+                                        torch::indexing::Slice()})
+                                .reshape({2,
+                                          static_cast<int64_t>(cache_config.seq_size_per_block),
+                                          static_cast<int64_t>(
+                                              cache_config.getAllocatorConfig(0).cache_specs[0]->local_head_num_kv),
+                                          static_cast<int64_t>(static_cast<rtp_llm::MHAKVCacheSpec&>(
+                                                                   *cache_config.getAllocatorConfig(0).cache_specs[0])
+                                                                   .size_per_head)})
+                                .transpose(2, 1)
+                                .contiguous();
                         // vblock is not used in setKVBlockValue in this case
-                        vblock = kvCache
-                                     .index({torch::indexing::Slice(),
-                                             static_cast<int64_t>(i),
-                                             1,
-                                             torch::indexing::Slice(block_start, block_end),
-                                             torch::indexing::Slice()})
-                                     .reshape({static_cast<int64_t>(cache_config.seq_size_per_block),
-                                               static_cast<int64_t>(cache_config.cache_specs[0]->local_head_num_kv),
-                                               static_cast<int64_t>(
-                                                   static_cast<rtp_llm::MHAKVCacheSpec&>(*cache_config.cache_specs[0])
-                                                       .size_per_head)})
-                                     .transpose(1, 0)
-                                     .contiguous();
+                        vblock =
+                            kvCache
+                                .index({torch::indexing::Slice(),
+                                        static_cast<int64_t>(i),
+                                        1,
+                                        torch::indexing::Slice(block_start, block_end),
+                                        torch::indexing::Slice()})
+                                .reshape({static_cast<int64_t>(cache_config.seq_size_per_block),
+                                          static_cast<int64_t>(
+                                              cache_config.getAllocatorConfig(0).cache_specs[0]->local_head_num_kv),
+                                          static_cast<int64_t>(static_cast<rtp_llm::MHAKVCacheSpec&>(
+                                                                   *cache_config.getAllocatorConfig(0).cache_specs[0])
+                                                                   .size_per_head)})
+                                .transpose(1, 0)
+                                .contiguous();
                     }
                     // std::cout << "index: " << k << " start: " << block_start << " end: " << block_end << std::endl;
                     // std::cout << "block index: " << k_indexs[k] << std::endl;

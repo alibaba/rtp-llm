@@ -247,7 +247,9 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
 
     auto cache_config               = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config);
     cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
-    cache_config.block_num          = 5;
+    for (auto& ac : cache_config.allocator_configs) {
+        ac.block_num = 5;
+    }
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(
@@ -321,10 +323,10 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
         RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
-        RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
-                         result.block_num,
-                         result.block_size_bytes / 1024);
-        RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
+        RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %zu KB",
+                         result.getAllocatorConfig(0).block_num,
+                         result.getAllocatorConfig(0).block_size_bytes / 1024);
+        RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.getAllocatorConfig(0).linear_step);
         resource_context_.cache_manager = make_shared<KVCacheManager>(
             result, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
         resource_context_.role_type = pd_sep_config.role_type;

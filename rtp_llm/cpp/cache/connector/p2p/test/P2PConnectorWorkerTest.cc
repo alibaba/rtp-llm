@@ -314,10 +314,6 @@ protected:
             }
         }
 
-        for (int i = 0; i < num_blocks; ++i) {
-            resource->cacheKeys().push_back(layer_id * 1000 + i);
-        }
-
         return resource;
     }
 
@@ -1042,9 +1038,6 @@ protected:
                 resource->mutableBlockIds(layer).add({i});
             }
         }
-        for (int i = 0; i < blocks_per_layer; ++i) {
-            resource->cacheKeys().push_back(1000 + i);
-        }
         return resource;
     }
 };
@@ -1052,34 +1045,34 @@ protected:
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxEqualActualCount) {
     auto resource = createResource(2, 3);
     // start_block_idx == actual_block_count (3) -> out of range
-    auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 3, -1);
+    auto buf = LayerCacheBufferUtil::convertLayer(*resource, {}, 0, 0, 3, -1);
     EXPECT_EQ(buf, nullptr);
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxGreaterThanActualCount) {
     auto resource = createResource(2, 3);
     // start_block_idx > actual_block_count
-    auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 10, -1);
+    auto buf = LayerCacheBufferUtil::convertLayer(*resource, {}, 0, 0, 10, -1);
     EXPECT_EQ(buf, nullptr);
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_BlockCountLessThanNegativeOne) {
     auto resource = createResource(2, 3);
     // block_count < -1 is undefined/illegal
-    auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 0, -2);
+    auto buf = LayerCacheBufferUtil::convertLayer(*resource, {}, 0, 0, 0, -2);
     EXPECT_EQ(buf, nullptr);
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_BlockCountZero) {
     auto resource = createResource(2, 3);
-    auto buf      = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 0, 0);
+    auto buf      = LayerCacheBufferUtil::convertLayer(*resource, {}, 0, 0, 0, 0);
     EXPECT_EQ(buf, nullptr);
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnPartial_BlockCountLimitsResult) {
     auto resource = createResource(2, 4);
     // start=1, count=2 -> should return 2 blocks
-    auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 1, 2);
+    auto buf = LayerCacheBufferUtil::convertLayer(*resource, {}, 0, 0, 1, 2);
     ASSERT_NE(buf, nullptr);
     EXPECT_EQ(static_cast<int>(buf->blockIdMap().size()), 2);
 }
@@ -1087,14 +1080,14 @@ TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnPartial_BlockCountLimitsResu
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnAll_BlockCountNegativeOne) {
     auto resource = createResource(2, 3);
     // block_count=-1 means "all remaining"
-    auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 0, -1);
+    auto buf = LayerCacheBufferUtil::convertLayer(*resource, {}, 0, 0, 0, -1);
     ASSERT_NE(buf, nullptr);
     EXPECT_EQ(static_cast<int>(buf->blockIdMap().size()), 3);
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxNegative) {
     auto resource = createResource(2, 3);
-    auto buf      = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, -1, -1);
+    auto buf      = LayerCacheBufferUtil::convertLayer(*resource, {}, 0, 0, -1, -1);
     EXPECT_EQ(buf, nullptr);
 }
 

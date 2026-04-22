@@ -33,14 +33,27 @@ private:
                                                                                    rtp_llm::DataType        dtype);
     static std::pair<std::vector<std::vector<int>>, std::vector<std::vector<int>>>
     createLayerGroups(const std::vector<int>& linear_layers, const std::vector<int>& full_layers, int& group_layer_num);
-    static void setupCacheConfigSpecs(CacheConfig&                         config,
-                                      const std::vector<std::vector<int>>& linear_groups,
-                                      const std::vector<std::vector<int>>& full_groups,
-                                      const KVCacheSpecPtr&                linear_spec,
-                                      const KVCacheSpecPtr&                full_spec);
-    static void
-    setupPhysicalSizes(CacheConfig& config, const KVCacheSpecPtr& full_spec, const KVCacheSpecPtr& linear_spec);
-    static void setupLayerToGroupMapping(CacheConfig& config);
+    // Returns the per-group layer_ids in the order: full groups first, then linear groups.
+    static std::vector<std::vector<int>> setupCacheConfigSpecs(CacheConfig&                         config,
+                                                               const std::vector<std::vector<int>>& linear_groups,
+                                                               const std::vector<std::vector<int>>& full_groups,
+                                                               const KVCacheSpecPtr&                linear_spec,
+                                                               const KVCacheSpecPtr&                full_spec,
+                                                               std::vector<KVCacheSpecPtr>&         out_cache_specs,
+                                                               std::vector<CacheGroupType>&         out_group_types,
+                                                               int& out_linear_group_num,
+                                                               int& out_full_group_num);
+    static void                          setupPhysicalSizes(int                   group_layer_num,
+                                                            const KVCacheSpecPtr& full_spec,
+                                                            const KVCacheSpecPtr& linear_spec,
+                                                            size_t&               out_kv_block_stride_bytes,
+                                                            size_t&               out_kv_scale_stride_bytes,
+                                                            size_t&               out_kv_block_size_bytes,
+                                                            size_t&               out_kv_scale_size_bytes,
+                                                            size_t&               out_block_size_bytes);
+    static void                          setupLayerToGroupMapping(uint32_t                             layer_num,
+                                                                  const std::vector<std::vector<int>>& layer_ids,
+                                                                  std::vector<int>&                    out_layer_to_group_id);
 };
 
 }  // namespace rtp_llm

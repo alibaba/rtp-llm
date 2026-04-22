@@ -139,13 +139,22 @@ protected:
                                           /*v_block_stride_bytes=*/v_block_bytes);
 
         // Create CacheConfig with the spec
+        rtp_llm::KVCacheAllocatorConfig alloc_cfg;
+        alloc_cfg.cache_specs           = {spec};
+        alloc_cfg.layer_num             = layer_num;
+        alloc_cfg.dtype                 = rtp_llm::DataType::TYPE_INT8;
+        alloc_cfg.seq_size_per_block    = 1;
+        alloc_cfg.kv_block_stride_bytes = spec->block_size_bytes();
+        alloc_cfg.group_layer_num       = layer_num;
+        alloc_cfg.layer_to_group_id.assign(layer_num, 0);
+        alloc_cfg.layer_to_block_stride_bytes.assign(layer_num, static_cast<int>(alloc_cfg.kv_block_stride_bytes));
+
+        alloc_cfg.block_num = block_num;
+
         rtp_llm::CacheConfig cache_config;
-        cache_config.cache_specs           = {spec};
-        cache_config.layer_num             = layer_num;
-        cache_config.block_num             = block_num;
-        cache_config.dtype                 = rtp_llm::DataType::TYPE_INT8;
-        cache_config.seq_size_per_block    = 1;
-        cache_config.kv_block_stride_bytes = spec->block_size_bytes();
+        cache_config.seq_size_per_block = 1;
+        cache_config.layer_all_num      = layer_num;
+        cache_config.allocator_configs.push_back(alloc_cfg);
 
         auto pool_cfg   = BlockPoolConfigHelper::createConfig(cache_config);
         auto layout_cfg = pool_cfg.memory_layouts[0];
@@ -226,14 +235,22 @@ TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
                                       /*k_block_stride_bytes=*/512,
                                       /*v_block_stride_bytes=*/512);
     // Create CacheConfig with the spec
+    rtp_llm::KVCacheAllocatorConfig alloc_cfg228;
+    alloc_cfg228.cache_specs           = {spec};
+    alloc_cfg228.layer_num             = 4;
+    alloc_cfg228.dtype                 = rtp_llm::DataType::TYPE_INT8;
+    alloc_cfg228.seq_size_per_block    = 4;
+    alloc_cfg228.kv_block_stride_bytes = spec->block_size_bytes();
+    alloc_cfg228.kv_scale_stride_bytes = spec->scale_block_size_bytes();
+    alloc_cfg228.group_layer_num       = 4;
+    alloc_cfg228.layer_to_group_id.assign(4, 0);
+    alloc_cfg228.layer_to_block_stride_bytes.assign(
+        4, static_cast<int>(alloc_cfg228.kv_block_stride_bytes + alloc_cfg228.kv_scale_stride_bytes));
+    alloc_cfg228.block_num = 8;
     rtp_llm::CacheConfig cache_config;
-    cache_config.cache_specs           = {spec};
-    cache_config.layer_num             = 4;
-    cache_config.block_num             = 8;
-    cache_config.dtype                 = rtp_llm::DataType::TYPE_INT8;
-    cache_config.seq_size_per_block    = 4;
-    cache_config.kv_block_stride_bytes = spec->block_size_bytes();
-    cache_config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
+    cache_config.seq_size_per_block = 4;
+    cache_config.layer_all_num      = 4;
+    cache_config.allocator_configs.push_back(alloc_cfg228);
 
     auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
@@ -391,13 +408,20 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadFp16UsesBy
                                       /*k_block_stride_bytes=*/1024,
                                       /*v_block_stride_bytes=*/1024);
     // Create CacheConfig with the spec
+    rtp_llm::KVCacheAllocatorConfig alloc_cfg392;
+    alloc_cfg392.cache_specs           = {spec};
+    alloc_cfg392.layer_num             = 4;
+    alloc_cfg392.dtype                 = rtp_llm::DataType::TYPE_FP16;
+    alloc_cfg392.seq_size_per_block    = 64;
+    alloc_cfg392.kv_block_stride_bytes = spec->block_size_bytes();
+    alloc_cfg392.group_layer_num       = 4;
+    alloc_cfg392.layer_to_group_id.assign(4, 0);
+    alloc_cfg392.layer_to_block_stride_bytes.assign(4, static_cast<int>(alloc_cfg392.kv_block_stride_bytes));
+    alloc_cfg392.block_num = 8;
     rtp_llm::CacheConfig cache_config;
-    cache_config.cache_specs           = {spec};
-    cache_config.layer_num             = 4;
-    cache_config.block_num             = 8;
-    cache_config.dtype                 = rtp_llm::DataType::TYPE_FP16;
-    cache_config.seq_size_per_block    = 64;
-    cache_config.kv_block_stride_bytes = spec->block_size_bytes();
+    cache_config.seq_size_per_block = 64;
+    cache_config.layer_all_num      = 4;
+    cache_config.allocator_configs.push_back(alloc_cfg392);
 
     auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];
@@ -462,14 +486,22 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithScale)
                                       /*k_block_stride_bytes=*/512,
                                       /*v_block_stride_bytes=*/512);
     // Create CacheConfig with the spec
+    rtp_llm::KVCacheAllocatorConfig alloc_cfg464;
+    alloc_cfg464.cache_specs           = {spec};
+    alloc_cfg464.layer_num             = 4;
+    alloc_cfg464.dtype                 = rtp_llm::DataType::TYPE_INT8;
+    alloc_cfg464.seq_size_per_block    = 64;
+    alloc_cfg464.kv_block_stride_bytes = spec->block_size_bytes();
+    alloc_cfg464.kv_scale_stride_bytes = spec->scale_block_size_bytes();
+    alloc_cfg464.group_layer_num       = 4;
+    alloc_cfg464.layer_to_group_id.assign(4, 0);
+    alloc_cfg464.layer_to_block_stride_bytes.assign(
+        4, static_cast<int>(alloc_cfg464.kv_block_stride_bytes + alloc_cfg464.kv_scale_stride_bytes));
+    alloc_cfg464.block_num = 8;
     rtp_llm::CacheConfig cache_config;
-    cache_config.cache_specs           = {spec};
-    cache_config.layer_num             = 4;
-    cache_config.block_num             = 8;
-    cache_config.dtype                 = rtp_llm::DataType::TYPE_INT8;
-    cache_config.seq_size_per_block    = 64;
-    cache_config.kv_block_stride_bytes = spec->block_size_bytes();
-    cache_config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
+    cache_config.seq_size_per_block = 64;
+    cache_config.layer_all_num      = 4;
+    cache_config.allocator_configs.push_back(alloc_cfg464);
 
     auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true

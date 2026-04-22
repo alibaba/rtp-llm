@@ -63,15 +63,10 @@ protected:
             }
         }
 
-        for (int i = 0; i < num_layers * blocks_per_layer; ++i) {
-            resource->cacheKeys().push_back(1000 + i);
-        }
-
         return resource;
     }
 
-    std::shared_ptr<MockMeta>
-    createMockMeta(int64_t request_id, const std::string& unique_key, int64_t deadline_ms) {
+    std::shared_ptr<MockMeta> createMockMeta(int64_t request_id, const std::string& unique_key, int64_t deadline_ms) {
         auto meta = std::make_shared<MockMeta>();
         meta->setRequestId(request_id);
         meta->setUniqueKey(unique_key);

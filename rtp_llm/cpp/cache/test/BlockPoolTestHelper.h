@@ -73,14 +73,24 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
         kLayerNum, dtype, local_head_num_kv, seq_size_per_block, k_block_stride_bytes, v_block_stride_bytes);
 
     // Create CacheConfig with the spec
+    rtp_llm::KVCacheAllocatorConfig alloc_cfg;
+    alloc_cfg.cache_specs           = {spec};
+    alloc_cfg.layer_num             = kLayerNum;
+    alloc_cfg.dtype                 = dtype;
+    alloc_cfg.seq_size_per_block    = seq_size_per_block;
+    alloc_cfg.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
+    alloc_cfg.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
+    alloc_cfg.group_layer_num       = kLayerNum;
+    alloc_cfg.layer_to_group_id.assign(kLayerNum, 0);
+    alloc_cfg.layer_to_block_stride_bytes.assign(
+        kLayerNum, static_cast<int>(alloc_cfg.kv_block_stride_bytes + alloc_cfg.kv_scale_stride_bytes));
+
+    alloc_cfg.block_num = kBlockNum;
+
     rtp_llm::CacheConfig cache_config;
-    cache_config.cache_specs           = {spec};
-    cache_config.layer_num             = kLayerNum;
-    cache_config.block_num             = kBlockNum;
-    cache_config.dtype                 = dtype;
-    cache_config.seq_size_per_block    = seq_size_per_block;
-    cache_config.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
-    cache_config.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
+    cache_config.seq_size_per_block = seq_size_per_block;
+    cache_config.layer_all_num      = kLayerNum;
+    cache_config.allocator_configs.push_back(alloc_cfg);
 
     return BlockPoolConfigHelper::createConfig(cache_config);
 }

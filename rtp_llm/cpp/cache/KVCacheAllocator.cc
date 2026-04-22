@@ -13,6 +13,12 @@
 namespace rtp_llm {
 
 bool KVCacheAllocator::init() {
+    // Ensure the allocator has a BlockCache. If none was injected via setExternalBlockCache(),
+    // create a standalone one (e.g. in unit tests or single-allocator scenarios).
+    if (!external_block_cache_) {
+        external_block_cache_ = std::make_shared<BlockCache>();
+    }
+
     RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");
 
     // NOTE: `availableBlocksNum()` depends on `block_pool_` and must be queried after `doInit()`.
@@ -81,44 +87,11 @@ MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
         return {false, 0};
     }
 
-    if (malloc_info.batch_kv_cache_resource->curBlocksNum() == 0) {
+    if (malloc_info.batch_kv_cache_resource->curBlocksNum(modelId()) == 0) {
         return initMalloc(malloc_info);
     } else {
         return incrMalloc(malloc_info);
     }
-}
-
-uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {
-    if (model_id == 0) {
-        // main model: local_layer_id is the global layer id
-        if (local_layer_id >= 0 && static_cast<size_t>(local_layer_id) < config_.layer_num) {
-            return static_cast<uint32_t>(local_layer_id);
-        }
-        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: local_layer_id=%d is invalid", local_layer_id);
-        return std::numeric_limits<uint32_t>::max();
-    }
-
-    if (model_id > config_.mtp_sub_configs.size()) {
-        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: model_id=%zu out of range (mtp_sub_configs=%zu)",
-                          model_id,
-                          config_.mtp_sub_configs.size());
-        return std::numeric_limits<uint32_t>::max();
-    }
-
-    const auto& sub = config_.mtp_sub_configs[model_id - 1];
-    if (!sub) {
-        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: mtp_sub_configs[%zu] is null", model_id - 1);
-        return std::numeric_limits<uint32_t>::max();
-    }
-    if (sub->global_layer_ids.empty()) {
-        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: mtp_sub_configs[%zu] global_layer_ids is empty", model_id - 1);
-        return std::numeric_limits<uint32_t>::max();
-    }
-    if (local_layer_id >= 0 && static_cast<size_t>(local_layer_id) < sub->global_layer_ids[0].size()) {
-        return sub->global_layer_ids[0][static_cast<size_t>(local_layer_id)];
-    }
-    RTP_LLM_LOG_ERROR("convertToGlobalLayerId: local_layer_id=%d is invalid", local_layer_id);
-    return std::numeric_limits<uint32_t>::max();
 }
 
 void KVCacheAllocator::blockCopy(int src_block_index, int dest_block_index) {
@@ -146,7 +119,8 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
 
     BatchCopyParams copy_params;
 
-    const size_t copy_num = (end_ptr - begin_ptr) * config_.layer_num;
+    const auto&  alloc_cfg = ac();
+    const size_t copy_num  = (end_ptr - begin_ptr) * alloc_cfg.layer_num;
 
     size_t copy_nums[CopyType::TYPE_SIZE] = {};
     auto   copy_type                      = BatchCopyParams::get_copy_type(
@@ -158,13 +132,13 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
         copy_params.reserve(static_cast<CopyType>(i), copy_nums[i]);
     }
 
-    auto&  spec                = config_.cache_specs[0];
+    auto&  spec                = alloc_cfg.cache_specs[0];
     size_t kv_block_size_bytes = spec->block_size_bytes();
 
     for (auto it = begin_ptr; it != end_ptr; ++it) {
         auto [src_block_index, dest_block_index] = *it;
 
-        for (int layer_id = 0; layer_id < config_.layer_num; layer_id++) {
+        for (int layer_id = 0; layer_id < static_cast<int>(alloc_cfg.layer_num); layer_id++) {
             auto src_addr_info = convertIndexToAddr(layer_id, src_block_index);
             auto dst_addr_info = convertIndexToAddr(layer_id, dest_block_index);
 
@@ -181,7 +155,7 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
             if (src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
                 copy_params.add(dst_addr_info.kv_scale_addr,
                                 src_addr_info.kv_scale_addr,
-                                static_cast<size_t>(config_.kv_scale_stride_bytes),
+                                static_cast<size_t>(alloc_cfg.kv_scale_stride_bytes),
                                 copy_type);
             }
         }
@@ -207,36 +181,44 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
         return nullptr;
     }
 
-    auto block_cache = block_pool_->blockCache();
-    if (!block_cache) {
+    if (!external_block_cache_) {
         return nullptr;
     }
 
-    auto evict_result = block_cache->selectAndEvict(min_blocks_to_free);
+    auto evict_result = external_block_cache_->selectAndEvict(min_blocks_to_free);
     if (evict_result.evicted_keys.empty()) {
         return nullptr;
     }
 
+    const auto& alloc_cfg = ac();
+    const int   grp_nums  = alloc_cfg.groupNums();
+
     auto batch_resource = std::make_shared<BatchKVCacheResource>();
     batch_resource->resetBatchSize(1);
-    batch_resource->initGroups(config_.groupNums(), static_cast<int>(config_.layer_all_num), config_.layer_to_group_id);
+    batch_resource->initGroups(grp_nums, static_cast<int>(alloc_cfg.layer_num), alloc_cfg.layer_to_group_id);
     batch_resource->setLastBlockAligned(true);
 
-    for (int gid = 0; gid < config_.groupNums(); ++gid) {
+    for (int gid = 0; gid < grp_nums; ++gid) {
         batch_resource->mutableBlockIds(0, gid).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
     }
 
     size_t evicted_idx = 0;
     for (const auto cache_key : evict_result.evicted_keys) {
         batch_resource->pushBackCacheKey(0, cache_key);
-        auto& items = evict_result.evicted_items.at(cache_key);
-        for (const auto& item : items) {
-            auto& block_ids = batch_resource->mutableBlockIds(0, item.group_id);
-            RTP_LLM_CHECK_WITH_INFO(evicted_idx < block_ids.blocksNum(),
-                                    "evicted index out of range: idx=%zu, blocks_num=%zu",
-                                    evicted_idx,
-                                    block_ids.blocksNum());
-            block_ids.setAt(evicted_idx, item.block_index);
+        const auto& item = evict_result.evicted_items.at(cache_key);
+        // Extract blocks from slots[model_id=0][group_id] for the current allocator
+        if (!item.slots.empty()) {
+            for (int gid = 0; gid < static_cast<int>(item.slots[0].size()) && gid < config_.groupNums(); ++gid) {
+                const auto& slot = item.slots[0][gid];
+                if (slot.valid()) {
+                    auto& block_ids = batch_resource->mutableBlockIds(0, gid);
+                    RTP_LLM_CHECK_WITH_INFO(evicted_idx < block_ids.blocksNum(),
+                                            "evicted index out of range: idx=%zu, blocks_num=%zu",
+                                            evicted_idx,
+                                            block_ids.blocksNum());
+                    block_ids.setAt(evicted_idx, slot.block_id);
+                }
+            }
         }
         ++evicted_idx;
     }

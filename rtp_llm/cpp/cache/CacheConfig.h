@@ -8,166 +8,131 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 
 namespace rtp_llm {
 
-struct CacheConfig {
-    // Cache specification and layer mapping
-    std::vector<KVCacheSpecPtr>   cache_specs;
-    std::vector<std::vector<int>> global_layer_ids;  // including mtp module layers
-    std::vector<std::vector<int>> layer_ids;
-    std::vector<std::vector<int>> linear_groups;  // for hybrid attention
-    std::vector<std::vector<int>> full_groups;    // for hybrid attention
-    std::vector<CacheGroupType>   group_types;    // for hybrid attention
-    std::vector<CacheGroupType>   layer_attn_types;
-    std::vector<int>              layer_to_group_id;
-    std::vector<int>              layer_to_block_stride_bytes;
+struct KVCacheAllocatorConfig {
+    size_t   model_id  = 0;
+    uint32_t layer_num = 0;
 
-    // Model configuration
-    rtp_llm::DataType dtype;
-    uint32_t          layer_num;      // the number of main model layers
-    uint32_t          layer_all_num;  // the number of all layers including mtp modules
+    rtp_llm::DataType dtype     = rtp_llm::DataType::TYPE_FP16;
     bool              use_mla   = false;
     bool              is_sparse = false;
 
+    // KVCacheSpec & group structure
+    std::vector<KVCacheSpecPtr>   cache_specs;
+    std::vector<CacheGroupType>   group_types;
+    std::vector<CacheGroupType>   layer_attn_types;   // per-layer attention type (FULL/LINEAR)
+    std::vector<std::vector<int>> layer_ids;          // [group_id][local_layer_idx]
+    std::vector<int>              layer_to_group_id;  // layer_id -> group_id
+    std::vector<int>              layer_to_block_stride_bytes;
+
     // Block configuration
-    uint32_t block_num;
-    size_t   seq_size_per_block        = 1;
-    size_t   kernel_seq_size_per_block = 1;
+    uint32_t block_num          = 0;
+    size_t   seq_size_per_block = 1;
 
-    // Returns how many kernel blocks fit inside one physical (kv-manager) block.
-    size_t kernelBlocksPerKvBlock() const {
-        if (kernel_seq_size_per_block == 0) {
-            return 1;
-        }
-        return std::max<size_t>(1, seq_size_per_block / kernel_seq_size_per_block);
-    }
-
-    // Block sizing information
-    // ---- Per-block sizes (all layers) ----
+    // Per-block sizes (all layers combined)
     size_t kv_block_size_bytes = 0;
     size_t kv_scale_size_bytes = 0;
-    size_t block_size_bytes    = 0;  // (kv + scales together)
+    size_t block_size_bytes    = 0;
 
-    // ---- Per-block strides (one layer) ----
+    // Per-block strides (one layer)
     size_t kv_block_stride_bytes = 0;
     size_t kv_scale_stride_bytes = 0;
 
-    // Attention-specific configuration
-    int linear_step      = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
-    int group_layer_num  = 1;  // Number of layers per group for hybrid attention
-    int linear_group_num = 0;  // Number of linear attention groups
-    int full_group_num   = 0;  // Number of full attention groups
-
-    // mtp-model configurations
-    std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
-
-    CacheConfig() {}
+    // Attention-specific
+    int linear_step      = 1;
+    int group_layer_num  = 1;
+    int linear_group_num = 0;
+    int full_group_num   = 0;
 
     int groupNums() const {
         return std::max<int>(1, static_cast<int>(cache_specs.size()));
     }
 
     std::string debugString(size_t indent = 0) const {
+        const std::string  pad = std::string(indent, ' ');
+        std::ostringstream os;
+        os << pad << "KVCacheAllocatorConfig{model_id=" << model_id << ", layer_num=" << layer_num
+           << ", block_num=" << block_num << ", block_size_bytes=" << block_size_bytes
+           << ", kv_block_stride_bytes=" << kv_block_stride_bytes << ", groups=" << groupNums() << "}";
+        return os.str();
+    }
+};
+
+struct CacheConfig {
+    // Cross-model shared / aggregate parameters only.
+    // Per-model parameters live in allocator_configs[model_id].
+
+    // Block configuration (shared across all models)
+    size_t seq_size_per_block        = 1;
+    size_t kernel_seq_size_per_block = 0;
+
+    // Total layer count across all models (main + all MTP modules)
+    uint32_t layer_all_num = 0;
+
+    // Cross-model combined layer mappings (global layer_id space: main + MTP concatenated).
+    // Used by connectors (P/D separation) that transfer KV data across all models.
+    std::vector<int> layer_to_group_id;
+    std::vector<int> layer_to_block_stride_bytes;
+
+    // Per-model allocator configurations.
+    // Non-MTP: allocator_configs.size() == 1 (main model only).
+    // MTP:     allocator_configs.size() == 1 + num_mtp_modules.
+    std::vector<KVCacheAllocatorConfig> allocator_configs;
+
+    CacheConfig() {}
+
+    size_t kernelBlocksPerKvBlock() const {
+        if (kernel_seq_size_per_block == 0 || seq_size_per_block == 0) {
+            return 1;
+        }
+        return seq_size_per_block / kernel_seq_size_per_block;
+    }
+
+    size_t modelNum() const {
+        return std::max<size_t>(1, allocator_configs.size());
+    }
+
+    // Returns group count for the main model (delegates to allocator_configs[0]).
+    int groupNums() const {
+        if (allocator_configs.empty()) {
+            return 1;
+        }
+        return allocator_configs[0].groupNums();
+    }
+
+    const KVCacheAllocatorConfig& getAllocatorConfig(size_t model_id = 0) const {
+        RTP_LLM_CHECK_WITH_INFO(model_id < allocator_configs.size(),
+                                "model_id %zu out of range (allocator_configs.size()=%zu)",
+                                model_id,
+                                allocator_configs.size());
+        return allocator_configs[model_id];
+    }
+
+    std::string debugString(size_t indent = 0) const {
         const std::string indent_str = std::string(indent, ' ');
         const std::string indent1    = indent_str + "  ";
-        const std::string indent2    = indent_str + "    ";
 
         std::ostringstream os;
         os << indent_str << "CacheConfig{\n";
 
-// Macro to simplify repeated field output and eliminate duplicate field names
 #define OUTPUT_FIELD(field) os << indent1 << #field << "=" << field << "\n"
-
-// Helper macro for complex expressions
 #define OUTPUT_FIELD_EXPR(name, expr) os << indent1 << name << "=" << expr << "\n"
 
-        // Model configuration section
-        os << indent1 << "# Model Configuration:\n";
-        OUTPUT_FIELD_EXPR("dtype", static_cast<int>(dtype));
-        OUTPUT_FIELD(layer_num);
-        OUTPUT_FIELD(layer_all_num);
-        OUTPUT_FIELD_EXPR("use_mla", (use_mla ? "true" : "false"));
-        os << "\n";
-
-        // Block configuration section
-        os << indent1 << "# Block Configuration:\n";
-        OUTPUT_FIELD(block_num);
+        // Cross-model shared block configuration
+        os << indent1 << "# Block Configuration (shared):\n";
         OUTPUT_FIELD(seq_size_per_block);
-        OUTPUT_FIELD(kernel_seq_size_per_block);
+        OUTPUT_FIELD(layer_all_num);
         os << "\n";
 
-        // Block sizing information section
-        os << indent1 << "# Block Sizing Information:\n";
-        OUTPUT_FIELD(kv_block_size_bytes);
-        OUTPUT_FIELD(kv_scale_size_bytes);
-        OUTPUT_FIELD(block_size_bytes);
-        OUTPUT_FIELD(kv_block_stride_bytes);
-        OUTPUT_FIELD(kv_scale_stride_bytes);
-        os << "\n";
-
-        // Attention-specific configuration section
-        os << indent1 << "# Attention Configuration:\n";
-        OUTPUT_FIELD(linear_step);
-        OUTPUT_FIELD(group_layer_num);
-        OUTPUT_FIELD(linear_group_num);
-        OUTPUT_FIELD(full_group_num);
-        os << "\n";
-
-        // Cache specification section
-        os << indent1 << "# Cache Specifications:\n";
-        OUTPUT_FIELD_EXPR("cache_specs.size()", cache_specs.size());
-        for (size_t i = 0; i < cache_specs.size(); ++i) {
-            const auto& spec = cache_specs[i];
-            if (!spec) {
-                os << indent1 << "cache_specs[" << i << "]=null\n";
-                continue;
-            }
-
-            os << indent1 << "cache_specs[" << i << "] {\n";
-            os << spec->debugString(indent + 2);
-            os << indent1 << "}\n";
-        }
-        os << "\n";
-
-        // Layer mapping section
-        os << indent1 << "# Layer Mapping:\n";
-        OUTPUT_FIELD_EXPR("global_layer_ids.size()", global_layer_ids.size());
-        os << indent1 << "global_layer_ids=" << rtp_llm::vectorsToString(global_layer_ids) << "\n";
-        OUTPUT_FIELD_EXPR("layer_ids.size()", layer_ids.size());
-        os << indent1 << "layer_ids=" << rtp_llm::vectorsToString(layer_ids) << "\n";
-        OUTPUT_FIELD_EXPR("group_types.size()", group_types.size());
-        os << indent1 << "group_types=[";
-        for (size_t i = 0; i < group_types.size(); ++i) {
-            os << static_cast<int>(group_types[i]);
-            if (i + 1 < group_types.size()) {
-                os << ",";
-            }
-        }
-        os << "]\n";
-        OUTPUT_FIELD_EXPR("layer_attn_types.size()", layer_attn_types.size());
-        os << indent1 << "layer_attn_types=[";
-        for (size_t i = 0; i < layer_attn_types.size(); ++i) {
-            os << static_cast<int>(layer_attn_types[i]);
-            if (i + 1 < layer_attn_types.size()) {
-                os << ",";
-            }
-        }
-        os << "]\n";
-        os << "\n";
-
-        // mtp configurations section
-        os << indent1 << "# MTP Configurations:\n";
-        OUTPUT_FIELD_EXPR("mtp_sub_configs.size()", mtp_sub_configs.size());
-        for (size_t i = 0; i < mtp_sub_configs.size(); ++i) {
-            const auto& sub = mtp_sub_configs[i];
-            if (!sub) {
-                os << indent1 << "mtp_sub_configs[" << i << "]=null\n";
-                continue;
-            }
-            os << indent1 << "mtp_sub_configs[" << i << "]:\n";
-            os << sub->debugString(indent + 4);
+        // Allocator configs section
+        os << indent1 << "# Allocator Configs:\n";
+        OUTPUT_FIELD_EXPR("allocator_configs.size()", allocator_configs.size());
+        for (size_t i = 0; i < allocator_configs.size(); ++i) {
+            os << indent1 << "allocator_configs[" << i << "]: " << allocator_configs[i].debugString() << "\n";
         }
         os << "\n";
 

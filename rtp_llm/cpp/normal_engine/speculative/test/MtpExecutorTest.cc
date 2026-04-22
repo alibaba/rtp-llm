@@ -342,7 +342,12 @@ public:
                                                          rtp_llm::TYPE_INT8,
                                                          /*local_head_num_kv=*/128,
                                                          /*size_per_head=*/256);
-        cache_config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(mtp_config));
+        // MTP sub-model's allocator config goes into allocator_configs[1].
+        {
+            KVCacheAllocatorConfig mtp_alloc = mtp_config.getAllocatorConfig(0);
+            mtp_alloc.model_id               = 1;
+            cache_config.allocator_configs.push_back(std::move(mtp_alloc));
+        }
 
         EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
         params.sp_config        = sp_config;

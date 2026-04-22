@@ -116,10 +116,11 @@ bool DefaultLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Lo
 bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                                  std::vector<std::string>& location_spec_group_names) const {
     const auto& group_block_ids = resource->groupBlocks();
-    const auto& cache_keys      = resource->cacheKeys();
-    RTP_LLM_CHECK(!cache_keys.empty());
-    size_t valid_keys_size = cache_keys.size();
-    if (!resource->lastBlockAligned()) {
+    if (group_block_ids.empty()) {
+        return false;
+    }
+    size_t valid_keys_size = group_block_ids.front()->blocks().size();
+    if (!resource->lastBlockAligned() && valid_keys_size > 0) {
         valid_keys_size--;
     }
     location_spec_group_names.reserve(valid_keys_size);
@@ -253,10 +254,11 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResou
         RTP_LLM_LOG_WARNING("group size not equal, expect [%lu], real [%lu]", groups_.size(), group_block_ids.size());
         return false;
     }
-    const auto& cache_keys = resource->cacheKeys();
-    RTP_LLM_CHECK(!cache_keys.empty());
-    size_t valid_keys_size = cache_keys.size();
-    if (!resource->lastBlockAligned()) {
+    if (group_block_ids.empty()) {
+        return false;
+    }
+    size_t valid_keys_size = group_block_ids.front()->blocks().size();
+    if (!resource->lastBlockAligned() && valid_keys_size > 0) {
         valid_keys_size--;
     }
     location_spec_group_names.resize(valid_keys_size, {});

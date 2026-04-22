@@ -67,7 +67,7 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = mtp_module_num;
 
-    // NOTE: createSpConfig will fill global_layer_ids for main + MTP sub-models.
+    // NOTE: createSpConfig will populate allocator_configs for main + MTP sub-models.
     auto cfg = rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
                                                            propose_model_config,
                                                            parallelism_config,
@@ -94,110 +94,62 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 1);
 }
 
-TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
-    // Use createSpConfig logic so that global_layer_ids is filled for main + sub-model layers.
-    // main(2 layers) + mtp1(1 layer) + mtp2(1 layer)
+TEST_F(BlockPoolTest, MTPIndependentBlockPools) {
+    // After global_layer_id removal, each model (main + MTP sub-models) has its own
+    // independent BlockPool with model-local layer IDs starting from 0.
+    // Verify that per-model BlockPools use model-local layer IDs correctly.
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
-    ASSERT_FALSE(cache_cfg.global_layer_ids.empty());
-    ASSERT_EQ(cache_cfg.global_layer_ids[0].size(), static_cast<size_t>(cache_cfg.layer_all_num));
+    // allocator_configs[0] = main model, allocator_configs[1..] = MTP sub-models.
+    ASSERT_EQ(cache_cfg.allocator_configs.size(), 3u);  // main + 2 MTP modules
 
-    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
-    ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
-    ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->groupNums(), 1);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->groupNums(), 1);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->cache_specs[0]->block_size_bytes(),
-              cache_cfg.mtp_sub_configs[1]->cache_specs[0]->block_size_bytes());
+    // Main model: BlockPool with 2 layers, using local layer IDs [0, 1]
+    auto main_pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    // main_pool_cfg has memory_layouts[0].layer_num == 2 (plus MTP layouts)
+    ASSERT_GE(main_pool_cfg.memory_layouts.size(), 1u);
+    ASSERT_EQ(main_pool_cfg.memory_layouts[0].layer_num, 2u);
 
-    ASSERT_FALSE(cache_cfg.mtp_sub_configs[0]->global_layer_ids.empty());
-    ASSERT_FALSE(cache_cfg.mtp_sub_configs[1]->global_layer_ids.empty());
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->global_layer_ids[0].size(), 1u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->global_layer_ids[0].size(), 1u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->global_layer_ids[0][0], 2);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->global_layer_ids[0][0], 3);
-
-    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
-    ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
-    ASSERT_EQ(pool_cfg.memory_layouts[0].layer_num, 2u);
-    ASSERT_EQ(pool_cfg.memory_layouts[1].layer_num, 1u);
-    ASSERT_EQ(pool_cfg.memory_layouts[2].layer_num, 1u);
-
-    block_pool_ = std::make_shared<BlockPool>(pool_cfg);
+    block_pool_ = std::make_shared<BlockPool>(main_pool_cfg);
     ASSERT_TRUE(block_pool_->init());
 
-    const int global_main = 0;
-    const int global_mtp1 = static_cast<int>(pool_cfg.memory_layouts[0].layer_num);
-    const int global_mtp2 = global_mtp1 + 1;
+    // model-local layer 0 and layer 1 should have distinct addresses
+    auto addr0 = block_pool_->convertIndexToAddr(/*layer_id=*/0, /*block_id=*/1);
+    auto addr1 = block_pool_->convertIndexToAddr(/*layer_id=*/1, /*block_id=*/1);
+    ASSERT_NE(addr0.kv_addr, nullptr);
+    ASSERT_NE(addr1.kv_addr, nullptr);
+    EXPECT_NE(addr0.kv_addr, addr1.kv_addr);
 
-    const int block_id  = 1;
-    auto      base_addr = block_pool_->convertIndexToAddr(/*layer_id=*/0, /*block_id=*/0);
-    ASSERT_NE(base_addr.kv_addr, nullptr);
-    ASSERT_NE(base_addr.kv_scale_addr, nullptr);
-    const uintptr_t base = reinterpret_cast<uintptr_t>(base_addr.kv_addr);
+    // MTP sub-model: separate BlockPool with its own 1 layer, using local layer ID [0].
+    // Build per-model CacheConfig from allocator_configs[1].
+    CacheConfig mtp_cfg;
+    {
+        auto sub_alloc                      = cache_cfg.getAllocatorConfig(1);
+        sub_alloc.model_id                  = 0;  // local model_id within this per-model config
+        mtp_cfg.seq_size_per_block          = sub_alloc.seq_size_per_block;
+        mtp_cfg.layer_all_num               = sub_alloc.layer_num;
+        mtp_cfg.layer_to_group_id           = sub_alloc.layer_to_group_id;
+        mtp_cfg.layer_to_block_stride_bytes = sub_alloc.layer_to_block_stride_bytes;
+        mtp_cfg.allocator_configs           = {sub_alloc};
+    }
+    auto mtp_pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(mtp_cfg);
+    ASSERT_EQ(mtp_pool_cfg.memory_layouts.size(), 1u);
+    ASSERT_EQ(mtp_pool_cfg.memory_layouts[0].layer_num, 1u);
 
-    auto verify_one = [&](int global_layer, size_t expect_layout_idx, int expect_local_layer) {
-        const auto& layout_cfg = pool_cfg.memory_layouts[expect_layout_idx];
-        auto        addr       = block_pool_->convertIndexToAddr(global_layer, block_id);
-        ASSERT_NE(addr.kv_addr, nullptr);
-        ASSERT_NE(addr.kv_scale_addr, nullptr);
+    auto mtp_pool = std::make_shared<BlockPool>(mtp_pool_cfg);
+    ASSERT_TRUE(mtp_pool->init());
 
-        const size_t idx_in_layout = static_cast<size_t>(expect_local_layer) * static_cast<size_t>(layout_cfg.block_num)
-                                     + static_cast<size_t>(block_id);
-        const size_t expect_kv_off =
-            layout_cfg.kv_cache_offset_bytes + idx_in_layout * layout_cfg.kv_block_stride_bytes;
-        const size_t expect_sc_off =
-            layout_cfg.kv_scale_offset_bytes + idx_in_layout * layout_cfg.kv_scale_stride_bytes;
+    auto mtp_addr0 = mtp_pool->convertIndexToAddr(/*layer_id=*/0, /*block_id=*/1);
+    ASSERT_NE(mtp_addr0.kv_addr, nullptr);
 
-        EXPECT_EQ(reinterpret_cast<uintptr_t>(addr.kv_addr) - base, expect_kv_off);
-        EXPECT_EQ(reinterpret_cast<uintptr_t>(addr.kv_scale_addr) - base, expect_sc_off);
-
-        auto buf = block_pool_->convertIndexToBuffer(global_layer, block_id);
-        ASSERT_EQ(buf.size(), 2u);
-        ASSERT_NE(buf[0].addr, nullptr);
-        ASSERT_NE(buf[1].addr, nullptr);
-        EXPECT_EQ(buf[0].addr, addr.kv_addr);
-        EXPECT_EQ(buf[0].size_bytes, layout_cfg.kv_block_stride_bytes);
-        EXPECT_EQ(buf[1].addr, addr.kv_scale_addr);
-        EXPECT_EQ(buf[1].size_bytes, layout_cfg.kv_scale_stride_bytes);
-    };
-
-    verify_one(global_main, /*expect_layout_idx=*/0, /*expect_local_layer=*/0);
-    verify_one(global_mtp1, /*expect_layout_idx=*/1, /*expect_local_layer=*/0);
-    verify_one(global_mtp2, /*expect_layout_idx=*/2, /*expect_local_layer=*/0);
-
-    // Partitioned buffer correctness on mtp layer (heads=2, partition_count=2, partition_id=1)
-    const auto& mtp_layout_cfg = pool_cfg.memory_layouts[1];
-    auto        addr_mtp1      = block_pool_->convertIndexToAddr(global_mtp1, block_id);
-    ASSERT_NE(addr_mtp1.kv_addr, nullptr);
-    ASSERT_NE(addr_mtp1.kv_scale_addr, nullptr);
-    auto parts = block_pool_->convertIndexToBuffer(global_mtp1, block_id, /*partition_count=*/2, /*partition_id=*/1);
-    ASSERT_EQ(parts.size(), 4u);
-    ASSERT_NE(parts[0].addr, nullptr);
-    ASSERT_NE(parts[1].addr, nullptr);
-    ASSERT_NE(parts[2].addr, nullptr);
-    ASSERT_NE(parts[3].addr, nullptr);
-    EXPECT_EQ(parts[0].size_bytes, mtp_layout_cfg.k_block_stride_bytes / 2);
-    EXPECT_EQ(parts[1].size_bytes, mtp_layout_cfg.v_block_stride_bytes / 2);
-    EXPECT_EQ(parts[2].size_bytes, mtp_layout_cfg.k_scale_stride_bytes / 2);
-    EXPECT_EQ(parts[3].size_bytes, mtp_layout_cfg.v_scale_stride_bytes / 2);
-
-    const size_t k_bytes_per_head = mtp_layout_cfg.k_block_stride_bytes / 2;
-    const size_t v_bytes_per_head = mtp_layout_cfg.v_block_stride_bytes / 2;
-    const size_t k_off            = k_bytes_per_head;
-    const size_t v_off            = mtp_layout_cfg.k_block_stride_bytes + v_bytes_per_head;
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[0].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_addr), k_off);
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[1].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_addr), v_off);
-
-    const size_t sc_bytes_per_head = mtp_layout_cfg.k_scale_stride_bytes / 2;
-    const size_t sc_k_off          = sc_bytes_per_head;
-    const size_t sc_v_off          = mtp_layout_cfg.k_scale_stride_bytes + sc_bytes_per_head;
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[2].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_scale_addr),
-              sc_k_off);
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[3].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_scale_addr),
-              sc_v_off);
+    // Partitioned buffer correctness on MTP layer (heads=2, partition_count=2, partition_id=1)
+    auto mtp_parts = mtp_pool->convertIndexToBuffer(
+        /*layer_id=*/0, /*block_id=*/1, /*partition_count=*/2, /*partition_id=*/1);
+    ASSERT_EQ(mtp_parts.size(), 4u);
+    ASSERT_NE(mtp_parts[0].addr, nullptr);
+    const auto& mtp_layout_cfg = mtp_pool_cfg.memory_layouts[0];
+    EXPECT_EQ(mtp_parts[0].size_bytes, mtp_layout_cfg.k_block_stride_bytes / 2);
+    EXPECT_EQ(mtp_parts[1].size_bytes, mtp_layout_cfg.v_block_stride_bytes / 2);
 }
-
 // Allocation Test
 TEST_F(BlockPoolTest, AllocSingleBlock) {
     auto config = createTestConfig();

@@ -55,7 +55,7 @@ static void assertScaleEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_
     ASSERT_NE(addr_info.kv_scale_addr, nullptr);
     ASSERT_EQ(expected_k.size(), expected_v.size());
 
-    const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kv_scale_stride_bytes;
+    const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().getAllocatorConfig(0).kv_scale_stride_bytes;
     ASSERT_GT(kv_scale_stride_bytes, 0u);
     const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
     void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr_info.kv_scale_addr) + kv_scale_block_bytes);
@@ -86,7 +86,7 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
     ASSERT_TRUE(cache_manager->init());
 
-    EXPECT_EQ(cache_manager->cacheConfig().block_num, 1);
+    EXPECT_EQ(cache_manager->cacheConfig().getAllocatorConfig(0).block_num, 1);
 
     EXPECT_EQ(cache_manager->totalBlocksNum(), 0);
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
@@ -115,7 +115,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
-    auto&        spec    = cache_manager->cacheConfig().cache_specs[0];
+    auto&        spec    = cache_manager->cacheConfig().getAllocatorConfig(0).cache_specs[0];
     const size_t k_bytes = spec->k_block_size_bytes();
     const size_t v_bytes = spec->v_block_size_bytes();
     ASSERT_GT(k_bytes, 0u);
@@ -180,7 +180,7 @@ TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {
         auto host_k_t = torch::tensor(src_k, torch::kFloat32);
         auto host_v_t = torch::tensor(src_v, torch::kFloat32);
 
-        const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kv_scale_stride_bytes;
+        const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().getAllocatorConfig(0).kv_scale_stride_bytes;
         ASSERT_GT(kv_scale_stride_bytes, 0u);
         const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
         void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr.kv_scale_addr) + kv_scale_block_bytes);
@@ -212,7 +212,7 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
-    auto&        spec    = cache_manager->cacheConfig().cache_specs[0];
+    auto&        spec    = cache_manager->cacheConfig().getAllocatorConfig(0).cache_specs[0];
     const size_t k_bytes = spec->k_block_size_bytes();
     const size_t v_bytes = spec->v_block_size_bytes();
 
@@ -401,31 +401,22 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
-    ASSERT_NE(kv_cache_manager->allocator_, nullptr);
+    ASSERT_FALSE(kv_cache_manager->allocators_.empty());
     ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
 
     // Seed device block cache with keys: 10, 11, 12 (put makes MRU at front => snapshot order: 12,11,10)
-    auto block_cache = kv_cache_manager->allocator_->getBlockPool()->blockCache();
+    auto block_cache = kv_cache_manager->allocators_[0]->blockCache();
     ASSERT_NE(block_cache, nullptr);
     {
-        BlockCache::CacheItem item;
-        item.group_id    = 0;
-        item.is_resident = false;
-        item.cache_key   = 10;
-        item.block_index = 1;
-        ASSERT_TRUE(block_cache->put(item));
-        item.cache_key   = 11;
-        item.block_index = 2;
-        ASSERT_TRUE(block_cache->put(item));
-        item.cache_key   = 12;
-        item.block_index = 3;
-        ASSERT_TRUE(block_cache->put(item));
+        ASSERT_TRUE(block_cache->putSlot(10, 0, 0, 1, false));
+        ASSERT_TRUE(block_cache->putSlot(11, 0, 0, 2, false));
+        ASSERT_TRUE(block_cache->putSlot(12, 0, 0, 3, false));
     }
 
     // Inject a lightweight memory connector with a MemoryBlockCache snapshot:
     // put 11 then 13 => MRU order: 13,11 (11 duplicates device key)
     auto mem_connector = std::make_shared<KVCacheMemoryConnector>(
-        cache_config, kv_cache_config, kv_cache_manager->allocator_, std::vector<std::string>{});
+        cache_config, kv_cache_config, kv_cache_manager->allocators_[0], std::vector<std::string>{});
     mem_connector->block_cache_ = std::make_shared<MemoryBlockCache>();
     {
         MemoryBlockCache::CacheItem item;
@@ -473,9 +464,9 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailabl
     // The "device-only" kv cache would be totalBlocksNum() * seq_size_per_block.
     // With memory cache enabled, total_kv_cache/available_kv_cache should be >= device-only.
     const size_t device_only_total =
-        kv_cache_manager->allocator_->totalBlocksNum() * kv_cache_manager->cacheConfig().seq_size_per_block;
+        kv_cache_manager->allocators_[0]->totalBlocksNum() * kv_cache_manager->cacheConfig().seq_size_per_block;
     const size_t device_only_available =
-        kv_cache_manager->allocator_->availableBlocksNum() * kv_cache_manager->cacheConfig().seq_size_per_block;
+        kv_cache_manager->allocators_[0]->availableBlocksNum() * kv_cache_manager->cacheConfig().seq_size_per_block;
 
     EXPECT_GE(info.total_kv_cache, device_only_total);
     EXPECT_GE(info.available_kv_cache, device_only_available);

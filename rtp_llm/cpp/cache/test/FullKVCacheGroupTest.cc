@@ -4,6 +4,7 @@
 #include <thread>
 #include <atomic>
 #include <algorithm>
+#include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
@@ -20,13 +21,14 @@ protected:
 // ==================== Basic functionality tests ====================
 
 TEST_F(FullKVCacheGroupTest, NeedBlocksNumTest) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     block_pool->init();
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
-    FullKVCacheGroup group1({}, spec, block_pool, 0);
+    FullKVCacheGroup group1({}, spec, block_pool, block_cache, 0);
     ASSERT_EQ(2, group1.needBlocksNum(10, 1));
     ASSERT_EQ(0, group1.needBlocksNum(10, 5));
     ASSERT_EQ(1, group1.needBlocksNum(1, 0));
@@ -34,13 +36,14 @@ TEST_F(FullKVCacheGroupTest, NeedBlocksNumTest) {
 }
 
 TEST_F(FullKVCacheGroupTest, GetNeedBlocksTest) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     ASSERT_TRUE(block_pool->init());
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
-    FullKVCacheGroup group({}, spec, block_pool, 0);
+    FullKVCacheGroup group({}, spec, block_pool, block_cache, 0);
 
     // common=8 => 2 blocks, seq=12 reserve=3 => ceil(15/4)=4 blocks => extra=2
     const auto need =
@@ -56,13 +59,14 @@ TEST_F(FullKVCacheGroupTest, GetNeedBlocksTest) {
 }
 
 TEST_F(FullKVCacheGroupTest, RemoveSkippedBlocksTest) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     block_pool->init();
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
-    FullKVCacheGroup group1({}, spec, block_pool, 0);
+    FullKVCacheGroup group1({}, spec, block_pool, block_cache, 0);
 
     BlockIndicesType old_indices = {1, 2, 3, 4};
     BlockIds         block_ids(/*kernel_blocks_per_kv_block=*/1);
@@ -73,22 +77,20 @@ TEST_F(FullKVCacheGroupTest, RemoveSkippedBlocksTest) {
 
 TEST_F(FullKVCacheGroupTest, MatchTest) {
 
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     block_pool->init();
-    auto block_cache = block_pool->blockCache();
 
-    BlockCache::CacheItem item    = {101, 0, 1, false};
-    auto                  result1 = block_cache->put(item);
+    auto result1 = block_cache->putSlot(101, 0, 0, 1, false);
     EXPECT_TRUE(result1);
 
-    BlockCache::CacheItem item2   = {102, 0, 2, false};
-    auto                  result2 = block_cache->put(item2);
+    auto result2 = block_cache->putSlot(102, 0, 0, 2, false);
     EXPECT_TRUE(result2);
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
-    FullKVCacheGroup group1({}, spec, block_pool, 0);
+    FullKVCacheGroup group1({}, spec, block_pool, block_cache, 0);
 
     // zero math
     CacheKeysType cache_keys    = {103, 104, 105, 106};
@@ -107,12 +109,10 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
     ASSERT_EQ(match_result2.block_indices, expected_result);
 
     // all match
-    BlockCache::CacheItem item3   = {103, 0, 3, false};
-    auto                  result3 = block_cache->put(item3);
+    auto result3 = block_cache->putSlot(103, 0, 0, 3, false);
     EXPECT_TRUE(result3);
 
-    BlockCache::CacheItem item4   = {104, 0, 4, false};
-    auto                  result4 = block_cache->put(item4);
+    auto result4 = block_cache->putSlot(104, 0, 0, 4, false);
     EXPECT_TRUE(result4);
 
     cache_keys         = {101, 102, 103, 104};
@@ -125,7 +125,8 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
 }
 
 TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     block_pool->init();
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
     ASSERT_EQ(block_pool->availableBlocksNum(), 9);
@@ -133,7 +134,7 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
-    FullKVCacheGroup group1({}, spec, block_pool, 0);
+    FullKVCacheGroup group1({}, spec, block_pool, block_cache, 0);
 
     CacheKeysType cache_keys = {101, 102, 103};
     BlockIds      block_ids(/*kernel_blocks_per_kv_block=*/1);
@@ -155,7 +156,8 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
 }
 
 TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     block_pool->init();
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
     ASSERT_EQ(block_pool->availableBlocksNum(), 9);
@@ -163,7 +165,7 @@ TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
-    FullKVCacheGroup group1({}, spec, block_pool, 0);
+    FullKVCacheGroup group1({}, spec, block_pool, block_cache, 0);
 
     CacheKeysType cache_keys = {103, 104, 105, 106};
     BlockIds      block_ids(/*kernel_blocks_per_kv_block=*/1);
@@ -194,15 +196,15 @@ TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
 }
 
 TEST_F(FullKVCacheGroupTest, EnsureFreeBlocksTest) {
-    auto block_pool = createBlockPool();
+    auto block_pool  = createBlockPool();
+    auto block_cache = std::make_shared<BlockCache>();
     block_pool->init();
-    auto block_cache  = block_pool->blockCache();
     auto total_blocks = block_pool->freeBlocksNum();
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
-    FullKVCacheGroup group1({}, spec, block_pool, 0);
+    FullKVCacheGroup group1({}, spec, block_pool, block_cache, 0);
     ASSERT_EQ(true, group1.ensureFreeBlocks(5));
     ASSERT_EQ(block_pool->freeBlocksNum(), total_blocks);
     ASSERT_EQ(block_pool->availableBlocksNum(), total_blocks);

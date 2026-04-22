@@ -54,10 +54,6 @@ public:
     virtual bool              executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
     std::vector<CacheKeyType> memoryCacheKeys() const;
 
-    uint32_t convertToGlobalLayerId(int model_id, int layer_id) const override {
-        return allocator_->convertToGlobalLayerId(model_id, layer_id);
-    }
-
     /// Prefill-side StartLoad path; P2P connector wiring fills this in when enabled.
     virtual void handleRead(const P2PConnectorStartLoadRequestPB& request,
                             P2PConnectorStartLoadResponsePB&      response,

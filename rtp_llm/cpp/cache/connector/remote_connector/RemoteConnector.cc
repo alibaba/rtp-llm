@@ -179,22 +179,23 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                             sp_config,
                                             register_buffer_addr,
                                             register_buffer_size};
-    init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
+    init_params_                 = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
+    const auto&          main_ac = cache_config.getAllocatorConfig(0);
     std::vector<int32_t> full_group_ids, linear_group_ids;
-    if (cache_config.linear_group_num == 0) {
+    if (main_ac.linear_group_num == 0) {
         full_group_ids.push_back(0);
         group_policy_ =
             std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_ids, linear_group_ids);
     } else {
-        for (int32_t group_id = 0; static_cast<size_t>(group_id) < cache_config.group_types.size(); group_id++) {
-            if (cache_config.group_types[group_id] == CacheGroupType::FULL) {
+        for (int32_t group_id = 0; static_cast<size_t>(group_id) < main_ac.group_types.size(); group_id++) {
+            if (main_ac.group_types[group_id] == CacheGroupType::FULL) {
                 full_group_ids.push_back(group_id);
             } else {
                 linear_group_ids.push_back(group_id);
             }
         }
         group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
-            allocator, full_group_ids, linear_group_ids, std::max(1, cache_config.linear_step));
+            allocator, full_group_ids, linear_group_ids, std::max(1, main_ac.linear_step));
     }
 }
 
@@ -215,7 +216,7 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
     assert(group_size > 0);
     auto location_spec_info_map_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecInfoMap>();
     // TODO : support different byte_size_per_block (transfer client not support now)
-    size_t                   byte_size_per_block = init_params_->cache_config.block_size_bytes;
+    size_t                   byte_size_per_block = init_params_->cache_config.getAllocatorConfig(0).block_size_bytes;
     std::vector<std::string> all_group_names;
     std::vector<uint64_t>    all_group_name_bithashs;
     all_group_names.reserve(group_size);
@@ -300,8 +301,9 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
 
     // ModelDeployment
     const auto& model_name   = init_params_->runtime_config.model_name;
-    const auto& dtype_str    = getDataTypeStr(init_params_->cache_config.dtype);  // TODO(zhoushipei.zsp) is this right?
-    bool        use_mla      = init_params_->cache_config.use_mla;
+    const auto& rc_main_ac   = init_params_->cache_config.getAllocatorConfig(0);
+    const auto& dtype_str    = getDataTypeStr(rc_main_ac.dtype);  // TODO(zhoushipei.zsp) is this right?
+    bool        use_mla      = rc_main_ac.use_mla;
     int64_t     tp_size      = init_params_->parallelism_config.tp_size;
     int64_t     dp_size      = init_params_->parallelism_config.dp_size;
     int         fp8_kv_cache = init_params_->kv_cache_config.fp8_kv_cache;
@@ -314,7 +316,7 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
     auto [location_spec_info_map, location_spec_groups] = genLocationSpecInfoMapAndGroups(tp_size);
 
     std::string draft_model_info = "";
-    if (init_params_->cache_config.mtp_sub_configs.size() != 0) {
+    if (init_params_->cache_config.modelNum() > 1) {
         draft_model_info += '{' + init_params_->sp_config.to_string() + '}';
     }
 
@@ -589,10 +591,10 @@ void RemoteConnector::asyncMatchTask(const std::shared_ptr<KVCacheResource>&    
         resource->deviceReuseBlockNum(),
         resource->memoryReuseBlockNum(),
         resource->remoteReuseBlockNum(),
-        resource->cacheKeys().size());
+        meta->cacheKeys().size());
 
     // do not match last block, whether last block aligned or not
-    auto keys = resource->cacheKeys();
+    auto keys = meta->cacheKeys();
 
     if (!keys.empty()) {
         keys.pop_back();
@@ -630,7 +632,7 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
         resource->deviceReuseBlockNum(),
         resource->memoryReuseBlockNum(),
         resource->remoteReuseBlockNum(),
-        resource->cacheKeys().size());
+        match_context->matchedBlockCount());
     const std::string& match_trace_id = match_context->trace_id();
     RTP_LLM_LOG_DEBUG("start_block_index:[%d], reuse_size:[%d]", start_block_index, reuse_size);
     assert(start_block_index >= match_context->prev_reuse_blocks_num());
@@ -680,8 +682,8 @@ void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&    
         resource->deviceReuseBlockNum(),
         resource->memoryReuseBlockNum(),
         resource->remoteReuseBlockNum(),
-        resource->cacheKeys().size());
-    auto keys = resource->cacheKeys();
+        meta->cacheKeys().size());
+    auto keys = meta->cacheKeys();
     if (!keys.empty() && !resource->lastBlockAligned()) {
         keys.pop_back();
     }

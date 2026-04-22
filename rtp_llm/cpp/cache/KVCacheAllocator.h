@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 
 namespace rtp_llm {
@@ -33,9 +34,9 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
-    virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                            const CacheKeysType&   cache_keys,
-                                                            bool                   is_connector = false)            = 0;
+    virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const ModelKVResources& model_resources,
+                                                            const CacheKeysType&    cache_keys,
+                                                            bool                    is_connector = false)            = 0;
 
     virtual CacheLayerLayout allLayerCacheBase() const                                     = 0;
     virtual bool             updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -55,6 +56,31 @@ public:
 
     BlockPoolPtr getBlockPool() const {
         return block_pool_;
+    }
+
+    // Returns the BlockCache held by this allocator.
+    // Valid after init() has been called.
+    BlockCachePtr blockCache() const {
+        return external_block_cache_;
+    }
+
+    // Inject a shared BlockCache before init(). When set, this instance will be used
+    // instead of creating a per-allocator BlockCache.
+    void setExternalBlockCache(BlockCachePtr block_cache) {
+        external_block_cache_ = std::move(block_cache);
+    }
+
+    // Convenience accessor: returns this allocator's per-model config (allocator_configs[0]).
+    // Valid only when config_.allocator_configs is non-empty (after createBasicConfig / createSpConfig).
+    const KVCacheAllocatorConfig& ac() const {
+        RTP_LLM_CHECK_WITH_INFO(!config_.allocator_configs.empty(),
+                                "KVCacheAllocator::ac() called but allocator_configs is empty");
+        return config_.allocator_configs[0];
+    }
+
+    // Returns this allocator's model_id (from its per-model config).
+    size_t modelId() const {
+        return config_.allocator_configs.empty() ? 0 : config_.allocator_configs[0].model_id;
     }
 
     // Reserve some blocks for already-running streams' future allocations.
@@ -79,8 +105,6 @@ public:
     size_t                  availableTokensNum() const;
     size_t                  totalBlocksNum() const;
     size_t                  maxAvailableTokensNum() const;
-    /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
-    uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
 protected:
     virtual bool         doInit() = 0;
@@ -93,6 +117,7 @@ protected:
     CacheConfig                        config_;
     AllocationType                     allocation_type_;
     BlockPoolPtr                       block_pool_;
+    BlockCachePtr                      external_block_cache_;
     const kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 
     size_t  reserve_block_num_{0};

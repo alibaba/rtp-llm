@@ -74,7 +74,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
     }
 
     auto collector           = std::make_shared<DecodeSchedulerMetricsCollector>(metrics_reporter_);
-    auto layer_cache_buffers = LayerCacheBufferUtil::convert(*resource, 0, block_range.first, block_range.second);
+    auto layer_cache_buffers = LayerCacheBufferUtil::convert(*resource, {}, 0, block_range.first, block_range.second);
     if (layer_cache_buffers.empty()) {
         RTP_LLM_LOG_WARNING("asyncRead: layer_cache_buffers is empty");
         collector->success = false;

@@ -398,7 +398,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         rpc_context.stub  = connect_status.value().stub;
         BroadcastLoadRequestPB load_request;
 
-        if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
+        if (engine_->resourceContext().cache_manager->cacheConfig().getAllocatorConfig(0).use_mla) {
             load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
         } else {
             load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
@@ -522,7 +522,7 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
             ClientContext          client_context;
             BroadcastLoadRequestPB load_request;
 
-            if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
+            if (engine_->resourceContext().cache_manager->cacheConfig().getAllocatorConfig(0).use_mla) {
                 load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
             } else {
                 load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
@@ -582,9 +582,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
-    const bool   use_mla       = cache_config.use_mla;
+    const auto&  dc_main_ac    = cache_config.getAllocatorConfig(0);
+    const bool   use_mla       = dc_main_ac.use_mla;
     const bool   use_hybrid    = cache_config.groupNums() > 1;
-    const auto&  spec          = cache_config.cache_specs[0];
+    const auto&  spec          = dc_main_ac.cache_specs[0];
     const size_t k_total_bytes = spec->k_block_size_bytes();
     const size_t v_total_bytes = spec->v_block_size_bytes();
 
@@ -632,10 +633,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             block_pos_list.reserve(block_num);
             if (use_hybrid && block_num > 0) {
                 CacheGroupType group_type = CacheGroupType::FULL;
-                if (layer_id < cache_config.layer_to_group_id.size() && !cache_config.group_types.empty()) {
+                if (layer_id < cache_config.layer_to_group_id.size() && !dc_main_ac.group_types.empty()) {
                     const int gid = cache_config.layer_to_group_id[layer_id];
-                    if (gid >= 0 && static_cast<size_t>(gid) < cache_config.group_types.size()) {
-                        group_type = cache_config.group_types[static_cast<size_t>(gid)];
+                    if (gid >= 0 && static_cast<size_t>(gid) < dc_main_ac.group_types.size()) {
+                        group_type = dc_main_ac.group_types[static_cast<size_t>(gid)];
                     }
                 }
                 if (group_type == CacheGroupType::LINEAR) {
@@ -708,13 +709,14 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     const auto&  mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
                     const size_t layer_num     = mtp_engine_init_params->model_config_.num_layers;
 
-                    RTP_LLM_CHECK_WITH_INFO(layer_num == mtp_cache_cfg.layer_num,
+                    RTP_LLM_CHECK_WITH_INFO(layer_num == mtp_cache_cfg.getAllocatorConfig(0).layer_num,
                                             "mtp layer_num mismatch: engine=" + std::to_string(layer_num)
-                                                + " cache_cfg=" + std::to_string(mtp_cache_cfg.layer_num)
+                                                + " cache_cfg="
+                                                + std::to_string(mtp_cache_cfg.getAllocatorConfig(0).layer_num)
                                                 + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
-                    RTP_LLM_CHECK_WITH_INFO(
-                        !mtp_cache_cfg.global_layer_ids.empty(),
-                        "mtp_cache_cfg.global_layer_ids is empty (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
+
+                    // allocator index: main model=0, MTP sub-models start at 1
+                    const size_t kv_allocator_model_id = mtp_model_id + 1;
 
                     for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                         auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
@@ -738,19 +740,19 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         auto        block_num = block_ids.size();
                         size_t      model_id  = mtp_base_model_id;
 
-                        // Use per-module global_layer_ids for address lookup.
-                        const int global_layer_id = mtp_cache_cfg.global_layer_ids[0][layer_id];
-
                         // Hybrid cache: Linear group only needs the last block; Full group needs all blocks.
                         std::vector<size_t> block_pos_list;
                         block_pos_list.reserve(block_num);
                         if (mtp_use_hybrid && block_num > 0) {
                             CacheGroupType group_type = CacheGroupType::FULL;
                             if (layer_id < mtp_cache_cfg.layer_to_group_id.size()
-                                && !mtp_cache_cfg.group_types.empty()) {
+                                && !mtp_cache_cfg.getAllocatorConfig(0).group_types.empty()) {
                                 const int gid = mtp_cache_cfg.layer_to_group_id[layer_id];
-                                if (gid >= 0 && static_cast<size_t>(gid) < mtp_cache_cfg.group_types.size()) {
-                                    group_type = mtp_cache_cfg.group_types[static_cast<size_t>(gid)];
+                                if (gid >= 0
+                                    && static_cast<size_t>(gid)
+                                           < mtp_cache_cfg.getAllocatorConfig(0).group_types.size()) {
+                                    group_type =
+                                        mtp_cache_cfg.getAllocatorConfig(0).group_types[static_cast<size_t>(gid)];
                                 }
                             }
                             if (group_type == CacheGroupType::LINEAR) {
@@ -772,11 +774,15 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             auto cache_key =
                                 makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
                             auto       block_id       = block_ids[block_pos];
-                            const bool mtp_use_mla    = mtp_cache_cfg.use_mla;
+                            const bool mtp_use_mla    = mtp_cache_cfg.getAllocatorConfig(0).use_mla;
                             const int  local_part_cnt = peer_cnt;
                             const int  local_part_id  = i;
-                            auto       parts          = cache_manager->convertIndexToBuffer(
-                                block_id, global_layer_id, local_part_cnt, local_part_id);
+                            // Use model-local layer_id + kv_allocator_model_id to index into the correct allocator.
+                            auto parts = cache_manager->convertIndexToBuffer(block_id,
+                                                                             static_cast<int>(layer_id),
+                                                                             local_part_cnt,
+                                                                             local_part_id,
+                                                                             kv_allocator_model_id);
 
                             auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                                 RTP_LLM_CHECK_WITH_INFO(

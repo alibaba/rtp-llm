@@ -361,8 +361,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
-        model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
+        model_input.kv_block_stride_bytes   = mtp_cache_cfg.getAllocatorConfig(0).kv_block_stride_bytes;
+        model_input.kv_scale_stride_bytes   = mtp_cache_cfg.getAllocatorConfig(0).kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         draft_model_output                  = std::move(draft_model_->forward(model_input));
     }
@@ -644,8 +644,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_draft_prefill_input)");
         maybePrintModelInput(model_input, "decode post draft model");
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
-        model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
+        model_input.kv_block_stride_bytes   = mtp_cache_cfg.getAllocatorConfig(0).kv_block_stride_bytes;
+        model_input.kv_scale_stride_bytes   = mtp_cache_cfg.getAllocatorConfig(0).kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
     }
 
@@ -801,8 +801,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     buffer_holder_.release();
 
     const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
-    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
+    model_input.kv_block_stride_bytes = mtp_cache_cfg.getAllocatorConfig(0).kv_block_stride_bytes;
+    model_input.kv_scale_stride_bytes = mtp_cache_cfg.getAllocatorConfig(0).kv_scale_stride_bytes;
 
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_ids_list;
@@ -886,8 +886,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         execBroadcast({{model_input.combo_tokens}, 0});
 
         const auto& cache_cfg             = cache_manager_->cacheConfig();
-        model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes = cache_cfg.kv_scale_stride_bytes;
+        model_input.kv_block_stride_bytes = cache_cfg.getAllocatorConfig(0).kv_block_stride_bytes;
+        model_input.kv_scale_stride_bytes = cache_cfg.getAllocatorConfig(0).kv_scale_stride_bytes;
     }
 }
 

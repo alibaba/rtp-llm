@@ -49,30 +49,16 @@ void BlockPool::initializeCacheBuffer() {
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
 }
 
-void BlockPool::initializeLayerMappings() {
-    torch::Tensor full_tensor = cache_aligned_buffer_;
-
-    size_t total_layers = 0;
-    for (const auto& layout_cfg : config_.memory_layouts) {
-        total_layers += static_cast<size_t>(layout_cfg.layer_num);
-    }
-    global_layer_to_local_.assign(total_layers, {-1, -1});
-    global_layer_kv_tensors_.assign(total_layers, torch::Tensor());
-    global_layer_kv_scale_tensors_.assign(total_layers, torch::Tensor());
-}
-
 void BlockPool::initializeLayoutStrategies() {
     layout_strategies_.resize(config_.memory_layouts.size());
     torch::Tensor full_tensor = cache_aligned_buffer_;
 
-    size_t global_layer_begin = 0;
     for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
-        processMemoryLayout(layout_idx, full_tensor, global_layer_begin);
-        global_layer_begin += static_cast<size_t>(config_.memory_layouts[layout_idx].layer_num);
+        processMemoryLayout(layout_idx, full_tensor);
     }
 }
 
-void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor, size_t& global_layer_begin) {
+void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor) {
     const auto& layout_cfg = config_.memory_layouts[layout_idx];
 
     // 创建 KV 缓存张量
@@ -93,9 +79,6 @@ void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full
 
     // 初始化内存布局策略
     initializeLayoutStrategy(layout_idx, layout_cfg, kv_cache_tensor, kv_scale_tensor);
-
-    // 处理层张量映射
-    processLayerTensors(layout_idx, layout_cfg, global_layer_begin);
 
     // 记录初始化信息
     RTP_LLM_LOG_INFO(
@@ -139,56 +122,16 @@ void BlockPool::initializeLayoutStrategy(size_t                    layout_idx,
         layout_idx);
 }
 
-void BlockPool::processLayerTensors(size_t                    layout_idx,
-                                    const MemoryLayoutConfig& layout_cfg,
-                                    size_t&                   global_layer_begin) {
-    // 获取层张量
-    auto layer_tensors = layout_strategies_[layout_idx]->getLayerCacheTensors();
-    RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() == static_cast<size_t>(layout_cfg.layer_num),
-                            "layout[%zu] layer tensors size mismatch: got=%zu expect=%u",
-                            layout_idx,
-                            layer_tensors.size(),
-                            layout_cfg.layer_num);
-
-    // 映射全局层到局部层，并设置KV张量
-    for (size_t local_layer = 0; local_layer < static_cast<size_t>(layout_cfg.layer_num); ++local_layer) {
-        const size_t global_layer = global_layer_begin + local_layer;
-        RTP_LLM_CHECK_WITH_INFO(global_layer < global_layer_to_local_.size(), "global layer index out of range");
-        global_layer_to_local_[global_layer]   = {static_cast<int>(layout_idx), static_cast<int>(local_layer)};
-        global_layer_kv_tensors_[global_layer] = layer_tensors[local_layer];
-    }
-
-    // 处理缩放张量（如果存在）
-    auto scale_tensors = layout_strategies_[layout_idx]->getLayerScaleCacheTensors();
-    if (!scale_tensors.empty()) {
-        RTP_LLM_CHECK_WITH_INFO(scale_tensors.size() == static_cast<size_t>(layout_cfg.layer_num),
-                                "layout[%zu] scale tensors size mismatch: got=%zu expect=%u",
-                                layout_idx,
-                                scale_tensors.size(),
-                                layout_cfg.layer_num);
-        for (size_t local_layer = 0; local_layer < static_cast<size_t>(layout_cfg.layer_num); ++local_layer) {
-            const size_t global_layer                    = global_layer_begin + local_layer;
-            global_layer_kv_scale_tensors_[global_layer] = scale_tensors[local_layer];
-        }
-    }
-}
-
 bool BlockPool::init() {
     validateConfig();
     initializeCacheBuffer();
-    initializeLayerMappings();
     initializeLayoutStrategies();
     initFreeBlocks();
 
-    RTP_LLM_LOG_INFO("BlockPool init success: memory_layouts=%zu, total_layers=%zu, total_size=%zu bytes",
-                     config_.memory_layouts.size(),
-                     global_layer_to_local_.size(),
-                     config_.total_size_bytes);
+    const size_t total_layers = layout_strategies_.empty() ? 0 : layout_strategies_[0]->getLayerCacheTensors().size();
+    RTP_LLM_LOG_INFO(
+        "BlockPool init success: layer_num=%zu, total_size=%zu bytes", total_layers, config_.total_size_bytes);
     return true;
-}
-
-BlockCachePtr BlockPool::blockCache() {
-    return block_cache_;
 }
 
 void BlockPool::initFreeBlocks() {
@@ -201,15 +144,20 @@ void BlockPool::initFreeBlocks() {
     req_con_ref_counter_.init(config_.block_num);
     block_cache_ref_counter_.init(config_.block_num);
     req_cache_ref_counter_.init(config_.block_num);
-    block_cache_ = std::make_shared<BlockCache>();
 }
 
 std::vector<torch::Tensor> BlockPool::allLayerCacheBase() const {
-    return global_layer_kv_tensors_;
+    if (layout_strategies_.empty() || !layout_strategies_[0]) {
+        return {};
+    }
+    return layout_strategies_[0]->getLayerCacheTensors();
 }
 
 std::vector<torch::Tensor> BlockPool::allLayerScaleCacheBase() const {
-    return global_layer_kv_scale_tensors_;
+    if (layout_strategies_.empty() || !layout_strategies_[0]) {
+        return {};
+    }
+    return layout_strategies_[0]->getLayerScaleCacheTensors();
 }
 
 BlockIndicesType BlockPool::malloc(int num_blocks) {
@@ -466,48 +414,27 @@ size_t BlockPool::notInUseBlocksNum() const {
     return req_cache_ref_counter_.freeBlockNum();
 }
 
-// MTP support: Map global_layer_id to (model_index, local_layer_id).
-// Returns {layout_index, local_layer_id}. layout_index is the index in BlockPoolConfig.memory_layouts.
-std::pair<int, int> BlockPool::mapGlobalLayerIdToLocal(int global_layer_id) const {
-    if (global_layer_id < 0 || static_cast<size_t>(global_layer_id) >= global_layer_to_local_.size()) {
-        RTP_LLM_LOG_ERROR(
-            "Global layer_id %d out of range (total layers: %zu)", global_layer_id, global_layer_to_local_.size());
-        return {-1, -1};
-    }
-
-    return global_layer_to_local_[static_cast<size_t>(global_layer_id)];
-}
-
 BlockAddrInfo BlockPool::convertIndexToAddr(int layer_id, int block_id) const {
-    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    checkLayoutValidity(layout_index);
-    return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToAddr(local_layer_id, block_id);
+    RTP_LLM_CHECK_WITH_INFO(!layout_strategies_.empty() && layout_strategies_[0],
+                            "BlockPool not initialized (no layout strategy)");
+    return layout_strategies_[0]->convertIndexToAddr(layer_id, block_id);
 }
 
 std::vector<BlockInfo> BlockPool::convertIndexToBuffer(int layer_id, int block_id) const {
-    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    checkLayoutValidity(layout_index);
-    return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(local_layer_id, block_id);
+    RTP_LLM_CHECK_WITH_INFO(!layout_strategies_.empty() && layout_strategies_[0],
+                            "BlockPool not initialized (no layout strategy)");
+    return layout_strategies_[0]->convertIndexToBuffer(layer_id, block_id);
 }
 
 std::vector<BlockInfo>
 BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
-    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    checkLayoutValidity(layout_index);
-
-    return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(
-        local_layer_id, block_id, partition_count, partition_id);
+    RTP_LLM_CHECK_WITH_INFO(!layout_strategies_.empty() && layout_strategies_[0],
+                            "BlockPool not initialized (no layout strategy)");
+    return layout_strategies_[0]->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
 MemoryType BlockPool::where() const {
     return cache_aligned_buffer_.is_cuda() ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
-}
-
-void BlockPool::checkLayoutValidity(int layout_id) const {
-    RTP_LLM_CHECK_WITH_INFO(layout_id >= 0 && static_cast<size_t>(layout_id) < layout_strategies_.size(),
-                            "Memory layout ID %d out of range (max: %zu)",
-                            layout_id,
-                            layout_strategies_.size());
 }
 
 }  // namespace rtp_llm

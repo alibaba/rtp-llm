@@ -25,8 +25,8 @@ public:
     ~KVCacheConnectorReadWriteContextImpl() override = default;
 
 public:
-    const KVCacheResource& kvCacheResource() const override {
-        return batch_resource_->cacheResource(0);
+    const ModelKVResources& modelKVResources() const override {
+        return batch_resource_->modelResources(0);
     }
     const std::shared_ptr<Meta>& meta() const override {
         return meta_;
@@ -39,8 +39,14 @@ private:
 
 class MetaImpl: public Meta {
 public:
-    MetaImpl(bool enable_memory_cache, bool enable_remote_cache, std::string trace_id):
-        enable_memory_cache_(enable_memory_cache), enable_remote_cache_(enable_remote_cache), trace_id_(trace_id) {}
+    MetaImpl(bool                        enable_memory_cache,
+             bool                        enable_remote_cache,
+             std::string                 trace_id,
+             const std::vector<int64_t>& cache_keys):
+        enable_memory_cache_(enable_memory_cache),
+        enable_remote_cache_(enable_remote_cache),
+        trace_id_(trace_id),
+        cache_keys_(cache_keys) {}
     virtual ~MetaImpl() = default;
 
 public:
@@ -58,6 +64,9 @@ public:
     }
     const std::vector<int64_t>& tokens() const override {
         return tokens_;
+    }
+    const std::vector<int64_t>& cacheKeys() const override {
+        return cache_keys_;
     }
 
     // P2P read extension field
@@ -94,6 +103,7 @@ private:
     std::string          trace_id_;
     std::string          unique_id_ = "";
     std::vector<int64_t> tokens_;  // TODO : get tokens (remote connector)
+    std::vector<int64_t> cache_keys_;
 };
 
 // ----------------------------- P2P Side-Channel Apply -----------------------------
@@ -195,26 +205,33 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 // ----------------------------- StreamCacheResource -----------------------------
 
 void StreamCacheResource::init(int batch_size) {
-    batch_kv_cache_resource_->resetBatchSize(batch_size);
-    int                         group_nums     = 1;
-    int                         layer_all_num  = 0;
-    std::vector<int>            layer_to_group = {};
-    std::vector<CacheGroupType> group_types    = {};
-
+    size_t model_num                  = 1;
     size_t kernel_blocks_per_kv_block = 1;
+
     if (resource_context_.cache_manager) {  // cache manager is null when warmup
+        model_num                = resource_context_.cache_manager->allocatorCount();
         const auto& cache_config = resource_context_.cache_manager->cacheConfig();
-        group_nums               = cache_config.groupNums();
-        layer_all_num            = static_cast<int>(cache_config.layer_all_num);
-        layer_to_group           = cache_config.layer_to_group_id;
-        group_types              = cache_config.group_types;
         if (cache_config.kernel_seq_size_per_block > 0 && cache_config.seq_size_per_block > 0) {
             kernel_blocks_per_kv_block = cache_config.seq_size_per_block / cache_config.kernel_seq_size_per_block;
         }
     }
 
-    batch_kv_cache_resource_->initGroups(
-        group_nums, layer_all_num, layer_to_group, kernel_blocks_per_kv_block, group_types);
+    batch_kv_cache_resource_->resetBatchSize(batch_size, model_num);
+
+    if (resource_context_.cache_manager) {
+        const auto& cache_config = resource_context_.cache_manager->cacheConfig();
+        for (size_t mid = 0; mid < model_num; ++mid) {
+            const auto& ac = cache_config.getAllocatorConfig(mid);
+            batch_kv_cache_resource_->initGroups(ac.groupNums(),
+                                                 static_cast<int>(ac.layer_num),
+                                                 ac.layer_to_group_id,
+                                                 kernel_blocks_per_kv_block,
+                                                 ac.group_types,
+                                                 mid);
+        }
+    } else {
+        batch_kv_cache_resource_->initGroups(1, 0, {}, kernel_blocks_per_kv_block);
+    }
     resource_released_ = false;
 }
 
@@ -409,8 +426,10 @@ bool StreamCacheResource::asyncLoadCache() {
     if (load_cache_once_.exchange(true)) {
         return true;
     }
-    auto meta = std::make_shared<MetaImpl>(
-        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
+    auto meta              = std::make_shared<MetaImpl>(reuseCache() && enableMemoryCache(),
+                                           reuseCache() && enableRemoteCache(),
+                                           stream_->traceId(),
+                                           batch_kv_cache_resource_->cacheKeys(0));
     meta->generate_stream_ = stream_;
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
@@ -518,24 +537,32 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 }
 
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
-    fake_inited_ = true;
-    batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
-    int                         group_nums                 = 1;
-    int                         layer_all_num              = 0;
-    size_t                      kernel_blocks_per_kv_block = 1;
-    std::vector<int>            layer_to_group             = {};
-    std::vector<CacheGroupType> group_types                = {};
+    fake_inited_                      = true;
+    size_t model_num                  = 1;
+    size_t kernel_blocks_per_kv_block = 1;
 
     if (resource_context_.cache_manager) {
+        model_num                  = resource_context_.cache_manager->allocatorCount();
         const auto& cache_config   = resource_context_.cache_manager->cacheConfig();
-        group_nums                 = cache_config.groupNums();
-        layer_all_num              = static_cast<int>(cache_config.layer_all_num);
-        layer_to_group             = cache_config.layer_to_group_id;
-        group_types                = cache_config.group_types;
         kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     }
-    batch_kv_cache_resource_->initGroups(
-        group_nums, layer_all_num, layer_to_group, kernel_blocks_per_kv_block, group_types);
+
+    batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize(), model_num);
+
+    if (resource_context_.cache_manager) {
+        const auto& cache_config = resource_context_.cache_manager->cacheConfig();
+        for (size_t mid = 0; mid < model_num; ++mid) {
+            const auto& ac = cache_config.getAllocatorConfig(mid);
+            batch_kv_cache_resource_->initGroups(ac.groupNums(),
+                                                 static_cast<int>(ac.layer_num),
+                                                 ac.layer_to_group_id,
+                                                 kernel_blocks_per_kv_block,
+                                                 ac.group_types,
+                                                 mid);
+        }
+    } else {
+        batch_kv_cache_resource_->initGroups(1, 0, {}, kernel_blocks_per_kv_block);
+    }
 
     reserved_blocks = std::max(1ul, reserved_blocks);
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
@@ -581,8 +608,10 @@ void StreamCacheResource::loadCacheSync() {
     if (load_cache_once_.exchange(true)) {
         return;
     }
-    auto meta = std::make_shared<MetaImpl>(
-        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
+    auto meta              = std::make_shared<MetaImpl>(reuseCache() && enableMemoryCache(),
+                                           reuseCache() && enableRemoteCache(),
+                                           stream_->traceId(),
+                                           batch_kv_cache_resource_->cacheKeys(0));
     meta->generate_stream_ = stream_;
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
@@ -641,7 +670,8 @@ void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<Fu
 std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
     const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
+    auto meta = std::make_shared<MetaImpl>(
+        enable_memory_cache, enable_remote_cache, stream_->traceId(), batch_resource->cacheKeys(0));
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
     auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
     if (resource_context_.write_cache_sync) {
@@ -703,7 +733,7 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    auto type_list = resource_context_.cache_manager->cacheConfig().group_types;
+    const auto& type_list = resource_context_.cache_manager->cacheConfig().getAllocatorConfig(0).group_types;
 
     for (size_t i = 0; i < type_list.size(); i++) {
         if (type_list[i] == CacheGroupType::LINEAR) {
@@ -713,9 +743,9 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
 }
 
 void StreamCacheResource::holdKVCacheForPDSep() {
-    auto&       resource   = batch_kv_cache_resource_->cacheResource(0);
-    const auto& cache_keys = resource.cacheKeys();
-    auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
+    const auto& model_resources = batch_kv_cache_resource_->modelResources(0);
+    auto        ref             = resource_context_.cache_manager->incrKVCacheRef(
+        model_resources, model_resources.cache_keys, /*is_connector=*/true);
     if (ref) {
         pd_kvcache_ref_ = std::move(ref);
     }

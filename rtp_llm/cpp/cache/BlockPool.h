@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/cache/BlockRefCounter.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
-#include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfig.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
@@ -27,8 +26,6 @@ public:
     ~BlockPool();
 
     bool init();
-
-    BlockCachePtr blockCache();
 
     MemoryType                 where() const;
     std::vector<torch::Tensor> allLayerCacheBase() const;
@@ -78,18 +75,14 @@ public:
 private:
     void initFreeBlocks();
     void tryFreeBlocks(const BlockIndicesType& block_indices);
-    // global_layer_id -> {layout_index, local_layer_id}
-    std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
-    void                checkLayoutValidity(int layout_id) const;
 
     // Helper functions for init()
     void validateConfig() const;
     void initializeCacheBuffer();
-    void initializeLayerMappings();
     void initializeLayoutStrategies();
 
     // Helper functions for initializeLayoutStrategies()
-    void          processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor, size_t& global_layer_begin);
+    void          processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor);
     torch::Tensor createTensor(const torch::Tensor& full_tensor,
                                int64_t              offset,
                                int64_t              size,
@@ -99,7 +92,6 @@ private:
                                            const MemoryLayoutConfig& layout_cfg,
                                            torch::Tensor&            kv_cache_tensor,
                                            torch::Tensor&            kv_scale_tensor);
-    void processLayerTensors(size_t layout_idx, const MemoryLayoutConfig& layout_cfg, size_t& global_layer_begin);
 
     // Helper functions for regUserMr/deregUserMr
     void registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
@@ -127,8 +119,6 @@ private:
 
     AllocationType allocation_type_;
 
-    BlockCachePtr block_cache_;
-
     torch::Tensor               cache_aligned_buffer_;
     void*                       cache_base_ptr_  = nullptr;
     bool                        kvcache_reg_mr_  = false;
@@ -136,9 +126,6 @@ private:
     std::shared_ptr<CacheStore> cache_store_;
 
     std::vector<std::unique_ptr<MemoryLayoutStrategy>> layout_strategies_;
-    std::vector<std::pair<int, int>>                   global_layer_to_local_;
-    std::vector<torch::Tensor>                         global_layer_kv_tensors_;
-    std::vector<torch::Tensor>                         global_layer_kv_scale_tensors_;
 
     mutable std::recursive_mutex mutex_;
 };

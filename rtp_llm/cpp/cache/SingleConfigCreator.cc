@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
+#include "rtp_llm/cpp/core/DeviceData.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -18,16 +19,6 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
         all_layer_ids[i] = i;
     }
 
-    CacheConfig config;
-    config.layer_num          = static_cast<uint32_t>(layer_num);
-    config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = 0;
-    config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-
-    config.use_mla   = model_config.attn_config.use_mla;
-    config.dtype     = dtype;
-    config.is_sparse = model_config.attn_config.is_sparse;
-
     KVCacheSpecPtr spec;
     if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
         spec = std::make_shared<MLAKVCacheSpec>(model_config.attn_config, parallelism_config);
@@ -35,36 +26,58 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
         spec = std::make_shared<MHAKVCacheSpec>(model_config.attn_config, parallelism_config);
     }
     spec->dtype = dtype;
-    config.cache_specs.push_back(spec);
-    config.group_types.push_back(CacheGroupType::FULL);
 
-    // Using spec interface for block size and scale
-    config.kv_block_stride_bytes = config.cache_specs[0]->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
+    const bool is_sparse       = model_config.attn_config.is_sparse;
+    const bool use_mla         = model_config.attn_config.use_mla;
+    size_t     kv_block_stride = spec->block_size_bytes();
+    size_t     kv_scale_stride = spec->scale_block_size_bytes();
 
-    // Scale handling - no need to check dtype as scale_block_size_bytes() returns 0 if no scale support
-    config.kv_scale_stride_bytes = config.cache_specs[0]->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
-
-    if (config.is_sparse) {
-        auto indexer_dim             = model_config.attn_config.indexer_head_dim;
-        config.kv_scale_stride_bytes = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
-        config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+    if (is_sparse) {
+        const auto indexer_dim = model_config.attn_config.indexer_head_dim;
+        kv_scale_stride        = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
     }
 
-    config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-    config.group_layer_num  = layer_num;  // only 1 group for SingleConfig
+    const size_t kv_block_size      = static_cast<size_t>(layer_num) * kv_block_stride;
+    const size_t kv_scale_size      = static_cast<size_t>(layer_num) * kv_scale_stride;
+    const size_t block_size         = kv_block_size + kv_scale_size;
+    const size_t per_layer_stride   = kv_block_stride + kv_scale_stride;
+    const size_t seq_size_per_block = static_cast<size_t>(model_config.attn_config.tokens_per_block);
 
-    // Per-layer block stride (kv + scale).
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    std::vector<int> layer_to_group_id(layer_num, 0);
+    std::vector<int> layer_to_block_stride(layer_num, static_cast<int>(per_layer_stride));
 
-    // Global layer ids are the indices used by BlockPool::convertIndexToAddr (0..N-1 in a single-model case).
-    config.global_layer_ids.push_back(all_layer_ids);
-    config.layer_ids.push_back(all_layer_ids);
-    config.layer_to_group_id.assign(config.layer_num, 0);
-    config.layer_attn_types.assign(config.layer_num, CacheGroupType::FULL);
+    // Build allocator config for main model (model_id=0).
+    KVCacheAllocatorConfig alloc_config;
+    alloc_config.model_id                    = 0;
+    alloc_config.layer_num                   = static_cast<uint32_t>(layer_num);
+    alloc_config.dtype                       = dtype;
+    alloc_config.use_mla                     = use_mla;
+    alloc_config.is_sparse                   = is_sparse;
+    alloc_config.cache_specs                 = {spec};
+    alloc_config.group_types                 = {CacheGroupType::FULL};
+    alloc_config.layer_ids                   = {all_layer_ids};
+    alloc_config.layer_to_group_id           = layer_to_group_id;
+    alloc_config.layer_to_block_stride_bytes = layer_to_block_stride;
+    alloc_config.block_num                   = 0;  // filled in by createConfig()
+    alloc_config.seq_size_per_block          = seq_size_per_block;
+    alloc_config.kv_block_size_bytes         = kv_block_size;
+    alloc_config.kv_scale_size_bytes         = kv_scale_size;
+    alloc_config.block_size_bytes            = block_size;
+    alloc_config.kv_block_stride_bytes       = kv_block_stride;
+    alloc_config.kv_scale_stride_bytes       = kv_scale_stride;
+    alloc_config.linear_step                 = 1;
+    alloc_config.group_layer_num             = layer_num;  // only 1 group for SingleConfig
+    alloc_config.linear_group_num            = 0;
+    alloc_config.full_group_num              = 1;
+
+    // Build CacheConfig (cross-model shared fields only).
+    CacheConfig config;
+    config.seq_size_per_block          = seq_size_per_block;
+    config.layer_all_num               = static_cast<uint32_t>(layer_num);
+    config.layer_to_group_id           = layer_to_group_id;
+    config.layer_to_block_stride_bytes = layer_to_block_stride;
+    config.allocator_configs.push_back(std::move(alloc_config));
+
     return config;
 }
 

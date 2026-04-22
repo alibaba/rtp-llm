@@ -4,13 +4,13 @@
 
 namespace rtp_llm {
 
-std::vector<std::shared_ptr<LayerCacheBuffer>>
-LayerCacheBufferUtil::convert(KVCacheResource& resource, int batch_id, int start_block_idx, int block_count) {
+std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(
+    KVCacheResource& resource, const CacheKeysType& cache_keys, int batch_id, int start_block_idx, int block_count) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
 
     const auto& layer_block_ids = resource.layerBlocks();
     for (size_t i = 0; i < layer_block_ids.size(); ++i) {
-        auto layer_cache_buffer = convertLayer(resource, batch_id, i, start_block_idx, block_count);
+        auto layer_cache_buffer = convertLayer(resource, cache_keys, batch_id, i, start_block_idx, block_count);
         if (layer_cache_buffer) {
             layer_cache_buffers.push_back(layer_cache_buffer);
         }
@@ -18,10 +18,13 @@ LayerCacheBufferUtil::convert(KVCacheResource& resource, int batch_id, int start
     return layer_cache_buffers;
 }
 
-std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(
-    KVCacheResource& resource, int batch_id, int layer_id, int start_block_idx, int block_count) {
+std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheResource&     resource,
+                                                                     const CacheKeysType& cache_keys,
+                                                                     int                  batch_id,
+                                                                     int                  layer_id,
+                                                                     int                  start_block_idx,
+                                                                     int                  block_count) {
     const auto& layer_block_ids = resource.layerBlocks();
-    const auto& cache_keys      = resource.cacheKeys();
 
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_block_ids.size()) {
         RTP_LLM_LOG_WARNING("invalid layer_id %d, total layers: %zu", layer_id, layer_block_ids.size());
@@ -36,7 +39,9 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(
 
     const auto& block_ids = layer_block_ids[layer_id]->blocks();
     // Use signed arithmetic throughout to avoid unsigned underflow when start_block_idx >= actual_block_count
-    int actual_block_count = static_cast<int>(std::min(block_ids.size(), cache_keys.size()));
+    const bool has_explicit_keys = !cache_keys.empty();
+    int        actual_block_count =
+        static_cast<int>(has_explicit_keys ? std::min(block_ids.size(), cache_keys.size()) : block_ids.size());
     if (start_block_idx >= actual_block_count) {
         RTP_LLM_LOG_WARNING("start_block_idx %d >= actual_block_count %d", start_block_idx, actual_block_count);
         return nullptr;
@@ -51,7 +56,7 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(
     auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id);
     for (size_t i = 0; i < block_ids_size; ++i) {
         int     block_id = block_ids[start_block_idx + i];
-        int64_t key      = cache_keys[start_block_idx + i];
+        int64_t key      = has_explicit_keys ? cache_keys[start_block_idx + i] : static_cast<int64_t>(block_id);
         layer_cache_buffer->addBlockId(key, block_id);
     }
 

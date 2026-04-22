@@ -65,9 +65,9 @@ public:
     int getNeedBlocks(const MallocInfo& malloc_info) const override {
         return 0;
     }
-    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                    const CacheKeysType&   cache_keys,
-                                                    bool                   is_connector = false) override {
+    std::shared_ptr<KVCacheResource> incrKVCacheRef(const ModelKVResources& model_resources,
+                                                    const CacheKeysType&    cache_keys,
+                                                    bool                    is_connector = false) override {
         return {};
     }
     void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override {
@@ -154,14 +154,8 @@ private:
         std::vector<int32_t> linear_group_ids({1, 2});
         auto                 allocator =
             std::make_shared<FakeKVCacheAllocator>(cache_config_, full_group_ids, linear_group_ids, layer_num_);
-        return std::shared_ptr<RemoteConnector>(new RemoteConnector(cache_config_,
-                                                                    kv_cache_config_,
-                                                                    runtime_config_,
-                                                                    parallelism_config_,
-                                                                    sp_config_,
-                                                                    nullptr,
-                                                                    0,
-                                                                    allocator));
+        return std::shared_ptr<RemoteConnector>(new RemoteConnector(
+            cache_config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, allocator));
     }
 
     CacheConfig                cache_config_;

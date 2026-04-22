@@ -127,6 +127,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="在测试时强制指定BLOCK的数量",
     )
     kv_cache_group.add_argument(
+        "--main_model_kvcache_ratio",
+        env_name="MAIN_MODEL_KVCACHE_RATIO",
+        bind_to=(kv_cache_config, "main_model_kvcache_ratio"),
+        type=int,
+        default=0,
+        help="投机采样（MTP）场景下主模型占用KV Cache显存的百分比（1–99）。"
+        "剩余显存由所有MTP子模型平均分配。0表示不设置，默认按block大小比例分配。",
+    )
+    kv_cache_group.add_argument(
         "--enable_memory_cache",
         env_name="ENABLE_MEMORY_CACHE",
         bind_to=(kv_cache_config, "enable_memory_cache"),

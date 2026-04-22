@@ -19,20 +19,17 @@ namespace test {
 
 static CacheConfig makeTinyHybridConfig() {
     // 4 layers: [0,1] linear, [2,3] full. gcd(2,2)=2 => group_size=2.
-    CacheConfig config;
-    config.dtype                     = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num                 = 4;
-    config.layer_all_num             = 4;
-    config.block_num                 = 10;
-    config.seq_size_per_block        = 4;
-    config.kernel_seq_size_per_block = 2;
-    config.linear_step               = 2;
-    config.group_layer_num           = 2;
+    constexpr uint32_t      kLayerNum        = 4;
+    constexpr uint32_t      kBlockNum        = 10;
+    constexpr size_t        kSeqSizePerBlock = 4;
+    constexpr int           kGroupLayerNum   = 2;
+    constexpr int           kLinearStep      = 2;
+    const rtp_llm::DataType kDtype           = rtp_llm::DataType::TYPE_FP16;
 
     // Linear spec (small but valid).
     auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
     linear_spec->type               = KVCacheSpecType::LinearAttention;
-    linear_spec->dtype              = config.dtype;
+    linear_spec->dtype              = kDtype;
     linear_spec->layer_num          = 2;
     linear_spec->local_num_k_heads  = 1;
     linear_spec->local_num_v_heads  = 1;
@@ -40,40 +37,64 @@ static CacheConfig makeTinyHybridConfig() {
     linear_spec->head_v_dim         = 1;
     linear_spec->conv_kernel_dim    = 2;
     linear_spec->local_head_num_kv  = 1;
-    linear_spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
+    linear_spec->seq_size_per_block = static_cast<uint32_t>(kSeqSizePerBlock);
 
     // Full spec.
     auto full_spec                = std::make_shared<MHAKVCacheSpec>();
     full_spec->type               = KVCacheSpecType::MultiHeadAttention;
-    full_spec->dtype              = config.dtype;
+    full_spec->dtype              = kDtype;
     full_spec->layer_num          = 2;
     full_spec->local_head_num_kv  = 1;
     full_spec->size_per_head      = 1;
-    full_spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
+    full_spec->seq_size_per_block = static_cast<uint32_t>(kSeqSizePerBlock);
 
     // Order matters: linear groups first, then full groups (as in CacheConfigCreator).
-    config.layer_ids        = {{0, 1}, {2, 3}};
-    config.global_layer_ids = config.layer_ids;
-    config.cache_specs      = {linear_spec, full_spec};
-    config.linear_group_num = 1;
-    config.full_group_num   = 1;
+    const std::vector<std::vector<int>> layer_ids_for_groups = {{0, 1}, {2, 3}};
+    const size_t kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
+    const size_t kv_block_size_bytes   = static_cast<size_t>(kGroupLayerNum) * kv_block_stride_bytes;
+    const size_t block_size_bytes      = kv_block_size_bytes;  // no scale for fp16
 
-    // Physical block strides: take max between full and linear.
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-
-    // No kv scale for fp16.
-    config.kv_scale_stride_bytes = 0;
-    config.kv_scale_size_bytes   = 0;
-
-    config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
-    config.layer_to_group_id.assign(static_cast<size_t>(config.layer_num), 0);
-    for (size_t gid = 0; gid < config.layer_ids.size(); ++gid) {
-        for (int layer_id : config.layer_ids[gid]) {
-            config.layer_to_group_id[static_cast<size_t>(layer_id)] = static_cast<int>(gid);
+    // Build layer_to_group_id mapping.
+    std::vector<int> layer_to_group_id(kLayerNum, 0);
+    for (size_t gid = 0; gid < layer_ids_for_groups.size(); ++gid) {
+        for (int layer_id : layer_ids_for_groups[gid]) {
+            layer_to_group_id[static_cast<size_t>(layer_id)] = static_cast<int>(gid);
         }
     }
+
+    // Populate KVCacheAllocatorConfig with all per-model fields.
+    KVCacheAllocatorConfig alloc;
+    alloc.model_id          = 0;
+    alloc.layer_num         = kLayerNum;
+    alloc.dtype             = kDtype;
+    alloc.use_mla           = false;
+    alloc.is_sparse         = false;
+    alloc.cache_specs       = {linear_spec, full_spec};
+    alloc.group_types       = {CacheGroupType::LINEAR, CacheGroupType::FULL};
+    alloc.layer_ids         = layer_ids_for_groups;
+    alloc.layer_to_group_id = layer_to_group_id;
+    alloc.layer_to_block_stride_bytes.assign(kLayerNum, static_cast<int>(kv_block_stride_bytes));
+    alloc.block_num             = kBlockNum;
+    alloc.seq_size_per_block    = kSeqSizePerBlock;
+    alloc.kv_block_size_bytes   = kv_block_size_bytes;
+    alloc.kv_scale_size_bytes   = 0;
+    alloc.block_size_bytes      = block_size_bytes;
+    alloc.kv_block_stride_bytes = kv_block_stride_bytes;
+    alloc.kv_scale_stride_bytes = 0;
+    alloc.linear_step           = kLinearStep;
+    alloc.group_layer_num       = kGroupLayerNum;
+    alloc.linear_group_num      = 1;
+    alloc.full_group_num        = 1;
+
+    // Populate CacheConfig with cross-model fields only.
+    CacheConfig config;
+    config.layer_all_num             = kLayerNum;
+    config.seq_size_per_block        = kSeqSizePerBlock;
+    config.kernel_seq_size_per_block = 2;
+    config.layer_to_group_id         = layer_to_group_id;
+    config.layer_to_block_stride_bytes.assign(kLayerNum, static_cast<int>(kv_block_stride_bytes));
+    config.allocator_configs.push_back(std::move(alloc));
+
     return config;
 }
 
@@ -93,7 +114,7 @@ static ModelConfig makeTinyModelConfig(uint32_t num_layers) {
     return cfg;
 }
 
-static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig() {
+[[maybe_unused]] static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig() {
     auto score_model_cfg   = makeTinyModelConfig(/*num_layers=*/4);
     auto propose_model_cfg = makeTinyModelConfig(/*num_layers=*/1);
 
@@ -163,12 +184,7 @@ static std::vector<BlockIdxType> allocateAndCache(BlockPoolPtr         block_poo
     EXPECT_EQ(blocks.size(), keys.size());
 
     for (size_t i = 0; i < keys.size(); ++i) {
-        BlockCache::CacheItem item;
-        item.cache_key   = keys[i];
-        item.group_id    = group_id;
-        item.block_index = blocks[i];
-        item.is_resident = is_resident;
-        EXPECT_TRUE(block_cache->put(item));
+        EXPECT_TRUE(block_cache->putSlot(keys[i], 0, group_id, blocks[i], is_resident));
         block_pool->blockCacheReference(blocks[i]);
     }
 
@@ -186,12 +202,7 @@ static std::vector<BlockIdxType> allocateAndCacheKeepAllocated(BlockPoolPtr     
     EXPECT_EQ(blocks.size(), keys.size());
 
     for (size_t i = 0; i < keys.size(); ++i) {
-        BlockCache::CacheItem item;
-        item.cache_key   = keys[i];
-        item.group_id    = group_id;
-        item.block_index = blocks[i];
-        item.is_resident = is_resident;
-        EXPECT_TRUE(block_cache->put(item));
+        EXPECT_TRUE(block_cache->putSlot(keys[i], 0, group_id, blocks[i], is_resident));
         block_pool->blockCacheReference(blocks[i]);
     }
 
@@ -223,41 +234,14 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
     ASSERT_TRUE(allocator->init());
 
     EXPECT_EQ(allocator->seqSizePerBlock(), 4);
-    EXPECT_EQ(allocator->totalBlocksNum(), config.block_num - 1);
-    EXPECT_EQ(allocator->freeBlocksNum(), config.block_num - 1);
+    EXPECT_EQ(allocator->totalBlocksNum(), config.getAllocatorConfig(0).block_num - 1);
+    EXPECT_EQ(allocator->freeBlocksNum(), config.getAllocatorConfig(0).block_num - 1);
 
     // Should be able to fetch address for any global layer and non-zero block id.
     auto addr0 = allocator->convertIndexToAddr(/*layer_id=*/0, /*block_id=*/1);
     auto addr3 = allocator->convertIndexToAddr(/*layer_id=*/3, /*block_id=*/1);
     EXPECT_NE(addr0.kv_addr, nullptr);
     EXPECT_NE(addr3.kv_addr, nullptr);
-}
-
-TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridNoMtp) {
-    auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/0), 0u);
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/3), 3u);
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/4),
-              std::numeric_limits<uint32_t>::max());
-
-    // no mtp sub-model
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0),
-              std::numeric_limits<uint32_t>::max());
-}
-
-TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridWithMtpSubConfigs) {
-    auto config    = makeTinyHybridMtpConfigByCreateSpConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/2), 2u);
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0), 4u);
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/0), 5u);
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/1),
-              std::numeric_limits<uint32_t>::max());
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/3, /*local_layer_id=*/0),
-              std::numeric_limits<uint32_t>::max());
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReuseFlag) {
@@ -311,7 +295,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     ASSERT_TRUE(allocator->init());
 
     auto block_pool  = allocator->getBlockPool();
-    auto block_cache = block_pool->blockCache();
+    auto block_cache = allocator->blockCache();
     ASSERT_NE(block_pool, nullptr);
     ASSERT_NE(block_cache, nullptr);
 
@@ -393,7 +377,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAlloc
     ASSERT_TRUE(allocator->init());
 
     auto block_pool  = allocator->getBlockPool();
-    auto block_cache = block_pool->blockCache();
+    auto block_cache = allocator->blockCache();
     ASSERT_NE(block_pool, nullptr);
     ASSERT_NE(block_cache, nullptr);
 
@@ -461,16 +445,17 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     resource.initGroups(/*group_nums=*/2,
                         /*layer_num=*/static_cast<int>(config.layer_all_num),
                         /*layer_to_group_id=*/config.layer_to_group_id);
-    resource.cacheKeys() = CacheKeysType{100, 101, 102};
     resource.mutableBlockIds(/*gid=*/0).assign(
         BlockIndicesType{blocks[0], 0, blocks[1]});  // linear group (contains a 0)
     resource.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{blocks[2], blocks[3], 0});  // full group (contains a 0)
+    ModelKVResources model_resources;
+    model_resources.model_resources.push_back(resource);
+    model_resources.cache_keys = CacheKeysType{100, 101, 102};
 
     // keys: 101(pos1)->gid0:0(ignore), gid1:blocks[3](ref); 102(pos2)->gid0:blocks[1](ref), gid1:0(ignore)
-    auto ref = allocator->incrKVCacheRef(resource, CacheKeysType{101, 999, 102});
+    auto ref = allocator->incrKVCacheRef(model_resources, CacheKeysType{101, 999, 102});
     ASSERT_NE(ref, nullptr);
     ASSERT_EQ(ref->groupNums(), 2);
-    ASSERT_EQ(ref->cacheKeys().size(), 3u);
     ASSERT_EQ(ref->blocks(0).size(), 2u);
     ASSERT_EQ(ref->blocks(1).size(), 2u);
 
@@ -487,7 +472,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     ASSERT_TRUE(allocator->init());
 
     auto block_pool  = allocator->getBlockPool();
-    auto block_cache = block_pool->blockCache();
+    auto block_cache = allocator->blockCache();
     ASSERT_NE(block_pool, nullptr);
     ASSERT_NE(block_cache, nullptr);
 
@@ -517,13 +502,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     allocator->insertIntoCache(insert_info);
 
     // Full group should have cached first two keys.
-    EXPECT_TRUE(block_cache->contains(100, gid_full));
-    EXPECT_TRUE(block_cache->contains(101, gid_full));
-    EXPECT_FALSE(block_cache->contains(102, gid_full));
+    EXPECT_TRUE(block_cache->containsSlot(100, 0, gid_full));
+    EXPECT_TRUE(block_cache->containsSlot(101, 0, gid_full));
+    EXPECT_FALSE(block_cache->containsSlot(102, 0, gid_full));
 
     // Linear group has NULL in early slots when reuse disabled, thus should not insert these full blocks.
-    EXPECT_FALSE(block_cache->contains(100, gid_linear));
-    EXPECT_FALSE(block_cache->contains(101, gid_linear));
+    EXPECT_FALSE(block_cache->containsSlot(100, 0, gid_linear));
+    EXPECT_FALSE(block_cache->containsSlot(101, 0, gid_linear));
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {
@@ -537,16 +522,16 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseS
     EXPECT_NE(buf0[0].addr, nullptr);
 
     auto layout = allocator->allLayerCacheBase();
-    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs.size(), static_cast<size_t>(config.layer_num));
+    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs.size(), static_cast<size_t>(config.getAllocatorConfig(0).layer_num));
     for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
         EXPECT_TRUE(layout.layers_to_kv_buffer_ptrs[i].defined());
     }
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocatedBlocks) {
-    auto config      = makeTinyHybridConfig();
-    config.block_num = 6;  // free=5
-    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto config                           = makeTinyHybridConfig();
+    config.allocator_configs[0].block_num = 6;  // free=5
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto block_pool = allocator->getBlockPool();

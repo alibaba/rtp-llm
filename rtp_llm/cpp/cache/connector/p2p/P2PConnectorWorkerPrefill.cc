@@ -53,7 +53,7 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
                                              AsyncEventPtr             event) {
     auto collector = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
-    auto layer_cache_buffer = LayerCacheBufferUtil::convertLayer(*resource, 0, layer_id, 0, -1);
+    auto layer_cache_buffer = LayerCacheBufferUtil::convertLayer(*resource, {}, 0, layer_id, 0, -1);
     if (!layer_cache_buffer) {
         RTP_LLM_LOG_ERROR(
             "writeByLayer failed: layer_cache_buffer is null, request_id=%ld, layer_id=%d", request_id, layer_id);
