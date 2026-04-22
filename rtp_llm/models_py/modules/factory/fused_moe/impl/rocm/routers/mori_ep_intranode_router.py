@@ -56,6 +56,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         self.use_fp8 = True
         self.async_mode = False
         self.expert_alignment = 128
+        self._dispatch_ids = None  # cached global dispatch_ids for finalize
 
     def prepare(
         self,
@@ -82,6 +83,9 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         local_start = self.ep_rank * self.expert_num_per_rank
         local_end = local_start + self.expert_num_per_rank
         non_local_mask = (dispatch_ids < local_start) | (dispatch_ids >= local_end)
+
+        # Cache global dispatch_ids for use in finalize()'s combine call.
+        self._dispatch_ids = dispatch_ids
 
         # Remap global expert IDs to local 0-based indices.
         # Non-local experts get mapped to index 0 (safe fallback) so the
@@ -116,9 +120,15 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         extra_finalize_args: Optional[Dict[str, Any]],
         skip_allreduce: bool = False,
     ) -> torch.Tensor:
-        if topk_ids.dtype != torch.int32:
-            topk_ids = topk_ids.to(torch.int32)
-        recv_x = self.mori_buffer_wrapper.op.combine(payload.fused_expert_output, None, topk_ids)[0]
+        # Use the cached global dispatch_ids for combine, not the local_ids
+        # that were set as expert_topk_ids for the fused_moe kernel.
+        global_dispatch_ids = self._dispatch_ids
+        if global_dispatch_ids.dtype != torch.int32:
+            global_dispatch_ids = global_dispatch_ids.to(torch.int32)
+
+        fused_out = payload.fused_expert_output
+
+        recv_x = self.mori_buffer_wrapper.op.combine(fused_out, None, global_dispatch_ids)[0]
 
         if extra_finalize_args is not None and "original_num_tokens" in extra_finalize_args:
             original_num_tokens = extra_finalize_args["original_num_tokens"]
