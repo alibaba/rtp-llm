@@ -62,9 +62,11 @@ class MoriEPWrapperConfig:
         model_config = config_adapter.model_config
         parallelism_config = config_adapter.parallelism_config
         moe_config = config_adapter.moe_config
-        max_num_tokens = (
-            moe_config.ll_num_max_token + parallelism_config.tp_size - 1
-        ) // parallelism_config.tp_size
+        # In EP+TP mode, TP splits the weight matrices (hidden dimension) but
+        # does NOT split the token dimension – every rank sees all tokens.
+        # Therefore max_num_inp_token_per_rank must equal the full
+        # ll_num_max_token so that MORI combine can return enough tokens.
+        max_num_tokens = moe_config.ll_num_max_token
         if parallelism_config.world_size > parallelism_config.local_world_size:
             mori_kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
             # on_gfx942():
