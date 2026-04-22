@@ -54,6 +54,8 @@ struct MallocInfo {
     bool                    verbose             = true;  // for failed log
     bool                    reuse_cache         = true;
     bool                    enable_device_cache = true;
+    // Sparse linear-block cleanup is only valid for incremental allocation.
+    bool enable_remove_skipped_blocks = true;
 };
 
 struct MallocResult {

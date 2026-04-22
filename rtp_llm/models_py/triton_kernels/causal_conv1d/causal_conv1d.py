@@ -181,6 +181,10 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             init_state_block_idx = tl.load(
                 block_map_ptr + idx_seq * max_block_size + init_state_block_pos
             ).to(tl.int64)
+            tl.device_assert(
+                init_state_block_idx >= 0,
+                "causal_conv1d: init_state_block_idx must be non-negative",
+            )
             conv_states_base = (
                 conv_states_ptr
                 + (init_state_block_idx * stride_conv_state_seq)
