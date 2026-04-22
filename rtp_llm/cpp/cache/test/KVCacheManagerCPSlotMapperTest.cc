@@ -23,15 +23,14 @@ static CacheConfig makeTestConfig(int block_num = 20, int seq_size_per_block = 4
         /*size_per_head=*/16);
 }
 
-static CompleteTokenIdsPtr makeTokenIds(rtp_llm::DeviceBase* device, int batch_size, int seq_len, int block_size) {
-    auto ids = std::make_shared<CompleteTokenIds>(device, batch_size, batch_size, seq_len + 100, block_size);
-    auto buf =
-        device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)seq_len}, rtp_llm::AllocationType::HOST}, {});
-    auto* ptr = buf->data<int32_t>();
+static CompleteTokenIdsPtr makeTokenIds(int batch_size, int seq_len, int block_size) {
+    auto  ids       = std::make_shared<CompleteTokenIds>(batch_size, batch_size, seq_len + 100, block_size);
+    auto  input_ids = torch::empty({(int64_t)seq_len}, torch::kInt32);
+    auto* ptr       = input_ids.data_ptr<int32_t>();
     for (int i = 0; i < seq_len; ++i)
         ptr[i] = i + 1;
     auto gi             = std::make_shared<GenerateInput>();
-    gi->input_ids       = buf;
+    gi->input_ids       = input_ids;
     gi->generate_config = std::make_shared<GenerateConfig>();
     ids->init(gi);
     return ids;
@@ -49,10 +48,8 @@ class KVCacheManagerCPSlotMapperTest: public ::testing::Test {
 protected:
     void SetUp() override {
         rtp_llm::initLogger();
-        device_ = createDevice();
-        ASSERT_NE(device_, nullptr);
+        createDevice();
     }
-    rtp_llm::DeviceBase* device_ = nullptr;
 };
 
 // When kv_cache_sharded is false (default), cpSlotMapper() should return nullptr.
@@ -63,7 +60,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, NoCPSharding_ReturnsNullMapper) {
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = false;
 
-    auto mgr = std::make_shared<KVCacheManager>(config, device_, false, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(config, false, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
     EXPECT_EQ(mgr->cpSlotMapper(), nullptr);
@@ -77,7 +74,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, SingleRank_ReturnsNullMapper) {
     par.tp_size                            = 1;
     par.prefill_cp_config.kv_cache_sharded = true;
 
-    auto mgr = std::make_shared<KVCacheManager>(config, device_, false, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(config, false, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
     EXPECT_EQ(mgr->cpSlotMapper(), nullptr);
@@ -93,7 +90,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;
 
-    auto mgr = std::make_shared<KVCacheManager>(config, device_, false, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(config, false, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
     auto mapper = mgr->cpSlotMapper();
@@ -117,12 +114,12 @@ TEST_F(KVCacheManagerCPSlotMapperTest, MallocAutoInjectReducesBlockCount) {
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;
 
-    auto mgr = std::make_shared<KVCacheManager>(config, device_, false, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(config, false, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
     const int seq_len   = 16;
     auto      resource  = makeResource(1, config.layer_num);
-    auto      token_ids = makeTokenIds(device_, 1, seq_len, seq_size_per_block);
+    auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
     // cp_slot_mapper left as nullptr -- should be auto-injected
@@ -144,12 +141,12 @@ TEST_F(KVCacheManagerCPSlotMapperTest, MallocWithoutCPAllocatesFullBlocks) {
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = false;
 
-    auto mgr = std::make_shared<KVCacheManager>(config, device_, false, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(config, false, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
     const int seq_len   = 16;
     auto      resource  = makeResource(1, config.layer_num);
-    auto      token_ids = makeTokenIds(device_, 1, seq_len, seq_size_per_block);
+    auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
     auto       result = mgr->malloc(info);
@@ -170,12 +167,12 @@ TEST_F(KVCacheManagerCPSlotMapperTest, MallocExplicitMapperOverridesAutoInject) 
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;
 
-    auto mgr = std::make_shared<KVCacheManager>(config, device_, false, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(config, false, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
     const int seq_len   = 64;
     auto      resource  = makeResource(1, config.layer_num);
-    auto      token_ids = makeTokenIds(device_, 1, seq_len, seq_size_per_block);
+    auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     auto explicit_mapper = std::make_shared<CPSlotMapper>(0, 4, seq_size_per_block);
     // virtual_block_size = 4 * 4 = 16
@@ -203,14 +200,14 @@ TEST_F(KVCacheManagerCPSlotMapperTest, InsertAutoInjectsMapper) {
     kv_cfg.reuse_cache         = true;
     kv_cfg.enable_device_cache = true;
 
-    auto mgr = std::make_shared<KVCacheManager>(config, device_, false, nullptr, kv_cfg, par);
+    auto mgr = std::make_shared<KVCacheManager>(config, false, nullptr, kv_cfg, par);
     ASSERT_TRUE(mgr->init());
     // virtual_block_size = 4 * 2 = 8
     // effectiveSeqLenForAlloc(16) = ceil(16/8) * 4 = 8 tokens worth => ceil(8/4) = 2 blocks
 
     const int seq_len   = 16;
     auto      resource  = makeResource(1, config.layer_num);
-    auto      token_ids = makeTokenIds(device_, 1, seq_len, seq_size_per_block);
+    auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.reuse_cache         = true;
