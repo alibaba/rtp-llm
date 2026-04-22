@@ -17,8 +17,8 @@ namespace rtp_llm {
 /// @note Requires (num_tokens + cp_padding_size) to be divisible by (2 * cp_size)
 class ZigZagProcessor: public IContextParallelProcessor {
 public:
-    explicit ZigZagProcessor(const ParallelismConfig& parallelism_config):
-        IContextParallelProcessor(parallelism_config) {}
+    explicit ZigZagProcessor(const ParallelismConfig& parallelism_config, int cp_chunk_alignment = 1):
+        IContextParallelProcessor(parallelism_config, cp_chunk_alignment) {}
     ~ZigZagProcessor() override = default;
 
     size_t handleOutputs(torch::Tensor&                            hidden_states,

@@ -259,9 +259,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>();
 
     if (device_props_.enable_prefill_cp) {
+        // Plan A: align CP padding to (cp_size * 2 * FLA_CHUNK_SIZE) so per-rank
+        // half-segments are chunk_size multiples — required for linear-attention
+        // (FLA) SSM cache writes to land on full-sequence chunk boundaries.
+        // Pure-attention models pay extra padding here but remain correct (the
+        // padded tokens are masked by qkv_padding_mask downstream).
+        // TODO: detect hybrid_attention_config and pass 1 for pure-attention CP
+        // to avoid padding overhead.
+        constexpr int kFlaChunkSize = 64;
         context_parallel_processor_ =
-            ContextParallelProcessorFactory::create(ProcessorType::ZIG_ZAG, params.parallelism_config);
-        RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy.");
+            ContextParallelProcessorFactory::create(ProcessorType::ZIG_ZAG, params.parallelism_config, kFlaChunkSize);
+        RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy "
+                         "(cp_chunk_alignment=%d).",
+                         kFlaChunkSize);
     }
 
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
