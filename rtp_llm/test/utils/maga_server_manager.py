@@ -78,6 +78,22 @@ class MagaServerManager(object):
             return self._server_process.pid
         return None
 
+    @property
+    def server_proc_status(self) -> Optional[str]:
+        """Read /proc/<pid>/status for the server process.
+
+        Returns the contents while the process is still visible in /proc,
+        or None if no server process or /proc entry is unavailable.
+        """
+        pid = self.server_pid
+        if pid is None:
+            return None
+        try:
+            with open(f"/proc/{pid}/status", "r") as f:
+                return f.read()
+        except (FileNotFoundError, PermissionError, OSError):
+            return None
+
     def wait_sever_done(self, timeout: int = 1600):
         # currently we can not check vit server health, assume it is ready, xieshui will fix it
         if int(self._env_args.get("VIT_SEPARATION", "0")) == 1:
