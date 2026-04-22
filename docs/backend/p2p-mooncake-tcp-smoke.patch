@@ -1,0 +1,20 @@
+diff --git a/internal_source/rtp_llm/test/smoke/BUILD b/internal_source/rtp_llm/test/smoke/BUILD
+index 0d9245ebf..75174ad06 100755
+--- a/internal_source/rtp_llm/test/smoke/BUILD
++++ b/internal_source/rtp_llm/test/smoke/BUILD
+@@ -1199,6 +1199,15 @@ test_suite(
+             },
+             gpu_type=["H20"]
+         ),
++        smoke_test(
++            name="pd_seperation_prefill_decode_reuse_cache_mooncake_tcp",
++            task_info="data/model/qwen25/q_r_prefill_and_decode_reuse.json",
++            smoke_args= {
++                "prefill": "--load_python_model 1 --warm_up 0 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --write_cache_sync 1 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --cache_store_mooncake_mode 1 --cache_store_mooncake_transport tcp --cache_store_mooncake_ip_or_host_name 127.0.0.1 --cache_store_mooncake_rpc_port 23545 --use_local 1 --role_type PREFILL --reserver_runtime_mem_mb 4002",
++                "decode": "--load_python_model 1 --warm_up 0 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --write_cache_sync 1 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --cache_store_mooncake_mode 1 --cache_store_mooncake_transport tcp --cache_store_mooncake_ip_or_host_name 127.0.0.1 --cache_store_mooncake_rpc_port 23546 --use_local 1 --role_type DECODE --reserver_runtime_mem_mb 4002"
++            },
++            gpu_type=["H20"]
++        ),
+         smoke_test(
+             name="pd_seperation_prefill_reuse_cache",
+             task_info="data/model/qwen25/q_r_prefill_reuse.json",

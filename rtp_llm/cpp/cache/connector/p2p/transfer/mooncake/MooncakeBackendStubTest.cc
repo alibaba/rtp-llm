@@ -1736,6 +1736,124 @@ TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineCopiesPayloadOverTcp
     EXPECT_EQ(std::memcmp(source_block, target_block, sizeof(source_block)), 0);
 }
 
+TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineCopiesMultipleBlocksOverTcpTransport) {
+    auto receiver_adapter = createMooncakeTransferEngineAdapter();
+    auto sender_adapter = createMooncakeTransferEngineAdapter();
+    if (!receiver_adapter || !sender_adapter) {
+        GTEST_SKIP() << "Mooncake classic TE is not enabled in this build";
+    }
+
+    const auto control_plane_port = nextTestPort();
+    const auto receiver_rpc_port = nextTestPort();
+    const auto sender_rpc_port = nextTestPort();
+    const auto receiver_server_name = std::string("127.0.0.1:") + std::to_string(receiver_rpc_port);
+    const auto sender_server_name = std::string("127.0.0.1:") + std::to_string(sender_rpc_port);
+
+    TransferBackendConfig receiver_config;
+    receiver_config.cache_store_mooncake_mode = true;
+    receiver_config.mooncake.location = "tp0";
+    receiver_config.mooncake.classic.transport = "tcp";
+    receiver_config.mooncake.control_plane_port = control_plane_port;
+    receiver_config.cache_store_listen_port = control_plane_port;
+    receiver_config.messager_io_thread_count = 1;
+    receiver_config.messager_worker_thread_count = 4;
+    receiver_config.cache_store_tcp_anet_rpc_thread_num = 1;
+    receiver_config.cache_store_tcp_anet_rpc_queue_num = 8;
+    receiver_config.mooncake.classic.local_server_name = receiver_server_name;
+    receiver_config.mooncake.classic.ip_or_host_name = "127.0.0.1";
+    receiver_config.mooncake.classic.rpc_port = static_cast<uint16_t>(receiver_rpc_port);
+
+    MooncakeKVCacheReceiver receiver(receiver_adapter);
+    ASSERT_TRUE(receiver.init(receiver_config));
+
+    char target_key10_block0[32]{};
+    char target_key30_block0[48]{};
+    char target_key30_block2[24]{};
+
+    BlockInfo recv_key10_block0{false, 0, 0, target_key10_block0, sizeof(target_key10_block0)};
+    BlockInfo recv_key30_block0{false, 0, 0, target_key30_block0, sizeof(target_key30_block0)};
+    BlockInfo recv_key30_block2{false, 0, 0, target_key30_block2, sizeof(target_key30_block2)};
+    ASSERT_TRUE(receiver.regMem(recv_key10_block0, sizeof(target_key10_block0)));
+    ASSERT_TRUE(receiver.regMem(recv_key30_block0, sizeof(target_key30_block0)));
+    ASSERT_TRUE(receiver.regMem(recv_key30_block2, sizeof(target_key30_block2)));
+
+    auto recv_key10_info = std::make_shared<KeyBlockInfo>();
+    recv_key10_info->blocks.push_back(recv_key10_block0);
+
+    auto recv_key30_info = std::make_shared<KeyBlockInfo>();
+    recv_key30_info->blocks.push_back(recv_key30_block0);
+    recv_key30_info->blocks.push_back(BlockInfo{false, 0, 0, nullptr, 0});
+    recv_key30_info->blocks.push_back(recv_key30_block2);
+
+    RecvRequest recv_request;
+    recv_request.unique_key = "classic_tcp_multi_block_round_trip";
+    recv_request.deadline_ms = currentTimeMs() + 5000;
+    recv_request.block_info[30] = recv_key30_info;
+    recv_request.block_info[10] = recv_key10_info;
+    auto recv_task = receiver.recv(recv_request);
+    ASSERT_NE(recv_task, nullptr);
+
+    TransferBackendConfig sender_config = receiver_config;
+    sender_config.mooncake.classic.local_server_name = sender_server_name;
+    sender_config.mooncake.classic.rpc_port = static_cast<uint16_t>(sender_rpc_port);
+
+    MooncakeKVCacheSender sender(sender_adapter, createMooncakeControlPlaneClient());
+    ASSERT_TRUE(sender.init(sender_config));
+
+    char source_key10_block0[32];
+    char source_key30_block0[48];
+    char source_key30_block2[24];
+    for (size_t i = 0; i < sizeof(source_key10_block0); ++i) {
+        source_key10_block0[i] = static_cast<char>('a' + (i % 26));
+    }
+    for (size_t i = 0; i < sizeof(source_key30_block0); ++i) {
+        source_key30_block0[i] = static_cast<char>('A' + (i % 23));
+    }
+    for (size_t i = 0; i < sizeof(source_key30_block2); ++i) {
+        source_key30_block2[i] = static_cast<char>('0' + (i % 10));
+    }
+
+    BlockInfo send_key10_block0{false, 0, 0, source_key10_block0, sizeof(source_key10_block0)};
+    BlockInfo send_key30_block0{false, 0, 0, source_key30_block0, sizeof(source_key30_block0)};
+    BlockInfo send_key30_block2{false, 0, 0, source_key30_block2, sizeof(source_key30_block2)};
+    ASSERT_TRUE(sender.regMem(send_key10_block0, sizeof(source_key10_block0)));
+    ASSERT_TRUE(sender.regMem(send_key30_block0, sizeof(source_key30_block0)));
+    ASSERT_TRUE(sender.regMem(send_key30_block2, sizeof(source_key30_block2)));
+
+    auto send_key10_info = std::make_shared<KeyBlockInfo>();
+    send_key10_info->blocks.push_back(send_key10_block0);
+
+    auto send_key30_info = std::make_shared<KeyBlockInfo>();
+    send_key30_info->blocks.push_back(send_key30_block0);
+    send_key30_info->blocks.push_back(BlockInfo{false, 0, 0, nullptr, 0});
+    send_key30_info->blocks.push_back(send_key30_block2);
+
+    SendRequest send_request;
+    send_request.ip = "127.0.0.1";
+    send_request.port = control_plane_port;
+    send_request.unique_key = recv_request.unique_key;
+    send_request.deadline_ms = recv_request.deadline_ms;
+    send_request.block_info[30] = send_key30_info;
+    send_request.block_info[10] = send_key10_info;
+
+    TransferErrorCode actual_code = TransferErrorCode::UNKNOWN;
+    std::string actual_msg;
+    sender.send(send_request, [&](TransferErrorCode code, const std::string& msg) {
+        actual_code = code;
+        actual_msg = msg;
+    });
+
+    EXPECT_EQ(actual_code, TransferErrorCode::OK) << actual_msg;
+    ASSERT_TRUE(waitTaskDone(recv_task, 2000));
+    EXPECT_TRUE(recv_task->success());
+    ASSERT_TRUE(waitBufferEquals(source_key10_block0, target_key10_block0, sizeof(source_key10_block0), 2000));
+    ASSERT_TRUE(waitBufferEquals(source_key30_block0, target_key30_block0, sizeof(source_key30_block0), 2000));
+    ASSERT_TRUE(waitBufferEquals(source_key30_block2, target_key30_block2, sizeof(source_key30_block2), 2000));
+    EXPECT_EQ(std::memcmp(source_key10_block0, target_key10_block0, sizeof(source_key10_block0)), 0);
+    EXPECT_EQ(std::memcmp(source_key30_block0, target_key30_block0, sizeof(source_key30_block0)), 0);
+    EXPECT_EQ(std::memcmp(source_key30_block2, target_key30_block2, sizeof(source_key30_block2)), 0);
+}
+
 }  // namespace
 }  // namespace mooncake
 }  // namespace transfer
