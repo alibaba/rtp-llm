@@ -1,5 +1,5 @@
 load("//:def.bzl", "rpm_library", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps", "fa_deps", "trt_plugins")
+load("@arch_config//:arch_select.bzl", "torch_deps", "fa_deps", "trt_plugins")
 package(default_visibility=["//rtp_llm:__subpackages__"])
 
 trt_plugins()

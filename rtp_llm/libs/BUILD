@@ -1,4 +1,4 @@
-load("//bazel:arch_select.bzl", "copy_all_so", "kernel_so_deps")
+load("@arch_config//:arch_select.bzl", "copy_all_so", "kernel_so_deps")
 load("//bazel:defs.bzl", "copy_files")
 
 package(default_visibility = ["//rtp_llm:__subpackages__"])

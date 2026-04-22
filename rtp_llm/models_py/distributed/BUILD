@@ -1,4 +1,4 @@
-load("//bazel:arch_select.bzl", "deep_ep_py_deps")
+load("@arch_config//:arch_select.bzl", "deep_ep_py_deps")
 
 deep_ep_py_deps()
 

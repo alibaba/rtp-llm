@@ -1,5 +1,5 @@
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 load("//:def.bzl", "copts", "cuda_copts", "gen_cpp_code")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
 

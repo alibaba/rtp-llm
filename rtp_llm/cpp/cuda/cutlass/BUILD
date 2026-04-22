@@ -2,7 +2,7 @@ load("//:def.bzl", "copts", "cuda_copts", "gen_cpp_code")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 load(":moe.bzl", "gen_moe_kernels")
-load("@//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 T = [('KernelType::BF16Int4Groupwise', 'BF16DetailsA', 'Int4DetailsW'),
      ('KernelType::BF16Int8PerChannel', 'BF16DetailsA', 'Int8DetailsW'),

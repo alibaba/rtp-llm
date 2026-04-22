@@ -1,6 +1,6 @@
 load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps", "flashinfer_deps", "select_py_bindings")
+load("@arch_config//:arch_select.bzl", "torch_deps", "flashinfer_deps", "select_py_bindings")
 load("@bazel_skylib//lib:selects.bzl", "selects")
 flashinfer_deps()
 

@@ -1,4 +1,4 @@
-load("@//bazel:arch_select.bzl", "cache_store_deps")
+load("@arch_config//:arch_select.bzl", "cache_store_deps")
 
 cache_store_deps()
 

@@ -1,5 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 load("//rtp_llm/cpp/cuda/deep_gemm:def.bzl", "sm90_cuda_copts", "copy_filegroup")
 
 cc_test = cc_test_wrapper

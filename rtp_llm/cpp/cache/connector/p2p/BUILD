@@ -1,4 +1,4 @@
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//rtp_llm/cpp/cache/connector/p2p:__subpackages__"])
 
