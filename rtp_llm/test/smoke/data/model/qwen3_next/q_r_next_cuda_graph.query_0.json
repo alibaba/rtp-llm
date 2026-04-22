@@ -1,0 +1,59 @@
+{
+  "id": "chat-",
+  "object": "chat.completion",
+  "created": 1776963860,
+  "model": "",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate).\n    *   **Goal:** The questions should be thought-provoking,",
+        "reasoning_content": null,
+        "function_call": null,
+        "tool_calls": null,
+        "partial": false,
+        "tool_call_id": null
+      },
+      "finish_reason": "length",
+      "logprobs": null
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 18,
+    "total_tokens": 118,
+    "completion_tokens": 100,
+    "completion_tokens_details": null,
+    "prompt_tokens_details": null
+  },
+  "debug_info": null,
+  "aux_info": {
+    "cost_time": 2618.807,
+    "iter_count": 100,
+    "prefix_len": 0,
+    "input_len": 18,
+    "output_len": 100,
+    "step_output_len": 100,
+    "first_token_cost_time": 1767.283,
+    "wait_time": 0.0,
+    "pd_sep": false,
+    "cum_log_probs": [],
+    "beam_responses": [],
+    "softmax_probs": [],
+    "reuse_len": 0,
+    "local_reuse_len": 0,
+    "remote_reuse_len": 0,
+    "memory_reuse_len": 0,
+    "prefill_total_reuse_len": 0,
+    "prefill_local_reuse_len": 0,
+    "prefill_remote_reuse_len": 0,
+    "prefill_memory_reuse_len": 0,
+    "decode_total_reuse_len": 0,
+    "decode_local_reuse_len": 0,
+    "decode_remote_reuse_len": 0,
+    "decode_memory_reuse_len": 0,
+    "role_addrs": [],
+    "aux_string": ""
+  },
+  "extra_outputs": null
+}

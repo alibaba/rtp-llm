@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts", "cc_test_wrapper")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 test_copts = [
     "-fno-access-control",

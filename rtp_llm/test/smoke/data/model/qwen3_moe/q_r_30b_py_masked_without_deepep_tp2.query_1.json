@@ -1,0 +1,68 @@
+{
+  "response_batch": [
+    {
+      "response": "\n\nI am Qwen, a large-scale language model developed by Alibaba Cloud. I am capable of answering questions, creating text such as stories, official documents,",
+      "response_alternatives": null,
+      "hidden_states": null,
+      "logits": null,
+      "loss": null,
+      "input_ids": null,
+      "output_ids": null,
+      "aux_info": {
+        "input_len": 3,
+        "prefix_len": 0,
+        "reuse_len": 0,
+        "local_reuse_len": 0,
+        "remote_reuse_len": 0,
+        "memory_reuse_len": 0,
+        "prefill_total_reuse_len": 0,
+        "prefill_local_reuse_len": 0,
+        "prefill_remote_reuse_len": 0,
+        "prefill_memory_reuse_len": 0,
+        "decode_total_reuse_len": 0,
+        "decode_local_reuse_len": 0,
+        "decode_remote_reuse_len": 0,
+        "decode_memory_reuse_len": 0,
+        "output_len": 32,
+        "step_output_len": 32,
+        "iter_count": 32,
+        "cum_log_probs": [],
+        "beam_responses": [],
+        "pd_sep": false,
+        "softmax_probs": []
+      }
+    },
+    {
+      "response": "\n\nI don't have an age like humans do. I'm a large-scale language model developed by Alibaba Cloud. I was first released in 202",
+      "response_alternatives": null,
+      "hidden_states": null,
+      "logits": null,
+      "loss": null,
+      "input_ids": null,
+      "output_ids": null,
+      "aux_info": {
+        "input_len": 4,
+        "prefix_len": 0,
+        "reuse_len": 0,
+        "local_reuse_len": 0,
+        "remote_reuse_len": 0,
+        "memory_reuse_len": 0,
+        "prefill_total_reuse_len": 0,
+        "prefill_local_reuse_len": 0,
+        "prefill_remote_reuse_len": 0,
+        "prefill_memory_reuse_len": 0,
+        "decode_total_reuse_len": 0,
+        "decode_local_reuse_len": 0,
+        "decode_remote_reuse_len": 0,
+        "decode_memory_reuse_len": 0,
+        "output_len": 32,
+        "step_output_len": 32,
+        "iter_count": 32,
+        "cum_log_probs": [],
+        "beam_responses": [],
+        "pd_sep": false,
+        "softmax_probs": []
+      }
+    }
+  ]
+}

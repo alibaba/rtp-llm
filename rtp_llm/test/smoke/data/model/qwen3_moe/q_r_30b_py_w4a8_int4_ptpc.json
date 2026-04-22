@@ -1,0 +1,46 @@
+{
+  "model_type": "qwen_3_moe",
+  "model_path": "/mnt/nas1/hf/Qwen3-30B-A3B-Instruct-2507_rotationall",
+  "query_result": [
+    {
+      "query": {
+        "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nwhat is CAP Theorem ?|im_end|>\n<|im_start|>assistant\n<think>\n",
+        "generate_config": {
+          "max_new_tokens": 64,
+          "temperature": 0.0,
+          "top_p": 0.1,
+          "top_k": 1
+        },
+        "_prompt_source": "chat-template wrapping $prompt:s1"
+      },
+      "result": {
+        "response": "I'm Qwen, a large-scale language model developed by Alibaba Cloud. I can assist you with answering questions, writing, logical reasoning, programming, and more. How can I help you today?",
+        "finished": true
+      }
+    },
+    {
+      "query": {
+        "prompt_batch": [
+          "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nwhat is CAP Theorem ?|im_end|>\n<|im_start|>assistant\n<think>\n",
+          "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nNameError: name 'screen\\_manager' is not defined|im_end|>\n<|im_start|>assistant\n<think>\n"
+        ],
+        "generate_config": {
+          "max_new_tokens": 64,
+          "temperature": 0.0,
+          "top_p": 0.1,
+          "top_k": 1
+        }
+      },
+      "result": {
+        "response_batch": [
+          {
+            "response": "I'm Qwen, a large-scale language model developed by Alibaba Cloud. I can assist you with answering questions, writing, logical reasoning, programming, and more. How can I help you today?"
+          },
+          {
+            "response": "I don't have an age, as I'm a large language model created by Alibaba Cloud. I don't have a physical form or a birth date. I exist to assist you with your inquiries. How can I help you today?"
+          }
+        ]
+      }
+    }
+  ]
+}

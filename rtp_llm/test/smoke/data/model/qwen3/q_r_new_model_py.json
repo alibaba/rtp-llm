@@ -1,0 +1,78 @@
+{
+    "model_type": "qwen_3",
+    "model_path": "/mnt/nas1/hf/Qwen3-8B",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    }
+                ],
+                "max_tokens": 10,
+                "temperature": 0.0,
+                "top_p": 1.0
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705333930,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "<think>\n嗯，用户让我以英语听力方法",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 16,
+                    "total_tokens": 26,
+                    "completion_tokens": 10
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    }
+                ],
+                "max_tokens": 10,
+                "temperature": 0.0,
+                "top_p": 1.0
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705333930,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "<think>\n嗯，用户让我以英语听力方法",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 16,
+                    "total_tokens": 26,
+                    "completion_tokens": 10
+                }
+            }
+        }
+    ]
+}

@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts", "cuda_copts", "any_cuda_copts")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [

@@ -1,0 +1,32 @@
+{
+  "response": "The CAP Theorem, also known as Brewer's Theorem, is a fundamental concept in distributed systems that highlights the trade-offs between three desirable properties in a distributed computing system: Consistency, Availability, and Partition Tolerance. The theorem states that it",
+  "response_alternatives": null,
+  "hidden_states": null,
+  "logits": null,
+  "loss": null,
+  "input_ids": null,
+  "output_ids": null,
+  "aux_info": {
+    "input_len": 25,
+    "prefix_len": 0,
+    "reuse_len": 0,
+    "local_reuse_len": 0,
+    "remote_reuse_len": 0,
+    "memory_reuse_len": 0,
+    "prefill_total_reuse_len": 0,
+    "prefill_local_reuse_len": 0,
+    "prefill_remote_reuse_len": 0,
+    "prefill_memory_reuse_len": 0,
+    "decode_total_reuse_len": 0,
+    "decode_local_reuse_len": 0,
+    "decode_remote_reuse_len": 0,
+    "decode_memory_reuse_len": 0,
+    "output_len": 50,
+    "step_output_len": 50,
+    "iter_count": 50,
+    "cum_log_probs": [],
+    "beam_responses": [],
+    "pd_sep": false,
+    "softmax_probs": []
+  }
+}

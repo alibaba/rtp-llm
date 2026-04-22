@@ -1,0 +1,61 @@
+{
+  "model_type": "qwen_2",
+  "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+  "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+  "query_result": [
+    {
+      "query": {
+        "prompt": "$prompt:s5",
+        "generate_config": {
+          "max_new_tokens": 10,
+          "top_k": 1,
+          "top_p": 0,
+          "return_softmax_probs": true
+        },
+        "yield_generator": false
+      },
+      "result": {
+        "response": " Flask is a lightweight web framework for Python, and",
+        "aux_info": {
+          "softmax_probs": [
+            0.19312472641468048,
+            0.2185598760843277,
+            0.7176850438117981,
+            0.28491923213005066,
+            0.38049623370170593,
+            0.9759673476219177,
+            0.4265383780002594,
+            0.8182097673416138,
+            0.34402593970298767,
+            0.18101073801517487
+          ]
+        }
+      }
+    },
+    {
+      "query": {
+        "prompt_batch": [
+          "Which recommended Flask alternative is most similar to Django North in syntax?",
+          "NameError: name 'screen\\_manager' is not defined"
+        ],
+        "generate_config": {
+          "max_new_tokens": 9,
+          "top_k": 1,
+          "top_p": 0,
+          "return_softmax_probs": true
+        },
+        "yield_generator": false
+      },
+      "result": {
+        "response_batch": [
+          {
+            "response": "1. Mathematics is like a lighthouse in"
+          },
+          {
+            "response": "1. Mathematics is like a fish's eyes"
+          }
+        ]
+      }
+    }
+  ]
+}

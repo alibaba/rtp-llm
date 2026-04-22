@@ -1,0 +1,37 @@
+{
+    "model_type": "roberta",
+    "endpoint": "/v1/classifier",
+    "model_path": "/mnt/nas1/hf/bge-reranker-large",
+    "query_result": [
+        {
+            "query": {
+                "input": [
+                    [
+                        "what is panda?",
+                        "hi"
+                    ],
+                    [
+                        "what is panda?",
+                        "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China."
+                    ]
+                ],
+                "model": "xx"
+            },
+            "result": {
+                "object": "list",
+                "score": [
+                    [
+                        -5.60546875
+                    ],
+                    [
+                        5.7734375
+                    ]
+                ],
+                "usage": {
+                    "prompt_tokens": 53,
+                    "total_tokens": 53
+                }
+            }
+        }
+    ]
+}

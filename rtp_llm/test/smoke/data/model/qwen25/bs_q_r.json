@@ -1,0 +1,50 @@
+{
+  "model_type": "qwen_2",
+  "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+  "query_result": [
+    {
+      "query": {
+        "prompt_batch": [
+          "$prompt:s2"
+        ],
+        "generate_config": {
+          "num_beams": 5,
+          "max_new_tokens": 45
+        }
+      },
+      "result": {
+        "response_batch": [
+          {
+            "response": " 我是阿里云开发的超大规模语言模型，我叫通义千问。通义千问是阿里云自主研发的超大规模语言模型，可以回答问题、创作文字，还能表达观点、撰写"
+          }
+        ]
+      }
+    },
+    {
+      "query": {
+        "prompt_batch": [
+          "$prompt:s3",
+          "$prompt:s2"
+        ],
+        "generate_config": {
+          "variable_num_beams": [
+            2,
+            20,
+            5
+          ],
+          "max_new_tokens": 10
+        }
+      },
+      "result": {
+        "response_batch": [
+          {
+            "response": "\n\nThe error message you're encountering, \"Name"
+          },
+          {
+            "response": "，并提供答案。\n1. What is your favorite"
+          }
+        ]
+      }
+    }
+  ]
+}

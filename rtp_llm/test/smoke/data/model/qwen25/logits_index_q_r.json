@@ -1,0 +1,88 @@
+{
+  "model_type": "qwen_tool",
+  "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+  "query_result": [
+    {
+      "query": {
+        "prompt": "$prompt:s1",
+        "generate_config": {
+          "max_new_tokens": 10,
+          "top_k": 1,
+          "top_p": 0,
+          "return_logits": true,
+          "select_tokens_id": [
+            1,
+            2
+          ],
+          "logits_index": 2,
+          "return_incremental": true,
+          "is_streaming": true
+        }
+      },
+      "result": {
+        "response": " The CAP theorem is a fundamental result in the field",
+        "finished": true,
+        "logits": [
+          [
+            5.4510579109191895,
+            2.556522846221924
+          ]
+        ]
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "what is CAP Theorem ?"
+          },
+          {
+            "role": "user",
+            "content": "$prompt:s1"
+          }
+        ],
+        "extra_configs": {
+          "max_new_tokens": 10,
+          "top_k": 1,
+          "top_p": 0,
+          "return_logits": true,
+          "select_tokens_id": [
+            1,
+            2
+          ],
+          "logits_index": 2,
+          "return_incremental": true,
+          "is_streaming": true
+        },
+        "stream": false
+      },
+      "result": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "The CAP theorem is a fundamental result in the field"
+            },
+            "finish_reason": "length"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 25,
+          "total_tokens": 35,
+          "completion_tokens": 10
+        },
+        "extra_outputs": {
+          "logits": [
+            [
+              6.5955681800842285,
+              2.0070443153381348
+            ]
+          ]
+        }
+      }
+    }
+  ]
+}

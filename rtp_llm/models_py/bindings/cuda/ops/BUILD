@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "cuda_register", "flashinfer_deps", "flashmla_deps")
-load("@//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "cuda_register", "flashinfer_deps", "flashmla_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cuda_register()
 flashinfer_deps()

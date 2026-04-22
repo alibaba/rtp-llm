@@ -1,0 +1,20 @@
+{
+    "model_type": "glm_5",
+    "model_path": "/mnt/nas1/hf/GLM-5-FP8-4layer",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "acheridera NaughtyMZpf_stubbingisseraab疏",
+                "finished": true
+            }
+        }
+    ]
+}

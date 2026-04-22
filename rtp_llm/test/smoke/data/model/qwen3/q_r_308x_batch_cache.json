@@ -1,0 +1,192 @@
+{
+  "model_type": "qwen_3",
+  "model_path": "/mnt/nas1/hf/Qwen3-32B/",
+  "query_result": [
+    {
+      "query": {
+        "prompt_batch": [
+          "$prompt:s2",
+          "$prompt:s4",
+          "$prompt:s6"
+        ],
+        "generate_config": {
+          "max_new_tokens": 20,
+          "temperature": 0.0,
+          "top_p": 0.1,
+          "top_k": 1
+        }
+      },
+      "result": {
+        "response_batch": [
+          {
+            "response": " 你好！我是Qwen3，是阿里巴巴集团最新推出的大语言模型。我基于更",
+            "finished": true
+          },
+          {
+            "response": "嗯，用户问的是“月亮圆不圆”，这个问题看起来挺简单的，但可能需要更",
+            "finished": true
+          },
+          {
+            "response": "嗯，用户发来了一条消息：“hello,你试试不上班|im_end|>",
+            "finished": true
+          }
+        ]
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "$prompt:s5"
+          }
+        ],
+        "extra_configs": {
+          "max_new_tokens": 100,
+          "temperature": 0.0,
+          "top_p": 0.1,
+          "top_k": 1
+        }
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 1776610196,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "<think>\nOkay, so I need to figure out how quantum algorithms solve complex problems efficiently. Hmm, I remember that quantum computing uses qubits, which can be in superpositions of states, unlike classical bits. But how does that help with solving problems faster?\n\nFirst, maybe I should recall some examples of quantum algorithms. Shor's algorithm for factoring large numbers and Grover's algorithm for searching unsorted databases come to mind. Shor's algorithm is exponentially faster than the best classical algorithm for",
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
+            },
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 17,
+          "total_tokens": 117,
+          "completion_tokens": 100,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": null
+        },
+        "debug_info": null,
+        "aux_info": {
+          "cost_time": 2989.088,
+          "iter_count": 100,
+          "prefix_len": 0,
+          "input_len": 17,
+          "output_len": 100,
+          "step_output_len": 100,
+          "first_token_cost_time": 52.489,
+          "wait_time": 0.22,
+          "pd_sep": false,
+          "cum_log_probs": [],
+          "beam_responses": [],
+          "softmax_probs": [],
+          "reuse_len": 0,
+          "local_reuse_len": 0,
+          "remote_reuse_len": 0,
+          "memory_reuse_len": 0,
+          "prefill_total_reuse_len": 0,
+          "prefill_local_reuse_len": 0,
+          "prefill_remote_reuse_len": 0,
+          "prefill_memory_reuse_len": 0,
+          "decode_total_reuse_len": 0,
+          "decode_local_reuse_len": 0,
+          "decode_remote_reuse_len": 0,
+          "decode_memory_reuse_len": 0,
+          "role_addrs": [],
+          "aux_string": ""
+        },
+        "extra_outputs": null
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "$prompt:s5"
+          }
+        ],
+        "extra_configs": {
+          "max_new_tokens": 100,
+          "temperature": 0.0,
+          "top_p": 0.1,
+          "top_k": 1
+        }
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 1776610220,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "<think>\nOkay, so I need to figure out how quantum algorithms solve complex problems efficiently. Hmm, I remember that quantum computing uses qubits instead of classical bits, right? But how does that actually help in solving problems faster? Let me start by recalling what I know about quantum mechanics and computing.\n\nFirst, qubits can be in a superposition of states. Unlike classical bits that are either 0 or 1, a qubit can be both 0 and 1 at the same time",
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
+            },
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 17,
+          "total_tokens": 117,
+          "completion_tokens": 100,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 16
+          }
+        },
+        "debug_info": null,
+        "aux_info": {
+          "cost_time": 23835.21,
+          "iter_count": 100,
+          "prefix_len": 0,
+          "input_len": 17,
+          "output_len": 100,
+          "step_output_len": 100,
+          "first_token_cost_time": 20898.399,
+          "wait_time": 0.151,
+          "pd_sep": false,
+          "cum_log_probs": [],
+          "beam_responses": [],
+          "softmax_probs": [],
+          "reuse_len": 16,
+          "local_reuse_len": 16,
+          "remote_reuse_len": 0,
+          "memory_reuse_len": 0,
+          "prefill_total_reuse_len": 0,
+          "prefill_local_reuse_len": 0,
+          "prefill_remote_reuse_len": 0,
+          "prefill_memory_reuse_len": 0,
+          "decode_total_reuse_len": 0,
+          "decode_local_reuse_len": 0,
+          "decode_remote_reuse_len": 0,
+          "decode_memory_reuse_len": 0,
+          "role_addrs": [],
+          "aux_string": ""
+        },
+        "extra_outputs": null
+      }
+    }
+  ]
+}
