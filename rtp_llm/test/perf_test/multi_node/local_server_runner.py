@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 current_file_path = pathlib.Path(__file__).parent.absolute()
-sys.path.insert(0, str(current_file_path.parent.parent.parent.absolute()))
+sys.path.append(str(current_file_path.parent.parent.parent.absolute()))
 from rtp_llm.utils.import_util import has_internal_source
 
 if has_internal_source():
