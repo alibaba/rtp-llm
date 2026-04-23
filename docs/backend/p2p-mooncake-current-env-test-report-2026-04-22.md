@@ -274,3 +274,45 @@
 - 本报告第 4 节中之前基于 `sm8x` 的 PTX 失败记录，已经被这次 `sm9x` 重跑结果覆盖。
 - 当前环境下，Mooncake TCP mode 的单测、E2E 和 smoke 都已经跑通。
 - 当前仍未完成的只剩真实 RDMA one-sided WRITE 相关验证，而不是 Mooncake TCP smoke 本身。
+
+## 9. 最新更新：Mooncake TCP Remote-Reuse Smoke 已通过
+
+最后验证时间：2026-04-23 10:43 CST
+
+为了把 Mooncake TCP 数据传输真的发生 在 smoke 里做实，本轮新增并执行了下面这条用例：
+
+- //rtp_llm/test/smoke:qwen25_05b_base_openai_remote_cache_pd_sep_mooncake_tcp
+- --config=cuda12_9
+- --config=sm9x
+
+结果：PASSED
+
+这条用例不是单纯拉起服务，而是同时满足下面 3 个条件：
+
+1. enable_remote_cache=true，说明测试目标就是远端 cache 复用路径。
+2. cache_store_mooncake_mode=1 且 cache_store_mooncake_transport=tcp，说明底层 cache store p2p 传输已经切到 Mooncake TCP backend。
+3. 第二条请求的实际返回结果明确为：
+   - reuse_len = 88
+   - local_reuse_len = 0
+   - remote_reuse_len = 88
+   - prefill_remote_reuse_len = 88
+   - decode_remote_reuse_len = 88
+
+关键证据：
+
+1. Bazel 最终输出：//rtp_llm/test/smoke:qwen25_05b_base_openai_remote_cache_pd_sep_mooncake_tcp PASSED in 213.4s
+2. test.log 明确打印 smoke_args：
+   - enable_remote_cache true
+   - cache_store_mooncake_mode 1
+   - cache_store_mooncake_transport tcp
+   - Mooncake RPC 端口 23547 / 23548
+3. 实际响应 artifact：
+   - /data0/qiongshi.gb/RTP-LLM/internal_source/rtp_llm/test/smoke/data/model/qwen25/q_r_l20_remote_cache_pd_sep.query_1.json
+   - 其中 aux_info.remote_reuse_len = 88
+
+结论补充：
+
+- pd_seperation_prefill_decode_reuse_cache_mooncake_tcp 证明了 Mooncake TCP smoke 能真实跑通。
+- qwen25_05b_base_openai_remote_cache_pd_sep_mooncake_tcp 进一步证明了 Mooncake TCP 路径下，远端 cache 数据复用确实发生，且 smoke 已经观测到 remote_reuse_len > 0。
+- 因此，在当前无 RDMA 环境里，Mooncake TCP 模式的 真实请求 + 真实远端数据传输 + smoke 断言 已经闭环验证完成。
+
