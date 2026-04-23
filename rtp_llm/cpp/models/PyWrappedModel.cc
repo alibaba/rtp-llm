@@ -281,6 +281,15 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
 GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forwardMicroBatched");
 
+    // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
+    // d2d_copies_ accumulates across ALL micro-batches before the single
+    // fusedCopy() flush below. Per micro-batch this adds ~6 copies from
+    // buildPyAttentionInputs + padding_offset, plus group_count from
+    // setupKVCacheForAttentionInputs. With the planMicroBatches cap of 2
+    // micro-batches and hybrid group_count of 4 the worst case is ~20.
+    // If new tensorHoldHostAndToCuda call sites land below — or if
+    // planMicroBatches starts producing >2 micro-batches — re-check
+    // MAX_FUSED_D2D_COPIES.
     d2d_copies_.clear();
     if (pinned_check_remaining_ > 0) {
         --pinned_check_remaining_;
