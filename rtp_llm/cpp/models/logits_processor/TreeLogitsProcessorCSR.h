@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/models/logits_processor/csr_utils.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 
+#include <future>
+
 // ---------------------------------------------------------------------------
 // StreamTreeInfo：基于 CSR 前缀树的限制性解码中，每个 beam 的约束状态。
 //
@@ -150,6 +152,24 @@ private:
 
     // d_col_offsets：[batch_size] int32，每步各 beam 对应的 new_tokens 列索引，复用分配。
     rtp_llm::BufferPtr d_col_offsets_;
+
+    // ---------------------------------------------------------------------------
+    // 异步延迟初始化：CSR CPU 构建与 prefill 并行
+    // ---------------------------------------------------------------------------
+    // fromGenerateInput() 中仅启动后台 CPU 构建（解析 + sort + build_csr），立即返回。
+    // 首次 process() / updateStatus() / updateMultiSeqStatus() 调用时：
+    //   1) wait 后台 future 拿到 CSRIndex
+    //   2) 在主线程做 H2D 和 tree_infos_ / d_states_batch_ 初始化（保证 GPU context 正确）
+    // ---------------------------------------------------------------------------
+    void ensureInitialized();
+
+    std::future<std::shared_ptr<CSRIndex<token_num>>> async_cpu_init_future_;
+    bool                                              async_initialized_ = false;
+
+    // 延迟初始化所需参数（由 fromGenerateInput 暂存）
+    int32_t pending_num_            = 0;
+    bool    pending_is_multi_seq_   = false;
+    int32_t pending_input_length_   = 0;
 };
 
 typedef std::shared_ptr<TreeLogitsProcessorCSR> TreeLogitsProcessorCSRPtr;

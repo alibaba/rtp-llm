@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <vector>
+#include <future>
 
 namespace rtp_llm {
 
@@ -34,6 +35,7 @@ namespace rtp_llm {
 //   4. 调用 maskLogits：把 mask=1 的位置置为 -inf
 // =============================================================================
 void TreeLogitsProcessorCSR::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
+    ensureInitialized();
     const size_t batch_size = size();
     RTP_LLM_CHECK(batch_size == finish_idx - start_idx);
 
@@ -101,6 +103,7 @@ void TreeLogitsProcessorCSR::process(const SamplerInputs& inputs, size_t start_i
 //   4. 一次 D2H [batch_size] 同步 CPU 侧 current_state 镜像
 // =============================================================================
 void TreeLogitsProcessorCSR::updateStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) {
+    ensureInitialized();
     RTP_LLM_CHECK(new_tokens->dim() == 2);
     RTP_LLM_CHECK(size() == new_tokens->shape()[0]);
     RTP_LLM_CHECK(d_states_batch_ != nullptr);
@@ -209,7 +212,7 @@ void TreeLogitsProcessorCSR::updateStatus(const rtp_llm::BufferPtr& new_tokens, 
 // d_states_batch_ 按新 beam 顺序重建（仅涉及 [batch_size] int32 的 H2D，开销极小）。
 // =============================================================================
 void TreeLogitsProcessorCSR::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
-    
+    ensureInitialized();
     std::vector<StreamTreeInfo> new_tree_infos;
     new_tree_infos.reserve(src_batch_indices.size());
 
@@ -235,51 +238,48 @@ void TreeLogitsProcessorCSR::updateMultiSeqStatus(const std::vector<int>& src_ba
 }
 
 // =============================================================================
-// fromGenerateInput()
+// ensureInitialized()
 //
-// 1. 解析 ele_rq_ids -> 排序后的 sids<token_num> 数组
-// 2. 在 CPU 上构建 CSRIndex<token_num>
-// 3. 将 indptr / packed_csr / start_mask 上传到 GPU（每次请求仅一次）
-// 4. 为每个 beam 创建 StreamTreeInfo（共享只读 GPU buffer）
-// 5. 初始化持久化 d_states_batch_（全零，对应根节点 state=0）
+// 延迟初始化入口：首次 process/updateStatus/updateMultiSeqStatus 时调用。
+//   1. 等待后台 async_cpu_init_future_ 完成（CPU 上解析 + sort + build_csr）
+//   2. 在主线程执行 H2D 和 tree_infos_ / d_states_batch_ 初始化（保证 GPU context）
 // =============================================================================
-std::shared_ptr<TreeLogitsProcessorCSR> TreeLogitsProcessorCSR::fromGenerateInput(
-    rtp_llm::DeviceBase* device, std::shared_ptr<GenerateInput> generate_input, int32_t num, int32_t vocab_size) {
-    if (generate_input->generate_config->ele_rq_ids.empty()) {
-        return nullptr;
+void TreeLogitsProcessorCSR::ensureInitialized() {
+    if (async_initialized_) {
+        return;
     }
 
-    // --- 1. 解析约束字符串 ---
-    std::vector<sids<token_num>> origin_rq_ids = split_strings<token_num>(generate_input->generate_config->ele_rq_ids);
-    std::sort(origin_rq_ids.begin(), origin_rq_ids.end());
-
-    // --- 2. 在 CPU 上构建 CSR 索引 ---
-    auto csr_index = std::make_shared<CSRIndex<token_num>>();
-    bool success   = build_csr_from_fresh_data<token_num>(origin_rq_ids, *csr_index, vocab_size);
-    if (!success) {
-        return nullptr;
+    // --- 等待后台 CPU 构建完成 ---
+    std::shared_ptr<CSRIndex<token_num>> csr_index;
+    if (async_cpu_init_future_.valid()) {
+        csr_index = async_cpu_init_future_.get();
     }
 
-    // --- 3. 将共享只读 CSR 数组上传到 GPU（每次请求仅一次） ---
+    if (!csr_index) {
+        // 构建失败：保持 tree_infos_ 为空，后续调用直接无操作返回
+        async_initialized_ = true;
+        return;
+    }
+
+    // --- H2D 拷贝（在主线程执行，确保 GPU context 正确）---
     rtp_llm::BufferPtr d_indptr;
     {
         auto cpu_buf = vector2Buffer(csr_index->indptr);
-        d_indptr     = device->clone({*cpu_buf, AllocationType::DEVICE});
+        d_indptr     = device_->clone({*cpu_buf, AllocationType::DEVICE});
     }
 
     rtp_llm::BufferPtr d_packed_csr_tokens;
     {
         auto cpu_buf        = vector2Buffer(csr_index->packed_csr_tokens);
-        d_packed_csr_tokens = device->clone({*cpu_buf, AllocationType::DEVICE});
+        d_packed_csr_tokens = device_->clone({*cpu_buf, AllocationType::DEVICE});
     }
 
     rtp_llm::BufferPtr d_packed_csr_states;
     {
         auto cpu_buf        = vector2Buffer(csr_index->packed_csr_states);
-        d_packed_csr_states = device->clone({*cpu_buf, AllocationType::DEVICE});
+        d_packed_csr_states = device_->clone({*cpu_buf, AllocationType::DEVICE});
     }
 
-    // start_mask 是 vector<bool>，需要转换为 vector<uint8_t> 才能上传
     rtp_llm::BufferPtr d_start_mask;
     {
         std::vector<uint8_t> sm_u8(csr_index->start_mask.size());
@@ -287,41 +287,74 @@ std::shared_ptr<TreeLogitsProcessorCSR> TreeLogitsProcessorCSR::fromGenerateInpu
             sm_u8[i] = csr_index->start_mask[i] ? 1u : 0u;
         }
         auto cpu_buf = vector2Buffer(sm_u8);
-        d_start_mask = device->clone({*cpu_buf, AllocationType::DEVICE});
+        d_start_mask = device_->clone({*cpu_buf, AllocationType::DEVICE});
     }
 
-    // --- 4. 为每个 beam 创建 StreamTreeInfo ---
-    bool is_multi_seq =
-        generate_input->generate_config->hasNumBeams() || generate_input->generate_config->num_return_sequences > 1;
-
-    // 直接使用调用方传入的 device，避免调用 DeviceFactory::getDefaultDevice()
-    // （后者在设备尚未完成注册时会触发 FATAL abort）
-    auto processor_ptr = std::make_shared<TreeLogitsProcessorCSR>(device);
-
-    for (int32_t i = 0; i < num; ++i) {
+    // --- 为每个 beam 创建 StreamTreeInfo ---
+    for (int32_t i = 0; i < pending_num_; ++i) {
         StreamTreeInfo tree_info(
             /*in_tree_mode=*/true,
-            /*input_length=*/generate_input->inputLength(),
+            /*input_length=*/pending_input_length_,
             /*current_output_length=*/0,
-            /*is_beam_search=*/is_multi_seq,
+            /*is_beam_search=*/pending_is_multi_seq_,
             /*current_state=*/0,
-            /*csr_index=*/csr_index,  // CPU 只读副本
-            /*d_indptr=*/d_indptr,    // 共享只读 GPU buffer
+            /*csr_index=*/csr_index,
+            /*d_indptr=*/d_indptr,
             /*d_packed_csr_tokens=*/d_packed_csr_tokens,
             /*d_packed_csr_states=*/d_packed_csr_states,
             /*d_start_mask=*/d_start_mask,
-            /*d_current_state=*/nullptr  // 优化版不再使用逐 beam 私有 buffer
-        );
-
-        std::vector<StreamTreeInfo> single_vec = {std::move(tree_info)};
-        auto single_processor = std::make_shared<TreeLogitsProcessorCSR>(device, std::move(single_vec));
-        processor_ptr->insert(single_processor);
+            /*d_current_state=*/nullptr);
+        tree_infos_.push_back(std::move(tree_info));
     }
 
-    // --- 5. 初始化持久化 d_states_batch_（全 0，对应根节点 state=0） ---
-    std::vector<int32_t> init_states(static_cast<size_t>(num), 0);
+    // --- 初始化持久化 d_states_batch_（全 0，对应根节点 state=0） ---
+    std::vector<int32_t> init_states(static_cast<size_t>(pending_num_), 0);
     auto                 cpu_states_buf = vector2Buffer(init_states);
-    processor_ptr->d_states_batch_      = device->clone({*cpu_states_buf, AllocationType::DEVICE});
+    d_states_batch_                     = device_->clone({*cpu_states_buf, AllocationType::DEVICE});
+
+    async_initialized_ = true;
+}
+
+// =============================================================================
+// fromGenerateInput()
+//
+// 异步优化版：仅暂存参数并启动后台 CPU 构建，立即返回。
+// H2D 和 tree_infos_ 初始化延迟到首次 ensureInitialized() 调用，
+// 从而与 prefill 的模型前向并行（CPU build_csr 重叠 GPU forward）。
+// =============================================================================
+std::shared_ptr<TreeLogitsProcessorCSR> TreeLogitsProcessorCSR::fromGenerateInput(
+    rtp_llm::DeviceBase* device, std::shared_ptr<GenerateInput> generate_input, int32_t num, int32_t vocab_size) {
+    if (generate_input->generate_config->ele_rq_ids.empty()) {
+        return nullptr;
+    }
+
+    bool is_multi_seq =
+        generate_input->generate_config->hasNumBeams() || generate_input->generate_config->num_return_sequences > 1;
+
+    auto processor_ptr = std::make_shared<TreeLogitsProcessorCSR>(device);
+    processor_ptr->pending_num_          = num;
+    processor_ptr->pending_is_multi_seq_ = is_multi_seq;
+    processor_ptr->pending_input_length_ = generate_input->inputLength();
+
+    // 捕获所需数据（按值拷贝，避免引用 generate_input 生命周期）
+    auto    ele_rq_ids_copy = generate_input->generate_config->ele_rq_ids;
+    int32_t vocab_size_copy = vocab_size;
+
+    // WARNING: std::launch::async 会为每个请求新建一个 OS 线程。
+    // 当前场景为少量大请求（单机 <= 40 QPS），线程开销可接受。
+    // 若后续扩展到高 QPS 小请求场景，请改用线程池（如 autil::LockFreeThreadPool）。
+    processor_ptr->async_cpu_init_future_ = std::async(
+        std::launch::async,
+        [ele_rq_ids_copy, vocab_size_copy]() -> std::shared_ptr<CSRIndex<token_num>> {
+            auto origin_rq_ids = split_strings<token_num>(ele_rq_ids_copy);
+            std::sort(origin_rq_ids.begin(), origin_rq_ids.end());
+            auto csr_index = std::make_shared<CSRIndex<token_num>>();
+            bool success   = build_csr_from_fresh_data<token_num>(origin_rq_ids, *csr_index, vocab_size_copy);
+            if (!success) {
+                return nullptr;
+            }
+            return csr_index;
+        });
 
     return processor_ptr;
 }
