@@ -615,7 +615,7 @@ py_wheel(
     version = RELEASE_VERSION,
     deps = [
         ":rtp_llm_frontend_package",
-        "//deps:extension_package_frontend"
+        "@rtp_deps//:extension_package_frontend"
     ],
     requires = whl_reqs,
 )
@@ -640,7 +640,7 @@ py_wheel(
     },
     deps = [
         ":rtp_llm_package",
-        "//deps:extension_package"
+        "@rtp_deps//:extension_package"
     ],
     requires = whl_reqs,
 )
@@ -653,7 +653,7 @@ py_wheel(
     version = RELEASE_VERSION,
     deps = [
         ":rtp_llm_package",
-        "//deps:extension_package",
+        "@rtp_deps//:extension_package",
     ],
     requires = whl_reqs + [
         "kserve",
@@ -711,7 +711,7 @@ py_library(
     deps = [
         ":rtp_llm_lib",
         "//rtp_llm/test/utils:test_util",
-        "//deps:extension_lib",
+        "@rtp_deps//:extension_lib",
         ":aiohttp",
     ]
 )
