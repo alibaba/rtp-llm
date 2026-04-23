@@ -3,17 +3,24 @@
 # Licensed under the Apache License, Version 2.0
 import logging
 import math
-from typing import Any, Dict, Optional
+import os
+from typing import Any, Dict, List, Optional
 
 import torch
 
 logger = logging.getLogger(__name__)
 
+TRITON_MOE_THRESHOLD = int(os.environ.get("TRITON_MOE_THRESHOLD", "4096"))
+
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     configure_deep_gemm_num_sms,
     is_deep_gemm_e8m0_used,
+    is_sm100,
     m_grouped_fp8_gemm_nt_contiguous,
+    m_grouped_fp8_fp4_gemm_nt_contiguous,
     m_grouped_fp8_gemm_nt_masked,
+    m_grouped_fp8_fp4_gemm_nt_masked,
+    pre_pack_weight_ue8m0_scale,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -115,6 +122,23 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         assert self.w2_weight.size(1) == self.K
         assert self.w2_weight.size(2) == self.N // 2
 
+        # Save triton-compatible weights (float32 scales) before UE8M0 packing
+        self.triton_threshold = TRITON_MOE_THRESHOLD
+        if self.triton_threshold > 0:
+            self._triton_w1_scale = weights[W.moe_s1].clone()
+            self._triton_w2_scale = weights[W.moe_s2].clone()
+            logger.info(
+                f"Triton MoE fallback enabled for token_num < {self.triton_threshold}"
+            )
+
+        # Pre-pack weight scales once at init time (avoids per-forward packing)
+        self.w13_weight_scale_inv = pre_pack_weight_ue8m0_scale(
+            self.w13_weight, self.w13_weight_scale_inv
+        )
+        self.w2_weight_scale_inv = pre_pack_weight_ue8m0_scale(
+            self.w2_weight, self.w2_weight_scale_inv
+        )
+
         self.w13_weight_fp8 = (
             self.w13_weight,
             self.w13_weight_scale_inv,
@@ -124,7 +148,86 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             self.w2_weight_scale_inv,
         )
 
+        # SM100 FP4: convert w13 (Gate/Up) weight to FP4
+        import os
+        self._use_fp4_w13 = False
+        if is_sm100() and os.environ.get("DG_USE_FP4_ON_SM100", "1") != "0":
+            try:
+                self._convert_w13_to_fp4()
+                self._use_fp4_w13 = True
+                logger.info(
+                    f"SM100 FP4 enabled for MoE w13 ({self.E}, {self.N}, {self.K})"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"SM100 FP4 MoE w13 conversion failed, fallback to FP8: {e}"
+                )
+
         self.num_gemm_sms = get_num_device_sms()
+
+    @torch.inference_mode()
+    def _convert_w13_to_fp4(self):
+        """Convert MoE w13 (Gate/Up) FP8 weight to FP4 for SM100."""
+        from deep_gemm.utils import per_token_cast_to_fp4
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+            CudaFp8DeepGEMMLinear,
+        )
+
+        w13_bf16 = CudaFp8DeepGEMMLinear._unpack_ue8m0_and_dequant(
+            self.w13_weight, self.w13_weight_scale_inv
+        )
+        E, N, K = w13_bf16.shape
+        fp4_list, scale_list = [], []
+        for i in range(E):
+            fp4_i, scale_i = per_token_cast_to_fp4(
+                w13_bf16[i], use_ue8m0=True, gran_k=32
+            )
+            fp4_list.append(fp4_i)
+            scale_list.append(scale_i)
+        self.w13_fp4 = torch.stack(fp4_list)
+        self.w13_fp4_scale = torch.stack(scale_list)
+        self.w13_weight_fp4 = (self.w13_fp4, self.w13_fp4_scale)
+        del w13_bf16, fp4_list, scale_list
+
+    def execute_triton_e2e(
+        self,
+        hidden_states_bf16: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+    ) -> CombineForwardPayload:
+        """Small-batch triton FP8 per-block path (bypasses Router FP8 quant).
+
+        For token_num < triton_threshold, the triton fused MoE kernel is faster
+        than DeepGemm because it avoids the fixed overhead of grouped GEMM setup.
+        """
+        from .triton_fused_moe import fused_experts_impl
+        from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+            recompute_topk_ids_sum_expert_count,
+        )
+
+        adjusted_topk_ids, _ = recompute_topk_ids_sum_expert_count(
+            topk_ids, self.start_expert_id, self.num_experts_per_partition
+        )
+
+        act_map = {"SiGLU": "silu", "silu": "silu", "GeGLU": "gelu", "gelu": "gelu"}
+        triton_act = act_map.get(activation, "silu")
+
+        output = fused_experts_impl(
+            hidden_states_bf16,
+            self.w13_weight,
+            self.w2_weight,
+            topk_weights,
+            adjusted_topk_ids.to(torch.int32),
+            inplace=False,
+            use_fp8_w8a8=True,
+            w1_scale=self._triton_w1_scale,
+            w2_scale=self._triton_w2_scale,
+            block_shape=self.DEEPGEMM_BLOCK_SHAPE,
+            activation=triton_act,
+            filter_expert=self.ep_size > 1,
+        )
+        return CombineForwardPayload(fused_expert_output=output)
 
     def execute(
         self,
@@ -247,14 +350,26 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 dtype=torch.bfloat16,
             )
             # Gate and Up GroupGEMM-0
-            m_grouped_fp8_gemm_nt_masked(
-                (input_tensor[0], input_tensor[1]),
-                self.w13_weight_fp8,
-                upgate_output,
-                num_recv_tokens_per_expert,
-                expected_m,
-                disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-            )
+            if self._use_fp4_w13:
+                m_grouped_fp8_fp4_gemm_nt_masked(
+                    (input_tensor[0], input_tensor[1]),
+                    self.w13_weight_fp4,
+                    upgate_output,
+                    num_recv_tokens_per_expert,
+                    expected_m,
+                    recipe_a=(1, 128),
+                    recipe_b=(1, 32),
+                    disable_ue8m0_cast=False,
+                )
+            else:
+                m_grouped_fp8_gemm_nt_masked(
+                    (input_tensor[0], input_tensor[1]),
+                    self.w13_weight_fp8,
+                    upgate_output,
+                    num_recv_tokens_per_expert,
+                    expected_m,
+                    disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                )
 
             del input_tensor
             # Allocate down_input
@@ -470,13 +585,24 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         )
         if not is_deep_gemm_e8m0_used():
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
-        m_grouped_fp8_gemm_nt_contiguous(
-            (input_tensor[0], input_tensor[1]),
-            self.w13_weight_fp8,
-            gateup_output,
-            m_indices,
-            disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-        )
+        if self._use_fp4_w13:
+            m_grouped_fp8_fp4_gemm_nt_contiguous(
+                (input_tensor[0], input_tensor[1]),
+                self.w13_weight_fp4,
+                gateup_output,
+                m_indices,
+                recipe_a=(1, 128),
+                recipe_b=(1, 32),
+                disable_ue8m0_cast=False,
+            )
+        else:
+            m_grouped_fp8_gemm_nt_contiguous(
+                (input_tensor[0], input_tensor[1]),
+                self.w13_weight_fp8,
+                gateup_output,
+                m_indices,
+                disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+            )
         del input_tensor
         down_input = torch.empty(
             (

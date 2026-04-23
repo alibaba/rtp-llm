@@ -119,7 +119,10 @@ class PureTpRouterBase(FusedMoeDataRouter):
     ) -> torch.Tensor:
         fused_expert_output = payload.fused_expert_output
         if self.tp_size > 1:
-            fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
+            prefer_ca = (extra_finalize_args or {}).get("prefer_ca", False)
+            fused_expert_output = all_reduce(
+                fused_expert_output, group=Group.TP, prefer_ca=prefer_ca
+            )
         return fused_expert_output
 
 

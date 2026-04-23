@@ -36,6 +36,8 @@ def kv_cache_dtype_to_torch_dtype(
         return torch.int8
     elif kv_cache_dtype == KvCacheDataType.FP8:
         return torch.float8_e4m3fn
+    elif kv_cache_dtype == KvCacheDataType.NVFP4:
+        return torch.uint8
     else:  # BASE
         return data_type.to_torch_dtype()
 
@@ -633,10 +635,15 @@ class ModelConfig(CppModelConfig):
                 logging.info(
                     "Setting attn_config.kv_cache_dtype to FP8 based on kv_cache_config.fp8_kv_cache"
                 )
+            elif kv_cache_config.nvfp4_kv_cache:
+                self.attn_config.kv_cache_dtype = KvCacheDataType.NVFP4
+                logging.info(
+                    "Setting attn_config.kv_cache_dtype to NVFP4 based on kv_cache_config.nvfp4_kv_cache"
+                )
             else:
                 self.attn_config.kv_cache_dtype = KvCacheDataType.BASE
                 logging.info(
-                    "Setting attn_config.kv_cache_dtype to BASE (default, no int8/fp8 kv_cache specified)"
+                    "Setting attn_config.kv_cache_dtype to BASE (default, no int8/fp8/nvfp4 kv_cache specified)"
                 )
 
         if quant_config and quant_config.get_method().lower() == "fp8":

@@ -5,8 +5,11 @@ import torch
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     configure_deep_gemm_num_sms,
     is_deep_gemm_e8m0_used,
+    is_sm100,
     m_grouped_bf16_gemm_nt_masked,
     m_grouped_fp8_gemm_nt_masked,
+    m_grouped_fp8_fp4_gemm_nt_masked,
+    pre_pack_weight_ue8m0_scale,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -141,8 +144,58 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         else:
             # Confirm to use bf16
             assert self._w1_scale is None and self._w2_scale is None
+
+        # Pre-pack weight scales once at init time (avoids per-forward packing)
+        if self._use_fp8:
+            self._w1_scale = pre_pack_weight_ue8m0_scale(self._w1, self._w1_scale)
+            self._w2_scale = pre_pack_weight_ue8m0_scale(self._w2, self._w2_scale)
+
+        # SM100 FP4: convert w1 weight to FP4 for Gate/Up GEMM
+        import os
+        self._use_fp4_w1 = False
+        if (
+            self._use_fp8
+            and is_sm100()
+            and os.environ.get("DG_USE_FP4_ON_SM100", "1") != "0"
+        ):
+            try:
+                self._convert_moe_w1_to_fp4()
+                self._use_fp4_w1 = True
+                import logging
+                logging.getLogger(__name__).info(
+                    f"SM100 FP4 enabled for MoE w1 ({self._E}, {self._N}, {self._K})"
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"SM100 FP4 MoE w1 conversion failed, fallback to FP8: {e}"
+                )
+
         # Initialize number of SMs for DeepGEMM
         self._num_gemm_sms = get_num_device_sms()
+
+    @torch.inference_mode()
+    def _convert_moe_w1_to_fp4(self):
+        """Convert MoE w1 (Gate/Up) FP8 weight to FP4 for SM100."""
+        from deep_gemm.utils import per_token_cast_to_fp4
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+            CudaFp8DeepGEMMLinear,
+        )
+
+        w1_bf16 = CudaFp8DeepGEMMLinear._unpack_ue8m0_and_dequant(
+            self._w1, self._w1_scale
+        )
+        E, N, K = w1_bf16.shape
+        fp4_list, scale_list = [], []
+        for i in range(E):
+            fp4_i, scale_i = per_token_cast_to_fp4(
+                w1_bf16[i], use_ue8m0=True, gran_k=32
+            )
+            fp4_list.append(fp4_i)
+            scale_list.append(scale_i)
+        self._w1_fp4 = torch.stack(fp4_list)
+        self._w1_fp4_scale = torch.stack(scale_list)
+        del w1_bf16, fp4_list, scale_list
 
     def _forward_masked_grouped_ffn(
         self,
@@ -187,20 +240,38 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 )
 
                 # Gate and Up GroupGEMM-0
-                m_grouped_fp8_gemm_nt_masked(
-                    (
-                        expert_x[start_idx:end_idx],
-                        expert_x_scale[start_idx:end_idx],
-                    ),
-                    (
-                        self._w1[start_idx:end_idx],
-                        self._w1_scale[start_idx:end_idx],
-                    ),
-                    upgate_output,
-                    masked_m[start_idx:end_idx],
-                    expected_m,
-                    disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-                )
+                if self._use_fp4_w1:
+                    m_grouped_fp8_fp4_gemm_nt_masked(
+                        (
+                            expert_x[start_idx:end_idx],
+                            expert_x_scale[start_idx:end_idx],
+                        ),
+                        (
+                            self._w1_fp4[start_idx:end_idx],
+                            self._w1_fp4_scale[start_idx:end_idx],
+                        ),
+                        upgate_output,
+                        masked_m[start_idx:end_idx],
+                        expected_m,
+                        recipe_a=(1, 128),
+                        recipe_b=(1, 32),
+                        disable_ue8m0_cast=False,
+                    )
+                else:
+                    m_grouped_fp8_gemm_nt_masked(
+                        (
+                            expert_x[start_idx:end_idx],
+                            expert_x_scale[start_idx:end_idx],
+                        ),
+                        (
+                            self._w1[start_idx:end_idx],
+                            self._w1_scale[start_idx:end_idx],
+                        ),
+                        upgate_output,
+                        masked_m[start_idx:end_idx],
+                        expected_m,
+                        disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                    )
 
                 # Free expert_x and expert_x_scale
                 if end_idx == self._E:

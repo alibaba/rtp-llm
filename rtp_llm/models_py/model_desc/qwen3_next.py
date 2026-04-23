@@ -456,9 +456,12 @@ class Qwen3NextAttention(CausalAttention):
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        prefer_ca: bool = False,
     ) -> torch.Tensor:
         gate = self.gate(hidden_states)
-        attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
+        attn_out = super().forward(
+            hidden_states, fmha_impl, kv_cache, gate, prefer_ca=prefer_ca
+        )
         return attn_out
 
 
@@ -540,6 +543,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata,
+        prefer_ca: bool = False,
     ) -> torch.Tensor:
         assert attention_inputs is not None, "attention_inputs is required"
         assert (
@@ -567,7 +571,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         attn_output = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
         attn_output = self.out_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
-            attn_output = all_reduce(attn_output, group=Group.TP)
+            attn_output = all_reduce(attn_output, group=Group.TP, prefer_ca=prefer_ca)
         return attn_output
 
 
@@ -635,6 +639,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        prefer_ca: bool = False,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -645,12 +650,13 @@ class Qwen3NextDecoderLayer(nn.Module):
             kv_cache=kv_cache,
             attention_inputs=attention_inputs,
             attn_meta=attn_meta,
+            prefer_ca=prefer_ca,
         )
         hidden_states = residual + hidden_states
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, prefer_ca=prefer_ca)
         hidden_states = residual + hidden_states
         return hidden_states
 
@@ -711,6 +717,7 @@ class Qwen3NextModel(GptModelBase):
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
+        prefer_ca = not attention_inputs.is_prefill
         if attention_inputs.is_prefill and not is_target_verify:
             cu_seqlen_without_padding = attention_inputs.cu_seqlens
             prefill_conv1d_meta = prepare_causal_conv1d_metadata(
@@ -736,6 +743,7 @@ class Qwen3NextModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
+                prefer_ca=prefer_ca,
             )
 
         hidden_states = self.norm(hidden_states)

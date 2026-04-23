@@ -151,6 +151,7 @@ struct KVCacheConfig {
     // Fields merged from PyKvCacheConfig
     int         int8_kv_cache             = 0;
     int         fp8_kv_cache              = 0;
+    int         nvfp4_kv_cache            = 0;
     std::string ssm_state_dtype           = "bf16";
     int64_t     kv_cache_mem_mb           = -1;
     int         seq_size_per_block        = 64;

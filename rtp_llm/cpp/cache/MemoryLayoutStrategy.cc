@@ -31,7 +31,7 @@ void MemoryLayoutStrategy::clearKVTensor(torch::Tensor& kv_cache_tensor) {
 
 void MemoryLayoutStrategy::clearScaleTensor(torch::Tensor& kv_scale_tensor) {
     if (config_.hasScale()) {
-        if (config_.dtype == rtp_llm::TYPE_FP8_E4M3) {
+        if (config_.dtype == rtp_llm::TYPE_FP8_E4M3 || config_.dtype == rtp_llm::TYPE_NVFP4) {
             kv_scale_tensor.fill_(1.0);
         } else {
             kv_scale_tensor.fill_(0);
@@ -128,6 +128,28 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
             layer_kv_scale_tensors_.push_back(reshaped_scale_tensor[layer_id]);
 
             RTP_LLM_LOG_DEBUG("Layer %d scale tensor shape: [%s], elements: %ld (MLA)",
+                              layer_id,
+                              torch::str(layer_kv_scale_tensors_[layer_id].sizes()).c_str(),
+                              layer_kv_scale_tensors_[layer_id].numel());
+        }
+    } else if (config_.dtype == rtp_llm::TYPE_NVFP4) {
+        // NVFP4: scale is float8_e4m3fn (stored as uint8), shape [layer_num, block_num, scale_stride_bytes]
+        const size_t scale_stride_elems = config_.kv_scale_stride_bytes;  // 1 byte per element
+        auto         scale_options =
+            torch::TensorOptions().dtype(torch::kUInt8).device(kv_scale_tensor.device()).requires_grad(false);
+        torch::Tensor kv_scale_typed = torch::from_blob(
+            kv_scale_tensor.data_ptr(), {static_cast<int64_t>(config_.kv_scale_pool_size_bytes)}, scale_options);
+        torch::Tensor reshaped_scale_tensor = kv_scale_typed.reshape({static_cast<int64_t>(config_.layer_num),
+                                                                      static_cast<int64_t>(config_.block_num),
+                                                                      static_cast<int64_t>(scale_stride_elems)});
+        reshaped_scale_tensor.fill_(0);
+
+        layer_kv_scale_tensors_.clear();
+        layer_kv_scale_tensors_.reserve(config_.layer_num);
+        for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
+            layer_kv_scale_tensors_.push_back(reshaped_scale_tensor[layer_id]);
+
+            RTP_LLM_LOG_DEBUG("Layer %d scale tensor shape: [%s], elements: %ld (NVFP4)",
                               layer_id,
                               torch::str(layer_kv_scale_tensors_[layer_id].sizes()).c_str(),
                               layer_kv_scale_tensors_[layer_id].numel());

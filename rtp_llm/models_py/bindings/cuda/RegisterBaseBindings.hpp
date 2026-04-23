@@ -23,6 +23,7 @@
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
+#include "rtp_llm/cpp/cuda/custom_allreduce/custom_allreduce.h"
 
 using namespace rtp_llm;
 
@@ -270,6 +271,22 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("scale"));
 }
 
+void registerCustomAllReduceOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("custom_ar_init", &rtp_llm::custom_ar_init,
+                  py::arg("ipc_ptrs"), py::arg("rank_data"), py::arg("rank"), py::arg("full_nvlink"));
+    rtp_ops_m.def("custom_ar_all_reduce", &rtp_llm::custom_ar_all_reduce,
+                  py::arg("fa"), py::arg("inp"), py::arg("out"),
+                  py::arg("reg_buffer"), py::arg("reg_buffer_sz_bytes"));
+    rtp_ops_m.def("custom_ar_dispose", &rtp_llm::custom_ar_dispose, py::arg("fa"));
+    rtp_ops_m.def("custom_ar_meta_size", &rtp_llm::custom_ar_meta_size);
+    rtp_ops_m.def("custom_ar_register_buffer", &rtp_llm::custom_ar_register_buffer,
+                  py::arg("fa"), py::arg("ipc_ptrs"));
+    rtp_ops_m.def("custom_ar_get_graph_buffer_ipc_meta", &rtp_llm::custom_ar_get_graph_buffer_ipc_meta,
+                  py::arg("fa"));
+    rtp_ops_m.def("custom_ar_register_graph_buffers", &rtp_llm::custom_ar_register_graph_buffers,
+                  py::arg("fa"), py::arg("handles"), py::arg("offsets"));
+}
+
 void registerBaseCudaBindings(py::module& rtp_ops_m) {
     registerBasicCudaOps(rtp_ops_m);
     registerFusedMoEOp(rtp_ops_m);
@@ -280,6 +297,7 @@ void registerBaseCudaBindings(py::module& rtp_ops_m) {
     registerTrtFp8QuantOp(rtp_ops_m);
     registerUserBuffersOp(rtp_ops_m);
     registerFakeBalanceExpertOp(rtp_ops_m);
+    registerCustomAllReduceOps(rtp_ops_m);
 }
 
 }  // namespace torch_ext

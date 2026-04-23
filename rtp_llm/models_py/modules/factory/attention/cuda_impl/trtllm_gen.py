@@ -1,20 +1,36 @@
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Tuple
 
 import flashinfer
+import flashinfer.page as page
 import torch
 import triton
 import triton.language as tl
 
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
+    MhaRotaryEmbeddingOp,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
+from rtp_llm.ops import (
+    AttentionConfigs,
+    FMHAType,
+    KvCacheDataType,
+    ParallelismConfig,
+    RopeStyle,
+)
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     FusedRopeKVCachePrefillOpQOut,
     LayerKVCache,
     PyAttentionInputs,
+    rtp_llm_ops,
 )
+
+# Empty int32 tensor used when prefix_lengths is None (normal decode path).
+# The C++ fill_params checks .defined() && .size(0) > 0, so an empty tensor
+# is treated as "no prefix" and falls back to sequence_lengths + 1.
+_EMPTY_PREFIX = torch.empty(0, dtype=torch.int32)
 
 # Constants
 DEFAULT_TRT_WORKSPACE_SIZE_MB = (
@@ -60,6 +76,239 @@ def release_trt_workspace_buffer(buffer: torch.Tensor) -> None:
         _g_trt_workspace_pool.append(buffer)
 
 
+# ---------------------------------------------------------------------------
+# NVFP4 KV Cache Write Op
+# ---------------------------------------------------------------------------
+
+FLOAT4_E2M1_MAX = 6.0
+FLOAT8_E4M3_MAX = 448.0
+NVFP4_BLOCK_SIZE = 16
+
+# Global scale factor for online NVFP4 KV cache quantization.
+#
+# Following the reference formula from nvfp4_quant.py:
+#   global_sf = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / tensor_amax
+#
+# For online inference we cannot compute per-tensor amax, so we use a fixed
+# estimate. With estimated_amax = FLOAT8_E4M3_MAX (= 448), the formula gives:
+#   global_sf = 448 * 6 / 448 = 6.0 = FLOAT4_E2M1_MAX
+#
+# With global_sf=1.0: block scale = vec_max / E2M1_MAX = vec_max / 6.0
+# This keeps scale values small, safe for |kv_values| up to E4M3_MAX * E2M1_MAX (2688).
+# The dequantized value = fp4_val * scale_fp8 / global_sf is mathematically independent
+# of global_sf (it cancels), but different values give different fp8 rounding behavior.
+_DEFAULT_NVFP4_GLOBAL_SF = 1.0
+
+
+class NVFP4KVCacheWriteOp:
+    """Operator for quantizing K/V to NVFP4 and writing to paged KV cache with swizzled scales.
+
+    Quantization follows the reference formula (see nvfp4_quant.py ref_nvfp4_quant):
+      1. Per block of 16 elements, compute vec_max = max(|block|)
+      2. scale = global_sf * (vec_max / FLOAT4_E2M1_MAX)  →  cast to fp8_e4m3fn
+      3. output_scale = global_sf / scale_fp8
+      4. quantized = clamp(x * output_scale, -6, 6)  →  round to fp4
+
+    The FMHA kernel dequantizes with: x ≈ fp4 * scale_fp8 * (1 / global_sf)
+    """
+
+    def __init__(
+        self,
+        num_kv_heads: int,
+        head_size: int,
+        token_per_block: int,
+    ) -> None:
+        self.num_kv_heads = num_kv_heads
+        self.head_size = head_size
+        self.token_per_block = token_per_block
+        self.scale_dim = head_size // NVFP4_BLOCK_SIZE
+        self.params = None
+
+        # Global scale factor tensors (on GPU, created lazily)
+        self._k_global_sf: Optional[torch.Tensor] = None
+        self._v_global_sf: Optional[torch.Tensor] = None
+        # kv_global_scale = (1/k_global_sf, 1/v_global_sf) for FMHA kernel
+        self.kv_global_scale: Tuple[float, float] = (
+            1.0 / _DEFAULT_NVFP4_GLOBAL_SF,
+            1.0 / _DEFAULT_NVFP4_GLOBAL_SF,
+        )
+
+        # Pre-compute swizzle index tables for scale writing.
+        # SM100 trtllm-gen MHA kernel expects swizzled scale layout (HND):
+        #   [P, H, T//4, 4, 4, S//4] → permute(0,1,2,4,5,3) → [P, H, T, S]
+        # Per-element index formulas:
+        #   swizzled_row = (t//4)*4 + s//(S//4)
+        #   swizzled_col = (s%(S//4))*4 + t%4
+        T = token_per_block
+        S = self.scale_dim
+        s_parts = S // 4
+        t_idx = torch.arange(T)
+        s_idx = torch.arange(S)
+        t_grid, s_grid = torch.meshgrid(t_idx, s_idx, indexing="ij")  # [T, S]
+        self._swizzle_rows = (t_grid // 4) * 4 + s_grid // s_parts  # [T, S]
+        self._swizzle_cols = (s_grid % s_parts) * 4 + t_grid % 4  # [T, S]
+
+    def _ensure_global_sf(self, device: torch.device) -> None:
+        """Lazily create global scale factor tensors on the right device."""
+        if self._k_global_sf is None or self._k_global_sf.device != device:
+            self._k_global_sf = torch.tensor(
+                [_DEFAULT_NVFP4_GLOBAL_SF], dtype=torch.float32, device=device
+            )
+            self._v_global_sf = torch.tensor(
+                [_DEFAULT_NVFP4_GLOBAL_SF], dtype=torch.float32, device=device
+            )
+            self._swizzle_rows = self._swizzle_rows.to(device)
+            self._swizzle_cols = self._swizzle_cols.to(device)
+
+    def set_params(self, params):
+        """Set the FlashInferMlaAttnParams to be used by this op."""
+        self.params = params
+
+    def forward(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+    ) -> None:
+        """Quantize key/value to NVFP4 and write to paged KV cache.
+
+        Args:
+            key: Key tensor [total_tokens, num_kv_heads, head_dim] bf16/fp16
+            value: Value tensor [total_tokens, num_kv_heads, head_dim] bf16/fp16
+            kv_cache: KV cache with:
+                kv_cache_base: [num_pages, 2, H, T, D//2] uint8 (FP4 packed)
+                kv_scale_base: [num_pages, 2, H, T, D//16] float8_e4m3fn (swizzled)
+        """
+        if kv_cache is None:
+            return
+
+        device = key.device
+        self._ensure_global_sf(device)
+        total_tokens = key.shape[0]
+
+        # 1. Quantize key and value to FP4 + block scales
+        k_2d = key.reshape(-1, self.head_size).contiguous()  # [N*H, D]
+        v_2d = value.reshape(-1, self.head_size).contiguous()
+
+        k_fp4, k_sf = flashinfer.fp4_quantize(
+            k_2d,
+            self._k_global_sf,
+            sf_vec_size=NVFP4_BLOCK_SIZE,
+            is_sf_swizzled_layout=False,
+        )
+        v_fp4, v_sf = flashinfer.fp4_quantize(
+            v_2d,
+            self._v_global_sf,
+            sf_vec_size=NVFP4_BLOCK_SIZE,
+            is_sf_swizzled_layout=False,
+        )
+
+        # Reshape to [total_tokens, H, ...]
+        k_fp4 = k_fp4.view(torch.uint8).reshape(
+            total_tokens, self.num_kv_heads, self.head_size // 2
+        )
+        v_fp4 = v_fp4.view(torch.uint8).reshape(
+            total_tokens, self.num_kv_heads, self.head_size // 2
+        )
+        k_sf = k_sf.view(torch.float8_e4m3fn).reshape(
+            total_tokens, self.num_kv_heads, self.scale_dim
+        )
+        v_sf = v_sf.view(torch.float8_e4m3fn).reshape(
+            total_tokens, self.num_kv_heads, self.scale_dim
+        )
+
+        # 2. Write FP4 data to cache using append_paged_kv_cache
+        if kv_cache.kv_cache_base.dim() == 5:
+            kv_cache_base = kv_cache.kv_cache_base
+        else:
+            kv_cache_base = kv_cache.kv_cache_base.view(
+                kv_cache.kv_cache_base.shape[0],
+                2,
+                self.num_kv_heads,
+                self.token_per_block,
+                self.head_size // 2,
+            )
+        k_cache_fp4 = kv_cache_base[:, 0]
+        v_cache_fp4 = kv_cache_base[:, 1]
+
+        page.append_paged_kv_cache(
+            k_fp4,
+            v_fp4,
+            self.params.batch_indice_d,
+            self.params.positions_d,
+            (k_cache_fp4, v_cache_fp4),
+            self.params.page_indice_d,
+            self.params.decode_page_indptr_d,
+            self.params.paged_kv_last_page_len_d,
+            "HND",
+        )
+
+        # 3. Write swizzled block scales to cache
+        self._write_swizzled_scales(k_sf, v_sf, kv_cache)
+
+    def _write_swizzled_scales(
+        self,
+        k_sf: torch.Tensor,
+        v_sf: torch.Tensor,
+        kv_cache: LayerKVCache,
+    ) -> None:
+        """Write block scales with swizzle transformation to the scale cache.
+
+        The SM100 trtllm-gen MHA kernel expects scales in a swizzled layout.
+        For HND: [P, H, T//4, 4, 4, S//4] → permute(0,1,2,4,5,3) → [P, H, T, S]
+        """
+        total_tokens = k_sf.shape[0]
+        T = self.token_per_block
+        S = self.scale_dim
+        H = self.num_kv_heads
+        device = k_sf.device
+
+        # Compute physical page index and position within page for each token
+        positions = self.params.positions_d  # [total_tokens]
+        batch_indices = self.params.batch_indice_d  # [total_tokens]
+        page_indices = self.params.page_indice_d  # flat page indices
+        page_indptr = self.params.decode_page_indptr_d  # [batch_size+1]
+
+        pos_in_page = positions % T  # [total_tokens]
+        logical_page = positions // T  # [total_tokens]
+
+        # Get physical page for each token
+        batch_page_starts = page_indptr[batch_indices]  # [total_tokens]
+        physical_pages = page_indices[
+            batch_page_starts + logical_page
+        ]  # [total_tokens]
+
+        # Get swizzled row/col for each token's position
+        # swizzle_rows/cols: [T, S] pre-computed
+        token_swizzle_rows = self._swizzle_rows[pos_in_page]  # [total_tokens, S]
+        token_swizzle_cols = self._swizzle_cols[pos_in_page]  # [total_tokens, S]
+
+        # Reshape scale cache to [num_pages, 2, H, T, S]
+        # For NVFP4, scale is stored as uint8, view as float8_e4m3fn
+        scale_base = kv_cache.kv_scale_base
+        if scale_base.dtype == torch.uint8:
+            scale_base = scale_base.view(torch.float8_e4m3fn)
+        kv_scale_base = scale_base.view(
+            kv_cache.kv_scale_base.shape[0],
+            2,
+            H,
+            T,
+            S,
+        )
+
+        # Build index tensors for scatter write: [total_tokens, H, S]
+        page_idx = physical_pages[:, None, None].expand(total_tokens, H, S)
+        head_idx = torch.arange(H, device=device)[None, :, None].expand(
+            total_tokens, H, S
+        )
+        row_idx = token_swizzle_rows[:, None, :].expand(total_tokens, H, S)
+        col_idx = token_swizzle_cols[:, None, :].expand(total_tokens, H, S)
+
+        # Write K scales (kv_dim=0) and V scales (kv_dim=1)
+        kv_scale_base[page_idx, 0, head_idx, row_idx, col_idx] = k_sf
+        kv_scale_base[page_idx, 1, head_idx, row_idx, col_idx] = v_sf
+
+
 class FlashInferTRTLLMParams(object):
     def __init__(
         self,
@@ -72,6 +321,7 @@ class FlashInferTRTLLMParams(object):
         block_tables: Optional[torch.Tensor] = None,
         cu_seqlens: Optional[torch.Tensor] = None,
         cu_kv_seqlens: Optional[torch.Tensor] = None,
+        kv_global_scale: Optional[Tuple[float, float]] = None,
     ):
 
         self.batch_size = batch_size
@@ -83,6 +333,8 @@ class FlashInferTRTLLMParams(object):
         self.block_tables = block_tables
         self.cu_seqlens = cu_seqlens
         self.cu_kv_seqlens = cu_kv_seqlens
+        # (k_global_scale, v_global_scale) for NVFP4 KV cache, None otherwise
+        self.kv_global_scale = kv_global_scale
 
 
 # ---------------------------------------------------------------------------
@@ -379,22 +631,56 @@ class FlashInferTRTLLMPrefillOp(object):
         fmha_params: FlashInferTRTLLMParams,
     ) -> torch.Tensor:
         dtype = kv_cache.kv_cache_base.dtype
+        is_nvfp4 = dtype == torch.uint8
         q_type = q.dtype
-        q = q.to(dtype)
         o_type = q_type
+
+        if is_nvfp4:
+            # TRTLLM-GEN FP4 kernels require Q=FP8(E4M3) and O=FP8(E4M3)
+            q = q.to(torch.float8_e4m3fn)
+            o_type = torch.float8_e4m3fn
+        else:
+            q = q.to(dtype)
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
-        q_scale = 1.0
-        k_scale = 1.0
-        bmm1_scale = q_scale * k_scale * self.scaling
-        bmm2_scale = 1.0
+
+        kv_cache_sf = None
+        if is_nvfp4:
+            k_global_scale, v_global_scale = fmha_params.kv_global_scale
+            bmm1_scale = k_global_scale * self.scaling
+            bmm2_scale = v_global_scale
+        else:
+            bmm1_scale = self.scaling
+            bmm2_scale = 1.0
+
         if kv_cache:
-            kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
-                kv_cache.kv_cache_base.shape[0],
-                2,
-                self.local_head_kv_num,
-                self.seq_size_per_block,
-                self.head_dim,
-            )
+            if is_nvfp4:
+                if kv_cache.kv_cache_base.dim() != 5:
+                    kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
+                        kv_cache.kv_cache_base.shape[0],
+                        2,
+                        self.local_head_kv_num,
+                        self.seq_size_per_block,
+                        self.head_dim // 2,
+                    )
+                kv_scale_base = kv_cache.kv_scale_base
+                if kv_scale_base.dtype == torch.uint8:
+                    kv_scale_base = kv_scale_base.view(torch.float8_e4m3fn)
+                kv_scales = kv_scale_base.view(
+                    kv_cache.kv_scale_base.shape[0],
+                    2,
+                    self.local_head_kv_num,
+                    self.seq_size_per_block,
+                    self.head_dim // 16,
+                )
+                kv_cache_sf = (kv_scales[:, 0], kv_scales[:, 1])
+            else:
+                kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
+                    kv_cache.kv_cache_base.shape[0],
+                    2,
+                    self.local_head_kv_num,
+                    self.seq_size_per_block,
+                    self.head_dim,
+                )
 
         o = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
             query=q,
@@ -410,9 +696,9 @@ class FlashInferTRTLLMPrefillOp(object):
             cum_seq_lens_q=fmha_params.cu_seqlens,
             cum_seq_lens_kv=fmha_params.cu_kv_seqlens,
             window_left=-1,
-            # TODO: add attention_sink operation or nvfp4 scale factor if needed
             sinks=None,
-            out_dtype=o_type,  # model_runner.dtype
+            out_dtype=o_type,
+            kv_cache_sf=kv_cache_sf,
         )
 
         return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
@@ -491,27 +777,58 @@ class FlashInferTRTLLMDecodeOp(object):
         fmha_params: FlashInferTRTLLMParams,
     ) -> torch.Tensor:
         dtype = kv_cache.kv_cache_base.dtype
+        is_nvfp4 = dtype == torch.uint8
         q_type = q.dtype
-        q = q.to(dtype)
         o_type = q_type
 
+        if is_nvfp4:
+            # TRTLLM-GEN FP4 kernels require Q=FP8(E4M3) and O=FP8(E4M3)
+            q = q.to(torch.float8_e4m3fn)
+            o_type = torch.float8_e4m3fn
+        else:
+            q = q.to(dtype)
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
-        q_scale = 1.0
-        k_scale = 1.0
-        bmm1_scale = q_scale * k_scale * self.scaling
-        bmm2_scale = 1.0
-        # sink: additional value per head in the denominator of the softmax.
+
+        kv_cache_sf = None
+        if is_nvfp4:
+            k_global_scale, v_global_scale = fmha_params.kv_global_scale
+            bmm1_scale = k_global_scale * self.scaling
+            bmm2_scale = v_global_scale
+        else:
+            bmm1_scale = self.scaling
+            bmm2_scale = 1.0
+
         if kv_cache:
-            kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
-                kv_cache.kv_cache_base.shape[0],
-                2,
-                self.local_head_kv_num,
-                self.seq_size_per_block,
-                self.head_dim,
-            )
+            if is_nvfp4:
+                if kv_cache.kv_cache_base.dim() != 5:
+                    kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
+                        kv_cache.kv_cache_base.shape[0],
+                        2,
+                        self.local_head_kv_num,
+                        self.seq_size_per_block,
+                        self.head_dim // 2,
+                    )
+                kv_scale_base = kv_cache.kv_scale_base
+                if kv_scale_base.dtype == torch.uint8:
+                    kv_scale_base = kv_scale_base.view(torch.float8_e4m3fn)
+                kv_scales = kv_scale_base.view(
+                    kv_cache.kv_scale_base.shape[0],
+                    2,
+                    self.local_head_kv_num,
+                    self.seq_size_per_block,
+                    self.head_dim // 16,
+                )
+                kv_cache_sf = (kv_scales[:, 0], kv_scales[:, 1])
+            else:
+                kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
+                    kv_cache.kv_cache_base.shape[0],
+                    2,
+                    self.local_head_kv_num,
+                    self.seq_size_per_block,
+                    self.head_dim,
+                )
 
         # Call TRT-LLM kernel
-        # raw_out: like q, [bs, acc_q_len, num_q_heads, head_dim] but with output dtype
         o = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
             query=q,
             kv_cache=kv_cache.kv_cache_base,
@@ -522,10 +839,10 @@ class FlashInferTRTLLMDecodeOp(object):
             bmm1_scale=bmm1_scale,
             bmm2_scale=bmm2_scale,
             window_left=-1,
-            # TODO: add attention_sink operation or nvfp4 scale factor if needed
             sinks=None,
-            out_dtype=o_type,  # model_runner.dtype
+            out_dtype=o_type,
             q_len_per_req=q.shape[0] // fmha_params.seq_lens.shape[0],
+            kv_cache_sf=kv_cache_sf,
         )
         return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
 
@@ -533,6 +850,25 @@ class FlashInferTRTLLMDecodeOp(object):
 # ---------------------------------------------------------------------------
 # Impl classes (CUDA-graph-aware wrappers)
 # ---------------------------------------------------------------------------
+
+
+def _split_qkv(
+    qkv: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> tuple:
+    """Split QKV tensor into query, key, value tensors."""
+    qkv = qkv.reshape(qkv.shape[0], -1)
+    q, k, v = torch.split(
+        qkv,
+        [head_dim * num_heads, head_dim * num_kv_heads, head_dim * num_kv_heads],
+        dim=-1,
+    )
+    query = q.reshape(q.shape[0], num_heads, head_dim)
+    key = k.reshape(k.shape[0], num_kv_heads, head_dim)
+    value = v.reshape(v.shape[0], num_kv_heads, head_dim)
+    return query, key, value
 
 
 class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
@@ -545,18 +881,60 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = FlashInferTRTLLMPrefillOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
         self.attn_inputs = attn_inputs
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+        self.is_nvfp4 = attn_configs.kv_cache_dtype == KvCacheDataType.NVFP4
+
+        if self.is_nvfp4:
+            # NVFP4 path: flashinfer rope + NVFP4 quantize + swizzled write
+            self.nvfp4_rope_impl = (
+                MhaRotaryEmbeddingOp(attn_configs)
+                if attn_configs.rope_config.style != RopeStyle.No
+                else None
+            )
+            self.nvfp4_write_op = NVFP4KVCacheWriteOp(
+                attn_configs.kv_head_num,
+                attn_configs.size_per_head,
+                attn_configs.kernel_tokens_per_block,
+            )
+            # Shared params for rope and write ops
+            self.nvfp4_params = rtp_llm_ops.FlashInferMlaAttnParams()
+            if self.nvfp4_rope_impl is not None:
+                self.nvfp4_rope_impl.set_params(self.nvfp4_params)
+            self.nvfp4_write_op.set_params(self.nvfp4_params)
+            prefix = (
+                attn_inputs.prefix_lengths
+                if attn_inputs.prefix_lengths is not None
+                else _EMPTY_PREFIX
+            )
+            self.nvfp4_params.fill_params(
+                prefix,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id_host,
+                attn_configs.kernel_tokens_per_block,
+            )
+            self.fmha_params.kv_global_scale = self.nvfp4_write_op.kv_global_scale
+            # CG kv_cache_offset: needed by Triton kernel but not read by our ops
+            from rtp_kernel.fused_rope_kvcache import convert_offset_to_block_array
+
+            kv_cache_offset = convert_offset_to_block_array(
+                attn_inputs.kv_cache_kernel_block_id_device
+            )
+        else:
+            # Non-NVFP4 path: fused rope + cache write
+            self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
+            self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+            kv_cache_offset = self.rope_params.kv_cache_offset
 
         self._cg = _init_prefill_cg_params(
             self.fmha_params.batch_size,
             attn_inputs.kv_cache_kernel_block_id_device,
             self.fmha_params.seq_lens,
             self.fmha_params.cu_kv_seqlens,
-            self.rope_params.kv_cache_offset,
+            kv_cache_offset,
             self.fmha_impl.seq_size_per_block,
         )
 
@@ -574,7 +952,22 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
         layer_idx: int,
     ) -> torch.Tensor:
         if self.need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+            if self.is_nvfp4:
+                if self.nvfp4_rope_impl is not None:
+                    query, key, value = self.nvfp4_rope_impl.forward(qkv)
+                else:
+                    query, key, value = _split_qkv(
+                        qkv,
+                        self.fmha_impl.local_head_num,
+                        self.fmha_impl.local_head_kv_num,
+                        self.fmha_impl.head_dim,
+                    )
+                self.nvfp4_write_op.forward(key, value, kv_cache)
+                fmha_input = query
+            else:
+                fmha_input = self.rope_kvcache_impl.forward(
+                    qkv, kv_cache, self.rope_params
+                )
         else:
             fmha_input = qkv
 
@@ -584,6 +977,20 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        if self.is_nvfp4:
+            prefix = (
+                attn_inputs.prefix_lengths
+                if attn_inputs.prefix_lengths is not None
+                else _EMPTY_PREFIX
+            )
+            self.nvfp4_params.fill_params(
+                prefix,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id_host,
+                self.fmha_impl.seq_size_per_block,
+                True,  # forbid_realloc
+            )
         p = self._cg
         _prepare_cg_prefill_kernel[p.grid](
             attn_inputs.input_lengths_d,
@@ -610,18 +1017,56 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+        self.is_nvfp4 = attn_configs.kv_cache_dtype == KvCacheDataType.NVFP4
+
+        if self.is_nvfp4:
+            self.nvfp4_rope_impl = (
+                MhaRotaryEmbeddingOp(attn_configs)
+                if attn_configs.rope_config.style != RopeStyle.No
+                else None
+            )
+            self.nvfp4_write_op = NVFP4KVCacheWriteOp(
+                attn_configs.kv_head_num,
+                attn_configs.size_per_head,
+                attn_configs.kernel_tokens_per_block,
+            )
+            self.nvfp4_params = rtp_llm_ops.FlashInferMlaAttnParams()
+            if self.nvfp4_rope_impl is not None:
+                self.nvfp4_rope_impl.set_params(self.nvfp4_params)
+            self.nvfp4_write_op.set_params(self.nvfp4_params)
+            prefix = (
+                attn_inputs.prefix_lengths
+                if attn_inputs.prefix_lengths is not None
+                else _EMPTY_PREFIX
+            )
+            self.nvfp4_params.fill_params(
+                prefix,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id_host,
+                attn_configs.kernel_tokens_per_block,
+            )
+            self.fmha_params.kv_global_scale = self.nvfp4_write_op.kv_global_scale
+            from rtp_kernel.fused_rope_kvcache import convert_offset_to_block_array
+
+            kv_cache_offset = convert_offset_to_block_array(
+                attn_inputs.kv_cache_kernel_block_id_device
+            )
+        else:
+            self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
+            self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+            kv_cache_offset = self.rope_params.kv_cache_offset
 
         self._cg = _init_decode_cg_params(
             self.fmha_params.batch_size,
             attn_inputs.kv_cache_kernel_block_id_device,
             self.fmha_params.seq_lens,
-            self.rope_params.kv_cache_offset,
+            kv_cache_offset,
         )
 
     @classmethod
@@ -640,7 +1085,22 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         layer_idx: int,
     ) -> torch.Tensor:
         if self.need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+            if self.is_nvfp4:
+                if self.nvfp4_rope_impl is not None:
+                    query, key, value = self.nvfp4_rope_impl.forward(qkv)
+                else:
+                    query, key, value = _split_qkv(
+                        qkv,
+                        self.fmha_impl.local_head_num,
+                        self.fmha_impl.local_head_kv_num,
+                        self.fmha_impl.head_dim,
+                    )
+                self.nvfp4_write_op.forward(key, value, kv_cache)
+                fmha_input = query
+            else:
+                fmha_input = self.rope_kvcache_impl.forward(
+                    qkv, kv_cache, self.rope_params
+                )
         else:
             fmha_input = qkv
 
@@ -650,6 +1110,20 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        if self.is_nvfp4:
+            prefix = (
+                attn_inputs.prefix_lengths
+                if attn_inputs.prefix_lengths is not None
+                else _EMPTY_PREFIX
+            )
+            self.nvfp4_params.fill_params(
+                prefix,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id_host,
+                self.fmha_impl.seq_size_per_block,
+                True,  # forbid_realloc
+            )
         p = self._cg
         if not attn_inputs.is_prefill:
             _prepare_cg_decode_kernel[p.grid](
@@ -686,18 +1160,56 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+        self.is_nvfp4 = attn_configs.kv_cache_dtype == KvCacheDataType.NVFP4
+
+        if self.is_nvfp4:
+            self.nvfp4_rope_impl = (
+                MhaRotaryEmbeddingOp(attn_configs)
+                if attn_configs.rope_config.style != RopeStyle.No
+                else None
+            )
+            self.nvfp4_write_op = NVFP4KVCacheWriteOp(
+                attn_configs.kv_head_num,
+                attn_configs.size_per_head,
+                attn_configs.kernel_tokens_per_block,
+            )
+            self.nvfp4_params = rtp_llm_ops.FlashInferMlaAttnParams()
+            if self.nvfp4_rope_impl is not None:
+                self.nvfp4_rope_impl.set_params(self.nvfp4_params)
+            self.nvfp4_write_op.set_params(self.nvfp4_params)
+            prefix = (
+                attn_inputs.prefix_lengths
+                if attn_inputs.prefix_lengths is not None
+                else _EMPTY_PREFIX
+            )
+            self.nvfp4_params.fill_params(
+                prefix,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id_host,
+                attn_configs.kernel_tokens_per_block,
+            )
+            self.fmha_params.kv_global_scale = self.nvfp4_write_op.kv_global_scale
+            from rtp_kernel.fused_rope_kvcache import convert_offset_to_block_array
+
+            kv_cache_offset = convert_offset_to_block_array(
+                attn_inputs.kv_cache_kernel_block_id_device
+            )
+        else:
+            self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
+            self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+            kv_cache_offset = self.rope_params.kv_cache_offset
 
         self._cg = _init_decode_cg_params(
             self.fmha_params.batch_size,
             attn_inputs.kv_cache_kernel_block_id_device,
             self.fmha_params.seq_lens,
-            self.rope_params.kv_cache_offset,
+            kv_cache_offset,
         )
 
     @classmethod
@@ -716,7 +1228,22 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
         layer_idx: int,
     ) -> torch.Tensor:
         if self.need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+            if self.is_nvfp4:
+                if self.nvfp4_rope_impl is not None:
+                    query, key, value = self.nvfp4_rope_impl.forward(qkv)
+                else:
+                    query, key, value = _split_qkv(
+                        qkv,
+                        self.fmha_impl.local_head_num,
+                        self.fmha_impl.local_head_kv_num,
+                        self.fmha_impl.head_dim,
+                    )
+                self.nvfp4_write_op.forward(key, value, kv_cache)
+                fmha_input = query
+            else:
+                fmha_input = self.rope_kvcache_impl.forward(
+                    qkv, kv_cache, self.rope_params
+                )
         else:
             fmha_input = qkv
 
@@ -726,6 +1253,20 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        if self.is_nvfp4:
+            prefix = (
+                attn_inputs.prefix_lengths
+                if attn_inputs.prefix_lengths is not None
+                else _EMPTY_PREFIX
+            )
+            self.nvfp4_params.fill_params(
+                prefix,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id_host,
+                self.fmha_impl.seq_size_per_block,
+                True,  # forbid_realloc
+            )
         p = self._cg
         _prepare_cg_decode_kernel[p.grid](
             attn_inputs.sequence_lengths_plus_1_d,

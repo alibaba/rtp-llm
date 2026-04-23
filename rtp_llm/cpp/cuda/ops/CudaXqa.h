@@ -13,6 +13,8 @@ struct XQAParams: public ParamsBase {
     size_t        max_seq_len;
     torch::Tensor kv_cache_offset;
     torch::Tensor sequence_lengths;
+    torch::Tensor q_cu_seqlens;
+    size_t        max_q_len{1};
 };
 
 using XQAParamsPtr = std::shared_ptr<XQAParams>;

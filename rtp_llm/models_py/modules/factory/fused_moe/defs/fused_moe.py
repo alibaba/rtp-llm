@@ -189,6 +189,18 @@ class FusedMoe(torch.nn.Module):
 
         a1 = hidden_states
 
+        triton_threshold = getattr(self.fused_experts, 'triton_threshold', 0)
+        if triton_threshold > 0 and a1.shape[0] < triton_threshold:
+            combine_payload = self.fused_experts.execute_triton_e2e(
+                a1, topk_weights, topk_ids, activation,
+            )
+            output = self.router.finalize(
+                combine_payload, topk_weights, topk_ids,
+                apply_router_weight_on_input,
+                {"a1_shape": a1.shape, "original_num_tokens": a1.size(0)},
+            )
+            return output
+
         expert_payload = self.router.prepare(
             a1,
             a1_scale,

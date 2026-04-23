@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 // Forward declare for opaque pointers in PyCacheStoreInputs
 namespace rtp_llm {
@@ -39,6 +40,7 @@ struct KVCache {
     int                        kernel_seq_size_per_block = 0;
     int                        num_kv_heads              = 0;
     int                        head_dim                  = 0;
+    bool                       is_nvfp4                  = false;
     bool                       use_mla                   = false;
     int                        kv_lora_rank              = 0;
     int                        rope_head_dim             = 0;
@@ -83,12 +85,49 @@ struct KVCache {
                                                               (int64_t)kernel_seq_size_per_block,
                                                               (int64_t)(kv_lora_rank + rope_head_dim)});
                 } else if (num_kv_heads > 0 && head_dim > 0) {
-                    // MHA layout: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
-                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
-                                                              2,
-                                                              (int64_t)num_kv_heads,
-                                                              (int64_t)kernel_seq_size_per_block,
-                                                              (int64_t)head_dim});
+                    if (is_nvfp4) {
+                        // NVFP4: packed 4-bit data stored as uint8, head_dim/2 bytes per head.
+                        // This packed representation requires an even head_dim.
+                        RTP_LLM_CHECK_WITH_INFO(
+                            head_dim % 2 == 0, "NVFP4 KV cache requires an even head_dim, got %d", head_dim);
+                        const int64_t packed_head_dim = (int64_t)head_dim / 2;
+                        const int64_t expected_elems  = kernel_block_num * 2 * (int64_t)num_kv_heads
+                                                       * (int64_t)kernel_seq_size_per_block * packed_head_dim;
+
+                        if (base.numel() == expected_elems) {
+                            // No padding, simple reshape
+                            layer_cache.kv_cache_base = base.reshape({kernel_block_num,
+                                                                      2,
+                                                                      (int64_t)num_kv_heads,
+                                                                      (int64_t)kernel_seq_size_per_block,
+                                                                      packed_head_dim});
+                        } else {
+                            // Padded stride (hybrid attention with linear > MHA block size).
+                            // Use as_strided so each kernel block is correctly addressed
+                            // with the physical stride.
+                            const int64_t stride_per_kb = base.size(1) / kernel_blocks_per_kv_block;
+                            const int64_t kv_stride =
+                                (int64_t)num_kv_heads * (int64_t)kernel_seq_size_per_block * packed_head_dim;
+                            layer_cache.kv_cache_base =
+                                base.as_strided({kernel_block_num,
+                                                 2,
+                                                 (int64_t)num_kv_heads,
+                                                 (int64_t)kernel_seq_size_per_block,
+                                                 packed_head_dim},
+                                                {stride_per_kb,
+                                                 kv_stride,
+                                                 (int64_t)kernel_seq_size_per_block * packed_head_dim,
+                                                 packed_head_dim,
+                                                 1});
+                        }
+                    } else {
+                        // MHA layout: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
+                        layer_cache.kv_cache_base = base.reshape({kernel_block_num,
+                                                                  2,
+                                                                  (int64_t)num_kv_heads,
+                                                                  (int64_t)kernel_seq_size_per_block,
+                                                                  (int64_t)head_dim});
+                    }
                 } else {
                     layer_cache.kv_cache_base = base;
                 }
