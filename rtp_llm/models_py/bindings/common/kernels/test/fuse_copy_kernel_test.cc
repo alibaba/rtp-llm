@@ -6,7 +6,7 @@
 #include <cuda_runtime.h>
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
 
 #include "rtp_llm/models_py/bindings/common/kernels/fuse_copy_kernel.h"
