@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_OPEN_SOURCE_REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEFAULT_WORKSPACE_ROOT="$(cd "$DEFAULT_OPEN_SOURCE_REPO/.." && pwd)"
+
 ACTION="${1:-all}"
 
 BRANCH="${BRANCH:-develop/vin/p2p-connector-3}"
-WORKSPACE_ROOT="${WORKSPACE_ROOT:-/data0/qiongshi.gb/RTP-LLM}"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$DEFAULT_WORKSPACE_ROOT}"
 HOST_WORK_ROOT="${HOST_WORK_ROOT:-$(dirname "$WORKSPACE_ROOT")}"
-OPEN_SOURCE_REPO="${OPEN_SOURCE_REPO:-${WORKSPACE_ROOT}/github-opensource}"
+OPEN_SOURCE_REPO="${OPEN_SOURCE_REPO:-$DEFAULT_OPEN_SOURCE_REPO}"
 INTERNAL_SOURCE_REPO="${INTERNAL_SOURCE_REPO:-${WORKSPACE_ROOT}/internal_source}"
 MODEL_ROOT="${MODEL_ROOT:-/mnt/nas1}"
 MODEL_SOURCE_PATH="${MODEL_SOURCE_PATH:-}"
@@ -29,21 +33,22 @@ APPLIED_SMOKE_BUILD=0
 
 declare -a BACKED_UP_ARTIFACTS=()
 
-declare -a BAZEL_OVERRIDE_ARGS=(
-  "--override_repository=havenask=${BAZEL_DEPS_ROOT}/havenask_3c973500afbd40933eb0a80cfdfb6592274377fb"
-  "--override_repository=com_google_absl=${BAZEL_DEPS_ROOT}/com_google_absl_6f9d96a1f41439ac172ee2ef7ccd8edf0e5d068c"
-  "--override_repository=cutlass_fa=${BAZEL_DEPS_ROOT}/cutlass_fa_bbe579a9e3beb6ea6626d9227ec32d0dae119a49"
-  "--override_repository=cutlass=${BAZEL_DEPS_ROOT}/cutlass_80243e0b8c644f281e2beb0c20fe78cf7b267061"
-  "--override_repository=cutlass_h_moe=${BAZEL_DEPS_ROOT}/cutlass_h_moe_19b4c5e065e7e5bbc8082dfc7dbd792bdac850fc"
-  "--override_repository=cutlass4.0=${BAZEL_DEPS_ROOT}/cutlass4_0_dc4817921edda44a549197ff3a9dcf5df0636e7b"
-  "--override_repository=cutlass3.6=${BAZEL_DEPS_ROOT}/cutlass3_6_cc3c29a81a140f7b97045718fb88eb0664c37bd7"
-  "--override_repository=rules_cc=${BAZEL_DEPS_ROOT}/rules_cc_from_devcache"
-  "--override_repository=rules_python=${BAZEL_DEPS_ROOT}/rules_python_084b877c98b580839ceab2b071b02fc6768f3de6_patched"
-  "--override_repository=flashinfer_cpp=${BAZEL_DEPS_ROOT}/flashinfer_cpp_1c88d650eeec97be3a4dcebe4a9912d7785bc250_patched"
-  "--override_repository=flash_attention=${BAZEL_DEPS_ROOT}/flash_attention_6c9e60de566800538fedad2ad5e6b7b55ca7f0c5_patched"
-  "--override_repository=rapidjson=${BAZEL_DEPS_ROOT}/rapidjson_f54b0e47a08782a6131cc3d60f94d038fa6e0a51_patched"
-  "--override_repository=grpc=${BAZEL_DEPS_ROOT}/grpc_109c570727c3089fef655edcdd0dd02cc5958010_patched"
+declare -a BAZEL_OVERRIDE_SPECS=(
+  "havenask:${BAZEL_DEPS_ROOT}/havenask_3c973500afbd40933eb0a80cfdfb6592274377fb"
+  "com_google_absl:${BAZEL_DEPS_ROOT}/com_google_absl_6f9d96a1f41439ac172ee2ef7ccd8edf0e5d068c"
+  "cutlass_fa:${BAZEL_DEPS_ROOT}/cutlass_fa_bbe579a9e3beb6ea6626d9227ec32d0dae119a49"
+  "cutlass:${BAZEL_DEPS_ROOT}/cutlass_80243e0b8c644f281e2beb0c20fe78cf7b267061"
+  "cutlass_h_moe:${BAZEL_DEPS_ROOT}/cutlass_h_moe_19b4c5e065e7e5bbc8082dfc7dbd792bdac850fc"
+  "cutlass4.0:${BAZEL_DEPS_ROOT}/cutlass4_0_dc4817921edda44a549197ff3a9dcf5df0636e7b"
+  "cutlass3.6:${BAZEL_DEPS_ROOT}/cutlass3_6_cc3c29a81a140f7b97045718fb88eb0664c37bd7"
+  "rules_cc:${BAZEL_DEPS_ROOT}/rules_cc_from_devcache"
+  "rules_python:${BAZEL_DEPS_ROOT}/rules_python_084b877c98b580839ceab2b071b02fc6768f3de6_patched"
+  "flashinfer_cpp:${BAZEL_DEPS_ROOT}/flashinfer_cpp_1c88d650eeec97be3a4dcebe4a9912d7785bc250_patched"
+  "flash_attention:${BAZEL_DEPS_ROOT}/flash_attention_6c9e60de566800538fedad2ad5e6b7b55ca7f0c5_patched"
+  "rapidjson:${BAZEL_DEPS_ROOT}/rapidjson_f54b0e47a08782a6131cc3d60f94d038fa6e0a51_patched"
+  "grpc:${BAZEL_DEPS_ROOT}/grpc_109c570727c3089fef655edcdd0dd02cc5958010_patched"
 )
+declare -a BAZEL_OVERRIDE_ARGS=()
 
 log() {
   printf '[mooncake-rdma-suite] %s\n' "$*"
@@ -56,6 +61,20 @@ die() {
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "缺少命令: $1"
+}
+
+build_bazel_override_args() {
+  local spec name path
+  BAZEL_OVERRIDE_ARGS=()
+  for spec in "${BAZEL_OVERRIDE_SPECS[@]}"; do
+    name="${spec%%:*}"
+    path="${spec#*:}"
+    if [[ -d "$path" ]]; then
+      BAZEL_OVERRIDE_ARGS+=("--override_repository=${name}=${path}")
+    else
+      log "跳过缺失 override: ${name} -> ${path}"
+    fi
+  done
 }
 
 backup_file_if_exists() {
@@ -103,6 +122,7 @@ host_precheck() {
     [[ -d "$MODEL_ROOT" ]] || die "不存在模型挂载目录: $MODEL_ROOT"
   fi
   mkdir -p "$BAZEL_CACHE_DIR"
+  build_bazel_override_args
 }
 
 checkout_branch() {
