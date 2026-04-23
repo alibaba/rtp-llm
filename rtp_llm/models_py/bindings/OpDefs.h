@@ -245,6 +245,12 @@ struct PyAttentionInputs {
 
     std::optional<PyContextParallelParams> context_parallel_info;
 
+    // Per-layer PD separation buffers: cids[layer] and cents[layer].
+    // cids: [num_kv_head, 16, prefill_lens], cents: [2, 16, 16] (fixed).
+    // Populated by PyWrappedModel::forward() from GptModelInputs when pd_separation is active.
+    std::optional<std::vector<torch::Tensor>> per_layer_cids;
+    std::optional<std::vector<torch::Tensor>> per_layer_cents;
+
     // Headwise attention config (Python dict or None).
     py::object headwise_config{py::none()};
 };

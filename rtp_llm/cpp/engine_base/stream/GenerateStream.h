@@ -281,6 +281,19 @@ public:
     void          setLastHiddenStates(torch::Tensor hidden_states) {
         last_hidden_states_ = std::move(hidden_states);
     };
+
+    const std::optional<std::vector<torch::Tensor>>& getPerLayerCids() const {
+        return per_layer_cids_;
+    }
+    void setPerLayerCids(std::vector<torch::Tensor> cids) {
+        per_layer_cids_ = std::move(cids);
+    }
+    const std::optional<std::vector<torch::Tensor>>& getPerLayerCents() const {
+        return per_layer_cents_;
+    }
+    void setPerLayerCents(std::vector<torch::Tensor> cents) {
+        per_layer_cents_ = std::move(cents);
+    }
     torch::Tensor        getSoftmaxProbs();
     StreamCacheResource& streamCacheResource();
     void                 setPerfTest(bool perf_test_);
@@ -597,6 +610,8 @@ protected:
     torch::Tensor                            softmax_probs_;
     torch::Tensor                            loss_;
     torch::Tensor                            last_hidden_states_;
+    std::optional<std::vector<torch::Tensor>> per_layer_cids_;
+    std::optional<std::vector<torch::Tensor>> per_layer_cents_;
     int                                      loss_index_ = 0;
     std::shared_ptr<std::mutex>              mutex_;
     std::shared_ptr<std::condition_variable> cv_;

@@ -332,6 +332,14 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         if (!inputs.warmup && inputs.pd_separation) {
             py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
         }
+
+        if (inputs.per_layer_cids.has_value()) {
+            py_attn_inputs.per_layer_cids = inputs.per_layer_cids;
+        }
+        if (inputs.per_layer_cents.has_value()) {
+            py_attn_inputs.per_layer_cents = inputs.per_layer_cents;
+        }
+
         setupKVCacheForAttentionInputs(py_attn_inputs, micro_inputs);
 
         calculatePaddingOffset(py_attn_inputs);
@@ -438,6 +446,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
             cache_store_async_writer_->init();
         }
+
+        if (inputs.per_layer_cids.has_value()) {
+            attention_inputs.per_layer_cids = inputs.per_layer_cids;
+        }
+        if (inputs.per_layer_cents.has_value()) {
+            attention_inputs.per_layer_cents = inputs.per_layer_cents;
+        }
+
         setupKVCacheForAttentionInputs(attention_inputs, inputs);
 
         calculatePaddingOffset(attention_inputs);
@@ -916,6 +932,17 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     if (inputs.multimodal_features.has_value()) {
         for (auto& mm_feature : inputs.multimodal_features.value()) {
             buffer_holder_.hold_host(mm_feature);
+        }
+    }
+
+    if (inputs.per_layer_cids.has_value()) {
+        for (auto& t : inputs.per_layer_cids.value()) {
+            buffer_holder_.hold_host(t);
+        }
+    }
+    if (inputs.per_layer_cents.has_value()) {
+        for (auto& t : inputs.per_layer_cents.value()) {
+            buffer_holder_.hold_host(t);
         }
     }
 

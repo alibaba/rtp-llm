@@ -46,6 +46,11 @@ struct GptModelInputs {
     // for mtp model
     torch::Tensor last_hidden_states;
 
+    // Per-layer PD separation buffers transferred from prefill to decode.
+    // cids: per layer [num_kv_head, 16, prefill_lens], cents: per layer [2, 16, 16]
+    std::optional<std::vector<torch::Tensor>> per_layer_cids;
+    std::optional<std::vector<torch::Tensor>> per_layer_cents;
+
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 
     // - single-type cache: [batch_size, block_nums]
