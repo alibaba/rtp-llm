@@ -13,7 +13,7 @@ from rtp_llm.test.perf_test.multi_node.perf_impl import BatchPerfImpl
 
 
 def run_single(
-    port: int,
+    base_port: int,
     dp_size: int,
     tp_size: int,
     batch_size_list: List[int],
@@ -39,13 +39,12 @@ def run_single(
     if not gang_config_string:
         gang_config_string = os.environ.get("GANG_CONFIG_STRING", "")
     if not gang_config_string:
-        gang_config_string = f"name:perf_part0,ip:127.0.0.1,port:{port}"
+        gang_config_string = f"name:perf_part0,ip:127.0.0.1,port:{base_port}"
 
     title_prefix = f"Speculative(step={propose_step}) " if is_speculative else ""
     title = "Decode Result" if is_decode else "Prefill Result"
     title = f"{title_prefix}{title}"
     batch_size_list = [1] if not is_decode else batch_size_list
-    base_port = port
 
     logging.info(f"start to run perf test")
     metrics_list: List[MetricState] = []
@@ -63,20 +62,18 @@ def run_single(
                     base_port=base_port,
                     dp_size=dp_size,
                     tp_size=tp_size,
+                    local_world_size=local_world_size,
                     batch_size=batch_size * dp_size,
                     input_len=input_len,
                     query=input_query_dict[input_len],
-                    is_decode=is_decode,
-                    wait_time=500,
-                    decode_test_length=decode_test_length,
-                    profile=True,
-                    generate_config=generate_config,
                     gang_config_string=gang_config_string,
-                    local_world_size=local_world_size,
                     request_tpot=request_tpot,
                     connection_timeout=connection_timeout,
                     retry_times=retry_times,
                     retry_interval=retry_interval,
+                    is_decode=is_decode,
+                    decode_test_length=decode_test_length,
+                    generate_config=generate_config,
                 ).run()
                 metrics_list.append(MetricState(input_len, batch_size, metric))
 
