@@ -66,6 +66,10 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
     auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto  attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
 
+    // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
+    // Worst case here is ~8 contiguous + (1 + group_count) strided copies,
+    // batched into one launch each. If new copies are added below — or if the
+    // hybrid KV-cache group_count grows materially — re-check MAX_FUSED_*_COPIES.
     FusedD2DCopyParams     d2d_copies;
     FusedStridedCopyParams strided_d2d_copies;
 

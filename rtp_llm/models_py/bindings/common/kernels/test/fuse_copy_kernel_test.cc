@@ -48,6 +48,17 @@ std::vector<T> deviceToHost(const T* d_ptr, size_t n) {
     return host;
 }
 
+// Allocate page-locked (pinned) host memory and fill it with the given data.
+// With UVA the returned pointer is directly dereferenceable from a CUDA kernel,
+// so it can be passed straight into FusedD2DCopyParams as a source pointer.
+template<typename T>
+T* pinnedHostAlloc(const std::vector<T>& host_data) {
+    T* h_pinned = nullptr;
+    EXPECT_EQ(cudaHostAlloc(&h_pinned, host_data.size() * sizeof(T), cudaHostAllocMapped), cudaSuccess);
+    std::memcpy(h_pinned, host_data.data(), host_data.size() * sizeof(T));
+    return h_pinned;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -219,6 +230,117 @@ TEST_F(FusedCopyTest, MaxFusedCopies) {
     }
 }
 
+// Documented worst-case contract: PyWrappedModel::forwardMicroBatched
+// accumulates copies across all micro-batches before a single flush. With
+// the planMicroBatches cap of 2 micro-batches and a hybrid KV-cache
+// group_count of 4, the total is (6 base + 4 group) * 2 = 20 copies.
+// This test pins that scenario down so any regression in the accounting
+// (or in MAX_FUSED_D2D_COPIES) fails here rather than at production runtime.
+TEST_F(FusedCopyTest, MicroBatchedAccumulationWorstCase) {
+    constexpr int    NUM_MICRO_BATCHES  = 2;
+    constexpr int    BASE_COPIES_PER_MB = 6;
+    constexpr int    GROUP_COUNT        = 4;
+    constexpr int    COPIES_PER_MB      = BASE_COPIES_PER_MB + GROUP_COUNT;
+    constexpr int    TOTAL_COPIES       = NUM_MICRO_BATCHES * COPIES_PER_MB;  // 20
+    constexpr size_t N                  = 256;
+
+    static_assert(TOTAL_COPIES <= rtp_llm::MAX_FUSED_D2D_COPIES,
+                  "MAX_FUSED_D2D_COPIES is below the documented forwardMicroBatched worst case; "
+                  "see fuse_copy_util.h sizing rationale.");
+
+    std::vector<std::vector<uint8_t>> host_srcs(TOTAL_COPIES);
+    std::vector<uint8_t*>             d_srcs(TOTAL_COPIES);
+    std::vector<uint8_t*>             d_dsts(TOTAL_COPIES);
+
+    for (int c = 0; c < TOTAL_COPIES; ++c) {
+        host_srcs[c].resize(N);
+        for (size_t i = 0; i < N; ++i)
+            host_srcs[c][i] = static_cast<uint8_t>((c * 19 + i) & 0xFF);
+        d_srcs[c] = deviceAlloc(host_srcs[c]);
+        d_dsts[c] = deviceAllocZero<uint8_t>(N);
+    }
+
+    rtp_llm::FusedD2DCopyParams params;
+    for (int c = 0; c < TOTAL_COPIES; ++c)
+        params.add(d_srcs[c], d_dsts[c], N);
+
+    rtp_llm::invokeFusedCopy(params, stream_);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+
+    for (int c = 0; c < TOTAL_COPIES; ++c) {
+        auto result = deviceToHost(d_dsts[c], N);
+        for (size_t i = 0; i < N; ++i)
+            ASSERT_EQ(result[i], host_srcs[c][i]) << "copy " << c << " mismatch at byte " << i;
+    }
+
+    for (int c = 0; c < TOTAL_COPIES; ++c) {
+        cudaFree(d_srcs[c]);
+        cudaFree(d_dsts[c]);
+    }
+}
+
+// Copy from page-locked (pinned) host memory directly into device memory.
+// The kernel dereferences the source pointer on the GPU, so this exercises
+// the UVA path where pinned host memory is reachable from a CUDA kernel.
+TEST_F(FusedCopyTest, PinnedHostToDeviceCopy) {
+    constexpr size_t     N = 1024;  // 16-byte aligned, hits the vectorised fast path
+    std::vector<uint8_t> host_src(N);
+    for (size_t i = 0; i < N; ++i)
+        host_src[i] = static_cast<uint8_t>((i * 5 + 1) & 0xFF);
+
+    uint8_t* h_src_pinned = pinnedHostAlloc(host_src);
+    uint8_t* d_dst        = deviceAllocZero<uint8_t>(N);
+
+    rtp_llm::FusedD2DCopyParams params;
+    params.add(h_src_pinned, d_dst, N);
+
+    rtp_llm::invokeFusedCopy(params, stream_);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+
+    auto result = deviceToHost(d_dst, N);
+    for (size_t i = 0; i < N; ++i)
+        ASSERT_EQ(result[i], host_src[i]) << "mismatch at byte " << i;
+
+    cudaFreeHost(h_src_pinned);
+    cudaFree(d_dst);
+}
+
+// Mixed sources in a single fused launch: some copies read from pinned host
+// memory, others from device memory. This is the realistic batched scenario.
+TEST_F(FusedCopyTest, MixedPinnedAndDeviceSrc) {
+    constexpr size_t N = 512;
+
+    std::vector<uint8_t> host_a(N), host_b(N);
+    for (size_t i = 0; i < N; ++i) {
+        host_a[i] = static_cast<uint8_t>((i + 11) & 0xFF);
+        host_b[i] = static_cast<uint8_t>((i * 3 + 7) & 0xFF);
+    }
+
+    uint8_t* h_src_pinned = pinnedHostAlloc(host_a);  // pinned host source
+    uint8_t* d_src_dev    = deviceAlloc(host_b);      // device source
+    uint8_t* d_dst_a      = deviceAllocZero<uint8_t>(N);
+    uint8_t* d_dst_b      = deviceAllocZero<uint8_t>(N);
+
+    rtp_llm::FusedD2DCopyParams params;
+    params.add(h_src_pinned, d_dst_a, N);
+    params.add(d_src_dev, d_dst_b, N);
+
+    rtp_llm::invokeFusedCopy(params, stream_);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+
+    auto result_a = deviceToHost(d_dst_a, N);
+    auto result_b = deviceToHost(d_dst_b, N);
+    for (size_t i = 0; i < N; ++i) {
+        ASSERT_EQ(result_a[i], host_a[i]) << "pinned-src mismatch at byte " << i;
+        ASSERT_EQ(result_b[i], host_b[i]) << "device-src mismatch at byte " << i;
+    }
+
+    cudaFreeHost(h_src_pinned);
+    cudaFree(d_src_dev);
+    cudaFree(d_dst_a);
+    cudaFree(d_dst_b);
+}
+
 // ---------------------------------------------------------------------------
 // FusedStridedCopy tests (invokeFusedStridedCopy)
 // ---------------------------------------------------------------------------
@@ -379,6 +501,36 @@ TEST_F(FusedStridedCopyTest, SingleRowCopy) {
         ASSERT_EQ(result[b], host_src[b]) << "mismatch at byte " << b;
 
     cudaFree(d_src);
+    cudaFree(d_dst);
+}
+
+// Strided copy from pinned host memory directly into device memory.
+TEST_F(FusedStridedCopyTest, PinnedHostToDeviceCopy) {
+    constexpr size_t NROWS      = 8;
+    constexpr size_t ROW_BYTES  = 32;
+    constexpr size_t SRC_STRIDE = 64;         // pinned source has padding per row
+    constexpr size_t DST_STRIDE = ROW_BYTES;  // compact device destination
+
+    std::vector<uint8_t> host_src(NROWS * SRC_STRIDE, 0xCD);
+    for (size_t r = 0; r < NROWS; ++r)
+        for (size_t b = 0; b < ROW_BYTES; ++b)
+            host_src[r * SRC_STRIDE + b] = static_cast<uint8_t>((r * ROW_BYTES + b * 2) & 0xFF);
+
+    uint8_t* h_src_pinned = pinnedHostAlloc(host_src);
+    uint8_t* d_dst        = deviceAllocZero<uint8_t>(NROWS * DST_STRIDE);
+
+    rtp_llm::FusedStridedCopyParams params;
+    params.add(h_src_pinned, d_dst, NROWS, ROW_BYTES, SRC_STRIDE, DST_STRIDE);
+
+    rtp_llm::invokeFusedStridedCopy(params, stream_);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+
+    auto result = deviceToHost(d_dst, NROWS * DST_STRIDE);
+    for (size_t r = 0; r < NROWS; ++r)
+        for (size_t b = 0; b < ROW_BYTES; ++b)
+            ASSERT_EQ(result[r * DST_STRIDE + b], host_src[r * SRC_STRIDE + b]) << "row " << r << " col " << b;
+
+    cudaFreeHost(h_src_pinned);
     cudaFree(d_dst);
 }
 
