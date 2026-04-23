@@ -213,7 +213,7 @@ private:
 
 __device__ inline void init(CtaBarrier* bar, uint32_t count)
 {
-    new (bar) CtaBarrier{count};
+    ::new (static_cast<void*>(bar)) CtaBarrier{count};
 }
 
 class NamedBarrier

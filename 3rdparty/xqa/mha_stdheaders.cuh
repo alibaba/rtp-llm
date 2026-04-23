@@ -13,12 +13,12 @@
 #pragma once
 
 #ifndef GENERATE_CUBIN
+#include <new>
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <new>
 #include <type_traits>
 #include <utility>
 #endif
