@@ -107,6 +107,22 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         decode_batch_size,
         batch_size);
 
+    // Defensive guard: PyWrappedModel currently does not support a mixed prefill+decode batch.
+    // The cu_seqlens slice assignment below assumes input_lengths.cumsum spans only context streams,
+    // but input_lengths actually has shape [decode + context]. When both are non-zero the sizes
+    // mismatch (slice=[context_batch_size] vs cumsum=[batch_size]) and copy_ throws an opaque
+    // PyTorch broadcast error. Failing here gives an actionable message and also catches any
+    // future scheduler regression that lets a mixed batch reach the python model path. Schedulers
+    // that talk to py_model are expected to drain decode before adding context (see
+    // FIFOScheduler::evaluateRunningMemory and GatherBatchScheduler::schedule's
+    // python_model_busy guard).
+    RTP_LLM_CHECK_WITH_INFO(context_batch_size == 0 || decode_batch_size == 0,
+                            "PyWrappedModel received a mixed prefill+decode batch which is not supported: "
+                            "context_batch_size[%ld] decode_batch_size[%ld]. The scheduler must keep prefill and "
+                            "decode batches separate when load_python_model is enabled.",
+                            context_batch_size,
+                            decode_batch_size);
+
     if (context_batch_size > 0) {
         torch::Tensor cu_seqlens =
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
