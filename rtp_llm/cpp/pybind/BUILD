@@ -34,6 +34,7 @@ cc_library(
     ],
     deps = [
         ":py_utils",
+        "//rtp_llm/cpp/cache:basic_type",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:model_config",  # Add ModelConfig implementation
         "//rtp_llm/cpp/model_utils:model_utils",

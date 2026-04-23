@@ -284,8 +284,8 @@ bool P2PConnector::executeRead(uint64_t                                request_i
     int       remote_tp_size = (p2p_request.remote_tp_size() > 0) ? p2p_request.remote_tp_size() : 1;
     ErrorInfo error_info     = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers, remote_tp_size);
     if (error_info.hasError()) {
-        RTP_LLM_LOG_WARNING("executeRead failed, request_id: %ld, unique_key: %s, error: %s",
-                            request_id,
+        RTP_LLM_LOG_WARNING("executeRead failed, request_id: %llu, unique_key: %s, error: %s",
+                            static_cast<unsigned long long>(request_id),
                             unique_key.c_str(),
                             error_info.ToString().c_str());
     }

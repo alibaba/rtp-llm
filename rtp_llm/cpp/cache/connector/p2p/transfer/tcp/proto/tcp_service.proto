@@ -22,7 +22,7 @@ message TcpBlockBufferInfo {
 }
 
 message TcpCacheKeyBlockBufferInfo {
-    optional int64 key = 1;
+    optional uint64 key = 1;
     repeated TcpBlockBufferInfo blocks = 2;
 }
 

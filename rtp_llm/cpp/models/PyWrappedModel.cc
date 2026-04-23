@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/cache/BasicType.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -222,12 +223,16 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     RTP_LLM_PROFILE_SCOPE("py_model.prepareWriteCacheParams");
     std::optional<PyCacheStoreInputs> params;
     if (!inputs.warmup && inputs.pd_separation) {
-        const size_t         decoder_batch_size = inputs.sequence_lengths.size(0);
-        const size_t         context_batch_size = inputs.input_lengths.size(0) - decoder_batch_size;
-        std::vector<int64_t> cache_keys_vec;
+        const size_t              decoder_batch_size = inputs.sequence_lengths.size(0);
+        const size_t              context_batch_size = inputs.input_lengths.size(0) - decoder_batch_size;
+        std::vector<CacheKeyType> cache_keys_vec;
         if (inputs.cache_keys.defined()) {
-            auto ck        = inputs.cache_keys.contiguous();
-            cache_keys_vec = std::vector<int64_t>(ck.data_ptr<int64_t>(), ck.data_ptr<int64_t>() + ck.numel());
+            auto        ck = inputs.cache_keys.contiguous();
+            const auto* p  = ck.data_ptr<int64_t>();
+            cache_keys_vec.reserve(static_cast<size_t>(ck.numel()));
+            for (int64_t i = 0; i < ck.numel(); ++i) {
+                cache_keys_vec.push_back(static_cast<CacheKeyType>(p[i]));
+            }
         }
         torch::Tensor kv_cache_layer_to_group =
             inputs.kv_cache_layer_to_group.defined() ? inputs.kv_cache_layer_to_group : torch::Tensor();

@@ -333,8 +333,8 @@ protected:
     std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, int num_blocks = 2) {
         auto buffer = std::make_shared<LayerCacheBuffer>(layer_id);
         for (int i = 0; i < num_blocks; ++i) {
-            int64_t cache_key = layer_id * 1000 + i;
-            int     block_id  = i;
+            CacheKeyType cache_key = static_cast<CacheKeyType>(layer_id * 1000 + i);
+            int          block_id  = i;
             buffer->addBlockId(cache_key, block_id);
         }
         return buffer;

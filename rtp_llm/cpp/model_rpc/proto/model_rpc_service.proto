@@ -261,7 +261,7 @@ message BroadcastLoadRequestPB {
     uint64 request_id = 1;
     string request_key = 2;
     repeated string peer_addrs = 3;
-    repeated int64 cache_keys = 4;
+    repeated uint64 cache_keys = 4;
     repeated int32 block_ids = 5;
     int64 block_num = 6;
     int64 reuse_block_size = 7;
@@ -343,7 +343,7 @@ message CacheStatusPB {
     int64 total_kv_cache = 2;
     int64 block_size = 3;
     int64 version = 4;
-    map<int64, bool> cache_keys = 5;
+    map<uint64, bool> cache_keys = 5;
 }
 
 message UpdateSchedulerInfoRequestPB {
@@ -463,7 +463,7 @@ message TPWorkerInfoPB {
 
 message LayerCacheBlockPB {
     uint32 layer_id = 1;
-    repeated int64 cache_keys = 2;
+    repeated uint64 cache_keys = 2;
     repeated uint32 block_ids = 3;
 }
 

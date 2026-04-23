@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheTypes.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/core/DeviceData.h"
 #include <string>

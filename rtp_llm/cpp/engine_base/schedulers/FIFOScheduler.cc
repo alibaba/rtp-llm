@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheTypes.h"
 #include <chrono>
 #include <memory>
 #include <mutex>

@@ -8,11 +8,11 @@ namespace rtp_llm {
 
 LayerCacheBuffer::LayerCacheBuffer(int layer_id): layer_id_(layer_id) {}
 
-void LayerCacheBuffer::addBlockId(int64_t key, int block_id) {
+void LayerCacheBuffer::addBlockId(CacheKeyType key, int block_id) {
     block_id_map_[key] = block_id;
 }
 
-int LayerCacheBuffer::getBlockId(int64_t cache_key) const {
+int LayerCacheBuffer::getBlockId(CacheKeyType cache_key) const {
     auto it = block_id_map_.find(cache_key);
     if (it == block_id_map_.end()) {
         return -1;

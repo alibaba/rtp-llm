@@ -2,7 +2,7 @@
 #include <cstring>
 #include <sstream>
 #include "torch/all.h"
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"

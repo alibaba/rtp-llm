@@ -3,7 +3,7 @@
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheTypes.h"
 #include <atomic>
 #include <mutex>
 #include <condition_variable>

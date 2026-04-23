@@ -50,8 +50,8 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(
 
     auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id);
     for (size_t i = 0; i < block_ids_size; ++i) {
-        int     block_id = block_ids[start_block_idx + i];
-        int64_t key      = cache_keys[start_block_idx + i];
+        int          block_id = block_ids[start_block_idx + i];
+        CacheKeyType key      = cache_keys[start_block_idx + i];
         layer_cache_buffer->addBlockId(key, block_id);
     }
 

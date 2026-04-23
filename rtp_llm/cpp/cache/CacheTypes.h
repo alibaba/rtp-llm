@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 
+#include "rtp_llm/cpp/cache/BasicType.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/core/Types.h"
@@ -11,9 +12,6 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
-
-typedef int32_t          GroupIdType;
-typedef std::vector<int> LayerIdsType;
 
 struct BlockAddrInfo {
     void* kv_addr       = nullptr;

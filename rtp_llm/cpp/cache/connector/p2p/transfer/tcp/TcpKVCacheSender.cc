@@ -93,7 +93,7 @@ bool TcpKVCacheSender::regMem(const BlockInfo& /*block_info*/, uint64_t /*aligne
 }
 
 bool TcpKVCacheSender::setBlockBufferInfo(::tcp_transfer::TcpBlockBufferInfo* block_buffer_info,
-                                          int64_t                             cache_key,
+                                          CacheKeyType                        cache_key,
                                           const BlockInfo&                    block_info,
                                           std::vector<CopyTask>&              copy_tasks) {
     block_buffer_info->set_len(static_cast<uint32_t>(block_info.size_bytes));

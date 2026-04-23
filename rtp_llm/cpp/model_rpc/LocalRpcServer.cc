@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheTypes.h"
 
 using namespace std;
 
@@ -192,7 +192,7 @@ LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionP
     response->set_version(cache_status.version);
     auto* cache_map = response->mutable_cache_keys();
     for (const auto& key : cache_status.cached_keys) {
-        (*cache_map)[static_cast<int64_t>(key)] = true;
+        (*cache_map)[key] = true;
     }
     return grpc::Status::OK;
 }

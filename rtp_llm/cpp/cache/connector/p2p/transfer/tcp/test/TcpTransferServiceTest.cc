@@ -67,7 +67,7 @@ private:
 // ---------------------------------------------------------------------------
 
 static void addRequestBlock(::tcp_transfer::TcpLayerBlockTransferRequest&        request,
-                            int64_t                                              cache_key,
+                            CacheKeyType                                         cache_key,
                             const std::vector<std::pair<uint32_t, std::string>>& sub_blocks) {
     auto* kb = request.add_blocks();
     kb->set_key(cache_key);
@@ -89,7 +89,7 @@ static ::tcp_transfer::TcpLayerBlockTransferRequest makeRequest(const std::strin
 // Task / block helpers
 // ---------------------------------------------------------------------------
 
-static KeyBlockInfoMap makeBlocks(int64_t cache_key, void* addr, size_t size) {
+static KeyBlockInfoMap makeBlocks(CacheKeyType cache_key, void* addr, size_t size) {
     auto kbi = std::make_shared<KeyBlockInfo>();
     kbi->blocks.push_back(BlockInfo{false, 0, 0, addr, size});
     KeyBlockInfoMap m;
@@ -97,7 +97,7 @@ static KeyBlockInfoMap makeBlocks(int64_t cache_key, void* addr, size_t size) {
     return m;
 }
 
-static KeyBlockInfoMap makeTwoSubBlocks(int64_t cache_key, void* addr0, size_t sz0, void* addr1, size_t sz1) {
+static KeyBlockInfoMap makeTwoSubBlocks(CacheKeyType cache_key, void* addr0, size_t sz0, void* addr1, size_t sz1) {
     auto kbi = std::make_shared<KeyBlockInfo>();
     kbi->blocks.push_back(BlockInfo{false, 0, 0, addr0, sz0});
     kbi->blocks.push_back(BlockInfo{false, 0, 0, addr1, sz1});

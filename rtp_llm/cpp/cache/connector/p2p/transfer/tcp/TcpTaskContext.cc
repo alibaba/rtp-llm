@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpTaskContext.h"
 
+#include "rtp_llm/cpp/cache/BasicType.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -60,7 +61,7 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
     }
 
     // Build a lookup index from the request for O(1) access by cache_key.
-    std::unordered_map<int64_t, const ::tcp_transfer::TcpCacheKeyBlockBufferInfo*> request_index;
+    std::unordered_map<CacheKeyType, const ::tcp_transfer::TcpCacheKeyBlockBufferInfo*> request_index;
     request_index.reserve(request_->blocks_size());
     for (const auto& cache_key_block : request_->blocks()) {
         request_index[cache_key_block.key()] = &cache_key_block;
@@ -72,8 +73,9 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
     for (const auto& [cache_key, kbi_ptr] : task_->getBlockInfos()) {
         auto req_it = request_index.find(cache_key);
         if (req_it == request_index.end()) {
-            RTP_LLM_LOG_WARNING(
-                "executeCopy: cache_key %lld missing in request, unique_key: %s", cache_key, unique_key_.c_str());
+            RTP_LLM_LOG_WARNING("executeCopy: cache_key %llu missing in request, unique_key: %s",
+                                (unsigned long long)cache_key,
+                                unique_key_.c_str());
             return false;
         }
         const auto* req_block = req_it->second;
@@ -84,8 +86,8 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
                 continue;
             }
             if (i >= req_block->blocks_size()) {
-                RTP_LLM_LOG_WARNING("executeCopy: cache_key %lld sub_block %d missing in request, unique_key: %s",
-                                    cache_key,
+                RTP_LLM_LOG_WARNING("executeCopy: cache_key %llu sub_block %d missing in request, unique_key: %s",
+                                    (unsigned long long)cache_key,
                                     i,
                                     unique_key_.c_str());
                 return false;
@@ -93,8 +95,8 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
             const auto& proto_block = req_block->blocks(i);
             if (proto_block.len() != static_cast<uint32_t>(bi.size_bytes)) {
                 RTP_LLM_LOG_WARNING(
-                    "executeCopy: size mismatch cache_key %lld sub %d: expected %zu got %u, unique_key: %s",
-                    cache_key,
+                    "executeCopy: size mismatch cache_key %llu sub %d: expected %zu got %u, unique_key: %s",
+                    (unsigned long long)cache_key,
                     i,
                     bi.size_bytes,
                     proto_block.len(),

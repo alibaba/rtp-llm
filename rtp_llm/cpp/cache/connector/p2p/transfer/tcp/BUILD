@@ -20,6 +20,7 @@ cc_library(
     srcs = ["TcpTaskContext.cc"],
     deps = [
         ":cuda_copy_util",
+        "//rtp_llm/cpp/cache:basic_type",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_metric",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp/proto:tcp_service_cc_proto",
@@ -56,6 +57,7 @@ cc_library(
     ],
     deps = [
         ":cuda_copy_util",
+        "//rtp_llm/cpp/cache:basic_type",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_metric",
         ":tcp_transfer_service",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",

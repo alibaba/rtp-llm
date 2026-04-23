@@ -5,7 +5,7 @@
 #include <unordered_map>
 
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheTypes.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/cpp/utils/Logger.h"

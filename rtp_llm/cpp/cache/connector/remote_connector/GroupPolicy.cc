@@ -4,7 +4,7 @@
 #include <typeinfo>
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheTypes.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
