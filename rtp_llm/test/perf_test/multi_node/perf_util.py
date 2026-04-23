@@ -24,6 +24,10 @@ def _load_tokenizer(model_type: str, tokenizer_path: str) -> PreTrainedTokenizer
             pad_token="<|endoftext|>",
             unk_token="<|endoftext|>",
         )
+    if os.path.isdir(tokenizer_path):
+        return AutoTokenizer.from_pretrained(
+            tokenizer_path, trust_remote_code=True, local_files_only=True
+        )
     return AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
 
