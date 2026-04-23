@@ -597,6 +597,114 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     block_pool->requestFree(keep);
 }
 
+// Prefill init path (StreamCacheResource::initKVBlock sets enable_remove_skipped_blocks=false).
+// With step=2 and reuse_blocks_len=3, the reused linear tail lands at pos 2, which is NOT
+// a step hit ((2+1)%2==1). Without sparse cleanup, that slot must survive so that
+// causal_conv1d can still read it by prefix_length.
+TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreservesReusedLinearTail) {
+    auto config      = makeTinyHybridConfig();
+    config.block_num = 16;  // 6 cached (resident, non-evictable) + 4 new + 1 null reserved
+    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool  = allocator->getBlockPool();
+    auto block_cache = block_pool->blockCache();
+    ASSERT_NE(block_pool, nullptr);
+    ASSERT_NE(block_cache, nullptr);
+
+    const int gid_linear = 0;
+    const int gid_full   = 1;
+
+    CacheKeysType shared_keys          = {100, 101, 102};
+    auto          cached_full_blocks   = allocateAndCache(block_pool, block_cache, gid_full, shared_keys);
+    auto          cached_linear_blocks = allocateAndCache(block_pool, block_cache, gid_linear, shared_keys);
+    ASSERT_EQ(cached_linear_blocks.size(), 3u);
+
+    // Request has 5 keys; allocator drops the last before matching, leaving {100,101,102,103}.
+    // Full matches the first 3 (103 is absent); linear joint backoff stops at pos=2 => reuse_blocks_len=3.
+    auto batch_res = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_to_group_id=*/config.layer_to_group_id,
+                                       CacheKeysType{100, 101, 102, 103, 104});
+
+    // seq_len=20 => 5 slots. block_size-3-reserve_step = 2, so removeSkippedBlocks would scan pos 2.
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
+
+    MallocInfo info{batch_res, token_ids};
+    info.enable_device_cache   = true;
+    info.reuse_cache           = true;
+    info.enable_remove_skipped_blocks = false;  // prefill init path
+    auto result                = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+
+    const auto& linear_out = batch_res->blocks(0, gid_linear);
+    ASSERT_EQ(linear_out.size(), 5u);
+    EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
+    EXPECT_TRUE(isNullBlockIdx(linear_out[1]));
+    EXPECT_EQ(linear_out[2], cached_linear_blocks[2]) << "reused linear tail must survive prefill init";
+    EXPECT_FALSE(isNullBlockIdx(linear_out[3]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[4]));
+}
+
+// Decode path (StreamCacheResource::incrKVBlock sets enable_remove_skipped_blocks=true).
+// The allocator is invoked on an already-populated resource, so malloc() dispatches directly
+// to incrMalloc(). Sparse cleanup must prune non-step blocks while preserving step hits and
+// the last two slots.
+TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLinearGroups) {
+    auto config      = makeTinyHybridConfig();
+    config.block_num = 16;  // pre-allocates 6 + 6 = 12 blocks plus the reserved null block
+    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool = allocator->getBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+
+    const int gid_linear = 0;
+    const int gid_full   = 1;
+
+    auto linear_alloc = block_pool->malloc(6);
+    auto full_alloc   = block_pool->malloc(6);
+    ASSERT_EQ(linear_alloc.size(), 6u);
+    ASSERT_EQ(full_alloc.size(), 6u);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_to_group_id=*/config.layer_to_group_id,
+                                       CacheKeysType{});
+    batch_res->mutableBlockIds(0, gid_linear).assign(linear_alloc);
+    batch_res->mutableBlockIds(0, gid_full).assign(full_alloc);
+    ASSERT_GT(batch_res->curBlocksNum(), 0);
+
+    // seq_len=24 => 6 slots; current_blocks==6 so group malloc is a no-op and only cleanup runs.
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/24, /*seq_size_per_block=*/4);
+
+    MallocInfo info{batch_res, token_ids};
+    info.enable_device_cache   = false;
+    info.reuse_cache           = true;
+    info.enable_remove_skipped_blocks = true;  // decode path
+    auto result                = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+
+    // For step=2 and size=6: keep pos 1, 3 (step hits) and last two (4, 5); null pos 0, 2.
+    const auto& linear_out = batch_res->blocks(0, gid_linear);
+    ASSERT_EQ(linear_out.size(), 6u);
+    EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[1]));
+    EXPECT_TRUE(isNullBlockIdx(linear_out[2]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[3]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[4]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[5]));
+
+    // Full group is untouched by sparse cleanup.
+    const auto& full_out = batch_res->blocks(0, gid_full);
+    ASSERT_EQ(full_out.size(), 6u);
+    for (size_t i = 0; i < full_out.size(); ++i) {
+        EXPECT_EQ(full_out[i], full_alloc[i]);
+    }
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 
