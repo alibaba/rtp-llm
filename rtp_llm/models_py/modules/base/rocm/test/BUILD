@@ -14,7 +14,7 @@ py_test (
     timeout = "eternal",
     env = test_envs,
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
+    exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
 py_test (
@@ -24,7 +24,7 @@ py_test (
     timeout = "eternal",
     env = test_envs,
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
+    exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
 py_test (
@@ -34,7 +34,7 @@ py_test (
     timeout = "eternal",
     env = test_envs,
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
+    exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
 py_test (
@@ -44,7 +44,7 @@ py_test (
     timeout = "eternal",
     env = test_envs,
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
+    exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
 py_test (
@@ -54,7 +54,7 @@ py_test (
     timeout = "eternal",
     env = test_envs,
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
+    exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
 py_test (
@@ -64,7 +64,7 @@ py_test (
     timeout = "eternal",
     env = test_envs,
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
+    exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
 py_test (
@@ -74,7 +74,7 @@ py_test (
     env = test_envs,
     timeout = "eternal",
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
+    exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
 py_test(
@@ -87,6 +87,6 @@ py_test(
     timeout = 'moderate',
     env = {"GPU_COUNT": "2"},
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X', 'gpu_count':'2'},
+    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
 )
 

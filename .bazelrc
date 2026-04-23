@@ -138,8 +138,21 @@ build:rocm --action_env TF_NEED_ROCM=1
 build:rocm --action_env GPU_ARCHS=gfx942
 build:rocm --copt="-DUSING_CUDA=0"
 build:rocm --copt="-DUSING_ROCM=1"
+
+build:rocm_gfx950 --config=rocm
+build:rocm_gfx950 --action_env GPU_ARCHS=gfx950
+build:rocm_gfx950 --copt="-DROCM_GFX950=1"
+build:rocm_gfx950 --define=gfx950=true
 build:rocm --copt="-DUSING_CK_INT4=1"
 build:rocm --copt="-D__HIP_PLATFORM_AMD__=1"
+
+build:rocm --copt="-DTORCH_CUDA_CPP_API=" # PyTorch 2.9 ROCm compatibility
+build:rocm --copt="-DTORCH_CUDA_CU_API=" # PyTorch 2.9 ROCm compatibility
+## ROCm clang may emit compiler-rt builtins (e.g. __truncsfbf2) that are not
+## pulled in automatically for shared objects in this toolchain setup.
+## NOTE: The clang version number (22) must be updated when upgrading ROCm.
+## Known mapping: ROCm 5.x → clang 17, ROCm 6.x → clang 18, ROCm 7.x → clang 22.
+build:rocm --linkopt="/opt/rocm/lib/llvm/lib/clang/22/lib/linux/libclang_rt.builtins-x86_64.a"
 build:rocm --copt="-DLEGACY_HIPBLAS_DIRECT"
 build:rocm --repo_env CK_FMHA_GEN_ARGS="--receipt 2"
 build:rocm --repo_env CK_LYNM_GEN_ARGS="--receipt 2"
@@ -161,6 +174,7 @@ build:rocm --action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/
 build:rocm --host_action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260321"
 build:rocm --copt="-DUSE_ROCM=1"
 build:rocm --copt="-DFORCE_NVSHMEM_API=1"
+build:rocm --copt="-DFLASHINFER_CUB_SUBTRACTLEFT_DEFINED"  # ROCm 7.2 hipcub uses SubtractLeft instead of FlagHeads
 build:aiter_src --define=using_aiter_src=true
 test:rocm --test_env="/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/"
 
