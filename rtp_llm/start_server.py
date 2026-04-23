@@ -145,16 +145,31 @@ def start_vit_server_impl(
 
         worker_processes = []
         worker_addresses = []
+        worker_http_addresses = []
 
         base_grpc_port = py_env_configs.server_config.rpc_server_port
 
+        # Per-worker we consume two ports (grpc + http). Fail fast if the
+        # range would walk past the 16-bit TCP port ceiling — otherwise
+        # bind() errors only surface inside the spawned worker and look like
+        # health-check timeouts.
+        max_port = base_grpc_port + vit_server_count * 2
+        if max_port >= 65536:
+            raise ValueError(
+                f"VIT worker port range exceeds 65535: base={base_grpc_port}, "
+                f"vit_server_count={vit_server_count}, max={max_port}"
+            )
+
         for i in range(vit_server_count):
-            internal_grpc_port = base_grpc_port + i + 1
+            internal_grpc_port = base_grpc_port + i * 2 + 1
+            internal_http_port = base_grpc_port + i * 2 + 2
             worker_addresses.append(f"127.0.0.1:{internal_grpc_port}")
+            worker_http_addresses.append(f"127.0.0.1:{internal_http_port}")
 
             logging.info(
                 f"[PROCESS_SPAWN] Start vit worker process worker_{i} "
-                f"(internal grpc_port={internal_grpc_port})"
+                f"(internal grpc_port={internal_grpc_port}, "
+                f"internal http_port={internal_http_port})"
             )
             process = torch.multiprocessing.Process(
                 target=vit_start_server,
@@ -162,7 +177,7 @@ def start_vit_server_impl(
                     i,
                     py_env_configs,
                     internal_grpc_port,  # grpc_port
-                    None,  # http_port (工作进程不需要 HTTP，None 表示工作进程模式)
+                    internal_http_port,  # http_port
                     True,  # is_proxy_mode (proxy 模式下的 worker 进程)
                 ),
                 name=f"vit_worker_{i}",
@@ -185,6 +200,7 @@ def start_vit_server_impl(
                 worker_addresses,
                 external_grpc_port,  # grpc_port
                 external_http_port,  # http_port
+                worker_http_addresses,  # worker_http_addresses
             ),
             name="vit_proxy",
         )
