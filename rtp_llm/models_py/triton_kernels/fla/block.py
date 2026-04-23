@@ -191,6 +191,12 @@ def store_ssm_state_to_block_map(
     max_block_size = block_map.shape[1]
     grid = (chunk_num, head_num, triton.cdiv(v, block_v))
     token_stride_ssm_state = ssm_states.stride(0)
+    # Ensure h and final_states have the same dtype as ssm_states so that
+    # Triton does not see mixed pointer types inside the kernel branches.
+    if h.dtype != ssm_states.dtype:
+        h = h.to(ssm_states.dtype)
+    if final_states.dtype != ssm_states.dtype:
+        final_states = final_states.to(ssm_states.dtype)
     store_ssm_state_to_block_map_kernel[grid](
         chunk_indices,
         h,
