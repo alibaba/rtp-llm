@@ -43,7 +43,7 @@
 2. 机器上存在工作区根目录：`/ssd/1/vin.gb/RTP-LLM`
 3. 开源仓路径存在：`/ssd/1/vin.gb/RTP-LLM/github-opensource`
 4. 内部 smoke 源路径存在：`/ssd/1/vin.gb/RTP-LLM/internal_source`
-5. 模型目录已挂载，例如：`/mnt/nas1/hf/Qwen2.5-0.5B-Instruct/config.json`
+5. 模型路径满足其一即可：标准路径 `/mnt/nas1/hf/Qwen2.5-0.5B-Instruct/config.json`，或自定义模型源目录例如 `/ssd/1/vin.gb/qwen2.5-0.5b`
 6. RDMA 设备可见：`/dev/infiniband`、`/sys/class/infiniband`
 7. Docker、NVIDIA runtime、`python3`、`git` 可用
 8. Bazel 依赖缓存目录存在：`/ssd/1/vin.gb/bazel_deps`
@@ -56,7 +56,8 @@ nvidia-smi
 ls -l /dev/infiniband
 ls /sys/class/infiniband
 rdma link show
-ls -l /mnt/nas1/hf/Qwen2.5-0.5B-Instruct/config.json
+ls -l /mnt/nas1/hf/Qwen2.5-0.5B-Instruct/config.json || true
+ls -l /ssd/1/vin.gb/qwen2.5-0.5b/config.json || true
 ```
 
 如果 `rdma link show` 为空，说明这台机器还不能验证真实 RDMA one-sided WRITE 数据面。
@@ -72,14 +73,15 @@ git checkout develop/vin/p2p-connector-3
 git pull --ff-only origin develop/vin/p2p-connector-3
 ```
 
-### 4.2 一键执行完整验证
+### 4.2 分两步执行完整验证
 
 ```bash
 cd /ssd/1/vin.gb/RTP-LLM/github-opensource
-bash tools/run_p2p_mooncake_rdma_suite.sh all
+MODEL_ROOT=/ssd/1/vin.gb MODEL_SOURCE_PATH=/ssd/1/vin.gb/qwen2.5-0.5b bash tools/setup_p2p_mooncake_rdma_env.sh prepare
+MODEL_ROOT=/ssd/1/vin.gb MODEL_SOURCE_PATH=/ssd/1/vin.gb/qwen2.5-0.5b bash tools/run_p2p_mooncake_rdma_tests.sh test
 ```
 
-这条命令会自动完成：
+这两条命令合起来会完成：
 
 1. 切分支并打印当前提交
 2. 删除并重建测试容器 `vin_rtp_rdma_test`
@@ -91,23 +93,28 @@ bash tools/run_p2p_mooncake_rdma_suite.sh all
 8. 打印 remote reuse artifact
 9. 默认恢复 `internal_source/rtp_llm/test/smoke/BUILD`
 
-## 5. 一键脚本用法
+## 5. 脚本用法
 
-脚本路径：`/ssd/1/vin.gb/RTP-LLM/github-opensource/tools/run_p2p_mooncake_rdma_suite.sh`
-
-帮助命令：
+主入口脚本：
 
 ```bash
-bash tools/run_p2p_mooncake_rdma_suite.sh --help
+bash tools/setup_p2p_mooncake_rdma_env.sh --help
+bash tools/run_p2p_mooncake_rdma_tests.sh --help
 ```
 
 支持动作：
 
 ```bash
-bash tools/run_p2p_mooncake_rdma_suite.sh prepare
-bash tools/run_p2p_mooncake_rdma_suite.sh test
-bash tools/run_p2p_mooncake_rdma_suite.sh smoke-tcp
-bash tools/run_p2p_mooncake_rdma_suite.sh smoke-rdma
+bash tools/setup_p2p_mooncake_rdma_env.sh prepare
+bash tools/setup_p2p_mooncake_rdma_env.sh check
+bash tools/run_p2p_mooncake_rdma_tests.sh test
+bash tools/run_p2p_mooncake_rdma_tests.sh smoke-tcp
+bash tools/run_p2p_mooncake_rdma_tests.sh smoke-rdma
+```
+
+兼容入口：
+
+```bash
 bash tools/run_p2p_mooncake_rdma_suite.sh all
 ```
 
@@ -117,36 +124,37 @@ bash tools/run_p2p_mooncake_rdma_suite.sh all
 
 ```bash
 cd /ssd/1/vin.gb/RTP-LLM/github-opensource
-bash tools/run_p2p_mooncake_rdma_suite.sh all
+MODEL_ROOT=/ssd/1/vin.gb MODEL_SOURCE_PATH=/ssd/1/vin.gb/qwen2.5-0.5b bash tools/setup_p2p_mooncake_rdma_env.sh prepare
+MODEL_ROOT=/ssd/1/vin.gb MODEL_SOURCE_PATH=/ssd/1/vin.gb/qwen2.5-0.5b bash tools/run_p2p_mooncake_rdma_tests.sh test
 ```
 
 如果容器已经准备好，只想重跑测试：
 
 ```bash
 cd /ssd/1/vin.gb/RTP-LLM/github-opensource
-bash tools/run_p2p_mooncake_rdma_suite.sh test
+MODEL_ROOT=/ssd/1/vin.gb MODEL_SOURCE_PATH=/ssd/1/vin.gb/qwen2.5-0.5b bash tools/run_p2p_mooncake_rdma_tests.sh test
 ```
 
 如果只想跑 TCP 参考 smoke：
 
 ```bash
 cd /ssd/1/vin.gb/RTP-LLM/github-opensource
-RUN_RDMA_SMOKE=0 bash tools/run_p2p_mooncake_rdma_suite.sh test
+MODEL_ROOT=/ssd/1/vin.gb MODEL_SOURCE_PATH=/ssd/1/vin.gb/qwen2.5-0.5b RUN_RDMA_SMOKE=0 bash tools/run_p2p_mooncake_rdma_tests.sh test
 ```
 
 如果只想跑 RDMA smoke：
 
 ```bash
 cd /ssd/1/vin.gb/RTP-LLM/github-opensource
-RUN_TCP_REFERENCE=0 bash tools/run_p2p_mooncake_rdma_suite.sh test
+MODEL_ROOT=/ssd/1/vin.gb MODEL_SOURCE_PATH=/ssd/1/vin.gb/qwen2.5-0.5b RUN_TCP_REFERENCE=0 bash tools/run_p2p_mooncake_rdma_tests.sh test
 ```
 
 如果只想单独执行 smoke：
 
 ```bash
 cd /ssd/1/vin.gb/RTP-LLM/github-opensource
-bash tools/run_p2p_mooncake_rdma_suite.sh smoke-tcp
-bash tools/run_p2p_mooncake_rdma_suite.sh smoke-rdma
+MODEL_ROOT=/ssd/1/vin.gb MODEL_SOURCE_PATH=/ssd/1/vin.gb/qwen2.5-0.5b bash tools/run_p2p_mooncake_rdma_tests.sh smoke-tcp
+MODEL_ROOT=/ssd/1/vin.gb MODEL_SOURCE_PATH=/ssd/1/vin.gb/qwen2.5-0.5b bash tools/run_p2p_mooncake_rdma_tests.sh smoke-rdma
 ```
 
 ### 5.2 关键环境变量
@@ -156,7 +164,9 @@ BRANCH=develop/vin/p2p-connector-3
 WORKSPACE_ROOT=/ssd/1/vin.gb/RTP-LLM
 OPEN_SOURCE_REPO=/ssd/1/vin.gb/RTP-LLM/github-opensource
 INTERNAL_SOURCE_REPO=/ssd/1/vin.gb/RTP-LLM/internal_source
-MODEL_ROOT=/mnt/nas1
+MODEL_ROOT=/ssd/1/vin.gb
+MODEL_SOURCE_PATH=/ssd/1/vin.gb/qwen2.5-0.5b
+MODEL_ALIAS_PATH=/mnt/nas1/hf/Qwen2.5-0.5B-Instruct
 BAZEL_DEPS_ROOT=/ssd/1/vin.gb/bazel_deps
 BAZEL_CACHE_DIR=/ssd/1/vin.gb/.bazel_cache
 CONTAINER_NAME=vin_rtp_rdma_test
@@ -169,10 +179,11 @@ RESTORE_INTERNAL_SOURCE=1
 
 说明：
 
-1. `RUN_TCP_REFERENCE=1` 表示先跑 Mooncake TCP 参考 smoke，确认控制面和 Mooncake transport 路径整体稳定
-2. `RUN_RDMA_SMOKE=1` 表示继续跑 Mooncake RDMA smoke
-3. `RESTORE_INTERNAL_SOURCE=1` 表示脚本退出时恢复 `internal_source/rtp_llm/test/smoke/BUILD`
-4. 如果你想保留脚本生成的 RDMA smoke target 方便手工调试，可临时设为 `RESTORE_INTERNAL_SOURCE=0`
+1. `MODEL_SOURCE_PATH` 非空时，脚本会在容器内自动创建模型别名，把自定义模型目录映射到 smoke 期望的 `/mnt/nas1/hf/Qwen2.5-0.5B-Instruct`
+2. `RUN_TCP_REFERENCE=1` 表示先跑 Mooncake TCP 参考 smoke，确认控制面和 Mooncake transport 路径整体稳定
+3. `RUN_RDMA_SMOKE=1` 表示继续跑 Mooncake RDMA smoke
+4. `RESTORE_INTERNAL_SOURCE=1` 表示脚本退出时恢复 `internal_source/rtp_llm/test/smoke/BUILD`
+5. 如果你想保留脚本生成的 RDMA smoke target 方便手工调试，可临时设为 `RESTORE_INTERNAL_SOURCE=0`
 
 ## 6. 脚本内部会跑哪些测试
 
