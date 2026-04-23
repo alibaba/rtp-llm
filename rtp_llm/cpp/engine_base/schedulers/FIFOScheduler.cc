@@ -78,7 +78,11 @@ int64_t FIFOScheduler::lastScheduleTime() {
 }
 
 // 在入队前校验输入长度，避免无效请求进入等待队列
-// 检查输入长度、投机解码预留空间和 batch token 上限。
+// REBASE CONFLICT CONTEXT(b51971280): keep new base speculative reserve_step
+// validation, but source branch removed enqueue-time input_length * batch_size
+// rejection because max_batch_tokens_size is enforced during scheduling.
+// 仅检查输入长度不超过 KV Cache 最大可用 token 数；max_batch_tokens_size 的约束在调度时由
+// evaluateRunningMemory 基于 contextLength 判断，不应在 enqueue 阶段乘以 batch_size 拒绝请求。
 bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
     const auto input_length = static_cast<size_t>(stream->inputLength());
     const auto reserve_step = stream->reserveStep();
@@ -100,14 +104,6 @@ bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
                                                             + " is greater than kv cache max available tokens num "
                                                             + std::to_string(cache_manager_->maxAvailableTokensNum())));
         return false;  // Input length exceeds max available tokens
-    } else if ((size_t)stream->inputLength() * stream->currentBatchSize() > max_batch_tokens_size_) {
-        auto error_info =
-            autil::StringUtil::formatString("input len [%d] * batch size [%d] > max_batch_tokens_size [%d]",
-                                            stream->inputLength(),
-                                            stream->currentBatchSize(),
-                                            max_batch_tokens_size_);
-        stream->reportError(ErrorCode::MALLOC_FAILED, error_info);
-        return false;
     }
     return true;
 }
