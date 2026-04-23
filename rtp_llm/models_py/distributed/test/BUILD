@@ -37,3 +37,17 @@ py_test(
    tags = ["open_skip", "H20"],
    exec_properties = {'gpu':'H20', 'gpu_count':'4'},
 )
+
+py_test(
+    name = "cp_moe_allgather_rs_test",
+    srcs = ["cp_moe_allgather_rs_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = 'moderate',
+    env = {"GPU_COUNT": "4"},
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20', 'gpu_count':'4'},
+)

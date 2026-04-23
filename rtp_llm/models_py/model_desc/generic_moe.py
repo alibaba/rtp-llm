@@ -316,14 +316,11 @@ class GenericMoeModel(GptModelBase):
             if py_hw_kernel_config is not None
             else False
         )
-        use_cp_moe_allgather_rs = (
-            parallelism_config.prefill_cp_config.is_enabled()
-            and parallelism_config.ep_size <= 1
-        )
+        use_cp_moe_allgather_rs = parallelism_config.prefill_cp_config.is_enabled()
         if use_cp_moe_allgather_rs:
             logging.info(
                 "CP MoE allgather+reduce_scatter enabled: "
-                "CP is active and MoE uses TP router (ep_size <= 1)"
+                f"tp_size={parallelism_config.tp_size}, ep_size={parallelism_config.ep_size}"
             )
         self.layers = nn.ModuleList(
             [
