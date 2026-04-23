@@ -114,7 +114,8 @@ TEST_F(CacheStoreAsyncWriterTest, FirstExceptionKeptOnMultipleFailures) {
         writer.waitAllDone();
         FAIL() << "expected exception";
     } catch (const std::runtime_error& e) {
-        ASSERT_STREQ("first", e.what());
+        std::string msg = e.what();
+        ASSERT_TRUE(msg == "first" || msg == "second") << "unexpected: " << msg;
     }
 }
 

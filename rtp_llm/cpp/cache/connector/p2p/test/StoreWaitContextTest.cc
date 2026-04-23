@@ -42,7 +42,7 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_NoEvent_TreatedAsReady) {
 
     // nullopt event is treated as ready
     StoreWaitContext context(request_id, std::nullopt, buffer, deadline_ms, collector);
-    checker.addContext(context);
+    checker.addContext(std::move(context));
 
     EXPECT_EQ(checker.getContextCount(), 1);
     checker.checkOnce();
@@ -62,7 +62,7 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_Timeout) {
 
     // Even with nullopt, timeout takes precedence
     StoreWaitContext context(request_id, std::nullopt, buffer, deadline_ms, collector);
-    checker.addContext(context);
+    checker.addContext(std::move(context));
 
     EXPECT_EQ(checker.getContextCount(), 1);
     checker.checkOnce();
