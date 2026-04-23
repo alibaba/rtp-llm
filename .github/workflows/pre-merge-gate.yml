@@ -1,0 +1,99 @@
+name: pre-merge-gate
+
+# Approve PR -> synchronously trigger internal (Aone) merge -> only allow
+# external merge if internal succeeded. Wire job "gate" as a required status
+# check on `main` (Settings -> Branches) so a red gate blocks the merge button.
+#
+# Required branch protection: "Dismiss stale pull request approvals when new
+# commits are pushed" must be ON, otherwise gate won't re-run on new SHAs.
+
+on:
+  pull_request_review:
+    types: [submitted]
+    branches: ["main"]
+
+# Do NOT cancel-in-progress: killing a running internal merge mid-flight can
+# leave the system in a half-applied state.
+concurrency:
+  group: pre-merge-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  # Job key "gate" determines the required-check name: "pre-merge-gate / gate".
+  # Do NOT add a top-level `if:` here. A skipped job is reported as success in
+  # branch protection, which would silently defeat the gate. Filter inside steps.
+  gate:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: .github/scripts
+
+    steps:
+      - name: Validate review state
+        id: gate_filter
+        run: |
+          STATE="${{ github.event.review.state }}"
+          echo "Review state: $STATE"
+          if [ "$STATE" != "approved" ]; then
+            echo "Non-approval review event; gate not required."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository (attempt 1)
+        if: steps.gate_filter.outputs.skip != 'true'
+        id: checkout1
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Checkout repository (attempt 2)
+        if: steps.gate_filter.outputs.skip != 'true' && steps.checkout1.outcome == 'failure'
+        id: checkout2
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Checkout repository (attempt 3)
+        if: steps.gate_filter.outputs.skip != 'true' && steps.checkout2.outcome == 'failure'
+        id: checkout3
+        uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        if: steps.gate_filter.outputs.skip != 'true'
+        run: chmod +x check-rebase-freshness.sh trigger-merge.sh get-merge-result.sh
+
+      - name: Re-check rebase freshness vs main
+        if: steps.gate_filter.outputs.skip != 'true'
+        run: |
+          ./check-rebase-freshness.sh \
+            "${{ github.event.pull_request.number }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            "${{ github.repository }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger internal merge (synchronous gate)
+        if: steps.gate_filter.outputs.skip != 'true'
+        run: |
+          PR_ID="${{ github.event.pull_request.number }}"
+          COMMIT_ID="${{ github.event.pull_request.head.sha }}"
+          echo "Triggering internal merge for commit $COMMIT_ID (PR #$PR_ID)"
+          ./trigger-merge.sh \
+            "$COMMIT_ID" \
+            "${{ secrets.CI_SECRET }}" \
+            "${{ github.actor_id }}${{ github.actor }}@users.github.com" \
+            "${{ github.actor }}" \
+            "pre-merge-gate: github commit $COMMIT_ID" \
+            "$PR_ID"
+        env:
+          AONE_PROJECT_ID: "3512232"
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Wait for internal merge result (blocks gate)
+        if: steps.gate_filter.outputs.skip != 'true'
+        run: |
+          ./get-merge-result.sh \
+            "${{ github.event.pull_request.head.sha }}" \
+            "${{ secrets.CI_SECRET }}" \
+            "${{ github.repository }}"
