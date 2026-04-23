@@ -205,6 +205,7 @@ class FrontendApp(object):
         @app.get("/status")
         @app.post("/status")
         @app.post("/health_check")
+        @app.get("/")
         async def health_check():
             if self.separated_frontend:
                 await check_all_health()
@@ -219,19 +220,7 @@ class FrontendApp(object):
                     status_code=400,
                     content={"error": f" HTTP health check failed"},
                 )
-            return "ok"
 
-        @app.get("/")
-        async def health():
-            if self.separated_frontend:
-                await check_all_health()
-                return {"status": "home"}
-            response = await self.grpc_client.post_request("health_check", {})
-            if response.get("status", "") != "ok":
-                return ORJSONResponse(
-                    status_code=400,
-                    content={"error": f" HTTP health check failed"},
-                )
             return "ok"
 
         @app.get("/cache_status")
@@ -386,6 +375,8 @@ class FrontendApp(object):
             return self.frontend_server.tokenize(req)
 
         if self.frontend_server.is_embedding:
+            from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
+
             # embedding
             @app.post("/v1/embeddings/similarity")
             @app.post("/v1/reranker")

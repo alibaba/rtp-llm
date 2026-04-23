@@ -60,7 +60,8 @@ public:
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input);
 
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
-                                       const std::vector<rtp_llm::MultimodalInput>& mm_inputs);
+                                       const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
+                                       const std::string&                           vit_role_addr);
 
     ErrorResult<MultimodalFeature> getMultimodalFeatures(const torch::Tensor&                         input_ids,
                                                          const std::vector<rtp_llm::MultimodalInput>& mm_inputs);

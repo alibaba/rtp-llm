@@ -9,7 +9,7 @@ import sys
 import time
 import traceback
 from multiprocessing import Process
-from typing import List
+from typing import List, Optional
 
 import torch
 from setproctitle import setproctitle
@@ -22,7 +22,6 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
-from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
@@ -425,11 +424,6 @@ def start_backend_server(
     load_gpu_nic_affinity()
 
     clear_jit_filelock()
-
-    if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
-        from rtp_llm.server.vit_rpc_server import vit_start_server
-
-        return vit_start_server()
 
     if not torch.cuda.is_available():
         return local_rank_start(global_controller, py_env_configs)
