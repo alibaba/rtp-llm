@@ -365,7 +365,9 @@ if __name__ == "__main__":
         "GANG_CONFIG_STRING", py_env_configs.distribute_config.gang_config_string
     )
     if not dist_config_str:
-        raise RuntimeError("no gang config string (GANG_CONFIG_STRING), unexpected!")
+        dist_config_str = f"name:perf_part0,ip:127.0.0.1,port:{port}"
+        logging.info(f"no GANG_CONFIG_STRING, auto-generated for single node: {dist_config_str}")
+    py_env_configs.distribute_config.gang_config_string = dist_config_str
     node_world_size = len(members_from_test_env(dist_config_str))
     node_rank = world_rank // local_world_size
 
