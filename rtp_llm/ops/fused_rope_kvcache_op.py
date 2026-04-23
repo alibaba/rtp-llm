@@ -22,7 +22,7 @@ class FusedRopeAttnParams:
     kv_cache_offset: Optional[torch.Tensor]
     kv_cache_offset_h: Optional[torch.Tensor]
     padding_offset: Optional[torch.Tensor]
-    cp_position_ids: Optional[torch.Tensor]
+    position_ids: Optional[torch.Tensor]
     cu_seqlens: torch.Tensor
     cu_kv_seqlens: torch.Tensor
     input_lengths: torch.Tensor
@@ -51,15 +51,15 @@ class FusedRopeKVCachePrefillOpBase:
             kv_cache_offset = None
         kv_cache_offset_h = None # not used
 
-        cp_position_ids = None
+        position_ids = attn_inputs.combo_position_ids
         if attn_inputs.context_parallel_info is not None:
-            cp_position_ids = attn_inputs.context_parallel_info.prefill_shuffle_indices
+            position_ids = attn_inputs.context_parallel_info.prefill_shuffle_indices
 
         return FusedRopeAttnParams(
             kv_cache_offset,
             kv_cache_offset_h,
             attn_inputs.padding_offset,
-            cp_position_ids,
+            position_ids,
             attn_inputs.cu_seqlens,
             attn_inputs.cu_kv_seqlens,
             attn_inputs.input_lengths,
@@ -85,7 +85,6 @@ class FusedRopeKVCachePrefillOpBase:
         use_paged_fmha: bool,
     ) -> torch.Tensor:
         store_cache = kv_cache is not None
-
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
 
@@ -113,7 +112,7 @@ class FusedRopeKVCachePrefillOpBase:
                 rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
             ),
             padding_offset=params.padding_offset,
-            cp_position_ids=params.cp_position_ids,
+            position_ids=params.position_ids,
             use_logn_attn=self.attn_configs.use_logn_attn,
             rope_style=rope_config.style,
             rope_dim=rope_config.dim,
@@ -185,6 +184,7 @@ class FusedRopeKVCacheDecodeOp:
         assert params.sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory"
         return decode_fused_rope_kvcache(
             qkv,
+            params.position_ids,
             params.sequence_lengths,
             params.sequence_lengths.size(0),
             self.attn_configs.head_num,
@@ -229,7 +229,7 @@ class FusedRopeKVCacheDecodeOp:
             kv_cache_offset,
             kv_cache_offset_h,
             attn_inputs.padding_offset,
-            attn_inputs.position_ids,
+            attn_inputs.combo_position_ids,
             attn_inputs.cu_seqlens,
             attn_inputs.cu_kv_seqlens,
             attn_inputs.input_lengths,
