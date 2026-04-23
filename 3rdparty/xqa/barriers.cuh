@@ -14,6 +14,7 @@
 #include "cuda_hint.cuh"
 #include "defines.h"
 #include <cassert>
+#include <new>
 #if !USE_CUSTOM_BARRIER
 #include <cuda/std/barrier>
 using CtaBarrier = cuda::barrier<cuda::thread_scope_block>;
