@@ -37,13 +37,20 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
     generate_config->force_sp_accept          = config_proto->force_sp_accept();
     generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
-    generate_config->return_all_probs         = config_proto->return_all_probs();
-    generate_config->return_softmax_probs     = config_proto->return_softmax_probs();
-    generate_config->can_use_pd_separation    = config_proto->can_use_pd_separation();
-    generate_config->gen_timeline             = config_proto->gen_timeline();
-    generate_config->profile_step             = config_proto->profile_step();
-    generate_config->profile_trace_name       = config_proto->profile_trace_name();
-    generate_config->ignore_eos               = config_proto->ignore_eos();
+    if (config_proto->return_all_probs_mode() != 0) {
+        // new client: explicit mode (offset 1)
+        generate_config->return_all_probs = static_cast<ReturnAllProbsMode>(config_proto->return_all_probs_mode() - 1);
+    } else {
+        // legacy client: only bool field set
+        generate_config->return_all_probs =
+            config_proto->return_all_probs() ? ReturnAllProbsMode::DEFAULT : ReturnAllProbsMode::NONE;
+    }
+    generate_config->return_softmax_probs  = config_proto->return_softmax_probs();
+    generate_config->can_use_pd_separation = config_proto->can_use_pd_separation();
+    generate_config->gen_timeline          = config_proto->gen_timeline();
+    generate_config->profile_step          = config_proto->profile_step();
+    generate_config->profile_trace_name    = config_proto->profile_trace_name();
+    generate_config->ignore_eos            = config_proto->ignore_eos();
     generate_config->select_tokens_id.resize(config_proto->select_tokens_id_size());
     memcpy(generate_config->select_tokens_id.data(),
            config_proto->select_tokens_id().data(),
@@ -353,6 +360,10 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_decode_remote_reuse_len(response.aux_info.decode_remote_reuse_len);
             aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
             aux_info->set_aux_string(aux_string);
+            auto* mm_map = aux_info->mutable_multimodal_lengths();
+            for (const auto& [key, value] : response.aux_info.multimodal_lengths) {
+                (*mm_map)[key] = value;
+            }
             if (response.aux_info.cum_log_probs.has_value()) {
                 transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value());
             }
@@ -376,6 +387,8 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
         }
     }
 
+    stackBuffersToTensorPB(
+        flatten_output->mutable_all_probs(), source_outputs, [](const auto& r) { return r.aux_info.all_probs; });
     stackBuffersToTensorPB(
         flatten_output->mutable_hidden_states(), source_outputs, [](const auto& r) { return r.hidden_states; });
 

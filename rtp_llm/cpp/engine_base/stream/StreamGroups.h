@@ -119,25 +119,29 @@ public:
 
     bool hasMMDeepstackEmbed() const {
         for (auto& stream : context_streams_) {
-            if (stream->multimodalDeepstackEmbeds().size() > 0) {
+            if (stream->hasMultimodalDeepstackEmbeds()) {
                 return true;
             }
         }
         return false;
     }
 
-    bool needReturnAllProbs() const {
+    ReturnAllProbsMode needReturnAllProbs() const {
+        // get the max return all probs mode from all streams
+        ReturnAllProbsMode return_all_probs = ReturnAllProbsMode::NONE;
         for (auto& stream : context_streams_) {
-            if (stream->getReturnAllProbs()) {
-                return true;
+            auto cur_return_all_probs = stream->getReturnAllProbs();
+            if (cur_return_all_probs > return_all_probs) {
+                return_all_probs = cur_return_all_probs;
             }
         }
         for (auto& stream : decode_streams_) {
-            if (stream->getReturnAllProbs()) {
-                return true;
+            auto cur_return_all_probs = stream->getReturnAllProbs();
+            if (cur_return_all_probs > return_all_probs) {
+                return_all_probs = cur_return_all_probs;
             }
         }
-        return false;
+        return return_all_probs;
     }
 
     bool needReturnCumLogProbs() const {

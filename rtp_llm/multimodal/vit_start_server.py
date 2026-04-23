@@ -59,7 +59,7 @@ def vit_start_server(
         model_config=model_config,
         engine_config=engine_config,
         vit_config=py_env_configs.vit_config,
-        device="cuda:0",  # VIT always runs on a single GPU regardless of worker count
+        device="cuda",  # VIT always runs on a single GPU regardless of worker count
         server_id=server_id,
         is_proxy_mode=is_proxy_mode,
     )
