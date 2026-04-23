@@ -59,11 +59,11 @@ protected:
 TEST_F(StoreWaitContextTest, CheckerCheckOnce_EventReady) {
     StoreWaitContextChecker checker(nullptr, computed_buffers_);
 
-    int64_t request_id  = 3001;
-    auto    event       = std::make_shared<MockDeviceEvent>(true);  // Event is ready
-    auto    buffer      = createLayerCacheBuffer(0);
-    int64_t deadline_ms = getDeadlineMs();
-    auto    collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
+    uint64_t request_id  = 3001;
+    auto     event       = std::make_shared<MockDeviceEvent>(true);  // Event is ready
+    auto     buffer      = createLayerCacheBuffer(0);
+    int64_t  deadline_ms = getDeadlineMs();
+    auto     collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
     StoreWaitContext context(request_id, event, buffer, deadline_ms, collector);
     checker.addContext(context);
@@ -83,11 +83,11 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_EventReady) {
 TEST_F(StoreWaitContextTest, CheckerCheckOnce_EventNotReady) {
     StoreWaitContextChecker checker(nullptr, computed_buffers_);
 
-    int64_t request_id  = 3002;
-    auto    event       = std::make_shared<MockDeviceEvent>(false);  // Event is not ready
-    auto    buffer      = createLayerCacheBuffer(0);
-    int64_t deadline_ms = getDeadlineMs();
-    auto    collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
+    uint64_t request_id  = 3002;
+    auto     event       = std::make_shared<MockDeviceEvent>(false);  // Event is not ready
+    auto     buffer      = createLayerCacheBuffer(0);
+    int64_t  deadline_ms = getDeadlineMs();
+    auto     collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
     StoreWaitContext context(request_id, event, buffer, deadline_ms, collector);
     checker.addContext(context);
@@ -118,10 +118,10 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_EventNotReady) {
 TEST_F(StoreWaitContextTest, CheckerCheckOnce_NullEvent) {
     StoreWaitContextChecker checker(nullptr, computed_buffers_);
 
-    int64_t request_id  = 3003;
-    auto    buffer      = createLayerCacheBuffer(0);
-    int64_t deadline_ms = getDeadlineMs();
-    auto    collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
+    uint64_t request_id  = 3003;
+    auto     buffer      = createLayerCacheBuffer(0);
+    int64_t  deadline_ms = getDeadlineMs();
+    auto     collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
     // null event 被视为已就绪
     StoreWaitContext context(request_id, nullptr, buffer, deadline_ms, collector);
@@ -142,11 +142,11 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_NullEvent) {
 TEST_F(StoreWaitContextTest, CheckerCheckOnce_Timeout) {
     StoreWaitContextChecker checker(nullptr, computed_buffers_);
 
-    int64_t request_id  = 3004;
-    auto    event       = std::make_shared<MockDeviceEvent>(false);  // Event is not ready
-    auto    buffer      = createLayerCacheBuffer(0);
-    int64_t deadline_ms = currentTimeMs() - 100;  // 已过期
-    auto    collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
+    uint64_t request_id  = 3004;
+    auto     event       = std::make_shared<MockDeviceEvent>(false);  // Event is not ready
+    auto     buffer      = createLayerCacheBuffer(0);
+    int64_t  deadline_ms = currentTimeMs() - 100;  // 已过期
+    auto     collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
     StoreWaitContext context(request_id, event, buffer, deadline_ms, collector);
     checker.addContext(context);

@@ -26,7 +26,7 @@ public:
     ~P2PConnectorWorkerDecode() = default;
 
 public:
-    ErrorInfo read(int64_t                                               request_id,
+    ErrorInfo read(uint64_t                                              request_id,
                    const std::string&                                    unique_key,
                    int64_t                                               deadline_ms,
                    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
@@ -67,7 +67,7 @@ private:
     /// partition key。
     ReadWaitOutcome waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<ReadTaskGroup>& task_group,
                                                         int64_t                               deadline_ms,
-                                                        int64_t                               request_id,
+                                                        uint64_t                              request_id,
                                                         const std::string&                    unique_key) const;
 
     RecvResultInfo aggregateRecvTaskResults(const std::shared_ptr<ReadTaskGroup>& task_group) const;

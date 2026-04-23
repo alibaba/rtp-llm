@@ -26,7 +26,7 @@ public:
 
     int64_t inputLength() const;
 
-    int64_t streamId() const;
+    uint64_t streamId() const;
 
     int64_t batchSize() const;
 

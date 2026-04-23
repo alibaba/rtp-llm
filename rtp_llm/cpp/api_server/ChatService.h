@@ -21,7 +21,7 @@ public:
                 const std::shared_ptr<autil::AtomicCounter>&    request_counter,
                 const std::shared_ptr<Tokenizer>&               tokenizer,
                 const std::shared_ptr<ChatRender>&              render,
-                const ModelConfig&                             model_config,
+                const ModelConfig&                              model_config,
                 const std::shared_ptr<ApiServerMetricReporter>& metric_reporter):
         engine_(engine),
         mm_processor_(mm_processor),
@@ -33,13 +33,13 @@ public:
 public:
     void chatCompletions(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                          const http_server::HttpRequest&                         request,
-                         int64_t                                                 request_id);
+                         uint64_t                                                request_id);
     void chatRender(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                     const http_server::HttpRequest&                         request);
 
 private:
     std::shared_ptr<GenerateInput>
-         fillGenerateInput(int64_t request_id, const ChatCompletionRequest& chat_request, const RenderedInputs& body);
+         fillGenerateInput(uint64_t request_id, const ChatCompletionRequest& chat_request, const RenderedInputs& body);
     void generateResponse(const std::shared_ptr<GenerateConfig>&                  config,
                           const GenerateStreamPtr&                                stream,
                           const RenderedInputs&                                   rendered_input,
@@ -47,7 +47,7 @@ private:
                           const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                           const ChatCompletionRequest&                            chat_request,
                           const std::string&                                      body,
-                          int64_t                                                 request_id,
+                          uint64_t                                                request_id,
                           int64_t                                                 start_time_us);
     void generateStreamingResponse(const std::shared_ptr<GenerateConfig>&                  config,
                                    const GenerateStreamPtr&                                stream,
@@ -56,7 +56,7 @@ private:
                                    const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                    const ChatCompletionRequest&                            chat_request,
                                    const std::string&                                      body,
-                                   int64_t                                                 request_id,
+                                   uint64_t                                                request_id,
                                    int64_t                                                 start_time_us);
     static std::string sseResponse(const std::string& response) {
         return "data: " + response + "\n\n";

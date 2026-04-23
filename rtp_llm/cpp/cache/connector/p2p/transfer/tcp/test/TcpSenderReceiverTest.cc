@@ -50,7 +50,7 @@ syncSend(TcpKVCacheSender& sender, const SendRequest& req, std::chrono::seconds 
 // Block builders
 // ---------------------------------------------------------------------------
 
-static KeyBlockInfoMap makeBlocks(int64_t cache_key, void* addr, size_t size) {
+static KeyBlockInfoMap makeBlocks(CacheKeyType cache_key, void* addr, size_t size) {
     auto kbi = std::make_shared<KeyBlockInfo>();
     kbi->blocks.push_back(BlockInfo{false, 0, 0, addr, size});
     KeyBlockInfoMap m;

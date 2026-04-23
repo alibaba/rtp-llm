@@ -3,7 +3,7 @@
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheTypes.h"
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
@@ -81,8 +81,9 @@ public:
             case StreamState::FINISHED:
                 break;
             default:
-                RTP_LLM_LOG_ERROR(
-                    "Unknown state: %d for stream [%ld]", static_cast<int>(new_state), stream->streamId());
+                RTP_LLM_LOG_ERROR("Unknown state: %d for stream [%llu]",
+                                  static_cast<int>(new_state),
+                                  (unsigned long long)stream->streamId());
                 break;
         }
     }

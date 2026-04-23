@@ -8,7 +8,6 @@
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/LRUCache.h"
-#include "rtp_llm/cpp/cache/Types.h"
 
 namespace rtp_llm {
 

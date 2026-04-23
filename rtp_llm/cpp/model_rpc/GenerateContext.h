@@ -13,7 +13,7 @@ const int64_t MAX_GRPC_TIMEOUT_MS = 3600 * 1000;
 
 class GenerateContext {
 public:
-    GenerateContext(int64_t                               request_id,
+    GenerateContext(uint64_t                              request_id,
                     int64_t                               request_timeout_ms,
                     grpc::ServerContext*                  server_context,
                     kmonitor::MetricsReporterPtr&         metrics_reporter,
@@ -39,7 +39,7 @@ public:
     virtual std::shared_ptr<GenerateStream>& getStream();
 
 public:
-    int64_t                               request_id;
+    uint64_t                              request_id;
     std::string                           request_key;
     int64_t                               retry_times           = 0;
     int64_t                               retry_cost_time_ms    = 0;

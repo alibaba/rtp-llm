@@ -76,8 +76,8 @@ void PrefillGenerateContext::stopStream() {
         stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
         // if is running, waiting util done
         while (stream_->getStatus() == StreamState::RUNNING) {
-            RTP_LLM_LOG_DEBUG("waiting prefill stream [%d] running done to cancel",
-                              stream_->generateInput()->request_id);
+            RTP_LLM_LOG_DEBUG("waiting prefill stream [%llu] running done to cancel",
+                              (unsigned long long)stream_->generateInput()->request_id);
             usleep(1000);
         }
         // stream status will only be set to finished by scheduler.
@@ -120,7 +120,7 @@ void PrefillGenerateContext::nextStage() {
 }
 
 void PrefillGenerateContext::markRequestEnd() {
-    int64_t real_id = request_id;
+    uint64_t real_id = request_id;
     if (stream_) {
         real_id = stream_->streamId();
     }
@@ -135,8 +135,8 @@ void PrefillGenerateContext::markRequestEnd() {
         auto& prefill_worker = prefill_workers[i];
         auto  connect_status = resource->rpc_pool.getConnection(prefill_worker);
         if (!connect_status.ok()) {
-            RTP_LLM_LOG_WARNING("request [%d], get grpc connection for ip %s failed, ignore markRequestEnd for it",
-                                real_id,
+            RTP_LLM_LOG_WARNING("request [%llu], get grpc connection for ip %s failed, ignore markRequestEnd for it",
+                                (unsigned long long)real_id,
                                 prefill_worker.c_str());
             continue;
         }

@@ -41,7 +41,7 @@ public:
     }
 
 public:
-    int64_t                         request_id = 0;
+    uint64_t                        request_id = 0;
     std::shared_ptr<GenerateConfig> generate_config;
     torch::Tensor                   input_ids;
     bool                            need_release_resource = true;
@@ -105,7 +105,7 @@ public:
 class GenerateOutputs {
 public:
     std::vector<GenerateOutput> generate_outputs;
-    int64_t                     request_id;
+    uint64_t                    request_id;
 };
 
 enum class StreamState {

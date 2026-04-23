@@ -18,7 +18,13 @@ public:
                          kmonitor::MetricsReporterPtr          metrics_reporter,
                          size_t                                extra_reserve_token_num = 0,
                          bool                                  perf_test               = false):
-        GenerateStream(query, model_config, runtime_config, resource_context, metrics_reporter, extra_reserve_token_num, perf_test),
+        GenerateStream(query,
+                       model_config,
+                       runtime_config,
+                       resource_context,
+                       metrics_reporter,
+                       extra_reserve_token_num,
+                       perf_test),
         request_id_(query->request_id) {
         generate_outputs_queue_.setCapacity(1000);
     }
@@ -35,7 +41,7 @@ private:
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
     void            enqueueGenerateOutput(GenerateOutputs&& generate_results);
 
-    int64_t                                   request_id_{0};
+    uint64_t                                  request_id_{0};
     bool                                      finished_{false};
     autil::SynchronizedQueue<GenerateOutputs> generate_outputs_queue_;
 };

@@ -4,7 +4,7 @@
 
 namespace rtp_llm {
 
-ComputedLayerCacheBuffer::ComputedLayerCacheBuffer(int64_t                                  request_id,
+ComputedLayerCacheBuffer::ComputedLayerCacheBuffer(uint64_t                                 request_id,
                                                    const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer,
                                                    int64_t                                  deadline_ms):
     request_id_(request_id), deadline_ms_(deadline_ms) {
@@ -54,7 +54,7 @@ ComputedLayerCacheBufferStore::ComputedLayerCacheBufferStore() {}
 ComputedLayerCacheBufferStore::~ComputedLayerCacheBufferStore() {}
 
 std::shared_ptr<ComputedLayerCacheBuffer> ComputedLayerCacheBufferStore::addBuffer(
-    int64_t request_id, const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer, int64_t deadline_ms) {
+    uint64_t request_id, const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer, int64_t deadline_ms) {
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
 
     auto iter = computed_buffers_.find(request_id);
@@ -70,7 +70,7 @@ std::shared_ptr<ComputedLayerCacheBuffer> ComputedLayerCacheBufferStore::addBuff
     return new_computed_layer_cache_buffer;
 }
 
-std::shared_ptr<ComputedLayerCacheBuffer> ComputedLayerCacheBufferStore::getBuffer(int64_t request_id) const {
+std::shared_ptr<ComputedLayerCacheBuffer> ComputedLayerCacheBufferStore::getBuffer(uint64_t request_id) const {
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
     auto                        iter = computed_buffers_.find(request_id);
     if (iter != computed_buffers_.end()) {
@@ -79,7 +79,7 @@ std::shared_ptr<ComputedLayerCacheBuffer> ComputedLayerCacheBufferStore::getBuff
     return nullptr;
 }
 
-void ComputedLayerCacheBufferStore::removeBuffer(int64_t request_id) {
+void ComputedLayerCacheBufferStore::removeBuffer(uint64_t request_id) {
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
     computed_buffers_.erase(request_id);
 }

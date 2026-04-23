@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 
+#include "rtp_llm/cpp/cache/BasicType.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/core/Types.h"
@@ -11,9 +12,6 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
-
-typedef int32_t          GroupIdType;
-typedef std::vector<int> LayerIdsType;
 
 struct BlockAddrInfo {
     void* kv_addr       = nullptr;
@@ -50,7 +48,7 @@ struct KVPartitionBytes {
 struct MallocInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
-    int64_t                 request_id          = 0;
+    uint64_t                request_id          = 0;
     bool                    verbose             = true;  // for failed log
     bool                    reuse_cache         = true;
     bool                    enable_device_cache = true;
@@ -67,7 +65,7 @@ struct FreeInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
 
-    int64_t request_id = 0;
+    uint64_t request_id = 0;
 };
 
 struct InsertInfo {

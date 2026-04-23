@@ -75,7 +75,7 @@ constexpr int kBackoffCapMs     = 8;
 P2PConnectorWorkerDecode::ReadWaitOutcome
 P2PConnectorWorkerDecode::waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<ReadTaskGroup>& task_group,
                                                               int64_t                               deadline_ms,
-                                                              int64_t                               request_id,
+                                                              uint64_t                              request_id,
                                                               const std::string&                    unique_key) const {
     // deadline_ms：scheduler 下发的绝对时间戳（ms），与 currentTimeMs() 同单位。
     // return_deadline_ms = D - return_before_ms：须在此刻前结束等待并向 scheduler 返回 RPC，为链路留出 return_before_ms
@@ -147,7 +147,7 @@ void P2PConnectorWorkerDecode::reportReadMetrics(int     total_block_count,
     metrics_reporter_->report<P2PConnectorMetrics, DecodeWorkerMetricsCollector>(nullptr, collector.get());
 }
 
-ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                               request_id,
+ErrorInfo P2PConnectorWorkerDecode::read(uint64_t                                              request_id,
                                          const std::string&                                    unique_key,
                                          int64_t                                               deadline_ms,
                                          const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,

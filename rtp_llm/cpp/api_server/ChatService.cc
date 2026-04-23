@@ -12,7 +12,7 @@ namespace rtp_llm {
 
 // ChatService::ChatService() {}
 
-std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t                      request_id,
+std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(uint64_t                     request_id,
                                                               const ChatCompletionRequest& chat_request,
                                                               const RenderedInputs&        rendered_input) {
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
@@ -44,7 +44,7 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>&       
                                    const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                    const ChatCompletionRequest&                            chat_request,
                                    const std::string&                                      body,
-                                   int64_t                                                 request_id,
+                                   uint64_t                                                request_id,
                                    int64_t                                                 start_time_us) {
     int                      index           = 0;
     int                      iterate_counter = 0;
@@ -110,7 +110,7 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
                                             const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                             const ChatCompletionRequest&                            chat_request,
                                             const std::string&                                      body,
-                                            int64_t                                                 request_id,
+                                            uint64_t                                                request_id,
                                             int64_t                                                 start_time_us) {
     int                      index           = 0;
     int                      iterate_counter = 0;
@@ -176,7 +176,7 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
 
 void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                   const http_server::HttpRequest&                         request,
-                                  int64_t                                                 request_id) {
+                                  uint64_t                                                request_id) {
     auto             start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     autil::StageTime iterate_stage_timer;
 

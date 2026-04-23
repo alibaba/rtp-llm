@@ -1,6 +1,7 @@
 #pragma once
 
 #include "autil/Thread.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include <mutex>
 #include <thread>
 #include <map>
@@ -17,19 +18,19 @@ public:
 
 public:
     /// @brief 记录 cache_key 对应的 block_id
-    void addBlockId(int64_t cache_key, int block_id);
+    void addBlockId(CacheKeyType cache_key, int block_id);
     /// @brief 查询 cache_key 对应的 block_id，未找到返回 -1
-    int getBlockId(int64_t cache_key) const;
+    int getBlockId(CacheKeyType cache_key) const;
     int getLayerId() const {
         return layer_id_;
     }
-    const std::map<int64_t, int>& blockIdMap() const {
+    const std::map<CacheKeyType, int>& blockIdMap() const {
         return block_id_map_;
     }
 
 private:
-    int                    layer_id_;
-    std::map<int64_t, int> block_id_map_;  // [cache_key, block_id]
+    int                         layer_id_;
+    std::map<CacheKeyType, int> block_id_map_;  // [cache_key, block_id]
 };
 
 class LayerCacheBufferStore {

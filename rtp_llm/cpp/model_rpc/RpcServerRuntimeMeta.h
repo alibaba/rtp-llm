@@ -27,13 +27,13 @@ public:
         return info;
     }
 
-    void enqueue(int64_t request_id, const GenerateStreamPtr& stream) {
+    void enqueue(uint64_t request_id, const GenerateStreamPtr& stream) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         running_streams_[request_id] = EngineScheduleInfo::TaskInfo(
             {request_id, stream->prefixLength(), stream->inputLength(), stream->getTimeInfo().wait_time_us});
     }
 
-    void dequeue(int64_t request_id, const GenerateStreamPtr& stream) {
+    void dequeue(uint64_t request_id, const GenerateStreamPtr& stream) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         auto                                ptr = running_streams_.find(request_id);
         if (ptr == running_streams_.end()) {
@@ -66,8 +66,8 @@ protected:
         while (iter != finished_streams_.end()) {
             int64_t end_time_ms = iter->second.end_time_ms;
             if (end_time_ms > current) {
-                RTP_LLM_LOG_WARNING("find task: %ld end time: %ld bigger than current time: %ld",
-                                    iter->second.request_id,
+                RTP_LLM_LOG_WARNING("find task: %llu end time: %ld bigger than current time: %ld",
+                                    (unsigned long long)iter->second.request_id,
                                     end_time_ms,
                                     current);
                 iter = finished_streams_.erase(iter);
@@ -78,7 +78,7 @@ protected:
             }
         }
     }
-    std::unordered_map<int64_t, EngineScheduleInfo::TaskInfo>   running_streams_;
+    std::unordered_map<uint64_t, EngineScheduleInfo::TaskInfo>  running_streams_;
     std::list<std::pair<int64_t, EngineScheduleInfo::TaskInfo>> finished_streams_;
     std::atomic<int64_t>                                        version_{0};
     mutable std::shared_mutex                                   read_write_lock_;

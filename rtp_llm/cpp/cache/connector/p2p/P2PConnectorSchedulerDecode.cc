@@ -55,7 +55,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
             ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "meta->p2pRouting() returned nullopt")};
     }
 
-    const int64_t     request_id      = routing->request_id;
+    const uint64_t    request_id      = routing->request_id;
     const std::string unique_key      = routing->unique_key;
     const int64_t     deadline_ms     = routing->deadline_ms;
     const auto&       prefill_addr    = routing->prefill_addr;
@@ -109,7 +109,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
 }
 
 std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSchedulerDecode::startAsyncReadCalls(
-    int64_t                                                 request_id,
+    uint64_t                                                request_id,
     const std::string&                                      prefill_ip,
     uint32_t                                                prefill_port,
     const std::string&                                      unique_key,

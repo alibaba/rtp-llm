@@ -21,11 +21,11 @@
 namespace rtp_llm {
 
 struct P2PConnectorResourceEntry {
-    int64_t                      request_id;         // 请求 ID
-    std::string                  unique_key;         // 路由唯一标识（从 Meta::P2PRoutingContext 填充）
-    KVCacheResourcePtr           kv_cache_resource;  // KV cache 资源引用，用于保持引用计数
-    int64_t                      deadline_ms;        // 过期时间
-    int64_t                      add_time_us;        // 添加时间
+    uint64_t           request_id;         // 请求 ID
+    std::string        unique_key;         // 路由唯一标识（从 Meta::P2PRoutingContext 填充）
+    KVCacheResourcePtr kv_cache_resource;  // KV cache 资源引用，用于保持引用计数
+    int64_t            deadline_ms;        // 过期时间
+    int64_t            add_time_us;        // 添加时间
 
     // Side-channel data (filled by prefill when first token / SP data is produced)
     struct SideChannelData {
@@ -39,10 +39,10 @@ struct P2PConnectorResourceEntry {
         TensorPB             propose_hidden;
         std::vector<int32_t> position_ids;
     };
-    SideChannelData             side_channel_data;
-    bool                        side_channel_ready = false;
-    mutable std::mutex          side_channel_mutex;
-    std::condition_variable     side_channel_cv;
+    SideChannelData         side_channel_data;
+    bool                    side_channel_ready = false;
+    mutable std::mutex      side_channel_mutex;
+    std::condition_variable side_channel_cv;
 };
 
 // p2p_connector 拉取过程中对应的资源不会释放。当 prefill 请求完成时, 需要将资源从 store 中移除, 如果超时未完成,
@@ -68,7 +68,9 @@ public:
     void notifySideChannelReady(const std::string& unique_key, const P2PConnectorResourceEntry::SideChannelData& data);
 
     // Wait for side-channel data ready (called by P2PConnector when filling response)
-    bool waitSideChannelReady(const std::string& unique_key, int64_t deadline_ms, std::function<bool()> is_cancelled = nullptr);
+    bool waitSideChannelReady(const std::string&    unique_key,
+                              int64_t               deadline_ms,
+                              std::function<bool()> is_cancelled = nullptr);
 
 private:
     void checkTimeout();

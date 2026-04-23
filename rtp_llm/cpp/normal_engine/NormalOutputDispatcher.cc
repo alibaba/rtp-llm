@@ -154,7 +154,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         }
     }
 
-    RTP_LLM_LOG_DEBUG("stream [%ld], new_tokens size = [%ld]", stream->streamId(), new_tokens.numel());
+    RTP_LLM_LOG_DEBUG(
+        "stream [%llu], new_tokens size = [%ld]", (unsigned long long)stream->streamId(), new_tokens.numel());
 
     stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
                     1,

@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheTypes.h"
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -277,7 +277,9 @@ void FIFOScheduler::addStreamToNewState(const GenerateStreamPtr& stream, StreamS
         case StreamState::FINISHED:
             break;
         default:
-            RTP_LLM_LOG_ERROR("Unknown state: %d for stream [%ld]", static_cast<int>(new_state), stream->streamId());
+            RTP_LLM_LOG_ERROR("Unknown state: %d for stream [%llu]",
+                              static_cast<int>(new_state),
+                              (unsigned long long)stream->streamId());
             break;
     }
 }

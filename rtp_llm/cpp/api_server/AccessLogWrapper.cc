@@ -61,7 +61,7 @@ class AccessLogInfoEmbedding: public autil::legacy::Jsonizable {
 public:
     AccessLogInfoEmbedding(const RequestLogInfo&  request,
                            const ResponseLogInfo& response,
-                           int64_t                request_id,
+                           uint64_t               request_id,
                            int64_t                start_time_us):
         request_(request),
         response_(response),
@@ -81,14 +81,14 @@ public:
 private:
     RequestLogInfo  request_;
     ResponseLogInfo response_;
-    int64_t         request_id_;
+    uint64_t        request_id_;
     std::string     log_time_;
     std::string     query_time_;
 };
 
 class AccessLogInfo: public autil::legacy::Jsonizable {
 public:
-    AccessLogInfo(const RequestLogInfo& request, const ResponseLogInfo& response, int64_t request_id):
+    AccessLogInfo(const RequestLogInfo& request, const ResponseLogInfo& response, uint64_t request_id):
         request_(request),
         response_(response),
         request_id_(request_id),
@@ -105,11 +105,11 @@ public:
 private:
     RequestLogInfo  request_;
     ResponseLogInfo response_;
-    int64_t         request_id_;
+    uint64_t        request_id_;
     std::string     log_time_;
 };
 
-void AccessLogWrapper::logQueryAccess(const std::string& raw_request, int64_t request_id, bool private_request) {
+void AccessLogWrapper::logQueryAccess(const std::string& raw_request, uint64_t request_id, bool private_request) {
     if (private_request) {
         return;
     }
@@ -191,7 +191,7 @@ std::string removeQuotesAroundBraces(const std::string& input) {
 
 // for embedding model
 void AccessLogWrapper::logSuccessAccess(const std::string&                raw_request,
-                                        int64_t                           request_id,
+                                        uint64_t                          request_id,
                                         int64_t                           start_time_us,
                                         const std::optional<std::string>& logable_response,
                                         bool                              private_request) {
@@ -217,7 +217,7 @@ void AccessLogWrapper::logSuccessAccess(const std::string&                raw_re
 
 // for normal model
 void AccessLogWrapper::logSuccessAccess(const std::string&              raw_request,
-                                        int64_t                         request_id,
+                                        uint64_t                        request_id,
                                         const std::vector<std::string>& complete_response,
                                         bool                            private_request) {
     if (private_request) {
@@ -255,7 +255,7 @@ bool isPrivate(const std::string& raw_request) {
 }
 
 void AccessLogWrapper::logExceptionAccess(const std::string& raw_request,
-                                          int64_t            request_id,
+                                          uint64_t           request_id,
                                           const std::string& exception) {
     try {
         RequestLogInfo request(raw_request);

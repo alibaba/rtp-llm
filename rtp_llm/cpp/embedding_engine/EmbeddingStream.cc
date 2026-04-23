@@ -17,7 +17,7 @@ EmbeddingStream::EmbeddingStream(const shared_ptr<rtp_llm::EmbeddingInput>& quer
     begin_time_us_    = autil::TimeUtility::currentTimeInMicroSeconds();
 }
 
-int64_t EmbeddingStream::streamId() const {
+uint64_t EmbeddingStream::streamId() const {
     return embedding_input_->request_id;
 }
 

@@ -9,7 +9,7 @@ namespace rtp_llm {
 EmbeddingInput::EmbeddingInput(const std::vector<int32_t>&             token_ids_param,
                                const std::vector<int32_t>&             token_type_ids_param,
                                const std::vector<int32_t>&             input_lengths_param,
-                               int64_t                                 request_id_param,
+                               uint64_t                                request_id_param,
                                const std::optional<MultimodalFeature>& multimodal_features_param,
                                std::optional<torch::Tensor>            input_embeddings_param) {
 
@@ -38,7 +38,7 @@ EmbeddingInput::EmbeddingInput(const std::vector<int32_t>&             token_ids
 EmbeddingInput::EmbeddingInput(const torch::Tensor&                    token_ids_,
                                const torch::Tensor&                    token_type_ids_,
                                const torch::Tensor&                    input_lengths_,
-                               int64_t                                 request_id_,
+                               uint64_t                                request_id_,
                                const std::optional<MultimodalFeature>& multimodal_features_,
                                std::optional<torch::Tensor>            input_embeddings_) {
     token_ids      = token_ids_;

@@ -13,7 +13,7 @@ namespace rtp_llm {
 
 class ComputedLayerCacheBuffer {
 public:
-    ComputedLayerCacheBuffer(int64_t                                  request_id,
+    ComputedLayerCacheBuffer(uint64_t                                 request_id,
                              const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer,
                              int64_t                                  deadline_ms);
 
@@ -31,7 +31,7 @@ public:
     }
 
 private:
-    int64_t                                          request_id_;
+    uint64_t                                         request_id_;
     std::map<int, std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers_;
     std::atomic<int64_t>                             deadline_ms_;
 
@@ -47,17 +47,17 @@ public:
 public:
     /// @brief 按 request_id 获取或创建对应的 ComputedLayerCacheBuffer 并追加首层数据
     std::shared_ptr<ComputedLayerCacheBuffer>
-    addBuffer(int64_t request_id, const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer, int64_t deadline_ms);
+    addBuffer(uint64_t request_id, const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer, int64_t deadline_ms);
 
-    std::shared_ptr<ComputedLayerCacheBuffer> getBuffer(int64_t request_id) const;
-    void                                      removeBuffer(int64_t request_id);
+    std::shared_ptr<ComputedLayerCacheBuffer> getBuffer(uint64_t request_id) const;
+    void                                      removeBuffer(uint64_t request_id);
     void                                      checkTimeout();
     int64_t                                   getBuffersCount() const;
 
 private:
     // stores layer cache buffer already computed
-    mutable std::mutex                                                     computed_buffers_mutex_;
-    std::unordered_map<int64_t, std::shared_ptr<ComputedLayerCacheBuffer>> computed_buffers_;
+    mutable std::mutex                                                      computed_buffers_mutex_;
+    std::unordered_map<uint64_t, std::shared_ptr<ComputedLayerCacheBuffer>> computed_buffers_;
 };
 
 }  // namespace rtp_llm

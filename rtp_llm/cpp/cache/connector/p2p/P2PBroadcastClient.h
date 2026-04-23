@@ -55,7 +55,7 @@ public:
     };
 
     /// @brief 向所有 TP worker 广播 KV cache 传输请求
-    std::shared_ptr<Result> broadcast(int64_t                                               request_id,
+    std::shared_ptr<Result> broadcast(uint64_t                                              request_id,
                                       const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
                                       const std::vector<std::pair<std::string, uint32_t>>&  decode_transfer_servers,
                                       const std::string&                                    unique_key,
@@ -68,7 +68,7 @@ public:
 
 private:
     void genBroadcastRequest(FunctionRequestPB&                                    request,
-                             int64_t                                               request_id,
+                             uint64_t                                              request_id,
                              const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
                              const std::vector<std::pair<std::string, uint32_t>>&  decode_transfer_servers,
                              const std::string&                                    unique_key,

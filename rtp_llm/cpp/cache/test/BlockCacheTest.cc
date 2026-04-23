@@ -58,8 +58,8 @@ TEST_F(BlockCacheTest, MatchBasicTest) {
 
 TEST_F(BlockCacheTest, PopBasicTest) {
     // Test basic pop functionality
-    std::vector<int64_t> cache_keys = {101, 102, 103, 104, 105};
-    std::vector<int>     block_ids  = {1, 2, 3, 4, 5};
+    std::vector<CacheKeyType> cache_keys = {101, 102, 103, 104, 105};
+    std::vector<int>          block_ids  = {1, 2, 3, 4, 5};
 
     CacheItem item1   = {101, 0, 1, false};
     auto      result1 = cache_->put(item1);

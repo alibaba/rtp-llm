@@ -44,7 +44,7 @@ struct PrefillStatInfo {
 };
 
 struct RPCContext {
-    int64_t requestID() {
+    uint64_t requestID() {
         return request->request_id();
     }
 
@@ -62,8 +62,7 @@ public:
                            std::shared_ptr<RpcServerRuntimeMeta> meta):
         GenerateContext(rpc_context.requestID(), timeout_ms, server_context, metrics_reporter, meta),
         resource(resource),
-        rpc_context(rpc_context)
-    {
+        rpc_context(rpc_context) {
         prefill_worker_cache_store_addrs = resource->workers;
     }
     ~PrefillGenerateContext();

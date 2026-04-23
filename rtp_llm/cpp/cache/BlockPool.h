@@ -10,7 +10,7 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/BlockRefCounter.h"
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheTypes.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"

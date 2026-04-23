@@ -2,7 +2,7 @@
 #include <cstring>
 #include <sstream>
 #include "torch/all.h"
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
@@ -328,7 +328,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                             stream->cacheKeys(i).size() * sizeof(int64_t));
             }
 
-            *(model_input.request_id.data_ptr<int64_t>() + prefill_batch_idx) = stream->streamId();
+            *(model_input.request_id.data_ptr<int64_t>() + prefill_batch_idx) =
+                static_cast<int64_t>(stream->streamId());
             *(reinterpret_cast<bool*>(model_input.request_pd_separation.data_ptr()) + prefill_batch_idx) =
                 stream->queryPdSep();
 

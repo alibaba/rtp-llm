@@ -132,7 +132,7 @@ message MultimodalOutputsPB {
 }
 
 message GenerateInputPB {
-    int64 request_id = 1;
+    uint64 request_id = 1;
     repeated int32 token_ids = 2;
     repeated MultimodalInputPB multimodal_inputs = 3;
     GenerateConfigPB generate_config = 4;
@@ -182,7 +182,7 @@ message FlattenOutputPB {
 }
 
 message GenerateOutputsPB {
-    int64 request_id = 1;
+    uint64 request_id = 1;
     FlattenOutputPB flatten_output = 2;
     int64 receive_load_time = 3;
     int64 start_load_time = 4;
@@ -244,7 +244,7 @@ enum RemoteStage {
 
 message GenerateRequestPB {
     RemoteStage stage = 1;
-    int64 request_id = 2;
+    uint64 request_id = 2;
     string client_id = 3;
     int64 start_time = 4;
     int32 first_generate_token_id = 5;
@@ -258,10 +258,10 @@ message GenerateRequestPB {
 
 // in tp case, decode master broadcast to decode worker
 message BroadcastLoadRequestPB {
-    int64 request_id = 1;
+    uint64 request_id = 1;
     string request_key = 2;
     repeated string peer_addrs = 3;
-    repeated int64 cache_keys = 4;
+    repeated uint64 cache_keys = 4;
     repeated int32 block_ids = 5;
     int64 block_num = 6;
     int64 reuse_block_size = 7;
@@ -279,7 +279,7 @@ message BroadcastLoadResponsePB {
 }
 
 message RemoteFinishRequestPB {
-    int64 request_id = 1;
+    uint64 request_id = 1;
 }
 
 message RemoteGenerateRequestPBNew {
@@ -313,7 +313,7 @@ message RemoteStorePartition {
 
 message RemoteStoreRequestPB {
     int64 dp_rank = 1;
-    int64 request_id = 2;
+    uint64 request_id = 2;
     string request_key = 3;
     repeated int32 decode_block_ids = 4;
     repeated int32 prefill_block_ids = 5;
@@ -343,7 +343,7 @@ message CacheStatusPB {
     int64 total_kv_cache = 2;
     int64 block_size = 3;
     int64 version = 4;
-    map<int64, bool> cache_keys = 5;
+    map<uint64, bool> cache_keys = 5;
 }
 
 message UpdateSchedulerInfoRequestPB {
@@ -377,7 +377,7 @@ message UpdateEplbConfigRequestPB {
 }
 
 message TaskInfoPB {
-    int64 request_id = 1;
+    uint64 request_id = 1;
     reserved 2;
     reserved "inter_request_id";
     int64 prefix_length = 3;
@@ -416,12 +416,12 @@ message EmbeddingInputPB {
     repeated int32 token_ids = 1;
     repeated int32 token_type_ids = 2;
     repeated int32 input_lengths = 3;
-    int64 request_id = 4;
+    uint64 request_id = 4;
     repeated MultimodalInputPB multimodal_features = 5;
 }
 
 message EmbeddingHealthRequestPB {
-    int64 request_id = 1;
+    uint64 request_id = 1;
 }
 
 message EmbeddingTensorMapPB {
@@ -463,7 +463,7 @@ message TPWorkerInfoPB {
 
 message LayerCacheBlockPB {
     uint32 layer_id = 1;
-    repeated int64 cache_keys = 2;
+    repeated uint64 cache_keys = 2;
     repeated uint32 block_ids = 3;
 }
 
@@ -478,7 +478,7 @@ message P2PConnectorBroadcastTpRequestPB {
     repeated LayerCacheBlockPB layer_blocks = 1;
     repeated TPWorkerInfoPB peer_workers = 2;
     string unique_key = 3;
-    int64 request_id = 4;
+    uint64 request_id = 4;
     int64 deadline_ms = 5;
     P2PConnectorBroadcastType type = 6;
     // TP size of the remote side (prefill_tp_size for decode, decode_tp_size for prefill)

@@ -16,14 +16,14 @@ public:
     explicit EmbeddingInput(const torch::Tensor&                    token_ids,
                             const torch::Tensor&                    token_type_ids,
                             const torch::Tensor&                    input_lengths,
-                            int64_t                                 request_id,
+                            uint64_t                                request_id,
                             const std::optional<MultimodalFeature>& multimodal_features = std::nullopt,
                             std::optional<torch::Tensor>            input_embeddings    = std::nullopt);
 
     explicit EmbeddingInput(const std::vector<int32_t>&             token_ids,
                             const std::vector<int32_t>&             token_type_ids,
                             const std::vector<int32_t>&             input_lengths,
-                            int64_t                                 request_id,
+                            uint64_t                                request_id,
                             const std::optional<MultimodalFeature>& multimodal_features = std::nullopt,
                             std::optional<torch::Tensor>            input_embeddings    = std::nullopt);
 
@@ -31,7 +31,7 @@ public:
     torch::Tensor                               token_type_ids;
     torch::Tensor                               input_lengths;
     int64_t                                     total_length;
-    int64_t                                     request_id;
+    uint64_t                                    request_id;
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
     std::optional<MultimodalFeature>            multimodal_features;
     std::optional<torch::Tensor>                input_embeddings;

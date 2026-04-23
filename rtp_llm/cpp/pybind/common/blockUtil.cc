@@ -1,14 +1,14 @@
 #include "rtp_llm/cpp/pybind/common/blockUtil.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 
-std::vector<int64_t> getBlockCacheKey(const std::vector<std::vector<int64_t>>& token_ids_list) {
-    std::vector<int64_t> block_ids;
-    int64_t              hash = 0;
+std::vector<rtp_llm::CacheKeyType> getBlockCacheKey(const std::vector<std::vector<int64_t>>& token_ids_list) {
+    std::vector<rtp_llm::CacheKeyType> cache_keys;
+    int64_t                            hash = 0;
     for (const auto& token_ids : token_ids_list) {
         hash = rtp_llm::hashInt64Vector(hash, token_ids);
-        block_ids.push_back(hash);
+        cache_keys.push_back(static_cast<rtp_llm::CacheKeyType>(hash));
     }
-    return block_ids;
+    return cache_keys;
 }
 
 void registerCommon(py::module& m) {

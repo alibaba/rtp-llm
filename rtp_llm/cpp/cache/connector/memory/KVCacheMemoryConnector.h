@@ -13,7 +13,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheTypes.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -125,7 +125,7 @@ private:
     std::shared_ptr<KVCacheAllocator> allocator_;
     const std::vector<std::string>    tp_addrs_;
 
-    std::shared_ptr<BlockPool> block_pool_;
+    std::shared_ptr<BlockPool>                 block_pool_;
     mutable std::mutex                         malloc_mutex_;
     std::shared_ptr<MemoryBlockCache>          block_cache_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;

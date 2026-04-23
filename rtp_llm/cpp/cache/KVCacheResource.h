@@ -6,13 +6,11 @@
 #include <string>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/BasicType.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
-
-using CacheKeyType = int64_t;
-using BlockIdxType = int32_t;
 
 constexpr BlockIdxType NULL_BLOCK_IDX = static_cast<BlockIdxType>(-1);
 

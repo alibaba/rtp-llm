@@ -66,7 +66,7 @@ private:
 /// Appends one TcpCacheKeyBlockBufferInfo entry to @p request.
 /// @param sub_blocks  list of (len, content) pairs, one per sub-block.
 static void addRequestBlock(::tcp_transfer::TcpLayerBlockTransferRequest&        request,
-                            int64_t                                              cache_key,
+                            CacheKeyType                                         cache_key,
                             const std::vector<std::pair<uint32_t, std::string>>& sub_blocks) {
     auto* kb = request.add_blocks();
     kb->set_key(cache_key);
@@ -126,7 +126,7 @@ protected:
     /// Returns a minimal request with a single cache_key and one sub-block.
     static ::tcp_transfer::TcpLayerBlockTransferRequest makeSimpleRequest(const std::string& unique_key,
                                                                           int64_t            deadline_ms,
-                                                                          int64_t            cache_key,
+                                                                          CacheKeyType       cache_key,
                                                                           uint32_t           len,
                                                                           const std::string& content) {
         ::tcp_transfer::TcpLayerBlockTransferRequest req;
@@ -149,7 +149,7 @@ protected:
 
     /// Returns a TransferTask whose sole block has addr/size as given.
     static std::shared_ptr<TransferTask>
-    makeTask(int64_t cache_key, void* addr, size_t size_bytes, int64_t deadline_offset_ms = 5000) {
+    makeTask(CacheKeyType cache_key, void* addr, size_t size_bytes, int64_t deadline_offset_ms = 5000) {
         auto kbi = std::make_shared<KeyBlockInfo>();
         kbi->blocks.push_back(BlockInfo{false, 0, 0, addr, size_bytes});
         KeyBlockInfoMap block_infos;

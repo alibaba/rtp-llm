@@ -325,7 +325,7 @@ protected:
         return std::make_shared<MockDeviceEvent>(ready);
     }
 
-    void addComputedBuffer(int64_t request_id, int layer_id, int64_t deadline_ms) {
+    void addComputedBuffer(uint64_t request_id, int layer_id, int64_t deadline_ms) {
         auto layer_cache_buffer = createLayerCacheBuffer(layer_id);
         computed_buffers_->addBuffer(request_id, layer_cache_buffer, deadline_ms);
     }
@@ -333,8 +333,8 @@ protected:
     std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, int num_blocks = 2) {
         auto buffer = std::make_shared<LayerCacheBuffer>(layer_id);
         for (int i = 0; i < num_blocks; ++i) {
-            int64_t cache_key = layer_id * 1000 + i;
-            int     block_id  = i;
+            CacheKeyType cache_key = static_cast<CacheKeyType>(layer_id * 1000 + i);
+            int          block_id  = i;
             buffer->addBlockId(cache_key, block_id);
         }
         return buffer;
@@ -373,10 +373,10 @@ protected:
 // ==================== writeByLayer 测试 (Prefill 端) ====================
 
 TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
-    int     layer_id   = 0;
-    int64_t request_id = 1002;
-    auto    resource   = createKVCacheResource(layer_id, 2);
-    auto    event      = createMockEvent(false);
+    int      layer_id   = 0;
+    uint64_t request_id = 1002;
+    auto     resource   = createKVCacheResource(layer_id, 2);
+    auto     event      = createMockEvent(false);
 
     bool success = prefill_->writeByLayer(layer_id, resource, request_id, event);
     EXPECT_TRUE(success);
@@ -395,7 +395,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
 // ==================== sendKVCache 测试 (Prefill 端) ====================
 
 TEST_F(P2PConnectorWorkerTest, SendKVCache_SendRequestDeadline_AlignedWithReturnBefore) {
-    int64_t     request_id  = 2000;
+    uint64_t    request_id  = 2000;
     std::string unique_key  = "test_send_deadline_align";
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
@@ -419,7 +419,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_SendRequestDeadline_AlignedWithReturn
 }
 
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_AllLayersTransferSuccess) {
-    int64_t     request_id  = 2001;
+    uint64_t    request_id  = 2001;
     std::string unique_key  = "test_all_success";
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
@@ -466,7 +466,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_AllLayersTransferSuccess) {
 }
 
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_PartialLayersTransferFailed) {
-    int64_t     request_id  = 2002;
+    uint64_t    request_id  = 2002;
     std::string unique_key  = "test_partial_fail";
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
@@ -515,7 +515,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_PartialLayersTransferFaile
 }
 
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_SomeLayersNotTransferred) {
-    int64_t     request_id = 2003;
+    uint64_t    request_id = 2003;
     std::string unique_key = "test_some_layers_missing";
     // D 须足够大，使 return_deadline_ms=D-100 仍晚于 now，才能先发出已有 layer 再因缺层失败
     int64_t deadline_ms = currentTimeMs() + 150;
@@ -563,7 +563,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_SomeLayersNotTransferred) 
 }
 
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_AsymmetricTP_2P4D_Success) {
-    int64_t     request_id  = 2004;
+    uint64_t    request_id  = 2004;
     std::string unique_key  = "test_asymmetric_all_success";
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
@@ -616,7 +616,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_AsymmetricTP_2P4D_Success) 
 }
 
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_TransferTimeout) {
-    int64_t     request_id = 2005;
+    uint64_t    request_id = 2005;
     std::string unique_key = "test_transfer_timeout";
     // 足够长的 D，使 return_deadline 晚于 200ms 回调延迟，仍能等到 mock 回调
     int64_t deadline_ms = currentTimeMs() + 500;
@@ -669,7 +669,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_TransferTimeout) {
 
 TEST_F(P2PConnectorWorkerTest, Read_ReturnTrue_AllLayersSuccess) {
     std::string unique_key  = "test_read_success";
-    int64_t     request_id  = 3001;
+    uint64_t    request_id  = 3001;
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
@@ -690,7 +690,7 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnTrue_AllLayersSuccess) {
 
 TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_PartialLayersFailed) {
     std::string unique_key  = "test_read_partial_fail";
-    int64_t     request_id  = 3002;
+    uint64_t    request_id  = 3002;
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
@@ -713,7 +713,7 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_PartialLayersFailed) {
 
 TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_Timeout) {
     std::string unique_key  = "test_read_timeout";
-    int64_t     request_id  = 3003;
+    uint64_t    request_id  = 3003;
     int64_t     deadline_ms = currentTimeMs() + 10;
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
@@ -733,7 +733,7 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_Timeout) {
 
 TEST_F(P2PConnectorWorkerTest, Read_ReturnTrue_EmptyBuffers) {
     std::string unique_key  = "test_read_empty";
-    int64_t     request_id  = 3004;
+    uint64_t    request_id  = 3004;
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
@@ -749,7 +749,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_RdmaTransferWaitTimeout) {
     // 设置很短的 rdma_transfer_wait_timeout_ms；return_deadline 须较近，否则 callback 等待会持续到 D-return_before
     setTransferWaitTimeout(50);  // 50ms
 
-    int64_t     request_id = 4001;
+    uint64_t    request_id = 4001;
     std::string unique_key = "test_rdma_transfer_wait_timeout_handleread";
     // return_deadline = deadline_ms - return_before_ms(100) ≈ now + 50ms，与 rdma cap 同量级
     int64_t deadline_ms = currentTimeMs() + 150;
@@ -800,7 +800,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_RdmaTransferWaitTimeout) {
 
 TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_RdmaTransferWaitTimeout) {
     std::string unique_key = "test_rdma_transfer_wait_timeout_read";
-    int64_t     request_id = 4002;
+    uint64_t    request_id = 4002;
     // return_deadline = D - return_before_ms ≈ now + 100ms
     int64_t deadline_ms = currentTimeMs() + 200;
 
@@ -826,7 +826,7 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_RdmaTransferWaitTimeout) {
 
 TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_CancelRead) {
     std::string unique_key  = "test_read_cancel";
-    int64_t     request_id  = 3005;
+    uint64_t    request_id  = 3005;
     int64_t     deadline_ms = currentTimeMs() + 5000;  // 足够长的 deadline
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
@@ -899,7 +899,7 @@ TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextNotFound) {
 }
 
 TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextFound) {
-    int64_t     request_id  = 3006;
+    uint64_t    request_id  = 3006;
     std::string unique_key  = "test_cancel_handle_read_found";
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
@@ -943,7 +943,7 @@ TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextFound) {
 
 // 异步回调错峰完成，覆盖 waitSendCallbacksWithTimeout 中 result_cv 多次 wait_for 唤醒
 TEST_F(P2PConnectorWorkerTest, SendKVCache_Succeeds_StaggeredAsyncCallbacks) {
-    int64_t     request_id  = 2009;
+    uint64_t    request_id  = 2009;
     std::string unique_key  = "test_staggered_cv";
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
@@ -985,7 +985,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Succeeds_StaggeredAsyncCallbacks) {
 
 // 测试：send callback 超时未回调 -> sendKVCache 应报告失败而非成功
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackWaitTimeout) {
-    int64_t     request_id  = 4001;
+    uint64_t    request_id  = 4001;
     std::string unique_key  = "test_callback_wait_timeout";
     int64_t     deadline_ms = currentTimeMs() + 5000;
 

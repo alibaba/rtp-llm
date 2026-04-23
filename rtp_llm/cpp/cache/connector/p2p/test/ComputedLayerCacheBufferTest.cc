@@ -37,8 +37,8 @@ protected:
 // ==================== ComputedLayerCacheBuffer 类测试 ====================
 
 TEST_F(ComputedLayerCacheBufferTest, nullBufferFirst) {
-    int64_t request_id   = 1001;
-    int64_t deadline_ms0 = getDeadlineMs();
+    uint64_t request_id   = 1001;
+    int64_t  deadline_ms0 = getDeadlineMs();
 
     ComputedLayerCacheBuffer computed_buffer(request_id, nullptr, deadline_ms0);
     ASSERT_EQ(deadline_ms0, computed_buffer.deadlineMs());
@@ -56,9 +56,9 @@ TEST_F(ComputedLayerCacheBufferTest, nullBufferFirst) {
 }
 
 TEST_F(ComputedLayerCacheBufferTest, fullBufferFirst) {
-    int64_t request_id   = 1001;
-    int64_t deadline_ms0 = getDeadlineMs();
-    auto    buffer       = createLayerCacheBuffer(0);
+    uint64_t request_id   = 1001;
+    int64_t  deadline_ms0 = getDeadlineMs();
+    auto     buffer       = createLayerCacheBuffer(0);
 
     ComputedLayerCacheBuffer computed_buffer(request_id, buffer, deadline_ms0);
     ASSERT_EQ(deadline_ms0, computed_buffer.deadlineMs());
@@ -75,9 +75,9 @@ TEST_F(ComputedLayerCacheBufferTest, fullBufferFirst) {
 }
 
 TEST_F(ComputedLayerCacheBufferTest, ComputedLayerCacheBuffer_WaitChange) {
-    int64_t request_id  = 1005;
-    auto    buffer0     = createLayerCacheBuffer(0);
-    int64_t deadline_ms = getDeadlineMs();
+    uint64_t request_id  = 1005;
+    auto     buffer0     = createLayerCacheBuffer(0);
+    int64_t  deadline_ms = getDeadlineMs();
 
     auto computed_buffer = std::make_shared<ComputedLayerCacheBuffer>(request_id, buffer0, deadline_ms);
 
@@ -107,9 +107,9 @@ TEST_F(ComputedLayerCacheBufferTest, ComputedLayerCacheBuffer_WaitChange) {
 }
 
 TEST_F(ComputedLayerCacheBufferTest, ComputedLayerCacheBuffer_WaitChangeTimeout) {
-    int64_t request_id  = 1006;
-    auto    buffer0     = createLayerCacheBuffer(0);
-    int64_t deadline_ms = getDeadlineMs();
+    uint64_t request_id  = 1006;
+    auto     buffer0     = createLayerCacheBuffer(0);
+    int64_t  deadline_ms = getDeadlineMs();
 
     ComputedLayerCacheBuffer computed_buffer(request_id, buffer0, deadline_ms);
 
@@ -126,9 +126,9 @@ TEST_F(ComputedLayerCacheBufferTest, ComputedLayerCacheBuffer_WaitChangeTimeout)
 // ==================== ComputedLayerCacheBufferStore 类测试 ====================
 
 TEST_F(ComputedLayerCacheBufferTest, AddAndGetBuffer) {
-    int64_t request_id  = 2001;
-    auto    buffer      = createLayerCacheBuffer(0);
-    int64_t deadline_ms = getDeadlineMs();
+    uint64_t request_id  = 2001;
+    auto     buffer      = createLayerCacheBuffer(0);
+    int64_t  deadline_ms = getDeadlineMs();
 
     ASSERT_TRUE(store_->getBuffer(request_id) == nullptr);
 
@@ -157,9 +157,9 @@ TEST_F(ComputedLayerCacheBufferTest, AddAndGetBuffer) {
 }
 
 TEST_F(ComputedLayerCacheBufferTest, RemoveBuffer) {
-    int64_t request_id  = 2003;
-    auto    buffer      = createLayerCacheBuffer(0);
-    int64_t deadline_ms = getDeadlineMs();
+    uint64_t request_id  = 2003;
+    auto     buffer      = createLayerCacheBuffer(0);
+    int64_t  deadline_ms = getDeadlineMs();
 
     store_->addBuffer(request_id, buffer, deadline_ms);
 
@@ -172,13 +172,13 @@ TEST_F(ComputedLayerCacheBufferTest, RemoveBuffer) {
 }
 
 TEST_F(ComputedLayerCacheBufferTest, CheckTimeoutMixed) {
-    int64_t request_id1  = 3003;
-    auto    buffer1      = createLayerCacheBuffer(0);
-    int64_t deadline_ms1 = getDeadlineMs(1000);  // 1秒后过期
+    uint64_t request_id1  = 3003;
+    auto     buffer1      = createLayerCacheBuffer(0);
+    int64_t  deadline_ms1 = getDeadlineMs(1000);  // 1秒后过期
 
-    int64_t request_id2  = 3004;
-    auto    buffer2      = createLayerCacheBuffer(0);
-    int64_t deadline_ms2 = getDeadlineMs(-100);  // 已经过期
+    uint64_t request_id2  = 3004;
+    auto     buffer2      = createLayerCacheBuffer(0);
+    int64_t  deadline_ms2 = getDeadlineMs(-100);  // 已经过期
 
     store_->addBuffer(request_id1, buffer1, deadline_ms1);
     store_->addBuffer(request_id2, buffer2, deadline_ms2);

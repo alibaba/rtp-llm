@@ -28,7 +28,7 @@ protected:
     }
 
     /// Create a MockMeta with routing context configured
-    std::shared_ptr<MockMeta> createMockMeta(const std::string& unique_key, int64_t request_id, int64_t deadline_ms) {
+    std::shared_ptr<MockMeta> createMockMeta(const std::string& unique_key, uint64_t request_id, int64_t deadline_ms) {
         auto meta = std::make_shared<MockMeta>();
         meta->setUniqueKey(unique_key);
         meta->setRequestId(request_id);
@@ -51,7 +51,7 @@ protected:
 
 TEST_F(P2PConnectorResourceStoreTest, AddAndStealResource_Success) {
     std::string unique_key  = "test_key_1";
-    int64_t     request_id  = 1001;
+    uint64_t    request_id  = 1001;
     int64_t     deadline_ms = getDeadlineMs();
     auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto        resource    = createMockKVCacheResource();
@@ -75,11 +75,11 @@ TEST_F(P2PConnectorResourceStoreTest, StealResource_NotFound) {
 }
 
 TEST_F(P2PConnectorResourceStoreTest, StealResource_CanOnlyStealOnce) {
-    std::string unique_key = "test_key_2";
-    int64_t     request_id = 1002;
+    std::string unique_key  = "test_key_2";
+    uint64_t    request_id  = 1002;
     int64_t     deadline_ms = getDeadlineMs();
-    auto        meta       = createMockMeta(unique_key, request_id, deadline_ms);
-    auto        resource   = createMockKVCacheResource();
+    auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto        resource    = createMockKVCacheResource();
 
     stream_store_->addResource(meta, resource);
 
@@ -96,7 +96,7 @@ TEST_F(P2PConnectorResourceStoreTest, StealResource_CanOnlyStealOnce) {
 
 TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_ImmediateReturn) {
     std::string unique_key  = "test_key_3";
-    int64_t     request_id  = 1003;
+    uint64_t    request_id  = 1003;
     int64_t     deadline_ms = getDeadlineMs();
     auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto        resource    = createMockKVCacheResource();
@@ -115,7 +115,7 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_ImmediateReturn) {
 
 TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_WaitForResource) {
     std::string unique_key  = "test_key_4";
-    int64_t     request_id  = 1004;
+    uint64_t    request_id  = 1004;
     int64_t     deadline_ms = getDeadlineMs(5000);
     auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto        resource    = createMockKVCacheResource();
@@ -191,9 +191,9 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_CancelledWhileWaiting
     EXPECT_LT(elapsed_ms, 2000);
 
     // Store 仍可用：补资源后应能正常 steal
-    const int64_t request_id = 2001;
-    auto          meta       = createMockMeta(unique_key, request_id, getDeadlineMs(5000));
-    auto          resource   = createMockKVCacheResource();
+    const uint64_t request_id = 2001;
+    auto           meta       = createMockMeta(unique_key, request_id, getDeadlineMs(5000));
+    auto           resource   = createMockKVCacheResource();
     ASSERT_TRUE(stream_store_->addResource(meta, resource));
     auto entry_after = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 500);
     ASSERT_NE(entry_after, nullptr);
@@ -202,7 +202,7 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_CancelledWhileWaiting
 
 TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_CancelledBeforeResourceAppears) {
     const std::string unique_key  = "test_key_cancel_before_add";
-    const int64_t     request_id  = 2002;
+    const uint64_t    request_id  = 2002;
     const int64_t     deadline_ms = getDeadlineMs(5000);
     auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto              resource    = createMockKVCacheResource();
@@ -288,7 +288,7 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_OnlyWakeUpCorrectWait
 
 TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_MultipleWaitersForSameKey) {
     std::string unique_key  = "test_key_7";
-    int64_t     request_id  = 1008;
+    uint64_t    request_id  = 1008;
     int64_t     deadline_ms = getDeadlineMs(5000);
     auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto        resource    = createMockKVCacheResource();
@@ -328,7 +328,7 @@ TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_MultipleWaitersForSam
 
 TEST_F(P2PConnectorResourceStoreTest, ResourceTimeout_AutoRemoval) {
     std::string unique_key  = "test_key_8";
-    int64_t     request_id  = 1009;
+    uint64_t    request_id  = 1009;
     int64_t     deadline_ms = currentTimeMs() + 50;
     auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto        resource    = createMockKVCacheResource();

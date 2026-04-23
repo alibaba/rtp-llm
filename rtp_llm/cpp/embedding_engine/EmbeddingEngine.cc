@@ -77,7 +77,7 @@ void EmbeddingEngine::loop() {
 std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(th::Tensor                       token_ids,
                                                          th::Tensor                       token_type_ids,
                                                          th::Tensor                       input_lengths,
-                                                         int64_t                          request_id,
+                                                         uint64_t                         request_id,
                                                          std::optional<MultimodalFeature> multimodal_features,
                                                          std::optional<th::Tensor>        input_embeddings) {
     auto input = std::make_shared<EmbeddingInput>(

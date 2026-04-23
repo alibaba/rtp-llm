@@ -214,11 +214,12 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         int block_num =
             (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id] + seq_size_per_block - 1)
             / seq_size_per_block;
-        auto request_id     = *(param.request_id.data_ptr<int64_t>() + batch_id);
-        auto event          = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
-        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
-        RTP_LLM_LOG_DEBUG(
-            "write cache store, request id is %ld, blocks num is %ld", request_id, block_num + reuse_block_num);
+        uint64_t request_id     = static_cast<uint64_t>(*(param.request_id.data_ptr<int64_t>() + batch_id));
+        auto     event          = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
+        auto     request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+        RTP_LLM_LOG_DEBUG("write cache store, request id is %llu, blocks num is %ld",
+                          (unsigned long long)request_id,
+                          (long)(block_num + reuse_block_num));
 
         CacheGroupType group_type = CacheGroupType::FULL;
         group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
@@ -282,8 +283,8 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
             if (!success) {
                 RTP_LLM_LOG_WARNING(
-                    "query [%ld], layer id [%d], call store kv cache failed, ec is %d, error msg is [%s]",
-                    request_id,
+                    "query [%llu], layer id [%d], call store kv cache failed, ec is %d, error msg is [%s]",
+                    (unsigned long long)request_id,
                     layer_id,
                     ec,
                     ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str());

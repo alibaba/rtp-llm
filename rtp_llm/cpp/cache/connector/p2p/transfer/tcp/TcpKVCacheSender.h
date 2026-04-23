@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/BasicType.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheSender.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TcpClient.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/CudaCopyUtil.h"
@@ -40,7 +41,7 @@ private:
                         const std::shared_ptr<TransferClientMetricsCollector>& collector);
 
     bool setBlockBufferInfo(::tcp_transfer::TcpBlockBufferInfo* block_buffer_info,
-                            int64_t                             cache_key,
+                            CacheKeyType                        cache_key,
                             const BlockInfo&                    block_info,
                             std::vector<CopyTask>&              copy_tasks);
 

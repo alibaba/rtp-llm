@@ -55,7 +55,7 @@ public:
                    bool                                                    isInternal = false);
 
 private:
-    void inferResponse(int64_t                                                 request_id,
+    void inferResponse(uint64_t                                                request_id,
                        const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                        const http_server::HttpRequest&                         request);
 
@@ -65,7 +65,7 @@ private:
                    const InferenceParsedRequest&                           req,
                    autil::StageTime&                                       iterate_stage_timer);
 
-    std::shared_ptr<GenerateInput> fillGenerateInput(int64_t                                request_id,
+    std::shared_ptr<GenerateInput> fillGenerateInput(uint64_t                               request_id,
                                                      const std::string&                     text,
                                                      const std::vector<std::string>&        urls,
                                                      const std::shared_ptr<GenerateConfig>& generate_config);

@@ -100,7 +100,7 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
     ConcurrencyControllerGuard controller_guard(controller_);
 
     EmbeddingRequest req;
-    int64_t          request_id = request_counter_->incAndReturn();
+    uint64_t         request_id = request_counter_->incAndReturn();
     try {
         FromJsonString(req, body);
     } catch (autil::legacy::ExceptionBase& e) {

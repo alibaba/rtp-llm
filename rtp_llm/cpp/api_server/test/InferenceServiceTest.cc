@@ -333,7 +333,7 @@ TEST_F(InferenceServiceTest, fillGenerateInput) {
     std::vector<int> token_ids = {1, 2, 3, 4, 5};
     EXPECT_CALL(*mock_token_processor_, encode(_)).WillOnce(Return(token_ids));
 
-    int64_t                  request_id = 10086;
+    uint64_t                 request_id = 10086;
     std::string              text;
     std::vector<std::string> urls;
     auto                     generate_config = std::make_shared<GenerateConfig>();

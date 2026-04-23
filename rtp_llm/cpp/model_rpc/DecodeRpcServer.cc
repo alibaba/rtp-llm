@@ -30,7 +30,7 @@ const int RDMA_CONNECT_RETRY_TIME = 3;
         return;                                                                                                        \
     }
 
-string makeRequestKey(const string& client_id, size_t request_id) {
+string makeRequestKey(const string& client_id, uint64_t request_id) {
     return client_id + "_request_id_" + std::to_string(request_id);
 }
 
@@ -211,8 +211,9 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     }
 
     generate_stream->resetBeginTime(currentTimeUs());
-    RTP_LLM_LOG_DEBUG(
-        "decode init stream[%d]: %s", generate_stream->streamId(), generate_stream->debugString().c_str());
+    RTP_LLM_LOG_DEBUG("decode init stream[%llu]: %s",
+                      (unsigned long long)generate_stream->streamId(),
+                      generate_stream->debugString().c_str());
     engine_->enqueue(generate_stream);
     RTP_LLM_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
     decode_context.error_status =
@@ -605,7 +606,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
-        RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
+        RTP_LLM_LOG_DEBUG("load context request id is %llu", (unsigned long long)load_context.request_id);
 
         for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
             auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);

@@ -15,6 +15,13 @@
 namespace rtp_llm {
 namespace {
 
+// MetaClient expects std::vector<int64_t>; cache keys are uint64_t. Same element size; reinterpret object
+// representation.
+inline const std::vector<int64_t>& cacheKeysAsInt64Vec(const CacheKeysType& keys) {
+    static_assert(sizeof(CacheKeyType) == sizeof(int64_t));
+    return reinterpret_cast<const std::vector<int64_t>&>(keys);
+}
+
 struct MatchMetricsHelper {
     MatchMetricsHelper(const std::string& trace_id, const kmonitor::MetricsReporterPtr& metrics_reporter):
         trace_id(trace_id), begin_us(rtp_llm::currentTimeUs()), metrics_reporter(metrics_reporter) {}
@@ -605,7 +612,8 @@ void RemoteConnector::asyncMatchTask(const std::shared_ptr<KVCacheResource>&    
     const std::string&          unique_id  = meta->unique_id();
     kv_cache_manager::QueryType query_type = kv_cache_manager::QueryType::QT_PREFIX_MATCH;
     async_context->setState(RemoteConnectorState::State::RCS_READ_MATCH);
-    auto match_result = client_wrapper_->match(unique_id, match_trace_id, query_type, keys, block_mask, {});
+    auto match_result =
+        client_wrapper_->match(unique_id, match_trace_id, query_type, cacheKeysAsInt64Vec(keys), block_mask, {});
     CHECK_AND_LOG(match_result.first, RCS_READ_MATCH_ERROR, "asyncGet match failed, [%s]", match_trace_id.c_str());
     async_context->set_trace_id(match_trace_id);
     async_context->set_locations(std::move(match_result.second));
@@ -698,7 +706,7 @@ void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&    
     // 1. for meta_client : get cache location from remote service
     async_context->setState(RemoteConnectorState::State::RCS_WRITE_START);
     auto [start_result, write_location] = client_wrapper_->getWriteLocation(
-        unique_id, start_write_trace_id, keys, tokens, location_spec_group_names, 600);
+        unique_id, start_write_trace_id, cacheKeysAsInt64Vec(keys), tokens, location_spec_group_names, 600);
     helper.collector.remote_get_write_location_time_us = currentTimeUs() - helper.begin_us;
     CHECK_AND_LOG(start_result, RCS_ERROR, "asyncPut getWriteLocation failed, [%s]", start_write_trace_id.c_str());
     RETURN_IF(write_location.locations.empty(), write);
