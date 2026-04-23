@@ -56,6 +56,8 @@ struct MallocInfo {
     bool                    enable_device_cache = true;
     // Sparse linear-block cleanup is only valid for incremental allocation.
     bool enable_remove_skipped_blocks = true;
+
+    std::vector<std::vector<int>> mm_intervals;  // for mm multimodal
 };
 
 struct MallocResult {

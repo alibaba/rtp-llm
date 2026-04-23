@@ -1,22 +1,17 @@
-"""Weight info for Kimi-K2.5 (text + vision tower).
+"""Weight info for Kimi-K2.5 (text core only).
 
 The text path reuses DeepSeekV2Weight but Kimi-K2.5 ships its text model
 under the `language_model.model.layers.{i}.*` HF prefix (with the
 `language_model.` wrapper). We rewrite the checkpoint names produced by
 DeepSeekV2Weight to add this prefix.
 
-The ViT weights live under `vision_tower.*` and the patchmerger projector
-under `mm_projector.*`. Both are streamed through the standard multimodal
-loader.
+The ViT / patchmerger weight info has moved out — it is now declared by
+``KimiK25VitWeight`` in :mod:`rtp_llm.multimodal.multimodal_mixins.kimi_k25.kimi_k25_mixin`
+and loaded through the unified multimodal-mixin factory path.
 """
 
 from rtp_llm.model_loader.weight_module import CompositeWeight, WeightModule
 from rtp_llm.models.deepseek_v2 import DeepSeekV2Weight
-from rtp_llm.models.multimodal.multimodal_mixin import (
-    BaseMultiModalWeightInfo,
-    BaseVitWeights,
-)
-
 
 _LANG_PREFIX = "language_model."
 
@@ -36,19 +31,7 @@ def _rewrite_ckpt_names(weight: WeightModule) -> None:
             _rewrite_ckpt_names(sub)
 
 
-class KimiK25VitWeight(BaseVitWeights):
-    def _set_weight_prefix(self):
-        # HF Kimi-K2.5 keeps vision_tower.* / mm_projector.* at top
-        # level; no `model.` prefix.
-        self._ckpt_prefix = ""
-        self._ft_prefix = "self.mm_part."
-
-
-class KimiK25Weight(DeepSeekV2Weight, BaseMultiModalWeightInfo):
-    def __init__(self, vit_weights, **kwargs):
-        DeepSeekV2Weight.__init__(self, **kwargs)
-        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
-
+class KimiK25Weight(DeepSeekV2Weight):
     def _process_meta(self, meta_dict, weight_keys):
         # Kimi-K2.5 keys are prefixed with `language_model.`; strip it
         # before delegating to DeepSeekV2's HF-style probes.
@@ -68,4 +51,4 @@ class KimiK25Weight(DeepSeekV2Weight, BaseMultiModalWeightInfo):
                     _rewrite_ckpt_names(w)
             else:
                 _rewrite_ckpt_names(layer)
-        return self._get_vit_info(info)
+        return info
