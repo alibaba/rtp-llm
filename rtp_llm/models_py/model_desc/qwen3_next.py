@@ -40,6 +40,9 @@ from rtp_llm.models_py.triton_kernels.fla.fused_sigmoid_gating_recurrent import 
     fused_sigmoid_gating_delta_rule_update,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.triton_kernels.fla.recurrent_final_state import (
+    recompute_final_state,
+)
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -257,9 +260,24 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             use_qk_l2norm_in_kernel=True,
         )
         if ssm_states is not None:
+            # Workaround: chunk_gated_delta_rule Triton kernel accumulates
+            # numerical errors across chunks on ROCm (tl.dot precision),
+            # producing incorrect final_state for long sequences.
+            # Recompute final_state using a lightweight recurrent kernel
+            # that processes token-by-token in fp32.
+            recomputed_fs = recompute_final_state(
+                k=key,
+                v=value,
+                g=g,
+                beta=beta,
+                scale=None,
+                initial_state=initial_states,
+                cu_seqlens=cu_seqlens_without_padding,
+                use_qk_l2norm_in_kernel=True,
+            )
             store_ssm_state_to_block_map(
                 h,
-                final_state.to(h.dtype),
+                recomputed_fs,
                 attn_inputs.prefix_lengths_d,
                 cu_seqlens_without_padding,
                 attn_inputs.kv_cache_kernel_block_id_device,
