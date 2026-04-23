@@ -42,10 +42,12 @@ class GenericMoeLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        skip_tp_allreduce: bool = False,
     ):
         super().__init__()
         self.config = config
         self.parallelism_config = parallelism_config
+        self.skip_tp_allreduce = skip_tp_allreduce
 
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.inter_size
@@ -86,7 +88,8 @@ class GenericMoeLayer(nn.Module):
         self.add_shared_expert = config.moe_style == 2
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
-                config.activation_type, parallelism_config, weights, quant_config
+                config.activation_type, parallelism_config, weights, quant_config,
+                skip_tp_allreduce=skip_tp_allreduce,
             )
         else:
             self.shared_expert = None
@@ -144,11 +147,15 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
+        extra_finalize_args = (
+            {"skip_tp_allreduce": True} if self.skip_tp_allreduce else None
+        )
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
+            extra_finalize_args=extra_finalize_args,
         )
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(hidden_states)

@@ -34,11 +34,13 @@ class DenseMLP(nn.Module):
         weights: Dict[str, torch.Tensor],
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        skip_tp_allreduce: bool = False,
     ):
         super().__init__()
 
         self.activation_type = activation_type
         self.parallelism_config = parallelism_config
+        self.skip_tp_allreduce = skip_tp_allreduce
         if self.activation_type not in _ACTIVATION_FUNC_MAP:
             raise ValueError(f"Unsupported activation type: {activation_type}")
         self.act_fn = _ACTIVATION_FUNC_MAP[activation_type]()
@@ -84,6 +86,6 @@ class DenseMLP(nn.Module):
         up = self.up_proj(x)
         activated = self.act_fn(up)
         output = self.down_proj(activated)
-        if self.parallelism_config.get_ffn_tp_size() > 1:
+        if self.parallelism_config.get_ffn_tp_size() > 1 and not self.skip_tp_allreduce:
             output = all_reduce(output, group=Group.TP)
         return output
