@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Tuple
 import requests
 
 from rtp_llm.distribute.distributed_server import members_from_test_env
-from perf_dataclass import (
+from rtp_llm.test.perf_test.multi_node.perf_dataclass import (
     ResponseInfo,
     TestResultMetrics,
     analyze_results,

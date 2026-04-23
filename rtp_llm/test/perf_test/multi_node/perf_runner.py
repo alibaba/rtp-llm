@@ -4,12 +4,12 @@ from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
 
-from perf_dataclass import (
+from rtp_llm.test.perf_test.multi_node.perf_dataclass import (
     MetricState,
     TableType,
     create_metrics_table,
 )
-from perf_impl import BatchPerfImpl
+from rtp_llm.test.perf_test.multi_node.perf_impl import BatchPerfImpl
 
 
 def run_single(
