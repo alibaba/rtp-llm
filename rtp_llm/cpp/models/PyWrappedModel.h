@@ -186,10 +186,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
         graph_params.hidden_size                  = params.hidden_size;
         graph_params.model_data_type              = dtype;
-        graph_params.max_context_batch_size       = device_params.concurrency_config.concurrency_limit;
-        graph_params.prefill_capture_seq_lens     = device_params.hw_kernel_config.prefill_capture_seq_lens;
-        graph_params.decode_capture_batch_sizes   = device_params.hw_kernel_config.decode_capture_batch_sizes;
-        graph_params.kv_cache_group_num           = device_params.kv_cache_group_num;
+        graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
+        graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
+        graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
+        graph_params.kv_cache_group_num           = params.kv_cache_group_num;
 
         if (kv_cache_layer_to_group.size() > 0) {
             graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;

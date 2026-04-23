@@ -1,3 +1,4 @@
+test_envs = {}
 
 flashinfer_test_envs = {
     "FLASHINFER_JIT_VERBOSE": "1",  # Enable verbose JIT compilation logs
