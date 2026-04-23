@@ -42,7 +42,8 @@ bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reus
     return true;
 }
 
-MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
+MatchResult FullKVCacheGroup::match(const CacheKeysType&                 cache_keys,
+                                    const std::vector<std::vector<int>>& mm_intervals) {
     MatchResult final_result;
 
     for (const auto& cache_key : cache_keys) {
@@ -55,6 +56,25 @@ MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
     }
 
     final_result.reuse_length = final_result.reuse_blocks * seqSizePerBlock();
+
+    if (!mm_intervals.empty()) {
+        for (auto interval = mm_intervals.rbegin(); interval != mm_intervals.rend(); ++interval) {
+            if ((*interval)[1] <= final_result.reuse_length) {
+                break;
+            }
+            if ((*interval)[0] > final_result.reuse_length) {
+                continue;
+            }
+            // floor to block boundary: keep entire pre-mm blocks reusable.
+            // Old form ((interval[0]-1)/block)*block dropped one extra block when
+            // interval[0] sat exactly on a block boundary (e.g. 64 → 0 instead of 64).
+            final_result.reuse_length = ((*interval)[0] / seqSizePerBlock()) * seqSizePerBlock();
+            final_result.reuse_blocks = final_result.reuse_length / seqSizePerBlock();
+            while (final_result.block_indices.size() > final_result.reuse_blocks) {
+                final_result.block_indices.pop_back();
+            }
+        }
+    }
 
     return final_result;
 }

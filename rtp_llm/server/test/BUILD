@@ -23,3 +23,12 @@ py_test(
     ],
     tags = ["manual"],
 )
+
+py_test(
+    name = "vit_proxy_server_test",
+    srcs = ["vit_proxy_server_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+    ],
+)
