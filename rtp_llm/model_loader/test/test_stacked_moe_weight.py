@@ -306,5 +306,143 @@ class TestIterStackedMoeWeights(unittest.TestCase):
         self.assertIs(results[1], w2)
 
 
+class TestGpuPreallocate(unittest.TestCase):
+    """Tests for MoeAtomicWeight._load_raw_tensor_gpu_preallocate."""
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
+    def test_stack_moe_w1_gpu_preallocate(self):
+        """GPU preallocate for stack_moe_w1 should match CPU fallback."""
+        from rtp_llm.utils.model_weight import stack_moe_w1
+
+        num_experts = 4
+        intermediate = 8
+        hidden = 16
+        # Build fake per-expert tensors: gate[expert_id] and up[expert_id]
+        tensors = {}
+        for eid in range(num_experts):
+            tensors[f"layers.0.gate.{eid}"] = torch.randn(intermediate, hidden)
+            tensors[f"layers.0.up.{eid}"] = torch.randn(intermediate, hidden)
+
+        config = MoeConfig(expert_num=num_experts)
+        ckpt_weights = [
+            CkptWeightInfo("layers.{i}.gate.{expert_id}"),
+            CkptWeightInfo("layers.{i}.up.{expert_id}"),
+        ]
+        moe_w = MoeAtomicWeight(
+            name=W.moe_w1,
+            weights=ckpt_weights,
+            config=config,
+            process_fun=stack_moe_w1,
+        )
+
+        source = FakeTensorSource(tensors)
+        lc = MagicMock()
+        lc.get_selected_experts.return_value = list(range(num_experts))
+        lc.compute_dtype = torch.float16
+
+        # CPU fallback path
+        cpu_result = moe_w._load_raw_tensor(source, 0, "cpu", lc)
+        cpu_tensor = cpu_result[W.moe_w1]
+
+        # GPU preallocate path
+        gpu_result = moe_w._load_raw_tensor(source, 0, "cuda:0", lc)
+        gpu_tensor = gpu_result[W.moe_w1]
+
+        self.assertEqual(cpu_tensor.shape, gpu_tensor.shape)
+        torch.testing.assert_close(cpu_tensor, gpu_tensor.cpu())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
+    def test_stack_gpu_preallocate(self):
+        """GPU preallocate for stack_ should match CPU fallback."""
+        from rtp_llm.utils.model_weight import stack_
+
+        num_experts = 4
+        dim0, dim1 = 8, 16
+        tensors = {}
+        for eid in range(num_experts):
+            tensors[f"layers.0.w2.{eid}"] = torch.randn(dim0, dim1)
+
+        config = MoeConfig(expert_num=num_experts)
+        ckpt_weights = [CkptWeightInfo("layers.{i}.w2.{expert_id}")]
+        moe_w = MoeAtomicWeight(
+            name=W.moe_w2,
+            weights=ckpt_weights,
+            config=config,
+            process_fun=stack_,
+        )
+
+        source = FakeTensorSource(tensors)
+        lc = MagicMock()
+        lc.get_selected_experts.return_value = list(range(num_experts))
+        lc.compute_dtype = torch.float16
+
+        cpu_result = moe_w._load_raw_tensor(source, 0, "cpu", lc)
+        gpu_result = moe_w._load_raw_tensor(source, 0, "cuda:0", lc)
+
+        torch.testing.assert_close(cpu_result[W.moe_w2], gpu_result[W.moe_w2].cpu())
+
+    def test_fallback_on_cpu_device(self):
+        """When device is CPU, should NOT use GPU preallocate path."""
+        from rtp_llm.utils.model_weight import stack_
+
+        num_experts = 4
+        dim0, dim1 = 8, 16
+        tensors = {}
+        for eid in range(num_experts):
+            tensors[f"layers.0.w2.{eid}"] = torch.randn(dim0, dim1)
+
+        config = MoeConfig(expert_num=num_experts)
+        ckpt_weights = [CkptWeightInfo("layers.{i}.w2.{expert_id}")]
+        moe_w = MoeAtomicWeight(
+            name=W.moe_w2,
+            weights=ckpt_weights,
+            config=config,
+            process_fun=stack_,
+        )
+
+        source = FakeTensorSource(tensors)
+        lc = MagicMock()
+        lc.get_selected_experts.return_value = list(range(num_experts))
+        lc.compute_dtype = torch.float16
+
+        result = moe_w._load_raw_tensor(source, 0, "cpu", lc)
+        # Should still produce correct result via fallback
+        self.assertEqual(result[W.moe_w2].shape[0], num_experts)
+        self.assertEqual(result[W.moe_w2].device.type, "cpu")
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
+    def test_stack_moe_w1_1d_scale_fallback(self):
+        """1D expert tensors (e.g. per-tensor quant scales) should fall back
+        to the normal path instead of crashing in GPU preallocate."""
+        from rtp_llm.utils.model_weight import stack_moe_w1
+
+        num_experts = 4
+        tensors = {}
+        for eid in range(num_experts):
+            tensors[f"layers.0.gate_s.{eid}"] = torch.tensor([1.0])
+            tensors[f"layers.0.up_s.{eid}"] = torch.tensor([2.0])
+
+        config = MoeConfig(expert_num=num_experts)
+        ckpt_weights = [
+            CkptWeightInfo("layers.{i}.gate_s.{expert_id}"),
+            CkptWeightInfo("layers.{i}.up_s.{expert_id}"),
+        ]
+        moe_w = MoeAtomicWeight(
+            name=W.moe_w1,
+            weights=ckpt_weights,
+            config=config,
+            process_fun=stack_moe_w1,
+        )
+
+        source = FakeTensorSource(tensors)
+        lc = MagicMock()
+        lc.get_selected_experts.return_value = list(range(num_experts))
+        lc.compute_dtype = torch.float16
+
+        # Should not crash — falls back to serial path for 1D tensors
+        result = moe_w._load_raw_tensor(source, 0, "cuda:0", lc)
+        self.assertIn(W.moe_w1, result)
+
+
 if __name__ == "__main__":
     unittest.main()

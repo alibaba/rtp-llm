@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import struct
-import threading
 from pathlib import PosixPath
 from typing import Any, Dict, List
 
@@ -149,26 +148,12 @@ class CkptFileInfo:
             self._st_handle.__exit__(None, None, None)
             self._st_handle = None
 
-    _tls = threading.local()
-
-    def _get_thread_local_handle(self):
-        """Get a thread-local safetensor handle (no contention between threads)."""
-        tls = CkptFileInfo._tls
-        if not hasattr(tls, "handles"):
-            tls.handles = {}
-        fname = self.file_name
-        if fname not in tls.handles:
-            tls.handles[fname] = safe_open(fname, framework="pt")
-        return tls.handles[fname]
-
-    def load_tensor_thread_safe(
-        self, name: str, datatype=torch.float16
-    ) -> torch.Tensor:
-        """Thread-safe version: each thread has its own cached file handle."""
-        f = self._get_thread_local_handle()
-        return f.get_tensor(name).to(datatype)
-
     def load_tensor(self, name: str, datatype: str = torch.float16) -> torch.Tensor:
+        """Load a single tensor by name.
+
+        Note: this method is NOT thread-safe — the cached safetensor handle
+        is shared across calls and has no internal locking.
+        """
         path: str = self.file_name
         if self.is_safetensor():
             f = self._get_safetensor_handle()

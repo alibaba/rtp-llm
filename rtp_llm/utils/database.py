@@ -85,7 +85,10 @@ class CkptDatabase(BaseDatabase):
             f"CkptDatabase all tensor names = {self.get_pretrain_tensor_names()}"
         )
 
-        # Build tensor_name -> CkptFileInfo index for O(1) lookup
+        # Build tensor_name -> CkptFileInfo index for O(1) lookup.
+        # If a tensor name appears in multiple files, the last file wins.
+        # In practice safetensors checkpoints guarantee each tensor is in
+        # exactly one shard, so duplicates should not occur.
         self._tensor_index: Dict[str, CkptFileInfo] = {}
         for ckpt_file in self.pretrain_file_list:
             for tname in ckpt_file.metadata.keys():
@@ -169,14 +172,6 @@ class CkptDatabase(BaseDatabase):
         ckpt_file = self._tensor_index.get(name)
         if ckpt_file is not None:
             return [ckpt_file.load_tensor(name, data_type)]
-        return []
-
-    def load_tensor_thread_safe(
-        self, name: str, data_type: Optional[torch.dtype] = torch.float16
-    ) -> List[torch.Tensor]:
-        ckpt_file = self._tensor_index.get(name)
-        if ckpt_file is not None:
-            return [ckpt_file.load_tensor_thread_safe(name, data_type)]
         return []
 
     def has_tensor(self, name: str) -> bool:
