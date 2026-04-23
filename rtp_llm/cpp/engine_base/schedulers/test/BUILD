@@ -65,3 +65,17 @@ cc_test(
     },
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "gather_batch_scheduler_test",
+    srcs = [
+        "GatherBatchSchedulerTest.cc",
+    ],
+    data = [],
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+)
