@@ -244,3 +244,33 @@
 2. 再跑 timeout / cancel / finish failure 的 RDMA 端到端场景
 3. 再跑 smoke
 4. 最后补性能与稳定性
+
+## 8. 最新更新：Mooncake TCP Smoke 已通过
+
+最后验证时间：2026-04-23 10:18 CST
+
+在当前 H20 机器上，使用下面这组配置重新执行 Mooncake TCP smoke：
+
+- `//rtp_llm/test/smoke:pd_seperation_prefill_decode_reuse_cache_mooncake_tcp`
+- `--config=cuda12_9`
+- `--config=sm9x`
+
+结果：`PASSED`
+
+直接证据：
+
+1. Bazel 最终输出：`//rtp_llm/test/smoke:pd_seperation_prefill_decode_reuse_cache_mooncake_tcp PASSED in 175.2s`
+2. `test.log` 明确打印了 Mooncake TCP 配置：
+   - `cache_store_mooncake_mode 1`
+   - `cache_store_mooncake_transport tcp`
+   - `cache_store_mooncake_rpc_port 23545` / `23546`
+3. `test.log` 明确打印了 prefill/decode 启动端口：
+   - prefill `10201`
+   - decode `10401`
+4. 本次通过说明 Mooncake TCP 模式下的 smoke 已经真实跑通，而不是只完成参数链路接入。
+
+结论修正：
+
+- 本报告第 4 节中之前基于 `sm8x` 的 PTX 失败记录，已经被这次 `sm9x` 重跑结果覆盖。
+- 当前环境下，Mooncake TCP mode 的单测、E2E 和 smoke 都已经跑通。
+- 当前仍未完成的只剩真实 RDMA one-sided WRITE 相关验证，而不是 Mooncake TCP smoke 本身。
