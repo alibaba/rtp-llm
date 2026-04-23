@@ -69,10 +69,41 @@ jobs:
 
       - name: Make scripts executable
         if: steps.gate_filter.outputs.skip != 'true'
-        run: chmod +x check-rebase-freshness.sh trigger-merge.sh get-merge-result.sh get-branch-info.sh
+        run: chmod +x check-rebase-freshness.sh trigger-merge.sh get-merge-result.sh get-branch-info.sh check-merge-done.sh
+
+      # Dedup re-approval: if a previous gate run already merged this commit
+      # internally, skip the rebase checks and merge trigger. Without this,
+      # a second approve on the same SHA (or dismiss+re-approve) would fire
+      # MERGE-TASK again on an already-merged commit.
+      - name: Pre-check internal merge status (dedup re-approval)
+        id: precheck
+        if: steps.gate_filter.outputs.skip != 'true'
+        run: |
+          echo "==============================================================="
+          echo "Pre-check: has internal merge already completed for this commit?"
+          echo "  PR:     #${{ github.event.pull_request.number }}"
+          echo "  Commit: ${{ github.event.pull_request.head.sha }}"
+          echo "==============================================================="
+          if ./check-merge-done.sh \
+              "${{ github.event.pull_request.head.sha }}" \
+              "${{ secrets.CI_SECRET }}" \
+              "${{ github.repository }}"; then
+            echo "==============================================================="
+            echo "[OK] Internal merge ALREADY DONE by an earlier gate run."
+            echo "     Skipping rebase checks and merge trigger."
+            echo "     Gate will report SUCCESS."
+            echo "==============================================================="
+            echo "already_merged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "==============================================================="
+            echo "[GO] Internal merge NOT YET DONE for this commit."
+            echo "     Proceeding with rebase checks and synchronous merge."
+            echo "==============================================================="
+            echo "already_merged=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Re-check rebase freshness vs main
-        if: steps.gate_filter.outputs.skip != 'true'
+        if: steps.gate_filter.outputs.skip != 'true' && steps.precheck.outputs.already_merged != 'true'
         run: |
           ./check-rebase-freshness.sh \
             "${{ github.event.pull_request.number }}" \
@@ -87,7 +118,7 @@ jobs:
       # If false-positives appear (REBASE merge could have handled the drift),
       # downgrade to a warning here and let trigger-merge be the source of truth.
       - name: Check internal rebase freshness vs main-internal
-        if: steps.gate_filter.outputs.skip != 'true'
+        if: steps.gate_filter.outputs.skip != 'true' && steps.precheck.outputs.already_merged != 'true'
         env:
           SECURITY: ${{ secrets.CI_SECRET }}
         run: |
@@ -129,7 +160,7 @@ jobs:
           echo "Internal branch is in sync with ${MAIN_BRANCH}"
 
       - name: Trigger internal merge (synchronous gate)
-        if: steps.gate_filter.outputs.skip != 'true'
+        if: steps.gate_filter.outputs.skip != 'true' && steps.precheck.outputs.already_merged != 'true'
         run: |
           PR_ID="${{ github.event.pull_request.number }}"
           COMMIT_ID="${{ github.event.pull_request.head.sha }}"
@@ -146,7 +177,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
 
       - name: Wait for internal merge result (blocks gate)
-        if: steps.gate_filter.outputs.skip != 'true'
+        if: steps.gate_filter.outputs.skip != 'true' && steps.precheck.outputs.already_merged != 'true'
         run: |
           ./get-merge-result.sh \
             "${{ github.event.pull_request.head.sha }}" \
