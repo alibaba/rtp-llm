@@ -119,25 +119,36 @@ public:
 
     bool hasMMDeepstackEmbed() const {
         for (auto& stream : context_streams_) {
-            if (stream->multimodalDeepstackEmbeds().size() > 0) {
+            if (stream->hasMultimodalDeepstackEmbeds()) {
                 return true;
             }
         }
         return false;
     }
 
-    bool needReturnAllProbs() const {
+    // NOTE: Aggregates by "max mode" across all streams in the batch
+    // (NONE < DEFAULT < ORIGINAL). When the batch contains any ORIGINAL
+    // stream, the sampler runs the ORIGINAL path for the entire batch and
+    // DEFAULT streams will receive un-renormalized raw probabilities. This
+    // is intentional: it avoids per-row branching inside the sampler kernel.
+    // Callers that cannot tolerate this implicit degradation must ensure
+    // streams with different modes are not scheduled into the same batch.
+    ReturnAllProbsMode needReturnAllProbs() const {
+        // get the max return all probs mode from all streams
+        ReturnAllProbsMode return_all_probs = ReturnAllProbsMode::NONE;
         for (auto& stream : context_streams_) {
-            if (stream->getReturnAllProbs()) {
-                return true;
+            auto cur_return_all_probs = stream->getReturnAllProbs();
+            if (cur_return_all_probs > return_all_probs) {
+                return_all_probs = cur_return_all_probs;
             }
         }
         for (auto& stream : decode_streams_) {
-            if (stream->getReturnAllProbs()) {
-                return true;
+            auto cur_return_all_probs = stream->getReturnAllProbs();
+            if (cur_return_all_probs > return_all_probs) {
+                return_all_probs = cur_return_all_probs;
             }
         }
-        return false;
+        return return_all_probs;
     }
 
     bool needReturnCumLogProbs() const {

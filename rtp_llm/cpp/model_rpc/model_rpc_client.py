@@ -6,7 +6,7 @@ import grpc
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RoleType
+from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
     ErrorDetailsPB,
@@ -131,7 +131,10 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_cum_log_probs = (
         input_py.generate_config.return_cum_log_probs
     )
-    generate_config_pb.return_all_probs = input_py.generate_config.return_all_probs
+    # dual-write: legacy bool (true if any probs requested) + new int32 mode (offset 1)
+    _rapm = input_py.generate_config.return_all_probs
+    generate_config_pb.return_all_probs = _rapm != ReturnAllProbsMode.NONE
+    generate_config_pb.return_all_probs_mode = _rapm + 1
     generate_config_pb.return_softmax_probs = (
         input_py.generate_config.return_softmax_probs
     )
