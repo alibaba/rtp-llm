@@ -6,7 +6,7 @@
 
 ## 1. 目的
 
-这份手册用于在带 GPU 和 RDMA 设备的机器上，直接复现并验证当前 `P2P Mooncake` 特性的完整测试路径，覆盖：
+这份手册用于在带 GPU 和 RDMA 设备的机器上，直接复现并验证当前 `P2P Mooncake` 特性的完整测试路径。以下命令统一以宿主机根目录 `/ssd/1/vin.gb` 为例，覆盖：
 
 1. 拉取 `develop/vin/p2p-connector-3` 分支
 2. 启动带 GPU、RDMA、模型目录和 Bazel cache 挂载的容器
@@ -40,14 +40,14 @@
 执行前请确认下面条件全部满足：
 
 1. 机器可访问 GitHub，且对 `alibaba/rtp-llm` 有拉取权限
-2. 机器上存在工作区根目录：`/data0/qiongshi.gb/RTP-LLM`
-3. 开源仓路径存在：`/data0/qiongshi.gb/RTP-LLM/github-opensource`
-4. 内部 smoke 源路径存在：`/data0/qiongshi.gb/RTP-LLM/internal_source`
+2. 机器上存在工作区根目录：`/ssd/1/vin.gb/RTP-LLM`
+3. 开源仓路径存在：`/ssd/1/vin.gb/RTP-LLM/github-opensource`
+4. 内部 smoke 源路径存在：`/ssd/1/vin.gb/RTP-LLM/internal_source`
 5. 模型目录已挂载，例如：`/mnt/nas1/hf/Qwen2.5-0.5B-Instruct/config.json`
 6. RDMA 设备可见：`/dev/infiniband`、`/sys/class/infiniband`
 7. Docker、NVIDIA runtime、`python3`、`git` 可用
-8. Bazel 依赖缓存目录存在：`/data0/qiongshi.gb/bazel_deps`
-9. 建议预留 Bazel cache 目录：`/data0/qiongshi.gb/.bazel_cache`
+8. Bazel 依赖缓存目录存在：`/ssd/1/vin.gb/bazel_deps`
+9. 建议预留 Bazel cache 目录：`/ssd/1/vin.gb/.bazel_cache`
 
 建议先在宿主机上执行：
 
@@ -66,7 +66,7 @@ ls -l /mnt/nas1/hf/Qwen2.5-0.5B-Instruct/config.json
 ### 4.1 拉取目标分支
 
 ```bash
-cd /data0/qiongshi.gb/RTP-LLM/github-opensource
+cd /ssd/1/vin.gb/RTP-LLM/github-opensource
 git fetch origin develop/vin/p2p-connector-3
 git checkout develop/vin/p2p-connector-3
 git pull --ff-only origin develop/vin/p2p-connector-3
@@ -75,7 +75,7 @@ git pull --ff-only origin develop/vin/p2p-connector-3
 ### 4.2 一键执行完整验证
 
 ```bash
-cd /data0/qiongshi.gb/RTP-LLM/github-opensource
+cd /ssd/1/vin.gb/RTP-LLM/github-opensource
 bash tools/run_p2p_mooncake_rdma_suite.sh all
 ```
 
@@ -93,7 +93,7 @@ bash tools/run_p2p_mooncake_rdma_suite.sh all
 
 ## 5. 一键脚本用法
 
-脚本路径：`/data0/qiongshi.gb/RTP-LLM/github-opensource/tools/run_p2p_mooncake_rdma_suite.sh`
+脚本路径：`/ssd/1/vin.gb/RTP-LLM/github-opensource/tools/run_p2p_mooncake_rdma_suite.sh`
 
 帮助命令：
 
@@ -116,35 +116,35 @@ bash tools/run_p2p_mooncake_rdma_suite.sh all
 第一次在新机器上跑：
 
 ```bash
-cd /data0/qiongshi.gb/RTP-LLM/github-opensource
+cd /ssd/1/vin.gb/RTP-LLM/github-opensource
 bash tools/run_p2p_mooncake_rdma_suite.sh all
 ```
 
 如果容器已经准备好，只想重跑测试：
 
 ```bash
-cd /data0/qiongshi.gb/RTP-LLM/github-opensource
+cd /ssd/1/vin.gb/RTP-LLM/github-opensource
 bash tools/run_p2p_mooncake_rdma_suite.sh test
 ```
 
 如果只想跑 TCP 参考 smoke：
 
 ```bash
-cd /data0/qiongshi.gb/RTP-LLM/github-opensource
+cd /ssd/1/vin.gb/RTP-LLM/github-opensource
 RUN_RDMA_SMOKE=0 bash tools/run_p2p_mooncake_rdma_suite.sh test
 ```
 
 如果只想跑 RDMA smoke：
 
 ```bash
-cd /data0/qiongshi.gb/RTP-LLM/github-opensource
+cd /ssd/1/vin.gb/RTP-LLM/github-opensource
 RUN_TCP_REFERENCE=0 bash tools/run_p2p_mooncake_rdma_suite.sh test
 ```
 
 如果只想单独执行 smoke：
 
 ```bash
-cd /data0/qiongshi.gb/RTP-LLM/github-opensource
+cd /ssd/1/vin.gb/RTP-LLM/github-opensource
 bash tools/run_p2p_mooncake_rdma_suite.sh smoke-tcp
 bash tools/run_p2p_mooncake_rdma_suite.sh smoke-rdma
 ```
@@ -153,12 +153,12 @@ bash tools/run_p2p_mooncake_rdma_suite.sh smoke-rdma
 
 ```bash
 BRANCH=develop/vin/p2p-connector-3
-WORKSPACE_ROOT=/data0/qiongshi.gb/RTP-LLM
-OPEN_SOURCE_REPO=/data0/qiongshi.gb/RTP-LLM/github-opensource
-INTERNAL_SOURCE_REPO=/data0/qiongshi.gb/RTP-LLM/internal_source
+WORKSPACE_ROOT=/ssd/1/vin.gb/RTP-LLM
+OPEN_SOURCE_REPO=/ssd/1/vin.gb/RTP-LLM/github-opensource
+INTERNAL_SOURCE_REPO=/ssd/1/vin.gb/RTP-LLM/internal_source
 MODEL_ROOT=/mnt/nas1
-BAZEL_DEPS_ROOT=/data0/qiongshi.gb/bazel_deps
-BAZEL_CACHE_DIR=/data0/qiongshi.gb/.bazel_cache
+BAZEL_DEPS_ROOT=/ssd/1/vin.gb/bazel_deps
+BAZEL_CACHE_DIR=/ssd/1/vin.gb/.bazel_cache
 CONTAINER_NAME=vin_rtp_rdma_test
 IMAGE=hub.docker.alibaba-inc.com/isearch/rtp_llm_dev_gpu_cuda12_9:2025_12_04_19_49_005d702
 GPU_CONFIG=sm9x
@@ -259,7 +259,7 @@ docker exec vin_rtp_rdma_test bash -lc 'rdma link show'
 ### 8.2 看 smoke BUILD 是否已生成 RDMA target
 
 ```bash
-sed -n '/mooncake_rdma/,+40p' /data0/qiongshi.gb/RTP-LLM/internal_source/rtp_llm/test/smoke/BUILD
+sed -n '/mooncake_rdma/,+40p' /ssd/1/vin.gb/RTP-LLM/internal_source/rtp_llm/test/smoke/BUILD
 ```
 
 ### 8.3 看 artifact
@@ -267,7 +267,7 @@ sed -n '/mooncake_rdma/,+40p' /data0/qiongshi.gb/RTP-LLM/internal_source/rtp_llm
 ```bash
 python3 - <<'PY'
 import json
-path = '/data0/qiongshi.gb/RTP-LLM/internal_source/rtp_llm/test/smoke/data/model/qwen25/q_r_l20_remote_cache_pd_sep.query_1.json'
+path = '/ssd/1/vin.gb/RTP-LLM/internal_source/rtp_llm/test/smoke/data/model/qwen25/q_r_l20_remote_cache_pd_sep.query_1.json'
 with open(path) as f:
     data = json.load(f)
 print(json.dumps(data.get('aux_info', {}), ensure_ascii=False, indent=2))
@@ -277,7 +277,7 @@ PY
 ### 8.4 看 Bazel 日志
 
 ```bash
-find /data0/qiongshi.gb/RTP-LLM/github-opensource/bazel-testlogs -name test.log | tail -n 20
+find /ssd/1/vin.gb/RTP-LLM/github-opensource/bazel-testlogs -name test.log | tail -n 20
 ```
 
 如果 smoke 失败，优先检查：
@@ -285,7 +285,7 @@ find /data0/qiongshi.gb/RTP-LLM/github-opensource/bazel-testlogs -name test.log 
 1. 模型目录是否真实挂载到容器里
 2. RDMA 设备是否真实透传到容器里
 3. `internal_source/rtp_llm/test/smoke/BUILD` 是否成功生成 RDMA target
-4. Bazel external repo 是否都能从 `/data0/qiongshi.gb/bazel_deps` 命中
+4. Bazel external repo 是否都能从 `/ssd/1/vin.gb/bazel_deps` 命中
 
 ## 9. 手工兜底命令
 
@@ -303,13 +303,13 @@ docker run -d --name vin_rtp_rdma_test \
   --gpus all \
   --ulimit memlock=-1 \
   --ulimit nofile=655350:655350 \
-  -v /data0/qiongshi.gb:/data0/qiongshi.gb \
+  -v /ssd/1/vin.gb:/ssd/1/vin.gb \
   -v /mnt/nas1:/mnt/nas1 \
   -v /dev/infiniband:/dev/infiniband \
   -v /sys/class/infiniband:/sys/class/infiniband \
   -v /sys/class/net:/sys/class/net \
-  -v /data0/qiongshi.gb/.bazel_cache:/root/.cache/bazel \
-  -w /data0/qiongshi.gb/RTP-LLM/github-opensource \
+  -v /ssd/1/vin.gb/.bazel_cache:/root/.cache/bazel \
+  -w /ssd/1/vin.gb/RTP-LLM/github-opensource \
   hub.docker.alibaba-inc.com/isearch/rtp_llm_dev_gpu_cuda12_9:2025_12_04_19_49_005d702 \
   bash -lc 'sleep infinity'
 ```
@@ -317,26 +317,26 @@ docker run -d --name vin_rtp_rdma_test \
 ### 9.2 手工跑测试
 
 ```bash
-docker exec -w /data0/qiongshi.gb/RTP-LLM/github-opensource vin_rtp_rdma_test \
+docker exec -w /ssd/1/vin.gb/RTP-LLM/github-opensource vin_rtp_rdma_test \
   bazelisk test //rtp_llm/cpp/cache/connector/p2p/transfer/mooncake:mooncake_backend_stub_test \
   --cache_test_results=no \
   --test_output=errors \
   --config=cuda12_9 \
   --config=sm9x \
   --define=enable_mooncake_te=true \
-  --override_repository=havenask=/data0/qiongshi.gb/bazel_deps/havenask_3c973500afbd40933eb0a80cfdfb6592274377fb \
-  --override_repository=com_google_absl=/data0/qiongshi.gb/bazel_deps/com_google_absl_6f9d96a1f41439ac172ee2ef7ccd8edf0e5d068c \
-  --override_repository=cutlass_fa=/data0/qiongshi.gb/bazel_deps/cutlass_fa_bbe579a9e3beb6ea6626d9227ec32d0dae119a49 \
-  --override_repository=cutlass=/data0/qiongshi.gb/bazel_deps/cutlass_80243e0b8c644f281e2beb0c20fe78cf7b267061 \
-  --override_repository=cutlass_h_moe=/data0/qiongshi.gb/bazel_deps/cutlass_h_moe_19b4c5e065e7e5bbc8082dfc7dbd792bdac850fc \
-  --override_repository=cutlass4.0=/data0/qiongshi.gb/bazel_deps/cutlass4_0_dc4817921edda44a549197ff3a9dcf5df0636e7b \
-  --override_repository=cutlass3.6=/data0/qiongshi.gb/bazel_deps/cutlass3_6_cc3c29a81a140f7b97045718fb88eb0664c37bd7 \
-  --override_repository=rules_cc=/data0/qiongshi.gb/bazel_deps/rules_cc_from_devcache \
-  --override_repository=rules_python=/data0/qiongshi.gb/bazel_deps/rules_python_084b877c98b580839ceab2b071b02fc6768f3de6_patched \
-  --override_repository=flashinfer_cpp=/data0/qiongshi.gb/bazel_deps/flashinfer_cpp_1c88d650eeec97be3a4dcebe4a9912d7785bc250_patched \
-  --override_repository=flash_attention=/data0/qiongshi.gb/bazel_deps/flash_attention_6c9e60de566800538fedad2ad5e6b7b55ca7f0c5_patched \
-  --override_repository=rapidjson=/data0/qiongshi.gb/bazel_deps/rapidjson_f54b0e47a08782a6131cc3d60f94d038fa6e0a51_patched \
-  --override_repository=grpc=/data0/qiongshi.gb/bazel_deps/grpc_109c570727c3089fef655edcdd0dd02cc5958010_patched
+  --override_repository=havenask=/ssd/1/vin.gb/bazel_deps/havenask_3c973500afbd40933eb0a80cfdfb6592274377fb \
+  --override_repository=com_google_absl=/ssd/1/vin.gb/bazel_deps/com_google_absl_6f9d96a1f41439ac172ee2ef7ccd8edf0e5d068c \
+  --override_repository=cutlass_fa=/ssd/1/vin.gb/bazel_deps/cutlass_fa_bbe579a9e3beb6ea6626d9227ec32d0dae119a49 \
+  --override_repository=cutlass=/ssd/1/vin.gb/bazel_deps/cutlass_80243e0b8c644f281e2beb0c20fe78cf7b267061 \
+  --override_repository=cutlass_h_moe=/ssd/1/vin.gb/bazel_deps/cutlass_h_moe_19b4c5e065e7e5bbc8082dfc7dbd792bdac850fc \
+  --override_repository=cutlass4.0=/ssd/1/vin.gb/bazel_deps/cutlass4_0_dc4817921edda44a549197ff3a9dcf5df0636e7b \
+  --override_repository=cutlass3.6=/ssd/1/vin.gb/bazel_deps/cutlass3_6_cc3c29a81a140f7b97045718fb88eb0664c37bd7 \
+  --override_repository=rules_cc=/ssd/1/vin.gb/bazel_deps/rules_cc_from_devcache \
+  --override_repository=rules_python=/ssd/1/vin.gb/bazel_deps/rules_python_084b877c98b580839ceab2b071b02fc6768f3de6_patched \
+  --override_repository=flashinfer_cpp=/ssd/1/vin.gb/bazel_deps/flashinfer_cpp_1c88d650eeec97be3a4dcebe4a9912d7785bc250_patched \
+  --override_repository=flash_attention=/ssd/1/vin.gb/bazel_deps/flash_attention_6c9e60de566800538fedad2ad5e6b7b55ca7f0c5_patched \
+  --override_repository=rapidjson=/ssd/1/vin.gb/bazel_deps/rapidjson_f54b0e47a08782a6131cc3d60f94d038fa6e0a51_patched \
+  --override_repository=grpc=/ssd/1/vin.gb/bazel_deps/grpc_109c570727c3089fef655edcdd0dd02cc5958010_patched
 ```
 
 ## 10. 清理
@@ -350,7 +350,7 @@ docker rm -f vin_rtp_rdma_test
 如果你把 `RESTORE_INTERNAL_SOURCE=0` 设成了关闭，测试结束后记得手工恢复：
 
 ```bash
-cd /data0/qiongshi.gb/RTP-LLM/internal_source
+cd /ssd/1/vin.gb/RTP-LLM/internal_source
 git restore --source=HEAD -- rtp_llm/test/smoke/BUILD
 ```
 

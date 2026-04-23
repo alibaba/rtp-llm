@@ -5,11 +5,12 @@ ACTION="${1:-all}"
 
 BRANCH="${BRANCH:-develop/vin/p2p-connector-3}"
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-/data0/qiongshi.gb/RTP-LLM}"
+HOST_WORK_ROOT="${HOST_WORK_ROOT:-$(dirname "$WORKSPACE_ROOT")}" 
 OPEN_SOURCE_REPO="${OPEN_SOURCE_REPO:-${WORKSPACE_ROOT}/github-opensource}"
 INTERNAL_SOURCE_REPO="${INTERNAL_SOURCE_REPO:-${WORKSPACE_ROOT}/internal_source}"
 MODEL_ROOT="${MODEL_ROOT:-/mnt/nas1}"
-BAZEL_DEPS_ROOT="${BAZEL_DEPS_ROOT:-/data0/qiongshi.gb/bazel_deps}"
-BAZEL_CACHE_DIR="${BAZEL_CACHE_DIR:-/data0/qiongshi.gb/.bazel_cache}"
+BAZEL_DEPS_ROOT="${BAZEL_DEPS_ROOT:-${HOST_WORK_ROOT}/bazel_deps}"
+BAZEL_CACHE_DIR="${BAZEL_CACHE_DIR:-${HOST_WORK_ROOT}/.bazel_cache}"
 CONTAINER_NAME="${CONTAINER_NAME:-vin_rtp_rdma_test}"
 IMAGE="${IMAGE:-hub.docker.alibaba-inc.com/isearch/rtp_llm_dev_gpu_cuda12_9:2025_12_04_19_49_005d702}"
 GPU_CONFIG="${GPU_CONFIG:-sm9x}"
@@ -116,7 +117,7 @@ start_container() {
     --gpus all \
     --ulimit memlock=-1 \
     --ulimit nofile=655350:655350 \
-    -v /data0/qiongshi.gb:/data0/qiongshi.gb \
+    -v "$HOST_WORK_ROOT":"$HOST_WORK_ROOT" \
     -v "$MODEL_ROOT":"$MODEL_ROOT" \
     -v /dev/infiniband:/dev/infiniband \
     -v /sys/class/infiniband:/sys/class/infiniband \
@@ -296,6 +297,7 @@ usage() {
 环境变量:
   BRANCH                     默认: develop/vin/p2p-connector-3
   WORKSPACE_ROOT             默认: /data0/qiongshi.gb/RTP-LLM
+  HOST_WORK_ROOT             默认: WORKSPACE_ROOT 的父目录
   CONTAINER_NAME             默认: vin_rtp_rdma_test
   IMAGE                      默认: $IMAGE
   GPU_CONFIG                 默认: sm9x
