@@ -7,6 +7,7 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, reduce_scatter
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -188,9 +189,13 @@ class GenericMoeDecoderLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        use_cp_moe_allgather_rs: bool = False,
     ):
         super().__init__()
         self.layer_idx = layer_idx
+
+        is_moe_layer = layer_idx in config.moe_layer_index
+        self.use_cp_moe_allgather_rs = use_cp_moe_allgather_rs and is_moe_layer
 
         # Get quant_config from model_config
         quant_config = config.quant_config
@@ -219,7 +224,7 @@ class GenericMoeDecoderLayer(nn.Module):
             )
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
-        if layer_idx not in config.moe_layer_index:
+        if not is_moe_layer:
             self.mlp = DenseMLP(
                 config.activation_type, parallelism_config, weights, quant_config
             )
@@ -231,6 +236,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 moe_config,
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
+                skip_tp_allreduce=self.use_cp_moe_allgather_rs,
             )
 
         # 使用 RMSResNorm 来 fuse residual add 和 layernorm
@@ -260,10 +266,20 @@ class GenericMoeDecoderLayer(nn.Module):
         # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
         hidden_states = self.post_attention_layernorm(hidden_states, residual)
 
-        # MLP (Dense or MoE，shared expert 逻辑已经在 GenericMoeLayer 内部处理)
+        cp_active = self.use_cp_moe_allgather_rs and getattr(fmha_impl, "is_cp_prefill", False)
+
+        if cp_active:
+            # CP MoE: allgather scattered hidden_states and residual to full,
+            # run MoE on full tokens, then reduce_scatter back to scattered.
+            hidden_states = all_gather(hidden_states, group=Group.TP)
+            residual = all_gather(residual, group=Group.TP)
+
         hidden_states = self.mlp(hidden_states)
 
-        # 返回 mlp_output 和 residual，让下一层的 input_layernorm 来 fuse 最后的 add
+        if cp_active:
+            hidden_states = reduce_scatter(hidden_states, group=Group.TP)
+            residual = reduce_scatter(residual, group=Group.TP)
+
         return DecodeLayerOutput(hidden_states, residual)
 
 
@@ -300,6 +316,15 @@ class GenericMoeModel(GptModelBase):
             if py_hw_kernel_config is not None
             else False
         )
+        use_cp_moe_allgather_rs = (
+            parallelism_config.prefill_cp_config.is_enabled()
+            and parallelism_config.ep_size <= 1
+        )
+        if use_cp_moe_allgather_rs:
+            logging.info(
+                "CP MoE allgather+reduce_scatter enabled: "
+                "CP is active and MoE uses TP router (ep_size <= 1)"
+            )
         self.layers = nn.ModuleList(
             [
                 GenericMoeDecoderLayer(
@@ -312,6 +337,7 @@ class GenericMoeModel(GptModelBase):
                     max_generate_batch_size,
                     enable_cuda_graph=enable_cuda_graph,
                     hw_kernel_config=py_hw_kernel_config,
+                    use_cp_moe_allgather_rs=use_cp_moe_allgather_rs,
                 )
                 for idx in range(self.layer_num)
             ]

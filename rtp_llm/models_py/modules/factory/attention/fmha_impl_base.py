@@ -82,6 +82,11 @@ class MlaImplBase(object):
     def support_prefill_cp(cls) -> bool:
         return False
 
+    @property
+    def is_cp_prefill(self) -> bool:
+        """Whether this impl is running a CP-enabled prefill forward pass."""
+        return False
+
     def forward(
         self,
         q: torch.Tensor,
@@ -168,6 +173,13 @@ class FMHAImplBase(ABC):
 
     @classmethod
     def support_prefill_cp(cls) -> bool:
+        return False
+
+    @property
+    def is_cp_prefill(self) -> bool:
+        """Whether this fmha_impl is running a CP-enabled prefill forward pass.
+        CP implementations should override to return True.
+        """
         return False
 
     # def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):

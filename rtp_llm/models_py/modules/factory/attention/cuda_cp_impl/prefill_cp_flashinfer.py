@@ -141,6 +141,11 @@ class CPFlashInferImpl(FMHAImplBase):
 
         # Store input info
         self.attn_inputs = attn_inputs
+        self._is_cp_prefill = True
+
+    @property
+    def is_cp_prefill(self) -> bool:
+        return self._is_cp_prefill
 
         # Create params
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)

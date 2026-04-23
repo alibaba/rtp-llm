@@ -364,6 +364,11 @@ class SparseMlaCpImpl(SparseMlaImpl):
         )
         self.fmha_impl.kv_cache_write_op = self.kv_cache_write_op
         self.fmha_impl.write_cache_store_impl = self.write_cache_store_impl
+        self._is_cp_prefill = True
+
+    @property
+    def is_cp_prefill(self) -> bool:
+        return self._is_cp_prefill
 
     @staticmethod
     def fmha_type() -> FMHAType:
