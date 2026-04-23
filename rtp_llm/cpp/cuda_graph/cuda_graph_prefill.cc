@@ -40,20 +40,21 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.prefix_lengths.fill_(prefix_len);
             auto& input_lengths = inputs.attention_inputs.input_lengths;
             for (int b = 0; b < active_bs; b++) {
-                int tokens           = (b < active_bs - 1) ? num_tokens_per_bs_ : (seq_len - b * num_tokens_per_bs_);
+                int tokens       = (b < active_bs - 1) ? num_tokens_per_bs_ : (seq_len - b * num_tokens_per_bs_);
                 input_lengths[b] = tokens;
             }
 
             // Build cu_seqlens and cu_kv_seqlens as cumulative sums
-            auto cu_seqlens_host = inputs.attention_inputs.cu_seqlens_host;
+            auto cu_seqlens_host    = inputs.attention_inputs.cu_seqlens_host;
             auto cu_kv_seqlens_host = inputs.attention_inputs.cu_kv_seqlens.cpu();
-            auto prefix_lengths = inputs.attention_inputs.prefix_lengths;
+            auto prefix_lengths     = inputs.attention_inputs.prefix_lengths;
 
-            cu_seqlens_host[0]        = 0;
-            cu_kv_seqlens_host[0]     = 0;
+            cu_seqlens_host[0]    = 0;
+            cu_kv_seqlens_host[0] = 0;
             for (int b = 0; b < max_bs_; b++) {
-                cu_seqlens_host[b + 1]    = cu_seqlens_host[b].item<int>() + input_lengths[b].item<int>();
-                cu_kv_seqlens_host[b + 1] = cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
+                cu_seqlens_host[b + 1] = cu_seqlens_host[b].item<int>() + input_lengths[b].item<int>();
+                cu_kv_seqlens_host[b + 1] =
+                    cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
             }
 
             inputs.attention_inputs.cu_seqlens.copy_(cu_seqlens_host);
