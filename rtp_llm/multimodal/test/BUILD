@@ -38,12 +38,22 @@ py_test(
     name = "multimodal_util_test",
     srcs = [
         "multimodal_util_test.py",
-],
+    ],
     deps = [
-        "//rtp_llm:testlib"
+        "//rtp_llm:testlib",
     ],
     data = [
         ":testdata",
     ],
-    exec_properties = {'gpu':'A10'}
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "mm_profiler_test",
+    srcs = [
+        "mm_profiler_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
 )
