@@ -124,6 +124,14 @@ public:
     std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
 
+    std::shared_ptr<CPSlotMapper> cpSlotMapper() const {
+        return cp_slot_mapper_;
+    }
+
+    BlockPoolPtr getBlockPool() const {
+        return allocator_ ? allocator_->getBlockPool() : nullptr;
+    }
+
 private:
     void initConnectorCoordinator();
     void allocateAndSync();
@@ -140,6 +148,8 @@ private:
     const SpeculativeExecutionConfig   sp_config_;
     const PDSepConfig                  pd_sep_config_;
     const CacheStoreConfig             cache_store_config_;
+
+    std::shared_ptr<CPSlotMapper> cp_slot_mapper_;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;

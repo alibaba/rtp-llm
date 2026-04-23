@@ -40,6 +40,18 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
         allocateAndSync();
     }
 
+    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
+    if (cp_cfg.kv_cache_sharded && parallelism_config_.tp_size > 1) {
+        cp_slot_mapper_ = std::make_shared<CPSlotMapper>(
+            parallelism_config_.tp_rank, parallelism_config_.tp_size, config_.seq_size_per_block);
+        RTP_LLM_LOG_INFO("CP sharded KV cache enabled: cp_rank=%d, cp_size=%d, block_size=%zu, "
+                         "virtual_block_size=%d",
+                         (int)parallelism_config_.tp_rank,
+                         (int)parallelism_config_.tp_size,
+                         config_.seq_size_per_block,
+                         cp_slot_mapper_->virtualBlockSize());
+    }
+
     RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_num=%d, block_size=%dB, seq_size_per_block=%zu",
                      config_.layer_num,
                      config_.block_num,
@@ -95,14 +107,46 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
-    const int seq_size_per_block = config_.seq_size_per_block;
-    if (!malloc_info.batch_kv_cache_resource->curBlocksNum()) {
-        initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
-    } else {
-        updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
+    // Auto-inject cp_slot_mapper when CP sharding is active and caller didn't
+    // provide one.  Fast path: when cp_slot_mapper_ is nullptr (non-CP mode),
+    // no copy is made and we use the original reference directly.
+    const MallocInfo* effective = &malloc_info;
+    MallocInfo        patched;
+    if (cp_slot_mapper_ && !malloc_info.cp_slot_mapper) {
+        patched                = malloc_info;
+        patched.cp_slot_mapper = cp_slot_mapper_;
+        effective              = &patched;
     }
 
-    return allocator_->malloc(malloc_info);
+    // Cache key computation: rolling hash over complete_token_ids at block_size
+    // granularity.  The hash is identical for CP and non-CP — we always have the
+    // full sequence's token ids regardless of how computation is distributed.
+    const int hash_block_size = static_cast<int>(config_.seq_size_per_block);
+    if (!effective->batch_kv_cache_resource->curBlocksNum()) {
+        initCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, hash_block_size);
+    } else {
+        updateCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, hash_block_size);
+    }
+
+    auto result = allocator_->malloc(*effective);
+
+    // Verify cacheKeys / blocks relationship under CP sharding:
+    // cacheKeys = ALL per-block keys (total_blocks), blocks = local blocks = ceil(total_blocks / cp_size).
+    if (effective->cp_slot_mapper && effective->cp_slot_mapper->isSharded()) {
+        const auto& res        = effective->batch_kv_cache_resource->cacheResource(0);
+        size_t      num_keys   = res.cacheKeys().size();
+        size_t      num_blocks = res.blocks().size();
+        int         cp_size    = effective->cp_slot_mapper->cpSize();
+        size_t      expected   = (num_keys + cp_size - 1) / cp_size;
+        RTP_LLM_CHECK_WITH_INFO(num_blocks == expected,
+                                "CP invariant violated: blocks=%zu != ceil(cacheKeys=%zu / cp_size=%d) = %zu",
+                                num_blocks,
+                                num_keys,
+                                cp_size,
+                                expected);
+    }
+
+    return result;
 }
 
 void KVCacheManager::free(const FreeInfo& free_info) {
@@ -114,6 +158,13 @@ void KVCacheManager::free(const FreeInfo& free_info) {
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     RTP_LLM_PROFILE_FUNCTION();
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
+
+    if (cp_slot_mapper_ && !insert_info.cp_slot_mapper) {
+        InsertInfo patched     = insert_info;
+        patched.cp_slot_mapper = cp_slot_mapper_;
+        allocator_->insertIntoCache(patched);
+        return;
+    }
     allocator_->insertIntoCache(insert_info);
 }
 

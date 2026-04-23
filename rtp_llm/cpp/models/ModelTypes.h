@@ -66,6 +66,7 @@ enum GptModelInputIndex : size_t {
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
+    maxCacheKeysPerBatch,  // cache_keys dimension (may differ from maxBlocksPerBatch in CP mode)
     gptModelInputLength,
 };
 

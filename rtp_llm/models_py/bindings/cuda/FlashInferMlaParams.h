@@ -45,7 +45,9 @@ private:
                             int&          input_token_num,
                             int&          page_num,
                             int&          reuse_page_num,
-                            int&          batch_reuse_info_size);
+                            int&          batch_reuse_info_size,
+                            int           cp_size          = 1,
+                            bool          kv_cache_sharded = false);
 
     // Ensure tensors are allocated with sufficient size.
     // forbid_realloc: when true (replay path only), throw if realloc would be needed.
@@ -66,7 +68,10 @@ public:
                     torch::Tensor t_input_lengths,
                     torch::Tensor t_kv_cache_block_id_host,
                     int           seq_size_per_block,
-                    bool          forbid_realloc = false);
+                    bool          forbid_realloc   = false,
+                    int           cp_rank          = 0,
+                    int           cp_size          = 1,
+                    bool          kv_cache_sharded = false);
 
     // Tensor views into buf_h and buf_d
     torch::Tensor batch_indice_h;

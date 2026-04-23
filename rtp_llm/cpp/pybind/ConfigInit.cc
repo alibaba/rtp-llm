@@ -50,6 +50,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("UNKNOWN", CPRotateMethod::UNKNOWN)
         .export_values();
 
+    py::enum_<CPProcessorType>(m, "CPProcessorType")
+        .value("ZIG_ZAG", CPProcessorType::ZIG_ZAG)
+        .value("ROUND_ROBIN", CPProcessorType::ROUND_ROBIN)
+        .export_values();
+
     py::enum_<FMHAType>(m, "FMHAType")
         .value("FLASH_INFER", FMHAType::FLASH_INFER)
         .value("NONE", FMHAType::NONE)
@@ -1596,21 +1601,27 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<PrefillCPConfig>(m, "PrefillCPConfig")
         .def(py::init<>())
         .def_readwrite("method", &PrefillCPConfig::method)
+        .def_readwrite("processor_type", &PrefillCPConfig::processor_type)
         .def_readwrite("comm_buffer_size", &PrefillCPConfig::comm_buffer_size)
+        .def_readwrite("kv_cache_sharded", &PrefillCPConfig::kv_cache_sharded)
         .def("to_string", &PrefillCPConfig::to_string)
         .def("is_enabled", &PrefillCPConfig::is_enabled)
-        .def("is_prefill_enabled", &PrefillCPConfig::is_prefill_enabled)
-        .def(py::pickle([](const PrefillCPConfig& self) { return py::make_tuple(self.method, self.comm_buffer_size); },
-                        [](py::tuple t) {
-                            if (t.size() != 2)
-                                throw std::runtime_error("Invalid state!");
-                            PrefillCPConfig c;
-                            try {
-                                c.method           = t[0].cast<CPRotateMethod>();
-                                c.comm_buffer_size = t[1].cast<size_t>();
-                            } catch (const std::exception& e) {
-                                throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());
-                            }
-                            return c;
-                        }));
+        .def(py::pickle(
+            [](const PrefillCPConfig& self) {
+                return py::make_tuple(self.method, self.comm_buffer_size, self.kv_cache_sharded, self.processor_type);
+            },
+            [](py::tuple t) {
+                if (t.size() != 4 && t.size() != 5)
+                    throw std::runtime_error("Invalid state!");
+                PrefillCPConfig c;
+                try {
+                    c.method           = t[0].cast<CPRotateMethod>();
+                    c.comm_buffer_size = t[1].cast<size_t>();
+                    c.kv_cache_sharded = t[2].cast<bool>();
+                    c.processor_type   = t[3].cast<CPProcessorType>();
+                } catch (const std::exception& e) {
+                    throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());
+                }
+                return c;
+            }));
 }

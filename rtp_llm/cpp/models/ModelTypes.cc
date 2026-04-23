@@ -59,6 +59,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints_ptr[GptModelInputIndex::maxCacheKeysPerBatch] =
+        inputs.cache_keys.defined() ? inputs.cache_keys.size(1) : 0;
     execBroadcast({{shape_hints_t}, 0});
     execSyncCommunication(false);
     cudaSyncAndCheck();
@@ -136,7 +138,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
                          {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks});
             if (inputs.pd_separation) {
-                inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64, {context_batch_size, max_blocks});
+                auto max_cache_keys = (size_t)shape_hints_ptr[GptModelInputIndex::maxCacheKeysPerBatch];
+                if (max_cache_keys == 0) {
+                    max_cache_keys = max_blocks;
+                }
+                inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64, {context_batch_size, max_cache_keys});
             }
         }
         if (layer_to_group_len) {

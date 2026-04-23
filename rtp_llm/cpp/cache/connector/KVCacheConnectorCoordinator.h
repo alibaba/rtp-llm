@@ -72,6 +72,7 @@ private:
     void                                    processReadContexts();
     void                                    processWriteContexts();
     void asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context);
+    int  cpSize() const;
 
     bool isPdInvertMode() const;
 

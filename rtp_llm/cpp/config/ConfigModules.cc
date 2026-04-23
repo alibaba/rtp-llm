@@ -43,7 +43,7 @@ std::string PrefillCPConfig::to_string() const {
             oss << "UNKNOWN";
             break;
     }
-    oss << "\n comm_buffer_size: " << comm_buffer_size << "\n";
+    oss << "\n comm_buffer_size: " << comm_buffer_size << "\n kv_cache_sharded: " << kv_cache_sharded << "\n";
     return oss.str();
 }
 

@@ -3,6 +3,8 @@
 namespace torch_ext {
 
 void registerPyOpDefs(pybind11::module& m) {
+    namespace py = pybind11;
+
     pybind11::enum_<rtp_llm::CacheGroupType>(m, "CacheGroupType")
         .value("LINEAR", rtp_llm::CacheGroupType::LINEAR)
         .value("FULL", rtp_llm::CacheGroupType::FULL)
@@ -14,6 +16,52 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id");
+
+    py::class_<rtp_llm::CPSlotMapper, std::shared_ptr<rtp_llm::CPSlotMapper>>(m, "CPSlotMapper")
+        .def(py::init<int, int, int>(), py::arg("cp_rank"), py::arg("cp_size"), py::arg("block_size"))
+        .def_property_readonly("is_sharded", &rtp_llm::CPSlotMapper::isSharded)
+        .def_property_readonly("virtual_block_size", &rtp_llm::CPSlotMapper::virtualBlockSize)
+        .def_property_readonly("cp_rank", &rtp_llm::CPSlotMapper::cpRank)
+        .def_property_readonly("cp_size", &rtp_llm::CPSlotMapper::cpSize)
+        .def_property_readonly("block_size", &rtp_llm::CPSlotMapper::blockSize)
+        .def("local_block_count", &rtp_llm::CPSlotMapper::localBlockCount, py::arg("seq_len"))
+        .def(
+            "compute_slot_mapping",
+            [](const rtp_llm::CPSlotMapper& self,
+               torch::Tensor                positions,
+               torch::Tensor                block_table,
+               torch::Tensor                batch_indices) -> torch::Tensor {
+                auto device = positions.device();
+                auto slots =
+                    torch::full({positions.size(0)}, -1, torch::TensorOptions().dtype(torch::kLong).device(device));
+
+                if (!self.isSharded()) {
+                    auto block_idx    = torch::floor_divide(positions, self.blockSize());
+                    auto block_off    = positions % self.blockSize();
+                    auto block_number = block_table.index({batch_indices.to(torch::kLong), block_idx.to(torch::kLong)});
+                    return block_number.to(torch::kLong) * self.blockSize() + block_off.to(torch::kLong);
+                }
+
+                // Page-level RR: block ownership by global block index
+                auto global_block_idx = torch::floor_divide(positions, self.blockSize());
+                auto mask             = global_block_idx % self.cpSize() == self.cpRank();
+                if (!mask.any().item<bool>()) {
+                    return slots;
+                }
+
+                auto owned_pos   = positions.index({mask});
+                auto owned_batch = batch_indices.index({mask});
+                // Virtual block index = global_block_idx / cp_size
+                auto owned_global_block = torch::floor_divide(owned_pos, self.blockSize());
+                auto vblock_idx         = torch::floor_divide(owned_global_block, self.cpSize());
+                auto local_off          = owned_pos % self.blockSize();
+                auto block_number = block_table.index({owned_batch.to(torch::kLong), vblock_idx.to(torch::kLong)});
+                slots.index_put_({mask}, block_number.to(torch::kLong) * self.blockSize() + local_off.to(torch::kLong));
+                return slots;
+            },
+            py::arg("positions"),
+            py::arg("block_table"),
+            py::arg("batch_indices"));
 
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())

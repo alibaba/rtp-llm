@@ -34,25 +34,27 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 captured_cache_store,
                 captured_kv_cache,
                 event = std::move(event)]() mutable {
-        CacheStoreInputs inputs{captured_input_lengths,
-                                captured_prefix_lengths,
-                                captured_kv_cache_block_id_host,
-                                captured_cache_store.kv_cache_layer_to_group,
-                                captured_cache_store.kv_cache_group_types,
-                                captured_cache_store.context_batch_size,
-                                captured_cache_store.decoder_batch_size,
-                                captured_cache_store.request_id,
-                                captured_cache_store.request_pd_separation,
-                                captured_cache_store.cache_keys,
-                                captured_cache_store.tokens_per_block,
-                                captured_cache_store.kv_block_stride_bytes,
-                                captured_cache_store.kv_scale_stride_bytes,
-                                captured_cache_store.pd_separation,
-                                captured_cache_store.model_id,
-                                captured_cache_store.decode_entrance,
-                                captured_cache_store.warmup,
-                                captured_kv_cache.layer_id,
-                                std::move(event)};
+        CacheStoreInputs inputs;
+        inputs.input_lengths_host           = captured_input_lengths;
+        inputs.prefix_lengths_host          = captured_prefix_lengths;
+        inputs.host_kv_cache_offset         = captured_kv_cache_block_id_host;
+        inputs.kv_cache_layer_to_group_host = captured_cache_store.kv_cache_layer_to_group;
+        inputs.kv_cache_group_types_host    = captured_cache_store.kv_cache_group_types;
+        inputs.context_batch_size           = captured_cache_store.context_batch_size;
+        inputs.decoder_batch_size           = captured_cache_store.decoder_batch_size;
+        inputs.request_id                   = captured_cache_store.request_id;
+        inputs.request_pd_separation        = captured_cache_store.request_pd_separation;
+        inputs.cache_keys                   = captured_cache_store.cache_keys;
+        inputs.tokens_per_block             = captured_cache_store.tokens_per_block;
+        inputs.kv_block_stride_bytes        = captured_cache_store.kv_block_stride_bytes;
+        inputs.kv_scale_stride_bytes        = captured_cache_store.kv_scale_stride_bytes;
+        inputs.pd_separation                = captured_cache_store.pd_separation;
+        inputs.model_id                     = captured_cache_store.model_id;
+        inputs.decode_entrance              = captured_cache_store.decode_entrance;
+        inputs.warmup                       = captured_cache_store.warmup;
+        inputs.layer_id                     = captured_kv_cache.layer_id;
+        inputs.pre_created_event            = std::move(event);
+        inputs.cp_slot_mapper               = captured_cache_store.cp_slot_mapper;
 
         KvCacheInfo kv_cache_info;
         kv_cache_info.kv_cache_buffer = captured_kv_cache.kv_cache_base;

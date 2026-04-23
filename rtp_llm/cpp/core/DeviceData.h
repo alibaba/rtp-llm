@@ -65,7 +65,9 @@ struct ExecInitParams {
     bool   enable_sp = false;
     size_t m_split   = 0;
 
-    bool enable_prefill_cp = false;
+    bool            enable_prefill_cp   = false;
+    CPProcessorType cp_processor_type   = CPProcessorType::ZIG_ZAG;
+    bool            cp_kv_cache_sharded = false;
 
     // to init deepep
     int64_t max_seq_len    = 0;
@@ -134,8 +136,10 @@ struct ExecProperties {
     bool          is_eagle3              = false;
     std::set<int> eagle3_selected_layer{1, 46, 90};
     // std::set<int> eagle3_selected_layer{0,1,2};
-    bool ffn_as_service    = false;
-    bool enable_prefill_cp = false;
+    bool            ffn_as_service      = false;
+    bool            enable_prefill_cp   = false;
+    CPProcessorType cp_processor_type   = CPProcessorType::ZIG_ZAG;
+    bool            cp_kv_cache_sharded = false;
 };
 
 struct MemoryStatus {
@@ -176,6 +180,8 @@ inline ExecProperties buildExecProperties(const ExecInitParams& p) {
     props.is_eagle3                = p.is_eagle3;
     props.ffn_as_service           = p.ffn_as_service;
     props.enable_prefill_cp        = p.enable_prefill_cp;
+    props.cp_processor_type        = p.cp_processor_type;
+    props.cp_kv_cache_sharded      = p.cp_kv_cache_sharded;
     return props;
 }
 

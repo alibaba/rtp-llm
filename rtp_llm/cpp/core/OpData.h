@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/cpp/core/CommonDefines.h"
@@ -338,9 +339,10 @@ struct CacheStoreInputs {
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;
 
-    torch::Tensor            request_id;             // [context_batch_size]
-    torch::Tensor            request_pd_separation;  // [context_batch_size]
-    std::vector<std::string> cache_keys;             // [context_batch_size]
+    torch::Tensor            request_id;                    // [context_batch_size]
+    torch::Tensor            request_pd_separation;         // [context_batch_size]
+    std::vector<std::string> cache_keys;                    // [context_batch_size * max_cache_keys_per_batch]
+    size_t                   max_cache_keys_per_batch = 0;  // 0 = same as max_blocks_per_batch
     size_t                   tokens_per_block;
     size_t                   kv_block_stride_bytes = 0;
     size_t                   kv_scale_stride_bytes = 0;
@@ -355,6 +357,8 @@ struct CacheStoreInputs {
     // contention on background threads. nullptr means writeCacheStore will
     // create an event on the spot (single-threaded / C++ path).
     AsyncEventPtr pre_created_event = nullptr;
+
+    std::shared_ptr<CPSlotMapper> cp_slot_mapper;  // nullptr = redundant (default)
 };
 
 struct AttentionCommonInputs {

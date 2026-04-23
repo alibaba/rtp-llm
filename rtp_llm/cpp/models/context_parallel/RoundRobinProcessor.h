@@ -3,28 +3,35 @@
 
 namespace rtp_llm {
 
-/// @brief Zig-zag processing implementation for context parallel
+/// @brief Round-robin processing implementation for context parallel.
 ///
-/// Processes tokens using a zig-zag shuffle pattern where each rank receives
-/// tokens from both the start and end of the sequence, ensuring balanced workload
-/// for variable-length sequences.
+/// Computation distribution: page-level round-robin stride.
+///   block b → rank (b % cp_size)
+///   Each rank processes entire blocks of page_size tokens.
 ///
-/// Distribution pattern:
-/// - Rank 0: [0, pair_size) and [seq_len - pair_size, seq_len)
-/// - Rank 1: [pair_size, 2*pair_size) and [seq_len - 2*pair_size, seq_len - pair_size)
-/// - ...
+/// KV cache storage: page-level block assignment.
+///   block b → rank (b % cp_size)
+///   Each rank stores only the blocks it owns; decode reads full blocks
+///   directly from the owning prefill peer.
 ///
-/// @note Requires (num_tokens + cp_padding_size) to be divisible by (2 * cp_size)
-class ZigZagProcessor: public IContextParallelProcessor {
+/// Distribution pattern (cp_size=2, page_size=4, 16 tokens / 4 blocks):
+/// - Rank 0: blocks [0, 2] → tokens [0-3, 8-11]
+/// - Rank 1: blocks [1, 3] → tokens [4-7, 12-15]
+///
+/// @note Requires padded_seq_len to be divisible by (page_size * cp_size)
+class RoundRobinProcessor: public IContextParallelProcessor {
 public:
-    ZigZagProcessor()           = default;
-    ~ZigZagProcessor() override = default;
+    explicit RoundRobinProcessor(int page_size = 1): page_size_(page_size) {}
+    ~RoundRobinProcessor() override = default;
 
     size_t handleOutputs(torch::Tensor&                            hidden_states,
                          const GptModelInputs&                     inputs,
                          const torch_ext::PyContextParallelParams& cp_params) override;
 
 protected:
+    int cpAlignSize(int cp_size) const override {
+        return page_size_ * cp_size;
+    }
     bool plan(const std::vector<int>& total_input_tokens,
               std::vector<int>&       input_tokens,
               std::vector<int>&       shuffle_indices,
@@ -38,6 +45,9 @@ protected:
     torch::Tensor generateQKVPaddingMask(const torch::Tensor& prefill_cp_chunk_lengths,
                                          const torch::Tensor& prefill_cp_padding_lengths,
                                          int                  cp_size) override;
+
+private:
+    int page_size_;
 };
 
 }  // namespace rtp_llm

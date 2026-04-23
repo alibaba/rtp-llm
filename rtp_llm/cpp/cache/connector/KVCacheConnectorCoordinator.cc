@@ -116,7 +116,26 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         return nullptr;
     }
 
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys(), true);
+    // In CP page-level round-robin mode, cacheKeys() returns ALL virtual block
+    // keys (total_blocks) while blocks() holds only local physical blocks
+    // (total_blocks / cp_size).  We must remap to local keys so that
+    // cacheKeys[i] corresponds 1:1 with blocks[i].
+    //
+    // Why localCacheKeys(cp_size-1, cp_size) — the *last* rank's keys?
+    // Each virtual block spans cp_size physical blocks across ranks.  The
+    // last-rank key is chosen as the canonical representative because it is
+    // the hash that covers the final token range of the virtual block, i.e.
+    // the block whose cache key depends on all preceding tokens in that
+    // virtual block.  Using the same last-rank key space for device cache
+    // match/insert, memory cache, and PD transfer guarantees that all
+    // components share one consistent prefix-match namespace.
+    const int       cp_size      = cpSize();
+    KVCacheResource ref_resource = kvcache_resource;
+    if (cp_size > 1) {
+        ref_resource.cacheKeys() = kvcache_resource.localCacheKeys(cp_size - 1, cp_size);
+    }
+    auto ref_keys = ref_resource.cacheKeys();
+    auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -154,7 +173,16 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         return nullptr;
     }
 
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys(), true);
+    // Same CP adjustment as asyncRead — use last-rank local keys so that
+    // cacheKeys[i] maps 1:1 to blocks[i].  See asyncRead comment for why
+    // cp_size-1 (last rank) is the canonical key.
+    const int       cp_size      = cpSize();
+    KVCacheResource ref_resource = kvcache_resource;
+    if (cp_size > 1) {
+        ref_resource.cacheKeys() = kvcache_resource.localCacheKeys(cp_size - 1, cp_size);
+    }
+    auto ref_keys = ref_resource.cacheKeys();
+    auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async write failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -218,6 +246,14 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
     RTP_LLM_LOG_ERROR("not RemoteConnector");
     return nullptr;
 #endif
+}
+
+int KVCacheConnectorCoordinator::cpSize() const {
+    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
+    if (cp_cfg.kv_cache_sharded && parallelism_config_.tp_size > 1) {
+        return parallelism_config_.tp_size;
+    }
+    return 1;
 }
 
 void KVCacheConnectorCoordinator::updateOnce() {

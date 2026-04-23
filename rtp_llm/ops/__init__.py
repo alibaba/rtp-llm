@@ -142,6 +142,7 @@ try:
         get_rope_cache,
         get_rope_cache_once,
         CPRotateMethod,
+        CPProcessorType,
         PrefillCPConfig,
     )
     # Alias for backward compatibility
