@@ -1309,7 +1309,7 @@ void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, Idx
 
     if (!fused_last_filter)
     {
-        air_topk_stable::last_filter_kernel<T, IdxT, BitsPerPass, true><<<blocks, BlockSize, 0, stream>>>(
+        air_topk_stable::last_filter_kernel<T, IdxT, BitsPerPass, false><<<blocks, BlockSize, 0, stream>>>(
             in, in_idx, out_buf, out_idx_buf, topk_out, topk_out_idx, len, k, counters, select_min);
         check_cuda_error();
     }
