@@ -17,6 +17,7 @@ import requests
 
 current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.insert(0, str(current_file_path.parent.parent.parent.absolute()))
+sys.path.insert(0, str(current_file_path))
 from rtp_llm.utils.import_util import has_internal_source
 
 if has_internal_source():
@@ -34,9 +35,9 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.distribute.distributed_server import members_from_test_env
 from rtp_llm.server.server_args.server_args import setup_args
-from rtp_llm.test.perf_test.multi_node.perf_runner import run_single
-from rtp_llm.test.perf_test.multi_node.perf_util import create_query
-from rtp_llm.test.perf_test.multi_node.server_manager import LocalServerManager
+from perf_runner import run_single
+from perf_util import create_query
+from server_manager import LocalServerManager
 
 # from uvicorn.loops.uvloop import uvloop_setup
 # uvloop_setup()
