@@ -17,7 +17,7 @@ public:
                        int                          linear_step = 0):
         KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id), linear_step_(linear_step) {}
 
-    MatchResult match(const CacheKeysType& cache_keys) override;
+    MatchResult match(const CacheKeysType& cache_keys, const std::vector<std::vector<int>>& mm_intervals = {}) override;
     // Match a single cache key (used by Hybrid allocator to do right-to-left joint matching).
     MatchResult matchSingleKey(CacheKeyType cache_key) const;
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;

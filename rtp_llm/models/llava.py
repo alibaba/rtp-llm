@@ -1,37 +1,31 @@
 import json
 import os
 import re
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict
 
 from transformers import CLIPVisionConfig
 
-from rtp_llm.config.model_config import ModelConfig, VitParameters
-from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.llama import Llama
-from rtp_llm.models.llava_vit import LlavaImageEmbedding
-from rtp_llm.models.llava_weight import LlavaWeightInfo
-from rtp_llm.models.multimodal.multimodal_mixin import BaseVitWeights, MultiModalMixin
+from rtp_llm.models.llama_weight import LlamaWeightInfo
+from rtp_llm.utils.model_weight import W
 
-class Llava(Llama, MultiModalMixin):
-    def _init_multimodal(
-        self,
-        mm_model_config: Any,  # MMModelConfig
-        vit_config: VitConfig,
-    ):
-        # mm_related_params is in model_config, not mm_model_config
-        mm_related_params = self.model_config.mm_related_params
-        self.mm_part = LlavaImageEmbedding(mm_related_params, model_config=self.model_config)
-        vit_weight_dict: Dict[str, Any] = {"mm_projector": self.mm_part.mm_projector}
-        if (
-            mm_related_params.config.get("unfreeze_mm_vision_tower", False)
-            or "mm_vision_tower" in mm_related_params.config.get("mm_tunable_parts", [])
-        ):
-            vit_weight_dict["vision_tower"] = self.mm_part.vision_tower
-        if "unpad" in mm_related_params.config.get("mm_patch_merge_type", "flat"):
-            vit_weight_dict["image_newline"] = self.mm_part.image_newline
-        mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
 
+class LlavaWeightInfo(LlamaWeightInfo):
+    def _get_weight_info(self):
+        llava_weight = super()._get_weight_info()
+
+        # for llava-next
+        for weight in llava_weight.layer_weights:
+            if weight.name == W.attn_o_b:
+                llava_weight.layer_weights.remove(weight)
+                break
+
+        return llava_weight
+
+
+class Llava(Llama):
     @staticmethod
     def _create_config(ckpt_path: str) -> ModelConfig:
         config = ModelConfig()
@@ -52,6 +46,7 @@ class Llava(Llama, MultiModalMixin):
             Llava.from_huggingface(config, config_json)
         else:
             raise Exception("llava parameter from unkown source")
+        config.mm_model_config.is_multimodal = True
         return config
 
     @staticmethod

@@ -156,6 +156,25 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         tryAddD2DCopy(inputs.attention_inputs.decode_cu_seqlens_d,
                       py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
                       (state.current_batch_size + 1) * sizeof(int));
+
+        if (need_combo_position_ids_ && inputs.combo_position_ids.defined() && inputs.combo_position_ids.numel() > 0
+            && inputs.combo_position_ids.has_storage()) {
+            if (!py_model_inputs_.combo_position_ids.defined()) {
+                RTP_LLM_LOG_WARNING("combo_position_ids not defined in graph but present in input, skipping copy");
+            } else {
+                size_t needed_size = state.current_batch_size * position_id_len_factor_ * sizeof(int);
+                size_t source_size = inputs.combo_position_ids.numel() * sizeof(int);
+                size_t copy_size   = std::min(needed_size, source_size);
+                if (py_model_inputs_.combo_position_ids.numel() * sizeof(int) >= copy_size) {
+                    optimizedCopyAsync(inputs.combo_position_ids, py_model_inputs_.combo_position_ids, copy_size);
+                } else {
+                    RTP_LLM_LOG_WARNING(
+                        "combo_position_ids target tensor size (%zu) is smaller than needed (%zu), skipping copy",
+                        py_model_inputs_.combo_position_ids.numel() * sizeof(int),
+                        copy_size);
+                }
+            }
+        }
     } else {
         // D2D copy
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
@@ -434,6 +453,13 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
 
     const int64_t max_kv_blocks =
         static_cast<int64_t>(((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_) + sp_steps_);
+
+    if (need_combo_position_ids_) {
+        inputs.combo_position_ids = torch::ones({int(max_bs_) * position_id_len_factor_}, options_cpu_int32_);
+        inputs.combo_position_ids = inputs.combo_position_ids.pin_memory();
+        inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
+    }
+
     const int64_t max_blocks = max_kv_blocks * seq_size_per_block_ / kernel_seq_size_per_block_;
     // kv_cache_kernel_block_id_device [batch_size, block_num]
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
@@ -526,6 +552,17 @@ void CudaGraphRunner::setTokenTypeEmbedding(torch::Tensor token_type_embedding) 
 
 void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
     input_embedding_scalar_ = input_embedding_scalar;
+}
+
+void CudaGraphRunner::setPositionIdLenFactor(int position_id_len_factor) {
+    position_id_len_factor_ = position_id_len_factor;
+    RTP_LLM_LOG_INFO("Set position_id_len_factor_ to %d (negative means no combo_position_ids)",
+                     position_id_len_factor_);
+}
+
+void CudaGraphRunner::setNeedComboPositionIds(bool need_combo_position_ids) {
+    need_combo_position_ids_ = need_combo_position_ids;
+    RTP_LLM_LOG_INFO("Set need_combo_position_ids_ to %d", need_combo_position_ids_);
 }
 
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
@@ -724,6 +761,11 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     }
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);
+    if (need_combo_position_ids_ && capture_mem_hold_.py_model_inputs_.combo_position_ids.defined()) {
+        inputs.combo_position_ids =
+            capture_mem_hold_.py_model_inputs_.combo_position_ids.slice(0, 0, batch_size * position_id_len_factor_);
+        inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
+    }
 
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
         capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.slice(0, 0, batch_size);
