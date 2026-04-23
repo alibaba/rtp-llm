@@ -10,10 +10,10 @@ from einops import rearrange
 from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h import (
     chunk_gated_delta_rule_fwd_h,
 )
-from rtp_llm.models_py.triton_kernels.fla.chunk_o import chunk_fwd_o
-from rtp_llm.models_py.triton_kernels.fla.chunk_scaled_dot_kkt import (
-    chunk_scaled_dot_kkt_fwd,
+from rtp_llm.models_py.triton_kernels.fla.chunk_fwd import (
+    chunk_gated_delta_rule_fwd_intra,
 )
+from rtp_llm.models_py.triton_kernels.fla.chunk_o import chunk_fwd_o
 from rtp_llm.models_py.triton_kernels.fla.cumsum import chunk_local_cumsum
 from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 from rtp_llm.models_py.triton_kernels.fla.solve_tril import solve_tril
@@ -22,7 +22,8 @@ from rtp_llm.models_py.triton_kernels.fla.utils import (
     autocast_custom_fwd,
     input_guard,
 )
-from rtp_llm.models_py.triton_kernels.fla.wy_fast import recompute_w_u_fwd
+
+RCP_LN2 = 1.0 / 0.6931471805599453
 
 
 def chunk_gated_delta_rule_fwd(
@@ -35,20 +36,22 @@ def chunk_gated_delta_rule_fwd(
     initial_state: Optional[torch.Tensor],
     output_final_state: bool,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    use_exp2: bool = True,
 ):
-    g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
-    # obtain WY representation. u is actually the new v.
-    A = chunk_scaled_dot_kkt_fwd(
-        k=k, beta=beta, g_cumsum=g, cu_seqlens=cu_seqlens, output_dtype=torch.float32
+    g = chunk_local_cumsum(
+        g,
+        chunk_size=64,
+        scale=RCP_LN2 if use_exp2 else None,
+        cu_seqlens=cu_seqlens,
     )
-    A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
-    w, u = recompute_w_u_fwd(
+    # fused kkt + solve_tril + recompute_w_u
+    w, u, A = chunk_gated_delta_rule_fwd_intra(
         k=k,
         v=v,
+        g=g,
         beta=beta,
-        A=A,
-        g_cumsum=g,
         cu_seqlens=cu_seqlens,
+        use_exp2=use_exp2,
     )
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -58,6 +61,7 @@ def chunk_gated_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        use_exp2=use_exp2,
     )
     o = chunk_fwd_o(
         q=q,
@@ -67,6 +71,7 @@ def chunk_gated_delta_rule_fwd(
         g=g,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        use_exp2=use_exp2,
     )
     return g, o, A, final_state, w, h, v_new
 

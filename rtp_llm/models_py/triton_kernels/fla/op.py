@@ -27,6 +27,11 @@ def safe_exp(x):
     return exp(tl.where(x <= 0, x, float("-inf")))
 
 
+@triton.jit
+def safe_exp2(x):
+    return exp2(tl.where(x <= 0, x, float("-inf")))
+
+
 if not is_gather_supported:
 
     @triton.jit

@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
-from rtp_llm.models_py.triton_kernels.fla.op import exp, safe_exp
+from rtp_llm.models_py.triton_kernels.fla.op import exp, exp2, safe_exp, safe_exp2
 from rtp_llm.models_py.triton_kernels.fla.utils import (
     check_shared_mem,
     is_nvidia_hopper,
@@ -55,6 +55,7 @@ def chunk_fwd_kernel_o(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -111,11 +112,16 @@ def chunk_fwd_kernel_o(
         g += bos * H + i_h
         p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
-        b_o = b_o * exp(b_g)[:, None]
-        b_A = b_A * safe_exp(b_g[:, None] - b_g[None, :])
+        if USE_EXP2:
+            b_o = b_o * exp2(b_g)[:, None]
+            b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
+        else:
+            b_o = b_o * exp(b_g)[:, None]
+            b_A = b_A * safe_exp(b_g[:, None] - b_g[None, :])
 
-    o_i = tl.arange(0, BT)
-    m_A = o_i[:, None] >= o_i[None, :]
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
     b_A = tl.where(m_A, b_A, 0)
 
     p_v = tl.make_block_ptr(
@@ -137,10 +143,11 @@ def chunk_fwd_o(
     k: torch.Tensor,
     v: torch.Tensor,
     h: torch.Tensor,
-    g: Optional[torch.Tensor] = None,  # cumsum of log decay
+    g: Optional[torch.Tensor] = None,
     scale: Optional[float] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
+    use_exp2: bool = False,
 ) -> torch.Tensor:
     B, T, Hg, K, V = *q.shape, v.shape[-1]
     H = v.shape[-2]
@@ -173,9 +180,10 @@ def chunk_fwd_o(
         K=K,
         V=V,
         BT=BT,
-        BK=128,
-        BV=64,
-        num_warps=4,
+        BK=64,
+        BV=128,
+        USE_EXP2=use_exp2,
+        num_warps=1,
         num_stages=2,
     )
     return o

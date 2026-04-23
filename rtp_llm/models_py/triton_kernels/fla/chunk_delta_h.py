@@ -12,7 +12,7 @@ from rtp_llm.models_py.triton_kernels.fla.index import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
 )
-from rtp_llm.models_py.triton_kernels.fla.op import exp, safe_exp
+from rtp_llm.models_py.triton_kernels.fla.op import exp, exp2, safe_exp, safe_exp2
 from rtp_llm.models_py.triton_kernels.fla.utils import is_nvidia_hopper
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
@@ -63,6 +63,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
+    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
@@ -182,13 +183,20 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
         last_idx = min((i_t + 1) * BT, T) - 1
         if USE_G:
-            b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
+            m_t = (i_t * BT + tl.arange(0, BT)) < T
+            b_g_last = tl.load(g + (bos * H + last_idx * H + i_h).to(tl.int64)).to(
+                tl.float32
+            )
             p_g = tl.make_block_ptr(
                 g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
             )
-            b_g = tl.load(p_g, boundary_check=(0,))
-            b_v = b_v * safe_exp(b_g_last - b_g)[:, None]
-            b_g_last = exp(b_g_last)
+            b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+            if USE_EXP2:
+                b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
+                b_g_last = exp2(b_g_last)
+            else:
+                b_v = b_v * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
+                b_g_last = exp(b_g_last)
             b_h1 = b_h1 * b_g_last
             if K > 64:
                 b_h2 = b_h2 * b_g_last
@@ -203,32 +211,44 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 gk + (bos + last_idx) * H * K + i_h * K + o_k1,
                 mask=(o_k1 < K),
                 other=0.0,
-            )
-            b_h1 *= exp(b_gk_last1)[:, None]
+            ).to(tl.float32)
+            if USE_EXP2:
+                b_h1 *= exp2(b_gk_last1)[:, None]
+            else:
+                b_h1 *= exp(b_gk_last1)[:, None]
             if K > 64:
                 o_k2 = 64 + o_k1
                 b_gk_last2 = tl.load(
                     gk + (bos + last_idx) * H * K + i_h * K + o_k2,
                     mask=(o_k2 < K),
                     other=0.0,
-                )
-                b_h2 *= exp(b_gk_last2)[:, None]
+                ).to(tl.float32)
+                if USE_EXP2:
+                    b_h2 *= exp2(b_gk_last2)[:, None]
+                else:
+                    b_h2 *= exp(b_gk_last2)[:, None]
             if K > 128:
                 o_k3 = 128 + o_k1
                 b_gk_last3 = tl.load(
                     gk + (bos + last_idx) * H * K + i_h * K + o_k3,
                     mask=(o_k3 < K),
                     other=0.0,
-                )
-                b_h3 *= exp(b_gk_last3)[:, None]
+                ).to(tl.float32)
+                if USE_EXP2:
+                    b_h3 *= exp2(b_gk_last3)[:, None]
+                else:
+                    b_h3 *= exp(b_gk_last3)[:, None]
             if K > 192:
                 o_k4 = 192 + o_k1
                 b_gk_last4 = tl.load(
                     gk + (bos + last_idx) * H * K + i_h * K + o_k4,
                     mask=(o_k4 < K),
                     other=0.0,
-                )
-                b_h4 *= exp(b_gk_last4)[:, None]
+                ).to(tl.float32)
+                if USE_EXP2:
+                    b_h4 *= exp2(b_gk_last4)[:, None]
+                else:
+                    b_h4 *= exp(b_gk_last4)[:, None]
         b_v = b_v.to(k.dtype.element_ty)
 
         p_k = tl.make_block_ptr(
@@ -284,9 +304,10 @@ def chunk_gated_delta_rule_fwd_h(
     gk: Optional[torch.Tensor] = None,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
-    chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+    chunk_size: int = 64,
     save_new_value: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    use_exp2: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, Hg, K, V = *k.shape, u.shape[-1]
     H = u.shape[-2]
@@ -336,7 +357,8 @@ def chunk_gated_delta_rule_fwd_h(
         K=K,
         V=V,
         BT=BT,
-        BV=32,
+        BV=16,
+        USE_EXP2=use_exp2,
         num_warps=4,
         num_stages=2,
     )
