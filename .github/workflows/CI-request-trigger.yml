@@ -51,14 +51,14 @@ jobs:
 
       # Runs trigger CI
       - name: Make the script files executable
-        run: chmod +x pre-check-CI-result.sh trigger-CI.sh get-CI-result.sh get-branch-info.sh add-comment.sh check-rebase-freshness.sh
+        run: chmod +x pre-check-CI-result.sh trigger-CI.sh get-CI-result.sh get-branch-info.sh add-comment.sh check-merge-conflicts.sh
 
-      - name: Check rebase freshness
+      - name: Check merge conflicts
         if: github.event_name == 'pull_request_review'
         run: |
           COMMIT_ID="${{ github.event.pull_request.head.sha }}"
           PR_NUMBER="${{ github.event.pull_request.number }}"
-          ./check-rebase-freshness.sh "$PR_NUMBER" "$COMMIT_ID" "${{ github.repository }}"
+          ./check-merge-conflicts.sh "$PR_NUMBER" "$COMMIT_ID" "${{ github.repository }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
