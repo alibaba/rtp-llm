@@ -69,7 +69,8 @@ int64_t FIFOScheduler::lastScheduleTime() {
 }
 
 // 在入队前校验输入长度，避免无效请求进入等待队列
-// 检查两个条件：1) 输入长度不超过 KV Cache 最大可用 token 数  2) 输入长度 * batch_size 不超过 max_batch_tokens_size
+// 仅检查输入长度不超过 KV Cache 最大可用 token 数；max_batch_tokens_size 的约束在调度时由
+// evaluateRunningMemory 基于 contextLength 判断，不应在 enqueue 阶段乘以 batch_size 拒绝请求。
 bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
     if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
         stream->reportError(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
@@ -77,14 +78,6 @@ bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
                                                             + " is greater than kv cache max available tokens num "
                                                             + std::to_string(cache_manager_->maxAvailableTokensNum())));
         return false;  // Input length exceeds max available tokens
-    } else if ((size_t)stream->inputLength() * stream->currentBatchSize() > max_batch_tokens_size_) {
-        auto error_info =
-            autil::StringUtil::formatString("input len [%d] * batch size [%d] > max_batch_tokens_size [%d]",
-                                            stream->inputLength(),
-                                            stream->currentBatchSize(),
-                                            max_batch_tokens_size_);
-        stream->reportError(ErrorCode::MALLOC_FAILED, error_info);
-        return false;
     }
     return true;
 }
