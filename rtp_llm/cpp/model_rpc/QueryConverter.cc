@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 
+#include <numeric>
+
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
@@ -118,8 +120,12 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (int i = 0; i < input->multimodal_inputs_size(); i++) {
-            auto mm_input             = &input->multimodal_inputs(i);
-            auto mm_preprocess_config = &mm_input->mm_preprocess_config();
+            auto               mm_input             = &input->multimodal_inputs(i);
+            auto               mm_preprocess_config = &mm_input->mm_preprocess_config();
+            std::vector<float> crop_positions;
+            for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
+                crop_positions.push_back(crop_position);
+            }
             mm_inputs.emplace_back(mm_input->multimodal_url(),
                                    torch::empty(1),
                                    mm_input->multimodal_type(),
@@ -129,7 +135,9 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
                                    mm_preprocess_config->max_pixels(),
                                    mm_preprocess_config->fps(),
                                    mm_preprocess_config->min_frames(),
-                                   mm_preprocess_config->max_frames());
+                                   mm_preprocess_config->max_frames(),
+                                   crop_positions,
+                                   mm_preprocess_config->mm_timeout_ms());
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
@@ -155,6 +163,12 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
     for (int i = 0; i < mm_inputs->multimodal_inputs_size(); i++) {
         auto mm_input             = &mm_inputs->multimodal_inputs(i);
         auto mm_preprocess_config = &mm_input->mm_preprocess_config();
+
+        std::vector<float> crop_positions;
+        for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
+            crop_positions.push_back(crop_position);
+        }
+
         // tensor should also converted from input pb, however it is only used in some embedding model, so just empty
         // for now
         inputs_vec.emplace_back(mm_input->multimodal_url(),
@@ -164,7 +178,11 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
                                 mm_preprocess_config->height(),
                                 mm_preprocess_config->min_pixels(),
                                 mm_preprocess_config->max_pixels(),
-                                mm_preprocess_config->fps());
+                                mm_preprocess_config->fps(),
+                                mm_preprocess_config->min_frames(),
+                                mm_preprocess_config->max_frames(),
+                                crop_positions,
+                                mm_preprocess_config->mm_timeout_ms());
     }
     return inputs_vec;
 }
@@ -187,19 +205,49 @@ void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, co
     config_pb->set_min_pixels(config.min_pixels);
     config_pb->set_max_pixels(config.max_pixels);
     config_pb->set_fps(config.fps);
+    config_pb->set_min_frames(config.min_frames);
+    config_pb->set_max_frames(config.max_frames);
+    config_pb->set_mm_timeout_ms(config.mm_timeout_ms);
+    for (const float& crop_position : config.crop_positions) {
+        config_pb->add_crop_positions(crop_position);
+    }
 }
 
-MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputsPB* outputs_pb) {
-    MultimodalOutput mm_output;
-    for (int i = 0; i < outputs_pb->multimodal_outputs_size(); i++) {
-        auto output_pb = outputs_pb->multimodal_outputs(i);
-        mm_output.mm_features.emplace_back(transTensor(output_pb.multimodal_embedding()));
-        if (output_pb.has_multimodal_pos_id()) {
-            if (mm_output.mm_position_ids == std::nullopt) {
-                mm_output.mm_position_ids = std::vector<torch::Tensor>();
-            }
-            mm_output.mm_position_ids.value().emplace_back(transTensor(output_pb.multimodal_pos_id()));
-        }
+MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_pb) {
+    torch::Tensor mm_embedding = transTensor(output_pb->multimodal_embedding()), mm_position_id, mm_deepstack_embeds;
+    bool          contain_pos  = output_pb->has_multimodal_pos_id();
+    bool          contain_deepstack = output_pb->has_multimodal_deepstack_embeds();
+    if (contain_pos) {
+        mm_position_id = transTensor(output_pb->multimodal_pos_id());
+    }
+    if (contain_deepstack) {
+        mm_deepstack_embeds = transTensor(output_pb->multimodal_deepstack_embeds());
+    }
+    MultimodalOutput     mm_output;
+    std::vector<int64_t> split_sizes;
+    for (auto split_size : output_pb->split_size()) {
+        split_sizes.push_back(split_size);
+    }
+    const int64_t split_total = std::accumulate(split_sizes.begin(), split_sizes.end(), int64_t{0});
+    RTP_LLM_CHECK_WITH_INFO(!split_sizes.empty() && split_total == mm_embedding.size(0),
+                            "split_sizes sum=%ld does not match mm_embedding.size(0)=%ld",
+                            split_total,
+                            mm_embedding.size(0));
+    mm_output.mm_features = mm_embedding.split(split_sizes, 0);
+    if (contain_pos) {
+        RTP_LLM_CHECK_WITH_INFO(split_total == mm_position_id.size(0),
+                                "split_sizes sum=%ld does not match mm_position_id.size(0)=%ld",
+                                split_total,
+                                mm_position_id.size(0));
+        mm_output.mm_position_ids = mm_position_id.split(split_sizes, 0);
+    }
+
+    if (contain_deepstack) {
+        RTP_LLM_CHECK_WITH_INFO(mm_deepstack_embeds.dim() >= 2 && split_total == mm_deepstack_embeds.size(1),
+                                "split_sizes sum=%ld does not match mm_deepstack_embeds.size(1)=%ld",
+                                split_total,
+                                mm_deepstack_embeds.dim() >= 2 ? mm_deepstack_embeds.size(1) : -1);
+        mm_output.mm_deepstack_embeds = mm_deepstack_embeds.split(split_sizes, 1);
     }
     return mm_output;
 }

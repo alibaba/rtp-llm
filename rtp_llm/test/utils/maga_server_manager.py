@@ -212,7 +212,6 @@ class MagaServerManager(object):
             cwd=cwd_path,
         )
         self._server_process = p
-
         return self.wait_sever_done(timeout)
 
     def stop_server(self):

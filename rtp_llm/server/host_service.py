@@ -576,6 +576,9 @@ class HostService:
 
         role_addrs: List[RoleAddr] = []
         for role in role_list:
+            if self.role_vip_map.get(role) is None:
+                logging.warning(f"Role {role} is not found in role_vip_map")
+                continue
             role_addr = _create_role_addr(role, self.role_vip_map.get(role))
             if role_addr:
                 role_addrs.append(role_addr)

@@ -397,7 +397,6 @@ def stack_moe_w1_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
         z = torch.zeros(pad_shape, device=w1.device).half()
         w1 = torch.cat((w1, z), dim=1)
         w3 = torch.cat((w3, z), dim=1)
-
     x = torch.concat([w1, w3], dim=1)
     return x
 
@@ -457,11 +456,14 @@ def get_sp_tensor(
     if len(t.shape) == 1:
         t = t.unsqueeze(0)
     qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
-
-    _kv_tp = math.gcd(head_num_kv, tp)
-    _kv_rank = tp_rank // (tp // _kv_tp)
-    ks = sp_neg1(t[:, q_hidden : q_hidden + kv_hidden], _kv_tp, _kv_rank)
-    vs = sp_neg1(t[:, q_hidden + kv_hidden :], _kv_tp, _kv_rank)
+    if head_num_kv == 1:
+        ks = t[:, q_hidden : q_hidden + kv_hidden]
+        vs = t[:, q_hidden + kv_hidden :]
+    else:
+        _kv_tp = math.gcd(head_num_kv, tp)
+        _kv_rank = tp_rank // (tp // _kv_tp)
+        ks = sp_neg1(t[:, q_hidden : q_hidden + kv_hidden], _kv_tp, _kv_rank)
+        vs = sp_neg1(t[:, q_hidden + kv_hidden :], _kv_tp, _kv_rank)
     return torch.concat([qs, ks, vs], dim=1).contiguous()
 
 
@@ -553,10 +555,14 @@ def get_sp_tensor_blocked(
         t = t.unsqueeze(0)
 
     qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
-    _kv_tp = math.gcd(head_num_kv, tp)
-    _kv_rank = tp_rank // (tp // _kv_tp)
-    ks = sp_neg1(t[:, q_hidden : q_hidden + kv_hidden], _kv_tp, _kv_rank)
-    vs = sp_neg1(t[:, q_hidden + kv_hidden :], _kv_tp, _kv_rank)
+    if head_num_kv == 1:
+        ks = t[:, q_hidden : q_hidden + kv_hidden]
+        vs = t[:, q_hidden + kv_hidden :]
+    else:
+        _kv_tp = math.gcd(head_num_kv, tp)
+        _kv_rank = tp_rank // (tp // _kv_tp)
+        ks = sp_neg1(t[:, q_hidden : q_hidden + kv_hidden], _kv_tp, _kv_rank)
+        vs = sp_neg1(t[:, q_hidden + kv_hidden :], _kv_tp, _kv_rank)
     return torch.concat([qs, ks, vs], dim=1).contiguous()
 
 
@@ -1051,6 +1057,28 @@ def sp_0_w13(
     w1 = sp_0(w1, ffn_tp_size, ffn_tp_rank, **kwargs)
     w3 = sp_0(w3, ffn_tp_size, ffn_tp_rank, **kwargs)
     return torch.concat([w1, w3], dim=0)
+
+
+def convert_gate_up_proj_(ts: List[torch.Tensor]) -> torch.Tensor:
+    tensor = identity(ts)
+    tensor = tensor.permute(0, 2, 1).contiguous()  # (experts, 1536, hidden)
+    split_size = tensor.shape[1] // 2
+    gate, up = torch.split(tensor, split_size, dim=1)
+    return torch.cat([up, gate], dim=1)
+
+
+# List[gate_up, hidden] -> [Expert, up_gate, hidden]
+def transpose_stack_moe_w1(ts: List[torch.Tensor]) -> torch.Tensor:
+    stacked_tensor = torch.stack(ts, dim=0)
+    gate_up_dim = stacked_tensor.shape[1] // 2
+    return torch.cat(
+        [stacked_tensor[:, gate_up_dim:, :], stacked_tensor[:, :gate_up_dim, :]], dim=1
+    )
+
+
+def convert_down_proj_(ts: List[torch.Tensor]) -> torch.Tensor:
+    tensor = identity(ts)
+    return tensor.permute(0, 2, 1).contiguous()
 
 
 def split_slopes_tp(slopes: torch.Tensor, head_num: int, tp: int, tp_rank: int):
