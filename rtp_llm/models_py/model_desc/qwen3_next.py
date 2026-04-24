@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules import (
     Embedding,
     FMHAImplBase,
     LinearFactory,
+    MultimodalEmbeddingInjector,
     RMSNorm,
     RMSResNorm,
 )
@@ -1111,10 +1112,12 @@ class Qwen3NextModel(GptModelBase):
             cp_local_valid_mask,
         )
 
-    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+    def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = inputs_embeds
+        return self.embed_tokens(input_ids)
+
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        hidden_states = self.word_embedding(inputs)
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         prefill_conv1d_meta = None
@@ -1183,3 +1186,48 @@ class Qwen3NextModel(GptModelBase):
 
         hidden_states, residual = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+
+
+class Qwen35Model(Qwen3NextModel):
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: ModelWeights,
+        moe_config,
+        max_generate_batch_size: int,
+        fmha_config=None,
+        py_hw_kernel_config=None,
+        device_resource_config=None,
+    ):
+        super().__init__(
+            model_config,
+            parallelism_config,
+            weights,
+            moe_config,
+            max_generate_batch_size,
+            fmha_config,
+            py_hw_kernel_config,
+            device_resource_config,
+        )
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
+
+    def need_combo_position_ids(self) -> bool:
+        return True
+
+    def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
+        input_ids: torch.Tensor = inputs.input_ids
+
+        position_ids = inputs.combo_position_ids
+        token_type_ids = inputs.embedding_inputs.combo_tokens_type_ids
+        text_tokens_mask = inputs.embedding_inputs.text_tokens_mask
+        mm_features = inputs.multimodal_inputs.multimodal_features
+        mm_feature_locs = inputs.multimodal_inputs.mm_features_locs
+
+        inputs_embeds = self.embed_tokens(
+            input_ids, position_ids, token_type_ids, text_tokens_mask
+        )
+        hidden_states = self.multimodal_embedding_injector(
+            inputs_embeds, mm_features, mm_feature_locs
+        )
+        return hidden_states
