@@ -124,6 +124,26 @@ class MagaServerManager(object):
             home_dir = os.environ.get("HOME", os.path.expanduser("~"))
             current_env["DG_JIT_CACHE_DIR"] = os.path.join(home_dir, ".deep_gemm")
 
+        rdma_lib_dir = "/usr/local/lib64"
+        ld_library_path = current_env.get("LD_LIBRARY_PATH", "")
+        current_env["LD_LIBRARY_PATH"] = ":".join(
+            [p for p in [rdma_lib_dir, ld_library_path] if p]
+        )
+        rdma_preload_paths = [
+            os.path.join(rdma_lib_dir, so_name)
+            for so_name in ["libibverbs.so.1", "librdmacm.so.1"]
+            if os.path.exists(os.path.join(rdma_lib_dir, so_name))
+        ]
+        if rdma_preload_paths:
+            existing_ld_preload = current_env.get("LD_PRELOAD", "")
+            current_env["LD_PRELOAD"] = " ".join(
+                rdma_preload_paths
+                + ([existing_ld_preload] if existing_ld_preload else [])
+            )
+        logging.info("maga_server LD_LIBRARY_PATH: %s", current_env["LD_LIBRARY_PATH"])
+        if current_env.get("LD_PRELOAD"):
+            logging.info("maga_server LD_PRELOAD: %s", current_env["LD_PRELOAD"])
+
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)
         # 创建一个文件来存储子进程的日志
