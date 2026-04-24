@@ -281,6 +281,7 @@ class EmptyClass:
 
 try:
     import librtp_compute_ops
+    logging.info(f"after import librtp_compute_ops: has rtp_llm namespace={hasattr(torch.ops, 'rtp_llm')}, has init_engine={hasattr(torch.ops.rtp_llm, 'init_engine') if hasattr(torch.ops, 'rtp_llm') else False}")
     from .compute_ops import rtp_llm_ops
     # Export KVCache and other types from librtp_compute_ops
     from librtp_compute_ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs, PyModelInitResources, PyCacheStoreInputs
@@ -296,6 +297,7 @@ try:
     from libth_transformer import EmbeddingCppOutput
 
     libth_transformer_imported = True
+    logging.info(f"after import libth_transformer: has rtp_llm namespace={hasattr(torch.ops, 'rtp_llm')}, has init_engine={hasattr(torch.ops.rtp_llm, 'init_engine') if hasattr(torch.ops, 'rtp_llm') else False}")
 except BaseException as e:
     MultimodalInputCpp = EmbeddingCppOutput = (
         EmptyClass
