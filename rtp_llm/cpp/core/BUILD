@@ -109,6 +109,7 @@ cc_library(
     ],
     deps = [
         ":buffer_hdr",
+        ":types",
         "//rtp_llm/cpp/utils:core_utils"
     ],
     copts = copts(),
