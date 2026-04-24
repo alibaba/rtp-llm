@@ -112,9 +112,13 @@ _PRELOAD_SO_NAMES = [
 
 
 def _resolve_dep_path(dep_name: str):
-    dep_path = os.path.join(so_path, dep_name)
-    if os.path.exists(dep_path):
-        return dep_path
+    preferred_paths = [
+        os.path.join("/usr/local/lib64", dep_name),
+        os.path.join(so_path, dep_name),
+    ]
+    for dep_path in preferred_paths:
+        if os.path.exists(dep_path):
+            return dep_path
     return find_upper_file(current_dir, dep_name)
 
 
