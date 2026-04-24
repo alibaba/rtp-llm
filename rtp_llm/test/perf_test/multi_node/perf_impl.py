@@ -52,7 +52,7 @@ def _curl_server_single_worker(
 
     if is_profile:
         req["gen_timeline"] = True
-        req["profile_step"] = 1
+        req["profile_step"] = 3
 
     if is_warmup:
         request_timeout = 1000
@@ -162,6 +162,12 @@ class BatchPerfImpl(object):
         logging.info(f"finished setting concurrency")
         _ = self._curl_server(is_profile=False, is_warmup=True)
         logging.info(f"finished warmup")
+        # Pre-warm the Kineto/roctracer profiler: the first call to enableProfiler()
+        # triggers roctracer thread initialization which may emit an "External init
+        # callback must run in same thread" warning and produces no GPU kernel events.
+        # A second profile call will see roctracer already initialized and capture correctly.
+        _ = self._curl_server(is_profile=True, is_warmup=False)
+        logging.info(f"finished profiler prewarm")
         results = self._curl_server(is_profile=False, is_warmup=False)
         logging.info(f"finished measure time")
         _ = self._curl_server(is_profile=True, is_warmup=False)
