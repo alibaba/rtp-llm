@@ -472,7 +472,9 @@ class V4Indexer(nn.Module):
         # Build the indexer's own compressed KV via its compressor.
         self.compressor(x, start_pos)
 
-        weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads ** -0.5)
+        weights = self.weights_proj(x.to(self.weights_proj.weight.dtype)) * (
+            self.softmax_scale * self.n_heads ** -0.5
+        )
         # index_score: [b, s_q, n_heads, n_compressed_so_far]
         index_score = torch.einsum(
             "bshd,btd->bsht", q, self.kv_cache[:bsz, : end_pos // ratio]
@@ -708,5 +710,5 @@ class V4Attention(nn.Module):
         o = o.reshape(bsz, seqlen, self.n_local_groups, -1)
         wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
         # einsum: per-group small linear, then concat across groups.
-        o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-        return self.wo_b(o.flatten(2))
+        o = torch.einsum("bsgd,grd->bsgr", o.to(wo_a.dtype), wo_a)
+        return self.wo_b(o.flatten(2).to(self.wo_b.weight.dtype))
