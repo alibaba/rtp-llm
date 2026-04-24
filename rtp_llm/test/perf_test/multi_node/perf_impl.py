@@ -5,8 +5,11 @@ import time
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Any, Dict, List, Tuple
 
+import grpc
 import requests
 
+import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
+import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
 from rtp_llm.distribute.distributed_server import members_from_test_env
 from rtp_llm.test.perf_test.multi_node.perf_dataclass import (
     ResponseInfo,
@@ -52,7 +55,7 @@ def _curl_server_single_worker(
 
     if is_profile:
         req["gen_timeline"] = True
-        req["profile_step"] = 3
+        req["profile_step"] = 2
 
     if is_warmup:
         request_timeout = 1000
@@ -156,6 +159,9 @@ class BatchPerfImpl(object):
         self.generate_config = generate_config
         self.tp0_endpoints = self._get_all_dp_tp0_frontends()
         logging.info(f"tp0_endpoints: {self.tp0_endpoints}")
+        self.all_grpc_endpoints = self._get_all_rank_grpc_endpoints()
+        logging.info(f"all_grpc_endpoints: {self.all_grpc_endpoints}")
+        self.profile_all_ranks = os.environ.get("GEN_TIMELINE_SYNC", "0") == "1"
 
     def run(self):
         self._set_concurrency()
@@ -166,10 +172,14 @@ class BatchPerfImpl(object):
         # triggers roctracer thread initialization which may emit an "External init
         # callback must run in same thread" warning and produces no GPU kernel events.
         # A second profile call will see roctracer already initialized and capture correctly.
+        if self.profile_all_ranks:
+            self._start_profile_on_all_ranks(num_steps=2)
         _ = self._curl_server(is_profile=True, is_warmup=False)
         logging.info(f"finished profiler prewarm")
         results = self._curl_server(is_profile=False, is_warmup=False)
         logging.info(f"finished measure time")
+        if self.profile_all_ranks:
+            self._start_profile_on_all_ranks(num_steps=2)
         _ = self._curl_server(is_profile=True, is_warmup=False)
         logging.info(f"finished dump profile json")
         return results
@@ -245,6 +255,52 @@ class BatchPerfImpl(object):
             )
             targets.append((nodes[node_idx].ip, int(port)))
         return list(dict.fromkeys(targets))
+
+    def _get_all_rank_grpc_endpoints(self) -> List[Tuple[str, int]]:
+        """Get gRPC endpoints for ALL ranks (including tp_ranks) across all nodes."""
+        nodes = members_from_test_env(self.gang_config_string)
+        worker_info_port_num = int(os.environ.get("WORKER_INFO_PORT_NUM", "10"))
+        targets: List[Tuple[str, int]] = []
+        total_world_size = self.dp_size * self.tp_size
+        for world_rank in range(total_world_size):
+            node_idx = world_rank // self.local_world_size
+            local_rank = world_rank % self.local_world_size
+            if node_idx >= len(nodes):
+                break
+            base_port = int(nodes[node_idx].server_port)
+            grpc_port = base_port + local_rank * worker_info_port_num + 1
+            targets.append((nodes[node_idx].ip, grpc_port))
+        return list(dict.fromkeys(targets))
+
+    def _start_profile_on_all_ranks(self, num_steps: int = 2):
+        """Send StartProfile gRPC request to all ranks (including tp_ranks) to enable profiling."""
+        def _send_start_profile(ip: str, port: int) -> Tuple[str, int, bool, str]:
+            try:
+                channel = grpc.insecure_channel(f"{ip}:{port}")
+                stub = pb2_grpc.RpcServiceStub(channel)
+                request = pb2.StartProfileRequestPB(
+                    trace_name="",
+                    start_step=0,
+                    num_steps=num_steps,
+                )
+                stub.StartProfile(request, timeout=5)
+                channel.close()
+                return ip, port, True, "ok"
+            except Exception as e:
+                return ip, port, False, str(e)
+
+        max_workers = min(len(self.all_grpc_endpoints), 64)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(_send_start_profile, ip, port)
+                for ip, port in self.all_grpc_endpoints
+            ]
+            for fut in futures:
+                ip, port, ok, msg = fut.result()
+                if ok:
+                    logging.info(f"StartProfile succeeded on {ip}:{port}")
+                else:
+                    logging.warning(f"StartProfile failed on {ip}:{port}: {msg}")
 
     def _curl_server(
         self, is_profile: bool = False, is_warmup: bool = False
