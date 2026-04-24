@@ -22,7 +22,7 @@ from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
 from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     get_default_config,
     invoke_fused_moe_kernel,
-    moe_align_block_size_compiled,
+    moe_align_block_size_torch,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -82,6 +82,12 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         assert topk_ids is not None
         assert topk_weights is not None
 
+        if self.ep_size > 1:
+            local_ids = topk_ids - self.start_expert_id
+            local_mask = (local_ids >= 0) & (local_ids < self.num_experts_per_partition)
+            topk_ids = local_ids.clamp(min=0, max=self.num_experts_per_partition - 1)
+            topk_weights = topk_weights * local_mask
+
         M, K = hidden_states.shape
         top_k = topk_ids.size(1)
         device = hidden_states.device
@@ -100,7 +106,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         block_m1 = config1["BLOCK_SIZE_M"]
         block_m2 = config2["BLOCK_SIZE_M"]
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size_compiled(topk_ids, block_m1, self.E)
+            moe_align_block_size_torch(topk_ids, block_m1, self.E)
         )
         if block_m1 == block_m2:
             sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
@@ -110,7 +116,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             )
         else:
             sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
-                moe_align_block_size_compiled(topk_ids, block_m2, self.E)
+                moe_align_block_size_torch(topk_ids, block_m2, self.E)
             )
 
         # GEMM1: hidden_states @ w1.T → intermediate1 [M*top_k, 2*inter]

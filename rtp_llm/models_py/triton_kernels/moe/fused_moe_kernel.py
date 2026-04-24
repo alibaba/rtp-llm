@@ -198,11 +198,15 @@ def moe_align_block_size_torch(
     # Pre-allocate to max possible size to avoid GPU→CPU sync
     max_padded = num_valid + num_experts * block_size
 
-    # Count tokens per expert → padded counts → cumulative offsets (fused chain)
-    tokens_per_expert = torch.bincount(
-        flat_ids.clamp(min=0, max=num_experts - 1).int(),
-        minlength=num_experts,
-    )  # [E]
+    # Count tokens per expert via scatter_add (CUDA-graph-safe, no CPU-GPU sync
+    # unlike torch.bincount which reads GPU data on CPU to determine output size)
+    tokens_per_expert = torch.zeros(
+        num_experts, dtype=torch.int32, device=topk_ids.device
+    )
+    clamped_ids = flat_ids.clamp(min=0, max=num_experts - 1).long()
+    tokens_per_expert.scatter_add_(
+        0, clamped_ids, torch.ones(num_valid, dtype=torch.int32, device=topk_ids.device)
+    )
     padded_counts = ((tokens_per_expert + block_size - 1) // block_size) * block_size
 
     # expert_offsets[0]=0, expert_offsets[i]=sum(padded_counts[:i])
@@ -245,9 +249,9 @@ def moe_align_block_size_torch(
     return sorted_token_ids, expert_ids, num_tokens_post_padded
 
 
-# Compiled version: fuses pointwise ops → fewer GPU kernel launches → lower overhead.
-# dynamic=True handles variable M without recompilation.
-moe_align_block_size_compiled = torch.compile(moe_align_block_size_torch, dynamic=True)
+# torch.compile with dynamic=True + assert_indirect_indexing causes spurious
+# assertion failures on valid expert IDs. Use the non-compiled version for now.
+moe_align_block_size_compiled = moe_align_block_size_torch
 
 
 def get_default_config(
