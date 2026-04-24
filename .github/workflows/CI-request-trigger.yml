@@ -37,17 +37,29 @@ jobs:
         id: checkout1
         continue-on-error: true
         uses: actions/checkout@v4
+        timeout-minutes: 10
+        with:
+          fetch-depth: 1
+          clean: true
 
       - name: Checkout repository (attempt 2)
         if: steps.checkout1.outcome == 'failure'
         id: checkout2
         continue-on-error: true
         uses: actions/checkout@v4
+        timeout-minutes: 10
+        with:
+          fetch-depth: 1
+          clean: true
 
       - name: Checkout repository (attempt 3)
         if: steps.checkout2.outcome == 'failure'
         id: checkout3
         uses: actions/checkout@v4
+        timeout-minutes: 10
+        with:
+          fetch-depth: 1
+          clean: true
 
       # Runs trigger CI
       - name: Make the script files executable
