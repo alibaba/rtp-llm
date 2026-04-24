@@ -1,0 +1,185 @@
+name: pre-merge-gate
+
+# Approve PR -> synchronously trigger internal (Aone) merge -> only allow
+# external merge if internal succeeded. Wire job "gate" as a required status
+# check on `main` (Settings -> Branches) so a red gate blocks the merge button.
+#
+# Required branch protection: "Dismiss stale pull request approvals when new
+# commits are pushed" must be ON, otherwise gate won't re-run on new SHAs.
+
+on:
+  # NOTE: `branches:` filter is intentionally NOT used here — GitHub Actions
+  # ignores it for `pull_request_review` events. We filter by base.ref inside
+  # the `gate_filter` step below instead.
+  pull_request_review:
+    types: [submitted]
+
+# Do NOT cancel-in-progress: killing a running internal merge mid-flight can
+# leave the system in a half-applied state.
+concurrency:
+  group: pre-merge-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  # Job key "gate" determines the required-check name: "pre-merge-gate / gate".
+  # Do NOT add a top-level `if:` here. A skipped job is reported as success in
+  # branch protection, which would silently defeat the gate. Filter inside steps.
+  gate:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: .github/scripts
+
+    steps:
+      - name: Validate review state and base branch
+        id: gate_filter
+        run: |
+          STATE="${{ github.event.review.state }}"
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          echo "Review state: $STATE, base ref: $BASE_REF"
+          if [ "$BASE_REF" != "main" ]; then
+            echo "PR targets '$BASE_REF', not main; gate not required."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$STATE" != "approved" ]; then
+            echo "Non-approval review event; gate not required."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository (attempt 1)
+        if: steps.gate_filter.outputs.skip != 'true'
+        id: checkout1
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Checkout repository (attempt 2)
+        if: steps.gate_filter.outputs.skip != 'true' && steps.checkout1.outcome == 'failure'
+        id: checkout2
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Checkout repository (attempt 3)
+        if: steps.gate_filter.outputs.skip != 'true' && steps.checkout2.outcome == 'failure'
+        id: checkout3
+        uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        if: steps.gate_filter.outputs.skip != 'true'
+        run: chmod +x check-rebase-freshness.sh trigger-merge.sh get-merge-result.sh get-branch-info.sh check-merge-done.sh
+
+      # Dedup re-approval: if a previous gate run already merged this commit
+      # internally, skip the rebase checks and merge trigger. Without this,
+      # a second approve on the same SHA (or dismiss+re-approve) would fire
+      # MERGE-TASK again on an already-merged commit.
+      - name: Pre-check internal merge status (dedup re-approval)
+        id: precheck
+        if: steps.gate_filter.outputs.skip != 'true'
+        run: |
+          echo "==============================================================="
+          echo "Pre-check: has internal merge already completed for this commit?"
+          echo "  PR:     #${{ github.event.pull_request.number }}"
+          echo "  Commit: ${{ github.event.pull_request.head.sha }}"
+          echo "==============================================================="
+          if ./check-merge-done.sh \
+              "${{ github.event.pull_request.head.sha }}" \
+              "${{ secrets.CI_SECRET }}" \
+              "${{ github.repository }}"; then
+            echo "==============================================================="
+            echo "[OK] Internal merge ALREADY DONE by an earlier gate run."
+            echo "     Skipping rebase checks and merge trigger."
+            echo "     Gate will report SUCCESS."
+            echo "==============================================================="
+            echo "already_merged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "==============================================================="
+            echo "[GO] Internal merge NOT YET DONE for this commit."
+            echo "     Proceeding with rebase checks and synchronous merge."
+            echo "==============================================================="
+            echo "already_merged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Re-check rebase freshness vs main
+        if: steps.gate_filter.outputs.skip != 'true' && steps.precheck.outputs.already_merged != 'true'
+        run: |
+          ./check-rebase-freshness.sh \
+            "${{ github.event.pull_request.number }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            "${{ github.repository }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Block when internal mirror open_merge/<PR> drifts from main-internal.
+      # Mirrors the comparison logic from CI-request-trigger.yml's
+      # "Add comment via REST API" step, but blocks instead of just commenting.
+      # If false-positives appear (REBASE merge could have handled the drift),
+      # downgrade to a warning here and let trigger-merge be the source of truth.
+      - name: Check internal rebase freshness vs main-internal
+        if: steps.gate_filter.outputs.skip != 'true' && steps.precheck.outputs.already_merged != 'true'
+        env:
+          SECURITY: ${{ secrets.CI_SECRET }}
+        run: |
+          PR_ID="${{ github.event.pull_request.number }}"
+          COMMIT_ID="${{ github.event.pull_request.head.sha }}"
+          REPO="${{ github.repository }}"
+          BRANCH_NAME="open_merge/${PR_ID}"
+          MAIN_BRANCH="main-internal"
+
+          echo "Querying internal branch info for $BRANCH_NAME..."
+          BRANCH_INFO=$(./get-branch-info.sh "$BRANCH_NAME" "$REPO" "$COMMIT_ID")
+          if [ $? -ne 0 ] || [ -z "$BRANCH_INFO" ]; then
+            echo "::error::Failed to query internal branch info for $BRANCH_NAME"
+            exit 1
+          fi
+          CURRENT_ID=$(echo "$BRANCH_INFO" | jq -r '.commit.id')
+
+          echo "Querying internal branch info for $MAIN_BRANCH..."
+          MAIN_INFO=$(./get-branch-info.sh "$MAIN_BRANCH" "$REPO" "$COMMIT_ID")
+          if [ $? -ne 0 ] || [ -z "$MAIN_INFO" ]; then
+            echo "::error::Failed to query internal branch info for $MAIN_BRANCH"
+            exit 1
+          fi
+          MAIN_ID=$(echo "$MAIN_INFO" | jq -r '.commit.id')
+
+          if [ -z "$CURRENT_ID" ] || [ "$CURRENT_ID" = "null" ] \
+             || [ -z "$MAIN_ID" ] || [ "$MAIN_ID" = "null" ]; then
+            echo "::error::Could not extract commit IDs (CURRENT='$CURRENT_ID', MAIN='$MAIN_ID')"
+            exit 1
+          fi
+
+          echo "open_merge/${PR_ID} commit: $CURRENT_ID"
+          echo "${MAIN_BRANCH} commit:      $MAIN_ID"
+
+          if [ "$CURRENT_ID" != "$MAIN_ID" ]; then
+            echo "::error::Internal branch open_merge/${PR_ID} is out of sync with ${MAIN_BRANCH}. Please rebase the internal branch before merging."
+            exit 1
+          fi
+          echo "Internal branch is in sync with ${MAIN_BRANCH}"
+
+      - name: Trigger internal merge (synchronous gate)
+        if: steps.gate_filter.outputs.skip != 'true' && steps.precheck.outputs.already_merged != 'true'
+        run: |
+          PR_ID="${{ github.event.pull_request.number }}"
+          COMMIT_ID="${{ github.event.pull_request.head.sha }}"
+          echo "Triggering internal merge for commit $COMMIT_ID (PR #$PR_ID)"
+          ./trigger-merge.sh \
+            "$COMMIT_ID" \
+            "${{ secrets.CI_SECRET }}" \
+            "${{ github.actor_id }}${{ github.actor }}@users.github.com" \
+            "${{ github.actor }}" \
+            "pre-merge-gate: github commit $COMMIT_ID" \
+            "$PR_ID"
+        env:
+          AONE_PROJECT_ID: "3512232"
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Wait for internal merge result (blocks gate)
+        if: steps.gate_filter.outputs.skip != 'true' && steps.precheck.outputs.already_merged != 'true'
+        run: |
+          ./get-merge-result.sh \
+            "${{ github.event.pull_request.head.sha }}" \
+            "${{ secrets.CI_SECRET }}" \
+            "${{ github.repository }}"

@@ -30,31 +30,31 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Make scripts executable
-        run: chmod +x trigger-merge.sh get-merge-result.sh
+        run: chmod +x trigger-merge.sh get-merge-result.sh check-merge-done.sh
 
-      - name: Trigger Aone Merge Task
+      # Backstop dedup: if pre-merge-gate already merged this commit, skip.
+      # Exits 0 when already merged (skip trigger), non-zero otherwise (run trigger).
+      - name: Pre-check internal merge status
+        id: precheck
+        if: github.event.pull_request.merged == true
+        continue-on-error: true
+        run: |
+          ./check-merge-done.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.repository }}"
+
+      - name: Trigger Aone Merge Task (backstop)
         id: trigger
+        if: github.event.pull_request.merged == true && steps.precheck.outcome == 'failure'
         run: |
           echo "Triggering Aone merge for commit ${{ github.event.pull_request.head.sha }}"
-          echo "$GITHUB_REF"
           PR_ID="${{ github.event.pull_request.number }}"
           echo "PR ID is $PR_ID"
-          if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
-            ./trigger-merge.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.actor_id }}${{ github.actor }}@users.github.com" "${{ github.actor }}" "auto-merge: github commit ${{ github.event.pull_request.head.sha }}" "$PR_ID"
-          else
-            echo "Pull request was closed without merge."
-            exit 0
-          fi
+          ./trigger-merge.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.actor_id }}${{ github.actor }}@users.github.com" "${{ github.actor }}" "auto-merge: github commit ${{ github.event.pull_request.head.sha }}" "$PR_ID"
         env:
-          AONE_PROJECT_ID: "3512232" 
+          AONE_PROJECT_ID: "3512232"
           GITHUB_REPOSITORY: ${{ github.repository }}
 
       - name: Get Merge Result
+        if: github.event.pull_request.merged == true && steps.precheck.outcome == 'failure'
         run: |
           echo "Polling for merge result of commit ${{ github.event.pull_request.head.sha }}"
-          if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
-            ./get-merge-result.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.repository }}"
-          else
-            echo "Pull request was closed without merge."
-            exit 0
-          fi
+          ./get-merge-result.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.repository }}"
