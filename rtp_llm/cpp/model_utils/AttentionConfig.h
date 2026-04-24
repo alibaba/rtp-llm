@@ -59,6 +59,20 @@ struct AttentionConfigs {
     int  indexer_head_num = 0;
     int  indexer_topk     = 0;
 
+    // DeepSeek-V4 hybrid attention (CSA + HCA + SWA-bypass)
+    // 0 = not V4 / non-compressed; 4 = CSA (compress every 4 tokens); 128 = HCA (every 128).
+    // Per-layer compress ratio drives layer-type dispatch (CSA/HCA/SWA-only).
+    std::vector<int> layer_compress_ratios = {};
+    bool             use_v4_hybrid_attn    = false;
+    int              o_groups              = 0;
+    int              o_lora_rank           = 0;
+    int              sliding_window        = 0;        // 0 = disabled
+    bool             has_attention_sink    = false;    // per-head learnable sink logit
+    int              hc_mult               = 0;        // mHC residual expansion factor n_hc (0 = no mHC)
+    int              hc_sinkhorn_iters     = 20;       // Sinkhorn-Knopp iterations for B projection
+    float            hc_eps                = 1e-6f;
+    int              compress_rope_theta   = 0;        // separate RoPE base for compressed KV branch (0 = use rope_config.base)
+
     // data type for attention computation
     c10::ScalarType dtype = c10::ScalarType::Half;
 

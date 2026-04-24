@@ -90,9 +90,16 @@ public:
     bool    moe_normalize_expert_scale = false;
     // 0 for no moe; 1 for all layer moe; 2 for partial layer moe
     int64_t moe_style = 0;
-    // 0 for softmax; 1 for sigmoid
+    // 0 for softmax; 1 for sigmoid; 2 for sqrt(softplus) (DeepSeek-V4)
     int64_t              scoring_func    = 0;
     std::vector<int64_t> moe_layer_index = {};
+
+    // DeepSeek-V4 MoE: first `moe_hash_routing_layers` MoE layers route via deterministic
+    // token-id hash instead of scoring; remaining layers use noaux_tc topk over scoring_func.
+    int64_t moe_hash_routing_layers = 0;
+    // DeepSeek-V4 SwiGLU clamp: linear ∈ [-swiglu_limit, swiglu_limit], gate ≤ swiglu_limit.
+    // 0.0f disables clamp.
+    float swiglu_limit = 0.0f;
 
     bool   has_positional_encoding    = false;
     bool   has_pre_decoder_layernorm  = false;

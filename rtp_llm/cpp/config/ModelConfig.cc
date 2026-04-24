@@ -234,6 +234,8 @@ std::string ModelConfig::to_string() const {
         << "moe_normalize_expert_scale: " << moe_normalize_expert_scale << "\n"
         << "moe_style: " << moe_style << "\n"
         << "scoring_func: " << scoring_func << "\n"
+        << "moe_hash_routing_layers: " << moe_hash_routing_layers << "\n"
+        << "swiglu_limit: " << swiglu_limit << "\n"
         << "moe_layer_index: [";
     for (size_t i = 0; i < moe_layer_index.size(); ++i) {
         oss << moe_layer_index[i];
