@@ -311,7 +311,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
             KVBlockArray kv_block_array = param.kv_block_array;
             Tcache*      k_cache = reinterpret_cast<Tcache*>(kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
             Tcache*      v_cache = reinterpret_cast<Tcache*>(kv_block_array.getVBlockPtr(batch_idx, dst_kv_seq_idx));
-            if constexpr (std::is_same<Tcache, __nv_fp8_e4m3>::value) {
+            if constexpr (ENABLE_8BITS_CACHE) {
                 float* k_scale_ptr   = reinterpret_cast<float*>(kv_block_array.getKScalePtr(batch_idx, dst_kv_seq_idx));
                 float* v_scale_ptr   = reinterpret_cast<float*>(kv_block_array.getVScalePtr(batch_idx, dst_kv_seq_idx));
                 const int inScaleIdx = kv_block_array.getKVScaleLocalIdx(dst_kv_seq_idx, head_idx);
@@ -325,8 +325,8 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
                     const int inKBlockIdx = kv_block_array.getKLocalIdx<KvCacheDataType::FP8>(
                         dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
 
-                    const int inVBlockIdx =
-                        kv_block_array.getVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
+                    const int inVBlockIdx = kv_block_array.getVLocalIdx<KvCacheDataType::FP8>(
+                        dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
 
                     k_cache[inKBlockIdx] =
                         Tcache(float(reinterpret_cast<T*>(&k)[vec_i]) * (float(1 << (8 - 1)) / s_max[0]));
@@ -345,8 +345,8 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
                         dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                     k_cache[inKBlockIdx] = reinterpret_cast<T*>(&k)[vec_i];
 
-                    const int inVBlockIdx =
-                        kv_block_array.getVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
+                    const int inVBlockIdx = kv_block_array.getVLocalIdx<KvCacheDataType::BASE>(
+                        dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                     v_cache[inVBlockIdx] = reinterpret_cast<T*>(&v)[vec_i];
                 }
             }
