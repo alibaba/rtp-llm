@@ -43,7 +43,11 @@ public:
         if (kernel_seq_size_per_block_ <= 0) {
             throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
         }
-        max_bs_               = graph_params.max_context_batch_size;
+        if (graph_params.is_prefill_cuda_graph_mode) {
+            max_bs_ = graph_params.max_context_batch_size;
+        } else {
+            max_bs_ = graph_params.concurrency_limit;
+        }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
@@ -80,6 +84,8 @@ public:
     void           replayPrefill(int seq_len);
     int            getCurrentRealGraphBs(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
+    void           setPositionIdLenFactor(int position_id_len_factor) override;
+    void           setNeedComboPositionIds(bool need_combo_position_ids) override;
     void           initCapture() override;
 
     // Factory methods for test: take GraphParams so callers can reuse the same struct
@@ -121,6 +127,8 @@ private:
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
     bool                    enable_cuda_graph_{false};
+    int                     position_id_len_factor_{1};  // batch_size * position_id_len_factor_
+    bool                    need_combo_position_ids_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     cuda_graph::GraphStream capture_stream_;

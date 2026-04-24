@@ -281,7 +281,9 @@ class GenericMoeDecoderLayer(nn.Module):
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
-            hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
+            hidden_states=hidden_states,
+            fmha_impl=fmha_impl,
+            kv_cache=kv_cache,
         )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
