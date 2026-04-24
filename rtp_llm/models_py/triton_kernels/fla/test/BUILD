@@ -51,15 +51,15 @@ py_test(
 )
 
 py_test(
-    name = "test_chunk_prefill_cp",
+    name = "test_chunk_prefill_cp_zigzag",
     srcs = [
-        "test_chunk_prefill_cp.py"
+        "test_chunk_prefill_cp_zigzag.py"
     ],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
         "//rtp_llm:testlib",
     ] + [":triton", ":torch"],
     visibility = ["//visibility:public"],
-    env = {"GPU_COUNT": "4"},
-    exec_properties = {'gpu': 'H20', 'gpu_count': '4'},
+    env = {"GPU_COUNT": "2"},
+    exec_properties = {'gpu': 'H20', 'gpu_count': '2'},
 )

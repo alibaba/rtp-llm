@@ -41,11 +41,11 @@ from rtp_llm.models_py.triton_kernels.fla.block import (
     store_ssm_state_to_block_map,
 )
 from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
-from rtp_llm.models_py.triton_kernels.fla.chunk_cp_scan import (
-    chunk_gated_delta_rule_fwd_cp_scan,
-)
-from rtp_llm.models_py.triton_kernels.fla.chunk_cp_zigzag import (
+from rtp_llm.models_py.triton_kernels.fla.cp.chunk_cp_zigzag import (
     chunk_gated_delta_rule_fwd_cp_zigzag,
+)
+from rtp_llm.models_py.triton_kernels.fla.cp.context import CpChunkAlignInfo
+from rtp_llm.models_py.triton_kernels.fla.cp.utils import (
     exchange_conv_context,
     prepend_conv_context,
     strip_conv_context,
@@ -72,167 +72,18 @@ from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
 
 
-class CpChunkAlignInfo(object):
-    """Precomputed indices for chunk-aligned padding/reorder in CP linear attention.
-
-    Plan A: align padded sequence to (cp_size * 2 * chunk_size) so that each rank's
-    half-segment is a chunk_size multiple — segment-internal chunk boundaries then
-    coincide with full-sequence chunk boundaries, making h states reusable for
-    SSM cache writes. Padding tokens must be made identity-preserving in the
-    GDN recurrence (see _forward_cp_prefill mask application).
-    """
-
-    def __init__(
-        self,
-        orig_full_cu: torch.Tensor,
-        local_cu: torch.Tensor,
-        local_total: int,
-        chunk_size: int,
-        h_causal_indices: torch.Tensor,
-        seg_cu: torch.Tensor,
-        causal_order: torch.Tensor,
-        local_cu_cpu: list,
-        half_lengths_cpu: list,
-        orig_full_lengths_cpu: list,
-        padded_full_cu_d: torch.Tensor,
-        orig_full_lengths_d: torch.Tensor,
-        local_padding_mask: Optional[torch.Tensor] = None,
-    ):
-        self.orig_full_cu = orig_full_cu
-        self.local_cu = local_cu
-        self.local_total = local_total
-        self.chunk_size = chunk_size
-        self.h_causal_indices = h_causal_indices
-        self.seg_cu = seg_cu
-        self.causal_order = causal_order
-        self.local_cu_cpu = local_cu_cpu
-        self.half_lengths_cpu = half_lengths_cpu
-        self.orig_full_lengths_cpu = orig_full_lengths_cpu
-        self.padded_full_cu_d = padded_full_cu_d
-        self.orig_full_lengths_d = orig_full_lengths_d
-        self.local_padding_mask = local_padding_mask
-
-    @classmethod
-    def build(
-        cls,
-        cp_size: int,
-        cp_rank: int,
-        device: torch.device,
-        orig_lengths_cpu: list,
-        padded_full_cu: torch.Tensor,
-        chunk_size: int = 64,
-        local_padding_mask: Optional[torch.Tensor] = None,
-    ) -> "CpChunkAlignInfo":
-        """Build CP metadata from CPU-side sequence lengths.
-
-        orig_lengths_cpu: per-sequence original lengths (Python list of ints).
-        padded_full_cu: cumulative padded lengths from C++, int32 on `device`.
-            Stored as-is; no re-cumsum, no GPU sync.
-        local_padding_mask: optional pre-built mask. Pass `cp_local_valid_mask`
-            when any sequence was padded; None when caller verified no padding.
-        """
-        from rtp_llm.models_py.triton_kernels.fla.chunk_cp_zigzag import (
-            zigzag_causal_order,
-        )
-
-        batch_size = len(orig_lengths_cpu)
-        align = cp_size * 2 * chunk_size
-
-        padded_lengths_cpu = [
-            ((L + align - 1) // align) * align for L in orig_lengths_cpu
-        ]
-        local_lengths_cpu = [L // cp_size for L in padded_lengths_cpu]
-        half_lengths_cpu = [L // 2 for L in local_lengths_cpu]
-
-        local_cu_cpu = [0]
-        for L in local_lengths_cpu:
-            local_cu_cpu.append(local_cu_cpu[-1] + L)
-        local_total = local_cu_cpu[-1]
-
-        orig_full_cu_cpu = [0]
-        for L in orig_lengths_cpu:
-            orig_full_cu_cpu.append(orig_full_cu_cpu[-1] + L)
-
-        # seg_cu: treats each seq's two halves as separate sequences
-        seg_cu_cpu = [0]
-        for h in half_lengths_cpu:
-            seg_cu_cpu.append(seg_cu_cpu[-1] + h)
-            seg_cu_cpu.append(seg_cu_cpu[-1] + h)
-
-        local_chunks_per_seq = [L // chunk_size for L in local_lengths_cpu]
-        local_NT = sum(local_chunks_per_seq)
-        half_chunks = [n // 2 for n in local_chunks_per_seq]
-        causal_order = zigzag_causal_order(cp_size)
-
-        seg_chunk_offsets = [0]
-        for hc in half_chunks:
-            seg_chunk_offsets.append(seg_chunk_offsets[-1] + 2 * hc)
-        orig_chunks_per_seq = [
-            (L + chunk_size - 1) // chunk_size for L in orig_lengths_cpu
-        ]
-
-        indices = []
-        for b in range(batch_size):
-            hc = half_chunks[b]
-            seg_base = seg_chunk_offsets[b]
-            remaining = orig_chunks_per_seq[b]
-            for pos in range(2 * cp_size):
-                ag_idx = causal_order[pos]
-                r = ag_idx // 2
-                seg = ag_idx % 2
-                src_start = r * local_NT + seg_base + seg * hc
-                n = min(hc, remaining)
-                if n <= 0:
-                    break
-                indices.extend(range(src_start, src_start + n))
-                remaining -= n
-
-        local_cu = torch.tensor(local_cu_cpu, dtype=torch.long, device=device)
-        seg_cu = torch.tensor(seg_cu_cpu, dtype=torch.long, device=device)
-        orig_full_cu = torch.tensor(orig_full_cu_cpu, dtype=torch.long, device=device)
-        h_causal_indices = torch.tensor(indices, dtype=torch.long, device=device)
-        causal_order_t = torch.tensor(causal_order, dtype=torch.long, device=device)
-        orig_full_lengths_d = torch.tensor(
-            orig_lengths_cpu, dtype=torch.int32, device=device
-        )
-
-        return cls(
-            orig_full_cu=orig_full_cu,
-            local_cu=local_cu,
-            local_total=local_total,
-            chunk_size=chunk_size,
-            h_causal_indices=h_causal_indices,
-            seg_cu=seg_cu,
-            causal_order=causal_order_t,
-            local_cu_cpu=local_cu_cpu,
-            half_lengths_cpu=half_lengths_cpu,
-            orig_full_lengths_cpu=orig_lengths_cpu,
-            padded_full_cu_d=padded_full_cu,  # reuse caller's tensor as-is
-            orig_full_lengths_d=orig_full_lengths_d,
-            local_padding_mask=local_padding_mask,
-        )
-
-
 class Qwen3NextMetadata(object):
     def __init__(
         self,
         prefill_conv1d_meta: Optional[CausalConv1dMetadata] = None,
         is_target_verify: bool = False,
-        full_prefill_conv1d_meta: Optional[CausalConv1dMetadata] = None,
-        full_prefill_cu_seqlens: Optional[torch.Tensor] = None,
         cp_restore_indices: Optional[torch.Tensor] = None,
-        cp_local_extract_indices: Optional[torch.Tensor] = None,
-        cp_local_valid_mask: Optional[torch.Tensor] = None,
         cp_write_cache_store_impl: Optional[WriteCacheStoreOp] = None,
         cp_chunk_align_info: Optional[CpChunkAlignInfo] = None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
-        self.full_prefill_conv1d_meta = full_prefill_conv1d_meta
-        self.full_prefill_cu_seqlens = full_prefill_cu_seqlens
         self.cp_restore_indices = cp_restore_indices
-        self.cp_local_extract_indices = cp_local_extract_indices
-        self.cp_local_valid_mask = cp_local_valid_mask
         self.cp_write_cache_store_impl = cp_write_cache_store_impl
         self.cp_chunk_align_info = cp_chunk_align_info
 
@@ -771,9 +622,6 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             attn_meta._cp_conv1d_meta = prepare_causal_conv1d_metadata(
                 query_start_loc=padded_seg_cu.int(), device=mixed_qkv.device
             )
-            attn_meta._cp_padded_seg_cu = padded_seg_cu
-            attn_meta._cp_padded_seg_cu_cpu = padded_seg_cu_cpu
-            attn_meta._cp_padded_batch = padded_batch
 
             # Build 2*batch prefix_lengths and block_map for conv1d kernel
             # Only rank 0's seg0 (even indices) needs prefix reading from block cache
@@ -798,10 +646,6 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 )
             attn_meta._cp_padded_prefix = padded_prefix
             attn_meta._cp_padded_block_map = padded_block_map
-        else:
-            padded_seg_cu = attn_meta._cp_padded_seg_cu
-            padded_seg_cu_cpu = attn_meta._cp_padded_seg_cu_cpu
-            padded_batch = attn_meta._cp_padded_batch
 
         conv_states = (
             gdn._get_conv_states(kv_cache_tensor).transpose(1, 2)
@@ -827,9 +671,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             seg0_has_ctx=(seg0_ctx is not None),
             local_total=chunk_align.local_total,
             ctx_len=ctx_len,
-        ).transpose(
-            0, 1
-        )  # [tokens, dim]
+        ).transpose(0, 1)
 
         local_padding_mask = chunk_align.local_padding_mask
         if local_padding_mask is not None:
@@ -1154,21 +996,16 @@ class Qwen3NextModel(GptModelBase):
         attention_inputs: PyAttentionInputs,
         device: torch.device,
     ) -> tuple[
-        Optional[CausalConv1dMetadata],
-        Optional[torch.Tensor],
-        Optional[torch.Tensor],
-        Optional[torch.Tensor],
         Optional[torch.Tensor],
         Optional[CpChunkAlignInfo],
     ]:
         """Precompute metadata for CP linear attention (per-layer all-gather path).
 
-        Returns (full_conv1d_meta, full_cu_seqlens, restore_indices,
-                 local_extract_indices, local_valid_mask, cp_chunk_align_info).
+        Returns (restore_indices, cp_chunk_align_info).
         """
         cp_info = attention_inputs.context_parallel_info
         if cp_info is None:
-            return None, None, None, None, None, None
+            return None, None
 
         # In CP mode the TP group is repurposed as the CP group, so tp_size == cp_size.
         cp_size = self.parallelism_config.tp_size
@@ -1179,18 +1016,11 @@ class Qwen3NextModel(GptModelBase):
         # padded_full_length = chunk_length * cp_size. No re-padding on Python side.
         full_new_lengths = cp_info.prefill_actual_input_lengths_cpu  # orig
         padded_chunk_lengths = cp_info.prefill_cp_chunk_lengths  # per-rank padded
-        full_cu = torch.zeros(
-            full_new_lengths.shape[0] + 1, dtype=torch.int32, device=device
-        )
-        full_cu[1:] = full_new_lengths.cumsum(0).to(device)
         padded_full_cu = torch.zeros(
             full_new_lengths.shape[0] + 1, dtype=torch.int32, device=device
         )
         padded_full_cu[1:] = (padded_chunk_lengths.to(device).long() * cp_size).cumsum(
             0
-        )
-        full_conv1d_meta = prepare_causal_conv1d_metadata(
-            query_start_loc=full_cu, device=device
         )
 
         restore_indices = cp_info.prefill_qkv_restore_indice
@@ -1206,10 +1036,11 @@ class Qwen3NextModel(GptModelBase):
             unpad_restore.shape[0], device=device
         )
 
+        # Local-var-only mask: pad-token suppression for CpChunkAlignInfo.
+        # Not stored on attn_meta — `chunk_align.local_padding_mask` is the
+        # canonical (and only) consumer.
         local_inv = inv_restore[local_start : local_start + local_chunk_total]
-        cp_local_valid_mask = local_inv >= 0
-        cp_local_extract_indices = local_inv[cp_local_valid_mask]
-
+        local_valid_mask = local_inv >= 0
         need_pad = int(full_new_lengths.sum().item()) != total_ag
 
         chunk_align = CpChunkAlignInfo.build(
@@ -1218,17 +1049,10 @@ class Qwen3NextModel(GptModelBase):
             device=device,
             orig_lengths_cpu=full_new_lengths.tolist(),
             padded_full_cu=padded_full_cu,
-            local_padding_mask=cp_local_valid_mask if need_pad else None,
+            local_padding_mask=local_valid_mask if need_pad else None,
         )
 
-        return (
-            full_conv1d_meta,
-            full_cu,
-            restore_indices,
-            cp_local_extract_indices,
-            cp_local_valid_mask,
-            chunk_align,
-        )
+        return restore_indices, chunk_align
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
 
@@ -1241,22 +1065,14 @@ class Qwen3NextModel(GptModelBase):
         is_target_verify = attention_inputs.is_target_verify
         is_cp = self.parallelism_config.prefill_cp_config.is_enabled()
 
-        full_prefill_conv1d_meta = None
-        full_prefill_cu_seqlens = None
         cp_restore_indices = None
-        cp_local_extract_indices = None
-        cp_local_valid_mask = None
         cp_write_cache_store_impl = None
         cp_chunk_align_info = None
 
         if attention_inputs.is_prefill and not is_target_verify:
             if is_cp:
                 (
-                    full_prefill_conv1d_meta,
-                    full_prefill_cu_seqlens,
                     cp_restore_indices,
-                    cp_local_extract_indices,
-                    cp_local_valid_mask,
                     cp_chunk_align_info,
                 ) = self._build_cp_linear_attn_metadata(
                     attention_inputs, hidden_states.device
@@ -1279,11 +1095,7 @@ class Qwen3NextModel(GptModelBase):
         attn_meta = Qwen3NextMetadata(
             prefill_conv1d_meta=prefill_conv1d_meta,
             is_target_verify=is_target_verify,
-            full_prefill_conv1d_meta=full_prefill_conv1d_meta,
-            full_prefill_cu_seqlens=full_prefill_cu_seqlens,
             cp_restore_indices=cp_restore_indices,
-            cp_local_extract_indices=cp_local_extract_indices,
-            cp_local_valid_mask=cp_local_valid_mask,
             cp_write_cache_store_impl=cp_write_cache_store_impl,
             cp_chunk_align_info=cp_chunk_align_info,
         )

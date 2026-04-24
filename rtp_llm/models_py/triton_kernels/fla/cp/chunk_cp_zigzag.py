@@ -1,15 +1,20 @@
 # -*- coding: utf-8 -*-
-# Context Parallelism — Prefix Scan variant
+# Context Parallelism — Zigzag variant
 #
-# Phase 1: All ranks run Step1-4 + Step5(h0=0) + compute M_total (parallel)
-# Phase 2: Inclusive prefix scan of (M, b) in log2(P) rounds
-# Phase 3: Broadcast h0_global, each rank computes h0_true locally
-# Phase 4: All ranks rerun Step5 with correct h0 + Step6 (parallel)
+# Each rank computes on its own zigzag tokens directly, no QKV all-gather needed.
+# Each rank has 2 segments (front half + back half of zigzag).
+# Total 2*cp_size segments form a causal chain.
 #
-# Affine pair: f(x) = M @ x + b
-# Combine: (M2, b2) ∘ (M1, b1) = (M2 @ M1, M2 @ b1 + b2)
+# Phase 0: Conv1d with P2P exchange of tail tokens (kernel_size-1 tokens)
+# Phase 1: Each rank computes (b, M) for its 2 segments locally
+# Phase 2: All-gather (b, M) from all ranks, reorder to causal order
+# Phase 3: cp_merge to compute h0_true for each segment
+# Phase 4: Rerun Step5+Step6 with correct h0
+#
+# Pure-Python helpers (exchange_conv_context / prepend_conv_context /
+# strip_conv_context / zigzag_causal_order / causal_positions /
+# build_segment_cu_seqlens) live in `cp.utils`.
 
-import math
 from typing import Optional
 
 import torch
@@ -24,14 +29,21 @@ from rtp_llm.models_py.triton_kernels.fla.chunk_o import chunk_fwd_o
 from rtp_llm.models_py.triton_kernels.fla.chunk_scaled_dot_kkt import (
     chunk_scaled_dot_kkt_fwd,
 )
+from rtp_llm.models_py.triton_kernels.fla.cp.utils import (
+    build_segment_cu_seqlens,
+    causal_positions,
+    zigzag_causal_order,
+)
 from rtp_llm.models_py.triton_kernels.fla.cumsum import chunk_local_cumsum
 from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
-from rtp_llm.models_py.triton_kernels.fla.op import exp, safe_exp
+from rtp_llm.models_py.triton_kernels.fla.op import exp
 from rtp_llm.models_py.triton_kernels.fla.solve_tril import solve_tril
 from rtp_llm.models_py.triton_kernels.fla.wy_fast import recompute_w_u_fwd
 
 # ---------------------------------------------------------------------------
-# Lightweight kernel: only compute h_final (= b_r), no h[t] or v_new stored.
+# cp_merge_kernel: walk the causal chain of (M, b) affines applied to h0.
+# Reads from `ag_hm` indirectly via `causal_order_ptr` so we never have to
+# materialise a reordered copy of the gathered buffer.
 # ---------------------------------------------------------------------------
 
 
@@ -119,12 +131,24 @@ def chunk_cp_compute_br_kernel(
 
         last_idx = min((i_t + 1) * BT, T) - 1
         if USE_G:
+            # Mask positions >= T inside this chunk: boundary-checked g loads
+            # return 0, but multiplying b_v by exp(b_g_last - 0) instead of 0
+            # leaks fp32 garbage into the b_h accumulator (fails on short
+            # sequences where T < BT).
+            m_t = (i_t * BT + tl.arange(0, BT)) < T
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = tl.make_block_ptr(
                 g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
             )
             b_g = tl.load(p_g, boundary_check=(0,))
-            b_v = b_v * safe_exp(b_g_last - b_g)[:, None]
+            # Use plain `exp` (NOT safe_exp): zigzag-CP's `chunk_local_cumsum`
+            # path can produce ULP-level differences vs the legacy single-card
+            # cumsum. safe_exp's `<= 0` branch amplifies that ULP noise into
+            # full magnitude divergence at chunk boundaries; plain exp keeps the
+            # decay continuous and stays within bf16 ULP of legacy.
+            # m_t mask is currently a no-op (sub-seq lens are chunk-multiples),
+            # kept for future cases where chunks may have intra-chunk padding.
+            b_v = b_v * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
             b_g_last = exp(b_g_last)
             b_h1 = b_h1 * b_g_last
             if K > 64:
@@ -219,12 +243,6 @@ def compute_br(k, w, u, g, cu_seqlens=None):
     return ht
 
 
-# ---------------------------------------------------------------------------
-# Kernel: compute M_total [N, H, K, K]
-# Propagate identity columns through all chunks to get transfer matrix.
-# ---------------------------------------------------------------------------
-
-
 @triton.heuristics(
     {
         "USE_G": lambda args: args["g"] is not None,
@@ -304,12 +322,17 @@ def chunk_cp_compute_M_total_kernel(
 
         last_idx = min((i_t + 1) * BT, T) - 1
         if USE_G:
+            # Same mask reasoning as compute_br_kernel.
+            m_t = (i_t * BT + tl.arange(0, BT)) < T
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = tl.make_block_ptr(
                 g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
             )
             b_g = tl.load(p_g, boundary_check=(0,))
-            b_wdh = b_wdh * safe_exp(b_g_last - b_g)[:, None]
+            # See compute_br_kernel comment: plain `exp` (no safe_exp) keeps
+            # decay continuous so ULP noise doesn't get amplified by `<= 0`
+            # branch.
+            b_wdh = b_wdh * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
             b_g_last_exp = exp(b_g_last)
             b_dh1 = b_dh1 * b_g_last_exp
             if K > 64:
@@ -400,73 +423,98 @@ def compute_M_total(k, w, g, cu_seqlens=None):
     return M_total
 
 
-# ---------------------------------------------------------------------------
-# Inclusive prefix scan of affine pairs using Hillis-Steele algorithm.
-# All communication is parallel within each round.
-# After scan, rank r holds: inclusive[r] = f_r ∘ f_{r-1} ∘ ... ∘ f_0
-# ---------------------------------------------------------------------------
+@triton.jit(do_not_specialize=["num_ranks"])
+def cp_merge_kernel(
+    h_out,
+    ag_hm,  # all-gather raw layout (NCCL order, NOT reordered)
+    h0,
+    causal_order_ptr,  # [2*cp_size] int tensor: causal_pos -> ag_hm row
+    num_ranks,  # number of affines to apply (causal positions 0..num_ranks-1)
+    N: tl.constexpr,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BV: tl.constexpr,
+    BK: tl.constexpr,
+    HAS_H0: tl.constexpr,
+):
+    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    i_n = i_nh // H
+    i_h = i_nh % H
+
+    stride_rank = N * H * K * (V + K)
+    ag_base = (i_n * H + i_h) * K * (V + K)
+
+    if HAS_H0:
+        p_h0 = tl.make_block_ptr(
+            h0 + (i_n * H + i_h) * K * V,
+            (K, V),
+            (V, 1),
+            (0, i_v * BV),
+            (BK, BV),
+            (1, 0),
+        )
+        b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
+    else:
+        b_h = tl.zeros([BK, BV], dtype=tl.float32)
+
+    for r in range(num_ranks):
+        # Look up actual ag_hm row for causal position r — avoids materializing
+        # a reordered copy of the gathered buffer (which is huge for large N).
+        r_actual = tl.load(causal_order_ptr + r).to(tl.int64)
+        base = r_actual * stride_rank + ag_base
+        p_b = tl.make_block_ptr(
+            ag_hm + base, (K, V), (V + K, 1), (0, i_v * BV), (BK, BV), (1, 0)
+        )
+        p_m = tl.make_block_ptr(
+            ag_hm + base + V, (K, K), (V + K, 1), (0, 0), (BK, BK), (1, 0)
+        )
+        b_b = tl.load(p_b, boundary_check=(0, 1)).to(tl.float32)
+        b_m = tl.load(p_m, boundary_check=(0, 1)).to(tl.float32)
+        b_h = tl.dot(b_m, b_h) + b_b
+
+    p_out = tl.make_block_ptr(
+        h_out + (i_n * H + i_h) * K * V, (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0)
+    )
+    tl.store(p_out, b_h.to(p_out.dtype.element_ty), boundary_check=(0, 1))
 
 
-def _bmm(A, B):
-    """Batched matmul for [N, H, K, K] tensors, reshaped to [N*H, K, K]."""
-    N, H, K, _ = A.shape
-    return torch.bmm(A.view(-1, K, K), B.view(-1, K, K)).view(N, H, K, K)
+def cp_merge(ag_hm, h0, num_ranks, N, H, K, V, causal_order):
+    """Triton kernel merge: iterate `num_ranks` affine transforms on h0,
+    reading affines from `ag_hm` in causal order via `causal_order` lookup.
 
-
-def _bmv(A, b):
-    """Batched mat-vec for [N,H,K,K] @ [N,H,K,V] → [N,H,K,V]."""
-    N, H, K, _ = A.shape
-    V = b.shape[-1]
-    return torch.bmm(A.view(-1, K, K), b.view(-1, K, V)).view(N, H, K, V)
-
-
-def inclusive_prefix_scan_affine(M_local, b_local, cp_group):
+    Args:
+        ag_hm: all-gather raw layout, shape [2*cp_size, N, H, K, V+K].
+        causal_order: [2*cp_size] int tensor; position r in causal chain
+            corresponds to row `causal_order[r]` of `ag_hm`.
     """
-    Hillis-Steele inclusive prefix scan.
-    After scan, rank r holds (M_inc, b_inc) = f_r ∘ ... ∘ f_0.
-    """
-    rank = dist.get_rank(cp_group)
-    world_size = dist.get_world_size(cp_group)
-    num_rounds = int(math.ceil(math.log2(world_size)))
+    BK = triton.next_power_of_2(K)
+    BV = 32
+    h_out = torch.empty(N, H, K, V, dtype=torch.float32, device=ag_hm.device)
 
-    M_cur = M_local.clone()
-    b_cur = b_local.clone()
+    def grid(meta):
+        return (triton.cdiv(V, meta["BV"]), N * H)
 
-    for d in range(num_rounds):
-        stride = 1 << d
-        src = rank - stride
-        dst = rank + stride
-
-        # Allocate recv buffers
-        M_recv = torch.empty_like(M_cur)
-        b_recv = torch.empty_like(b_cur)
-
-        # All sends and recvs in parallel using isend/irecv
-        ops = []
-        if dst < world_size:
-            ops.append(dist.isend(M_cur, dst=dst, group=cp_group))
-            ops.append(dist.isend(b_cur, dst=dst, group=cp_group))
-        if src >= 0:
-            ops.append(dist.irecv(M_recv, src=src, group=cp_group))
-            ops.append(dist.irecv(b_recv, src=src, group=cp_group))
-
-        for op in ops:
-            op.wait()
-
-        if src >= 0:
-            # combine: (M_cur, b_cur) ∘ (M_recv, b_recv)
-            b_cur = _bmv(M_cur, b_recv) + b_cur
-            M_cur = _bmm(M_cur, M_recv)
-
-    return M_cur, b_cur
+    cp_merge_kernel[grid](
+        h_out=h_out,
+        ag_hm=ag_hm,
+        h0=h0,
+        causal_order_ptr=causal_order,
+        num_ranks=num_ranks,
+        N=N,
+        H=H,
+        K=K,
+        V=V,
+        BV=BV,
+        BK=BK,
+        HAS_H0=h0 is not None,
+        num_warps=4,
+        num_stages=2,
+    )
+    return h_out
 
 
-# ---------------------------------------------------------------------------
-# Top-level
-# ---------------------------------------------------------------------------
-
-
-def chunk_gated_delta_rule_fwd_cp_scan(
+def chunk_gated_delta_rule_fwd_cp_zigzag(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -478,17 +526,21 @@ def chunk_gated_delta_rule_fwd_cp_scan(
     scale: Optional[float] = None,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    seg_cu: Optional[torch.LongTensor] = None,
+    causal_order: Optional[torch.Tensor] = None,
 ):
     """
-    CP-parallel gated delta rule forward — prefix scan variant.
+    CP-parallel gated delta rule forward — zigzag variant.
 
-    Phase 1: All ranks Step1-4 + Step5(h0=0) + M_total  (parallel)
-    Phase 2: Inclusive prefix scan in log2(P) rounds
-    Phase 3: Broadcast h0_global + local h0_true computation
-    Phase 4: All ranks Step5(h0_true) + Step6  (parallel)
+    Each rank computes on its own zigzag tokens. No QKV all-gather needed.
+    Communication is limited to SSM state affine pairs (b, M).
+
+    Input tokens are laid out as [seg0, seg1] per sequence, where seg0 is the
+    front half and seg1 is the back half of this rank's zigzag assignment.
     """
     rank = dist.get_rank(cp_group)
-    world_size = dist.get_world_size(cp_group)
+    cp_size = dist.get_world_size(cp_group)
+    num_segs = 2 * cp_size
 
     if use_qk_l2norm_in_kernel:
         q = l2norm_fwd(q)
@@ -497,79 +549,97 @@ def chunk_gated_delta_rule_fwd_cp_scan(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
-    # ---- Step 1-4 (all parallel) ----
-    g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
+    # ---- Phase 1: compute (b, M) for both segments in one pass ----
+    if seg_cu is None:
+        seg_cu = build_segment_cu_seqlens(cu_seqlens)
+
+    g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=seg_cu)
+
     A = chunk_scaled_dot_kkt_fwd(
-        k=k, beta=beta, g_cumsum=g, cu_seqlens=cu_seqlens, output_dtype=torch.float32
-    )
-    A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
-    w, u = recompute_w_u_fwd(
-        k=k,
-        v=v,
-        beta=beta,
-        A=A,
-        g_cumsum=g,
-        cu_seqlens=cu_seqlens,
+        k=k, beta=beta, g_cumsum=g, cu_seqlens=seg_cu, output_dtype=torch.float32
     )
 
-    B = k.shape[0]
+    A = solve_tril(A=A, cu_seqlens=seg_cu, output_dtype=k.dtype)
+
+    w, u = recompute_w_u_fwd(k=k, v=v, beta=beta, A=A, g_cumsum=g, cu_seqlens=seg_cu)
+
+    b = compute_br(k=k, w=w, u=u, g=g, cu_seqlens=seg_cu)  # [2*N, H, K, V]
+    M = compute_M_total(k=k, w=w, g=g, cu_seqlens=seg_cu)  # [2*N, H, K, K]
+
+    b0 = b[0::2].contiguous()  # [N, H, K, V]
+    b1 = b[1::2].contiguous()
+    M0 = M[0::2].contiguous()  # [N, H, K, K]
+    M1 = M[1::2].contiguous()
+
+    N = cu_seqlens.shape[0] - 1
     H = w.shape[2]
     K = k.shape[3]
-    V = u.shape[-1]
-    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
+    V = v.shape[-1]
 
-    # ---- Phase 1: compute b_r and M_r (all parallel) ----
-    h_partial_final = compute_br(k=k, w=w, u=u, g=g, cu_seqlens=cu_seqlens)
-    M_total = compute_M_total(k=k, w=w, g=g, cu_seqlens=cu_seqlens)
+    # ---- Phase 2: all-gather affine pairs ----
+    packed = torch.stack(
+        [
+            torch.cat([b0, M0], dim=-1),
+            torch.cat([b1, M1], dim=-1),
+        ],
+        dim=0,
+    )  # [2, N, H, K, V+K]
 
-    # ---- Phase 2: inclusive prefix scan (log2(P) rounds) ----
-    M_inc, b_inc = inclusive_prefix_scan_affine(M_total, h_partial_final, cp_group)
-    # Now rank r has: inclusive[r] = f_r ∘ ... ∘ f_0
-    # meaning: true_final[r] = M_inc @ h0_global + b_inc
-
-    # ---- Phase 3: compute h0_true locally + shift ----
-    h0_global = (
-        initial_state.float()
-        if initial_state is not None
-        else torch.zeros(N, H, K, V, dtype=torch.float32, device=k.device)
+    gathered = torch.empty(
+        num_segs, *packed.shape[1:], device=packed.device, dtype=packed.dtype
+    )
+    dist.all_gather_into_tensor(
+        gathered.view(num_segs, -1),
+        packed.view(2, -1),
+        group=cp_group,
     )
 
-    # All ranks compute true_final[rank] = M_inc @ h0_global + b_inc
-    true_final_local = _bmv(M_inc, h0_global) + b_inc
+    # No physical reorder of `gathered` — cp_merge_kernel reads ag_hm rows
+    # via `causal_order` lookup. Saves a 537MB+ transient buffer per layer
+    # at high N (and avoids the PyTorch advanced-indexing grid-limit bug).
+    if causal_order is None:
+        causal_order = torch.tensor(
+            zigzag_causal_order(cp_size), dtype=torch.long, device=packed.device
+        )
 
-    # Shift: rank r-1 sends true_final to rank r (all parallel)
-    h0_true = torch.empty(N, H, K, V, dtype=torch.float32, device=k.device)
-    ops = []
-    if rank > 0:
-        ops.append(dist.irecv(h0_true, src=rank - 1, group=cp_group))
-    if rank < world_size - 1:
-        ops.append(dist.isend(true_final_local, dst=rank + 1, group=cp_group))
-    for op in ops:
-        op.wait()
-    if rank == 0:
-        h0_true = h0_global
+    # ---- Phase 3: cp_merge to get h0 for each segment ----
+    h0_global = initial_state.float() if initial_state is not None else None
+    seg0_pos, seg1_pos = causal_positions(rank, cp_size)
 
-    # ---- Phase 4: rerun Step5 with correct h0 + Step6 (all parallel) ----
-    h, v_new, _ = chunk_gated_delta_rule_fwd_h(
+    h0_seg0 = cp_merge(gathered, h0_global, seg0_pos, N, H, K, V, causal_order)
+    h0_seg1 = cp_merge(gathered, h0_global, seg1_pos, N, H, K, V, causal_order)
+
+    # ---- Phase 4: rerun Step5 + Step6 with correct h0 (single pass) ----
+    # Interleave h0_seg0 and h0_seg1 to match seg_cu layout:
+    # seg_cu sequences are [seg0_seq0, seg1_seq0, seg0_seq1, seg1_seq1, ...]
+    h0_combined = torch.empty(2 * N, H, K, V, dtype=torch.float32, device=k.device)
+    h0_combined[0::2] = h0_seg0
+    h0_combined[1::2] = h0_seg1
+
+    h_all, v_new_all, _ = chunk_gated_delta_rule_fwd_h(
         k=k,
         w=w,
         u=u,
         g=g,
-        initial_state=h0_true,
+        initial_state=h0_combined,
         output_final_state=False,
-        cu_seqlens=cu_seqlens,
+        cu_seqlens=seg_cu,
     )
-
     o = chunk_fwd_o(
         q=q,
         k=k,
-        v=v_new,
-        h=h,
+        v=v_new_all,
+        h=h_all,
         g=g,
         scale=scale,
-        cu_seqlens=cu_seqlens,
+        cu_seqlens=seg_cu,
     )
 
-    final_state = true_final_local if output_final_state else None
+    # final_state: result of applying every rank's affine in causal order to h0
+    final_state = (
+        cp_merge(gathered, h0_global, num_segs, N, H, K, V, causal_order)
+        if output_final_state
+        else None
+    )
 
-    return o, h, final_state
+    return o, h_all, final_state
