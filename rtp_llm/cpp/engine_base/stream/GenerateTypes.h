@@ -24,6 +24,20 @@ public:
         return inputLength() - prefix_length;
     }
 
+    std::map<int, int> multimodalLengths() const {
+        std::map<int, int> lengths;
+        if (!multimodal_inputs.has_value() || !multimodal_features.has_value()) {
+            return {};
+        } else {
+            RTP_LLM_CHECK(multimodal_inputs.value().size() == multimodal_features.value().size());
+            int mm_num = multimodal_inputs.value().size();
+            for (int i = 0; i < mm_num; ++i) {
+                lengths[multimodal_inputs.value()[i].mm_type] += multimodal_features.value()[i].size(0);
+            }
+        }
+        return lengths;
+    }
+
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "GenerateInput {"
@@ -88,6 +102,7 @@ struct AuxInfo {
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;
+    std::map<int, int>           multimodal_lengths = {};
 };
 
 class GenerateOutput {
