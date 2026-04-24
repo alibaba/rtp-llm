@@ -11,3 +11,19 @@ py_test(
         'gpu': 'H20',
     },
 )
+
+py_test(
+    name = "test_per_channel_fp8_helpers",
+    srcs = ["test_per_channel_fp8_helpers.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "test_model_weight_info",
+    srcs = ["test_model_weight_info.py"],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
