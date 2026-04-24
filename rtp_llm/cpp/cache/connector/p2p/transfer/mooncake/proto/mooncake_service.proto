@@ -1,0 +1,57 @@
+syntax = "proto2";
+
+import "arpc/proto/rpc_extensions.proto";
+option cc_generic_services = true;
+
+package mooncake_transfer;
+
+enum MooncakeTransferErrorCodePB {
+    MOONCAKE_TRANSFER_NONE_ERROR      = 0;
+    MOONCAKE_TRANSFER_UNKNOWN_ERROR   = 1;
+    MOONCAKE_TRANSFER_CONTEXT_TIMEOUT = 2;
+    MOONCAKE_TRANSFER_TASK_CANCELLED  = 3;
+    MOONCAKE_TRANSFER_BUFFER_MISMATCH = 4;
+}
+
+message MooncakeRemoteBlockDescriptor {
+    optional int64  cache_key   = 1;
+    optional uint32 block_index = 2;
+    optional uint64 target_addr = 3;
+    optional uint64 len         = 4;
+}
+
+message MooncakePrepareRequest {
+    optional string unique_key  = 1;
+    optional int64  deadline_ms = 2;
+}
+
+message MooncakePrepareResponse {
+    optional MooncakeTransferErrorCodePB error_code    = 1;
+    optional string                      error_message = 2;
+    optional string                      segment_name  = 3;
+    repeated MooncakeRemoteBlockDescriptor descriptors = 4;
+}
+
+message MooncakeFinishRequest {
+    optional string                      unique_key    = 1;
+    optional bool                        success       = 2;
+    optional MooncakeTransferErrorCodePB error_code    = 3;
+    optional string                      error_message = 4;
+}
+
+message MooncakeFinishResponse {
+    optional MooncakeTransferErrorCodePB error_code    = 1;
+    optional string                      error_message = 2;
+}
+
+service MooncakeTransferService {
+    option (arpc.global_service_id) = 10019;
+
+    rpc prepare(MooncakePrepareRequest) returns (MooncakePrepareResponse) {
+        option (arpc.local_method_id) = 10020;
+    }
+
+    rpc finish(MooncakeFinishRequest) returns (MooncakeFinishResponse) {
+        option (arpc.local_method_id) = 10021;
+    }
+}

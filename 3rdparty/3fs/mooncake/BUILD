@@ -1,6 +1,6 @@
 load("//bazel:defs.bzl", "rpm_library")
 
-_HF3FS_SHARED_LIBS = [
+_HF3FS_SHARED_LIBS_WITHOUT_GLOG = [
     "libhf3fs_api_shared.so",
     "libboost_context.so.1.71.0",
     "libboost_filesystem.so.1.71.0",
@@ -10,8 +10,6 @@ _HF3FS_SHARED_LIBS = [
     "libboost_thread.so.1.71.0",
     "libboost_atomic.so.1.71.0",
     "libdouble-conversion.so.3",
-    "libgflags.so.2.2",
-    "libglog.so.0",
     "libevent-2.1.so.7",
     "libdwarf.so.1",
     "libicui18n.so.66",
@@ -23,29 +21,18 @@ _HF3FS_SHARED_LIBS = [
 ]
 
 rpm_library(
-    name = "hf3fs_default_impl",
+    name = "hf3fs_mooncake_impl",
     rpms = [
         "@hf3fs_rpm//file:file",
     ],
     lib_path = "usr/lib64",
     include_path = "usr/include",
-    shared_libs = _HF3FS_SHARED_LIBS,
+    shared_libs = _HF3FS_SHARED_LIBS_WITHOUT_GLOG,
     hdrs = [
         "hf3fs_usrbio.h",
     ],
-)
-
-cc_library(
-    name = "hf3fs",
-    deps = select({
-        "//:enable_mooncake_te": ["//3rdparty/3fs/mooncake:hf3fs_mooncake_impl"],
-        "//conditions:default": [":hf3fs_default_impl"],
-    }),
-    visibility = ["//visibility:public"],
-)
-
-alias(
-    name = "hf3fs_shared",
-    actual = ":hf3fs",
-    visibility = ["//visibility:public"],
+    deps = [
+        "@mooncake_transfer_engine_local//:glog",
+        "@mooncake_transfer_engine_local//:gflags",
+    ],
 )

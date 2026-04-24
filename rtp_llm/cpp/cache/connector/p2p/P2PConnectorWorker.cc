@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
+#include <exception>
+
 namespace rtp_llm {
 
 P2PConnectorWorker::P2PConnectorWorker(P2PConnectorWorkerConfig                    config,
@@ -21,9 +23,17 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
         return false;
     }
 
-    auto backend = config_.transfer_backend_config.cache_store_rdma_mode ? transfer::TransferBackend::kBarexRdma
-                                                                          : transfer::TransferBackend::kTcp;
-    auto [sender, receiver] = transfer::createTransferBackend(backend, config_.transfer_backend_config, metrics_reporter_);
+    transfer::TransferBackendPair backend_pair;
+    const auto backend = config_.transfer_backend_config.resolveBackend();
+    try {
+        backend_pair = transfer::createTransferBackend(backend, config_.transfer_backend_config, metrics_reporter_);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("init failed: createTransferBackend threw, backend: %d, error: %s",
+                          static_cast<int>(backend),
+                          e.what());
+        return false;
+    }
+    auto [sender, receiver] = std::move(backend_pair);
     if (!sender || !receiver) {
         RTP_LLM_LOG_ERROR("init failed: createTransferBackend failed");
         return false;

@@ -78,6 +78,7 @@ cc_library(
     srcs = ["TransferBackendFactory.cc"],
     deps = [
         ":transfer_backend_factory_interface",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/mooncake:mooncake_backend_stub",
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
         "//rtp_llm/cpp/utils:core_utils",
     ],
@@ -94,4 +95,3 @@ cc_library(
     ],
     visibility = ['//visibility:public'],
 )
-
