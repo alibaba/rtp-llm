@@ -51,7 +51,7 @@ public:
         }
 
         config_ = config;
-        engine_ = std::make_unique<::mooncake::TransferEngine>(false);
+        engine_ = std::make_unique<::mooncake::TransferEngine>(true);
 
         const auto metadata_conn_string = config.classic.metadata_conn_string.empty()
                                               ? std::string(P2PHANDSHAKE)

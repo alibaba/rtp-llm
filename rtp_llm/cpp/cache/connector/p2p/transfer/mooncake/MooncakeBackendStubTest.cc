@@ -2154,6 +2154,96 @@ TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineReturnsCancelledWhen
     EXPECT_NE(actual_msg.find("task not found"), std::string::npos);
 }
 
+
+TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineCopiesPayloadOverRdmaTransport) {
+    auto receiver_adapter = createMooncakeTransferEngineAdapter();
+    auto sender_adapter = createMooncakeTransferEngineAdapter();
+    if (!receiver_adapter || !sender_adapter) {
+        GTEST_SKIP() << "Mooncake classic TE is not enabled in this build";
+    }
+
+    const std::string rdma_host = autil::NetUtil::getBindIp();
+    if (rdma_host.empty() || rdma_host == "127.0.0.1") {
+        GTEST_SKIP() << "No routable host ip for RDMA test";
+    }
+
+    const auto control_plane_port = nextTestPort();
+    const auto receiver_rpc_port = nextTestPort();
+    const auto sender_rpc_port = nextTestPort();
+    const auto receiver_server_name = rdma_host + ":" + std::to_string(receiver_rpc_port);
+    const auto sender_server_name = rdma_host + ":" + std::to_string(sender_rpc_port);
+
+    TransferBackendConfig receiver_config;
+    receiver_config.cache_store_mooncake_mode = true;
+    receiver_config.mooncake.location = "tp0";
+    receiver_config.mooncake.classic.transport = "rdma";
+    receiver_config.mooncake.control_plane_port = control_plane_port;
+    receiver_config.cache_store_listen_port = control_plane_port;
+    receiver_config.messager_io_thread_count = 1;
+    receiver_config.messager_worker_thread_count = 4;
+    receiver_config.cache_store_tcp_anet_rpc_thread_num = 1;
+    receiver_config.cache_store_tcp_anet_rpc_queue_num = 8;
+    receiver_config.mooncake.classic.local_server_name = receiver_server_name;
+    receiver_config.mooncake.classic.ip_or_host_name = rdma_host;
+    receiver_config.mooncake.classic.rpc_port = static_cast<uint16_t>(receiver_rpc_port);
+
+    MooncakeKVCacheReceiver receiver(receiver_adapter);
+    if (!receiver.init(receiver_config)) {
+        GTEST_SKIP() << "Mooncake classic TE RDMA init unavailable on this host";
+    }
+
+    char target_block[64]{};
+    BlockInfo recv_mem{false, 0, 0, target_block, sizeof(target_block)};
+    ASSERT_TRUE(receiver.regMem(recv_mem, sizeof(target_block)));
+
+    auto recv_block_info = std::make_shared<KeyBlockInfo>();
+    recv_block_info->blocks.push_back(recv_mem);
+
+    RecvRequest recv_request;
+    recv_request.unique_key = "classic_rdma_round_trip";
+    recv_request.deadline_ms = currentTimeMs() + 5000;
+    recv_request.block_info[188] = recv_block_info;
+    auto recv_task = receiver.recv(recv_request);
+    ASSERT_NE(recv_task, nullptr);
+
+    TransferBackendConfig sender_config = receiver_config;
+    sender_config.mooncake.classic.local_server_name = sender_server_name;
+    sender_config.mooncake.classic.rpc_port = static_cast<uint16_t>(sender_rpc_port);
+
+    MooncakeKVCacheSender sender(sender_adapter, createMooncakeControlPlaneClient());
+    ASSERT_TRUE(sender.init(sender_config));
+
+    char source_block[64];
+    for (size_t i = 0; i < sizeof(source_block); ++i) {
+        source_block[i] = static_cast<char>('K' + (i % 11));
+    }
+    BlockInfo send_mem{false, 0, 0, source_block, sizeof(source_block)};
+    ASSERT_TRUE(sender.regMem(send_mem, sizeof(source_block)));
+
+    auto send_block_info = std::make_shared<KeyBlockInfo>();
+    send_block_info->blocks.push_back(send_mem);
+
+    SendRequest send_request;
+    send_request.ip = rdma_host;
+    send_request.port = control_plane_port;
+    send_request.unique_key = recv_request.unique_key;
+    send_request.deadline_ms = recv_request.deadline_ms;
+    send_request.block_info[188] = send_block_info;
+
+    TransferErrorCode actual_code = TransferErrorCode::UNKNOWN;
+    std::string actual_msg;
+    sender.send(send_request, [&](TransferErrorCode code, const std::string& msg) {
+        actual_code = code;
+        actual_msg = msg;
+    });
+
+    EXPECT_EQ(actual_code, TransferErrorCode::OK) << actual_msg;
+    ASSERT_TRUE(waitTaskDone(recv_task, 2000));
+    EXPECT_TRUE(recv_task->success());
+    ASSERT_TRUE(waitBufferEquals(source_block, target_block, sizeof(source_block), 2000));
+    EXPECT_EQ(std::memcmp(source_block, target_block, sizeof(source_block)), 0);
+}
+
 }  // namespace
 }  // namespace mooncake
 }  // namespace transfer
