@@ -140,16 +140,41 @@ class PyFlashinferPrefillPagedAttnOp(object):
             qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
 
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
+            # Allocate DEDICATED max-sized CUDA-graph buffers instead of
+            # aliasing to fmha_params.{decode_page_indptr_d, page_indice_d,
+            # paged_kv_last_page_len_d}. Those fmha_params tensors are
+            # reshaped per call by FlashInferMlaParams::refreshBuffer
+            # (set_sizes_contiguous), violating FlashInfer's CG contract
+            # and causing captured graphs to bake stale plan_info scalars.
+            fixed_batch_size = len(attn_inputs.cu_seqlens) - 1
+            max_pages_per_seq = (
+                self.max_seq_len + self.page_size - 1
+            ) // self.page_size
+            max_total_pages = max(fixed_batch_size * max_pages_per_seq, 1)
+            dtype = qo_indptr.dtype
+            # FlashInfer CG buffers must be GPU-resident so captured kernels can
+            # dereference them.  qo_indptr may be a non-pinned CPU tensor (result
+            # of cu_seqlens.clone() which does NOT preserve pin_memory), so we
+            # move everything to CUDA explicitly.
+            cg_device = torch.device("cuda")
+            qo_indptr = qo_indptr.to(cg_device)
+            self._paged_kv_indptr_buf = torch.zeros(
+                fixed_batch_size + 1, dtype=dtype, device=cg_device
+            )
+            self._paged_kv_last_page_len_buf = torch.zeros(
+                fixed_batch_size, dtype=dtype, device=cg_device
+            )
+            self._paged_kv_indices_buf = torch.zeros(
+                max_total_pages, dtype=dtype, device=cg_device
+            )
             self.prefill_wrapper._use_cuda_graph = True
             self.prefill_wrapper._qo_indptr_buf = qo_indptr
-            self.prefill_wrapper._paged_kv_indptr_buf = (
-                self.fmha_params.decode_page_indptr_d
-            )
+            self.prefill_wrapper._paged_kv_indptr_buf = self._paged_kv_indptr_buf
             self.prefill_wrapper._paged_kv_last_page_len_buf = (
-                self.fmha_params.paged_kv_last_page_len_d
+                self._paged_kv_last_page_len_buf
             )
-            self.prefill_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
-            self.prefill_wrapper._fixed_batch_size = len(attn_inputs.cu_seqlens) - 1
+            self.prefill_wrapper._paged_kv_indices_buf = self._paged_kv_indices_buf
+            self.prefill_wrapper._fixed_batch_size = fixed_batch_size
             if attn_inputs.prefill_cuda_graph_copy_params is not None:
                 self.prefill_cuda_graph_copy_params = (
                     attn_inputs.prefill_cuda_graph_copy_params
@@ -219,7 +244,22 @@ class PyFlashinferPrefillPagedAttnOp(object):
             causal=True,
             q_data_type=self.datatype,
             kv_data_type=kv_dtype,
+            disable_split_kv=self.enable_cuda_graph,
         )
+        # CG replay: pad stale entries in the fixed-size CG buffers.
+        # plan() only copies source tensors up to actual_batch_size+1 entries into
+        # the max-sized CG buffers; entries [actual_batch_size+1:max_batch_size+1]
+        # remain stale from prior calls.  During replay (which processes max_batch_size
+        # sequences), padding batches use those stale page ranges and read wrong KV data.
+        if getattr(self, "_paged_kv_indptr_buf", None) is not None:
+            actual_bs = attn_inputs.input_lengths.size(0)
+            max_bs = self._paged_kv_indptr_buf.size(0) - 1
+            if actual_bs < max_bs:
+                last_indptr = self._paged_kv_indptr_buf[actual_bs].item()
+                self._paged_kv_indptr_buf[actual_bs + 1 :].fill_(last_indptr)
+                self._paged_kv_last_page_len_buf[actual_bs:].fill_(1)
+            else:
+                torch.clamp_min_(self._paged_kv_last_page_len_buf, 1)
         return self.fmha_params
 
     @staticmethod
@@ -669,12 +709,26 @@ class PyFlashinferPrefillPagedTargetVerifyAttnOp(object):
         self.head_dim_qk = attn_configs.size_per_head
         self.head_dim_vo = attn_configs.size_per_head
         self.page_size = attn_configs.kernel_tokens_per_block
+        self.max_seq_len = attn_configs.max_seq_len
         self.datatype = attn_configs.dtype
         self.kv_cache_dtype = attn_configs.kv_cache_dtype
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = getattr(attn_inputs, "is_cuda_graph", False)
-        self._qo_indptr_buf: Optional[torch.Tensor] = None
         self._cuda_graph_initialized = False
+        # Dedicated max-sized CUDA-graph buffers; allocated at first prepare()
+        # when max_batch_size is known from the captured attn_inputs layout.
+        # These MUST be separate from fmha_params.{decode_page_indptr_d,
+        # page_indice_d, paged_kv_last_page_len_d} — those tensors are
+        # reshaped in place per call by FlashInferMlaParams::refreshBuffer,
+        # violating FlashInfer's CG contract that the buffers must be sized
+        # for the maximum workload over the wrapper lifetime.  Aliasing
+        # caused the captured graph's kernel launch to bake stale
+        # plan_info scalars and concurrent replays read wrong KV ranges.
+        self._qo_indptr_buf: Optional[torch.Tensor] = None
+        self._paged_kv_indptr_buf: Optional[torch.Tensor] = None
+        self._paged_kv_last_page_len_buf: Optional[torch.Tensor] = None
+        self._paged_kv_indices_buf: Optional[torch.Tensor] = None
+        self._capture_qo_indptr: Optional[torch.Tensor] = None
         self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
             self.g_workspace_buffer,
             "HND",
@@ -724,21 +778,52 @@ class PyFlashinferPrefillPagedTargetVerifyAttnOp(object):
         kv_dtype = self._get_kv_dtype(attn_inputs)
 
         if self.enable_cuda_graph and not self._cuda_graph_initialized:
+            # Size CG buffers to the maximum workload: max_batch_size slots,
+            # each holding up to ceil(max_seq_len / page_size) page IDs.
+            # FlashInfer's plan() in CG mode copies the input indptr/indices
+            # tensors into these dedicated buffers via .copy_() — that write
+            # must target storage distinct from the source (fmha_params.*_d),
+            # otherwise it degenerates to a self-copy and the captured graph
+            # ends up reading from the dynamically-reshaped fmha_params
+            # storage instead of the stable CG buffer.
+            max_pages_per_seq = (
+                self.max_seq_len + self.page_size - 1
+            ) // self.page_size
+            max_total_pages = max(batch_size * max_pages_per_seq, 1)
+            device = qo_indptr.device
+            dtype = qo_indptr.dtype
+            self._qo_indptr_buf = torch.zeros(
+                batch_size + 1, dtype=dtype, device=device
+            )
+            self._paged_kv_indptr_buf = torch.zeros(
+                batch_size + 1, dtype=dtype, device=device
+            )
+            self._paged_kv_last_page_len_buf = torch.zeros(
+                batch_size, dtype=dtype, device=device
+            )
+            self._paged_kv_indices_buf = torch.zeros(
+                max_total_pages, dtype=dtype, device=device
+            )
             self.prefill_wrapper._use_cuda_graph = True
-            self._qo_indptr_buf = qo_indptr.clone()
             self.prefill_wrapper._qo_indptr_buf = self._qo_indptr_buf
-            self.prefill_wrapper._paged_kv_indptr_buf = (
-                self.fmha_params.decode_page_indptr_d
-            )
+            self.prefill_wrapper._paged_kv_indptr_buf = self._paged_kv_indptr_buf
             self.prefill_wrapper._paged_kv_last_page_len_buf = (
-                self.fmha_params.paged_kv_last_page_len_d
+                self._paged_kv_last_page_len_buf
             )
-            self.prefill_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
+            self.prefill_wrapper._paged_kv_indices_buf = self._paged_kv_indices_buf
             self.prefill_wrapper._fixed_batch_size = batch_size
+            self._capture_qo_indptr = qo_indptr.clone()
             self._cuda_graph_initialized = True
-        elif self.enable_cuda_graph:
-            self._qo_indptr_buf.copy_(qo_indptr, non_blocking=True)
-            qo_indptr = self._qo_indptr_buf
+
+        # In CG mode, always use the capture-time qo_indptr so that
+        # plan_info (baked into the captured CUDA graph as kernel arguments)
+        # stays identical across capture and all replays.  The C++ runner
+        # modifies decode_cu_seqlens_d for padding batches (filling them
+        # with the last active offset), which changes total_num_rows and
+        # per-batch Q counts, producing a different plan_info grid that
+        # mismatches the captured kernel launch configuration.
+        if self._capture_qo_indptr is not None:
+            qo_indptr = self._capture_qo_indptr
 
         self.prefill_wrapper.plan(
             qo_indptr,
@@ -752,7 +837,39 @@ class PyFlashinferPrefillPagedTargetVerifyAttnOp(object):
             causal=True,
             q_data_type=self.datatype,
             kv_data_type=kv_dtype,
+            disable_split_kv=self.enable_cuda_graph,
         )
+        # CG replay: ensure padding batches have safe KV metadata.
+        # plan() copies source tensors into CG buffers; padding batches
+        # (input_lengths=0) get 0 KV pages from fill_params.  With the
+        # fixed capture-time qo_indptr, the kernel still launches CTAs
+        # for padding batches.  Give each padding batch 1 dummy KV page
+        # (pointing to a real page) so the kernel reads valid memory
+        # instead of computing negative kv_len from 0 pages.
+        if self._cuda_graph_initialized and self._paged_kv_indptr_buf is not None:
+            actual_bs = int((attn_inputs.input_lengths > 0).sum().item())
+            max_bs = self._paged_kv_indptr_buf.size(0) - 1
+            if actual_bs < max_bs and actual_bs > 0:
+                last_real_indptr = int(self._paged_kv_indptr_buf[actual_bs].item())
+                num_padding = max_bs - actual_bs
+                self._paged_kv_indptr_buf[actual_bs + 1 :] = (
+                    last_real_indptr
+                    + torch.arange(
+                        1,
+                        num_padding + 1,
+                        device=self._paged_kv_indptr_buf.device,
+                        dtype=self._paged_kv_indptr_buf.dtype,
+                    )
+                )
+                safe_page = int(self._paged_kv_indices_buf[0].item())
+                end_idx = min(
+                    last_real_indptr + num_padding,
+                    self._paged_kv_indices_buf.size(0),
+                )
+                self._paged_kv_indices_buf[last_real_indptr:end_idx].fill_(safe_page)
+                self._paged_kv_last_page_len_buf[actual_bs:].fill_(1)
+            else:
+                torch.clamp_min_(self._paged_kv_last_page_len_buf, 1)
         return self.fmha_params
 
     @staticmethod

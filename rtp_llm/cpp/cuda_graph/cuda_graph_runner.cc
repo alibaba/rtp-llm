@@ -256,6 +256,21 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
             if (py_model_inputs_.attention_inputs.input_lengths_d.defined()) {
                 py_model_inputs_.attention_inputs.input_lengths_d.slice(0, state.current_batch_size, max_bs_).fill_(0);
             }
+            // Padding rows: sequence_lengths_plus_1_d must be >= 1 for SSM kernels
+            // (they compute index = value - 1; 0 would underflow to ~4.3B → OOB).
+            py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d.slice(0, state.current_batch_size, max_bs_)
+                .fill_(1);
+        }
+
+        // Propagate per-batch sequence_lengths_plus_1_d from the actual request so
+        // SSM/linear-attention kernels (Qwen3-Next GatedDeltaNet) see the correct
+        // state slot for each batch.  PyWrappedModel sets this to
+        // sequence_lengths + 1 (or prefix_lengths + 1 for target_verify), so it
+        // reflects the true KV-cache position before the current draft tokens.
+        if (inputs.attention_inputs.sequence_lengths_plus_1_d.defined()) {
+            optimizedCopyAsync(inputs.attention_inputs.sequence_lengths_plus_1_d,
+                               py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
+                               state.current_batch_size * sizeof(int));
         }
 
         int last_valid = state.current_seq_len;
@@ -542,11 +557,15 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.prefix_lengths_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
     }
     // padding_offset [max_num_token_, int32] (for attention padding)
-    inputs.attention_inputs.padding_offset            = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
-    inputs.attention_inputs.padding_offset            = inputs.attention_inputs.padding_offset.pin_memory();
-    inputs.attention_inputs.dtype                     = model_data_type_;
-    inputs.attention_inputs.is_s_padded               = true;
-    inputs.attention_inputs.sequence_lengths_plus_1_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+    inputs.attention_inputs.padding_offset = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
+    inputs.attention_inputs.padding_offset = inputs.attention_inputs.padding_offset.pin_memory();
+    inputs.attention_inputs.dtype          = model_data_type_;
+    inputs.attention_inputs.is_s_padded    = true;
+    // Initialize to 1, not 0: SSM/linear-attention kernels (Qwen3-Next GatedDeltaNet)
+    // compute `index = value - 1`; a value of 0 wraps to ~4.3B on unsigned indexing → OOB.
+    // The initial forward in initCapture() (output-dtype probe) runs with this tensor,
+    // so it must be safe before capturePrefill() fills it with the correct prefix_len+1.
+    inputs.attention_inputs.sequence_lengths_plus_1_d = torch::ones({int(max_bs_)}, options_cuda_int32_);
     // Pre-allocate stable device buffers for prefix_lengths_d / input_lengths_d.
     // These are consumed (outside the captured graph) by Triton kernels
     // `_prepare_cg_spec_decode_kernel` and `_prepare_cg_prefill_kernel` which

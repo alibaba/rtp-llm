@@ -52,6 +52,15 @@ void CudaGraphRunner::capturePrefill() {
                 cu_seqlens_ptr[b + 1]    = cu_seqlens_ptr[b] + input_lengths_ptr[b];
                 cu_kv_seqlens_ptr[b + 1] = cu_kv_seqlens_ptr[b] + input_lengths_ptr[b] + prefix_lengths_ptr[b];
             }
+
+            // SSM/linear-attention kernels (e.g. Qwen3-Next GatedDeltaNet) use
+            // `sequence_lengths_plus_1_d - 1` as the current SSM state slot index.
+            // SSM state has max_seq_len_ slots (indices 0..max_seq_len_-1), so
+            // sequence_lengths_plus_1_d must not exceed max_seq_len_ to avoid OOB.
+            // Capture uses prefix_len = max_seq_len_ for attention buffer sizing, but
+            // using fill_(prefix_len + 1) = max_seq_len_ + 1 gives index max_seq_len_
+            // which is OOB.  Use max_seq_len_ as the cap: index = max_seq_len_ - 1.
+            inputs.attention_inputs.sequence_lengths_plus_1_d.fill_(max_seq_len_);
         }
 
         inputs.attention_inputs.context_total_kv_length = seq_len;
