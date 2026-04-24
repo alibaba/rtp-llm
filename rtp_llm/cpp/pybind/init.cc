@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpEmbeddingOp.h"
+#include "rtp_llm/cpp/pybind/common/InitEngineOps.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingQuery.h"
 #include "pybind11/pybind11.h"
@@ -53,6 +54,7 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerMultimodalInput(m);
     registerRtpEmbeddingOp(m);
     registerEmbeddingOutput(m);
+    m.def("init_engine", &initEngine, py::arg("py_ft_alog_file_path"));
 }
 
 }  // namespace rtp_llm

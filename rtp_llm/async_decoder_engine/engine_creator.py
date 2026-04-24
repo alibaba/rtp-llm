@@ -14,6 +14,25 @@ from rtp_llm.ops import TaskType
 from rtp_llm.utils.time_util import timer_wrapper
 
 
+def _init_rtp_engine(alog_conf_path: str) -> None:
+    has_namespace = hasattr(torch.ops, "rtp_llm")
+    has_init_engine = has_namespace and hasattr(torch.ops.rtp_llm, "init_engine")
+    if has_init_engine:
+        torch.ops.rtp_llm.init_engine(alog_conf_path)
+        return
+
+    logging.warning(
+        "torch.ops.rtp_llm.init_engine missing, fallback to libth_transformer.init_engine"
+    )
+    import libth_transformer
+
+    if not hasattr(libth_transformer, "init_engine"):
+        raise AttributeError(
+            "libth_transformer.init_engine is not available after torch op fallback"
+        )
+    libth_transformer.init_engine(alog_conf_path)
+
+
 @timer_wrapper(description="create async engine")
 def create_engine(
     model: BaseModel,
@@ -35,7 +54,7 @@ def create_engine(
     Returns:
         BaseEngine instance
     """
-    torch.ops.rtp_llm.init_engine(alog_conf_path)
+    _init_rtp_engine(alog_conf_path)
 
     if model.model_config.task_type == TaskType.LANGUAGE_MODEL:
         return LanguageCppEngine(
