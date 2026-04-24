@@ -1,5 +1,6 @@
 import functools
 import logging
+import re
 
 # Forward references for type hints
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
@@ -519,11 +520,58 @@ class ModelDeployWeightInfo:
         if isinstance(database, CkptDatabase) and not database.is_ft_style:
             self.process_meta_from_ckpt(database.pretrain_file_list)
             self.process_meta_from_ckpt(database.finetune_file_list)
-            return self.get_weight_info()
+            weight_info = self.get_weight_info()
+            self._filter_ckpt_files_by_weight_info(database, weight_info)
+            return weight_info
         elif database.is_ft_style:
             return None
         else:
             raise Exception("Unknown database class")
+
+    @staticmethod
+    def _ckpt_tensor_name_to_regex(tensor_name: str) -> re.Pattern[str]:
+        placeholder_pattern = re.compile(r"\{[^{}]+\}")
+        pattern_parts = []
+        pos = 0
+        for match in placeholder_pattern.finditer(tensor_name):
+            pattern_parts.append(re.escape(tensor_name[pos : match.start()]))
+            pattern_parts.append(r"\d+")
+            pos = match.end()
+        pattern_parts.append(re.escape(tensor_name[pos:]))
+        return re.compile(r"^" + "".join(pattern_parts) + r"$")
+
+    @classmethod
+    def _collect_ckpt_tensor_name_regexes(
+        cls, weight_info: ModelWeightInfo
+    ) -> List[re.Pattern[str]]:
+        tensor_names = set()
+
+        def collect_from_weight(weight: WeightModule):
+            for component in weight.get_components():
+                for ckpt_weight in getattr(component, "weights", []) or []:
+                    if ckpt_weight.name:
+                        tensor_names.add(ckpt_weight.name)
+
+        for weight in weight_info.weights or []:
+            collect_from_weight(weight)
+
+        for layer_weights in weight_info.layer_weights or []:
+            if isinstance(layer_weights, list):
+                for weight in layer_weights:
+                    collect_from_weight(weight)
+            else:
+                collect_from_weight(layer_weights)
+
+        return [
+            cls._ckpt_tensor_name_to_regex(tensor_name)
+            for tensor_name in sorted(tensor_names)
+        ]
+
+    def _filter_ckpt_files_by_weight_info(
+        self, database: CkptDatabase, weight_info: ModelWeightInfo
+    ):
+        required_tensor_patterns = self._collect_ckpt_tensor_name_regexes(weight_info)
+        database.filter_by_tensor_name_regexes(required_tensor_patterns)
 
     def create_dynamic_weights(self) -> List[AtomicWeight]:
         dynamic_weights = []

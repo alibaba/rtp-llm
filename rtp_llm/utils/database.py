@@ -110,7 +110,43 @@ class CkptDatabase(BaseDatabase):
         return self._ft_weight_params
 
     def get_max_file_size(self) -> int:
+        if not self.pretrain_file_list:
+            return 0
         return max([file.file_size for file in self.pretrain_file_list])
+
+    def filter_by_tensor_name_regexes(
+        self, required_tensor_patterns: List[re.Pattern[str]]
+    ):
+        """Keep only pretrain checkpoint files containing tensors required by the model.
+
+        Finetune files, such as ptuning weights, are intentionally left untouched
+        because they are small and still need to be applied after pretrain loading.
+        """
+        if len(self.pretrain_file_list) <= 1 or not required_tensor_patterns:
+            return
+
+        def is_required_file(ckpt_file: CkptFileInfo) -> bool:
+            return any(
+                pattern.fullmatch(tensor_name)
+                for tensor_name in ckpt_file.get_tensor_names()
+                for pattern in required_tensor_patterns
+            )
+
+        original_count = len(self.pretrain_file_list)
+        filtered_file_list = [
+            ckpt for ckpt in self.pretrain_file_list if is_required_file(ckpt)
+        ]
+        if not filtered_file_list:
+            logging.warning(
+                "filter_by_tensor_name_regexes found no matching checkpoint files; "
+                "keep original pretrain_file_list"
+            )
+            return
+
+        self.pretrain_file_list = filtered_file_list
+        logging.info(
+            f"filter_by_tensor_name_regexes: {original_count} -> {len(self.pretrain_file_list)} files"
+        )
 
     def load_hf_meta(self, path: str):
         # avoid consolidated.safetensors in Mistral-Nemo-Instruct-2407
