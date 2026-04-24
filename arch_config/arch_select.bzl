@@ -66,8 +66,8 @@ def platform_deps():
     return select({
         "@rtp_llm//:using_arm": [],
         "@rtp_llm//:using_cuda12_arm": [],
-        "@rtp_llm//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0"],
-        "//conditions:default": ["decord==0.6.0"],
+        "@rtp_llm//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0", "av==16.1.0"],
+        "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
     })
 
 def torch_deps():
