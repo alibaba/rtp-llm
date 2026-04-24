@@ -39,6 +39,19 @@ py_test(
 )
 
 py_test(
+    name = "test_chunk_gdn_amd",
+    srcs = [
+        "test_chunk_gdn_amd.py"
+    ],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
+)
+
+py_test(
     name = "test_l2norm",
     srcs = [
         "test_l2norm.py"

@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
-from rtp_llm.models_py.triton_kernels.fla.op import exp, exp2
+from rtp_llm.models_py.triton_kernels.fla.op import exp2
 from rtp_llm.models_py.triton_kernels.fla.wy_fast import recompute_w_u_fwd
 
 
@@ -35,7 +35,6 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     BC: tl.constexpr,
     BK: tl.constexpr,
     USE_G: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
@@ -141,98 +140,57 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     m_I = o_i[:, None] == o_i[None, :]
 
     if USE_G:
-        if USE_EXP2:
-            b_A00 *= tl.where(
-                m_d & m_tc0[:, None] & m_tc0[None, :],
-                exp2(b_g0[:, None] - b_g0[None, :]),
-                0.0,
-            )
-            b_A11 *= tl.where(
-                m_d & m_tc1[:, None] & m_tc1[None, :],
-                exp2(b_g1[:, None] - b_g1[None, :]),
-                0.0,
-            )
-            b_A22 *= tl.where(
-                m_d & m_tc2[:, None] & m_tc2[None, :],
-                exp2(b_g2[:, None] - b_g2[None, :]),
-                0.0,
-            )
-            b_A33 *= tl.where(
-                m_d & m_tc3[:, None] & m_tc3[None, :],
-                exp2(b_g3[:, None] - b_g3[None, :]),
-                0.0,
-            )
+        b_A00 *= tl.where(
+            m_d & m_tc0[:, None] & m_tc0[None, :],
+            exp2(b_g0[:, None] - b_g0[None, :]),
+            0.0,
+        )
+        b_A11 *= tl.where(
+            m_d & m_tc1[:, None] & m_tc1[None, :],
+            exp2(b_g1[:, None] - b_g1[None, :]),
+            0.0,
+        )
+        b_A22 *= tl.where(
+            m_d & m_tc2[:, None] & m_tc2[None, :],
+            exp2(b_g2[:, None] - b_g2[None, :]),
+            0.0,
+        )
+        b_A33 *= tl.where(
+            m_d & m_tc3[:, None] & m_tc3[None, :],
+            exp2(b_g3[:, None] - b_g3[None, :]),
+            0.0,
+        )
 
-            b_A10 *= tl.where(
-                m_tc1[:, None] & m_tc0[None, :],
-                exp2(b_g1[:, None] - b_g0[None, :]),
-                0.0,
-            )
-            b_A20 *= tl.where(
-                m_tc2[:, None] & m_tc0[None, :],
-                exp2(b_g2[:, None] - b_g0[None, :]),
-                0.0,
-            )
-            b_A21 *= tl.where(
-                m_tc2[:, None] & m_tc1[None, :],
-                exp2(b_g2[:, None] - b_g1[None, :]),
-                0.0,
-            )
-            b_A30 *= tl.where(
-                m_tc3[:, None] & m_tc0[None, :],
-                exp2(b_g3[:, None] - b_g0[None, :]),
-                0.0,
-            )
-            b_A31 *= tl.where(
-                m_tc3[:, None] & m_tc1[None, :],
-                exp2(b_g3[:, None] - b_g1[None, :]),
-                0.0,
-            )
-            b_A32 *= tl.where(
-                m_tc3[:, None] & m_tc2[None, :],
-                exp2(b_g3[:, None] - b_g2[None, :]),
-                0.0,
-            )
-        else:
-            b_A00 *= tl.where(
-                m_d & m_tc0[:, None] & m_tc0[None, :],
-                exp(b_g0[:, None] - b_g0[None, :]),
-                0.0,
-            )
-            b_A11 *= tl.where(
-                m_d & m_tc1[:, None] & m_tc1[None, :],
-                exp(b_g1[:, None] - b_g1[None, :]),
-                0.0,
-            )
-            b_A22 *= tl.where(
-                m_d & m_tc2[:, None] & m_tc2[None, :],
-                exp(b_g2[:, None] - b_g2[None, :]),
-                0.0,
-            )
-            b_A33 *= tl.where(
-                m_d & m_tc3[:, None] & m_tc3[None, :],
-                exp(b_g3[:, None] - b_g3[None, :]),
-                0.0,
-            )
-
-            b_A10 *= tl.where(
-                m_tc1[:, None] & m_tc0[None, :], exp(b_g1[:, None] - b_g0[None, :]), 0.0
-            )
-            b_A20 *= tl.where(
-                m_tc2[:, None] & m_tc0[None, :], exp(b_g2[:, None] - b_g0[None, :]), 0.0
-            )
-            b_A21 *= tl.where(
-                m_tc2[:, None] & m_tc1[None, :], exp(b_g2[:, None] - b_g1[None, :]), 0.0
-            )
-            b_A30 *= tl.where(
-                m_tc3[:, None] & m_tc0[None, :], exp(b_g3[:, None] - b_g0[None, :]), 0.0
-            )
-            b_A31 *= tl.where(
-                m_tc3[:, None] & m_tc1[None, :], exp(b_g3[:, None] - b_g1[None, :]), 0.0
-            )
-            b_A32 *= tl.where(
-                m_tc3[:, None] & m_tc2[None, :], exp(b_g3[:, None] - b_g2[None, :]), 0.0
-            )
+        b_A10 *= tl.where(
+            m_tc1[:, None] & m_tc0[None, :],
+            exp2(b_g1[:, None] - b_g0[None, :]),
+            0.0,
+        )
+        b_A20 *= tl.where(
+            m_tc2[:, None] & m_tc0[None, :],
+            exp2(b_g2[:, None] - b_g0[None, :]),
+            0.0,
+        )
+        b_A21 *= tl.where(
+            m_tc2[:, None] & m_tc1[None, :],
+            exp2(b_g2[:, None] - b_g1[None, :]),
+            0.0,
+        )
+        b_A30 *= tl.where(
+            m_tc3[:, None] & m_tc0[None, :],
+            exp2(b_g3[:, None] - b_g0[None, :]),
+            0.0,
+        )
+        b_A31 *= tl.where(
+            m_tc3[:, None] & m_tc1[None, :],
+            exp2(b_g3[:, None] - b_g1[None, :]),
+            0.0,
+        )
+        b_A32 *= tl.where(
+            m_tc3[:, None] & m_tc2[None, :],
+            exp2(b_g3[:, None] - b_g2[None, :]),
+            0.0,
+        )
     else:
         b_A00 = tl.where(m_d, b_A00, 0.0)
         b_A11 = tl.where(m_d, b_A11, 0.0)
@@ -352,7 +310,6 @@ def chunk_gated_delta_rule_fwd_intra(
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
     chunk_indices: Optional[torch.LongTensor] = None,
-    use_exp2: bool = False,
 ):
     B, T, Hg, K = k.shape
     H = beta.shape[2]
@@ -378,7 +335,6 @@ def chunk_gated_delta_rule_fwd_intra(
         BT=BT,
         BC=BC,
         BK=64,
-        USE_EXP2=use_exp2,
         num_warps=1,
         num_stages=1,
     )
@@ -390,6 +346,5 @@ def chunk_gated_delta_rule_fwd_intra(
         A=A,
         g_cumsum=g,
         cu_seqlens=cu_seqlens,
-        use_exp2=use_exp2,
     )
     return w, u, A

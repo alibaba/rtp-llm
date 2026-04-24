@@ -12,8 +12,8 @@ from rtp_llm.models_py.triton_kernels.fla.index import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
 )
-from rtp_llm.models_py.triton_kernels.fla.op import exp, exp2, safe_exp, safe_exp2
-from rtp_llm.models_py.triton_kernels.fla.utils import is_nvidia_hopper
+from rtp_llm.models_py.triton_kernels.fla.op import exp2
+from rtp_llm.models_py.triton_kernels.fla.utils import is_amd, is_nvidia_hopper
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 
@@ -63,7 +63,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
@@ -191,12 +190,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
             )
             b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
-            if USE_EXP2:
-                b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
-                b_g_last = exp2(b_g_last)
-            else:
-                b_v = b_v * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
-                b_g_last = exp(b_g_last)
+            b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
+            b_g_last = exp2(b_g_last)
             b_h1 = b_h1 * b_g_last
             if K > 64:
                 b_h2 = b_h2 * b_g_last
@@ -212,10 +207,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 mask=(o_k1 < K),
                 other=0.0,
             ).to(tl.float32)
-            if USE_EXP2:
-                b_h1 *= exp2(b_gk_last1)[:, None]
-            else:
-                b_h1 *= exp(b_gk_last1)[:, None]
+            b_h1 *= exp2(b_gk_last1)[:, None]
             if K > 64:
                 o_k2 = 64 + o_k1
                 b_gk_last2 = tl.load(
@@ -223,10 +215,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k2 < K),
                     other=0.0,
                 ).to(tl.float32)
-                if USE_EXP2:
-                    b_h2 *= exp2(b_gk_last2)[:, None]
-                else:
-                    b_h2 *= exp(b_gk_last2)[:, None]
+                b_h2 *= exp2(b_gk_last2)[:, None]
             if K > 128:
                 o_k3 = 128 + o_k1
                 b_gk_last3 = tl.load(
@@ -234,10 +223,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k3 < K),
                     other=0.0,
                 ).to(tl.float32)
-                if USE_EXP2:
-                    b_h3 *= exp2(b_gk_last3)[:, None]
-                else:
-                    b_h3 *= exp(b_gk_last3)[:, None]
+                b_h3 *= exp2(b_gk_last3)[:, None]
             if K > 192:
                 o_k4 = 192 + o_k1
                 b_gk_last4 = tl.load(
@@ -245,10 +231,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k4 < K),
                     other=0.0,
                 ).to(tl.float32)
-                if USE_EXP2:
-                    b_h4 *= exp2(b_gk_last4)[:, None]
-                else:
-                    b_h4 *= exp(b_gk_last4)[:, None]
+                b_h4 *= exp2(b_gk_last4)[:, None]
         b_v = b_v.to(k.dtype.element_ty)
 
         p_k = tl.make_block_ptr(
@@ -307,8 +290,26 @@ def chunk_gated_delta_rule_fwd_h(
     chunk_size: int = 64,
     save_new_value: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    use_exp2: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    # Gluon dispatch for AMD CDNA4 (MI355X): ~10-18% faster for TP2 H≤32 T≤64K
+    try:
+        from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h_gluon import (
+            _is_gluon_beneficial,
+            chunk_gated_delta_rule_fwd_h_gluon,
+        )
+        H = u.shape[-2]
+        T = k.shape[1]
+        if gk is None and _is_gluon_beneficial(H, T):
+            return chunk_gated_delta_rule_fwd_h_gluon(
+                k=k, w=w, u=u, g=g,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                chunk_size=chunk_size,
+                save_new_value=save_new_value,
+                cu_seqlens=cu_seqlens,
+            )
+    except ImportError:
+        pass
     B, T, Hg, K, V = *k.shape, u.shape[-1]
     H = u.shape[-2]
     BT = chunk_size
@@ -357,8 +358,7 @@ def chunk_gated_delta_rule_fwd_h(
         K=K,
         V=V,
         BT=BT,
-        BV=16,
-        USE_EXP2=use_exp2,
+        BV=16 if is_amd else 32,
         num_warps=4,
         num_stages=2,
     )
