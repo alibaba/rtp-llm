@@ -424,7 +424,9 @@ py_library(
         ":blobfile",
         ":partial_json_parser",
     ],
-    data = jit_deps(),
+    data = jit_deps() + [
+        "//rtp_llm/libs:libs",
+    ],
     imports = ["."],
 )
 

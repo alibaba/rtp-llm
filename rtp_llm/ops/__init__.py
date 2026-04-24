@@ -69,7 +69,18 @@ if not os.path.exists(os.path.join(so_path, SO_NAME)):
         so_path = find_upper_so(current_dir)
 
 logging.info(f"so path: {so_path}")
-sys.path.append(so_path)
+ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
+os.environ["LD_LIBRARY_PATH"] = ":".join([p for p in [so_path, ld_library_path] if p])
+logging.info(f"updated LD_LIBRARY_PATH for ops: {os.environ['LD_LIBRARY_PATH']}")
+sys.path.insert(0, so_path)
+
+from ctypes import CDLL, RTLD_GLOBAL
+
+for dep_name in ("libhf3fs_api_shared.so", "kv_cache_manager_client.so"):
+    dep_path = os.path.join(so_path, dep_name)
+    if os.path.exists(dep_path):
+        CDLL(dep_path, mode=RTLD_GLOBAL)
+        logging.info(f"preloaded {dep_name} from {dep_path}")
 
 # load intel xft lib
 xft_loaded = False
