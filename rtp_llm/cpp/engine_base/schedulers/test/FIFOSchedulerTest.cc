@@ -383,7 +383,10 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     }
 
     {
-        // test abnormal case with tile num
+        // After fix (commit 2238d50cf): checkInputLength no longer rejects when
+        // inputLength * currentBatchSize > max_batch_tokens_size. Such requests must
+        // be admitted to the waiting queue; the per-round token-budget constraint is
+        // enforced later in evaluateRunningMemory using contextLength (not batch_size).
         autil::EnvGuard perf_scope("PERF_TEST", "1");
 
         std::shared_ptr<GenerateInput> query2         = make_shared<GenerateInput>();
@@ -392,13 +395,74 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
         query2->generate_config->num_return_sequences = 20;
         shared_ptr<GenerateStream> stream2 =
             make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
-        // In the new code, checkInputLength rejects at enqueue time
-        ASSERT_FALSE(scheduler.enqueue(stream2).ok());
-        ASSERT_TRUE(stream2->hasError());
-        ASSERT_EQ(stream2->stopReason(), "input len [7] * batch size [20] > max_batch_tokens_size [100]");
-        ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
-        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
-        ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+        // input_len 7 * batch_size 20 = 140 > max_batch_tokens_size 100, but enqueue still succeeds.
+        ASSERT_TRUE(scheduler.enqueue(stream2).ok());
+        ASSERT_FALSE(stream2->hasError());
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    }
+}
+
+// Regression test for commit 2238d50cf: removing the
+// `inputLength * currentBatchSize() > max_batch_tokens_size_` rejection in
+// FIFOScheduler::checkInputLength. The check was wrong because max_batch_tokens_size
+// bounds per-scheduling-round token usage (computed from contextLength in
+// evaluateRunningMemory), not the multi-sequence batch fan-out at enqueue.
+TEST_F(FIFOSchedulerTest, testCheckInputLengthIgnoresBatchSizeFanOut) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    // max_seq_len must exceed the longest input below (maxAvailableTokensNum + 1) so that
+    // stream construction does not throw on its own seq_length check; the scheduler-level
+    // checkInputLength is what we actually want to exercise here.
+    model_config.max_seq_len = 1024;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    {
+        // num_return_sequences fan-out: input_len 7 * batch 20 = 140 > 100, but accepted.
+        std::shared_ptr<GenerateInput> query         = make_shared<GenerateInput>();
+        query->input_ids                             = torch::tensor({1, 2, 3, 4, 5, 6, 7}, torch::kInt32);
+        query->generate_config                       = make_shared<GenerateConfig>();
+        query->generate_config->num_return_sequences = 20;
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+        ASSERT_FALSE(stream->hasError());
+    }
+
+    {
+        // num_beams fan-out: input_len 10 * batch 16 = 160 > 100, but accepted.
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = torch::tensor({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, torch::kInt32);
+        query->generate_config               = make_shared<GenerateConfig>();
+        query->generate_config->num_beams    = 16;
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+        ASSERT_FALSE(stream->hasError());
+    }
+
+    // The KV-cache-bound check still rejects (input_len > maxAvailableTokensNum).
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        // Cache has 20 blocks * 8 tokens/block - 1 reserved tail = 159 max available; pick a length above it.
+        std::vector<int32_t> ids(int(cache_manager->maxAvailableTokensNum()) + 1, 1);
+        query->input_ids       = torch::tensor(ids, torch::kInt32);
+        query->generate_config = make_shared<GenerateConfig>();
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_FALSE(scheduler.enqueue(stream).ok());
+        ASSERT_TRUE(stream->hasError());
     }
 }
 
