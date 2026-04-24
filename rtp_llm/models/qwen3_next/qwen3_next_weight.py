@@ -34,6 +34,7 @@ from rtp_llm.utils.model_weight import (
     stack_moe_w1,
     transpose,
     transpose_pad,
+    transpose_stack_moe_w1,
 )
 
 
@@ -187,15 +188,6 @@ def transpose_gate_up(ts: List[torch.Tensor]):
     up = ts[0][:, half_dim:, :]
 
     return torch.cat([up, gate], dim=1)
-
-
-# List[gate_up, hidden] -> [Expert, up_gate, hidden]
-def transpose_stack_moe_w1(ts: List[torch.Tensor]) -> torch.Tensor:
-    stacked_tensor = torch.stack(ts, dim=0)
-    gate_up_dim = stacked_tensor.shape[1] // 2
-    return torch.cat(
-        [stacked_tensor[:, gate_up_dim:, :], stacked_tensor[:, :gate_up_dim, :]], dim=1
-    )
 
 
 class Qwen3NextBaseWeight(ModelDeployWeightInfo):
