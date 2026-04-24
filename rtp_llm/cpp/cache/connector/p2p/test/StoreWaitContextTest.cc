@@ -2,35 +2,13 @@
 #include <memory>
 #include <thread>
 #include <chrono>
-#include <atomic>
+#include <optional>
 
 #include "rtp_llm/cpp/cache/connector/p2p/StoreWaitContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
-
-// Mock async event for testing
-class MockDeviceEvent: public AsyncEvent {
-public:
-    MockDeviceEvent(bool ready = false): ready_(ready) {}
-    ~MockDeviceEvent() override = default;
-
-    void synchronize() const override {
-        // Do nothing in mock
-    }
-
-    bool checkReadiness() const override {
-        return ready_.load();
-    }
-
-    void setReady(bool ready) {
-        ready_.store(ready);
-    }
-
-private:
-    mutable std::atomic<bool> ready_;
-};
 
 class StoreWaitContextTest: public ::testing::Test {
 protected:
@@ -42,12 +20,10 @@ protected:
         computed_buffers_.reset();
     }
 
-    // 创建测试用的 LayerCacheBuffer
     std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id) {
         return std::make_shared<LayerCacheBuffer>(layer_id);
     }
 
-    // 获取当前时间（毫秒）+ 偏移量
     int64_t getDeadlineMs(int64_t offset_ms = 1000) {
         return currentTimeMs() + offset_ms;
     }
@@ -56,85 +32,22 @@ protected:
     std::shared_ptr<ComputedLayerCacheBufferStore> computed_buffers_;
 };
 
-TEST_F(StoreWaitContextTest, CheckerCheckOnce_EventReady) {
+TEST_F(StoreWaitContextTest, CheckerCheckOnce_NoEvent_TreatedAsReady) {
     StoreWaitContextChecker checker(nullptr, computed_buffers_);
 
     int64_t request_id  = 3001;
-    auto    event       = std::make_shared<MockDeviceEvent>(true);  // Event is ready
     auto    buffer      = createLayerCacheBuffer(0);
     int64_t deadline_ms = getDeadlineMs();
     auto    collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
-    StoreWaitContext context(request_id, event, buffer, deadline_ms, collector);
-    checker.addContext(context);
+    // nullopt event is treated as ready
+    StoreWaitContext context(request_id, std::nullopt, buffer, deadline_ms, collector);
+    checker.addContext(std::move(context));
 
     EXPECT_EQ(checker.getContextCount(), 1);
-
-    // 调用 checkOnce，由于 event 已就绪，应该被移除
     checker.checkOnce();
-
     EXPECT_EQ(checker.getContextCount(), 0);
 
-    // 验证 buffer 被添加到 computed_buffers_
-    auto computed_buffer = computed_buffers_->getBuffer(request_id);
-    ASSERT_NE(computed_buffer, nullptr);
-}
-
-TEST_F(StoreWaitContextTest, CheckerCheckOnce_EventNotReady) {
-    StoreWaitContextChecker checker(nullptr, computed_buffers_);
-
-    int64_t request_id  = 3002;
-    auto    event       = std::make_shared<MockDeviceEvent>(false);  // Event is not ready
-    auto    buffer      = createLayerCacheBuffer(0);
-    int64_t deadline_ms = getDeadlineMs();
-    auto    collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
-
-    StoreWaitContext context(request_id, event, buffer, deadline_ms, collector);
-    checker.addContext(context);
-
-    EXPECT_EQ(checker.getContextCount(), 1);
-
-    // 调用 checkOnce，由于 event 未就绪，应该保留
-    checker.checkOnce();
-
-    EXPECT_EQ(checker.getContextCount(), 1);
-
-    // 验证 buffer 没有被添加到 computed_buffers_
-    auto computed_buffer = computed_buffers_->getBuffer(request_id);
-    EXPECT_EQ(computed_buffer, nullptr);
-
-    event->setReady(true);
-
-    // 调用 checkOnce，由于 event 已就绪，应该被移除
-    checker.checkOnce();
-
-    EXPECT_EQ(checker.getContextCount(), 0);
-
-    // 验证 buffer 被添加到 computed_buffers_
-    computed_buffer = computed_buffers_->getBuffer(request_id);
-    ASSERT_NE(computed_buffer, nullptr);
-}
-
-TEST_F(StoreWaitContextTest, CheckerCheckOnce_NullEvent) {
-    StoreWaitContextChecker checker(nullptr, computed_buffers_);
-
-    int64_t request_id  = 3003;
-    auto    buffer      = createLayerCacheBuffer(0);
-    int64_t deadline_ms = getDeadlineMs();
-    auto    collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
-
-    // null event 被视为已就绪
-    StoreWaitContext context(request_id, nullptr, buffer, deadline_ms, collector);
-    checker.addContext(context);
-
-    EXPECT_EQ(checker.getContextCount(), 1);
-
-    // 调用 checkOnce，null event 应该被视为就绪
-    checker.checkOnce();
-
-    EXPECT_EQ(checker.getContextCount(), 0);
-
-    // 验证 buffer 被添加到 computed_buffers_
     auto computed_buffer = computed_buffers_->getBuffer(request_id);
     ASSERT_NE(computed_buffer, nullptr);
 }
@@ -143,22 +56,19 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_Timeout) {
     StoreWaitContextChecker checker(nullptr, computed_buffers_);
 
     int64_t request_id  = 3004;
-    auto    event       = std::make_shared<MockDeviceEvent>(false);  // Event is not ready
     auto    buffer      = createLayerCacheBuffer(0);
-    int64_t deadline_ms = currentTimeMs() - 100;  // 已过期
+    int64_t deadline_ms = currentTimeMs() - 100;  // already expired
     auto    collector   = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
-    StoreWaitContext context(request_id, event, buffer, deadline_ms, collector);
-    checker.addContext(context);
+    // Even with nullopt, timeout takes precedence
+    StoreWaitContext context(request_id, std::nullopt, buffer, deadline_ms, collector);
+    checker.addContext(std::move(context));
 
     EXPECT_EQ(checker.getContextCount(), 1);
-
-    // 调用 checkOnce，由于已超时，应该被移除
     checker.checkOnce();
-
     EXPECT_EQ(checker.getContextCount(), 0);
 
-    // 验证 buffer 没有被添加到 computed_buffers_（因为是超时，不是成功完成）
+    // Buffer should NOT be added (timeout, not success)
     auto computed_buffer = computed_buffers_->getBuffer(request_id);
     EXPECT_EQ(computed_buffer, nullptr);
 }

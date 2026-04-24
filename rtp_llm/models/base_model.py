@@ -51,7 +51,6 @@ class BaseModel(object):
         kv_cache_config: KVCacheConfig,
         fmha_config: FMHAConfig,
         moe_config: MoeConfig,
-        load_python_model: bool,
         max_generate_batch_size: int,
         load_method: LoadMethod,
         vit_config: Optional[VitConfig],
@@ -67,7 +66,6 @@ class BaseModel(object):
             kv_cache_config: KV cache configuration
             fmha_config: FMHA configuration
             moe_config: MoE configuration
-            load_python_model: Whether to load Python model (instead of C++ GptModel)
             max_generate_batch_size: Maximum batch size for generation
             vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
@@ -79,7 +77,6 @@ class BaseModel(object):
         self.kv_cache_config = kv_cache_config
         self.fmha_config = fmha_config
         self.moe_config = moe_config
-        self.load_python_model = load_python_model
         self.max_generate_batch_size = max_generate_batch_size
         self.load_method = load_method
         self.vit_config = vit_config
@@ -132,10 +129,9 @@ class BaseModel(object):
         return f"cuda:{self.parallelism_config.local_rank}"
 
     @timer_wrapper(description="load model")
-    def load(self):
+    def load(self, skip_python_model: bool = False):
         if (
-            self.load_python_model
-            and self.hw_kernel_config.enable_cuda_graph
+            self.hw_kernel_config.enable_cuda_graph
             and self.support_cuda_graph() is False
         ):
             raise Exception("current model can't support cuda graph in py model mode")
@@ -150,22 +146,21 @@ class BaseModel(object):
         self.weight_manager = WeightManager(
             self.device, self.weight, self.model_weights_loader
         )
-        if self.load_python_model:
-            logging.info(
-                f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
+        if skip_python_model:
+            return
+        logging.info(
+            f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
+        )
+        remote_jit_dir = os.environ.get("REMOTE_JIT_DIR", None)
+        logging.info(f"python model remote_jit_dir for deep_gemm: {remote_jit_dir}")
+        if remote_jit_dir:
+            os.environ["DG_JIT_REMOTE_CACHE_DIR"] = os.path.join(
+                remote_jit_dir, "deep_gemm_python"
             )
-            remote_jit_dir = os.environ.get("REMOTE_JIT_DIR", None)
-            logging.info(f"python model remote_jit_dir for deep_gemm: {remote_jit_dir}")
-            if remote_jit_dir:
-                os.environ["DG_JIT_REMOTE_CACHE_DIR"] = os.path.join(
-                    remote_jit_dir, "deep_gemm_python"
-                )
-            self._create_python_model()
-        else:
-            logging.info(f"Skip creating python model, use legacy cpp GptModel")
+        self._create_python_model()
 
     def _create_python_model(self):
-        raise NotImplementedError("Python Model is not implemented for this model.")
+        pass
 
     def support_cuda_graph(self) -> bool:
         return False
@@ -210,13 +205,13 @@ class BaseModel(object):
         kv_cache_config: KVCacheConfig,
         fmha_config: FMHAConfig,
         moe_config: MoeConfig,
-        load_python_model: bool,
         load_method,
         max_generate_batch_size: int,
         vit_config: VitConfig,
         merge_lora: bool,
         device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
+        skip_python_model: bool = False,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -227,7 +222,6 @@ class BaseModel(object):
             kv_cache_config: KV cache configuration
             fmha_config: FMHA configuration
             moe_config: MoE configuration
-            load_python_model: Whether to load Python model (instead of C++ GptModel)
             max_generate_batch_size: Maximum batch size for generation
             vit_config: VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
@@ -241,7 +235,6 @@ class BaseModel(object):
             kv_cache_config=kv_cache_config,
             fmha_config=fmha_config,
             moe_config=moe_config,
-            load_python_model=load_python_model,
             load_method=load_method,
             max_generate_batch_size=max_generate_batch_size,
             vit_config=vit_config,
@@ -260,7 +253,7 @@ class BaseModel(object):
 
         # 在加载前后分别记录内存使用
         logging.info(f"Before loading: {get_host_memory_usage():.2f} MB")
-        model.load()
+        model.load(skip_python_model=skip_python_model)
         logging.info(f"After loading: {get_host_memory_usage():.2f} MB")
         return model
 

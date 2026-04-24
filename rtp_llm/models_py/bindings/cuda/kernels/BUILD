@@ -9,7 +9,7 @@ sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
 ]
 
 cuda_deps = [
-    "//rtp_llm/cpp/cuda:cuda_host_utils",
+    "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
     ":cuda_utils_common",
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
@@ -22,7 +22,7 @@ cc_library(
         "util.h",
     ],
     deps = [
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
     copts = cuda_copts(),
@@ -35,8 +35,8 @@ cc_library(
     hdrs = ["fused_qk_rmsnorm.h"],
     deps = cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
-        "//rtp_llm/cpp/cuda:launch_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -48,9 +48,9 @@ cc_library(
     srcs = ["no_aux_tc_kernels.cu"],
     hdrs = ["no_aux_tc_kernels.h"],
     deps = [
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
-        "//rtp_llm/cpp/cuda:launch_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
         ":cuda_utils_common",
         "//rtp_llm/cpp/utils:core_utils",
     ],
@@ -65,9 +65,9 @@ cc_library(
         "scaled_fp8_quant_utils.h",
     ],
     deps = [
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
-        "//rtp_llm/cpp/cuda:launch_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
         ":cuda_utils_common",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
@@ -80,8 +80,8 @@ cc_library(
     srcs = ["scaled_fp4_quant.cu"],
     hdrs = ["scaled_fp4_quant.h"],
     deps = [
-        "//rtp_llm/cpp/cuda/cutlass:fp4_gemm_cu",
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         ":cuda_utils_common",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
@@ -103,8 +103,8 @@ cc_library(
         "per_token_group_quant_8bit_v2.h",
     ],
     deps = [
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
         ":cuda_utils_common",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
@@ -116,7 +116,7 @@ cc_library(
     srcs = ["fast_topk.cu"],
     hdrs = ["fast_topk.h"],
     deps = [
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         ":cuda_utils_common",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
@@ -129,8 +129,8 @@ cc_library(
     srcs = ["mla_quant_kernel.cu"],
     hdrs = ["mla_quant_kernel.h"],
     deps = [
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
         ":cuda_utils_common",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
@@ -155,7 +155,7 @@ cc_library(
     hdrs = ["user_buffer/user_buffers.h"],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),

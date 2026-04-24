@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "autil/EnvUtil.h"
 
 using namespace rtp_llm;
@@ -154,14 +154,8 @@ private:
         std::vector<int32_t> linear_group_ids({1, 2});
         auto                 allocator =
             std::make_shared<FakeKVCacheAllocator>(cache_config_, full_group_ids, linear_group_ids, layer_num_);
-        return std::shared_ptr<RemoteConnector>(new RemoteConnector(cache_config_,
-                                                                    kv_cache_config_,
-                                                                    runtime_config_,
-                                                                    parallelism_config_,
-                                                                    sp_config_,
-                                                                    nullptr,
-                                                                    0,
-                                                                    allocator));
+        return std::shared_ptr<RemoteConnector>(new RemoteConnector(
+            cache_config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, allocator));
     }
 
     CacheConfig                cache_config_;

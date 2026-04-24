@@ -9,7 +9,7 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <pybind11/pybind11.h>
 
-#include "rtp_llm/cpp/core/DeviceData.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 
 namespace py = pybind11;
 using namespace torch_ext;

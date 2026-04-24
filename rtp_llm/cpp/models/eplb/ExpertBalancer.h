@@ -3,11 +3,11 @@
 #include <torch/extension.h>
 #include "rtp_llm/cpp/models/eplb/ExpertBalancerPythonWrapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/core/OpData.h"
+#include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_utils/QuantInfo.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 

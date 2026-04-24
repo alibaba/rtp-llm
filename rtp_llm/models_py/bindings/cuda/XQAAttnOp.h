@@ -5,7 +5,7 @@
 #include <torch/extension.h>
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
-#include "rtp_llm/cpp/cuda/ops/CudaXqa.h"
+#include "rtp_llm/models_py/bindings/cuda/ops/CudaXqa.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace rtp_llm {

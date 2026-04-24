@@ -1,6 +1,6 @@
 #include "rtp_llm/models_py/bindings/cuda/MlaKMergeOp.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_kernels/mla_merge_transpose_kernel.h"
-#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include <cuda_runtime.h>
 

@@ -13,7 +13,7 @@
 #else
 #include <ATen/cuda/CUDAGraph.h>
 #include <ATen/cuda/CUDAContext.h>
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #define GRAPH_DEVICE_TYPE c10::DeviceType::CUDA
 #endif
 

@@ -10,7 +10,7 @@
 #endif
 #if USING_ROCM
 #include <hip/hip_runtime.h>
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
 
 // Helper function to convert to float (specialized for each type)
@@ -109,14 +109,10 @@ void invokeCudaGraphCopySmall2Large(T*        input_tensor,
         return;
     }
 
-    // Calculate grid and block dimensions
-    // Use cu_seq_len[batch_size] which contains total token count
-    const int total_elements = cu_seq_len[*batch_size] * hidden_size;
-    dim3      block(256);
-    const int grid_size = min((total_elements + block.x - 1) / block.x, 65536);
-    dim3      grid(grid_size);
+    // use fixed block and grid size for cuda graph
+    dim3 block(256);
+    dim3 grid(1024);
 
-    // Launch kernel
     cudaGraphCopySmall2LargeKernel<T><<<grid, block, 0, stream>>>(
         input_tensor, output_tensor, input_lengths, batch_size, max_seq_len, hidden_size, cu_seq_len);
 }
@@ -177,21 +173,15 @@ void invokeCudaGraphCopyLarge2Small(T*        input_tensor,
 #elif USING_ROCM
                                     hipStream_t stream) {
 #endif
-    // Validate input parameters
     if (input_tensor == nullptr || output_tensor == nullptr || input_lengths == nullptr || *batch_size <= 0
         || max_seq_len <= 0 || hidden_size <= 0 || cu_seq_len == nullptr) {
         return;
     }
 
-    // Calculate grid and block dimensions
-    // Use cu_seq_len[batch_size] which contains total token count
-    const int total_elements = cu_seq_len[*batch_size] * hidden_size;
+    // use fixed block and grid size for cuda graph
+    dim3 block(256);
+    dim3 grid(1024);
 
-    dim3      block(256);
-    const int grid_size = min((total_elements + block.x - 1) / block.x, 65536);
-    dim3      grid(grid_size);
-
-    // Launch kernel
     cudaGraphCopyLarge2SmallKernel<T><<<grid, block, 0, stream>>>(
         input_tensor, output_tensor, input_lengths, batch_size, max_seq_len, hidden_size, cu_seq_len);
 }

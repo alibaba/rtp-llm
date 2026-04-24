@@ -1,8 +1,8 @@
 
 #include "rtp_llm/models_py/bindings/rocm/Norm.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
-#include "rtp_llm/cpp/core/Dispatch.h"
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/Dispatch.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 #include <hip/hip_runtime.h>
 
 namespace rtp_llm {

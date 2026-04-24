@@ -1,11 +1,11 @@
 #include "batch_copy.h"
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
 
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
-#include "rtp_llm/cpp/rocm/hip_host_utils.h"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
 #endif
 
 namespace rtp_llm {

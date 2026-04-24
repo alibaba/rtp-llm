@@ -2,13 +2,13 @@
 
 #include "decoder_masked_multihead_attention_utils.h"
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
-#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/models_py/bindings/cuda/cuda_type_utils.cuh"
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
 
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
 #include <type_traits>
 

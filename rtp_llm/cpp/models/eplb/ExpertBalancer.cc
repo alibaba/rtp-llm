@@ -2,8 +2,8 @@
 #include <thread>
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 using namespace std;
 

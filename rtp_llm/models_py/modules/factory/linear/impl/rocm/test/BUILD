@@ -1,7 +1,3 @@
-test_envs = {
-    "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
-}
-
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
@@ -10,9 +6,8 @@ py_test(
     name = "rocm_linear_test",
     srcs = ["rocm_linear_test.py"],
     deps = py_test_deps,
-    env = test_envs,
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
+    exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
 py_test(
@@ -20,8 +15,7 @@ py_test(
     srcs = ["fp8_ptpc_linear_test.py"],
     deps = py_test_deps,
     timeout = "eternal",
-    env = test_envs,
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
+    exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 

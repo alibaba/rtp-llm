@@ -1,7 +1,7 @@
 #pragma once
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/torch.h>
-#include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_fp8_utils.h"
 
 #ifdef ENABLE_FP8
 #include <cuda_fp8.h>

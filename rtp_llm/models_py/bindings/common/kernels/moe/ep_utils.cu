@@ -1,5 +1,5 @@
 #include "rtp_llm/models_py/bindings/common/kernels/moe/ep_utils.h"
-#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/moe_gemm/moe_kernels.inl"
+#include "rtp_llm/models_py/bindings/common/kernels/moe/moe_routing_kernels.h"
 
 namespace trt = tensorrt_llm::kernels;
 namespace rtp_llm {
@@ -288,11 +288,11 @@ void finalizeMoeRoutingKernelLauncher(T const*       expanded_permuted_rows,
                                                             OutputType,
                                                             T /*GemmOutputType*/,
                                                             T /*ScaleBiasType*/,
-                                                            ScaleMode::DEFAULT /*SCALE_MODE*/,
+                                                            trt::ScaleMode::DEFAULT /*SCALE_MODE*/,
                                                             false /*CHECK_SKIPPED*/>);
 
-    FuncPtr     func_map[2] = {&trt::finalizeMoeRoutingKernel<T, OutputType, T, T, ScaleMode::DEFAULT, false>,
-                               &trt::finalizeMoeRoutingKernel<T, OutputType, T, T, ScaleMode::DEFAULT, true>};
+    FuncPtr     func_map[2] = {&trt::finalizeMoeRoutingKernel<T, OutputType, T, T, trt::ScaleMode::DEFAULT, false>,
+                               &trt::finalizeMoeRoutingKernel<T, OutputType, T, T, trt::ScaleMode::DEFAULT, true>};
     auto* const kernel      = func_map[check_finished];
     kernel<<<blocks, threads, 0, stream>>>(
         expanded_permuted_rows,

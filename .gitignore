@@ -72,3 +72,6 @@ git.diff
 .doctrees/
 node_modules/
 docs/index/dist/
+
+# Local analysis reports
+*_analysis_report.md

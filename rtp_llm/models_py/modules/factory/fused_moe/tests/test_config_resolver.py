@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.device.device_type import DeviceType
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -12,7 +13,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.ops import MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import DeviceType
 
 
 def create_config_adapter(
@@ -63,9 +63,9 @@ class TestMoeConfigResolver(unittest.TestCase):
     def test_get_device_type(self):
         """Test getting device type"""
         with patch(
-            "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.get_exec_ctx"
-        ) as mock_device:
-            mock_device.return_value.get_device_type.return_value = DeviceType.Cuda
+            "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.get_device_type"
+        ) as mock_get_device_type:
+            mock_get_device_type.return_value = DeviceType.Cuda
             device_type = self.resolver.get_device_type()
             self.assertEqual(device_type, DeviceType.Cuda)
 
@@ -155,6 +155,7 @@ class TestMoeConfigResolver(unittest.TestCase):
         """Test pure TP mode rejects ep_size > 1"""
         config = create_config_adapter(tp_size=2, dp_size=1, ep_size=2)
         self.assertFalse(self.resolver.is_pure_tp_mode(config))
+
 
 if __name__ == "__main__":
     unittest.main()

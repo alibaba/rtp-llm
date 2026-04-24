@@ -89,8 +89,7 @@ class BackendManager(object):
 
         # Initialize DeepEP wrapper if MOE model and DeepEP is enabled
         if (
-            engine_config.model_specific_config.load_python_model
-            and engine_config.moe_config.use_deepep_moe
+            engine_config.moe_config.use_deepep_moe
             and model_config.expert_num > 0
             and engine_config.parallelism_config.world_size > 1
             and not engine_config.moe_config.use_all_gather

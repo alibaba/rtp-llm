@@ -5,12 +5,11 @@
 #include <map>
 #include <vector>
 #include "rtp_llm/cpp/config/RoleTypes.h"
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
 
-/** NCCL communication config (ip + ports). When set, initExecCtx uses this
- * instead of ParallelismConfig for master_ip and tp/dp_tp/ffn_tp ports. Aligns with Python NcclCommConfig. */
+/** NCCL communication config (ip + ports). Aligns with Python NcclCommConfig. */
 struct NcclCommConfig {
     std::string master_ip   = "";
     int64_t     tp_port     = 0;
@@ -193,20 +192,18 @@ struct KVCacheConfig {
 };
 
 struct ProfilingDebugLoggingConfig {
-    bool        trace_memory               = false;
-    bool        trace_malloc_stack         = false;
-    bool        enable_device_perf         = false;
-    bool        ft_core_dump_on_exception  = false;
-    std::string ft_alog_conf_path          = "";
-    bool        gen_timeline_sync          = false;
-    std::string torch_cuda_profiler_dir    = "";
-    int         log_file_backup_count      = 16;
-    bool        debug_load_server          = false;
-    int         hack_layer_num             = 0;
-    bool        debug_start_fake_process   = false;
-    bool        enable_detail_log          = false;
-    bool        check_nan                  = false;
-    bool        enable_torch_alloc_profile = false;
+    bool        trace_memory              = false;
+    bool        enable_device_perf        = false;
+    bool        ft_core_dump_on_exception = false;
+    std::string ft_alog_conf_path         = "";
+    bool        gen_timeline_sync         = false;
+    std::string torch_cuda_profiler_dir   = "";
+    int         log_file_backup_count     = 16;
+    bool        debug_load_server         = false;
+    int         hack_layer_num            = 0;
+    bool        debug_start_fake_process  = false;
+    bool        enable_detail_log         = false;
+    bool        check_nan                 = false;
 
     std::string to_string() const;
 };
@@ -262,7 +259,6 @@ struct MoeConfig {
 };
 
 struct ModelSpecificConfig {
-    bool        load_python_model = false;
     std::string to_string() const;
 };
 
@@ -335,22 +331,14 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size           = 1;
-    int64_t     scheduler_reserve_resource_ratio = 5;
-    int64_t     max_batch_tokens_size            = 0;
-    std::string to_string() const;
-};
-
-struct SchedulerConfig {
-    bool        use_batch_decode_scheduler = false;
-    bool        use_gather_batch_scheduler = false;
+    int64_t     max_context_batch_size = 1;
+    int64_t     max_batch_tokens_size  = 0;
     std::string to_string() const;
 };
 
 struct RuntimeConfig {
     int64_t max_generate_batch_size = 1;
 
-    bool    pre_allocate_op_mem     = true;
     int64_t max_block_size_per_item = 16;
 
     int64_t reserve_runtime_mem_mb = 0;
@@ -368,8 +356,7 @@ struct RuntimeConfig {
     std::vector<std::string> worker_addrs;
 
     // Fields merged from PyDeviceResourceConfig
-    std::string specify_gpu_arch      = "";
-    std::string acext_gemm_config_dir = "";
+    std::string specify_gpu_arch = "";
 
     std::string to_string() const;
 };

@@ -43,11 +43,7 @@ public:
         if (kernel_seq_size_per_block_ <= 0) {
             throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
         }
-        if (graph_params.is_prefill_cuda_graph_mode) {
-            max_bs_ = graph_params.max_context_batch_size;
-        } else {
-            max_bs_ = graph_params.concurrency_limit;
-        }
+        max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
@@ -106,7 +102,6 @@ private:
     void              setInputEmbeddingScalar(float input_embedding_scalar) override;
 
 private:
-    void             copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
     std::vector<int> getDecodeBatchSizesToCapture();
     std::vector<int> getPrefillSequenceLengthsToCapture();
     /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).

@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTaskImpl.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <chrono>
+#include <thread>
 
 namespace rtp_llm {
 
@@ -56,7 +58,13 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::shared_ptr<RequestBlockBuff
     // event to sync wait compute
     auto event = request_block_buffer->getEvent();
     if (event) {
+#if USE_PPU
+        while (!event->query()) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+#else
         event->synchronize();
+#endif
     }
 
     if (request_block_buffer->getRequestId() != request_->request_id) {

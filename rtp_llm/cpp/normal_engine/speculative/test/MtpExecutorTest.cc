@@ -11,9 +11,9 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
@@ -365,18 +365,16 @@ public:
         cache_manager->init();
 
         // Create MtpExecutor
-        auto executor = std::make_unique<MtpExecutor>(params, propose_params, cache_manager, ExecInitParams{}, false);
+        auto executor = std::make_unique<MtpExecutor>(params, propose_params, cache_manager);
 
         // Create fake models
-        ExecInitParams     exec_init_params;
         GptModelInitParams target_model_params(
             {params.gpt_weights,
              Executor::genModelDescription(
                  params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
              std::nullopt,
              params.model_id,
-             params.parallelism_config,
-             exec_init_params});
+             params.parallelism_config});
 
         GptModelInitParams draft_model_params(
             {params.gpt_weights,
@@ -384,8 +382,7 @@ public:
                  params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
              std::nullopt,
              params.model_id,
-             params.parallelism_config,
-             exec_init_params});
+             params.parallelism_config});
 
         auto fake_target_model        = std::make_unique<FakeModel>(target_model_params);
         auto fake_draft_model         = std::make_unique<FakeModel>(draft_model_params);

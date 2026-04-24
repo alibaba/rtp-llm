@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
-#include "rtp_llm/cpp/core/Event.h"
+#include <c10/core/Event.h>
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <grpc++/grpc++.h>

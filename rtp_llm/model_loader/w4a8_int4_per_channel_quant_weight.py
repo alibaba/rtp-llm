@@ -21,7 +21,7 @@ from rtp_llm.utils.model_weight import W, WeightStyle
 
 
 def quantize_weight_to_int4b(input: torch.Tensor, group_size: int, eps: float = 1e-12):
-    from rtp_kernel.w4a8_group_gemm import unified_encode_int4b, pack_scale_fp8
+    from rtp_kernel.w4a8_group_gemm import unified_encode_int4b, reorder_tensor, pack_scale_fp8
 
     N, K = input.shape
     assert (K % group_size == 0), f"invalid params {K} or {group_size}"
@@ -49,6 +49,7 @@ def quantize_weight_to_int4b(input: torch.Tensor, group_size: int, eps: float = 
     scale_c = scale_f.to(torch.float8_e4m3fn).squeeze(-1).t().contiguous()
 
     output_unified_int4 = unified_encode_int4b(output_int4_c)
+    output_unified_int4 = reorder_tensor(output_unified_int4)
     scale_packed = pack_scale_fp8(scale_c)
 
     return output_unified_int4, scale_packed

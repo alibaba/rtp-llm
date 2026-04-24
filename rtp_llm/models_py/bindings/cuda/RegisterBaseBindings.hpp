@@ -7,7 +7,6 @@
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"
-#include "rtp_llm/models_py/bindings/cuda/FusedMoEOp.h"
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/GroupTopKOp.h"
 // RtpProcessGroup is deprecated, use rtp_llm.distribute.collective_torch instead
@@ -272,7 +271,6 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {
     registerBasicCudaOps(rtp_ops_m);
-    registerFusedMoEOp(rtp_ops_m);
     registerSelectTopkOp(rtp_ops_m);
     registerGroupTopKOp(rtp_ops_m);
     // RtpProcessGroup is deprecated, use rtp_llm.distribute.collective_torch instead

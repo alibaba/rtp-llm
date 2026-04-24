@@ -183,12 +183,12 @@ class WeightConverter:
             )
             pc.local_world_size = max(min(n, pc.world_size), 1)
         if pc.ep_size == 1:
-            assert pc.tp_size >= 1, (
-                f"Pure TP mode (ep_size=1) requires tp_size >= 1, got tp_size={pc.tp_size}"
-            )
-            assert pc.dp_size == 1, (
-                f"Pure TP mode (ep_size=1) requires dp_size == 1, got dp_size={pc.dp_size}"
-            )
+            assert (
+                pc.tp_size >= 1
+            ), f"Pure TP mode (ep_size=1) requires tp_size >= 1, got tp_size={pc.tp_size}"
+            assert (
+                pc.dp_size == 1
+            ), f"Pure TP mode (ep_size=1) requires dp_size == 1, got dp_size={pc.dp_size}"
         elif pc.ep_size == 0:
             logging.info("ep_size == 0, auto set to world size")
             pc.ep_size = pc.tp_size * pc.dp_size
@@ -283,12 +283,12 @@ class WeightConverter:
             kv_cache_config=kv_cache_config,
             fmha_config=fmha_config,
             moe_config=moe_config,
-            load_python_model=False,
             load_method=LoadMethod.AUTO,
             max_generate_batch_size=0,
             vit_config=vit_config,
             merge_lora=False,
             device_resource_config=device_resource_config,
+            skip_python_model=True,
         )
         loader = model.create_model_loader()
         device_str = f"cuda:{parallelism_config.local_rank}"

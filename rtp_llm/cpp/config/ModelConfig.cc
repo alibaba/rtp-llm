@@ -2,8 +2,8 @@
 #include "autil/Log.h"
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
-#include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <sstream>
 #include <string>
 
@@ -155,9 +155,29 @@ bool ModelConfig::isKvCacheQuant() const {
 AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
     AttentionConfigs config = attn_config;
 
-    config.head_num    = config.head_num / tp_size;
-    config.kv_head_num = config.kv_head_num / tp_size;
+    if (tp_size > 1) {
+        /* 
+        KV head partitioning logic for tensor parallelism:
+        Case 1: If kv_head_num % tp_size == 0,
+            then each rank gets kv_head_num / tp_size KV heads.
 
+        Case 2: If kv_head_num % tp_size != 0,
+            then we take the greatest common divisor:
+                gcd = GCD(kv_head_num, tp_size),
+            and each rank gets kv_head_num / gcd KV heads.
+        */
+        if (config.head_num % config.kv_head_num != 0) {
+        throw std::runtime_error("head_num must be divisible by kv_head_num for attention config");
+        }
+        if (config.kv_head_num % tp_size == 0) {
+            config.kv_head_num = config.kv_head_num / tp_size;
+        } else {
+            int64_t gcd = std::gcd(config.kv_head_num, tp_size);
+            config.kv_head_num = config.kv_head_num / gcd;
+        }
+        config.head_num = config.head_num / tp_size;
+    }
+    
     if (config.kernel_tokens_per_block == 0) {
         config.kernel_tokens_per_block = config.tokens_per_block;
     }

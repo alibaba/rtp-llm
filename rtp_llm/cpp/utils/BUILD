@@ -186,11 +186,11 @@ cc_library(
         "DebugUtils.cc",
     ],
     deps = [
-        "//rtp_llm/cpp/cuda/ops:exec_ctx_fwd",
-        "//rtp_llm/cpp/core:type_convert",
-        "//rtp_llm/cpp/core:common_defines",
+        "//rtp_llm/models_py/bindings/cuda/ops:exec_ctx_fwd",
+        "//rtp_llm/models_py/bindings/core:type_convert",
+        "//rtp_llm/models_py/bindings/core:common_defines",
     ] + select({
-        "//:using_cuda": ["//rtp_llm/cpp/cuda/ops:gpu_base"],
+        "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda/ops:gpu_base"],
         "//conditions:default": [],
     }),
     copts = copts(),
@@ -204,7 +204,7 @@ cc_library(
         "DevicePerfWrapper.h",
     ],
     deps = [
-        "//rtp_llm/cpp/cuda/ops:exec_ctx_fwd",
+        "//rtp_llm/models_py/bindings/cuda/ops:exec_ctx_fwd",
         "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),

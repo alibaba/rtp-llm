@@ -1,6 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/testing/TestBase.h"
-#include "rtp_llm/cpp/cuda/ops/BeamSearchOp.h"
+#include "rtp_llm/models_py/bindings/cuda/ops/BeamSearchOp.h"
 #include <torch/torch.h>
 
 using namespace rtp_llm;

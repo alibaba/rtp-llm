@@ -77,7 +77,6 @@ py_test(
         "HACK_LAYER_NUM": "1",
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
         "SEQ_SIZE_PER_BLOCK": "64",
-        "LOAD_PYTHON_MODEL": "1",
         "ACT_TYPE": "BF16",
     },
     tags = ["H20"],

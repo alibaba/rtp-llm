@@ -535,26 +535,26 @@ protected:
     void reportCacheReuseMetrics() const;
 
 protected:
-    uint64_t                             stream_magic_ = STREAM_MAGIC;
-    std::shared_ptr<GenerateInput>       generate_input_;
-    std::shared_ptr<GenerateStateMachine>      generate_status_;
-    std::vector<StreamState>          sub_generate_status_;
-    int                                  max_seq_len_;
-    int64_t                              vocab_size_;
-    std::shared_ptr<CompleteTokenIds>    complete_token_ids_;
-    int64_t                              begin_time_us_;
-    int64_t                              wait_time_us_  = 0;
-    std::shared_ptr<StreamCacheResource> stream_cache_resource_;
-    std::shared_ptr<bool>                is_context_stream_;
-    size_t                               iter_count_           = 0;
-    size_t                               sp_iter_count_        = 0;
-    size_t                               last_output_pos_      = 0;
-    int                                  initial_reuse_length_ = 0;
-    int                                  reuse_length_         = 0;
-    int                                  local_reuse_length_   = 0;
-    int                                  remote_reuse_length_  = 0;
-    int                                  memory_reuse_length_  = 0;
-    int                                  reuse_mm_length_      = 0;
+    uint64_t                              stream_magic_ = STREAM_MAGIC;
+    std::shared_ptr<GenerateInput>        generate_input_;
+    std::shared_ptr<GenerateStateMachine> generate_status_;
+    std::vector<StreamState>              sub_generate_status_;
+    int                                   max_seq_len_;
+    int64_t                               vocab_size_;
+    std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
+    int64_t                               begin_time_us_;
+    int64_t                               wait_time_us_ = 0;
+    std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
+    std::shared_ptr<bool>                 is_context_stream_;
+    size_t                                iter_count_           = 0;
+    size_t                                sp_iter_count_        = 0;
+    size_t                                last_output_pos_      = 0;
+    int                                   initial_reuse_length_ = 0;
+    int                                   reuse_length_         = 0;
+    int                                   local_reuse_length_   = 0;
+    int                                   remote_reuse_length_  = 0;
+    int                                   memory_reuse_length_  = 0;
+    int                                   reuse_mm_length_      = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;

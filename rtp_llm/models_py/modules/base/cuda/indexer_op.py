@@ -148,77 +148,40 @@ class IndexerOp(nn.Module):
         self,
         q: torch.Tensor,
         k: torch.Tensor,
-        positions: torch.Tensor,
-        total_local_ids: torch.Tensor,
-        total_global_ids: torch.Tensor,
+        full_rope_pos_ids: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Apply RoPE and Hadamard transform to query and key tensors.
-        Split by q0_idx/q1_idx so only valid (unpadded) tokens get RoPE; write back in-place to q's PE part.
+        CP variant of apply_rope_and_rotate_q_k.
+
+        Uses ``full_rope_pos_ids`` (length = num_tokens) so RoPE runs on the
+        entire buffer in-place, eliminating the per-layer gather/scatter EW
+        kernels.  Padding rows receive pos=0 and produce garbage, but they are
+        never consumed downstream (everything selects by ``total_local_ids``).
 
         Args:
             q: Query tensor [num_tokens, index_n_heads, index_head_dim]
             k: Key tensor [num_tokens, index_head_dim]
-            positions: Position IDs for RoPE (local order, length = num_tokens)
-            total_local_ids: Local row indices into ``q``/``k`` for this CP rank.
-            total_global_ids: Indices into ``positions`` (unpadded global order).
+            full_rope_pos_ids: Full-length position IDs [num_tokens], built
+                in plan() via ``full[total_local_ids] = positions_d[total_global_ids]``.
+                None when no valid tokens exist (n_q == 0).
 
         Returns:
             Tuple of (rotated_query, rotated_key)
         """
-        # q_pe / k_pe are views of the PE part; we will modify them in-place via q_pe0/q_pe1
-        pe_dim = self.index_head_dim - self.rope_head_dim
-        q_pe = q[:, :, :pe_dim]
-        k_pe = k[:, :pe_dim]
+        q_pe = q[:, :, : self.index_head_dim - self.rope_head_dim]
+        k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
-        if self.cos_sin_cache is not None and total_local_ids.size(0) > 0:
-            # total_local_ids index into local q/k (this rank's chunk)
-            n_local = q_pe.size(0)
-            if total_local_ids.numel() > 0:
-                max_lid = total_local_ids.max().item()
-                if max_lid >= n_local:
-                    raise ValueError(
-                        f"total_local_ids out of range for q/k: "
-                        f"max(total_local_ids)={max_lid}, q.size(0)={n_local}. "
-                        "Check CP plan() local chunk vs actual input size."
-                    )
-            if total_global_ids.numel() > 0:
-                max_gid = total_global_ids.max().item()
-                if max_gid >= positions.size(0):
-                    raise ValueError(
-                        f"total_global_ids out of range for positions: "
-                        f"max(total_global_ids)={max_gid}, positions.size(0)={positions.size(0)}. "
-                        "Likely padded-to-unpadded coordinate conversion is missing in plan()."
-                    )
-            q_pe_local = q_pe[total_local_ids]  # element wise
-            k_pe_local = k_pe[total_local_ids]  # element wise
-            k_rope = k_pe_local.unsqueeze(1)
-            pos_ids_q0_global = positions[total_global_ids]  # element wise
-            # To isolate async CUDA errors from earlier kernels, uncomment: torch.cuda.synchronize()
-            # RoPE kernel may device-assert if pos_ids exceed cos_sin_cache length
-            max_cache_pos = self.cos_sin_cache.shape[0]
-            if pos_ids_q0_global.numel() > 0:
-                pos_max = pos_ids_q0_global.max().item()
-                if pos_max >= max_cache_pos:
-                    raise ValueError(
-                        f"RoPE pos_ids out of range: max(pos_ids)={pos_max} >= "
-                        f"cos_sin_cache.shape[0]={max_cache_pos}. "
-                        "Check max_position_embeddings vs actual sequence length."
-                    )
+        if self.cos_sin_cache is not None and full_rope_pos_ids is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(
-                q=q_pe_local,
-                k=k_rope,
-                q_rope=q_pe_local,
-                k_rope=k_rope,
+                q=q_pe,
+                k=k_pe.unsqueeze(1),
+                q_rope=q_pe,
+                k_rope=k_pe.unsqueeze(1),
                 cos_sin_cache=self.cos_sin_cache,
-                pos_ids=pos_ids_q0_global,
+                pos_ids=full_rope_pos_ids,
                 interleave=not self.is_neox_style,
             )
-            k_rope = k_rope.squeeze(1)
-            k_pe[total_local_ids] = k_rope  # element wise
-            q_pe[total_local_ids] = q_pe_local  # element wise
 
-        # Apply Hadamard transform (activation rotation)
         query = _rotate_activation(q)
         key = _rotate_activation(k)
 
@@ -548,9 +511,12 @@ class IndexerOp(nn.Module):
         fmha_params: Any,
         attention_inputs: Any,
         total_local_ids: torch.Tensor,
-        total_global_ids: torch.Tensor,
         cu_kv_seqlens_global: torch.Tensor,
         num_kv_tokens: int,
+        precomputed_ks: torch.Tensor,
+        precomputed_ke: torch.Tensor,
+        precomputed_lengths: torch.Tensor,
+        precomputed_topk_off: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute TopK indices for ragged attention (prefill phase) with context parallel
@@ -565,18 +531,18 @@ class IndexerOp(nn.Module):
             q_fp8: Local quantized query for this CP rank [local_tokens, ...].
             weights: Weights tensor for this rank, shape [local_tokens, ...].
             kv_cache: KV cache object
-            fmha_params: FMHA parameters with ks, ke, expanded_seq_lens, topk_indices_offset
-            attention_inputs: Attention inputs with kv_cache_kernel_block_id_device (same as
-                non-CP ragged topk gather), cu_kv_seqlens, and
-                context_parallel_info.prefill_cp_chunk_lengths
+            fmha_params: FMHA parameters (ks/ke/etc. on the full tensor; not used for indexing).
+            attention_inputs: Attention inputs with kv_cache_kernel_block_id_device.
             total_local_ids: Rows of ``q_fp8`` / ``weights`` to participate in logits.
-            total_global_ids: Index into FMHA ``ks``/``ke`` rows (global token ids).
             cu_kv_seqlens_global: Cumulative KV lengths for the full (gathered) sequence.
             num_kv_tokens: Full KV token count (length of logical KV after restore).
+            precomputed_ks: ``fmha_params.ks[total_global_ids]``, precomputed in plan().
+            precomputed_ke: ``fmha_params.ke[total_global_ids]``, precomputed in plan().
+            precomputed_lengths: ``fmha_params.expanded_seq_lens[total_global_ids]``, precomputed in plan().
+            precomputed_topk_off: ``fmha_params.topk_indices_offset[total_global_ids]``, precomputed in plan().
 
         Returns:
-            (topk0, topk1): TopK indices for the two CP chunks, shapes
-                [len(q0_idx), index_topk] and [len(q1_idx), index_topk].
+            TopK indices for the CP chunks, shape [len(total_local_ids), index_topk].
         """
         from rtp_llm.models_py.kernels.cuda.fast_topk import (
             fast_topk_transform_ragged_fused,
@@ -610,20 +576,15 @@ class IndexerOp(nn.Module):
             cu_kv_seqlens_global,
         )
         kv_fp8_full = (k_fp8, k_scale.view(torch.float32))
-        assert (
-            fmha_params.ks is not None and fmha_params.ke is not None
-        ), "ks/ke must be prepared in prefill"
 
         def run_part_logits_topk(
             q_part: torch.Tensor,
-            q_idx_global: torch.Tensor,
             weights_part: torch.Tensor,
+            ks: torch.Tensor,
+            ke: torch.Tensor,
+            lengths: torch.Tensor,
+            topk_off: torch.Tensor,
         ) -> torch.Tensor:
-            assert q_idx_global.size(0) > 0, "q_idx_global must be set"
-            ks = fmha_params.ks[q_idx_global]
-            ke = fmha_params.ke[q_idx_global]
-            lengths = fmha_params.expanded_seq_lens[q_idx_global]
-            topk_off = fmha_params.topk_indices_offset[q_idx_global]
             logits_p = deep_gemm.fp8_mqa_logits(
                 q_part,
                 kv_fp8_full,
@@ -641,7 +602,11 @@ class IndexerOp(nn.Module):
             )
 
         if total_local_ids.size(0) > 0:
-            topk = run_part_logits_topk(q0, total_global_ids, weights_sq0)
+            topk = run_part_logits_topk(
+                q0, weights_sq0,
+                precomputed_ks, precomputed_ke,
+                precomputed_lengths, precomputed_topk_off,
+            )
         else:
             topk = None
         return topk

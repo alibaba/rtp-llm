@@ -2,7 +2,7 @@
 #include "c10/core/ScalarType.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
@@ -63,7 +63,6 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
         nullopt,  // no kv cache buffer for embedding executor
         0,
         parallelism_config,
-        ExecInitParams{buildDeviceType()},
     });
 
     RTP_LLM_CHECK_WITH_INFO(!params.py_model.is_none(), "py_model must be provided, legacy C++ GptModel path removed");
@@ -94,12 +93,14 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     int64_t batch_size = 0;
     calcTokenNum(streams, token_num, batch_size);
     GptModelInputs model_input;
-    model_input.combo_tokens          = torch::empty({token_num}, torch::kInt32);
-    model_input.combo_tokens_type_ids = torch::empty({token_num}, torch::kInt32);
-    model_input.combo_position_ids    = torch::empty({token_num}, torch::kInt32);
-    model_input.input_lengths         = torch::empty({batch_size}, torch::kInt32);
-    model_input.sequence_lengths      = torch::empty({0}, torch::kInt32);
-    model_input.prefix_lengths        = torch::zeros({batch_size}, torch::kInt32);
+    auto           i32_options = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+
+    model_input.combo_tokens          = torch::empty({token_num}, i32_options);
+    model_input.combo_tokens_type_ids = torch::empty({token_num}, i32_options);
+    model_input.combo_position_ids    = torch::empty({token_num}, i32_options);
+    model_input.input_lengths         = torch::empty({batch_size}, i32_options);
+    model_input.sequence_lengths      = torch::empty({0}, i32_options);
+    model_input.prefix_lengths        = torch::zeros({batch_size}, i32_options);
     int* merged_tokens                = model_input.combo_tokens.data_ptr<int>();
     int* input_lengths                = model_input.input_lengths.data_ptr<int>();
     int* merged_positon_ids           = model_input.combo_position_ids.data_ptr<int>();

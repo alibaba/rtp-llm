@@ -1,10 +1,6 @@
-
-test_envs = {
-    "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
-}
+test_envs = {}
 
 flashinfer_test_envs = {
-    "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
     "FLASHINFER_JIT_VERBOSE": "1",  # Enable verbose JIT compilation logs
 }
 
@@ -28,7 +24,6 @@ py_test (
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
-    env = test_envs,
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
@@ -43,7 +38,6 @@ py_test (
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
-    env = test_envs,
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
@@ -54,7 +48,6 @@ py_test (
     deps = py_test_deps + [
         "//rtp_llm:testlib",
     ],
-    env = test_envs,
     tags = ["open_skip", "H20", "manual"],
     exec_properties = {'gpu':'H20'},
 )

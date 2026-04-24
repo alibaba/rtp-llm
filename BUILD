@@ -64,6 +64,14 @@ config_setting(
 )
 
 config_setting(
+    name = "rocm_gfx950",
+    define_values = {
+        "using_rocm": "true",
+        "gfx950": "true",
+    },
+)
+
+config_setting(
     name = "using_arm",
     values = {"define": "using_arm=true"},
 )
@@ -84,6 +92,11 @@ selects.config_setting_group(
 config_setting(
     name = "xft_use_icx",
     values = {"define": "xft_use_icx=true"},
+)
+
+config_setting(
+    name = "using_ppu",
+    define_values = {"use_ppu": "true"},
 )
 
 config_setting(

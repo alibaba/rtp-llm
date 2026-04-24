@@ -136,6 +136,12 @@ class GetTopkRaggedCPTest(TestCase):
         q0_idx_list, _q1_idx_list = generate_q_indices(chunk_lengths)
         n0 = len(q0_idx_list)
 
+        # Precompute indexed params (simulates what create_params does)
+        precomputed_ks = fmha_params.ks[total_global_ids]
+        precomputed_ke = fmha_params.ke[total_global_ids]
+        precomputed_lengths = fmha_params.expanded_seq_lens[total_global_ids]
+        precomputed_topk_off = fmha_params.topk_indices_offset[total_global_ids]
+
         topk_result = op._get_topk_ragged_cp(
             q_fp8,
             weights,
@@ -143,9 +149,12 @@ class GetTopkRaggedCPTest(TestCase):
             fmha_params,
             attn_inputs,
             total_local_ids,
-            total_global_ids,
             cu_kv_seqlens_global,
             total_tokens,
+            precomputed_ks,
+            precomputed_ke,
+            precomputed_lengths,
+            precomputed_topk_off,
         )
         topk0 = topk_result[:n0]
         topk1 = topk_result[n0:]
@@ -267,6 +276,12 @@ class GetTopkRaggedCPTest(TestCase):
         q0_idx_list, _q1_idx_list = generate_q_indices(chunk_lengths)
         n0 = len(q0_idx_list)
 
+        # Precompute indexed params (simulates what create_params does)
+        precomputed_ks = fmha_params.ks[total_global_ids]
+        precomputed_ke = fmha_params.ke[total_global_ids]
+        precomputed_lengths = fmha_params.expanded_seq_lens[total_global_ids]
+        precomputed_topk_off = fmha_params.topk_indices_offset[total_global_ids]
+
         topk_result = op._get_topk_ragged_cp(
             q_fp8,
             weights,
@@ -274,9 +289,12 @@ class GetTopkRaggedCPTest(TestCase):
             fmha_params,
             attn_inputs,
             total_local_ids,
-            total_global_ids,
             cu_kv_seqlens_global,
             total_kv_tokens,
+            precomputed_ks,
+            precomputed_ke,
+            precomputed_lengths,
+            precomputed_topk_off,
         )
         topk0 = topk_result[:n0]
         topk1 = topk_result[n0:]

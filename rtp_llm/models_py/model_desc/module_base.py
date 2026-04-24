@@ -4,16 +4,15 @@ from typing import Any, Optional
 from torch import Tensor, nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
-    DeviceType,
     KVCache,
     PyModelInitResources,
     PyModelInputs,
     PyModelOutputs,
-    get_exec_ctx,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -47,7 +46,7 @@ class GptModelBase(nn.Module):
         self.vocab_size: int = config.vocab_size
 
         self.kv_cache: Optional[KVCache] = None
-        self.device_type: DeviceType = get_exec_ctx().get_device_type()
+        self.device_type: DeviceType = get_device_type()
 
         ## (batch_size -> fmha_params)
         self.params_dict: dict[int, Any] = {}

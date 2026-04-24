@@ -15,9 +15,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/Types.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheReceiver.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheSender.h"
-#include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/test/DeviceReserveForTest.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "autil/NetUtil.h"
 #include <torch/torch.h>
@@ -65,37 +64,10 @@ static KeyBlockInfoMap makeBlocks(int64_t cache_key, void* addr, size_t size) {
 class TcpSenderOnlyTest: public ::testing::Test {
 public:
     static void SetUpTestSuite() {
-        ParallelismConfig           parallelism_config;
-        ModelConfig                 model_config;
-        EPLBConfig                  eplb_config;
-        FMHAConfig                  fmha_config;
-        DeviceResourceConfig        device_resource_config;
-        MoeConfig                   moe_config;
-        SpeculativeExecutionConfig  sp_config;
-        MiscellaneousConfig         misc_config;
-        ProfilingDebugLoggingConfig profiling_debug_logging_config;
-        HWKernelConfig              hw_kernel_config;
-        ConcurrencyConfig           concurrency_config;
-        FfnDisAggregateConfig       ffn_disaggregate_config;
-        RuntimeConfig               runtime_config;
-        ModelSpecificConfig         model_specific_config;
-
-        tcp_test_internal::apply_device_reserve_from_env(device_resource_config);
-        initExecCtx(parallelism_config,
-                    model_config,
-                    eplb_config,
-                    fmha_config,
-                    device_resource_config,
-                    moe_config,
-                    sp_config,
-                    misc_config,
-                    profiling_debug_logging_config,
-                    hw_kernel_config,
-                    concurrency_config,
-                    ffn_disaggregate_config,
-                    runtime_config,
-                    model_specific_config,
-                    NcclCommConfig{});
+        initRuntime(/*device_id=*/0,
+                    /*trace_memory=*/false,
+                    /*enable_comm_overlap=*/false,
+                    MlaOpsType::AUTO);
         device_initialized_ = isRuntimeInitialized();
     }
 
@@ -120,37 +92,10 @@ bool TcpSenderOnlyTest::device_initialized_ = false;
 class TcpSenderReceiverTest: public ::testing::Test {
 public:
     static void SetUpTestSuite() {
-        ParallelismConfig           parallelism_config;
-        ModelConfig                 model_config;
-        EPLBConfig                  eplb_config;
-        FMHAConfig                  fmha_config;
-        DeviceResourceConfig        device_resource_config;
-        MoeConfig                   moe_config;
-        SpeculativeExecutionConfig  sp_config;
-        MiscellaneousConfig         misc_config;
-        ProfilingDebugLoggingConfig profiling_debug_logging_config;
-        HWKernelConfig              hw_kernel_config;
-        ConcurrencyConfig           concurrency_config;
-        FfnDisAggregateConfig       ffn_disaggregate_config;
-        RuntimeConfig               runtime_config;
-        ModelSpecificConfig         model_specific_config;
-
-        tcp_test_internal::apply_device_reserve_from_env(device_resource_config);
-        initExecCtx(parallelism_config,
-                    model_config,
-                    eplb_config,
-                    fmha_config,
-                    device_resource_config,
-                    moe_config,
-                    sp_config,
-                    misc_config,
-                    profiling_debug_logging_config,
-                    hw_kernel_config,
-                    concurrency_config,
-                    ffn_disaggregate_config,
-                    runtime_config,
-                    model_specific_config,
-                    NcclCommConfig{});
+        initRuntime(/*device_id=*/0,
+                    /*trace_memory=*/false,
+                    /*enable_comm_overlap=*/false,
+                    MlaOpsType::AUTO);
         device_initialized_ = isRuntimeInitialized();
     }
 

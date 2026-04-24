@@ -27,7 +27,10 @@ class CudaNoQuantEpLowLatencyStrategy(MoeStrategy):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method is None)
-        checker.check(config.moe_strategy == "no_auant_ep_low_latency" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == "no_auant_ep_low_latency"
+            or config.moe_strategy == "auto"
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor import (
@@ -50,11 +53,13 @@ class CudaNoQuantCppStrategy(MoeStrategy):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        checker.check(config.moe_strategy == "no_auant_cpp" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == "no_auant_cpp" or config.moe_strategy == "auto"
+        )
 
     def get_attributes(self) -> StrategyAttributes:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.f16_cpp_executor import (
-            CppMoeExecutor,
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.triton_fused_executor import (
+            TritonFusedMoeExecutor,
         )
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
             PureTpRouterNoQuant,
@@ -63,7 +68,7 @@ class CudaNoQuantCppStrategy(MoeStrategy):
         quant_config = FusedMoEQuantConfig(quant_dtype=None)
         return StrategyAttributes(
             router_class=PureTpRouterNoQuant,
-            executor_class=CppMoeExecutor,
+            executor_class=TritonFusedMoeExecutor,
             quant_config=quant_config,
         )
 
@@ -73,11 +78,13 @@ class CudaNoQuantDpNormalStrategy(MoeStrategy):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        checker.check(config.moe_strategy == "no_auant_dp_normal" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == "no_auant_dp_normal" or config.moe_strategy == "auto"
+        )
 
     def get_attributes(self) -> StrategyAttributes:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.f16_cpp_executor import (
-            CppMoeExecutor,
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.triton_fused_executor import (
+            TritonFusedMoeExecutor,
         )
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
             DeepepNormalRouterNoQuant,
@@ -86,6 +93,6 @@ class CudaNoQuantDpNormalStrategy(MoeStrategy):
         quant_config = FusedMoEQuantConfig(quant_dtype=None)
         return StrategyAttributes(
             router_class=DeepepNormalRouterNoQuant,
-            executor_class=CppMoeExecutor,
+            executor_class=TritonFusedMoeExecutor,
             quant_config=quant_config,
         )

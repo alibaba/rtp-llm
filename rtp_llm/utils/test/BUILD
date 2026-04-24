@@ -109,3 +109,21 @@ py_test(
     ],
     exec_properties = {'gpu':'H20'}
 )
+
+py_test(
+    name = "duplicated_kv_test",
+    srcs = [
+        "duplicated_kv_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:_ft_pickler",
+    ],
+    data = [
+        "//:th_transformer",
+        "//:th_transformer_config",
+        "//:rtp_compute_ops",
+    ],
+    exec_properties = {'gpu':'A10'}
+)

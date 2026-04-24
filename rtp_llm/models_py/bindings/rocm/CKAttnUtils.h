@@ -4,8 +4,8 @@
 #include "rtp_llm/models_py/bindings/common/kernels/kv_cache_kernels.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/core/OpData.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 
 #include <hip/hip_runtime.h>

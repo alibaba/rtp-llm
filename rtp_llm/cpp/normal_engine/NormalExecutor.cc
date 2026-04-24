@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstdlib>
 #include <memory>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
@@ -26,7 +26,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                bool                                   warm_up,
                                bool                                   is_propose,
                                int                                    propose_model_index,
-                               const ExecInitParams&                  exec_init_params):
+                               MlaOpsType                             mla_ops_type,
+                               int32_t                                kv_cache_group_num,
+                               const std::vector<int32_t>&            kv_cache_layer_to_group):
     Executor(),
     cache_manager_(cache_manager),
     warm_up_(warm_up),
@@ -73,8 +75,20 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
              std::nullopt,
          params.model_id,
          params.parallelism_config,
-         exec_init_params,
-         cache_manager});  // Pass cache_manager for cache_store access
+         params.hw_kernel_config,
+         params.profiling_debug_logging_config,
+         params.runtime_config,
+         params.concurrency_config,
+         params.sp_config,
+         params.device_resource_config,
+         mla_ops_type,
+         params.model_config_.max_seq_len,
+         params.model_config_.hidden_size,
+         params.model_config_.attn_config.tokens_per_block,
+         params.model_config_.attn_config.kernel_tokens_per_block,
+         kv_cache_group_num,
+         kv_cache_layer_to_group,
+         cache_manager});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");

@@ -93,6 +93,7 @@ requirement([
     "thrift",
     "torch",
     "torchvision",
+    "triton",
     "numpy",
     "safetensors",
     "einops",
@@ -130,11 +131,6 @@ requirement([
     "pybind11_stubgen",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
-filegroup(
-    name = "cutlass_config",
-    srcs = glob(["utils/gemm_utils/luts/*"]),
-    visibility = ["//visibility:public"],
-)
 
 py_library(
     name = "empty_target",
@@ -148,7 +144,6 @@ py_library(
     srcs = glob([
         "utils/**/*.py",
     ]),
-    data = [":cutlass_config"],
     deps = [
         ":torch",
         ":safetensors",
@@ -233,6 +228,7 @@ py_library(
         ":pillow-avif-plugin",
         ":torch",
         ":torchvision",
+        ":triton",
         ":pyOpenSSL",
         ":einops",
         ":utils",

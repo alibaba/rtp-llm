@@ -16,9 +16,8 @@ cc_library(
     ),
     deps = [
         "@com_google_googletest//:gtest",
-        "//rtp_llm/cpp/core:devices_base",
-        "//rtp_llm/cpp/core:exec_ops_test_lib",
-        "//rtp_llm/cpp/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
@@ -43,7 +42,6 @@ cc_library(
     srcs = ["DistributedTest.cc"],
     deps = [
         ":device_test_utils",
-        "//rtp_llm/cpp/core:distributed_comm_hdr",
     ],
     visibility = ["//visibility:public"],
     copts = test_copts,
@@ -54,7 +52,7 @@ cc_library(
     hdrs = ["BeamSearchOpTest.hpp"],
     deps = [
         ":device_test_utils",
-        "//rtp_llm/cpp/cuda/ops:torch_beam_search_op_impl",
+        "//rtp_llm/models_py/bindings/cuda/ops:torch_beam_search_op_impl",
         "//rtp_llm/cpp/models:models",
     ],
     visibility = ["//visibility:public"],

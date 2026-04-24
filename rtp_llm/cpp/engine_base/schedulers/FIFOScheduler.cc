@@ -26,8 +26,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_seq_len_(model_config.max_seq_len),
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
-    need_fill_fake_stream_((parallelism_config.dp_size > 1 || parallelism_config.tp_size > 1)
-                           && parallelism_config.tp_rank == 0),
+    need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     metrics_reporter_(metrics_reporter) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d]",
                      max_generate_batch_size_,
@@ -129,11 +128,9 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
             return true;
         }
     }
-    if (model_specific_config_.load_python_model) {
-        // new model py not support prefill and decode togather now
-        if (!running_streams_.empty()) {
-            return false;
-        }
+    // prefill and decode not mixed together
+    if (!running_streams_.empty()) {
+        return false;
     }
     if (running_streams_.size() + streams.size() + 1 > max_generate_batch_size_) {
         return false;

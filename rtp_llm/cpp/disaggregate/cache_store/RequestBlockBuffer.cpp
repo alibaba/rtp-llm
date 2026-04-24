@@ -8,7 +8,7 @@ namespace rtp_llm {
 RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, const std::string& request_key):
     requestid_(requestid), request_key_(request_key) {}
 
-RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, rtp_llm::AsyncEventPtr event):
+RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, std::shared_ptr<torch::Event> event):
     requestid_(requestid), event_(std::move(event)) {}
 
 RequestBlockBuffer::~RequestBlockBuffer() {}
@@ -26,7 +26,7 @@ const std::string& RequestBlockBuffer::getRequestKey() const {
     return request_key_.empty() ? requestid_ : request_key_;
 }
 
-const rtp_llm::AsyncEvent* RequestBlockBuffer::getEvent() const {
+const torch::Event* RequestBlockBuffer::getEvent() const {
     return event_.get();
 }
 
