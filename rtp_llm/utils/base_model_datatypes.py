@@ -59,7 +59,9 @@ class GenerateInput:
     prefix_length: int = 0
     token_type_ids: List[int] = field(default_factory=list)
     batch_group_size: int = 1
-    batch_group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
+    batch_group_id: int = (
+        -1
+    )  # Batch group ID for force batch grouping, -1 means not set
 
     class Config:
         arbitrary_types_allowed = True
@@ -106,6 +108,8 @@ class AuxInfo:
     decode_local_reuse_len: int = 0
     decode_remote_reuse_len: int = 0
     decode_memory_reuse_len: int = 0
+
+    multimodal_lengths: Dict[int, int] = field(default_factory=dict)
 
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
