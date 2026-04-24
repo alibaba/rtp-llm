@@ -43,8 +43,15 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
                   py::arg("eps"),
                   py::arg("hip_stream") = 0);
 
-    rtp_ops_m.def(
-        "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
+    rtp_ops_m.def("embedding",
+                  &embedding,
+                  "Embedding lookup kernel",
+                  py::arg("output"),
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("position_ids")     = py::none(),
+                  py::arg("token_type_ids")   = py::none(),
+                  py::arg("text_tokens_mask") = py::none());
 
     rtp_ops_m.def("embedding_bert",
                   &embeddingBert,

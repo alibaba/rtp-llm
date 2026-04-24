@@ -162,7 +162,8 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
             if (!py_model_inputs_.combo_position_ids.defined()) {
                 RTP_LLM_LOG_WARNING("combo_position_ids not defined in graph but present in input, skipping copy");
             } else {
-                size_t needed_size = state.current_batch_size * position_id_len_factor_ * sizeof(int);
+                size_t needed_size =
+                    state.current_batch_size * num_tokens_per_bs_ * position_id_len_factor_ * sizeof(int);
                 size_t source_size = inputs.combo_position_ids.numel() * sizeof(int);
                 size_t copy_size   = std::min(needed_size, source_size);
                 if (py_model_inputs_.combo_position_ids.numel() * sizeof(int) >= copy_size) {
@@ -455,8 +456,9 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         static_cast<int64_t>(((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_) + sp_steps_);
 
     if (need_combo_position_ids_) {
-        inputs.combo_position_ids = torch::ones({int(max_bs_) * position_id_len_factor_}, options_cpu_int32_);
-        inputs.combo_position_ids = inputs.combo_position_ids.pin_memory();
+        inputs.combo_position_ids =
+            torch::ones({int(max_bs_) * num_tokens_per_bs_ * position_id_len_factor_}, options_cpu_int32_);
+        inputs.combo_position_ids                  = inputs.combo_position_ids.pin_memory();
         inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
     }
 
@@ -762,8 +764,8 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);
     if (need_combo_position_ids_ && capture_mem_hold_.py_model_inputs_.combo_position_ids.defined()) {
-        inputs.combo_position_ids =
-            capture_mem_hold_.py_model_inputs_.combo_position_ids.slice(0, 0, batch_size * position_id_len_factor_);
+        inputs.combo_position_ids = capture_mem_hold_.py_model_inputs_.combo_position_ids.slice(
+            0, 0, batch_size * num_tokens_per_bs_ * position_id_len_factor_);
         inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
     }
 
