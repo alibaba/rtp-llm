@@ -27,7 +27,6 @@ def _curl_server_single_worker(
     is_decode: bool,
     decode_test_length: int,
     request_timeout: int,
-    is_profile: bool = False,
     is_warmup: bool = False,
     generate_config: Dict[str, Any] = {},
 ) -> ResponseInfo:
@@ -52,10 +51,6 @@ def _curl_server_single_worker(
 
     if "top_k" not in req:
         req["top_k"] = 1
-
-    if is_profile:
-        req["gen_timeline"] = True
-        req["profile_step"] = 2
 
     if is_warmup:
         request_timeout = 1000
@@ -82,7 +77,6 @@ def _curl_server_batch_worker(
     is_decode: bool,
     decode_test_length: int,
     request_timeout: int,
-    is_profile: bool = False,
     is_warmup: bool = False,
     generate_config: Dict[str, Any] = {},
 ) -> List[ResponseInfo]:
@@ -100,7 +94,6 @@ def _curl_server_batch_worker(
                 is_decode,
                 decode_test_length,
                 request_timeout,
-                is_profile,
                 is_warmup,
                 generate_config,
             )
@@ -166,21 +159,15 @@ class BatchPerfImpl(object):
     def run(self):
         self._set_concurrency()
         logging.info(f"finished setting concurrency")
-        _ = self._curl_server(is_profile=False, is_warmup=True)
+        _ = self._curl_server(is_warmup=True)
         logging.info(f"finished warmup")
-        # Pre-warm the Kineto/roctracer profiler: the first call to enableProfiler()
-        # triggers roctracer thread initialization which may emit an "External init
-        # callback must run in same thread" warning and produces no GPU kernel events.
-        # A second profile call will see roctracer already initialized and capture correctly.
-        if self.profile_all_ranks:
-            self._start_profile_on_all_ranks(num_steps=2)
-        _ = self._curl_server(is_profile=True, is_warmup=False)
-        logging.info(f"finished profiler prewarm")
-        results = self._curl_server(is_profile=False, is_warmup=False)
+        results = self._curl_server()
         logging.info(f"finished measure time")
+        # When GEN_TIMELINE_SYNC=1, send StartProfile gRPC directly to all ranks so
+        # every tp_rank captures a timeline (not just rank-0 via the HTTP gen_timeline path).
         if self.profile_all_ranks:
             self._start_profile_on_all_ranks(num_steps=2)
-        _ = self._curl_server(is_profile=True, is_warmup=False)
+        _ = self._curl_server()
         logging.info(f"finished dump profile json")
         return results
 
@@ -303,7 +290,7 @@ class BatchPerfImpl(object):
                     logging.warning(f"StartProfile failed on {ip}:{port}: {msg}")
 
     def _curl_server(
-        self, is_profile: bool = False, is_warmup: bool = False
+        self, is_warmup: bool = False
     ) -> TestResultMetrics:
         request_batches: List[List[int]] = []
         for i in range(0, self.total_batch_size, self.max_requests_per_process):
@@ -324,7 +311,6 @@ class BatchPerfImpl(object):
                     self.is_decode,
                     self.decode_test_length,
                     self.request_timeout,
-                    is_profile,
                     is_warmup,
                     self.generate_config,
                 )
