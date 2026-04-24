@@ -1,9 +1,44 @@
 #include "rtp_llm/cpp/cache/BlockCache.h"
+
+#include <algorithm>
+#include <cstring>
+
 #include "rtp_llm/cpp/utils/LRUCache.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
+
+void BlockCache::registerParentIndex(const CacheItem& item, const CacheKeyGroupPair& lru_key) {
+    if (item.valid_token_len <= 0) {
+        return;
+    }
+    ParentGroupKey p{item.parent_block_key, item.group_id};
+    auto&          vec = parent_bucket_[p];
+    if (std::find(vec.begin(), vec.end(), lru_key) == vec.end()) {
+        vec.push_back(lru_key);
+    }
+    lru_key_to_parent_[lru_key] = p;
+}
+
+void BlockCache::onLruEntryRemoved(const CacheKeyGroupPair& lru_key, const CacheItem& item) {
+    (void)item;
+    auto it = lru_key_to_parent_.find(lru_key);
+    if (it == lru_key_to_parent_.end()) {
+        return;
+    }
+    ParentGroupKey p = it->second;
+    lru_key_to_parent_.erase(it);
+    auto bit = parent_bucket_.find(p);
+    if (bit == parent_bucket_.end()) {
+        return;
+    }
+    auto& vec = bit->second;
+    vec.erase(std::remove(vec.begin(), vec.end(), lru_key), vec.end());
+    if (vec.empty()) {
+        parent_bucket_.erase(bit);
+    }
+}
 
 BlockCache::MatchResult BlockCache::match(CacheKeyType cache_key, int group_id) {
     RTP_LLM_PROFILE_FUNCTION();
@@ -17,6 +52,88 @@ BlockCache::MatchResult BlockCache::match(CacheKeyType cache_key, int group_id) 
     }
 }
 
+BlockCache::PartialTailMatchResult BlockCache::matchPartialTailByParent(CacheKeyType   parent_block_key,
+                                                                        GroupIdType    group_id,
+                                                                        int            L,
+                                                                        int            seq_size_per_block,
+                                                                        bool           is_linear_attention,
+                                                                        const int32_t* req_tokens,
+                                                                        int            req_token_off) {
+    RTP_LLM_PROFILE_FUNCTION();
+    PartialTailMatchResult out;
+    if (L <= 0 || seq_size_per_block <= 0 || req_tokens == nullptr) {
+        return out;
+    }
+
+    std::lock_guard<std::mutex> lock(mu_);
+    ParentGroupKey              pkey{parent_block_key, group_id};
+    auto                        bit = parent_bucket_.find(pkey);
+    if (bit == parent_bucket_.end()) {
+        return out;
+    }
+
+    size_t            best_reuse = 0;
+    int               best_v     = -1;
+    CacheKeyGroupPair best_lru{};
+    bool              found = false;
+
+    for (const auto& cand_lru : bit->second) {
+        CacheItem it;
+        if (!lru_cache_.peek(cand_lru, &it)) {
+            continue;
+        }
+        if (it.valid_token_len <= 0) {
+            continue;
+        }
+        const int v = it.valid_token_len;
+        if (static_cast<int>(it.prefix_tokens.size()) < v) {
+            continue;
+        }
+        const int cmp_n = std::min(v, L);
+        if (cmp_n > 0
+            && std::memcmp(
+                   req_tokens + req_token_off, it.prefix_tokens.data(), sizeof(int32_t) * static_cast<size_t>(cmp_n))
+                   != 0) {
+            continue;
+        }
+
+        size_t reuse = 0;
+        if (is_linear_attention) {
+            if (L < v) {
+                continue;
+            }
+            reuse = static_cast<size_t>(v);
+        } else {
+            if (v <= L) {
+                reuse = static_cast<size_t>(v);
+            } else {
+                reuse = static_cast<size_t>(L);
+            }
+        }
+
+        const bool better = (!found) || (reuse > best_reuse) || (reuse == best_reuse && v > best_v);
+        if (better) {
+            found      = true;
+            best_reuse = reuse;
+            best_v     = v;
+            best_lru   = cand_lru;
+        }
+    }
+
+    if (!found) {
+        return out;
+    }
+
+    auto [touch_ok, touched] = lru_cache_.get(best_lru);
+    (void)touched;
+    if (!touch_ok) {
+        return out;
+    }
+    out.matched_index = touched.block_index;
+    out.reuse_tokens  = best_reuse;
+    return out;
+}
+
 bool BlockCache::contains(CacheKeyType cache_key, int group_id) const {
     std::lock_guard<std::mutex> lock(mu_);
     CacheKeyGroupPair           key{cache_key, group_id};
@@ -28,32 +145,45 @@ bool BlockCache::put(CacheItem& item) {
     std::lock_guard<std::mutex> lock(mu_);
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null block");
 
-    CacheKeyGroupPair key{item.cache_key, item.group_id};
+    CacheKeyGroupPair lru_k{item.cache_key, item.group_id};
 
-    if (lru_cache_.contains(key)) {
-        // It already exists; increase its popularity.
-        lru_cache_.get(key);
+    if (lru_cache_.contains(lru_k)) {
+        lru_cache_.get(lru_k);
         return false;
     }
 
-    lru_cache_.put(key, item);
+    if (lru_cache_.full()) {
+        auto [popped_ok, evicted] = lru_cache_.pop();
+        if (popped_ok) {
+            CacheKeyGroupPair evict_k{evicted.cache_key, evicted.group_id};
+            onLruEntryRemoved(evict_k, evicted);
+        }
+    }
+
+    lru_cache_.put(lru_k, item);
+    if (item.valid_token_len > 0) {
+        registerParentIndex(item, lru_k);
+    }
     return true;
 }
 
-BlockIndicesType BlockCache::pop(int nums) {
+BlockIndicesType BlockCache::pop(int n) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
-    RTP_LLM_CHECK_WITH_INFO(nums > 0, "pop nums should > 0, nums = " + std::to_string(nums));
+    RTP_LLM_CHECK_WITH_INFO(n > 0, "pop n should > 0, n = " + std::to_string(n));
     BlockIndicesType pop_blocks;
 
-    auto cond = [&](const CacheKeyGroupPair& key, const CacheItem& item) { return !item.is_resident; };
+    auto cond = [&](const CacheKeyGroupPair& /*key*/, const CacheItem& item) { return !item.is_resident; };
 
-    while (nums > 0 && !lru_cache_.empty()) {
+    while (n > 0 && !lru_cache_.empty()) {
         auto [success, item] = lru_cache_.popWithCond(cond);
-        if (!success)
+        if (!success) {
             break;
+        }
+        CacheKeyGroupPair k{item.cache_key, item.group_id};
+        onLruEntryRemoved(k, item);
         pop_blocks.push_back(item.block_index);
-        nums--;
+        n--;
     }
 
     return pop_blocks;
@@ -66,6 +196,7 @@ std::optional<BlockCache::CacheItem> BlockCache::remove(CacheKeyType cache_key, 
     if (!lru_cache_.remove(key, &removed_item)) {
         return std::nullopt;
     }
+    onLruEntryRemoved(key, removed_item);
     return removed_item;
 }
 
@@ -145,6 +276,7 @@ BlockCache::EvictResult BlockCache::selectAndEvict(size_t min_blocks) {
             CacheKeyGroupPair key{item.cache_key, item.group_id};
             CacheItem         removed_item;
             if (lru_cache_.remove(key, &removed_item)) {
+                onLruEntryRemoved(key, removed_item);
                 evicted_items.push_back(removed_item);
             }
         }

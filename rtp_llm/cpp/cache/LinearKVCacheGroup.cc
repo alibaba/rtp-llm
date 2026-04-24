@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <unordered_set>
 
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -204,6 +205,52 @@ void LinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& 
     filterValidBlocks(new_block_indices, valid);
     if (!valid.empty()) {
         block_pool_->requestReference(valid);
+    }
+}
+
+void LinearKVCacheGroup::insertPartialTailForBatch(const InsertInfo& insert_info,
+                                                   int               batch_id,
+                                                   bool              is_linear_attention) {
+    auto res = insert_info.batch_kv_cache_resource;
+    if (!res || !insert_info.complete_token_ids) {
+        return;
+    }
+    if (res->lastBlockAligned()) {
+        return;
+    }
+    const auto& keys = res->cacheKeys(batch_id);
+    const auto& blk  = res->blocks(batch_id, group_id_);
+    if (keys.empty() || blk.empty()) {
+        return;
+    }
+    const int last = static_cast<int>(keys.size()) - 1;
+    if (isNullBlockIdx(blk[static_cast<size_t>(last)])) {
+        return;
+    }
+
+    const CacheKeyType parent_key = last > 0 ? keys[static_cast<size_t>(last - 1)] : static_cast<CacheKeyType>(0);
+    const int          seq_len    = insert_info.complete_token_ids->seqLength();
+    const int          B          = seq_size_per_block_;
+    const int          L          = seq_len - last * B;
+    if (L <= 0 || L > B) {
+        return;
+    }
+
+    const int32_t* tok = insert_info.complete_token_ids->data(batch_id);
+    const int      off = last * B;
+
+    BlockCache::CacheItem item;
+    item.cache_key        = keys[static_cast<size_t>(last)];
+    item.parent_block_key = parent_key;
+    item.group_id         = group_id_;
+    item.block_index      = blk[static_cast<size_t>(last)];
+    item.is_resident      = insert_info.is_resident;
+    item.valid_token_len  = L;
+    item.prefix_tokens.assign(tok + off, tok + off + L);
+    item.is_linear_group = is_linear_attention;
+
+    if (block_cache_->put(item)) {
+        block_pool_->blockCacheReference(blk[static_cast<size_t>(last)]);
     }
 }
 

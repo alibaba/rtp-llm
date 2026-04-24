@@ -60,6 +60,9 @@ struct CacheConfig {
     int linear_group_num = 0;  // Number of linear attention groups
     int full_group_num   = 0;  // Number of full attention groups
 
+    /// GPU device BlockCache: parent-bucket partial tail reuse (see docs/backend/gpu_partial_kv_cache_reuse.md).
+    bool enable_device_partial_block_reuse = false;
+
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
 
@@ -113,6 +116,7 @@ struct CacheConfig {
         OUTPUT_FIELD(group_layer_num);
         OUTPUT_FIELD(linear_group_num);
         OUTPUT_FIELD(full_group_num);
+        OUTPUT_FIELD(enable_device_partial_block_reuse);
         os << "\n";
 
         // Cache specification section

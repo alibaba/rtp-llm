@@ -284,6 +284,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             // save cache to gpu
             if (enableDeviceCache()) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
+                insert_info.insert_tail_partial_block =
+                    resource_context_.cache_manager->cacheConfig().enable_device_partial_block_reuse;
                 resource_context_.cache_manager->insertIntoCache(insert_info);
             }
             storeCacheAsync(batch_kv_cache_resource_,
@@ -341,6 +343,9 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         malloc_info.reuse_cache         = reuseCache();
         malloc_info.enable_device_cache = reuseCache() && enableDeviceCache();
     }
+    malloc_info.enable_device_partial_block_reuse =
+        resource_context_.cache_manager->cacheConfig().enable_device_partial_block_reuse && malloc_info.reuse_cache
+        && malloc_info.enable_device_cache;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);
@@ -372,6 +377,9 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache             = reuseCache();
     malloc_info.enable_device_cache     = reuseCache() && enableDeviceCache();
+    malloc_info.enable_device_partial_block_reuse =
+        resource_context_.cache_manager->cacheConfig().enable_device_partial_block_reuse && malloc_info.reuse_cache
+        && malloc_info.enable_device_cache;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);

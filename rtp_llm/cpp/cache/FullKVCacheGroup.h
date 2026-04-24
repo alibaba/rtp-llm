@@ -28,6 +28,8 @@ public:
                                  bool reuse_enabled = false) const override;
     void           reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
 
+    void insertPartialTailForBatch(const InsertInfo& insert_info, int batch_id, bool is_linear_attention) override;
+
 private:
 };
 

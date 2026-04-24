@@ -54,6 +54,9 @@ public:
 
     bool remove(const KeyType& key, ValueType* removed_value = nullptr);
 
+    // Read value without changing LRU order (for inspection / candidate scoring).
+    bool peek(const KeyType& key, ValueType* out_value = nullptr) const;
+
     void printCache() const;
 
     CacheIterator begin() {
@@ -163,6 +166,18 @@ template<typename KeyType, typename ValueType, typename Hash, typename Equal>
 bool LRUCache<KeyType, ValueType, Hash, Equal>::contains(const KeyType& key) const {
     auto it = cache_items_map_.find(key);
     return it != cache_items_map_.end();
+}
+
+template<typename KeyType, typename ValueType, typename Hash, typename Equal>
+bool LRUCache<KeyType, ValueType, Hash, Equal>::peek(const KeyType& key, ValueType* out_value) const {
+    auto it = cache_items_map_.find(key);
+    if (it == cache_items_map_.end()) {
+        return false;
+    }
+    if (out_value) {
+        *out_value = it->second->second;
+    }
+    return true;
 }
 
 template<typename KeyType, typename ValueType, typename Hash, typename Equal>

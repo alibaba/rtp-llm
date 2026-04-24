@@ -34,6 +34,8 @@ public:
                                  int  reuse_blocks_len,
                                  bool reuse_enabled = false) const override;
 
+    void insertPartialTailForBatch(const InsertInfo& insert_info, int batch_id, bool is_linear_attention) override;
+
 private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
 

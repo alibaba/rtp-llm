@@ -160,12 +160,13 @@ struct KVCacheConfig {
     bool        enable_device_cache       = true;
     bool        enable_memory_cache       = false;
     // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
-    bool    enable_memory_cache_sm_copy  = false;
-    bool    enable_remote_cache          = false;
-    bool    write_cache_sync             = false;
-    bool    enable_tiered_memory_cache   = false;
-    int64_t device_cache_min_free_blocks = 0;
-    int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
+    bool    enable_memory_cache_sm_copy       = false;
+    bool    enable_remote_cache               = false;
+    bool    write_cache_sync                  = false;
+    bool    enable_tiered_memory_cache        = false;
+    int64_t device_cache_min_free_blocks      = 0;
+    int     load_cache_retry_times            = 1;  // Maximum retry attempts for load cache transfer failures
+    bool    enable_device_partial_block_reuse = false;
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;

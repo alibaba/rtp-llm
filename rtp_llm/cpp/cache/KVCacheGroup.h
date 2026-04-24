@@ -47,6 +47,9 @@ public:
         int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled = false) const = 0;
     virtual void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices)                         = 0;
 
+    /// Insert last partial logical block into device BlockCache with parent-bucket metadata (stream FINISHED path).
+    virtual void insertPartialTailForBatch(const InsertInfo& insert_info, int batch_id, bool is_linear_attention);
+
     void                                   reference(const BlockIndicesType& new_block_indices);
     std::unordered_map<int, torch::Tensor> allLayerCacheBase() const;
     std::unordered_map<int, torch::Tensor> allLayerScaleCacheBase() const;
@@ -59,6 +62,10 @@ public:
     bool   ensureFreeBlocks(int need_blocks);
     int    seqSizePerBlock() const;
     int    group_id() const;
+
+    const BlockCachePtr& blockCache() const {
+        return block_cache_;
+    }
 
 protected:
     LayerIdsType   layer_ids_;

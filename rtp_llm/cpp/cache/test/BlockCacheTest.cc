@@ -5,12 +5,36 @@
 #include <atomic>
 #include <algorithm>
 #include <set>
+#include <cstdint>
 #include "rtp_llm/cpp/cache/BlockCache.h"
 
 namespace rtp_llm {
 namespace test {
 
 typedef BlockCache::CacheItem CacheItem;
+
+namespace {
+
+CacheItem make_partial_tail(CacheKeyType         cache_key,
+                            GroupIdType          group_id,
+                            BlockIdxType         block_index,
+                            CacheKeyType         parent_block_key,
+                            int                  valid_token_len,
+                            std::vector<int32_t> prefix_tokens,
+                            bool                 is_linear_group) {
+    CacheItem item;
+    item.cache_key        = cache_key;
+    item.group_id         = group_id;
+    item.block_index      = block_index;
+    item.is_resident      = false;
+    item.valid_token_len  = valid_token_len;
+    item.parent_block_key = parent_block_key;
+    item.prefix_tokens    = std::move(prefix_tokens);
+    item.is_linear_group  = is_linear_group;
+    return item;
+}
+
+}  // namespace
 
 class BlockCacheTest: public ::testing::Test {
 protected:
@@ -251,6 +275,128 @@ TEST_F(BlockCacheTest, SelectAndEvictLRUOrder) {
     EXPECT_EQ(result.evicted_keys.size(), 1);
     EXPECT_EQ(result.evicted_keys[0], 102);
     EXPECT_EQ(cache_->size(), 2);
+}
+
+// ==================== Parent-bucket partial tail (matchPartialTailByParent) ====================
+
+TEST_F(BlockCacheTest, PartialTailFull_vLeL_reuse_all_v) {
+    constexpr int kB     = 64;
+    const int32_t parent = 9001;
+    CacheItem     tail   = make_partial_tail(9101, 0, 7001, parent, 4, {10, 11, 12, 13}, false);
+    ASSERT_TRUE(cache_->put(tail));
+
+    std::vector<int32_t> req = {10, 11, 12, 13, 20, 21};
+    const int            L   = 6;
+    auto                 pm  = cache_->matchPartialTailByParent(
+        parent, 0, L, kB, /*is_linear_attention=*/false, req.data(), /*req_token_off=*/0);
+    EXPECT_FALSE(isNullBlockIdx(pm.matched_index));
+    EXPECT_EQ(pm.matched_index, 7001);
+    EXPECT_EQ(pm.reuse_tokens, 4u);
+}
+
+TEST_F(BlockCacheTest, PartialTailFull_vGtL_reuse_L) {
+    constexpr int kB     = 64;
+    const int32_t parent = 9002;
+    CacheItem     tail   = make_partial_tail(9102, 0, 7002, parent, 6, {1, 2, 3, 4, 5, 6}, false);
+    ASSERT_TRUE(cache_->put(tail));
+
+    std::vector<int32_t> req = {1, 2, 3, 4};
+    const int            L   = 4;
+    auto                 pm  = cache_->matchPartialTailByParent(parent, 0, L, kB, false, req.data(), 0);
+    EXPECT_EQ(pm.matched_index, 7002);
+    EXPECT_EQ(pm.reuse_tokens, 4u);
+}
+
+TEST_F(BlockCacheTest, PartialTailFull_prefix_mismatch_no_match) {
+    constexpr int kB     = 64;
+    const int32_t parent = 9003;
+    CacheItem     tail   = make_partial_tail(9103, 0, 7003, parent, 3, {7, 8, 9}, false);
+    ASSERT_TRUE(cache_->put(tail));
+
+    std::vector<int32_t> req = {7, 8, 99};
+    auto                 pm  = cache_->matchPartialTailByParent(parent, 0, 3, kB, false, req.data(), 0);
+    EXPECT_TRUE(isNullBlockIdx(pm.matched_index));
+    EXPECT_EQ(pm.reuse_tokens, 0u);
+}
+
+TEST_F(BlockCacheTest, PartialTailLinear_L_lt_v_no_match) {
+    constexpr int kB     = 64;
+    const int32_t parent = 9004;
+    CacheItem     tail   = make_partial_tail(9104, 0, 7004, parent, 5, {1, 2, 3, 4, 5}, true);
+    ASSERT_TRUE(cache_->put(tail));
+
+    std::vector<int32_t> req = {1, 2, 3, 4};
+    const int            L   = 4;
+    auto                 pm  = cache_->matchPartialTailByParent(parent, 0, L, kB, true, req.data(), 0);
+    EXPECT_TRUE(isNullBlockIdx(pm.matched_index));
+    EXPECT_EQ(pm.reuse_tokens, 0u);
+}
+
+TEST_F(BlockCacheTest, PartialTailLinear_L_ge_v_reuse_v) {
+    constexpr int kB     = 64;
+    const int32_t parent = 9005;
+    CacheItem     tail   = make_partial_tail(9105, 0, 7005, parent, 3, {100, 101, 102}, true);
+    ASSERT_TRUE(cache_->put(tail));
+
+    std::vector<int32_t> req = {100, 101, 102, 200};
+    const int            L   = 4;
+    auto                 pm  = cache_->matchPartialTailByParent(parent, 0, L, kB, true, req.data(), 0);
+    EXPECT_EQ(pm.matched_index, 7005);
+    EXPECT_EQ(pm.reuse_tokens, 3u);
+}
+
+TEST_F(BlockCacheTest, PartialTail_wrong_parent_bucket_empty) {
+    constexpr int kB   = 64;
+    CacheItem     tail = make_partial_tail(9200, 0, 8000, 9100, 2, {1, 2}, false);
+    ASSERT_TRUE(cache_->put(tail));
+
+    std::vector<int32_t> req = {1, 2};
+    auto                 pm  = cache_->matchPartialTailByParent(9999, 0, 2, kB, false, req.data(), 0);
+    EXPECT_TRUE(isNullBlockIdx(pm.matched_index));
+}
+
+TEST_F(BlockCacheTest, PartialTail_req_token_offset) {
+    constexpr int kB     = 64;
+    const int32_t parent = 9006;
+    CacheItem     tail   = make_partial_tail(9106, 0, 7006, parent, 2, {5, 6}, false);
+    ASSERT_TRUE(cache_->put(tail));
+
+    std::vector<int32_t> req = {0, 0, 5, 6};
+    auto                 pm  = cache_->matchPartialTailByParent(parent, 0, 2, kB, false, req.data(), 2);
+    EXPECT_EQ(pm.matched_index, 7006);
+    EXPECT_EQ(pm.reuse_tokens, 2u);
+}
+
+TEST_F(BlockCacheTest, PartialTail_remove_unregisters_parent_index) {
+    constexpr int kB     = 64;
+    const int32_t parent = 9007;
+    CacheItem     tail   = make_partial_tail(9107, 0, 7007, parent, 2, {3, 4}, false);
+    ASSERT_TRUE(cache_->put(tail));
+
+    std::vector<int32_t> req = {3, 4};
+    ASSERT_FALSE(
+        isNullBlockIdx(cache_->matchPartialTailByParent(parent, 0, 2, kB, false, req.data(), 0).matched_index));
+
+    auto removed = cache_->remove(9107, 0);
+    ASSERT_TRUE(removed.has_value());
+
+    auto pm = cache_->matchPartialTailByParent(parent, 0, 2, kB, false, req.data(), 0);
+    EXPECT_TRUE(isNullBlockIdx(pm.matched_index));
+}
+
+TEST_F(BlockCacheTest, PartialTail_tie_prefers_larger_v_when_reuse_equal) {
+    constexpr int kB     = 64;
+    const int32_t parent = 9008;
+    // Both Full with L=4 yield reuse_tokens=4; pick entry with larger valid_token_len (v=5).
+    CacheItem shorter = make_partial_tail(9108, 0, 8010, parent, 4, {1, 2, 3, 4}, false);
+    CacheItem longer  = make_partial_tail(9109, 0, 8011, parent, 5, {1, 2, 3, 4, 99}, false);
+    ASSERT_TRUE(cache_->put(shorter));
+    ASSERT_TRUE(cache_->put(longer));
+
+    std::vector<int32_t> req = {1, 2, 3, 4};
+    auto                 pm  = cache_->matchPartialTailByParent(parent, 0, 4, kB, false, req.data(), 0);
+    EXPECT_EQ(pm.matched_index, 8011);
+    EXPECT_EQ(pm.reuse_tokens, 4u);
 }
 
 }  // namespace test

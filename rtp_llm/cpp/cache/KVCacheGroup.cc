@@ -109,4 +109,10 @@ void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
     block_pool_->requestReference(new_block_indices);
 }
 
+void KVCacheGroup::insertPartialTailForBatch(const InsertInfo& insert_info, int batch_id, bool is_linear_attention) {
+    (void)insert_info;
+    (void)batch_id;
+    (void)is_linear_attention;
+}
+
 }  // namespace rtp_llm

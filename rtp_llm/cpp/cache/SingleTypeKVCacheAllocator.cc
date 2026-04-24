@@ -88,8 +88,36 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         match_cost_time_us                = currentTimeUs() - match_begin_time_us;
         reuse_len                         = static_cast<int>(match_result.reuse_length);
         reuse_blocks                      = static_cast<int>(match_result.reuse_blocks);
-        kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
+        kv_resource->cacheResource(0).setDeviceReuseBlockNum(static_cast<size_t>(reuse_blocks));
         full_kv_cache_group_->reference(block_ids_0, match_result.block_indices);
+
+        // Phase-2: parent-bucket partial tail reuse (single full-attn allocator only).
+        if (config_.enable_device_partial_block_reuse && malloc_info.enable_device_partial_block_reuse) {
+            const int B       = full_kv_cache_group_->seqSizePerBlock();
+            const int seq_len = malloc_info.complete_token_ids->seqLength();
+            if (!kv_resource->lastBlockAligned() && reuse_blocks == static_cast<int>(match_keys.size())
+                && cache_keys.size() == match_keys.size() + 1) {
+                const CacheKeyType parent_key = match_keys.empty() ? static_cast<CacheKeyType>(0) : match_keys.back();
+                const int          L          = seq_len - static_cast<int>(match_keys.size()) * B;
+                const int          req_off    = static_cast<int>(match_keys.size()) * B;
+                if (L > 0 && L <= B) {
+                    auto pm = full_kv_cache_group_->blockCache()->matchPartialTailByParent(
+                        parent_key,
+                        full_kv_cache_group_->group_id(),
+                        L,
+                        B,
+                        /*is_linear_attention=*/false,
+                        malloc_info.complete_token_ids->data(0),
+                        req_off);
+                    if (!isNullBlockIdx(pm.matched_index) && pm.reuse_tokens > 0) {
+                        reuse_blocks += 1;
+                        reuse_len = static_cast<int>(static_cast<size_t>(reuse_len) + pm.reuse_tokens);
+                        kv_resource->cacheResource(0).setDeviceReuseBlockNum(static_cast<size_t>(reuse_blocks));
+                        full_kv_cache_group_->reference(block_ids_0, BlockIndicesType{pm.matched_index});
+                    }
+                }
+            }
+        }
     }
 
     // Check if available blocks are enough for the request.
@@ -203,10 +231,22 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
             continue;
         }
 
-        CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + block_num);
-        BlockIndicesType put_block_ids(blocks.begin(), blocks.begin() + block_num);
+        const bool tail_partial_insert = insert_info.insert_tail_partial_block
+                                         && config_.enable_device_partial_block_reuse && insert_info.complete_token_ids
+                                         && !kv_resource->lastBlockAligned() && block_num >= 1;
 
-        full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
+        if (tail_partial_insert && block_num >= 2) {
+            CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + block_num - 1);
+            BlockIndicesType put_block_ids(blocks.begin(), blocks.begin() + block_num - 1);
+            full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
+            full_kv_cache_group_->insertPartialTailForBatch(insert_info, batch_id, /*is_linear_attention=*/false);
+        } else if (tail_partial_insert && block_num == 1) {
+            full_kv_cache_group_->insertPartialTailForBatch(insert_info, batch_id, /*is_linear_attention=*/false);
+        } else {
+            CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + block_num);
+            BlockIndicesType put_block_ids(blocks.begin(), blocks.begin() + block_num);
+            full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
+        }
     }
 }
 

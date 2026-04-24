@@ -113,7 +113,9 @@ void KVCacheManager::free(const FreeInfo& free_info) {
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     RTP_LLM_PROFILE_FUNCTION();
-    dropLastPartialBlock(insert_info.batch_kv_cache_resource);
+    if (!insert_info.insert_tail_partial_block) {
+        dropLastPartialBlock(insert_info.batch_kv_cache_resource);
+    }
     allocator_->insertIntoCache(insert_info);
 }
 

@@ -29,7 +29,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     CacheConfig config    = CacheConfigCreator::createBasicConfig(model_config, parallelism_config);
     uint32_t    block_num = 0;
 
-    config.linear_step = kv_cache_config.linear_step;
+    config.linear_step                       = kv_cache_config.linear_step;
+    config.enable_device_partial_block_reuse = kv_cache_config.enable_device_partial_block_reuse;
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block % kv_cache_config.kernel_seq_size_per_block == 0,
                                 "seq_size_per_block(%d) must be divisible by kernel_seq_size_per_block(%d)",

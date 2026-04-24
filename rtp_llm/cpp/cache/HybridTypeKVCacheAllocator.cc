@@ -7,6 +7,7 @@
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -328,6 +329,20 @@ void HybridTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
             }
             kv_cache_groups_[static_cast<size_t>(gid)]->insertIntoCache(
                 put_cache_keys, put_blocks, insert_info.is_resident);
+        }
+    }
+
+    if (insert_info.insert_tail_partial_block && config_.enable_device_partial_block_reuse
+        && insert_info.complete_token_ids) {
+        for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
+            if (kv_cache_resource->cacheResource(batch_id).lastBlockAligned()) {
+                continue;
+            }
+            for (int gid = 0; gid < kv_cache_resource->groupNums(); ++gid) {
+                const bool is_linear = static_cast<size_t>(gid) < config_.group_types.size()
+                                       && config_.group_types[static_cast<size_t>(gid)] == CacheGroupType::LINEAR;
+                kv_cache_groups_[static_cast<size_t>(gid)]->insertPartialTailForBatch(insert_info, batch_id, is_linear);
+            }
         }
     }
 }

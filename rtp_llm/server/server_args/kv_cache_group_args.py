@@ -23,6 +23,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="控制是否启用显存Cache的重用机制, 默认开启。设置为 True 启用 , False 关闭",
     )
     kv_cache_group.add_argument(
+        "--enable_device_partial_block_reuse",
+        env_name="ENABLE_DEVICE_PARTIAL_BLOCK_REUSE",
+        bind_to=(kv_cache_config, "enable_device_partial_block_reuse"),
+        type=str2bool,
+        default=False,
+        help="在显存 BlockCache 上启用按父块尾 token 匹配的部分块复用（需 reuse_cache 与 enable_device_cache）。默认关闭。",
+    )
+    kv_cache_group.add_argument(
         "--reserve_block_ratio",
         env_name="RESERVE_BLOCK_RATIO",
         bind_to=(kv_cache_config, "reserve_block_ratio"),
