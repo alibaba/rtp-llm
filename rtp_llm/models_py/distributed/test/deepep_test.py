@@ -2196,6 +2196,7 @@ class DeepEPTest(TestCase):
         )
         # just need test get instance
         deepep_wrapper = DeepEPWrapper.get_instance(deepep_config)
+        destroy_distributed_environment()
 
     def test_deepep_normal(self):
         with PortsContext(None, 1) as ports:

@@ -129,7 +129,7 @@ class BaseModel(object):
         return f"cuda:{self.parallelism_config.local_rank}"
 
     @timer_wrapper(description="load model")
-    def load(self):
+    def load(self, skip_python_model: bool = False):
         if (
             self.hw_kernel_config.enable_cuda_graph
             and self.support_cuda_graph() is False
@@ -146,6 +146,8 @@ class BaseModel(object):
         self.weight_manager = WeightManager(
             self.device, self.weight, self.model_weights_loader
         )
+        if skip_python_model:
+            return
         logging.info(
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
@@ -158,7 +160,7 @@ class BaseModel(object):
         self._create_python_model()
 
     def _create_python_model(self):
-        raise NotImplementedError("Python Model is not implemented for this model.")
+        pass
 
     def support_cuda_graph(self) -> bool:
         return False
@@ -209,6 +211,7 @@ class BaseModel(object):
         merge_lora: bool,
         device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
+        skip_python_model: bool = False,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -250,7 +253,7 @@ class BaseModel(object):
 
         # 在加载前后分别记录内存使用
         logging.info(f"Before loading: {get_host_memory_usage():.2f} MB")
-        model.load()
+        model.load(skip_python_model=skip_python_model)
         logging.info(f"After loading: {get_host_memory_usage():.2f} MB")
         return model
 

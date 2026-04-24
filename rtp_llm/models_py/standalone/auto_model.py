@@ -18,7 +18,6 @@ from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
-    get_device_type,
     get_typemeta,
     init_exec_ctx,
 )

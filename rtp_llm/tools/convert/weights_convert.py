@@ -288,6 +288,7 @@ class WeightConverter:
             vit_config=vit_config,
             merge_lora=False,
             device_resource_config=device_resource_config,
+            skip_python_model=True,
         )
         loader = model.create_model_loader()
         device_str = f"cuda:{parallelism_config.local_rank}"
