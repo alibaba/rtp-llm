@@ -14,17 +14,21 @@ SO_NAME = "libth_transformer_config.so"
 
 
 # for py test
-def find_upper_so(current_dir: str):
-    logging.info(f"find_upper_so: {current_dir}")
+def find_upper_file(current_dir: str, file_name: str):
+    logging.info(f"find_upper_file: {current_dir}, target: {file_name}")
     p = pathlib.Path(current_dir).resolve()
     while p != p.parent:
         if p.exists():
-            for root, _, files in os.walk(p):
-                logging.info(f"find_upper_so: {root}, {files}")
-                if SO_NAME in files:
-                    return root
+            for root, _, files in os.walk(p, followlinks = True):
+                if file_name in files:
+                    return os.path.join(root, file_name)
         p = p.parent
-    raise Exception(f"failed to find {SO_NAME} in {current_dir}")
+    raise Exception(f"failed to find {file_name} in {current_dir}")
+
+
+def find_upper_so(current_dir: str):
+    so_file = find_upper_file(current_dir, SO_NAME)
+    return str(pathlib.Path(so_file).parent)
 
 
 def find_th_transformer(current_dir: str):
@@ -80,6 +84,12 @@ sys.path.insert(0, so_path)
 from ctypes import CDLL, RTLD_GLOBAL
 
 _PRELOAD_SO_NAMES = [
+    "libicudata.so.66",
+    "libicuuc.so.66",
+    "libicui18n.so.66",
+    "libunwind.so.8",
+    "libcrypto.so.1.1",
+    "libssl.so.1.1",
     "libboost_context.so.1.71.0",
     "libboost_filesystem.so.1.71.0",
     "libboost_program_options.so.1.71.0",
@@ -92,24 +102,43 @@ _PRELOAD_SO_NAMES = [
     "libglog.so.0",
     "libevent-2.1.so.7",
     "libdwarf.so.1",
-    "libicudata.so.66",
-    "libicuuc.so.66",
-    "libicui18n.so.66",
-    "libunwind.so.8",
-    "libssl.so.1.1",
-    "libcrypto.so.1.1",
     "libhf3fs_api_shared.so",
     "kv_cache_manager_client.so",
 ]
-for dep_name in _PRELOAD_SO_NAMES:
+
+
+def _resolve_dep_path(dep_name: str):
     dep_path = os.path.join(so_path, dep_name)
-    if not os.path.exists(dep_path):
-        continue
-    try:
-        CDLL(dep_path, mode=RTLD_GLOBAL)
-        logging.info(f"preloaded {dep_name} from {dep_path}")
-    except OSError as e:
-        logging.info(f"failed to preload {dep_name} from {dep_path}: {e}")
+    if os.path.exists(dep_path):
+        return dep_path
+    return find_upper_file(current_dir, dep_name)
+
+
+failed_dep_names = list(_PRELOAD_SO_NAMES)
+last_errors = {}
+for _ in range(4):
+    remaining = []
+    progress = False
+    for dep_name in failed_dep_names:
+        try:
+            dep_path = _resolve_dep_path(dep_name)
+        except Exception:
+            continue
+        try:
+            CDLL(dep_path, mode=RTLD_GLOBAL)
+            logging.info(f"preloaded {dep_name} from {dep_path}")
+            progress = True
+        except OSError as e:
+            last_errors[dep_name] = (dep_path, str(e))
+            remaining.append(dep_name)
+    if not remaining or not progress:
+        failed_dep_names = remaining
+        break
+    failed_dep_names = remaining
+
+for dep_name in failed_dep_names:
+    dep_path, err = last_errors.get(dep_name, ("", "unknown error"))
+    logging.info(f"failed to preload {dep_name} from {dep_path}: {err}")
 
 # load intel xft lib
 xft_loaded = False
@@ -255,5 +284,5 @@ except BaseException as e:
     RtpEmbeddingOp = RtpLLMOp = EmptyClass
 
     logging.info(
-        "libth_transformer not imported, you may under python standalone mode or frontend mode now."
+        f"libth_transformer not imported: {e}, traceback: {traceback.format_exc()}"
     )

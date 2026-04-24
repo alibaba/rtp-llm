@@ -9,7 +9,8 @@ copy_all_so()
 copy_files(
     name = "copy_hf3fs_libs",
     srcs = select({
-        "//:using_remote_kv_cache": ["//3rdparty/3fs:hf3fs_shared"],
+        "//:enable_mooncake_te": ["//3rdparty/3fs/mooncake:hf3fs_mooncake_impl_shared"],
+        "//:using_remote_kv_cache": ["//3rdparty/3fs:hf3fs_default_impl_shared"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
