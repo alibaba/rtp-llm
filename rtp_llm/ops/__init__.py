@@ -74,13 +74,42 @@ os.environ["LD_LIBRARY_PATH"] = ":".join([p for p in [so_path, ld_library_path] 
 logging.info(f"updated LD_LIBRARY_PATH for ops: {os.environ['LD_LIBRARY_PATH']}")
 sys.path.insert(0, so_path)
 
+# glibc does not reliably honor runtime LD_LIBRARY_PATH updates for the current
+# process, so preload transformer runtime deps by absolute path before importing
+# libth_transformer.
 from ctypes import CDLL, RTLD_GLOBAL
 
-for dep_name in ("libhf3fs_api_shared.so", "kv_cache_manager_client.so"):
+_PRELOAD_SO_NAMES = [
+    "libboost_context.so.1.71.0",
+    "libboost_filesystem.so.1.71.0",
+    "libboost_program_options.so.1.71.0",
+    "libboost_regex.so.1.71.0",
+    "libboost_system.so.1.71.0",
+    "libboost_thread.so.1.71.0",
+    "libboost_atomic.so.1.71.0",
+    "libdouble-conversion.so.3",
+    "libgflags.so.2.2",
+    "libglog.so.0",
+    "libevent-2.1.so.7",
+    "libdwarf.so.1",
+    "libicudata.so.66",
+    "libicuuc.so.66",
+    "libicui18n.so.66",
+    "libunwind.so.8",
+    "libssl.so.1.1",
+    "libcrypto.so.1.1",
+    "libhf3fs_api_shared.so",
+    "kv_cache_manager_client.so",
+]
+for dep_name in _PRELOAD_SO_NAMES:
     dep_path = os.path.join(so_path, dep_name)
-    if os.path.exists(dep_path):
+    if not os.path.exists(dep_path):
+        continue
+    try:
         CDLL(dep_path, mode=RTLD_GLOBAL)
         logging.info(f"preloaded {dep_name} from {dep_path}")
+    except OSError as e:
+        logging.info(f"failed to preload {dep_name} from {dep_path}: {e}")
 
 # load intel xft lib
 xft_loaded = False
