@@ -140,6 +140,25 @@ for dep_name in failed_dep_names:
     dep_path, err = last_errors.get(dep_name, ("", "unknown error"))
     logging.info(f"failed to preload {dep_name} from {dep_path}: {err}")
 
+_CORE_EXTENSION_NAMES = [
+    "librtp_compute_ops.so",
+    "libth_transformer_config.so",
+    "libth_transformer.so",
+]
+for ext_name in _CORE_EXTENSION_NAMES:
+    if ext_name == "libth_transformer.so" and failed_dep_names:
+        logging.info(f"skip preloading {ext_name} because unresolved deps remain: {failed_dep_names}")
+        continue
+    try:
+        ext_path = _resolve_dep_path(ext_name)
+    except Exception:
+        continue
+    try:
+        CDLL(ext_path, mode=RTLD_GLOBAL)
+        logging.info(f"preloaded core extension {ext_name} from {ext_path}")
+    except OSError as e:
+        logging.info(f"failed to preload core extension {ext_name} from {ext_path}: {e}")
+
 # load intel xft lib
 xft_loaded = False
 # for path in sys.path:
