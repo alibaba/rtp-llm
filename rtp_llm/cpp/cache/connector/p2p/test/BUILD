@@ -55,6 +55,20 @@ cc_test(
 )
 
 cc_test(
+    name = "p2p_connector_config_test",
+    srcs = [
+        "P2PConnectorConfigTest.cc",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cache/connector/p2p:p2p_connector_config",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_config",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = test_copts,
+)
+
+cc_test(
     name = "p2p_connector_test",
     srcs = [
         "P2PConnectorTest.cc",
