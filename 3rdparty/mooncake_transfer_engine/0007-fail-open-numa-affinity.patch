@@ -1,0 +1,19 @@
+--- a/mooncake-transfer-engine/include/common.h
++++ b/mooncake-transfer-engine/include/common.h
+@@ -83,7 +83,15 @@
+     if (socket_id < 0 || socket_id >= numa_num_configured_nodes())
+         socket_id = 0;
+     struct bitmask *cpu_list = numa_allocate_cpumask();
+-    numa_node_to_cpus(socket_id, cpu_list);
++    if (cpu_list == nullptr) {
++        LOG(WARNING) << "bindToSocket: numa_allocate_cpumask failed, skip affinity binding";
++        return 0;
++    }
++    if (numa_node_to_cpus(socket_id, cpu_list) != 0) {
++        LOG(WARNING) << "bindToSocket: numa_node_to_cpus failed, skip affinity binding";
++        numa_free_cpumask(cpu_list);
++        return 0;
++    }
+     int nr_possible_cpus = numa_num_possible_cpus();
+     int nr_cpus = 0;
+     for (int cpu = 0; cpu < nr_possible_cpus; ++cpu) {

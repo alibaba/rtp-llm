@@ -1,0 +1,13 @@
+--- a/mooncake-transfer-engine/src/transport/rdma_transport/rdma_context.cpp
++++ b/mooncake-transfer-engine/src/transport/rdma_transport/rdma_context.cpp
+@@ -407,7 +407,10 @@ ibv_comp_channel *RdmaContext::compChannel() {
+ }
+ 
+ int RdmaContext::compVector() {
++    if (context_ == nullptr || context_->num_comp_vectors <= 0) {
++        return 0;
++    }
+     return (next_comp_vector_index_++) % context_->num_comp_vectors;
+ }
+ 
+ static inline int ipv6_addr_v4mapped(const struct in6_addr *a) {

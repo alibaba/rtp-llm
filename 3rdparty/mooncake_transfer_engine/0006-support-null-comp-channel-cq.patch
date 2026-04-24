@@ -1,0 +1,22 @@
+--- a/mooncake-transfer-engine/src/transport/rdma_transport/rdma_context.cpp
++++ b/mooncake-transfer-engine/src/transport/rdma_transport/rdma_context.cpp
+@@ -134,7 +134,8 @@
+         auto cq =
+             ibv_create_cq(context_, max_cqe,
+                           (void *)&cq_list_[i].outstanding /* CQ context */,
+-                          compChannel(), compVector());
++                          num_comp_channel_ > 0 ? compChannel() : nullptr,
++                          compVector());
+         if (!cq) {
+             PLOG(ERROR) << "Failed to create completion queue";
+             close(event_fd_);
+@@ -399,6 +400,9 @@
+ }
+ 
+ ibv_comp_channel *RdmaContext::compChannel() {
++    if (num_comp_channel_ == 0 || comp_channel_ == nullptr) {
++        return nullptr;
++    }
+     int index = (next_comp_channel_index_++) % num_comp_channel_;
+     return comp_channel_[index];
+ }

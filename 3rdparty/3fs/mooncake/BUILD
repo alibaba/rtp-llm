@@ -32,7 +32,7 @@ rpm_library(
         "hf3fs_usrbio.h",
     ],
     deps = [
-        "@mooncake_transfer_engine_local//:glog",
-        "@mooncake_transfer_engine_local//:gflags",
+        "@mooncake_transfer_engine//:glog",
+        "@mooncake_transfer_engine//:gflags",
     ],
 )

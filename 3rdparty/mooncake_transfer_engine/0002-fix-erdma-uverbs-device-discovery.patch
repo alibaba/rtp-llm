@@ -1,0 +1,59 @@
+--- a/mooncake-transfer-engine/src/topology.cpp
++++ b/mooncake-transfer-engine/src/topology.cpp
+@@ -38,13 +38,54 @@
+ 
+ static bool isIbDeviceAccessible(struct ibv_device *device) {
+     char device_path[PATH_MAX];
++    char verbs_dir[PATH_MAX];
+     struct stat st;
++    const char *device_name = ibv_get_device_name(device);
+ 
+     snprintf(device_path, sizeof(device_path), "/dev/infiniband/%s",
+-             device->dev_name);
++             device_name);
++
++    if (stat(device_path, &st) != 0 || !S_ISCHR(st.st_mode)) {
++        snprintf(verbs_dir,
++                 sizeof(verbs_dir),
++                 "/sys/class/infiniband/%s/device/infiniband_verbs",
++                 device_name);
++
++        DIR *dir = opendir(verbs_dir);
++        if (dir != NULL) {
++            struct dirent *entry = nullptr;
++            bool found = false;
++            while ((entry = readdir(dir)) != NULL) {
++                if (entry->d_name[0] == '.') {
++                    continue;
++                }
++
++                snprintf(device_path,
++                         sizeof(device_path),
++                         "/dev/infiniband/%s",
++                         entry->d_name);
++                if (stat(device_path, &st) == 0 && S_ISCHR(st.st_mode)) {
++                    found = true;
++                    break;
++                }
++            }
++            closedir(dir);
++            if (!found) {
++                device_path[0] = '\0';
++            }
++        } else {
++            device_path[0] = '\0';
++        }
++    }
++
++    if (device_path[0] == '\0') {
++        LOG(WARNING) << "Device " << device_name
++                     << " character device under /dev/infiniband was not found";
++        return false;
++    }
+ 
+     if (stat(device_path, &st) != 0) {
+-        LOG(WARNING) << "Device " << ibv_get_device_name(device) << " path "
++        LOG(WARNING) << "Device " << device_name << " path "
+                      << device_path << " does not exist";
+         return false;
+     }

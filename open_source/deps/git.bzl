@@ -253,6 +253,16 @@ def git_deps():
     )
 
     new_git_repository(
+        name = "mooncake_transfer_engine",
+        remote = "https://github.com/XucSh/Mooncake.git",
+        commit = "9874a8c67685669fa5c7d312f02a60c3a097bf64",
+        recursive_init_submodules = True,
+        build_file = str(Label("//3rdparty/mooncake_transfer_engine:mooncake_transfer_engine.BUILD")),
+        patches = ["//3rdparty/mooncake_transfer_engine:0001-fix-gcc13-parentheses.patch", "//3rdparty/mooncake_transfer_engine:0002-fix-erdma-uverbs-device-discovery.patch", "//3rdparty/mooncake_transfer_engine:0003-fix-erdma-gid-autodetect.patch", "//3rdparty/mooncake_transfer_engine:0004-support-zero-comp-channels.patch", "//3rdparty/mooncake_transfer_engine:0005-allow-zero-comp-channels-config.patch", "//3rdparty/mooncake_transfer_engine:0006-support-null-comp-channel-cq.patch", "//3rdparty/mooncake_transfer_engine:0007-fail-open-numa-affinity.patch", "//3rdparty/mooncake_transfer_engine:0008-honor-force-hca-filter.patch", "//3rdparty/mooncake_transfer_engine:0009-fix-zero-comp-vectors.patch", "//3rdparty/mooncake_transfer_engine:0010-keep-device-list-alive.patch"],
+        patch_args = ["-p1"],
+    )
+
+    new_git_repository(
         name = "havenask",
         remote = "https://github.com/alibaba/havenask.git",
         commit = "3c973500afbd40933eb0a80cfdfb6592274377fb",

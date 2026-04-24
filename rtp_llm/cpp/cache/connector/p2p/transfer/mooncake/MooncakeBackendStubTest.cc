@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <cstdlib>
 #include <memory>
 #include "autil/NetUtil.h"
 #include <string>
@@ -1797,9 +1798,13 @@ TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineCopiesPayloadOverTcp
     MooncakeKVCacheReceiver receiver(receiver_adapter);
     ASSERT_TRUE(receiver.init(receiver_config));
 
-    char target_block[64]{};
-    BlockInfo recv_mem{false, 0, 0, target_block, sizeof(target_block)};
-    ASSERT_TRUE(receiver.regMem(recv_mem, sizeof(target_block)));
+    void* target_block_raw = nullptr;
+    ASSERT_EQ(posix_memalign(&target_block_raw, 4096, 4096), 0);
+    std::unique_ptr<void, decltype(&std::free)> target_block_guard(target_block_raw, &std::free);
+    auto* target_block = static_cast<char*>(target_block_guard.get());
+    std::memset(target_block, 0, 4096);
+    BlockInfo recv_mem{false, 0, 0, target_block, 64};
+    ASSERT_TRUE(receiver.regMem(recv_mem, 64));
 
     auto recv_block_info = std::make_shared<KeyBlockInfo>();
     recv_block_info->blocks.push_back(recv_mem);
@@ -2192,9 +2197,13 @@ TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineCopiesPayloadOverRdm
         GTEST_SKIP() << "Mooncake classic TE RDMA init unavailable on this host";
     }
 
-    char target_block[64]{};
-    BlockInfo recv_mem{false, 0, 0, target_block, sizeof(target_block)};
-    ASSERT_TRUE(receiver.regMem(recv_mem, sizeof(target_block)));
+    void* target_block_raw = nullptr;
+    ASSERT_EQ(posix_memalign(&target_block_raw, 4096, 4096), 0);
+    std::unique_ptr<void, decltype(&std::free)> target_block_guard(target_block_raw, &std::free);
+    auto* target_block = static_cast<char*>(target_block_guard.get());
+    std::memset(target_block, 0, 4096);
+    BlockInfo recv_mem{false, 0, 0, target_block, 64};
+    ASSERT_TRUE(receiver.regMem(recv_mem, 64));
 
     auto recv_block_info = std::make_shared<KeyBlockInfo>();
     recv_block_info->blocks.push_back(recv_mem);
@@ -2213,12 +2222,15 @@ TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineCopiesPayloadOverRdm
     MooncakeKVCacheSender sender(sender_adapter, createMooncakeControlPlaneClient());
     ASSERT_TRUE(sender.init(sender_config));
 
-    char source_block[64];
-    for (size_t i = 0; i < sizeof(source_block); ++i) {
+    void* source_block_raw = nullptr;
+    ASSERT_EQ(posix_memalign(&source_block_raw, 4096, 4096), 0);
+    std::unique_ptr<void, decltype(&std::free)> source_block_guard(source_block_raw, &std::free);
+    auto* source_block = static_cast<char*>(source_block_guard.get());
+    for (size_t i = 0; i < 64; ++i) {
         source_block[i] = static_cast<char>('K' + (i % 11));
     }
-    BlockInfo send_mem{false, 0, 0, source_block, sizeof(source_block)};
-    ASSERT_TRUE(sender.regMem(send_mem, sizeof(source_block)));
+    BlockInfo send_mem{false, 0, 0, source_block, 64};
+    ASSERT_TRUE(sender.regMem(send_mem, 64));
 
     auto send_block_info = std::make_shared<KeyBlockInfo>();
     send_block_info->blocks.push_back(send_mem);
@@ -2240,8 +2252,8 @@ TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineCopiesPayloadOverRdm
     EXPECT_EQ(actual_code, TransferErrorCode::OK) << actual_msg;
     ASSERT_TRUE(waitTaskDone(recv_task, 2000));
     EXPECT_TRUE(recv_task->success());
-    ASSERT_TRUE(waitBufferEquals(source_block, target_block, sizeof(source_block), 2000));
-    EXPECT_EQ(std::memcmp(source_block, target_block, sizeof(source_block)), 0);
+    ASSERT_TRUE(waitBufferEquals(source_block, target_block, 64, 2000));
+    EXPECT_EQ(std::memcmp(source_block, target_block, 64), 0);
 }
 
 }  // namespace

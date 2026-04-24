@@ -1,0 +1,25 @@
+--- a/mooncake-transfer-engine/src/transport/rdma_transport/rdma_context.cpp
++++ b/mooncake-transfer-engine/src/transport/rdma_transport/rdma_context.cpp
+@@ -110,10 +110,18 @@
+         return ERR_CONTEXT;
+     }
+ 
+-    if (joinNonblockingPollList(event_fd_, context_->async_fd)) {
+-        LOG(ERROR) << "Failed to register context async fd to epoll";
+-        close(event_fd_);
+-        return ERR_CONTEXT;
++    if (context_->async_fd >= 0) {
++        if (joinNonblockingPollList(event_fd_, context_->async_fd)) {
++            if (num_comp_channel_ == 0) {
++                PLOG(WARNING) << "Failed to register context async fd to epoll, continue in polling mode";
++            } else {
++                LOG(ERROR) << "Failed to register context async fd to epoll";
++                close(event_fd_);
++                return ERR_CONTEXT;
++            }
++        }
++    } else {
++        LOG(WARNING) << "Context async fd unavailable, skip epoll registration";
+     }
+ 
+     for (size_t i = 0; i < num_comp_channel_; ++i)

@@ -31,7 +31,7 @@ cc_library(
         "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_config",
         "//rtp_llm/cpp/utils:core_utils",
     ] + select({
-        "//:enable_mooncake_te": ["@mooncake_transfer_engine_local//:transfer_engine"],
+        "//:enable_mooncake_te": ["@mooncake_transfer_engine//:transfer_engine"],
         "//conditions:default": [],
     }),
 )
