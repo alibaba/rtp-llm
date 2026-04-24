@@ -81,6 +81,52 @@ def _is_custom_ar_disabled() -> bool:
     return val.lower() in ("1", "true", "yes", "on")
 
 
+def _detect_full_nvlink(world_size: int) -> bool:
+    """Detect whether all GPUs are connected via NVLink.
+
+    Checks nvidia-smi topo output. Falls back to True for <=2 GPUs.
+    Can be overridden via CUSTOM_AR_FULL_NVLINK=0|1 env var.
+    """
+    env_override = os.environ.get("CUSTOM_AR_FULL_NVLINK")
+    if env_override is not None:
+        return env_override.lower() in ("1", "true", "yes")
+    if world_size <= 2:
+        return True
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "topo", "-m"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            logger.warning("nvidia-smi topo failed, assuming full_nvlink=False")
+            return False
+        gpu_lines_checked = 0
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("GPU"):
+                continue
+            parts = stripped.split()
+            if len(parts) < 1 + world_size:
+                continue
+            gpu_lines_checked += 1
+            for tok in parts[1:1 + world_size]:
+                if tok == "X":
+                    continue
+                if not tok.startswith("NV"):
+                    logger.info(
+                        f"_detect_full_nvlink: non-NVLink connection found: {tok} in line: {stripped[:80]}")
+                    return False
+        if gpu_lines_checked >= world_size:
+            return True
+        logger.warning(
+            f"_detect_full_nvlink: only found {gpu_lines_checked} GPU lines, expected {world_size}")
+        return False
+    except Exception as e:
+        logger.warning(f"_detect_full_nvlink failed: {e}, assuming False")
+        return False
+
+
 def _get_ops():
     """Get custom allreduce ops from librtp_compute_ops."""
     try:
@@ -169,8 +215,10 @@ class CustomAllReduceCommunicator:
             self.max_size, self.rank, self.world_size, self._gloo)
 
         self._rank_data = torch.empty(self.max_size, dtype=torch.uint8, device=device)
+        full_nvlink = _detect_full_nvlink(self.world_size)
+        logger.info(f"CustomAllReduce: full_nvlink={full_nvlink} (world_size={self.world_size})")
         self._ptr = self._ops.custom_ar_init(
-            self._meta_ptrs, self._rank_data, self.rank, self.world_size <= 2)
+            self._meta_ptrs, self._rank_data, self.rank, full_nvlink)
         self._ops.custom_ar_register_buffer(self._ptr, self._buf_ptrs)
         torch.cuda.synchronize(device)
         logger.info(f"CustomAllReduce._init_ipc complete on {device}")
