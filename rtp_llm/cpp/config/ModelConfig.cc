@@ -2,8 +2,8 @@
 #include "autil/Log.h"
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
-#include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <sstream>
 #include <string>
 

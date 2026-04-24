@@ -3,6 +3,8 @@ Base modules - independent modules without dependencies on other modules.
 Different architectures may have different implementations.
 """
 
+from rtp_llm.device.device_type import DeviceType, get_device_type
+
 # Import common base modules (architecture-independent)
 from rtp_llm.models_py.modules.base.common.embedding import Embedding, EmbeddingBert
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
@@ -13,10 +15,9 @@ from rtp_llm.models_py.modules.base.common.norm import (
     RMSNormTorch,
     RMSResNormTorch,
 )
-from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
 
 # Determine device type and import architecture-specific modules
-device_type = get_exec_ctx().get_device_type()
+device_type = get_device_type()
 
 if device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.base.rocm.activation import FusedSiluAndMul

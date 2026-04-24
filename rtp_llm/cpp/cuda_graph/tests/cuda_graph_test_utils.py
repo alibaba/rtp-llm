@@ -93,9 +93,6 @@ class CudaGraphTestModelBuilder:
         if not self.py_env_configs.model_args.tokenizer_path:
             self.py_env_configs.model_args.tokenizer_path = model_path
 
-        # Set ModelSpecificConfig.load_python_model = True
-        self.py_env_configs.model_specific_config.load_python_model = True
-
     def build_model(
         self, init_kv_cache: bool = False, is_casual: bool = True
     ) -> ModelBuildResult:
@@ -154,22 +151,12 @@ class CudaGraphTestModelBuilder:
         model = self.gpt_model.py_model
         py_model_config = model.config
 
-        # Init device with new API
+        pc = engine_config.parallelism_config
         init_exec_ctx(
-            parallelism_config=engine_config.parallelism_config,
-            model_config=model_config,
-            eplb_config=model_config.eplb_config,
-            fmha_config=engine_config.fmha_config,
-            device_resource_config=engine_config.device_resource_config,
-            moe_config=engine_config.moe_config,
-            sp_config=engine_config.sp_config,
-            misc_config=engine_config.misc_config,
-            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
-            hw_kernel_config=engine_config.hw_kernel_config,
-            concurrency_config=engine_config.concurrency_config,
-            ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
-            runtime_config=engine_config.runtime_config,
-            model_specific_config=engine_config.model_specific_config,
+            device_id=pc.world_rank % pc.local_world_size,
+            trace_memory=engine_config.profiling_debug_logging_config.trace_memory,
+            enable_comm_overlap=engine_config.device_resource_config.enable_comm_overlap,
+            mla_ops_type=int(model_config.mla_ops_type),
         )
 
         result = ModelBuildResult(

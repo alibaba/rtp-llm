@@ -6,8 +6,8 @@ rocm_deps = [
     ":rocm_utils",
     "@local_config_rocm//rocm:rocm_headers",
     "@local_config_rocm//rocm:hip",
-    "//rtp_llm/cpp/rocm:rocm_types_hdr",
-    "//rtp_llm/cpp/rocm:rocm_host_utils",
+    "//rtp_llm/models_py/bindings/rocm:rocm_types_hdr",
+    "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
 ]
 
 cc_library(
@@ -24,7 +24,7 @@ cc_library(
     hdrs = ["layernorm_kernels.h"],
     deps = rocm_deps + [
         "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
     ],
     copts = rocm_copts(),
     visibility = ["//visibility:public"],
@@ -35,7 +35,7 @@ cc_library(
     srcs = ["fused_qk_rmsnorm.cu"],
     hdrs = ["fused_qk_rmsnorm.h"],
     deps = rocm_deps + [
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
     ],
     copts = rocm_copts(),
     visibility = ["//visibility:public"],
@@ -58,7 +58,7 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:math_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
         "//rtp_llm/models_py/bindings/common/kernels:attn_utils",
     ],
     copts = rocm_copts(),

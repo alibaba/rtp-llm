@@ -1,12 +1,12 @@
 
 #pragma once
 #include "rtp_llm/cpp/models/ModelTypes.h"
-#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <optional>
 #include <string>
 #include <mutex>
-#include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/core/DeviceData.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/embed.h>
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
@@ -17,9 +17,9 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #endif
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
-#include "rtp_llm/cpp/core/DeviceData.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
-#include "rtp_llm/cpp/core/CacheStoreAsyncWriter.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
 namespace py = pybind11;
 
@@ -73,7 +73,6 @@ private:
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties            device_props_;
-    const rtp_llm::ExecInitParams            device_init_params_;
     const rtp_llm::MlaOpsType                mla_ops_type_;
     const size_t                             layer_num_;
     const GptModelDescription                description_;
@@ -90,6 +89,7 @@ private:
     bool       is_prefill_cuda_graph_mode_{false};
     bool       use_spec_decoding_{false};
     bool       enable_device_perf_{false};
+    bool       check_nan_{false};
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::unique_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
@@ -108,16 +108,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       bool                      is_prefill_cuda_graph_mode,
                                       bool                      use_spec_decoding,
                                       const std::vector<int>&   kv_cache_layer_to_group):
-    device_props_(buildExecProperties(params.exec_init_params)),
-    device_init_params_(params.exec_init_params),
-    mla_ops_type_(params.exec_init_params.mla_ops_type),
+    device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
+    mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),
     cache_manager_(params.cache_manager),
-    enable_cuda_graph_(device_init_params_.hw_kernel_config.enable_cuda_graph),
+    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     use_spec_decoding_(use_spec_decoding),
-    enable_device_perf_(device_init_params_.profile_debug_logging_config.enable_device_perf) {
+    enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
+    check_nan_(params.profile_debug_logging_config.check_nan) {
     weights_               = params.weights;
     model_id_              = params.model_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
@@ -176,26 +176,25 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 #if USING_CUDA || USING_ROCM
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
 
-        // Create GraphParams from ExecInitParams
-        const auto& device_params = device_init_params_;
+        // Create GraphParams from individual config fields
         GraphParams graph_params;
-        graph_params.enable_cuda_graph            = device_params.hw_kernel_config.enable_cuda_graph;
-        graph_params.enable_cuda_graph_debug_mode = device_params.hw_kernel_config.enable_cuda_graph_debug_mode;
+        graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
+        graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
-        graph_params.max_seq_len                  = device_params.max_seq_len;
-        graph_params.tokens_per_block             = device_params.tokens_per_block;
-        graph_params.kernel_tokens_per_block      = device_params.kernel_tokens_per_block;
-        graph_params.hidden_size                  = device_params.hidden_size;
+        graph_params.max_seq_len                  = params.max_seq_len;
+        graph_params.tokens_per_block             = params.tokens_per_block;
+        graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
+        graph_params.hidden_size                  = params.hidden_size;
         graph_params.model_data_type              = dtype;
-        graph_params.max_context_batch_size       = device_params.concurrency_config.concurrency_limit;
-        graph_params.prefill_capture_seq_lens     = device_params.hw_kernel_config.prefill_capture_seq_lens;
-        graph_params.decode_capture_batch_sizes   = device_params.hw_kernel_config.decode_capture_batch_sizes;
-        graph_params.kv_cache_group_num           = device_params.kv_cache_group_num;
+        graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
+        graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
+        graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
+        graph_params.kv_cache_group_num           = params.kv_cache_group_num;
 
         if (kv_cache_layer_to_group.size() > 0) {
             graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
         } else {
-            graph_params.kv_cache_layer_to_group = device_params.kv_cache_layer_to_group;
+            graph_params.kv_cache_layer_to_group = params.kv_cache_layer_to_group;
         }
 
         // clang-format off
@@ -211,29 +210,30 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // +---------------------------+--------------------------+----------------+----------+-------------------------+
         // clang-format on
 
-        if (is_prefill_cuda_graph_mode && device_params.sp_config.type == SP_TYPE_NONE) {
+        if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
-            graph_params.num_tokens_per_bs = device_params.max_seq_len;
-        } else if (device_params.sp_config.type != SP_TYPE_NONE && device_params.sp_config.gen_num_per_cycle > 1
+            graph_params.num_tokens_per_bs = params.max_seq_len;
+        } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 1
                    && (!params.model_id || is_prefill_cuda_graph_mode)) {
             // for target model verify and draft model prefill
             // Only use multi-token capture when SP is actually enabled;
             // gen_num_per_cycle may be >1 from config even when SP is disabled.
-            graph_params.num_tokens_per_bs = device_params.sp_config.gen_num_per_cycle + 1;
+            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
         } else {
             graph_params.num_tokens_per_bs = 1;
         }
         graph_params.is_target_verify = use_spec_decoding;
-        if (device_params.sp_config.type != SP_TYPE_NONE) {
-            graph_params.sp_steps = device_params.sp_config.gen_num_per_cycle;
+        if (params.sp_config.type != SP_TYPE_NONE) {
+            graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
 
         graph_runner_ = new CudaGraphRunner(graph_params, py_instance);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
         {
             void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
-            cuda_graph::register_graph_capture_nccl_comm(
-                nccl_comm, static_cast<int>(device_params.tp_size), static_cast<int>(device_params.tp_rank));
+            cuda_graph::register_graph_capture_nccl_comm(nccl_comm,
+                                                         static_cast<int>(params.parallelism_config.tp_size),
+                                                         static_cast<int>(params.parallelism_config.tp_rank));
         }
 #else
         RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP Graph is only supported on CUDA/ROCm platform");

@@ -1,7 +1,7 @@
 
 #ifdef USING_CUDA12
 #include "rtp_llm/models_py/bindings/cuda/XQAAttnOp.h"
-#include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
+#include "rtp_llm/models_py/bindings/cuda/cufmha/TrtV2FmhaRunner.h"
 #include <ATen/cuda/CUDAContext.h>
 
 namespace rtp_llm {

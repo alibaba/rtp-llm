@@ -51,20 +51,19 @@ cc_library(
     srcs = [
         "ComputeInit.cc",
     ] + select({
-        "@//:using_cuda12": ["//rtp_llm/cpp/core:exec_ops_srcs"],
+        "@//:using_cuda12": ["//rtp_llm/models_py/bindings/core:exec_ops_srcs"],
         "//conditions:default": [],
     }),
     hdrs = [],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/core:devices_base",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:device_perf_wrapper",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
     ] + torch_deps() + select_py_bindings() + select({
-        "@//:using_cuda12": ["//rtp_llm/cpp/cuda/ops:gpu_base"],
-        "@//:using_rocm": ["//rtp_llm/cpp/core:exec_ctx_rocm"],
+        "@//:using_cuda12": ["//rtp_llm/models_py/bindings/cuda/ops:gpu_base"],
+        "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],
         "//conditions:default": [],
     }) + no_block_copy_link_deps(),
     copts = copts(),
@@ -95,16 +94,15 @@ cc_library(
         "//:rtp_compute_ops",
     ] + torch_deps() + select({
         "//:using_cuda": [
-            "//rtp_llm/cpp/cuda/ops:gpu_base",
+            "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         # libth_transformer.so does NOT contain its own copy of
-        # globalRuntime() / globalPgState().  Those symbols are
-        # resolved at load-time from librtp_compute_ops.so.
+        # globalRuntime().  Those symbols are resolved at load-time
+        # from librtp_compute_ops.so.
         "@//:using_rocm": [
-            "//rtp_llm/cpp/core:exec_ctx_ops",
-            "//rtp_llm/cpp/core:exec_ops_hdr",
-            "//rtp_llm/cpp/core:distributed_comm_hdr",
+            "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
+            "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "//conditions:default": [],
@@ -116,15 +114,8 @@ cc_library(
 
 cc_library(
     name = "th_transformer_gpu",
-    srcs = select({
-        "@//:using_cuda12": [
-            "common/CutlassConfigOps.cc",
-        ],
-        "//conditions:default": [],
-    }),
-    deps = [
-        "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_common",
-    ] + torch_deps(),
+    srcs = [],
+    deps = [] + torch_deps(),
     copts = copts(),
     alwayslink = True,
     visibility = ["//visibility:public"],

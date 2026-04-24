@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/utils/SignalUtils.h"
 #include "rtp_llm/cpp/pybind/common/InitEngineOps.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "absl/debugging/symbolize.h"
 #include <cstdio>
 #include <string>

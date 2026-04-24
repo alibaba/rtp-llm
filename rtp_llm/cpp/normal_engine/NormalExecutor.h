@@ -8,8 +8,8 @@
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
-#include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/core/DeviceData.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 
@@ -22,10 +22,12 @@ class NormalExecutor: public Executor {
 public:
     explicit NormalExecutor(const EngineInitParams&                params,
                             const std::shared_ptr<KVCacheManager>& cache_manager,
-                            bool                                   warm_up             = false,
-                            bool                                   is_propose          = false,
-                            int                                    propose_model_index = 0,
-                            const ExecInitParams&                  exec_init_params    = ExecInitParams{});
+                            bool                                   warm_up                 = false,
+                            bool                                   is_propose              = false,
+                            int                                    propose_model_index     = 0,
+                            MlaOpsType                             mla_ops_type            = MlaOpsType::AUTO,
+                            int32_t                                kv_cache_group_num      = 1,
+                            const std::vector<int32_t>&            kv_cache_layer_to_group = {});
     ~NormalExecutor();
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
     void         reportMetrics(const StreamGroups&             stream_groups,

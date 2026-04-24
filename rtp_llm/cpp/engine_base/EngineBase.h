@@ -8,8 +8,8 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
-#include "rtp_llm/cpp/core/DeviceData.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 
 namespace rtp_llm {
@@ -38,7 +38,7 @@ public:
     EngineBase(const EngineInitParams& params);
     virtual ~EngineBase();
 
-    void initExecCtx(const EngineInitParams& params);
+    void initRuntime(const EngineInitParams& params);
 
     void pause() {
         pause_ = true;
@@ -95,7 +95,9 @@ public:
 
 protected:
     ResourceContext                resource_context_;
-    ExecInitParams                 exec_init_params_;
+    MlaOpsType                     mla_ops_type_       = MlaOpsType::AUTO;
+    int32_t                        kv_cache_group_num_ = 1;
+    std::vector<int32_t>           kv_cache_layer_to_group_;
     std::unique_ptr<SchedulerBase> scheduler_ = nullptr;
     bool                           pause_     = false;
 };

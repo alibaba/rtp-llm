@@ -1,7 +1,7 @@
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
-#include "rtp_llm/cpp/core/Dispatch.h"
+#include "rtp_llm/models_py/bindings/core/Dispatch.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 
 namespace rtp_llm {
 

@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/ops/StandaloneOps.h"
+#include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
 #include "ATen/cuda/CUDAContext.h"
 #endif
 

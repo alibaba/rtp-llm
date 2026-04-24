@@ -25,7 +25,7 @@ cc_library(
         "@havenask//aios/autil:env_util",
         ":role_types",
         ":eplb_config",
-        "//rtp_llm/cpp/core:types",
+        "//rtp_llm/models_py/bindings/core:types",
     ],
     copts = copts(),
 )
@@ -54,8 +54,8 @@ cc_library(
         ":special_tokens",
         ":config_modules",
         "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/core:types",
-        "//rtp_llm/cpp/core:type_convert"
+        "//rtp_llm/models_py/bindings/core:types",
+        "//rtp_llm/models_py/bindings/core:type_convert"
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

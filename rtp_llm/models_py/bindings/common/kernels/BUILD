@@ -5,7 +5,7 @@ package(default_visibility = ["//rtp_llm:__subpackages__"])
 any_cuda_deps = select({
     "@//:using_cuda": [
         "//rtp_llm/models_py/bindings/cuda/kernels:cuda_utils_common",
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
@@ -13,8 +13,8 @@ any_cuda_deps = select({
         "//rtp_llm/models_py/bindings/rocm/kernels:rocm_utils",
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:hip",
-        "//rtp_llm/cpp/rocm:rocm_types_hdr",
-        "//rtp_llm/cpp/rocm:rocm_host_utils",
+        "//rtp_llm/models_py/bindings/rocm:rocm_types_hdr",
+        "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
     ],
     "//conditions:default": [],
 })
@@ -25,8 +25,8 @@ cc_library(
     hdrs = ["activation_kernels.h"],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
-        "//rtp_llm/cpp/cuda:launch_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -48,8 +48,8 @@ cc_library(
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:math_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
-        "//rtp_llm/cpp/cuda:launch_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -82,8 +82,8 @@ cc_library(
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
-        "//rtp_llm/cpp/cuda:launch_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -95,7 +95,12 @@ cc_library(
     srcs = ["debug_kernel.cu"],
     hdrs = ["debug_kernel.h"],
     deps = any_cuda_deps + [
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:math_utils",
+        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
+        ":attn_utils",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -108,7 +113,7 @@ cc_library(
     hdrs = ["embedding_kernels.h"],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -121,7 +126,7 @@ cc_library(
     hdrs = ["moe_kernels.h"],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -135,7 +140,7 @@ cc_library(
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:math_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -148,7 +153,7 @@ cc_library(
     hdrs = ["kv_cache_kernels.h"],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -169,8 +174,8 @@ cc_library(
     ],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cuda:cuda_utils_cu",
-        "//rtp_llm/cpp/cuda:launch_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -182,12 +187,10 @@ cc_library(
     srcs = glob(["moe/*.cu"]),
     hdrs = glob(["moe/*.h"]),
     deps = any_cuda_deps + [
-        "//rtp_llm/cpp/cuda/cutlass:cutlass_interface",
-        "//rtp_llm/cpp/cuda:trt_utils",
+        "//rtp_llm/models_py/bindings/cuda:trt_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
         "@cutlass_h_moe//:cutlass",
         "@cutlass_h_moe//:cutlass_utils",
-        "//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
     ] + torch_deps(),
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -201,7 +204,7 @@ cc_library(
     copts = any_cuda_copts(),
     deps = select({
         "@//:using_cuda": [
-            "//rtp_llm/cpp/cuda:cuda_host_utils",
+            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "@local_config_cuda//cuda:cuda_headers",
             "@local_config_cuda//cuda:cudart",
         ],

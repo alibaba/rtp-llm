@@ -2,7 +2,8 @@
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
-#include "rtp_llm/cpp/core/Event.h"
+#include <c10/core/Event.h>
+#include <optional>
 #include "rtp_llm/cpp/cache/connector/p2p/AsymmetricTpUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
@@ -34,7 +35,8 @@ public:
 public:
     bool init(int64_t store_wait_timeout_ms);
 
-    bool writeByLayer(int layer_id, const KVCacheResourcePtr& resource, int64_t request_id, AsyncEventPtr event);
+    bool
+    writeByLayer(int layer_id, const KVCacheResourcePtr& resource, int64_t request_id, std::optional<c10::Event> event);
 
     ErrorInfo sendKVCache(int64_t                                              request_id,
                           const std::string&                                   unique_key,

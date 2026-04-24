@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
 
@@ -87,36 +87,10 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
 
 inline void createDevice() {
     torch::manual_seed(114514);
-    rtp_llm::ParallelismConfig           parallelism_config;
-    rtp_llm::ModelConfig                 model_config;
-    rtp_llm::EPLBConfig                  eplb_config;
-    rtp_llm::FMHAConfig                  fmha_config;
-    rtp_llm::DeviceResourceConfig        device_resource_config;
-    rtp_llm::MoeConfig                   moe_config;
-    rtp_llm::SpeculativeExecutionConfig  sp_config;
-    rtp_llm::MiscellaneousConfig         misc_config;
-    rtp_llm::ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    rtp_llm::HWKernelConfig              hw_kernel_config;
-    rtp_llm::ConcurrencyConfig           concurrency_config;
-    rtp_llm::FfnDisAggregateConfig       ffn_disaggregate_config;
-    rtp_llm::RuntimeConfig               runtime_config;
-    rtp_llm::ModelSpecificConfig         model_specific_config;
-
-    rtp_llm::initExecCtx(parallelism_config,
-                         model_config,
-                         eplb_config,
-                         fmha_config,
-                         device_resource_config,
-                         moe_config,
-                         sp_config,
-                         misc_config,
-                         profiling_debug_logging_config,
-                         hw_kernel_config,
-                         concurrency_config,
-                         ffn_disaggregate_config,
-                         runtime_config,
-                         model_specific_config,
-                         rtp_llm::NcclCommConfig{});
+    rtp_llm::initRuntime(/*device_id=*/0,
+                         /*trace_memory=*/false,
+                         /*enable_comm_overlap=*/false,
+                         rtp_llm::MlaOpsType::AUTO);
 }
 
 BlockPoolPtr createBlockPool() {

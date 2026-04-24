@@ -18,8 +18,8 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -124,36 +124,10 @@ protected:
 
 private:
     void createDevice() const {
-        ParallelismConfig           parallelism_config;
-        ModelConfig                 model_config;
-        EPLBConfig                  eplb_config;
-        FMHAConfig                  fmha_config;
-        DeviceResourceConfig        device_resource_config;
-        MoeConfig                   moe_config;
-        SpeculativeExecutionConfig  sp_config;
-        MiscellaneousConfig         misc_config;
-        ProfilingDebugLoggingConfig profiling_debug_logging_config;
-        HWKernelConfig              hw_kernel_config;
-        ConcurrencyConfig           concurrency_config;
-        FfnDisAggregateConfig       ffn_disaggregate_config;
-        RuntimeConfig               runtime_config;
-        ModelSpecificConfig         model_specific_config;
-
-        initExecCtx(parallelism_config,
-                    model_config,
-                    eplb_config,
-                    fmha_config,
-                    device_resource_config,
-                    moe_config,
-                    sp_config,
-                    misc_config,
-                    profiling_debug_logging_config,
-                    hw_kernel_config,
-                    concurrency_config,
-                    ffn_disaggregate_config,
-                    runtime_config,
-                    model_specific_config,
-                    rtp_llm::NcclCommConfig{});
+        initRuntime(/*device_id=*/0,
+                    /*trace_memory=*/false,
+                    /*enable_comm_overlap=*/false,
+                    MlaOpsType::AUTO);
     }
     CacheConfig createMockCacheConfig(int               layer_num          = 4,
                                       int               block_num          = 10,

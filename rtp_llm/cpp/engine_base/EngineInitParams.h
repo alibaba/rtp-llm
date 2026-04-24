@@ -2,8 +2,8 @@
 #include <cstddef>
 #include <tuple>
 
-#include "rtp_llm/cpp/core/OpData.h"
-#include "rtp_llm/cpp/core/DeviceData.h"
+#include "rtp_llm/models_py/bindings/core/OpData.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
@@ -89,7 +89,7 @@ struct EngineInitParams {
     size_t                       model_id;
     ModelConfig                  model_config_;
     ParallelismConfig            parallelism_config;
-    NcclCommConfig               nccl_comm_config;  // initExecCtx uses this for NCCL ip/ports
+    NcclCommConfig               nccl_comm_config;  // NCCL ip/ports
     py::object                   server_config;     // Python ServerConfig; RPC/HTTP ports read from it
     RuntimeConfig                runtime_config;
     EPLBConfig                   eplb_config;
@@ -115,7 +115,6 @@ struct EngineInitParams {
     py::object                   py_sp_model;
     py::object                   weight_manager;
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
-    ExecInitParams               exec_init_params;
 
 public:
     void showDebugInfo() const {

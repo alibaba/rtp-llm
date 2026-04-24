@@ -3,7 +3,7 @@ from typing import Optional, Type
 
 from rtp_llm.device.device_base import DeviceBase
 from rtp_llm.device.device_impl import ArmCpuImpl, CpuImpl, CudaImpl, PpuImpl, RocmImpl
-from rtp_llm.ops.compute_ops import DeviceType, ExecCtxExporter, get_exec_ctx
+from rtp_llm.device.device_type import DeviceType, get_device_type
 
 _current_device: Optional[DeviceBase] = None
 
@@ -29,11 +29,10 @@ def get_current_device() -> DeviceBase:
     if _current_device != None:
         return _current_device
 
-    exported_device: ExecCtxExporter = get_exec_ctx()
-    device_type = exported_device.get_device_type()
+    device_type = get_device_type()
     device_cls = get_device_cls(device_type)
 
-    _current_device = device_cls(exported_device)
+    _current_device = device_cls()
     if not _current_device:
         raise ValueError(f"Failed to create device of type {device_type}")
 

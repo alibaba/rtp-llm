@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
@@ -112,7 +112,9 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
 MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
-                         const ExecInitParams&                          exec_init_params,
+                         MlaOpsType                                     mla_ops_type,
+                         int32_t                                        kv_cache_group_num,
+                         const std::vector<int32_t>&                    kv_cache_layer_to_group,
                          bool                                           warm_up):
     Executor(),
     cache_manager_(cache_manager),
@@ -172,7 +174,19 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          cache_manager ? std::make_optional(target_cache_layer_layout) : std::nullopt,
          params.model_id,
          params.parallelism_config,
-         exec_init_params,
+         params.hw_kernel_config,
+         params.profiling_debug_logging_config,
+         params.runtime_config,
+         params.concurrency_config,
+         params.sp_config,
+         params.device_resource_config,
+         mla_ops_type,
+         params.model_config_.max_seq_len,
+         params.model_config_.hidden_size,
+         params.model_config_.attn_config.tokens_per_block,
+         params.model_config_.attn_config.kernel_tokens_per_block,
+         kv_cache_group_num,
+         kv_cache_layer_to_group,
          cache_manager});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
@@ -208,7 +222,19 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 cache_manager ? std::make_optional(draft_cache_layer_layout) : std::nullopt,
                                 mtp_params->model_id,
                                 mtp_params->parallelism_config,
-                                exec_init_params,
+                                params.hw_kernel_config,
+                                params.profiling_debug_logging_config,
+                                params.runtime_config,
+                                params.concurrency_config,
+                                params.sp_config,
+                                params.device_resource_config,
+                                mla_ops_type,
+                                mtp_params->model_config_.max_seq_len,
+                                mtp_params->model_config_.hidden_size,
+                                mtp_params->model_config_.attn_config.tokens_per_block,
+                                mtp_params->model_config_.attn_config.kernel_tokens_per_block,
+                                kv_cache_group_num,
+                                kv_cache_layer_to_group,
                                 cache_manager});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
@@ -887,7 +913,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
         // Since other tp ranks don't have streams, its combo_tokens' first token is not correct.
         // Thus, we need to broadcast the combo_tokens to other tp ranks.
-        execBroadcast({{model_input.combo_tokens}, 0});
+        if (parallelism_config_.tp_size > 1) {
+            execBroadcast({{model_input.combo_tokens}, 0});
+        }
 
         const auto& cache_cfg             = cache_manager_->cacheConfig();
         model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;

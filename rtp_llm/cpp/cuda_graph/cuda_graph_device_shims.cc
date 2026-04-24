@@ -3,7 +3,7 @@
 #include <hip/hip_runtime.h>
 #else
 #include <c10/cuda/CUDACachingAllocator.h>
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
 
 namespace rtp_llm {

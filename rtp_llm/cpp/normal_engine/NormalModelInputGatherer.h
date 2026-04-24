@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/core/OpData.h"
+#include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 

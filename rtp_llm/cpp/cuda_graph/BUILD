@@ -66,7 +66,7 @@ cc_library(
     deps = torch_deps() + [
         ":cuda_graph_base",
         ":cuda_graph_hdrs_lib",
-        "//rtp_llm/cpp/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/models_py/bindings:op_defs",
@@ -74,7 +74,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
     ] + select({
         "//:using_cuda": [
-            "//rtp_llm/cpp/cuda:cuda",
+            "//rtp_llm/models_py/bindings/cuda:cuda",
         ],
         "@//:using_rocm": [
             "@local_config_rocm//rocm:rocm_headers",

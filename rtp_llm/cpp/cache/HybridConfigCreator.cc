@@ -171,7 +171,7 @@ void HybridConfigCreator::setupLayerToGroupMapping(CacheConfig& config) {
 CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
                                                     bool                     is_mtp) {
-    auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config, buildDeviceType());
+    auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
 
     // Split layers by attention type
     auto [linear_layers, full_layers] = HybridConfigCreator::splitLayersByAttentionType(model_config);

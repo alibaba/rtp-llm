@@ -3,7 +3,7 @@
 #include "MockKVCMClient.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "autil/EnvUtil.h"
 
@@ -126,37 +126,10 @@ protected:
     }
 
     void initDevice() {
-        ParallelismConfig           parallelism_config;
-        ModelConfig                 model_config;
-        EPLBConfig                  eplb_config;
-        FMHAConfig                  fmha_config;
-        DeviceResourceConfig        device_resource_config;
-        MoeConfig                   moe_config;
-        SpeculativeExecutionConfig  sp_config;
-        MiscellaneousConfig         misc_config;
-        ProfilingDebugLoggingConfig profiling_debug_logging_config;
-        HWKernelConfig              hw_kernel_config;
-        ConcurrencyConfig           concurrency_config;
-        FfnDisAggregateConfig       ffn_disaggregate_config;
-        RuntimeConfig               runtime_config;
-        ModelSpecificConfig         model_specific_config;
-        NcclCommConfig              nccl_comm_config;
-
-        initExecCtx(parallelism_config,
-                    model_config,
-                    eplb_config,
-                    fmha_config,
-                    device_resource_config,
-                    moe_config,
-                    sp_config,
-                    misc_config,
-                    profiling_debug_logging_config,
-                    hw_kernel_config,
-                    concurrency_config,
-                    ffn_disaggregate_config,
-                    runtime_config,
-                    model_specific_config,
-                    nccl_comm_config);
+        initRuntime(/*device_id=*/0,
+                    /*trace_memory=*/false,
+                    /*enable_comm_overlap=*/false,
+                    MlaOpsType::AUTO);
     }
     void initServer() {
         for (int i = 0; i < tp_size_; i++) {

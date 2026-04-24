@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/ops/StandaloneOps.h"
+#include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
 #include "ATen/cuda/CUDAContext.h"
 #endif
 

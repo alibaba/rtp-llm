@@ -2,13 +2,14 @@
 
 import logging
 
+from rtp_llm.device.device_type import DeviceType, get_device_type
+
 # Import the factory after lists are defined to avoid circular imports
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
     MlaImplBase,
 )
-from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
 
 __all__ = [
     "FMHAImplBase",
@@ -26,7 +27,7 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     PREFILL_MLA_IMPS,
 )
 
-device_type = get_exec_ctx().get_device_type()
+device_type = get_device_type()
 if device_type == DeviceType.ROCm:
     # Import to register ROCm FMHA implementations
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (

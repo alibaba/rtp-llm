@@ -1,10 +1,10 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant_utils.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/vec_dtypes.cuh"
-#include "rtp_llm/cpp/cuda/launch_utils.h"
-#include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
-#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/launch_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_fp8_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 #include <c10/util/Float8_e4m3fn.h>

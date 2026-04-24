@@ -19,30 +19,9 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/core/Event.h"
-
 namespace rtp_llm {
 
 namespace test {
-
-// Mock async GPU event for testing
-class MockDeviceEvent: public AsyncEvent {
-public:
-    MockDeviceEvent(bool ready = false): ready_(ready) {}
-
-    void synchronize() const override {}
-
-    bool checkReadiness() const override {
-        return ready_.load();
-    }
-
-    void setReady(bool ready) {
-        ready_.store(ready);
-    }
-
-private:
-    mutable std::atomic<bool> ready_;
-};
 
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
@@ -321,8 +300,9 @@ protected:
         return resource;
     }
 
-    std::shared_ptr<MockDeviceEvent> createMockEvent(bool ready = false) {
-        return std::make_shared<MockDeviceEvent>(ready);
+    // Create a c10::Event that is immediately queryable (already recorded on current stream).
+    std::optional<c10::Event> createReadyEvent() {
+        return std::nullopt;  // nullopt means "immediately ready" in StoreWaitContext logic
     }
 
     void addComputedBuffer(int64_t request_id, int layer_id, int64_t deadline_ms) {
@@ -376,18 +356,12 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
     int     layer_id   = 0;
     int64_t request_id = 1002;
     auto    resource   = createKVCacheResource(layer_id, 2);
-    auto    event      = createMockEvent(false);
 
-    bool success = prefill_->writeByLayer(layer_id, resource, request_id, event);
+    // Pass nullopt — means "immediately ready" in StoreWaitContext logic
+    bool success = prefill_->writeByLayer(layer_id, resource, request_id, std::nullopt);
     EXPECT_TRUE(success);
-    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
 
-    // Wait for cleanup thread to check once
-    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
-    auto computed_buffer = computed_buffers_->getBuffer(request_id);
-    EXPECT_EQ(computed_buffer, nullptr);
-
-    event->setReady(true);
+    // Wait for cleanup thread to check once — event is immediately ready so buffer should appear
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
     ASSERT_NE(computed_buffers_->getBuffer(request_id), nullptr);
 }

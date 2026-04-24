@@ -2,7 +2,7 @@
 
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
 // Sampler would split logits into appropriate groups (mostly, based on beam size)

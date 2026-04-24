@@ -5,7 +5,7 @@ cc_test = cc_test_wrapper
 
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
-    "//rtp_llm/cpp/cuda/ops:cuda_impl",
+    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/utils:core_utils",
     "//rtp_llm/cpp/normal_engine:normal_engine",
     "//rtp_llm/cpp/engine_base/schedulers:schedulers",

@@ -2,10 +2,10 @@
 #include <vector>
 #include <torch/extension.h>
 #include <torch/all.h>
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 
 #if USING_ROCM
-#include <rtp_llm/cpp/rocm/amd_bfloat16.h>
+#include <rtp_llm/models_py/bindings/rocm/amd_bfloat16.h>
 #include <hip/hip_runtime.h>
 #include <ATen/hip/HIPContext.h>
 #include "rtp_llm/models_py/bindings/rocm/kernels/fused_qk_rmsnorm.h"

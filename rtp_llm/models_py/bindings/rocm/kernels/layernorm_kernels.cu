@@ -14,16 +14,16 @@
  * limitations under the License.
  */
 
-#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/models_py/bindings/cuda/cuda_type_utils.cuh"
 #include "rtp_llm/models_py/bindings/rocm/kernels/layernorm_kernels.h"
-#include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
+#include "rtp_llm/models_py/bindings/cuda/reduce_kernel_utils.cuh"
 
 #if ENABLE_TRITON
 #include "rtp_llm/models_py/bindings/common/kernels/triton/layernorm_kernels.h"
 #endif
 
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
 
 // wont't support new features

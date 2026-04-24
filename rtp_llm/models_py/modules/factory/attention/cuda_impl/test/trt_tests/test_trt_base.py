@@ -111,21 +111,12 @@ class TRTAttnTestBase(BaseAttentionTest):
             model_config = ModelConfig()
             model_config.max_seq_len = 512
 
+            pc = engine_config.parallelism_config
             init_exec_ctx(
-                parallelism_config=engine_config.parallelism_config,
-                model_config=model_config,
-                eplb_config=model_config.eplb_config,
-                fmha_config=engine_config.fmha_config,
-                device_resource_config=engine_config.device_resource_config,
-                moe_config=engine_config.moe_config,
-                sp_config=engine_config.sp_config,
-                misc_config=engine_config.misc_config,
-                profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
-                hw_kernel_config=engine_config.hw_kernel_config,
-                concurrency_config=engine_config.concurrency_config,
-                ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
-                runtime_config=engine_config.runtime_config,
-                model_specific_config=engine_config.model_specific_config,
+                device_id=pc.world_rank % pc.local_world_size,
+                trace_memory=engine_config.profiling_debug_logging_config.trace_memory,
+                enable_comm_overlap=engine_config.device_resource_config.enable_comm_overlap,
+                mla_ops_type=int(model_config.mla_ops_type),
             )
             print("Device initialized successfully", flush=True)
         except Exception as e:

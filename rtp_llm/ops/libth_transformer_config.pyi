@@ -1164,7 +1164,6 @@ class ModelConfig:
 
 
 class ModelSpecificConfig:
-    load_python_model: bool
     max_lora_model_size: int
 
     def __getstate__(self) -> tuple:
@@ -1394,14 +1393,12 @@ class ProfilingDebugLoggingConfig:
     debug_start_fake_process: bool
     enable_detail_log: bool
     enable_device_perf: bool
-    enable_torch_alloc_profile: bool
     ft_alog_conf_path: str
     ft_core_dump_on_exception: bool
     gen_timeline_sync: bool
     hack_layer_num: int
     log_file_backup_count: int
     torch_cuda_profiler_dir: str
-    trace_malloc_stack: bool
     trace_memory: bool
 
     def __getstate__(self) -> tuple:
@@ -1741,11 +1738,9 @@ class RopeStyle:
 
 
 class RuntimeConfig:
-    acext_gemm_config_dir: str
     max_block_size_per_item: int
     max_generate_batch_size: int
     model_name: str
-    pre_allocate_op_mem: bool
     reserve_runtime_mem_mb: int
     specify_gpu_arch: str
     use_batch_decode_scheduler: bool

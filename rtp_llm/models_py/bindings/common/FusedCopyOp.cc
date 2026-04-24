@@ -1,5 +1,5 @@
-#include "rtp_llm/cpp/core/ExecOps.h"
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/common/kernels/fuse_copy_kernel.h"
 
 #if USING_CUDA
@@ -8,7 +8,7 @@
 #endif
 #if USING_ROCM
 #include <ATen/hip/HIPContext.h>
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #include <hip/hip_runtime.h>
 #endif
 

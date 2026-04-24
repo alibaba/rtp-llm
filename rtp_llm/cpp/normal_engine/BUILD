@@ -27,7 +27,7 @@ cc_library(
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + select({
         "//:using_cuda": [
-            "//rtp_llm/cpp/cuda/ops:standalone_ops",
+            "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "@//:using_rocm": [

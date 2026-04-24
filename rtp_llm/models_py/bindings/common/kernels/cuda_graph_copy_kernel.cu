@@ -10,7 +10,7 @@
 #endif
 #if USING_ROCM
 #include <hip/hip_runtime.h>
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
 
 // Helper function to convert to float (specialized for each type)

@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -17,21 +17,13 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
     step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
-    rtp_llm::initExecCtx(params.parallelism_config,
-                         params.model_config_,
-                         params.eplb_config,
-                         params.fmha_config,
-                         params.device_resource_config,
-                         params.moe_config,
-                         params.sp_config,
-                         params.misc_config,
-                         params.profiling_debug_logging_config,
-                         params.hw_kernel_config,
-                         params.concurrency_config,
-                         params.ffn_disaggregate_config,
-                         params.runtime_config,
-                         params.model_specific_config,
-                         params.nccl_comm_config);
+    {
+        size_t device_id = params.parallelism_config.world_rank % params.parallelism_config.local_world_size;
+        rtp_llm::initRuntime(device_id,
+                             params.profiling_debug_logging_config.trace_memory,
+                             params.device_resource_config.enable_comm_overlap,
+                             params.model_config_.mla_ops_type);
+    }
     warmupNoBlockCopy();
     executor_.reset(new EmbeddingExecutor(params, handler));
     scheduler_.reset(

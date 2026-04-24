@@ -1,7 +1,7 @@
 #include "rtp_llm/models_py/bindings/cuda/TRTAttnOp.h"
-#include "rtp_llm/cpp/cuda/cufmha/TRTAttn.h"
-#include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
-#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
+#include "rtp_llm/models_py/bindings/cuda/cufmha/TRTAttn.h"
+#include "rtp_llm/models_py/bindings/cuda/cufmha/TrtV2FmhaRunner.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include <vector>
 #include <cuda_runtime.h>

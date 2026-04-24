@@ -2,7 +2,7 @@
 #include "c10/core/ScalarType.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
@@ -63,7 +63,6 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
         nullopt,  // no kv cache buffer for embedding executor
         0,
         parallelism_config,
-        ExecInitParams{buildDeviceType()},
     });
 
     RTP_LLM_CHECK_WITH_INFO(!params.py_model.is_none(), "py_model must be provided, legacy C++ GptModel path removed");

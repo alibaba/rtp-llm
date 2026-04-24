@@ -50,7 +50,7 @@ bool P2PConnectorWorkerPrefill::init(int64_t store_wait_timeout_ms) {
 bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
                                              const KVCacheResourcePtr& resource,
                                              int64_t                   request_id,
-                                             AsyncEventPtr             event) {
+                                             std::optional<c10::Event> event) {
     auto collector = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
     auto layer_cache_buffer = LayerCacheBufferUtil::convertLayer(*resource, 0, layer_id, 0, -1);
@@ -68,7 +68,7 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
 
     int64_t deadline_ms = currentTimeMs() + store_wait_timeout_ms_;
     store_wait_context_checker_->addContext(
-        StoreWaitContext(request_id, event, layer_cache_buffer, deadline_ms, collector));
+        StoreWaitContext(request_id, std::move(event), layer_cache_buffer, deadline_ms, collector));
     if (layer_id == 0) {
         RTP_LLM_LOG_INFO("writeByLayer [P2P Prefill]: queued request_id=%ld, layer_id=%d, blocks=%zu",
                          request_id,

@@ -1,4 +1,5 @@
 load("@//bazel:arch_select.bzl", "cache_store_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 cache_store_deps()
 
@@ -57,8 +58,7 @@ cc_library(
         "//rtp_llm/cpp/utils:time_util",
         # "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/metrics:metrics",
-        "//rtp_llm/cpp/core:event",
-    ],
+    ] + torch_deps(),
     visibility=['//visibility:public'],
     alwayslink = True,
 )

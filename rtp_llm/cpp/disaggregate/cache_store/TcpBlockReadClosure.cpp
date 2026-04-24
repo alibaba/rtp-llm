@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpBlockReadClosure.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <torch/torch.h>
 

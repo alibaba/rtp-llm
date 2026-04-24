@@ -6,8 +6,8 @@
 #include <regex>
 
 #include "rtp_llm/cpp/utils/DebugUtils.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
-#include "rtp_llm/cpp/core/CommonDefines.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 
 namespace fs = std::filesystem;
 

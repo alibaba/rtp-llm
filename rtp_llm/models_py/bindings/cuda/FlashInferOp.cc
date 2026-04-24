@@ -1,8 +1,8 @@
 #include "rtp_llm/models_py/bindings/cuda/FlashInferOp.h"
-#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "3rdparty/flashinfer/flashinfer.h"
-#include "rtp_llm/cpp/cuda/ops/CudaFlashInfer.h"
-#include "rtp_llm/cpp/core/OpData.h"
+#include "rtp_llm/models_py/bindings/cuda/ops/CudaFlashInfer.h"
+#include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 

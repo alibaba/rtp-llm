@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/models_py/bindings/cuda/cuda_type_utils.cuh"
 #include "rtp_llm/models_py/bindings/common/kernels/debug_kernel.h"
 
 #include <cstdio>

@@ -8,14 +8,13 @@ import torch
 
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
-    W4a8Int4PerChannelQuantConfig,
     QuantizationConfig,
+    W4a8Int4PerChannelQuantConfig,
     init_quant_config,
 )
 from rtp_llm.ops import DataType, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
 from rtp_llm.ops import TaskType
-from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 from rtp_llm.utils.util import get_config_from_path, to_torch_dtype
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
@@ -855,9 +854,6 @@ def build_model_config(
         model_config.hidden_size = (
             model_config.attn_config.size_per_head * model_config.attn_config.head_num
         )
-
-    # Load cutlass gemm config
-    load_cutlass_gemm_config(model_config.quant_algo)
 
     # Apply hack_layer_num if needed
     hack_layer_num = profiling_debug_logging_config.hack_layer_num

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <memory>
-#include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
+#include "rtp_llm/models_py/bindings/cuda/cufmha/TrtV2FmhaRunner.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"

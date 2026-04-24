@@ -4,15 +4,15 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>  // For half
 #include <cuda_bf16.h>  // For __nv_bfloat16
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
 
 #if USING_ROCM
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
-#include "rtp_llm/cpp/rocm/hip_host_utils.h"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
 #endif
 
 namespace rtp_llm {

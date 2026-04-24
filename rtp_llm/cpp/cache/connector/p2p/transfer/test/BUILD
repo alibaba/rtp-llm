@@ -16,7 +16,7 @@ cc_test(
     exec_properties = {'gpu':'H20'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/cpp/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "//rtp_llm/cpp/utils:time_util",
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),
@@ -32,7 +32,7 @@ cc_test(
     exec_properties = {'gpu':'H20'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/cpp/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "//rtp_llm/cpp/utils:time_util",
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),

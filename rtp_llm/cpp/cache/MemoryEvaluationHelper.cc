@@ -6,13 +6,13 @@
 #include <cuda_runtime.h>
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
-#include "rtp_llm/cpp/rocm/hip_host_utils.h"
+#include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
 #endif
 
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
 
 namespace rtp_llm {
@@ -29,17 +29,17 @@ void MemoryEvaluationHelper::updateMemoryIfNeeded(size_t& current_size, size_t m
     }
 }
 
-rtp_llm::DataType MemoryEvaluationHelper::getDataTypeForCache(const ModelConfig&  model_config,
-                                                              rtp_llm::DeviceType device_type) {
+rtp_llm::DataType MemoryEvaluationHelper::getDataTypeForCache(const ModelConfig& model_config) {
+#if defined(BUILDING_ARM_ONLY)
+    auto dtype =
+        model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::TYPE_INT8 : rtp_llm::TYPE_FP32;
+#else
     auto dtype =
         model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ?
             rtp_llm::DataType::TYPE_INT8 :
             (model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8 ? rtp_llm::DataType::TYPE_FP8_E4M3 :
                                                                                model_config.data_type);
-    if (device_type == rtp_llm::DeviceType::ArmCpu) {
-        dtype =
-            model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::TYPE_INT8 : rtp_llm::TYPE_FP32;
-    }
+#endif
     return dtype;
 }
 
@@ -53,8 +53,8 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
     // Reserve at least 5% of total GPU memory for runtime (forward pass intermediates, cublas workspace, etc.)
     // with a minimum floor of 2048 MiB. This is needed because KV cache is pre-allocated as a fixed block,
     // and the remaining GPU memory must be sufficient for model forward passes.
-    size_t total_gpu_bytes = 0;
-    size_t free_gpu_bytes  = 0;
+    size_t                  total_gpu_bytes = 0;
+    [[maybe_unused]] size_t free_gpu_bytes  = 0;
 #if USING_CUDA
     check_cuda_value(cudaMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
 #elif USING_ROCM

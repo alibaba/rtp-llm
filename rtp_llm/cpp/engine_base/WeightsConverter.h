@@ -6,7 +6,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "rtp_llm/cpp/core/OpData.h"
+#include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 

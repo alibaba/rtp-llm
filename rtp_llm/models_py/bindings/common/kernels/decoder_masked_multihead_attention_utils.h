@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/models_py/bindings/cuda/cuda_type_utils.cuh"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -3295,13 +3295,13 @@ __device__ __host__ constexpr inline T const& const_max(T const& a, T const& b) 
 #pragma once
 
 #include <stdint.h>
-#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/models_py/bindings/cuda/cuda_type_utils.cuh"
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
 
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
 
 #ifdef ENABLE_BF16

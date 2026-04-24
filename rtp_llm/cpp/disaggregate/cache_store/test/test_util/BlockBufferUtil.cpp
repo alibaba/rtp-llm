@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/test/test_util/BlockBufferUtil.h"
 
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include <atomic>

@@ -14,4 +14,18 @@ if is_cuda():
         FusedRopeKVCachePrefillOpQOut,
     )
 else:
-    logging.info("Fallback to default implementation of FusedRopeKVCacheOp on non-CUDA device.")
+    logging.info(
+        "Fallback to default implementation of FusedRopeKVCacheOp on non-CUDA device."
+    )
+
+    # On non-CUDA platforms (e.g. PPU), use C++ FusedRopeKVCacheOp from bindings
+    try:
+        from librtp_compute_ops.rtp_llm_ops import (
+            FusedRopeKVCacheDecodeOp,
+            FusedRopeKVCachePrefillOpQKVOut,
+            FusedRopeKVCachePrefillOpQOut,
+        )
+
+        logging.info("Loaded C++ FusedRopeKVCacheOp from librtp_compute_ops")
+    except ImportError as e:
+        logging.warning(f"Failed to load C++ FusedRopeKVCacheOp: {e}")

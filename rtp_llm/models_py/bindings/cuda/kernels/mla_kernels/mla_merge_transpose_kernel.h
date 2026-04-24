@@ -1,7 +1,7 @@
 #pragma once
 
 #ifdef USING_ROCM
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
 
 #if USING_CUDA

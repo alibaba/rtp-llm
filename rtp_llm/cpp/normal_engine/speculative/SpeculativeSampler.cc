@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 
 namespace rtp_llm {

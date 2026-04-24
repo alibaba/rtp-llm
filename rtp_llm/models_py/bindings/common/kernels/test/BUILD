@@ -10,7 +10,7 @@ any_cuda_deps = select({
     "@//:using_rocm": [
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:hip",
-        "//rtp_llm/cpp/rocm:rocm_types_hdr",
+        "//rtp_llm/models_py/bindings/rocm:rocm_types_hdr",
     ],
     "//conditions:default": [],
 })
