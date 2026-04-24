@@ -164,27 +164,54 @@ class AiterPrefillAttnOp:
     def _reshape_kv_cache_vectorized(self, kv_cache_base):
         """Reshape kv_cache_base into 5D VECTORIZED_LAYOUT for mha_batch_prefill.
 
+        Handles both 2D flat buffer and 5D pre-shaped kv_cache_base.
+
         Returns (k_cache_5d, v_cache_5d):
             K: [num_blocks, num_kv_heads, head_dim/vs, page_size, vs]
             V: [num_blocks, num_kv_heads, page_size/vs, head_dim, vs]
+
+        Note on V layout:
+        - V1 non-FP8 (BASE): kernel uses non-template getVLocalIdx → linear [hd, ps].
+          Needs permute to convert to vectorized [ps//vs, hd, vs].
+        - V1 FP8: kernel uses getVLocalIdx<FP8> → already vectorized [ps//vs, hd, vs].
+        - ASM (both BASE and FP8): kernel uses getVLocalIdx<CType> → vectorized.
         """
         block_num = kv_cache_base.shape[0]
         hk = self.head_num_kv
         ps = self.tokens_per_block
         hd = self.head_dim
         vs = 16 // kv_cache_base.element_size()
-        expected_elems = 2 * hk * ps * hd
 
+        # FP8 KV cache always uses vectorized layout (getKLocalIdx<FP8>/getVLocalIdx<FP8>),
+        # regardless of v1_kv_layout flag.
+        is_fp8 = kv_cache_base.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
+        use_v1_linear_v = self.v1_kv_layout and not is_fp8
+
+        if kv_cache_base.ndim >= 4:
+            # Already shaped as [block_num, 2, hk, ps, hd] or similar multi-dim format.
+            k_4d = kv_cache_base.select(1, 0)  # [block_num, hk, ps, hd]
+            v_4d = kv_cache_base.select(1, 1)  # [block_num, hk, ps, hd]
+            k_cache = k_4d.view(block_num, hk, hd // vs, ps, vs)
+            if use_v1_linear_v:
+                v_linear = v_4d.reshape(block_num, hk, hd, ps)
+                v_cache = (
+                    v_linear.reshape(block_num, hk, hd, ps // vs, vs)
+                    .permute(0, 1, 3, 2, 4)
+                    .contiguous()
+                )
+            else:
+                v_cache = v_4d.view(block_num, hk, ps // vs, hd, vs)
+            return k_cache, v_cache
+
+        # 2D flat buffer path
+        expected_elems = 2 * hk * ps * hd
         flat = kv_cache_base[:, :expected_elems].reshape(block_num, 2, hk, ps * hd)
 
-        # K: V1 kernel writes via getKLocalIdx<BASE> → vectorized [hd//vs, ps, vs].
-        # This matches the target 5D shape directly via view.
+        # K: kernel writes via getKLocalIdx<CType> → vectorized [hd//vs, ps, vs].
         k_cache = flat[:, 0, :, :].view(block_num, hk, hd // vs, ps, vs)
 
-        if self.v1_kv_layout:
-            # V1 kernel writes V via non-template getVLocalIdx → linear [hd, ps].
-            # Target layout for mha_batch_prefill: [ps//vs, hd, vs].
-            # Permute [hd, ps] → [hd, ps//vs, vs] → [ps//vs, hd, vs].
+        if use_v1_linear_v:
+            # V1 non-FP8: kernel uses non-template getVLocalIdx → linear [hd, ps].
             v_linear = flat[:, 1, :, :].view(block_num, hk, hd, ps)
             v_cache = (
                 v_linear.reshape(block_num, hk, hd, ps // vs, vs)
@@ -192,7 +219,7 @@ class AiterPrefillAttnOp:
                 .contiguous()
             )
         else:
-            # ASM kernel writes V via getVLocalIdx<BASE> → vectorized [ps//vs, hd, vs].
+            # ASM or FP8: kernel uses getVLocalIdx<CType> → vectorized [ps//vs, hd, vs].
             v_cache = flat[:, 1, :, :].view(block_num, hk, ps // vs, hd, vs)
 
         return k_cache, v_cache
@@ -252,36 +279,18 @@ class AiterPrefillAttnOp:
             causal=self.is_causal,
         )
         return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
+    def _forward_paged(self, q_tensor, kv_cache, fmha_params):
+        """Paged prefill attention from paged KV cache using mha_batch_prefill_func.
 
-    def forward(self, qkv, kv_cache, fmha_params):
-        q_tensor = qkv[0] if isinstance(qkv, (tuple, list)) else qkv
+        Supports BF16/FP16 Q or FP8 Q with FP8 KV cache (with descale).
+        mha_batch_prefill_func handles mixed dtype via q_descale/k_descale/v_descale.
+        """
+        # Ensure Q is 3D [tokens, heads, head_dim] for mha_batch_prefill_func
+        if q_tensor.dim() == 2:
+            q_tensor = q_tensor.view(q_tensor.size(0), self.head_num, self.head_dim)
 
-        # FP8 path: C++ returns full qkv_buf_fp8 (Q+K+V concatenated in FP8).
-        # Split into Q/K/V and use flash_attn_varlen_fp8_pertensor_func.
-        if q_tensor.dtype == torch.float8_e4m3fnuz:
-            query, key, value = self._split_qkv_fp8(q_tensor)
-            cu_seqlens_q = fmha_params.cu_seqlens_q.to(query.device)
-            cu_seqlens_k = fmha_params.cu_seqlens_k.to(query.device)
-            res = aiter.flash_attn_varlen_fp8_pertensor_func(
-                query,
-                key,
-                value,
-                None,
-                None,
-                None,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                fmha_params.max_seqlen_q,
-                fmha_params.max_seqlen_k,
-                causal=self.is_causal,
-            )
-            return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
-
-        if kv_cache is None:
-            return self._forward_varlen(qkv, fmha_params)
-
-        # Unified path: always use mha_batch_prefill from paged KV cache
         k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
+
         block_table = fmha_params.kv_cache_block_id_device
         cu_seqlens_q = fmha_params.cu_seqlens_q.to(q_tensor.device)
 
@@ -304,6 +313,15 @@ class AiterPrefillAttnOp:
         kv_indptr = cu_seqlens_q
         kv_page_indices = torch.empty(0, dtype=torch.int32, device=q_tensor.device)
 
+        # FP8 KV cache needs descale parameters for mha_batch_prefill_func
+        q_descale = None
+        k_descale = None
+        v_descale = None
+        if kv_cache.kv_cache_base.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
+            q_descale = torch.ones(1, dtype=torch.float32, device=q_tensor.device)
+            k_descale = torch.ones(1, dtype=torch.float32, device=q_tensor.device)
+            v_descale = torch.ones(1, dtype=torch.float32, device=q_tensor.device)
+
         res = aiter.mha_batch_prefill_func(
             q_tensor,
             k_cache,
@@ -319,9 +337,42 @@ class AiterPrefillAttnOp:
             window_size=(-1, 0),
             block_table=block_table,
             seqlen_k=seqlen_k,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
         return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
 
+    def forward(self, qkv, kv_cache, fmha_params):
+        q_tensor = qkv[0] if isinstance(qkv, (tuple, list)) else qkv
+
+        # FP8 path: C++ returns full qkv_buf_fp8 (Q+K+V concatenated in FP8).
+        # Split into Q/K/V and use flash_attn_varlen_fp8_pertensor_func.
+        # Both ASM and V1 return full QKV when use_paged_fmha=false (default).
+        if q_tensor.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
+            query, key, value = self._split_qkv_fp8(q_tensor)
+            cu_seqlens_q = fmha_params.cu_seqlens_q.to(query.device)
+            cu_seqlens_k = fmha_params.cu_seqlens_k.to(query.device)
+            res = aiter.flash_attn_varlen_fp8_pertensor_func(
+                query,
+                key,
+                value,
+                None,
+                None,
+                None,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                fmha_params.max_seqlen_q,
+                fmha_params.max_seqlen_k,
+                causal=self.is_causal,
+            )
+            return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
+
+        if kv_cache is None:
+            return self._forward_varlen(qkv, fmha_params)
+
+        # Non-FP8 paged path: bf16 Q + paged KV cache → batch prefill
+        return self._forward_paged(q_tensor, kv_cache, fmha_params)
 
 class AiterPrefillAttnOpPaged:
     """Paged prefill attention"""
@@ -861,7 +912,6 @@ class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
         )
         return output.view(num_seqs, -1)
 
-
 class AiterPrefillImplAsm(FMHAImplBase):
     """Aiter prefill attention implementation using ASM."""
 
@@ -894,7 +944,7 @@ class AiterPrefillImplAsm(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
-        layer_idx: int,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         if kv_cache is None:
             return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
@@ -912,7 +962,6 @@ class AiterPrefillImplAsm(FMHAImplBase):
 
         # Execute FMHA forward
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
-
 
 class AiterPrefillImplNonAsm(FMHAImplBase):
     """Aiter prefill attention implementation using non-ASM."""
@@ -946,7 +995,7 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
-        layer_idx: int,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         if kv_cache is None:
             return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
@@ -1049,7 +1098,6 @@ class AiterPrefillImplPaged(FMHAImplBase):
             return self.batch_prefill_impl.forward(
                 fmha_input, kv_cache, self.fmha_params
             )
-
 
 class AiterDecodeImplBase(FMHAImplBase):
     fmha_params: Any

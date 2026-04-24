@@ -107,12 +107,16 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 
     const int     q_output_token_num = (use_paged_fmha && pad_query) ? batch_size * seq_len : token_num;
     const bool    paged_fp8          = use_paged_fmha && attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
-    torch::Tensor q_output           = torch::zeros({q_output_token_num, local_head_num, size_per_head},
-                                          torch::TensorOptions(qkv.dtype()).device(qkv.device()));
+    torch::Tensor q_output = use_paged_fmha ?
+        torch::zeros({q_output_token_num, local_head_num, size_per_head},
+                     torch::TensorOptions(qkv.dtype()).device(qkv.device())) :
+        torch::zeros({batch_size, local_head_num, seq_len, size_per_head},
+                     torch::TensorOptions(qkv.dtype()).device(qkv.device()));
     torch::Tensor q_fp8_buf;
     if (paged_fp8) {
-        q_fp8_buf = torch::empty({q_output_token_num, local_head_num, size_per_head},
-                                 torch::TensorOptions(get_fp8_dtype()).device(qkv.device()));
+        q_fp8_buf = torch::empty(
+            {q_output_token_num, local_head_num, size_per_head},
+            torch::TensorOptions(get_fp8_dtype()).device(qkv.device()));
     }
     torch::Tensor k_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head},
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
@@ -213,7 +217,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
             pad_query,
             stream_);
 
-    } else {
+        // V1 kernel: same FP8 logic as ASM — use QuantizedQKV for FP8 output.
+        // FP8 paged: write FP8 Q into q_fp8_buf via QuantizedQKV ptr.
+        // FP8 non-paged: write full FP8 QKV into qkv_buf_fp8 via QuantizedQKV ptr.
+        // Non-FP8: USE_PAGED_FMHA=true for packed-token Q layout.
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
                                          invokeAddFusedQKVBiasTransposePrefillV1,
                                          q_output.data_ptr(),
@@ -221,7 +228,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          v_output.data_ptr(),
                                          &prefix_prompt_param,
                                          qkv.data_ptr(),
-                                         nullptr,
+                                         paged_fp8 ? q_fp8_buf.data_ptr() :
+                                                     (use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr),
                                          nullptr,
                                          nullptr,
                                          params->padding_offset.data_ptr<int>(),
@@ -236,24 +244,24 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          attn_configs_.use_logn_attn,
                                          nullptr,
                                          0,
-                                         use_fmha_fp8 ? use_paged_fmha :
-                                                        true,  // FP8: original flag; non-FP8: always paged
-                                         store_qkv,
-                                         store_q,
-                                         store_kv,
-                                         store_cache,
+                                         use_fmha_fp8 ? use_paged_fmha : true,  // FP8: original flag; non-FP8: always paged
+                                         store_qkv,    // store_qkv
+                                         store_q,      // store_q
+                                         store_kv,     // store_kv
+                                         store_cache,  // store_cache
                                          nullptr,
                                          stream_);
     }
-    // FP8 path: return full qkv_buf_fp8 for flash_attn_varlen_fp8_pertensor_func
+
+    // FP8 paged: return FP8 Q (from q_fp8_buf) for mha_batch_prefill_func.
+    if (paged_fp8) {
+        return std::make_tuple(q_fp8_buf, torch::Tensor(), torch::Tensor());
+    }
+    // FP8 non-paged: return full qkv_buf_fp8 for flash_attn_varlen_fp8_pertensor_func.
     if (use_fmha_fp8) {
         return std::make_tuple(qkv_buf_fp8, torch::Tensor(), torch::Tensor());
     }
-    // Non-FP8 paged path: return packed-token Q only (K/V in paged cache)
-    if (use_paged_fmha) {
-        return std::make_tuple(q_output, torch::Tensor(), torch::Tensor());
-    }
-
+    // Non-FP8: return bf16 Q (K/V in paged cache).
     return std::make_tuple(q_output, torch::Tensor(), torch::Tensor());
 }
 
