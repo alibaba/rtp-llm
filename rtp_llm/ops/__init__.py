@@ -74,7 +74,9 @@ if not os.path.exists(os.path.join(so_path, SO_NAME)):
 
 logging.info(f"so path: {so_path}")
 ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
-os.environ["LD_LIBRARY_PATH"] = ":".join([p for p in [so_path, ld_library_path] if p])
+os.environ["LD_LIBRARY_PATH"] = ":".join(
+    [p for p in ["/usr/local/lib64", so_path, ld_library_path] if p]
+)
 logging.info(f"updated LD_LIBRARY_PATH for ops: {os.environ['LD_LIBRARY_PATH']}")
 sys.path.insert(0, so_path)
 
@@ -84,6 +86,8 @@ sys.path.insert(0, so_path)
 from ctypes import CDLL, RTLD_GLOBAL
 
 _PRELOAD_SO_NAMES = [
+    "libibverbs.so.1",
+    "librdmacm.so.1",
     "libicudata.so.66",
     "libicuuc.so.66",
     "libicui18n.so.66",
