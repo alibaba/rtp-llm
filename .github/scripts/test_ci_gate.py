@@ -578,6 +578,16 @@ class TestPreCheckStatus(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertIn("ci_action=wait", output.read())
 
+    @patch("ci_gate.ci.time.sleep")
+    @patch("ci_gate.ci.retrieve_task_status")
+    def test_pending_returns_trigger_action(self, mock_status, mock_sleep):
+        mock_status.return_value = {"status": "PENDING", "commitId": "abc", "taskId": "1"}
+        with tempfile.NamedTemporaryFile(mode="r+") as output:
+            result = pre_check_status(self._args(output_file=output.name))
+            output.seek(0)
+            self.assertEqual(result, 1)
+            self.assertIn("ci_action=trigger", output.read())
+
 
 # ---------------------------------------------------------------------------
 # ci.wait_status (mocked)

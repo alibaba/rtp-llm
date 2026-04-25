@@ -1,0 +1,50 @@
+name: CI Event Dispatcher
+
+on:
+  pull_request_review:
+    types: [submitted]
+    branches: ["main"]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  actions: write
+  pull-requests: read
+  issues: read
+
+jobs:
+  dispatch:
+    if: >-
+      (github.event_name == 'pull_request_review' &&
+       (github.event.review.state == 'approved' ||
+        (github.event.review.user.login == 'LLLLKKKK' &&
+         github.event.review.state == 'commented'))) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       github.event.comment.user.login == 'LLLLKKKK' &&
+       contains(github.event.comment.body, 'lgtm ready to ci'))
+    runs-on: [self-hosted, Linux]
+    steps:
+      - name: Resolve PR context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request_review" ]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            PR_NUMBER="${{ github.event.issue.number }}"
+            HEAD_SHA=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}" --jq '.head.sha')
+          fi
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Dispatching CI for PR #${PR_NUMBER} @ ${HEAD_SHA:0:8}"
+
+      - name: Trigger CI workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run CI-request-trigger.yml \
+            -f pr_number="${{ steps.ctx.outputs.pr_number }}" \
+            -f head_sha="${{ steps.ctx.outputs.head_sha }}"

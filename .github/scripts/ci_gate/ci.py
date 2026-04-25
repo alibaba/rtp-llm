@@ -56,10 +56,14 @@ def pre_check_status(args):
 
     log("")
     log("=== Final Result ===")
-    if main_status in {"RUNNING", "PENDING"}:
-        log("CI is %s for this commit after %d checks, skipping trigger but waiting for result" % (main_status, max_attempts))
+    if main_status == "RUNNING":
+        log("CI is RUNNING for this commit after %d checks, skipping trigger but waiting for result" % max_attempts)
         _write_pre_check_action(args, "wait")
         return 0
+    if main_status == "PENDING":
+        log("CI stuck in PENDING after %d checks, will re-trigger" % max_attempts)
+        _write_pre_check_action(args, "trigger")
+        return 1
     log("CI status is %s after %d checks, allowing CI trigger" % (main_status, max_attempts))
     _write_pre_check_action(args, "trigger")
     return 1

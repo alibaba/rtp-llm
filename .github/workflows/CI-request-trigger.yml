@@ -1,9 +1,6 @@
 name: CI Request Trigger
 
 on:
-  pull_request_review:
-    types: [submitted]
-    branches: ["main"]
   # synchronize fires on force-push / new commits. Fresh-review gate will
   # reject it unless a reviewer has already approved the *new* HEAD SHA,
   # which is the intended safety behavior: un-reviewed changes don't get CI.
@@ -12,10 +9,8 @@ on:
   pull_request:
     types: [synchronize]
     branches: ["main"]
-  # issue_comment fires on PR conversation comments (not review comments).
-  # This lets LLLLKKKK trigger CI via a plain "lgtm ready to ci" comment.
-  issue_comment:
-    types: [created, edited]
+  # All other events (pull_request_review, issue_comment) are dispatched
+  # here via CI-event-dispatcher.yml as workflow_dispatch calls.
   workflow_dispatch:
     inputs:
       pr_number:
@@ -35,15 +30,13 @@ on:
 permissions:
   pull-requests: read
   contents: read
-  issues: read
+  statuses: write
 
 concurrency:
   group: >-
     ${{ github.workflow }}-${{
       github.event_name == 'workflow_dispatch'
         && inputs.pr_number
-        || github.event_name == 'issue_comment'
-        && github.event.issue.number
         || github.event.pull_request.number
     }}
   cancel-in-progress: true
@@ -52,16 +45,8 @@ jobs:
   build:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request_review' &&
-       (github.event.review.state == 'approved' ||
-        (github.event.review.user.login == 'LLLLKKKK' &&
-         github.event.review.state == 'commented'))) ||
       (github.event_name == 'pull_request' &&
-       github.event.action == 'synchronize') ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request &&
-       github.event.comment.user.login == 'LLLLKKKK' &&
-       contains(github.event.comment.body, 'lgtm ready to ci'))
+       github.event.action == 'synchronize')
     runs-on: [self-hosted, Linux]
     defaults:
       run:
@@ -102,9 +87,20 @@ jobs:
             --input-head-sha "${{ inputs.head_sha }}" \
             --input-skip-review "${{ inputs.skip_review_check }}" \
             --event-head-sha "${{ github.event.pull_request.head.sha }}" \
-            --event-pr-number "${{ github.event.pull_request.number || github.event.issue.number }}" \
+            --event-pr-number "${{ github.event.pull_request.number }}" \
             --event-clone-url "${{ github.event.pull_request.head.repo.clone_url }}" \
             --output-file "$GITHUB_OUTPUT"
+
+      - name: Set pending commit status
+        if: github.event_name == 'workflow_dispatch' && steps.review-gate.outputs.qualified == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/statuses/${{ steps.review-gate.outputs.head_sha }}" \
+            -f state=pending \
+            -f context="CI Request Trigger" \
+            -f description="CI is running..." \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Check merge conflicts
         if: steps.review-gate.outputs.qualified == 'true'
@@ -175,3 +171,19 @@ jobs:
             --max-wait-time 28800 \
             --max-wait-pending-time 21600 \
             --max-wait-running-time 7200
+
+      - name: Update commit status
+        if: always() && github.event_name == 'workflow_dispatch' && steps.review-gate.outputs.head_sha != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            STATE="success"; DESC="CI passed"
+          else
+            STATE="failure"; DESC="CI failed"
+          fi
+          gh api "repos/${{ github.repository }}/statuses/${{ steps.review-gate.outputs.head_sha }}" \
+            -f state="${STATE}" \
+            -f context="CI Request Trigger" \
+            -f description="${DESC}" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
