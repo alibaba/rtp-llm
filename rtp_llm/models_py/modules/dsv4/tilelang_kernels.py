@@ -19,6 +19,9 @@ from typing import Optional
 import torch
 
 
+import logging as _logging
+_log = _logging.getLogger(__name__)
+
 _TILELANG_AVAILABLE: bool = False
 _SPARSE_ATTN_KERNEL_CACHE: dict = {}
 
@@ -176,6 +179,7 @@ def sparse_attn(
     key = (h_padded, d, float(softmax_scale))
     kernel = _SPARSE_ATTN_KERNEL_CACHE.get(key)
     if kernel is None:
+        _log.info("[dsv4] JIT-compiling V4 TileLang sparse_attn h=%d d=%d", h_padded, d)
         kernel = _sparse_attn_kernel(h_padded, d, softmax_scale)
         _SPARSE_ATTN_KERNEL_CACHE[key] = kernel
 

@@ -125,6 +125,28 @@ class DeepSeekV4Model(GptModelBase):
             # V4-Flash = 2048. config.inter_size = n_shared * 2048 = 2048 (since n_shared=1).
             args.moe_inter_dim = int(model_config.inter_size) or args.moe_inter_dim
 
+        # S7 scaffold: thread the framework's parallelism config into V4Args.
+        # No behavior change at TP=1; the fields are read by future patches
+        # (see docs/dsv4/parallel_design.md) when sharding lands per-module.
+        pc = parallelism_config
+        if pc is not None:
+            args.tp_size = int(getattr(pc, "tp_size", 1) or 1)
+            args.tp_rank = int(getattr(pc, "tp_rank", 0) or 0)
+            args.ep_size = int(getattr(pc, "ep_size", 1) or 1)
+            args.ep_rank = int(getattr(pc, "ep_rank", 0) or 0)
+            args.dp_size = int(getattr(pc, "dp_size", 1) or 1)
+            args.dp_rank = int(getattr(pc, "dp_rank", 0) or 0)
+            args.world_size = int(getattr(pc, "world_size", 1) or 1)
+            args.world_rank = int(getattr(pc, "world_rank", 0) or 0)
+        if args.world_size > 1:
+            logging.info(
+                "[DeepSeekV4Model] parallelism: world=%d tp=%d/%d ep=%d/%d dp=%d/%d "
+                "(scaffold only — V4 sharding not yet implemented; see "
+                "docs/dsv4/parallel_design.md)",
+                args.world_size, args.tp_rank, args.tp_size,
+                args.ep_rank, args.ep_size, args.dp_rank, args.dp_size,
+            )
+
         logging.info(
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d "
             "o_groups=%d n_experts=%d n_act=%d moe_inter=%d win=%d hc_mult=%d "
