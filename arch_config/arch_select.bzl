@@ -10,16 +10,10 @@ def copy_all_so():
     copy_so("//:th_transformer")
     copy_so("//:th_transformer_config")
     copy_so("//:rtp_compute_ops")
-    copy_so("@flashinfer_cpp//:flashinfer_single_prefill")
-    copy_so("@flashinfer_cpp//:flashinfer_single_decode")
     copy_so("@flashinfer_cpp//:flashinfer_batch_paged_prefill")
     copy_so("@flashinfer_cpp//:flashinfer_batch_paged_decode")
-    copy_so("@flashinfer_cpp//:flashinfer_batch_ragged_prefill")
-    copy_so("@flashinfer_cpp//:flashinfer_single_prefill_256")
-    copy_so("@flashinfer_cpp//:flashinfer_single_decode_256")
     copy_so("@flashinfer_cpp//:flashinfer_batch_paged_prefill_256")
     copy_so("@flashinfer_cpp//:flashinfer_batch_paged_decode_256")
-    copy_so("@flashinfer_cpp//:flashinfer_batch_ragged_prefill_256")
     copy_so("@flashinfer_cpp//:flashinfer_sm90")
 
 def requirement(names):
@@ -111,9 +105,6 @@ def torch_deps():
     })
     return deps
 
-def fa_deps():
-    pass
-
 def flashinfer_deps():
     native.alias(
         name = "flashinfer",
@@ -127,10 +118,7 @@ def flashmla_deps():
     )
 
 def deep_ep_deps():
-    native.alias(
-        name = "deep_ep",
-        actual = "@deep_ep//:deep_ep"
-    )
+    pass
 
 def deep_ep_py_deps():
     native.alias(
@@ -140,7 +128,7 @@ def deep_ep_py_deps():
 
 def kernel_so_deps():
     return select({
-        "@//:using_cuda": [":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libflashinfer_single_prefill_256_so", ":libflashinfer_single_decode_256_so", ":libflashinfer_batch_paged_prefill_256_so", ":libflashinfer_batch_paged_decode_256_so", ":libflashinfer_batch_ragged_prefill_256_so"],
+        "@//:using_cuda": [":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_sm90_so", ":libflashinfer_batch_paged_prefill_256_so", ":libflashinfer_batch_paged_decode_256_so"],
         "@//:using_rocm": [],
         "//conditions:default":[],
     })
