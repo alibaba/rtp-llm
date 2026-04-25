@@ -106,6 +106,7 @@ def _build_block(layer_id: int, args: V4Args,
         hc_mult=args.hc_mult, hc_sinkhorn_iters=args.hc_sinkhorn_iters, hc_eps=args.hc_eps,
         norm_eps=args.norm_eps,
         weights=weights, prefix=prefix,
+        tp_size=args.tp_size, tp_rank=args.tp_rank,
     )
 
 
