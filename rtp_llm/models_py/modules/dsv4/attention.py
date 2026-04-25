@@ -29,17 +29,13 @@ from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
-# FlashMLA sparse kernel: tiles the topk dim in blocks of 64. Pad V4's
-# variable topk to this granularity with -1 (= invalid / masked).
-_FLASHMLA_TOPK_BLOCK = 64
-
-_FLASHMLA_AVAILABLE: bool = False
-try:
-    from flash_mla import flash_mla_sparse_fwd  # noqa: F401
-
-    _FLASHMLA_AVAILABLE = True
-except ImportError:
-    _FLASHMLA_AVAILABLE = False
+# V4 author's TileLang sparse_attn kernel — vendored from
+# /mnt/nas1/hf/DeepSeek-V4-Flash/inference/kernel.py:sparse_attn_kernel.
+# V4 is MQA + Q-LoRA (NOT MLA); this is the author-authored kernel for
+# exactly this math. Falls back to the PyTorch reference `_sparse_attn`
+# when tilelang is unavailable (e.g. environments where libstdc++
+# symbols don't match tilelang's pre-built libtvm.so).
+from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
 
 
 def _v4_fp8_linear_from_dict(
@@ -100,67 +96,6 @@ def _get_compress_topk_idxs(ratio: int, bsz: int, seqlen: int, start_pos: int, o
         mask = matrix >= torch.arange(1, seqlen + 1, device=device).unsqueeze(1) // ratio
         matrix = torch.where(mask, -1, matrix + offset)
     return matrix.unsqueeze(0).expand(bsz, -1, -1).contiguous()
-
-
-def _sparse_attn_flashmla(
-    q: torch.Tensor,           # [B, S, H, D] bf16
-    kv: torch.Tensor,          # [B, T_kv, D] bf16  (single KV head, shared across H)
-    sink: torch.Tensor,        # [H] fp32
-    topk_idxs: torch.Tensor,   # [B, S, K] long; -1 entries are masked out
-    softmax_scale: float,
-) -> torch.Tensor:
-    """Sparse MQA attention via ``flash_mla.flash_mla_sparse_fwd``.
-
-    **The name "FlashMLA" is misleading** — V4 is NOT MLA (V4 uses Q-LoRA
-    + MQA: single 512-dim shared K=V across 64 Q heads, no kv_b
-    expansion). ``flash_mla_sparse_fwd`` is a *generalised* sparse
-    attention kernel; its signature takes ``q [s_q, h_q, d_qk]``,
-    ``kv [s_kv, h_kv, d_qk]``, ``d_v`` separate, and computes
-    ``out = Σ softmax(q·kv[indices].T) * kv[indices, :d_v]``. Setting
-    ``d_qk == d_v == 512`` with ``h_kv == 1`` reduces it to the standard
-    sparse MQA math V4 needs. Numerically verified against the Python
-    reference ``_sparse_attn`` at 1e-3 relative-diff level (BF16 precision)
-    and against the bit-exact smoke golden.
-
-    Shape reshaping:
-      - q:  [B, S, H, D] → [B*S, H, D]
-      - kv: [B, T, D]    → [T, 1, D]  (requires B=1; V4's engine runs B=1)
-      - topk_idxs: [B, S, K] long → [B*S, 1, K_pad] int32, right-padded
-        with -1 to the next multiple of 64 (FlashMLA's B_TOPK tile)
-
-    ``attn_sink``: FlashMLA natively multiplies output by
-    ``exp(lse) / (exp(lse) + exp(attn_sink))`` which is exactly V4's
-    per-head learned-sink denominator — no post-correction needed.
-
-    Future work: swap to V4's official TileLang sparse_attn_kernel for
-    potentially better tiling on V4's d_qk=512 (FlashMLA is tuned for
-    MLA's d_qk=576).
-    """
-    from flash_mla import flash_mla_sparse_fwd  # cached by Python
-
-    B, S, H, D = q.shape
-    assert B == 1, f"FlashMLA sparse path currently requires B=1, got B={B}"
-    _, T, _ = kv.shape
-    K = topk_idxs.size(-1)
-    K_pad = ((K + _FLASHMLA_TOPK_BLOCK - 1) // _FLASHMLA_TOPK_BLOCK) * _FLASHMLA_TOPK_BLOCK
-
-    idx_2d = topk_idxs.view(B * S, K).to(torch.int32)
-    if K_pad != K:
-        pad = torch.full(
-            (B * S, K_pad - K), -1,
-            dtype=torch.int32, device=idx_2d.device,
-        )
-        idx_2d = torch.cat([idx_2d, pad], dim=-1)
-    indices = idx_2d.unsqueeze(1)   # [B*S, 1, K_pad]
-
-    q_flat = q.reshape(B * S, H, D).to(torch.bfloat16)
-    kv_flat = kv.reshape(T, 1, D).to(torch.bfloat16)
-
-    out, _max_logits, _lse = flash_mla_sparse_fwd(
-        q_flat, kv_flat, indices, softmax_scale,
-        d_v=D, attn_sink=sink.float(),
-    )                               # out: [B*S, H, D] bf16
-    return out.view(B, S, H, D).to(q.dtype)
 
 
 def _sparse_attn(
@@ -453,16 +388,16 @@ class Attention(nn.Module):
                 kv_compress = self.compressor(x, start_pos)
                 if kv_compress is not None:
                     kv = torch.cat([kv, kv_compress], dim=1)
-            if _FLASHMLA_AVAILABLE and q.size(0) == 1:
-                o = _sparse_attn_flashmla(q, kv, self.attn_sink, topk_idxs, self.softmax_scale)
+            if _tl_kernels.tilelang_available():
+                o = _tl_kernels.sparse_attn(q, kv, self.attn_sink, topk_idxs, self.softmax_scale)
             else:
                 o = _sparse_attn(q, kv, self.attn_sink, topk_idxs, self.softmax_scale)
         else:
             self.kv_cache[:bsz, start_pos % win] = kv.squeeze(1)
             if self.compress_ratio:
                 self.compressor(x, start_pos)
-            if _FLASHMLA_AVAILABLE and q.size(0) == 1:
-                o = _sparse_attn_flashmla(q, self.kv_cache[:bsz], self.attn_sink, topk_idxs, self.softmax_scale)
+            if _tl_kernels.tilelang_available():
+                o = _tl_kernels.sparse_attn(q, self.kv_cache[:bsz], self.attn_sink, topk_idxs, self.softmax_scale)
             else:
                 o = _sparse_attn(q, self.kv_cache[:bsz], self.attn_sink, topk_idxs, self.softmax_scale)
 
