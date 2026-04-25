@@ -137,6 +137,12 @@ class ModelConfig(CppModelConfig):
         "embedding_size",
         "moe_normalize_expert_scale",
         "scoring_func",
+        # DeepSeek-V4 fields
+        "hc_mult",
+        "hc_sinkhorn_iters",
+        "hc_eps",
+        "swiglu_limit",
+        "num_hash_layers",
         "has_positional_encoding",
         "has_pre_decoder_layernorm",
         "has_post_decoder_layernorm",
