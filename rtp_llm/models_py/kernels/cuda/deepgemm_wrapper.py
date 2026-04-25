@@ -680,7 +680,7 @@ def m_grouped_fp8_fp4_gemm_nt_contiguous(
     compiled_dims: str = "nk",
     disable_ue8m0_cast: Optional[bool] = None,
     use_psum_layout: bool = False,
-    expected_m_for_psum: int = 0,
+    expected_m_for_psum_layout: Optional[int] = None,
 ) -> None:
     """Grouped FP8×FP4 GEMM with contiguous per-expert token layout.
 
@@ -706,7 +706,7 @@ def m_grouped_fp8_fp4_gemm_nt_contiguous(
             else not is_deep_gemm_e8m0_used()
         ),
         use_psum_layout=use_psum_layout,
-        expected_m_for_psum=expected_m_for_psum,
+        expected_m_for_psum_layout=expected_m_for_psum_layout,
     )
 
 
