@@ -1076,19 +1076,35 @@ public:
         if (it != ptr_to_comm_ptrs_.end()) {
             cptrs = it->second;
         } else {
-            gpuStreamCaptureStatus status;
-            gpuStreamIsCapturing(stream, &status);
-            int remaining = comm_ptrs_buf_len_ - used_comm_ptrs_ - unregistered_ptrs_.size();
-            if (status == gpuStreamCaptureStatusActive && size < 1024 * 4096 * 16 && remaining > 0) {
-                unregistered_ptrs_.push_back(ptr);
-                cptrs = comm_ptrs_ + used_comm_ptrs_ + unregistered_ptrs_.size() - 1;
-            } else {
-                // Fallback: copy input into the IPC-shared data_ buffer and use
-                // comm_ptrs_[0] whose data_ptrs[rank_] already points to data_.
-                // Other ranks will read from their own IPC view of the same memory.
-                cptrs = comm_ptrs_ + 0;
-                gpuMemcpyAsync(data_, ptr, size, gpuMemcpyDeviceToDevice, stream);
-            }
+            // BUGFIX (trt-allreduce-stale-ipc-cache):
+            //
+            // The original code had a "fast path" here that, when called inside
+            // hipGraph capture with a small input, would push the input's
+            // data_ptr() into unregistered_ptrs_ and assign a fresh slot in
+            // comm_ptrs_, then exchange IPC handles for that exact allocation
+            // across ranks at consume_capture() time. The captured graph baked
+            // the slot index into the launched kernel.
+            //
+            // This is unsafe under PyTorch's caching allocator: the underlying
+            // allocation backing `ptr` can be freed and reused by an unrelated
+            // tensor any time the input tensor goes out of scope. Once that
+            // happens, the IPC-translated peer pointers stored in the slot no
+            // longer refer to meaningful data — they read garbage memory which,
+            // when reduced across ranks, can overflow BF16 to Inf -> NaN.
+            //
+            // Worse, each rank has its own caching allocator, so different ranks
+            // hit the cache vs miss it for the *same* logical tensor on
+            // different replays, producing per-rank divergence in the captured
+            // graph (observed: ranks 0/1/2 finite + bit-identical, rank 3 NaN).
+            //
+            // The fix is to always use the stable workspace `data_` buffer for
+            // unknown ptrs. comm_ptrs_[0] was set up at init time to map
+            // data_ptrs[r] = ipc_data_[r] for the workspace's own gpuMalloc'd
+            // data_ buffer, whose IPC handles never expire. The extra
+            // gpuMemcpyAsync is a same-GPU HBM-to-HBM copy (negligible vs the
+            // allreduce kernel's bandwidth cost).
+            cptrs = comm_ptrs_ + 0;
+            gpuMemcpyAsync(data_, ptr, size, gpuMemcpyDeviceToDevice, stream);
         }
 
         return {meta, cptrs};
