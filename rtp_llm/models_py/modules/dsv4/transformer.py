@@ -8,7 +8,7 @@ mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -71,7 +71,9 @@ class V4Args:
     max_seq_len: int = 4096
 
 
-def _build_block(layer_id: int, args: V4Args) -> Block:
+def _build_block(layer_id: int, args: V4Args,
+                 weights: Optional[Dict[str, torch.Tensor]] = None,
+                 prefix: str = "") -> Block:
     return Block(
         layer_id=layer_id,
         dim=args.dim, n_heads=args.n_heads, q_lora_rank=args.q_lora_rank,
@@ -92,39 +94,61 @@ def _build_block(layer_id: int, args: V4Args) -> Block:
         vocab_size=args.vocab_size,
         hc_mult=args.hc_mult, hc_sinkhorn_iters=args.hc_sinkhorn_iters, hc_eps=args.hc_eps,
         norm_eps=args.norm_eps,
+        weights=weights, prefix=prefix,
     )
 
 
 class V4Transformer(nn.Module):
     """Standalone V4 forward. No TP/EP/PP sharding (world_size=1)."""
 
-    def __init__(self, args: V4Args):
+    def __init__(self, args: V4Args, weights: Optional[Dict[str, torch.Tensor]] = None):
         super().__init__()
         self.args = args
         self.max_seq_len = args.max_seq_len
         self.norm_eps = args.norm_eps
         self.hc_eps = args.hc_eps
         self.hc_mult = args.hc_mult
+        self._factory_mode = weights is not None
 
         self.embed = nn.Embedding(args.vocab_size, args.dim)
 
-        self.layers = nn.ModuleList([_build_block(i, args) for i in range(args.n_layers)])
+        self.layers = nn.ModuleList([
+            _build_block(
+                i, args,
+                weights=weights,
+                prefix=f"layers.{i}" if self._factory_mode else "",
+            )
+            for i in range(args.n_layers)
+        ])
         self.norm = _RMSNorm(args.dim, args.norm_eps)
 
         # MTP layers
         self.mtp = nn.ModuleList()
         for i in range(args.n_mtp_layers):
             mtp_args = args
-            blk = _build_block(args.n_layers + i, mtp_args)
+            # NOTE: MTPBlock ckpt keys live under `mtp.{i}.*`. Loading not
+            # yet implemented — the block is a placeholder today. Pass
+            # weights=None to keep legacy empty-param construction.
+            blk = _build_block(args.n_layers + i, mtp_args, weights=None, prefix="")
             self.mtp.append(blk)
 
         # Final LM head + hc_head reduce
         # head.weight FP32 per official ParallelHead.
         self.head = _LMHead(args.vocab_size, args.dim)
         hc_dim = args.hc_mult * args.dim
-        self.hc_head_fn = nn.Parameter(torch.empty(args.hc_mult, hc_dim, dtype=torch.float32))
-        self.hc_head_base = nn.Parameter(torch.empty(args.hc_mult, dtype=torch.float32))
-        self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
+        if self._factory_mode:
+            # Embedding + LM head are BF16 in ckpt; cast to FP32 head (match
+            # official ParallelHead.weight.dtype) but keep embed in BF16.
+            self.embed.weight = nn.Parameter(weights["embed.weight"], requires_grad=False)
+            self.head.weight = nn.Parameter(weights["head.weight"].float(), requires_grad=False)
+            self.norm.weight = nn.Parameter(weights["norm.weight"].float(), requires_grad=False)
+            self.hc_head_fn = nn.Parameter(weights["hc_head_fn"].float(), requires_grad=False)
+            self.hc_head_base = nn.Parameter(weights["hc_head_base"].float(), requires_grad=False)
+            self.hc_head_scale = nn.Parameter(weights["hc_head_scale"].float(), requires_grad=False)
+        else:
+            self.hc_head_fn = nn.Parameter(torch.empty(args.hc_mult, hc_dim, dtype=torch.float32))
+            self.hc_head_base = nn.Parameter(torch.empty(args.hc_mult, dtype=torch.float32))
+            self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
     def _hc_head_reduce(self, x: torch.Tensor) -> torch.Tensor:
         """[B, S, hc, d] -> [B, S, d]"""

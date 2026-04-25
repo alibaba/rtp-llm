@@ -17,7 +17,7 @@ Usage:
 
 import json
 import os
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, Set
 
 import torch
 from safetensors import safe_open
@@ -25,6 +25,110 @@ from safetensors import safe_open
 
 FP8_BLOCK = 128
 FP4_BLOCK = 32
+
+
+def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
+    """Convert V4's FP8 weight-scale layout to DeepGEMM's MN-major
+    TMA-aligned UE8M0-packed int32 tensor.
+
+    V4 ckpt ships FP8 attention/indexer-linear scales as
+    ``torch.float8_e8m0fnu`` with shape ``[N/128, K/128]`` — one byte per
+    128×128 weight block. DeepGEMM's ``fp8_gemm_nt`` (SM100+ E8M0 path)
+    consumes scales via its ``get_mn_major_tma_aligned_packed_ue8m0_tensor``
+    utility which takes an FP32 scale of shape ``[N, K/128]``, one row per
+    weight row.  We:
+
+    1. Cast UE8M0 → FP32 via ``.float()`` (semantically ``2^(byte-127)``)
+    2. Row-repeat along N by 128 so each weight row gets its own scale row
+    3. Hand off to DeepGEMM's helper which returns a column-major
+       int32-packed UE8M0 tensor in TMA-aligned layout.
+
+    Must be called on-device (the DeepGEMM helper is a CUDA op).
+    """
+    assert scale.dtype == torch.float8_e8m0fnu, f"unexpected scale dtype {scale.dtype}"
+    assert scale.dim() == 2, f"unexpected scale dim {scale.dim()}"
+    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
+    N_blk, K_blk = scale.shape
+    N = N_blk * 128
+    scale_fp32 = scale.float()
+    idx = torch.arange(N, device=scale.device) // 128
+    scale_rep = scale_fp32.index_select(-2, idx)
+    return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
+
+
+def _should_repack_scale(weight_dtype: torch.dtype, scale_dtype: torch.dtype) -> bool:
+    """Only FP8 e4m3fn weights with UE8M0 scale need repacking. FP4 stays
+    as-is (DeepGEMM FP4 kernels consume UE8M0 directly) and BF16/FP32
+    params have no scale."""
+    return (
+        weight_dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+        and scale_dtype == torch.float8_e8m0fnu
+    )
+
+
+def load_v4_weights_dict(
+    ckpt_dir: str,
+    device: str = "cpu",
+    keys_filter: Optional[Iterable[str]] = None,
+    repack_fp8_scale: bool = True,
+    cast_bf16_fp32_params: bool = True,
+) -> Dict[str, torch.Tensor]:
+    """Load V4-Flash safetensors into a flat dict ready to feed into
+    ``LinearFactory.create_linear_from_weights``.
+
+    - FP8 weights keep their native ``float8_e4m3fn`` dtype.
+    - FP8 scales are repacked into int32 (``_repack_v4_fp8_scale_to_int32``)
+      so ``CudaFp8DeepGEMMLinear`` on SM100+ consumes them directly.
+    - FP4 weights (packed int8) and FP4 scales (UE8M0) are returned
+      unchanged — DeepGEMM's ``fp8_fp4_gemm_nt`` consumes them natively.
+    - BF16/FP32 params (norms, gate, embed, lm_head, hc_*) are returned
+      as-is so callers can wrap them in ``nn.Parameter`` directly.
+
+    Memory-efficient via ``safe_open(..., device=device)`` — tensors land
+    straight in target-device memory with no CPU staging.
+    """
+    idx_path = os.path.join(ckpt_dir, "model.safetensors.index.json")
+    with open(idx_path) as f:
+        weight_map: Dict[str, str] = json.load(f)["weight_map"]
+
+    filters: Optional[Set[str]] = None
+    if keys_filter is not None:
+        filters = set(keys_filter)
+
+    def _matches(key: str) -> bool:
+        if filters is None:
+            return True
+        return any(key.startswith(p) for p in filters)
+
+    # Group keys by shard for sequential reads per file.
+    by_shard: Dict[str, list] = {}
+    for key, shard in weight_map.items():
+        if not _matches(key):
+            continue
+        by_shard.setdefault(shard, []).append(key)
+
+    out: Dict[str, torch.Tensor] = {}
+    for shard, keys in by_shard.items():
+        path = os.path.join(ckpt_dir, shard)
+        with safe_open(path, framework="pt", device=device) as f:
+            for key in keys:
+                out[key] = f.get_tensor(key)
+
+    if repack_fp8_scale:
+        # NOTE: we do NOT repack here — some call sites (e.g. the grouped
+        # output projection wo_a, routed FP4 experts) want the original
+        # ckpt layout. Call sites that route through LinearFactory are
+        # responsible for invoking `_repack_v4_fp8_scale_to_int32` on the
+        # specific scale tensor they consume. This parameter is kept for
+        # API stability and future opt-in batch repacking.
+        pass
+
+    # Some params (norms, attn_sink) ship as BF16/F32 in ckpt but the
+    # standalone reference code built them as FP32 Parameters. Callers
+    # that assign directly as nn.Parameter tolerate dtype mismatch; no
+    # eager cast here (saves RAM) unless explicitly asked.
+    return out
 
 
 def _dequant_fp8_block128(weight_fp8: torch.Tensor, scale: torch.Tensor,

@@ -24,7 +24,30 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
-from rtp_llm.models_py.modules.dsv4.weight_loader import load_v4_safetensors
+from rtp_llm.models_py.modules.dsv4.weight_loader import (
+    load_v4_safetensors,
+    load_v4_weights_dict,
+)
+
+
+def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
+    """Walk the module tree and replace any meta-device buffer with a
+    zeroed real-device tensor of the same shape/dtype. Factory-mode
+    construction builds V4Transformer under `torch.device("meta")` to
+    skip placeholder allocations; this pass re-materializes the
+    non-parameter buffers (kv_cache, kv_state, score_state, etc.) so
+    forward() can read and write them."""
+    count = 0
+    for mod in module.modules():
+        for name, buf in list(mod._buffers.items()):
+            if buf is None:
+                continue
+            if buf.device.type == "meta":
+                mod._buffers[name] = torch.zeros(
+                    buf.shape, dtype=buf.dtype, device=device,
+                )
+                count += 1
+    return count
 from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 
 
@@ -114,13 +137,12 @@ class DeepSeekV4Model(GptModelBase):
         )
         self._v4_args = args
 
-        # Build on meta first to avoid blowing CPU RAM during engine init;
-        # materialize + ckpt load happens in `initialize()`.
-        prev_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.bfloat16)
-        with torch.device("meta"):
-            self.v4 = V4Transformer(args)
-        torch.set_default_dtype(prev_dtype)
+        # Factory-path flow (S2+): we defer construction to `initialize()`
+        # where the weights dict is loaded from the ckpt directly to the
+        # target device, then V4Transformer modules are built bound to
+        # real ckpt tensors via LinearFactory (see dsv4/weight_loader.py
+        # and attention.py).  `self.v4` is assigned in `initialize()`.
+        self.v4: Optional[V4Transformer] = None
 
         self._materialized = False
         self._ckpt_path: str = model_config.ckpt_path
@@ -146,19 +168,35 @@ class DeepSeekV4Model(GptModelBase):
 
         device = next(iter(self.weight.global_weights.values())).device if self.weight.global_weights else "cuda:0"
         device_str = str(device)
-        logging.info("[DeepSeekV4Model] materializing on %s ...", device_str)
-        self.v4 = self.v4.to_empty(device=device_str)
 
-        # Recompute RoPE cache (meta-path buffers come back as zeros, not initialized).
+        logging.info("[DeepSeekV4Model] loading ckpt dict from %s to %s ...",
+                     self._ckpt_path, device_str)
+        weights = load_v4_weights_dict(self._ckpt_path, device=device_str)
+        logging.info("[DeepSeekV4Model] loaded %d tensors from ckpt", len(weights))
+
+        logging.info("[DeepSeekV4Model] building V4Transformer via factory ...")
+        # Construct under meta device so the nn.Embedding / nn.Linear /
+        # QuantizedLinear placeholder allocations inside the module tree
+        # skip real RAM. Each module's factory branch then reassigns
+        # `.weight`/`.scale` to the cuda tensors from the weights dict.
+        prev_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            with torch.device("meta"):
+                self.v4 = V4Transformer(self._v4_args, weights=weights)
+        finally:
+            torch.set_default_dtype(prev_dtype)
+
+        n = _materialize_meta_buffers(self.v4, device_str)
+        logging.info("[DeepSeekV4Model] materialized %d meta buffers on %s", n, device_str)
+
+        # Recompute RoPE cache on real device (precompute_freqs_cis under
+        # meta context yields zeros; we need real values).
         for layer in self.v4.layers:
             layer.attn.reset_rope_cache(device=device_str)
 
-        logging.info("[DeepSeekV4Model] loading ckpt from %s ...", self._ckpt_path)
-        loaded = load_v4_safetensors(
-            self.v4, self._ckpt_path, dtype=torch.bfloat16, device=device_str,
-            strict=False, verbose=False,
-        )
-        logging.info("[DeepSeekV4Model] loaded %d tensors", len(loaded))
+        # Drop the dict's references to release any residual CPU copies.
+        del weights
 
         if torch.cuda.is_available() and device_str.startswith("cuda"):
             mem = torch.cuda.memory_allocated(torch.device(device_str)) / 1024**3

@@ -4,7 +4,7 @@ Mirrors `inference/model.py:Block`. Each call applies hc_pre/F/hc_post
 twice — once for Attention and once for MoE FFN.
 """
 
-from typing import Optional
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -66,6 +66,8 @@ class Block(nn.Module):
         hc_sinkhorn_iters: int,
         hc_eps: float,
         norm_eps: float = 1e-6,
+        weights: Optional[Dict[str, torch.Tensor]] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -73,6 +75,7 @@ class Block(nn.Module):
         self.hc_eps = hc_eps
         self.hc_mult = hc_mult
         self.hc_sinkhorn_iters = hc_sinkhorn_iters
+        self._factory_mode = weights is not None
 
         self.attn = Attention(
             layer_id=layer_id,
@@ -86,6 +89,8 @@ class Block(nn.Module):
             max_batch_size=max_batch_size, max_seq_len=max_seq_len,
             index_n_heads=index_n_heads, index_head_dim=index_head_dim,
             index_topk=index_topk, norm_eps=norm_eps,
+            weights=weights,
+            prefix=f"{prefix}.attn" if self._factory_mode else "",
         )
         self.ffn = MoE(
             layer_id=layer_id, dim=dim, moe_inter_dim=moe_inter_dim,
@@ -93,19 +98,36 @@ class Block(nn.Module):
             n_shared_experts=n_shared_experts, score_func=score_func,
             route_scale=route_scale, swiglu_limit=swiglu_limit,
             n_hash_layers=n_hash_layers, vocab_size=vocab_size,
+            weights=weights,
+            prefix=f"{prefix}.ffn" if self._factory_mode else "",
         )
         self.attn_norm = _RMSNorm(dim, norm_eps)
         self.ffn_norm = _RMSNorm(dim, norm_eps)
+        if self._factory_mode:
+            self.attn_norm.weight = nn.Parameter(
+                weights[f"{prefix}.attn_norm.weight"].float(), requires_grad=False,
+            )
+            self.ffn_norm.weight = nn.Parameter(
+                weights[f"{prefix}.ffn_norm.weight"].float(), requires_grad=False,
+            )
 
         mix_hc = (2 + hc_mult) * hc_mult
         hc_dim = hc_mult * dim
-        # Match official param naming for ckpt loading.
-        self.hc_attn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim, dtype=torch.float32))
-        self.hc_ffn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim, dtype=torch.float32))
-        self.hc_attn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
-        self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
-        self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
-        self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+        if self._factory_mode:
+            self.hc_attn_fn = nn.Parameter(weights[f"{prefix}.hc_attn_fn"].float(), requires_grad=False)
+            self.hc_ffn_fn = nn.Parameter(weights[f"{prefix}.hc_ffn_fn"].float(), requires_grad=False)
+            self.hc_attn_base = nn.Parameter(weights[f"{prefix}.hc_attn_base"].float(), requires_grad=False)
+            self.hc_ffn_base = nn.Parameter(weights[f"{prefix}.hc_ffn_base"].float(), requires_grad=False)
+            self.hc_attn_scale = nn.Parameter(weights[f"{prefix}.hc_attn_scale"].float(), requires_grad=False)
+            self.hc_ffn_scale = nn.Parameter(weights[f"{prefix}.hc_ffn_scale"].float(), requires_grad=False)
+        else:
+            # Match official param naming for ckpt loading.
+            self.hc_attn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim, dtype=torch.float32))
+            self.hc_ffn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim, dtype=torch.float32))
+            self.hc_attn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
+            self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
+            self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+            self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
     def _hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
         """x: [B,S,hc,d] -> y: [B,S,d], post: [B,S,hc], comb: [B,S,hc,hc]"""
