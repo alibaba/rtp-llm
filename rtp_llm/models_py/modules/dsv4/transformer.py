@@ -69,6 +69,17 @@ class V4Args:
     # runtime
     max_batch_size: int = 4
     max_seq_len: int = 4096
+    # parallelism (S7 scaffold — currently unused; populated from
+    # ParallelismConfig in deepseek_v4_model.py and threaded down so
+    # downstream patches can shard without re-wiring the constructor.)
+    tp_size: int = 1
+    tp_rank: int = 0
+    ep_size: int = 1
+    ep_rank: int = 0
+    dp_size: int = 1
+    dp_rank: int = 0
+    world_size: int = 1
+    world_rank: int = 0
 
 
 def _build_block(layer_id: int, args: V4Args,
