@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
@@ -214,3 +215,65 @@ class W8A8Fp8PerBlockLinearAttnAtomicWeight(LinearAttnAtomicWeight):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.split_func_factory = _linear_attn_w8a8_per_block_split_strategy
+
+
+def split_qkvz_channel_scale(
+    t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
+) -> torch.Tensor:
+    """Split per-channel scale [out_dim, 1] along dim=0 by qkvz heads."""
+    origin_qkvz_size = (
+        linear_config.linear_key_head_dim * linear_config.linear_num_key_heads
+        + linear_config.linear_value_head_dim * linear_config.linear_num_value_heads
+    ) * 2
+    assert (
+        t.shape[0] == origin_qkvz_size
+    ), f"Expected per-channel scale dim0={origin_qkvz_size}, got {t.shape[0]}"
+    q, k, v, z = torch.split(
+        t,
+        [
+            linear_config.linear_key_head_dim * linear_config.linear_num_key_heads,
+            linear_config.linear_key_head_dim * linear_config.linear_num_key_heads,
+            linear_config.linear_value_head_dim * linear_config.linear_num_value_heads,
+            linear_config.linear_value_head_dim * linear_config.linear_num_value_heads,
+        ],
+        dim=0,
+    )
+    q = torch.split(q, q.shape[0] // load_config.tp_size, dim=0)[
+        load_config.tp_rank
+    ].contiguous()
+    k = torch.split(k, k.shape[0] // load_config.tp_size, dim=0)[
+        load_config.tp_rank
+    ].contiguous()
+    v = torch.split(v, v.shape[0] // load_config.tp_size, dim=0)[
+        load_config.tp_rank
+    ].contiguous()
+    z = torch.split(z, z.shape[0] // load_config.tp_size, dim=0)[
+        load_config.tp_rank
+    ].contiguous()
+    return torch.cat([q, k, v, z], dim=0)
+
+
+def split_out_linear_channel_scale(
+    t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
+) -> torch.Tensor:
+    """Split per-channel scale [out_dim, 1] along dim=0 by value heads."""
+    second_dim = t.shape[1]
+    t_squeezed = t.view(linear_config.linear_num_value_heads, -1, second_dim)
+    local_head_num_v = linear_config.linear_num_value_heads // load_config.tp_size
+    start_head_num_v = local_head_num_v * load_config.tp_rank
+    end_head_num_v = start_head_num_v + local_head_num_v
+    return t_squeezed[start_head_num_v:end_head_num_v, :, :].reshape(-1, second_dim)
+
+
+_linear_attn_w8a8_per_channel_split_strategy = {
+    W.linear_attn_qkvz_w: split_qkvz_t,
+    W.linear_attn_qkvz_s: split_qkvz_channel_scale,
+    W.linear_attn_out_w: split_out_linear_t,
+    W.linear_attn_out_s: sp_id,
+}
+
+
+class W8A8Fp8PerChannelLinearAttnAtomicWeight(LinearAttnAtomicWeight):
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.split_func_factory = _linear_attn_w8a8_per_channel_split_strategy

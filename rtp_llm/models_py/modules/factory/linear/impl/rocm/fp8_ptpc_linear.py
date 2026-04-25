@@ -5,6 +5,7 @@ from typing import Optional
 
 import aiter
 import torch
+from aiter.ops.gemm_op_a8w8 import gemm_a8w8_bpreshuffle_cktile
 
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 
@@ -26,7 +27,7 @@ class RocmFp8PTPCLinear(LinearBase):
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        """Handle FP8_PER_CHANNEL_COMPRESSED"""
+        """Handle FP8_PER_CHANNEL_COMPRESSED and FP8_PER_CHANNEL_QUARK"""
         if weight_scales is None or quant_config is None:
             return False
 
@@ -36,7 +37,7 @@ class RocmFp8PTPCLinear(LinearBase):
 
         # Check quantization method
         quant_method = quant_config.get_method()
-        return quant_method == "FP8_PER_CHANNEL_COMPRESSED"
+        return quant_method in ("FP8_PER_CHANNEL_COMPRESSED", "FP8_PER_CHANNEL_QUARK")
 
     def __init__(
         self,
@@ -86,14 +87,23 @@ class RocmFp8PTPCLinear(LinearBase):
         x_scales = input_scales
         w_scales = self.weight_scales
 
-        output = aiter.gemm_a8w8_bpreshuffle(
-            input_fp8,  # A_quant_tensor
-            self.weight,  # W_kernel_tensor (already reshaped to [n, k])
-            x_scales,  # A_quant_scale_tensor (M, 1)
-            w_scales,  # W_scale_tensor (reshaped)
-            None,
-            input_bf16.dtype,
-        )
+        K = input_fp8.shape[-1]
+        if K < 192:
+            output = torch.empty(
+                (M, N), dtype=input_bf16.dtype, device=input_bf16.device
+            )
+            gemm_a8w8_bpreshuffle_cktile(
+                input_fp8, self.weight, x_scales, w_scales, output
+            )
+        else:
+            output = aiter.gemm_a8w8_bpreshuffle(
+                input_fp8,
+                self.weight,
+                x_scales,
+                w_scales,
+                None,
+                input_bf16.dtype,
+            )
 
         # Add bias if present
         if self.bias is not None:

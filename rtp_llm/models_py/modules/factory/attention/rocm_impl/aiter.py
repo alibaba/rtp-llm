@@ -19,7 +19,6 @@ from rtp_llm.ops.compute_ops import (
     LayerKVCache,
     ParamsBase,
     PyAttentionInputs,
-    paged_attention_atrex,
 )
 
 
