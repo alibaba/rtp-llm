@@ -13,16 +13,42 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
 import math
-from typing import Optional
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
+from rtp_llm.models_py.modules.dsv4.weight_loader import _repack_v4_fp8_scale_to_int32
+from rtp_llm.models_py.modules.factory.linear import LinearFactory
+
+_V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
+
+
+def _v4_fp8_linear_from_dict(
+    weights: dict, weight_key: str, scale_key: str,
+):
+    """Build a CudaFp8DeepGEMMLinear from V4 ckpt tensors.
+
+    Repacks the UE8M0 float8_e8m0fnu scale into DeepGEMM's int32 layout
+    in place in the weights dict so subsequent callers see the packed form.
+    """
+    w = weights[weight_key]
+    s = weights.get(scale_key)
+    assert s is not None, f"expected FP8 scale at {scale_key}"
+    if s.dtype == torch.float8_e8m0fnu:
+        s = _repack_v4_fp8_scale_to_int32(s)
+        weights[scale_key] = s
+    # Build via factory (CudaFp8DeepGEMMLinear matches FP8_PER_BLOCK +
+    # float8_e4m3fn weight + int32 scale).
+    return LinearFactory.create_linear_from_weights(
+        weights, weight_key, scale_key, quant_config=_V4_FP8_BLOCK_CFG,
+    )
 
 
 class _NormHolder(nn.Module):
@@ -137,6 +163,8 @@ class Attention(nn.Module):
         index_head_dim: int,
         index_topk: int,
         norm_eps: float = 1e-6,
+        weights: Optional[Dict[str, torch.Tensor]] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -151,22 +179,56 @@ class Attention(nn.Module):
         self.compress_ratio = compress_ratio
         self.eps = norm_eps
         self.softmax_scale = head_dim ** -0.5
+        self._factory_mode = weights is not None
 
-        # Q / KV / O — all attention linear weights stored as FP8 in V4-Flash ckpt.
-        self.wq_a = QuantizedLinear(dim, q_lora_rank, storage="fp8")
-        self.q_norm = _NormHolder(q_lora_rank)
-        self.wq_b = QuantizedLinear(q_lora_rank, n_heads * head_dim, storage="fp8")
+        if self._factory_mode:
+            # Q / KV / O — FP8 linears go through LinearFactory →
+            # CudaFp8DeepGEMMLinear → DeepGEMM fp8_gemm_nt.
+            def _fp8(name: str):
+                return _v4_fp8_linear_from_dict(
+                    weights, f"{prefix}.{name}.weight", f"{prefix}.{name}.scale",
+                )
 
-        self.wkv = QuantizedLinear(dim, head_dim, storage="fp8")
-        self.kv_norm = _NormHolder(head_dim)
+            self.wq_a = _fp8("wq_a")
+            self.wq_b = _fp8("wq_b")
+            self.wkv = _fp8("wkv")
+            # wo_a is a GROUPED projection — its FP8 [g*r, d] weight is
+            # reshaped to [g, r, d] and einsumed per-group. Factory linears
+            # assume standard K×N matmul, so wo_a stays on QuantizedLinear
+            # until we wire up m_grouped_fp8_gemm_nt. Load into it directly
+            # from the weights dict.
+            assert (n_heads * head_dim) % o_groups == 0
+            self.wo_a = QuantizedLinear(n_heads * head_dim // o_groups, o_groups * o_lora_rank, storage="fp8")
+            with torch.no_grad():
+                self.wo_a.weight = nn.Parameter(weights[f"{prefix}.wo_a.weight"], requires_grad=False)
+                self.wo_a.scale = nn.Parameter(weights[f"{prefix}.wo_a.scale"], requires_grad=False)
+            self.wo_b = _fp8("wo_b")
 
-        # Grouped output projection
+            # Non-quantized params copy straight from the dict.
+            self.q_norm = _NormHolder(q_lora_rank)
+            self.q_norm.weight = nn.Parameter(
+                weights[f"{prefix}.q_norm.weight"].float(), requires_grad=False
+            )
+            self.kv_norm = _NormHolder(head_dim)
+            self.kv_norm.weight = nn.Parameter(
+                weights[f"{prefix}.kv_norm.weight"].float(), requires_grad=False
+            )
+            self.attn_sink = nn.Parameter(
+                weights[f"{prefix}.attn_sink"].float(), requires_grad=False
+            )
+        else:
+            # Legacy meta-tensor + load_v4_safetensors path.
+            self.wq_a = QuantizedLinear(dim, q_lora_rank, storage="fp8")
+            self.q_norm = _NormHolder(q_lora_rank)
+            self.wq_b = QuantizedLinear(q_lora_rank, n_heads * head_dim, storage="fp8")
+            self.wkv = QuantizedLinear(dim, head_dim, storage="fp8")
+            self.kv_norm = _NormHolder(head_dim)
+            assert (n_heads * head_dim) % o_groups == 0
+            self.wo_a = QuantizedLinear(n_heads * head_dim // o_groups, o_groups * o_lora_rank, storage="fp8")
+            self.wo_b = QuantizedLinear(o_groups * o_lora_rank, dim, storage="fp8")
+            self.attn_sink = nn.Parameter(torch.empty(n_heads, dtype=torch.float32))
+
         assert (n_heads * head_dim) % o_groups == 0
-        self.wo_a = QuantizedLinear(n_heads * head_dim // o_groups, o_groups * o_lora_rank, storage="fp8")
-        self.wo_b = QuantizedLinear(o_groups * o_lora_rank, dim, storage="fp8")
-
-        # per-head learnable attention sink (added to softmax denominator)
-        self.attn_sink = nn.Parameter(torch.empty(n_heads, dtype=torch.float32))
 
         # Compressor + Indexer (only for compressed layers)
         if compress_ratio:
@@ -177,6 +239,8 @@ class Attention(nn.Module):
                 compress_ratio=compress_ratio,
                 max_batch_size=max_batch_size,
                 norm_eps=norm_eps,
+                weights=weights,
+                prefix=f"{prefix}.compressor" if self._factory_mode else "",
             )
             if compress_ratio == 4:
                 self.indexer = Indexer(
@@ -190,6 +254,8 @@ class Attention(nn.Module):
                     max_batch_size=max_batch_size,
                     max_seq_len=max_seq_len,
                     norm_eps=norm_eps,
+                    weights=weights,
+                    prefix=f"{prefix}.indexer" if self._factory_mode else "",
                 )
             else:
                 self.indexer = None
@@ -251,6 +317,15 @@ class Attention(nn.Module):
         x32 = x32 * torch.rsqrt(x32.square().mean(-1, keepdim=True) + self.eps)
         return (weight * x32).to(dtype)
 
+    def _lin(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
+        """Linear call that tolerates both the legacy QuantizedLinear
+        (3-D input OK via F.linear) and factory LinearBase (expects 2-D)."""
+        if self._factory_mode and x.dim() > 2:
+            shape = x.shape
+            y = layer(x.reshape(-1, shape[-1]))
+            return y.view(*shape[:-1], y.shape[-1])
+        return layer(x)
+
     def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
         bsz, seqlen, _ = x.size()
         freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
@@ -267,14 +342,14 @@ class Attention(nn.Module):
                 self.indexer.freqs_cis = self.freqs_cis
 
         # Q path
-        qr = self._rmsnorm_weighted(self.wq_a(x), self.q_norm.weight)  # [B, S, q_lora_rank]
-        q = self.wq_b(qr).unflatten(-1, (self.n_heads, self.head_dim))
+        qr = self._rmsnorm_weighted(self._lin(self.wq_a, x), self.q_norm.weight)  # [B, S, q_lora_rank]
+        q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
         # QK RMSNorm (no learnable scale here, per official code)
         q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.eps).to(q.dtype)
         apply_rotary_emb(q[..., -rd:], freqs_cis)
 
         # KV path (single KV head)
-        kv = self._rmsnorm_weighted(self.wkv(x), self.kv_norm.weight)  # [B, S, head_dim]
+        kv = self._rmsnorm_weighted(self._lin(self.wkv, x), self.kv_norm.weight)  # [B, S, head_dim]
         apply_rotary_emb(kv[..., -rd:], freqs_cis)
 
         # build topk_idxs
@@ -321,4 +396,4 @@ class Attention(nn.Module):
         wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
         wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
         o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-        return self.wo_b(o.flatten(2))
+        return self._lin(self.wo_b, o.flatten(2))

@@ -9,7 +9,7 @@ softmax-gated weighting, applies RMSNorm + RoPE on the compressed
 result, and writes into a target `kv_cache` buffer.
 """
 
-from typing import Optional
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -33,6 +33,8 @@ class Compressor(nn.Module):
         max_batch_size: int,
         norm_eps: float = 1e-6,
         rotate: bool = False,
+        weights: Optional[Dict[str, torch.Tensor]] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.dim = dim
@@ -42,16 +44,33 @@ class Compressor(nn.Module):
         self.overlap = compress_ratio == 4
         self.rotate = rotate
         coff = 1 + self.overlap
+        self._factory_mode = weights is not None
 
-        self.ape = nn.Parameter(torch.empty(compress_ratio, coff * head_dim, dtype=torch.float32))
-        self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
-        self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
-        # Force fp32 for the gating + pooling matmuls.
-        with torch.no_grad():
-            self.wkv.weight = nn.Parameter(self.wkv.weight.float())
-            self.wgate.weight = nn.Parameter(self.wgate.weight.float())
-        # RMSNorm — wrap in a submodule so ckpt key "norm.weight" maps directly.
-        self.norm = _CompressorNorm(head_dim)
+        if self._factory_mode:
+            self.ape = nn.Parameter(
+                weights[f"{prefix}.ape"].float(), requires_grad=False,
+            )
+            self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
+            self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
+            with torch.no_grad():
+                self.wkv.weight = nn.Parameter(
+                    weights[f"{prefix}.wkv.weight"].float(), requires_grad=False,
+                )
+                self.wgate.weight = nn.Parameter(
+                    weights[f"{prefix}.wgate.weight"].float(), requires_grad=False,
+                )
+            self.norm = _CompressorNorm(head_dim)
+            self.norm.weight = nn.Parameter(
+                weights[f"{prefix}.norm.weight"].float(), requires_grad=False,
+            )
+        else:
+            self.ape = nn.Parameter(torch.empty(compress_ratio, coff * head_dim, dtype=torch.float32))
+            self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
+            self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
+            with torch.no_grad():
+                self.wkv.weight = nn.Parameter(self.wkv.weight.float())
+                self.wgate.weight = nn.Parameter(self.wgate.weight.float())
+            self.norm = _CompressorNorm(head_dim)
         self.norm_eps = norm_eps
 
         # State buffers for incremental decode-phase compression.
