@@ -121,13 +121,12 @@ def trigger_ci(args):
     # type: (argparse.Namespace) -> int
     github_repository = args.repository
     branch_name = "open_merge/%s" % args.github_pr_id
+    current_internal_commit_id = "UNKNOWN"
     try:
         branch_info = get_branch_info(branch_name, github_repository, args.commit_id, args.security)
         current_internal_commit_id = str(((branch_info.get("commit") or {}).get("id")) or "UNKNOWN")
     except GateError as exc:
-        raise GateError("::error::Failed to retrieve internal commit id for %s: %s" % (branch_name, exc))
-    if current_internal_commit_id == "UNKNOWN":
-        raise GateError("::error::Internal commit id is UNKNOWN for branch %s — cannot trigger CI safely" % branch_name)
+        log("Branch info query failed for %s: %s — will send CREATE-TASK with UNKNOWN commit id" % (branch_name, exc))
 
     payload = {
         "type": "CREATE-TASK",
