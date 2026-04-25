@@ -65,7 +65,19 @@ def _exclude_pattern_for(base_name_template: str) -> Optional["re.Pattern"]:
 def _ckpt_base_matches_quant_exclude(
     base_name_template: str, exclude_modules: set
 ) -> bool:
-    """True if ckpt module path (``{i}`` = layer) matches any entry in quant ``exclude``."""
+    """
+    Check if the checkpoint module path template matches any entry in the quantization exclude list.
+    
+    Args:
+        base_name_template: A template string representing the module path, where '{i}' 
+                            acts as a placeholder for the layer index (e.g., 'model.layers.{i}.mlp.gate_proj').
+        exclude_modules: A set of concrete module paths that are excluded from quantization 
+                         (e.g., {'model.layers.0.mlp.gate_proj', 'model.layers.1.mlp.gate_proj'}).
+    
+    Returns:
+        True if the template (with '{i}' replaced by a wildcard for digits) matches any 
+        concrete path in 'exclude_modules'.
+    """
     if not exclude_modules:
         return False
     if base_name_template in exclude_modules:
@@ -239,11 +251,11 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         name = src_weight_info.name
         if name not in cls.w8a8_weight_list:
             return False
-        if quant_config._exclude_modules and hasattr(src_weight_info, "weights"):
+        if quant_config.exclude_modules and hasattr(src_weight_info, "weights"):
             for ckpt_w in src_weight_info.weights:
                 base_name = ckpt_w.name.rsplit(".", 1)[0]
                 if _ckpt_base_matches_quant_exclude(
-                    base_name, quant_config._exclude_modules
+                    base_name, quant_config.exclude_modules
                 ):
                     return False
         return True
@@ -596,14 +608,6 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             config=src_weight_info.config,
         )
         return [kernel, scale]
-
-    def _split(
-        self,
-        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
-        load_config: LoadConfig,
-    ):
-        result = super()._split(tensor, load_config)
-        return result
 
     def _postprocess(
         self,

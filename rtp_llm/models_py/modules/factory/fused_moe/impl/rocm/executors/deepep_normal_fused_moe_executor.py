@@ -332,7 +332,9 @@ def torch_moe_ref(
         ffn_out[mask] = out
 
     # === 加权求和 ===
-    if apply_router_weight_on_input == False:
+    if apply_router_weight_on_input:
+        weighted = ffn_out
+    else:
         weighted = ffn_out * topk_weights.unsqueeze(-1)
 
     final_out = weighted.sum(dim=1)  # [M, D]

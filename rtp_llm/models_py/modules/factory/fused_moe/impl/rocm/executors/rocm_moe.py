@@ -1,3 +1,4 @@
+import copy
 from typing import Any, Dict, Optional
 
 import aiter
@@ -16,6 +17,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm._utils import (
+    get_rocm_fp8_dtype,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
@@ -26,13 +30,6 @@ def _moe_activation_type(activation: str) -> aiter.ActivationType:
     if activation in ("silu", "SiGLU"):
         return aiter.ActivationType.Silu
     return aiter.ActivationType.Gelu
-
-
-def _rocm_fp8_dtype() -> torch.dtype:
-    prop = torch.cuda.get_device_properties(torch.cuda.current_device())
-    if "gfx950" in getattr(prop, "gcnArchName", ""):
-        return torch.float8_e4m3fn
-    return torch.float8_e4m3fnuz
 
 
 def build_ep_expert_mask(
@@ -176,8 +173,9 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
     ):
         super().__init__(config, quant_config, weights)
 
-        # Update quant_config with FP8-specific settings
-        self.quant_config.quant_dtype = _rocm_fp8_dtype()
+        # Avoid mutating the strategy-shared FusedMoEQuantConfig instance.
+        self.quant_config = copy.copy(self.quant_config)
+        self.quant_config.quant_dtype = get_rocm_fp8_dtype()
         self.quant_config.per_act_token_quant = True
         self.quant_config.per_out_ch_quant = True
         self.quant_config.block_shape = None
@@ -273,7 +271,7 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
 
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(quant_method in ("FP8_PER_BLOCK",))
+        checker.check(quant_method in ("FP8_PER_BLOCK", "FP8_PER_BLOCK_QUARK"))
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -287,11 +285,13 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
     ):
         super().__init__(config, quant_config, weights)
 
-        # Update quant_config with FP8-specific settings
-        self.quant_config.quant_dtype = _rocm_fp8_dtype()
+        # Avoid mutating the strategy-shared FusedMoEQuantConfig instance.
+        # block_shape is left as set by the strategy ([128, 128]) so that
+        # FusedMoEQuantConfig.is_block_quantized() stays consistent.
+        self.quant_config = copy.copy(self.quant_config)
+        self.quant_config.quant_dtype = get_rocm_fp8_dtype()
         self.quant_config.per_act_token_quant = False
         self.quant_config.per_out_ch_quant = False
-        self.quant_config.block_shape = None
 
         self.num_experts = config.expert_num
         self.ep_rank = config.ep_rank

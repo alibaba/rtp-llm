@@ -29,7 +29,7 @@ class QuantizationConfig(ABC):
         self._bits = bits
         self._group_size = group_size
         self._is_quanted = is_quanted
-        self._exclude_modules: set = set()
+        self.exclude_modules: set = set()
 
     @property
     def bits(self):
@@ -236,7 +236,7 @@ class QuantizationConfig(ABC):
             }
         )
         if quant_config and "exclude" in quant_config:
-            result._exclude_modules = set(quant_config["exclude"])
+            result.exclude_modules = set(quant_config["exclude"])
         return result
 
 

@@ -1,9 +1,5 @@
 """Rocm FP8 PerChannel quantization strategies"""
 
-from typing import Any
-
-import torch
-
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
 )
@@ -11,6 +7,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
+from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm._utils import (
+    get_rocm_fp8_dtype,
+)
 
 
 class RocmFp8PerChannelPureTPStrategy(MoeStrategy):
@@ -24,14 +23,8 @@ class RocmFp8PerChannelPureTPStrategy(MoeStrategy):
             PureTpRouterFusedQuant,
         )
 
-        prop = torch.cuda.get_device_properties(torch.cuda.current_device())
-        fp8_dtype = (
-            torch.float8_e4m3fn
-            if "gfx950" in getattr(prop, "gcnArchName", "")
-            else torch.float8_e4m3fnuz
-        )
         quant_config = FusedMoEQuantConfig(
-            quant_dtype=fp8_dtype,
+            quant_dtype=get_rocm_fp8_dtype(),
             per_act_token_quant=True,
             per_out_ch_quant=True,
         )

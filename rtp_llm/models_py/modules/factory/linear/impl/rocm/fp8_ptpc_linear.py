@@ -71,9 +71,6 @@ class RocmFp8PTPCLinear(LinearBase):
         M = input_bf16.shape[0]
         N = self.output_size
 
-        # Pre-allocate output tensor
-        output = torch.empty((M, N), dtype=torch.bfloat16, device=input_bf16.device)
-
         quantization_eps = 1e-10
         # Use per-token quantization (not per-token-block)
         input_fp8, input_scales = rocm_per_token_quant_fp8(
@@ -88,6 +85,8 @@ class RocmFp8PTPCLinear(LinearBase):
         w_scales = self.weight_scales
 
         K = input_fp8.shape[-1]
+        # 192 is aiter's empirical threshold: small-K uses bpreshuffle_cktile
+        # (caller-allocated output); large-K uses gemm_a8w8_bpreshuffle (returns new).
         if K < 192:
             output = torch.empty(
                 (M, N), dtype=input_bf16.dtype, device=input_bf16.device
