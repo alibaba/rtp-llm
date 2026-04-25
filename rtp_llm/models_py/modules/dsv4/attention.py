@@ -173,21 +173,41 @@ class Attention(nn.Module):
         norm_eps: float = 1e-6,
         weights: Optional[Dict[str, torch.Tensor]] = None,
         prefix: str = "",
+        tp_size: int = 1,
+        tp_rank: int = 0,
     ):
         super().__init__()
         self.layer_id = layer_id
         self.dim = dim
-        self.n_heads = n_heads
         self.q_lora_rank = q_lora_rank
         self.o_lora_rank = o_lora_rank
         self.head_dim = head_dim
         self.rope_head_dim = rope_head_dim
-        self.n_groups = o_groups
         self.window_size = window_size
         self.compress_ratio = compress_ratio
         self.eps = norm_eps
         self.softmax_scale = head_dim ** -0.5
         self._factory_mode = weights is not None
+        self.tp_size = tp_size
+        self.tp_rank = tp_rank
+        # Per-rank head + group counts (S7a). Sharding only kicks in when
+        # tp_size > 1; tp_size==1 keeps everything bit-exact unchanged.
+        assert n_heads % tp_size == 0, f"n_heads={n_heads} not divisible by tp_size={tp_size}"
+        assert o_groups % tp_size == 0, f"o_groups={o_groups} not divisible by tp_size={tp_size}"
+        self.n_heads = n_heads // tp_size
+        self.n_groups = o_groups // tp_size
+
+        # Slices used to carve TP-local tensors out of the full ckpt.
+        n_heads_local = self.n_heads
+        n_groups_local = self.n_groups
+        wq_b_row_slice = slice(tp_rank * n_heads_local * head_dim,
+                               (tp_rank + 1) * n_heads_local * head_dim)
+        wo_a_row_slice = slice(tp_rank * n_groups_local * o_lora_rank,
+                               (tp_rank + 1) * n_groups_local * o_lora_rank)
+        wo_b_col_slice = slice(tp_rank * n_groups_local * o_lora_rank,
+                               (tp_rank + 1) * n_groups_local * o_lora_rank)
+        attn_sink_slice = slice(tp_rank * n_heads_local,
+                                (tp_rank + 1) * n_heads_local)
 
         if self._factory_mode:
             # Q / KV / O — FP8 linears go through LinearFactory →
@@ -197,20 +217,54 @@ class Attention(nn.Module):
                     weights, f"{prefix}.{name}.weight", f"{prefix}.{name}.scale",
                 )
 
-            self.wq_a = _fp8("wq_a")
-            self.wq_b = _fp8("wq_b")
-            self.wkv = _fp8("wkv")
-            # wo_a is a GROUPED projection — its FP8 [g*r, d] weight is
-            # reshaped to [g, r, d] and einsumed per-group. Factory linears
-            # assume standard K×N matmul, so wo_a stays on QuantizedLinear
-            # until we wire up m_grouped_fp8_gemm_nt. Load into it directly
-            # from the weights dict.
+            def _fp8_sliced(name: str, row_slice: slice = None,
+                            col_slice: slice = None) -> "torch.nn.Module":
+                """Build a CudaFp8DeepGEMMLinear from a sliced view of the
+                ckpt FP8 weight + UE8M0 block-128 scale.  Slices the scale
+                along the *block-128* axis correspondingly: row_slice with
+                stride/start divisible by 128 maps to a row_slice on the
+                scale; same for col_slice."""
+                wkey = f"{prefix}.{name}.weight"
+                skey = f"{prefix}.{name}.scale"
+                w = weights[wkey]
+                s = weights[skey]
+                if row_slice is not None:
+                    rs = row_slice.start // 128
+                    re = row_slice.stop // 128
+                    w = w[row_slice]
+                    s = s[rs:re]
+                if col_slice is not None:
+                    cs = col_slice.start // 128
+                    ce = col_slice.stop // 128
+                    w = w[:, col_slice]
+                    s = s[:, cs:ce]
+                # Local dict so the factory call sees the slice
+                local = dict(weights)
+                local[wkey] = w.contiguous()
+                local[skey] = s.contiguous()
+                return _v4_fp8_linear_from_dict(local, wkey, skey)
+
+            self.wq_a = _fp8("wq_a")  # [q_lora, dim] — replicate
+            # wq_b is row-split along N (n_heads * head_dim)
+            self.wq_b = _fp8_sliced("wq_b", row_slice=wq_b_row_slice) if tp_size > 1 else _fp8("wq_b")
+            self.wkv = _fp8("wkv")  # MQA single KV head — replicate
+
+            # wo_a grouped projection: row-split along (n_groups*o_lora_rank).
+            # Stays on QuantizedLinear (grouped einsum, no factory equivalent yet).
             assert (n_heads * head_dim) % o_groups == 0
-            self.wo_a = QuantizedLinear(n_heads * head_dim // o_groups, o_groups * o_lora_rank, storage="fp8")
+            self.wo_a = QuantizedLinear(n_heads_local * head_dim // n_groups_local,
+                                         n_groups_local * o_lora_rank, storage="fp8")
             with torch.no_grad():
-                self.wo_a.weight = nn.Parameter(weights[f"{prefix}.wo_a.weight"], requires_grad=False)
-                self.wo_a.scale = nn.Parameter(weights[f"{prefix}.wo_a.scale"], requires_grad=False)
-            self.wo_b = _fp8("wo_b")
+                wo_a_w = weights[f"{prefix}.wo_a.weight"]
+                wo_a_s = weights[f"{prefix}.wo_a.scale"]
+                if tp_size > 1:
+                    wo_a_w = wo_a_w[wo_a_row_slice].contiguous()
+                    wo_a_s = wo_a_s[wo_a_row_slice.start // 128:wo_a_row_slice.stop // 128].contiguous()
+                self.wo_a.weight = nn.Parameter(wo_a_w, requires_grad=False)
+                self.wo_a.scale = nn.Parameter(wo_a_s, requires_grad=False)
+
+            # wo_b row-split along K (cols), all_reduce after forward
+            self.wo_b = _fp8_sliced("wo_b", col_slice=wo_b_col_slice) if tp_size > 1 else _fp8("wo_b")
 
             # Non-quantized params copy straight from the dict.
             self.q_norm = _NormHolder(q_lora_rank)
@@ -221,8 +275,10 @@ class Attention(nn.Module):
             self.kv_norm.weight = nn.Parameter(
                 weights[f"{prefix}.kv_norm.weight"].float(), requires_grad=False
             )
+            attn_sink_full = weights[f"{prefix}.attn_sink"].float()
             self.attn_sink = nn.Parameter(
-                weights[f"{prefix}.attn_sink"].float(), requires_grad=False
+                attn_sink_full[attn_sink_slice].contiguous() if tp_size > 1 else attn_sink_full,
+                requires_grad=False,
             )
         else:
             # Legacy meta-tensor + load_v4_safetensors path.
@@ -410,4 +466,12 @@ class Attention(nn.Module):
         wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
         wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
         o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-        return self._lin(self.wo_b, o.flatten(2))
+        out = self._lin(self.wo_b, o.flatten(2))
+        if self.tp_size > 1:
+            # wo_b is row-split along K — each rank produces a partial
+            # sum; AR combines across the tp group.
+            from rtp_llm.models_py.distributed.collective_torch import (
+                Group, all_reduce,
+            )
+            all_reduce(out, Group.TP)
+        return out
