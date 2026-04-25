@@ -10,7 +10,7 @@ from aiter_meta.csrc.cpp_itfs.pa_gluon_aot.pa_decode_gluon_aot import (
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, FMHAType, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOpAsm,
     FusedRopeKVCacheDecodeOpNonAsm,
@@ -32,10 +32,13 @@ class FMHAParams(ParamsBase):
         is_prefill: bool = True,
         enable_cuda_graph: bool = True,
         graph_max_seq_len: Optional[int] = None,
+        alloc_scale: bool = False,
     ):
         super().__init__()
         self.enable_cuda_graph = enable_cuda_graph
         self.graph_max_seq_len = graph_max_seq_len
+        # avoids device alloc in forward under graph capture.
+        self.kv_scale: Optional[torch.Tensor] = None
 
         # Prefill mode
         if is_prefill:
@@ -81,6 +84,10 @@ class FMHAParams(ParamsBase):
             self.prefix_lengths = prefix_lengths
             self.token_q_num = input_lengths.sum().item()
             self.token_kv_num = kv_lengths.sum().item()
+
+            if alloc_scale:
+                dev = input_lengths.device
+                self.kv_scale = torch.ones(1, dtype=torch.float32, device=dev)
         # Decode mode
         else:
             input_lengths = attn_inputs.input_lengths
@@ -111,6 +118,10 @@ class FMHAParams(ParamsBase):
                 self.seq_lens = (sequence_lengths + 1).to(torch.device("cuda"))
             else:
                 self.seq_lens = None
+
+            bid = self.kv_cache_block_id_device
+            if bid is not None and alloc_scale:
+                self.kv_scale = torch.ones(1, dtype=torch.float32, device=bid.device)
 
     def fillParams(
         self,
@@ -417,6 +428,7 @@ def _run_triton_paged_attention(
     max_seq_len: int,
     num_kv_heads: int,
     context_partition_size: int,
+    kv_scale_buf: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     key_cache = paged_kv_cache.select(1, 0)
     value_cache = paged_kv_cache.select(1, 1)
@@ -432,8 +444,11 @@ def _run_triton_paged_attention(
 
     key_scale, value_scale = None, None
     if kv_scale_base is not None:
-        key_scale = torch.ones(1, dtype=torch.float32, device=query.device)
-        value_scale = torch.ones(1, dtype=torch.float32, device=query.device)
+        kv_b = kv_scale_buf
+        if kv_b is None or kv_b.device != query.device:
+            kv_b = torch.ones(1, dtype=torch.float32, device=query.device)
+        key_scale = kv_b
+        value_scale = kv_b
 
     num_query_heads = query.shape[1]
     head_size = query.shape[2]
@@ -508,11 +523,13 @@ def _run_triton_paged_attention(
     context_lengths = seq_lens.to(dtype=torch.int32, device=query.device)
     block_tables = block_tables_id_device.to(dtype=torch.int32, device=query.device)
 
-    query_scale = (
-        torch.tensor([1.0], device=query.device, dtype=torch.float32)
-        if query.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
-        else None
-    )
+    if query.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
+        q_b = kv_scale_buf
+        if q_b is None or q_b.device != query.device:
+            q_b = torch.ones(1, device=query.device, dtype=torch.float32)
+        query_scale = q_b
+    else:
+        query_scale = None
 
     pa_decode_gluon_aot(
         output=output,
@@ -544,6 +561,7 @@ class AiterPrefillAttnOpTriton:
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
         self.context_partition_size = 256
+        self.alloc_scale = attn_configs.kv_cache_dtype == KvCacheDataType.FP8
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         has_prefix = (
@@ -557,6 +575,7 @@ class AiterPrefillAttnOpTriton:
         fmha_params = FMHAParams(
             attn_inputs=attn_inputs,
             is_prefill=True,
+            alloc_scale=self.alloc_scale,
         )
         return fmha_params
 
@@ -588,6 +607,7 @@ class AiterPrefillAttnOpTriton:
             fmha_params.max_seqlen_k,
             self.head_num_kv,
             self.context_partition_size,
+            kv_scale_buf=fmha_params.kv_scale,
         )
 
         if token_num != real_token_num:
@@ -612,6 +632,7 @@ class AiterDecodeAttnOpBase:
         self.head_num_kv = attn_configs.kv_head_num
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
         self.max_seq_len = attn_configs.max_seq_len
+        self.alloc_scale = True
         # Updated per-request in prepare(); keep default false to avoid stale state
         # before first input is prepared.
         self.enable_cuda_graph = False
@@ -634,6 +655,7 @@ class AiterDecodeAttnOpBase:
             is_prefill=False,
             enable_cuda_graph=self.enable_cuda_graph,
             graph_max_seq_len=self.max_seq_len,
+            alloc_scale=self.alloc_scale,
         )
         fmha_params.max_seqlen_k = fmha_params.max_seq_len
 
@@ -662,6 +684,10 @@ class AiterDecodeAttnOpBase:
 class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
     """Aiter decode attention operation using ASM paged attention."""
 
+    def __init__(self, attn_configs: AttentionConfigs):
+        super().__init__(attn_configs)
+        self.alloc_scale = False
+
     def forward(
         self, query: torch.Tensor, kv_cache: Optional[LayerKVCache], fmha_params
     ) -> torch.Tensor:
@@ -673,10 +699,10 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
         max_num_blocks = block_tables_id_device.shape[1]
         K_QScale = None
         V_QScale = None
-        if (
-            key_cache.dtype == torch.float8_e4m3fnuz
-            and value_cache.dtype == torch.float8_e4m3fnuz
-        ):
+        if key_cache.dtype in (
+            torch.float8_e4m3fnuz,
+            torch.float8_e4m3fn,
+        ) and value_cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
             K_QScale = kv_cache.kv_scale_base.select(1, 0)
             V_QScale = kv_cache.kv_scale_base.select(1, 1)
         out_ = self._get_output(query)
@@ -701,6 +727,13 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
 class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
     """Aiter decode attention operation using non-ASM paged attention."""
 
+    def __init__(self, attn_configs: AttentionConfigs):
+        super().__init__(attn_configs)
+        # Non-ASM fallback scale is only needed for non-FP8 KV cache:
+        # - FP8 KV cache use kv_cache.kv_scale_base directly.
+        # - non-FP8 KV cache: pass a pre-allocated unit scale (1.0) as fallback.
+        self.alloc_scale = attn_configs.kv_cache_dtype != KvCacheDataType.FP8
+
     def forward(
         self, query: torch.Tensor, kv_cache: Optional[LayerKVCache], fmha_params
     ) -> torch.Tensor:
@@ -711,10 +744,10 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         K_QScale = None
         V_QScale = None
         using_fp8_kvcache = False
-        if (
-            key_cache.dtype == torch.float8_e4m3fnuz
-            and value_cache.dtype == torch.float8_e4m3fnuz
-        ):
+        if key_cache.dtype in (
+            torch.float8_e4m3fnuz,
+            torch.float8_e4m3fn,
+        ) and value_cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
             K_QScale = kv_cache.kv_scale_base.select(1, 0)
             V_QScale = kv_cache.kv_scale_base.select(1, 1)
             using_fp8_kvcache = True
@@ -797,14 +830,10 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
 
             kv_cache_dtype = "auto"
             k_scale = (
-                K_QScale
-                if kv_cache and K_QScale is not None
-                else torch.tensor(1.0, device=query.device, dtype=query.dtype)
+                K_QScale if kv_cache and K_QScale is not None else fmha_params.kv_scale
             )
             v_scale = (
-                V_QScale
-                if kv_cache and V_QScale is not None
-                else torch.tensor(1.0, device=query.device, dtype=query.dtype)
+                V_QScale if kv_cache and V_QScale is not None else fmha_params.kv_scale
             )
             aiter.paged_attention_rocm(
                 output,
@@ -836,6 +865,7 @@ class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
 
     def __init__(self, attn_configs: AttentionConfigs):
         super().__init__(attn_configs)
+        self.alloc_scale = attn_configs.kv_cache_dtype == KvCacheDataType.FP8
         self.context_partition_size = 256
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
@@ -857,6 +887,7 @@ class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
             fmha_params.max_seq_len,
             self.head_num_kv,
             self.context_partition_size,
+            kv_scale_buf=fmha_params.kv_scale,
         )
         return output.view(num_seqs, -1)
 
