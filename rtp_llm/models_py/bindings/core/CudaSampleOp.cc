@@ -469,7 +469,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                 float p = top_p_ptr[b];
                 if (std::abs(p - 1.0f) >= 1e-7) {
                     auto row                            = filtered_probs[b];
-                    auto [sorted_probs, sorted_indices] = row.sort(/*descending=*/true);
+                    auto [sorted_probs, sorted_indices] = row.sort(/*dim=*/0, /*descending=*/true);
                     auto cumsum                         = sorted_probs.cumsum(0);
                     auto mask                           = cumsum - sorted_probs > p;
                     sorted_probs.masked_fill_(mask, 0.0f);
