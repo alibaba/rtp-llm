@@ -344,6 +344,27 @@ class MoeAtomicWeight(AtomicWeight):
                 )
         return split_config
 
+    def _postprocess(
+        self,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        raw_tensor = tensor.get(self.name) if isinstance(tensor, dict) else tensor
+        # NOTE: scale (moe_s1/moe_s2) must also go through shuffle_moe_weight to
+        # perform the up/gate cat swap that keeps scale aligned with the kernel
+        # ordering. shuffle_moe_weight internally skips the layout shuffle for
+        # scale (do_shuffle=False) and only performs the swap.
+        if self.name in [W.moe_w1, W.moe_w2, W.moe_s1, W.moe_s2]:
+            raw_tensor = load_config.exported_device.shuffle_moe_weight(
+                raw_tensor, load_config.compute_dtype, self.name
+            )
+        return {
+            self.name: load_config.exported_device.maybe_rewrite_weight_by_key(
+                self.name, raw_tensor
+            )
+        }
+
     def _load_raw_tensor(
         self,
         tensor_source: TensorSource,
@@ -625,16 +646,7 @@ class MoeWeight(CompositeWeight):
     def _postprocess(
         self, tensor: Dict[str, torch.Tensor], device: str, load_config: LoadConfig
     ):
-        moe_w1 = tensor.get(W.moe_w1)
-        moe_w2 = tensor.get(W.moe_w2)
-        for weight, keys in [
-            (moe_w1, [W.moe_w1, W.moe_s1]),
-            (moe_w2, [W.moe_w2, W.moe_s2]),
-        ]:
-            if isinstance(weight, dict):
-                for key in keys:
-                    if key in weight:
-                        self._shuff_moe_weight(key, weight, load_config)
-            else:
-                self._shuff_moe_weight(keys[0], tensor, load_config)
+        # MoE weight shuffle is handled by MoeAtomicWeight._postprocess
+        # (called via CompositeWeight._postprocess's recursive sub_weight loop).
+        # Do NOT shuffle here to avoid double-shuffle.
         return super()._postprocess(tensor, device, load_config)

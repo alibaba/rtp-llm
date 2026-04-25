@@ -385,22 +385,32 @@ class ModelLoader:
             for layer_id in range(self._load_config.num_layers):
                 layer_weights = self._model_weights_info.layer_weights[layer_id]
                 if isinstance(layer_weights, WeightModule):
-                    names = layer_weights.get_tensor_names(layer_id, self._load_config)
-                    collector = TensorCollector(names, self._load_config.database)
-                    weight_info = WeightInfo(
-                        weight=layer_weights, layer_id=layer_id, collector=collector
-                    )
-                    tensor_to_weight_map.update({k: weight_info for k in names})
-                    weight_info_list.append(weight_info)
-                else:
-                    for weight in layer_weights:
-                        names = weight.get_tensor_names(layer_id, self._load_config)
+                    # For CompositeWeight (e.g. MoeWithSharedWeight), split into
+                    # sub-components so each gets its own collector. This prevents
+                    # large stacked MoE tensors from accumulating in a single
+                    # collector waiting for all sub-weights to arrive.
+                    for component in layer_weights.get_components():
+                        names = component.get_tensor_names(layer_id, self._load_config)
                         collector = TensorCollector(names, self._load_config.database)
                         weight_info = WeightInfo(
-                            weight=weight, layer_id=layer_id, collector=collector
+                            weight=component, layer_id=layer_id, collector=collector
                         )
                         tensor_to_weight_map.update({k: weight_info for k in names})
                         weight_info_list.append(weight_info)
+                else:
+                    for weight in layer_weights:
+                        for component in weight.get_components():
+                            names = component.get_tensor_names(
+                                layer_id, self._load_config
+                            )
+                            collector = TensorCollector(
+                                names, self._load_config.database
+                            )
+                            weight_info = WeightInfo(
+                                weight=component, layer_id=layer_id, collector=collector
+                            )
+                            tensor_to_weight_map.update({k: weight_info for k in names})
+                            weight_info_list.append(weight_info)
         for weight in self._model_weights_info.weights:
             if self._maybe_skip_weight(weight):
                 continue

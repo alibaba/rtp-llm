@@ -861,64 +861,17 @@ class RocmImpl(GpuImpl):
         specify_gpu_arch = self.py_env_configs.runtime_config.specify_gpu_arch
         return "900" if specify_gpu_arch == "" else specify_gpu_arch
 
+    def _is_gfx950(self) -> bool:
+        try:
+            prop = torch.cuda.get_device_properties(torch.cuda.current_device())
+            return "gfx950" in getattr(prop, "gcnArchName", "")
+        except Exception:
+            return self.arch == "950"
+
     def shuffle_moe_weight(
         self, x: torch.Tensor, datatype: torch.dtype, name: str
     ) -> torch.Tensor:
-        def _padding_to_multiply_512(x_, is_gate):
-            align = [0, 512, 0] if is_gate else [0, 0, 512]
-            shape_tmp = list(
-                x_.shape
-            )  # due to gate+up, need temporarily seperate them for padding
-            if is_gate:
-                shape_tmp[1] = shape_tmp[1] // 2
-            # align and padding to multiply of 512
-            padding = [0 for i in range(len(align) * 2)]
-            for i in range(len(align)):
-                if (align[i] > 0) and (shape_tmp[i] % align[i] > 0):
-                    padding[-(i * 2 + 1)] = align[i] - (shape_tmp[i] % align[i])
-            if sum(padding):
-                if is_gate:
-                    x_ = torch.cat(
-                        [
-                            torch.nn.functional.pad(
-                                x_[:, : x_.shape[1] // 2, :],
-                                padding,
-                                mode="constant",
-                                value=0,
-                            ),
-                            torch.nn.functional.pad(
-                                x_[:, x_.shape[1] // 2 :, :],
-                                padding,
-                                mode="constant",
-                                value=0,
-                            ),
-                        ],
-                        dim=1,
-                    )
-                else:
-                    x_ = torch.nn.functional.pad(
-                        x_, tuple(padding), mode="constant", value=0
-                    )
-                # logging.info(f'Moe padding shape {[ele for ele in x.shape]} with {padding} to {[ele for ele in x_.shape]}')
-            return x_
-
-        def _shuffle_weight(x_, layout=(16, 16), use_int4=False):
-            # Hardcode BLOCK_K and BLOCK_N
-            IN, IK = layout
-            BK = IK * 2
-            K = 16 // x_.element_size() if not use_int4 else 32
-            BN = IN
-            assert (
-                x_.shape[-2] % BN == 0
-            ), f"{x_.shape[-2]} % {BN} == {x_.shape[-2] % BN }"
-            assert (
-                x_.shape[-1] % BK == 0
-            ), f"{x_.shape[-1]} % {BK} == {x_.shape[-1] % BK }"
-            x__ = x_.view(-1, x_.shape[-2] // BN, BN, x_.shape[-1] // BK, BK // K, K)
-            x__ = x__.permute(0, 1, 3, 4, 2, 5)
-            x__ = x__.contiguous()
-            x__ = x__.view(*x_.shape)
-            return x__
+        from aiter.ops.shuffle import shuffle_weight
 
         is_gate = name in [W.moe_w1, W.moe_s1]
         do_shuffle = name in [W.moe_w1, W.moe_w2]
@@ -930,23 +883,23 @@ class RocmImpl(GpuImpl):
             else x
         )  # swap from [up, gate] to [gate, up]
         if do_shuffle:
-            # for now we use ck_moe for dtype is not fp8, so we need to pad to multiply of 512
-            if x_.dtype not in [torch.float8_e4m3fn, torch.float8_e4m3fnuz]:
-                x_ = _padding_to_multiply_512(x_, is_gate)
-            x_ = _shuffle_weight(x_)
+            x_ = shuffle_weight(x_, (16, 16))
         return x_
 
     def maybe_rewrite_weight_by_key(
         self, key: str, weight: torch.Tensor
     ) -> torch.Tensor:
+        is_gfx950 = self._is_gfx950()
         if key == "weight":
             assert weight.dtype == torch.float8_e4m3fn
-            weight_as_int8 = weight.view(torch.int8)
-            ROCM_FP8_NAN_AS_INT = -128
-            weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
-            weight = weight_as_int8.view(torch.float8_e4m3fnuz)
+            if not is_gfx950:
+                weight_as_int8 = weight.view(torch.int8)
+                ROCM_FP8_NAN_AS_INT = -128
+                weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
+                weight = weight_as_int8.view(torch.float8_e4m3fnuz)
         elif key == "scale":
-            weight = weight * 2.0
+            if not is_gfx950:
+                weight = weight * 2.0
 
         if key in [
             W.attn_qkv_w,
@@ -1007,6 +960,8 @@ class RocmImpl(GpuImpl):
         self, weight: torch.Tensor, weight_scale: torch.Tensor
     ):
         assert weight.dtype == torch.float8_e4m3fn
+        if self._is_gfx950():
+            return weight, weight_scale
         # The bits pattern 10000000(-128) represents zero in e4m3fn
         # but NaN in e4m3fnuz. So here we set it to 0.
         # https://onnx.ai/onnx/technical/float8.html

@@ -28,6 +28,13 @@ def _moe_activation_type(activation: str) -> aiter.ActivationType:
     return aiter.ActivationType.Gelu
 
 
+def _rocm_fp8_dtype() -> torch.dtype:
+    prop = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if "gfx950" in getattr(prop, "gcnArchName", ""):
+        return torch.float8_e4m3fn
+    return torch.float8_e4m3fnuz
+
+
 def build_ep_expert_mask(
     num_experts: int,
     ep_rank: int,
@@ -170,7 +177,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         super().__init__(config, quant_config, weights)
 
         # Update quant_config with FP8-specific settings
-        self.quant_config.quant_dtype = torch.float8_e4m3fnuz
+        self.quant_config.quant_dtype = _rocm_fp8_dtype()
         self.quant_config.per_act_token_quant = True
         self.quant_config.per_out_ch_quant = True
         self.quant_config.block_shape = None
@@ -281,7 +288,7 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
         super().__init__(config, quant_config, weights)
 
         # Update quant_config with FP8-specific settings
-        self.quant_config.quant_dtype = torch.float8_e4m3fnuz
+        self.quant_config.quant_dtype = _rocm_fp8_dtype()
         self.quant_config.per_act_token_quant = False
         self.quant_config.per_out_ch_quant = False
         self.quant_config.block_shape = None

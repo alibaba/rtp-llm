@@ -46,6 +46,9 @@ class WeightModule(ABC):
         super().__init_subclass__(**kwargs)
         cls._registry[cls.__name__] = cls
 
+    def get_components(self):
+        return [self]
+
     @property
     def lora_a_name(self):
         return f"{self.name}.{self.lora_A_suffix}"
@@ -660,9 +663,6 @@ class AtomicWeight(WeightModule):
 
     def _get_split_func(self):
         return W.gpt_style_tp_strategy[self.name]
-
-    def get_components(self):
-        return [self]
 
     @classmethod
     def support(
