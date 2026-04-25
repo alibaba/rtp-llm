@@ -94,13 +94,18 @@ jobs:
       - name: Set pending commit status
         if: github.event_name == 'workflow_dispatch' && steps.review-gate.outputs.qualified == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh api "repos/${{ github.repository }}/statuses/${{ steps.review-gate.outputs.head_sha }}" \
-            -f state=pending \
-            -f context="CI Request Trigger" \
-            -f description="CI is running..." \
-            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -sf -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ steps.review-gate.outputs.head_sha }}" \
+            -d '{
+              "state": "pending",
+              "context": "CI Request Trigger",
+              "description": "CI is running...",
+              "target_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }'
 
       - name: Check merge conflicts
         if: steps.review-gate.outputs.qualified == 'true'
@@ -175,15 +180,20 @@ jobs:
       - name: Update commit status
         if: always() && github.event_name == 'workflow_dispatch' && steps.review-gate.outputs.head_sha != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ "${{ job.status }}" = "success" ]; then
             STATE="success"; DESC="CI passed"
           else
             STATE="failure"; DESC="CI failed"
           fi
-          gh api "repos/${{ github.repository }}/statuses/${{ steps.review-gate.outputs.head_sha }}" \
-            -f state="${STATE}" \
-            -f context="CI Request Trigger" \
-            -f description="${DESC}" \
-            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -sf -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ steps.review-gate.outputs.head_sha }}" \
+            -d "{
+              \"state\": \"${STATE}\",
+              \"context\": \"CI Request Trigger\",
+              \"description\": \"${DESC}\",
+              \"target_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+            }"
