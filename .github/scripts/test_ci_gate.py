@@ -10,7 +10,13 @@ from unittest.mock import MagicMock, patch
 
 from ci_gate.common import GateError, is_true
 from ci_gate.ci_service import collect_status_tokens, parse_ci_status
-from ci_gate.review import check_review_qualified, latest_fresh_reviews, resolve_context
+from ci_gate.review import (
+    _check_issue_comments_qualified,
+    _fetch_head_commit_date,
+    check_review_qualified,
+    latest_fresh_reviews,
+    resolve_context,
+)
 from ci_gate.ci import pre_check_status, trigger_ci, wait_status
 from ci_gate.merge import check_merge_conflicts, trigger_merge, wait_merge
 
@@ -239,6 +245,182 @@ class TestCheckReviewQualified(unittest.TestCase):
         mock_pages.return_value = []
         result = check_review_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
         self.assertFalse(result)
+
+
+# ---------------------------------------------------------------------------
+# review._check_issue_comments_qualified (mocked)
+# ---------------------------------------------------------------------------
+class TestCheckIssueCommentsQualified(unittest.TestCase):
+    COMMIT_DATE = "2025-04-20T10:00:00Z"
+    COMMIT_RESPONSE = {
+        "commit": {"committer": {"date": COMMIT_DATE}},
+    }
+
+    def _comment(self, login="LLLLKKKK", body="lgtm ready to ci", updated_at="2025-04-20T12:00:00Z"):
+        return {"user": {"login": login}, "body": body, "updated_at": updated_at}
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_fresh_lgtm_qualifies(self, mock_get, mock_pages):
+        mock_get.return_value = self.COMMIT_RESPONSE
+        mock_pages.return_value = [self._comment()]
+        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
+        self.assertTrue(result)
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_stale_comment_rejected(self, mock_get, mock_pages):
+        mock_get.return_value = self.COMMIT_RESPONSE
+        mock_pages.return_value = [self._comment(updated_at="2025-04-19T09:00:00Z")]
+        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
+        self.assertFalse(result)
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_wrong_author_rejected(self, mock_get, mock_pages):
+        mock_get.return_value = self.COMMIT_RESPONSE
+        mock_pages.return_value = [self._comment(login="other-user")]
+        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
+        self.assertFalse(result)
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_missing_phrase_rejected(self, mock_get, mock_pages):
+        mock_get.return_value = self.COMMIT_RESPONSE
+        mock_pages.return_value = [self._comment(body="looks good")]
+        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
+        self.assertFalse(result)
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_no_comments(self, mock_get, mock_pages):
+        mock_get.return_value = self.COMMIT_RESPONSE
+        mock_pages.return_value = []
+        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
+        self.assertFalse(result)
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_case_insensitive_phrase(self, mock_get, mock_pages):
+        mock_get.return_value = self.COMMIT_RESPONSE
+        mock_pages.return_value = [self._comment(body="LGTM Ready To CI")]
+        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
+        self.assertTrue(result)
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_picks_latest_matching_comment(self, mock_get, mock_pages):
+        mock_get.return_value = self.COMMIT_RESPONSE
+        mock_pages.return_value = [
+            self._comment(updated_at="2025-04-20T11:00:00Z"),
+            self._comment(updated_at="2025-04-20T14:00:00Z"),
+        ]
+        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
+        self.assertTrue(result)
+
+
+# ---------------------------------------------------------------------------
+# review.check_review_qualified — issue comment fallback
+# ---------------------------------------------------------------------------
+class TestCheckReviewQualifiedWithIssueComments(unittest.TestCase):
+    """Verify that check_review_qualified falls back to issue comments."""
+
+    @patch("ci_gate.review._check_issue_comments_qualified")
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_no_reviews_falls_back_to_issue_comments(self, mock_get, mock_pages, mock_issue):
+        mock_get.return_value = {"user": {"login": "author"}}
+        mock_pages.return_value = []
+        mock_issue.return_value = True
+        result = check_review_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
+        self.assertTrue(result)
+        mock_issue.assert_called_once_with("1", "repo", "sha1", "token", "LLLLKKKK")
+
+    @patch("ci_gate.review._check_issue_comments_qualified")
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_approved_review_skips_issue_comments(self, mock_get, mock_pages, mock_issue):
+        mock_get.return_value = {"user": {"login": "author"}}
+        mock_pages.return_value = [
+            {"id": 1, "user": {"login": "rev", "type": "User"},
+             "state": "APPROVED", "commit_id": "sha1", "body": ""}
+        ]
+        result = check_review_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
+        self.assertTrue(result)
+        mock_issue.assert_not_called()
+
+    @patch("ci_gate.review._check_issue_comments_qualified")
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_changes_requested_blocks_even_with_issue_comment(self, mock_get, mock_pages, mock_issue):
+        mock_get.return_value = {"user": {"login": "author"}}
+        mock_pages.return_value = [
+            {"id": 1, "user": {"login": "rev", "type": "User"},
+             "state": "CHANGES_REQUESTED", "commit_id": "sha1", "body": ""}
+        ]
+        result = check_review_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
+        self.assertFalse(result)
+        mock_issue.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# review.resolve_context — issue_comment event
+# ---------------------------------------------------------------------------
+class TestResolveContextIssueComment(unittest.TestCase):
+    """Verify resolve_context works for issue_comment events where head_sha
+    and clone_url are absent from the event payload."""
+
+    def _base_args(self, **overrides):
+        defaults = {
+            "event_name": "issue_comment",
+            "repository": "org/repo",
+            "github_token": "tok",
+            "input_pr_number": "",
+            "input_head_sha": "",
+            "input_skip_review": "false",
+            "event_head_sha": "",
+            "event_pr_number": "42",
+            "event_clone_url": "",
+            "lgtm_user": "LLLLKKKK",
+            "output_file": "",
+        }
+        defaults.update(overrides)
+        return argparse.Namespace(**defaults)
+
+    @patch("ci_gate.review.check_review_qualified")
+    @patch("ci_gate.review.github_get")
+    def test_issue_comment_resolves_head_from_pr(self, mock_get, mock_qualified):
+        mock_get.return_value = {
+            "user": {"login": "author"},
+            "head": {"sha": "abc111", "repo": {"clone_url": "https://github.com/org/repo.git"}},
+            "state": "open",
+        }
+        mock_qualified.return_value = True
+        with tempfile.NamedTemporaryFile(mode="r+") as output:
+            result = resolve_context(self._base_args(output_file=output.name))
+            output.seek(0)
+            contents = output.read()
+        self.assertEqual(result, 0)
+        self.assertIn("head_sha=abc111", contents)
+        self.assertIn("clone_url=https://github.com/org/repo.git", contents)
+        self.assertIn("qualified=true", contents)
+        mock_qualified.assert_called_once_with("42", "org/repo", "abc111", "tok", "LLLLKKKK")
+
+    @patch("ci_gate.review.check_review_qualified")
+    @patch("ci_gate.review.github_get")
+    def test_issue_comment_unqualified_returns_1(self, mock_get, mock_qualified):
+        mock_get.return_value = {
+            "user": {"login": "author"},
+            "head": {"sha": "abc111", "repo": {"clone_url": "url"}},
+            "state": "open",
+        }
+        mock_qualified.return_value = False
+        with tempfile.NamedTemporaryFile(mode="r+") as output:
+            result = resolve_context(self._base_args(output_file=output.name))
+            output.seek(0)
+            contents = output.read()
+        self.assertEqual(result, 1)
+        self.assertIn("qualified=false", contents)
 
 
 # ---------------------------------------------------------------------------

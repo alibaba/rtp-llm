@@ -27,6 +27,56 @@ def latest_fresh_reviews(reviews, head_sha, pr_author):
     return list(latest_by_user.values())
 
 
+def _fetch_head_commit_date(repo, head_sha, github_token):
+    # type: (str, str, str) -> str
+    """Return the committer date (ISO 8601) of the given commit."""
+    commit = github_get(
+        repo, "/commits/%s" % head_sha,
+        "fetching commit %s" % short_sha(head_sha), github_token,
+    )
+    if not isinstance(commit, dict):
+        raise GateError("::error::Unexpected commit response for %s" % short_sha(head_sha), 2)
+    return (((commit.get("commit") or {}).get("committer") or {}).get("date")) or ""
+
+
+def _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
+    # type: (str, str, str, str, str) -> bool
+    """Check whether a fresh LGTM issue comment from *lgtm_user* exists.
+
+    Freshness is defined as ``comment.updated_at >= head_commit.committer.date``
+    because issue comments have no ``commit_id`` field.
+    """
+    head_date = _fetch_head_commit_date(repo, head_sha, github_token)
+    if not head_date:
+        log("Could not determine head commit date, skipping issue comment check")
+        return False
+
+    comments = github_get_pages(
+        repo, "/issues/%s/comments" % pr_number,
+        "fetching issue comments for PR #%s" % pr_number, github_token,
+    )
+
+    lgtm_phrase = "lgtm ready to ci"
+    latest_match = None  # type: Any
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        user = (comment.get("user") or {}).get("login", "")
+        body = (comment.get("body") or "").lower()
+        updated_at = comment.get("updated_at", "")
+        if user == lgtm_user and lgtm_phrase in body and updated_at >= head_date:
+            if latest_match is None or updated_at > (latest_match.get("updated_at") or ""):
+                latest_match = comment
+
+    if latest_match:
+        log("PR #%s has fresh LGTM issue comment from %s (updated_at: %s >= commit: %s)"
+            % (pr_number, lgtm_user, latest_match.get("updated_at", ""), head_date))
+        return True
+
+    log("PR #%s has no qualifying fresh issue comment" % pr_number)
+    return False
+
+
 def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
     # type: (str, str, str, str, str) -> bool
     pr_data = github_get(repo, "/pulls/%s" % pr_number, "fetching PR #%s" % pr_number, github_token)
@@ -37,10 +87,6 @@ def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
     reviews = github_get_pages(repo, "/pulls/%s/reviews" % pr_number, "fetching reviews for PR #%s" % pr_number, github_token)
     fresh = latest_fresh_reviews([r for r in reviews if isinstance(r, dict)], head_sha, pr_author)
     log("PR #%s: %d fresh review(s) against %s (author: %s)" % (pr_number, len(fresh), short_sha(head_sha), pr_author))
-
-    if not fresh:
-        log("No fresh reviews found, skipping")
-        return False
 
     change_request = next((r for r in fresh if r.get("state") == "CHANGES_REQUESTED"), None)
     if change_request:
@@ -60,7 +106,10 @@ def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
             log("PR #%s has latest fresh LGTM from %s" % (pr_number, lgtm_user))
             return True
 
-    log("PR #%s has no qualifying fresh review" % pr_number)
+    if _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
+        return True
+
+    log("PR #%s has no qualifying fresh review or issue comment" % pr_number)
     return False
 
 
@@ -101,6 +150,12 @@ def resolve_context(args):
         if not isinstance(pr_data, dict):
             raise GateError("::error::Unexpected PR response for #%s" % pr_number)
         actual_head = ((pr_data.get("head") or {}).get("sha")) or ""
+
+        if not head_sha and actual_head:
+            head_sha = actual_head
+        if not clone_url:
+            clone_url = (((pr_data.get("head") or {}).get("repo") or {}).get("clone_url")) or ""
+
         if actual_head and actual_head != head_sha:
             log(
                 "::error::PR HEAD changed since event (%s -> "
