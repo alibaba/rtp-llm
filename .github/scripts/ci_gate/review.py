@@ -82,12 +82,12 @@ def resolve_context(args):
         if not clone_url:
             raise GateError("::error::Failed to fetch clone_url for PR #%s (state: %s)" % (pr_number, pr_state))
         if pr_state != "open":
-            log("::warning::PR #%s is %s, skipping" % (pr_number, pr_state))
+            log("::error::PR #%s is %s — CI will not run" % (pr_number, pr_state))
             write_output("head_sha", head_sha, args.output_file)
             write_output("pr_number", pr_number, args.output_file)
             write_output("clone_url", clone_url, args.output_file)
             write_output("qualified", "false", args.output_file)
-            return 0
+            return 1
         if actual_head and actual_head != head_sha:
             raise GateError(
                 "::error::workflow_dispatch head_sha %s does not match "
@@ -103,14 +103,14 @@ def resolve_context(args):
         actual_head = ((pr_data.get("head") or {}).get("sha")) or ""
         if actual_head and actual_head != head_sha:
             log(
-                "::warning::PR HEAD changed since event (%s -> "
-                "%s), skipping (new workflow will handle)" % (short_sha(head_sha), short_sha(actual_head))
+                "::error::PR HEAD changed since event (%s -> "
+                "%s) — CI will not run (new workflow will handle)" % (short_sha(head_sha), short_sha(actual_head))
             )
             write_output("head_sha", head_sha, args.output_file)
             write_output("pr_number", pr_number, args.output_file)
             write_output("clone_url", clone_url, args.output_file)
             write_output("qualified", "false", args.output_file)
-            return 0
+            return 1
 
     write_output("head_sha", head_sha, args.output_file)
     write_output("pr_number", pr_number, args.output_file)
@@ -123,4 +123,7 @@ def resolve_context(args):
 
     qualified = check_review_qualified(pr_number, repo, head_sha, args.github_token, args.lgtm_user)
     write_output("qualified", "true" if qualified else "false", args.output_file)
+    if not qualified:
+        log("::error::No qualifying review — build check will report failure")
+        return 1
     return 0

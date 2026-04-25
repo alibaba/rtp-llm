@@ -153,9 +153,14 @@ def parse_ci_status(response):
     if "PENDING" in joined:
         return "PENDING", status_summary
 
-    success_tokens = {"SUCCESS", "SUCCEEDED", "DONE", "NOT_RUN", "SKIPPED", "PASS", "PASSED"}
-    if all(token in success_tokens for token in tokens):
-        return "DONE", status_summary
+    real_success = {"SUCCESS", "SUCCEEDED", "DONE", "PASS", "PASSED"}
+    ignorable = {"NOT_RUN", "SKIPPED"}
+    all_acceptable = real_success | ignorable
+    if all(token in all_acceptable for token in tokens):
+        if any(token in real_success for token in tokens):
+            return "DONE", status_summary
+        log("::error::All CI jobs were %s — treating as FAILED" % "/".join(sorted(set(tokens))))
+        return "FAILED", status_summary
     if len(tokens) == 1 and tokens[0] in {"UNKNOWN", "NULL"}:
         return "UNKNOWN", status_summary
     return "FAILED", status_summary

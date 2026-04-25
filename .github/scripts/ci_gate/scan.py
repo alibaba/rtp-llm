@@ -104,5 +104,6 @@ def scan_and_trigger(args):
     log("")
     log("=== Scan complete: triggered CI for %d/%d PRs (API errors: %d) ===" % (triggered, len(prs), api_errors))
     if api_errors:
-        log("::warning::%d PR(s) skipped due to API errors, will be retried on next scan" % api_errors)
+        log("::error::%d PR(s) skipped due to API errors" % api_errors)
+        return 1
     return 0

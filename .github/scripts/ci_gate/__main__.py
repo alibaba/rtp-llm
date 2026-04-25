@@ -56,6 +56,7 @@ def main(argv):
     pre_check.add_argument("repository")
     pre_check.add_argument("--max-attempts", type=int, default=6)
     pre_check.add_argument("--sleep-interval", type=int, default=20)
+    pre_check.add_argument("--output-file", default="")
 
     wait = subparsers.add_parser("wait-status")
     wait.add_argument("commit_id")

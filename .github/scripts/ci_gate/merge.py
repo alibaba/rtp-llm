@@ -69,12 +69,13 @@ def trigger_merge(args):
     }
     log("Sending MERGE-TASK for commitId: %s" % args.commit_id)
     body = ci_service_request(payload, args.security, "triggering merge", CI_TRIGGER_URL)
-    if isinstance(body, dict):
-        if body.get("success") is False:
-            raise GateError("::error::Merge trigger rejected: %s" % (body.get("errorMsg") or body.get("error") or body))
-        status = str(body.get("status", "")).upper()
-        if status in {"FAILED", "ERROR"}:
-            raise GateError("::error::Merge trigger failed: %s" % body)
+    if not isinstance(body, dict):
+        raise GateError("::error::Merge trigger returned non-dict response: %s" % body)
+    if body.get("success") is False:
+        raise GateError("::error::Merge trigger rejected: %s" % (body.get("errorMsg") or body.get("error") or body))
+    status = str(body.get("status", "")).upper()
+    if status in {"FAILED", "ERROR"}:
+        raise GateError("::error::Merge trigger failed: %s" % body)
     return 0
 
 

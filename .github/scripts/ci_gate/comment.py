@@ -85,25 +85,25 @@ def sync_comment(args):
     try:
         current_info = get_branch_info(current_branch, args.repository, args.commit_id, args.security)
     except GateError as exc:
-        log("Error: Failed to query branch info for %s: %s" % (current_branch, exc))
-        return 0
+        log("::error::Failed to query branch info for %s: %s" % (current_branch, exc))
+        return 1
 
     current_commit_id = branch_commit_id(current_info)
     if not current_commit_id:
-        log("Error: Failed to extract commit ID from branch info")
-        return 0
+        log("::error::Failed to extract commit ID from branch info for %s" % current_branch)
+        return 1
     log("Current internal commit ID: %s" % current_commit_id)
 
     try:
         main_info = get_branch_info(args.main_branch, args.repository, args.commit_id, args.security)
     except GateError as exc:
-        log("Error: Failed to query branch info for %s: %s" % (args.main_branch, exc))
-        return 0
+        log("::error::Failed to query branch info for %s: %s" % (args.main_branch, exc))
+        return 1
 
     main_commit_id = branch_commit_id(main_info)
     if not main_commit_id:
-        log("Error: Failed to extract commit ID from main branch info")
-        return 0
+        log("::error::Failed to extract commit ID from main branch info for %s" % args.main_branch)
+        return 1
     log("Main internal commit ID: %s" % main_commit_id)
 
     if current_commit_id == main_commit_id:

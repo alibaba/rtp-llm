@@ -115,16 +115,15 @@ jobs:
             "${{ secrets.CI_SECRET }}" \
             "${{ github.repository }}" \
             --max-attempts 6 \
-            --sleep-interval 20; then
-            echo "skip_ci=true" >> $GITHUB_OUTPUT
-            echo "CI already completed or running, will skip trigger"
+            --sleep-interval 20 \
+            --output-file "$GITHUB_OUTPUT"; then
+            echo "CI already completed or running, will not trigger duplicate CI"
           else
-            echo "skip_ci=false" >> $GITHUB_OUTPUT
             echo "CI not completed, will trigger new CI"
           fi
 
       - name: Trigger CI
-        if: steps.review-gate.outputs.qualified == 'true' && steps.pre-check.outputs.skip_ci != 'true'
+        if: steps.review-gate.outputs.qualified == 'true' && steps.pre-check.outputs.ci_action == 'trigger'
         run: |
           echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
           echo "Using Commit ID: ${{ steps.review-gate.outputs.head_sha }}"
@@ -138,7 +137,7 @@ jobs:
           sleep 30
 
       - name: Add comment via REST API
-        if: steps.review-gate.outputs.qualified == 'true' && steps.review-gate.outputs.pr_number != '' && steps.pre-check.outputs.skip_ci != 'true'
+        if: steps.review-gate.outputs.qualified == 'true' && steps.review-gate.outputs.pr_number != '' && steps.pre-check.outputs.ci_action == 'trigger'
         continue-on-error: true
         run: |
           echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
@@ -154,7 +153,7 @@ jobs:
             --retry-interval 5
 
       - name: Get CI result
-        if: steps.review-gate.outputs.qualified == 'true' && steps.pre-check.outputs.skip_ci != 'true'
+        if: steps.review-gate.outputs.qualified == 'true' && steps.pre-check.outputs.ci_action != 'done'
         run: |
           echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
           echo "Using Commit ID: ${{ steps.review-gate.outputs.head_sha }}"
