@@ -29,6 +29,7 @@ class QuantizationConfig(ABC):
         self._bits = bits
         self._group_size = group_size
         self._is_quanted = is_quanted
+        self._exclude_modules: set = set()
 
     @property
     def bits(self):
@@ -226,7 +227,7 @@ class QuantizationConfig(ABC):
                 )
             
 
-        return cls.from_config(
+        result = cls.from_config(
             {
                 "bits": bits,
                 "method": quant_method,
@@ -234,6 +235,9 @@ class QuantizationConfig(ABC):
                 "is_quanted": True,
             }
         )
+        if quant_config and "exclude" in quant_config:
+            result._exclude_modules = set(quant_config["exclude"])
+        return result
 
 
 class WeightOnlyInt8PerChannelQuantConfig(QuantizationConfig):

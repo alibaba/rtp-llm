@@ -80,14 +80,14 @@ class RocmFp8DeepGEMMLinear(LinearBase):
         input_scales = torch.clamp(input_scales, min=min_scale_threshold)
         input_scales = input_scales.to(torch.float32)
 
-        # Use per-token-block scales directly (M, K/128)
-        x_scales = input_scales
+        # bpreshuffle kernel
+        x_scales = input_scales.transpose(0, 1).contiguous().view(*input_scales.shape)
         w_scales = self.weight_scales
 
-        output = aiter.gemm_a8w8_blockscale(
+        output = aiter.gemm_a8w8_blockscale_bpreshuffle(
             input_fp8,  # XQ
-            self.weight,  # WQ
-            x_scales,  # x_scale
+            self.weight,  # WQ (pre-shuffled layout)
+            x_scales,  # x_scale (bpreshuffle layout)
             w_scales,  # w_scale
         )
 

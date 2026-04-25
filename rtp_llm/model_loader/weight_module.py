@@ -759,6 +759,8 @@ class CompositeWeight(WeightModule):
         )
 
     def get_components(self):
+        if isinstance(self, QuantWeight):
+            return [self]
         res = []
         for sub_weight in self.sub_weights.values():
             res.extend(sub_weight.get_components())
