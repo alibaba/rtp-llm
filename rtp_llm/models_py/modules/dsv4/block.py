@@ -68,6 +68,8 @@ class Block(nn.Module):
         norm_eps: float = 1e-6,
         weights: Optional[Dict[str, torch.Tensor]] = None,
         prefix: str = "",
+        tp_size: int = 1,
+        tp_rank: int = 0,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -91,6 +93,7 @@ class Block(nn.Module):
             index_topk=index_topk, norm_eps=norm_eps,
             weights=weights,
             prefix=f"{prefix}.attn" if self._factory_mode else "",
+            tp_size=tp_size, tp_rank=tp_rank,
         )
         self.ffn = MoE(
             layer_id=layer_id, dim=dim, moe_inter_dim=moe_inter_dim,
