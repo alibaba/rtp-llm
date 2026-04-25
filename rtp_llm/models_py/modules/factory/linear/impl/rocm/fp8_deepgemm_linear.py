@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_group_quant_fp8
 from rtp_llm.ops import HWKernelConfig
 
+
 class RocmFp8DeepGEMMLinear(LinearBase):
     """ROCm FP8 DeepGEMM quantized Linear"""
 
@@ -22,7 +23,7 @@ class RocmFp8DeepGEMMLinear(LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
@@ -36,7 +37,7 @@ class RocmFp8DeepGEMMLinear(LinearBase):
 
         # Check quantization method - handle FP8 methods that are NOT PTPC
         quant_method = quant_config.get_method()
-        return quant_method == "FP8_PER_BLOCK"
+        return quant_method in ("FP8_PER_BLOCK", "FP8_PER_BLOCK_QUARK")
 
     def __init__(
         self,
@@ -47,8 +48,9 @@ class RocmFp8DeepGEMMLinear(LinearBase):
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(weight, weight_scales, input_scales,
-                         bias, quant_config, weight_scale_2)
+        super().__init__(
+            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+        )
         self.hidden_size = weight.shape[0]  # k
         self.output_size = weight.shape[1]  # n
         self.weight = weight.reshape([weight.shape[1], weight.shape[0]])

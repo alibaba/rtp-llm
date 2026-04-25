@@ -36,3 +36,16 @@ py_test (
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
+py_test (
+    name = "rocm_fp8_fused_moe_test",
+    srcs = ["rocm_fp8_fused_moe_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "eternal",
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
+)
+

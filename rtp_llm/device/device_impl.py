@@ -1,7 +1,7 @@
 import logging
 import os
 import re
-from typing import List
+from typing import List, Optional
 
 import psutil
 import torch
@@ -13,6 +13,23 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.swizzle_utils import swizzle_tensor
+
+
+def is_gfx950(arch_fallback: Optional[str] = None) -> bool:
+    """Detect whether the current ROCm device is gfx950 (MI355X).
+
+    Falls back to ``arch_fallback`` (typically the configured ``specify_gpu_arch``)
+    when CUDA/ROCm is not available — e.g. CPU-only build environments. Callers
+    that have no fallback string can pass ``None`` to use the ``ROCM_GFX_ARCH``
+    env var instead.
+    """
+    try:
+        prop = torch.cuda.get_device_properties(torch.cuda.current_device())
+        return "gfx950" in getattr(prop, "gcnArchName", "")
+    except Exception:
+        if arch_fallback is not None:
+            return arch_fallback == "950"
+        return os.environ.get("ROCM_GFX_ARCH", "") == "950"
 
 
 class CpuImpl(DeviceBase):
@@ -679,10 +696,15 @@ class PpuImpl(CudaImpl):
 class RocmImpl(GpuImpl):
     def __init__(self):
         super().__init__()
+        # arch / mem-info paths read self.rocml unconditionally, so the
+        # attribute must exist even when pyrsmi is missing or smi_initialize
+        # fails. Keep it None on failure; callers already null-check.
+        self.rocml = None
         try:
             from pyrsmi import rocml
 
             rocml.smi_initialize()
+            self.rocml = rocml
         except Exception as e:
             logging.warn(f"no rocm smi found: " + str(e))
 
@@ -862,11 +884,7 @@ class RocmImpl(GpuImpl):
         return "900" if specify_gpu_arch == "" else specify_gpu_arch
 
     def _is_gfx950(self) -> bool:
-        try:
-            prop = torch.cuda.get_device_properties(torch.cuda.current_device())
-            return "gfx950" in getattr(prop, "gcnArchName", "")
-        except Exception:
-            return self.arch == "950"
+        return is_gfx950(arch_fallback=self.arch)
 
     def shuffle_moe_weight(
         self, x: torch.Tensor, datatype: torch.dtype, name: str

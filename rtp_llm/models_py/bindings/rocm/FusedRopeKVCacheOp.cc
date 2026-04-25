@@ -163,9 +163,16 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     }
     // FP8 path: keep original behavior (store QKV linearly for flash_attn_varlen_fp8)
     // Non-FP8 path: paged layout only (Q packed-token, K/V in paged cache)
-    bool store_qkv   = use_fmha_fp8 ? !use_paged_fmha : false;
-    bool store_q     = true;
-    bool store_kv    = true;  // Always store K/V for flash_attn_varlen_func
+    bool store_qkv = use_fmha_fp8 ? !use_paged_fmha : false;
+    bool store_q   = true;
+    // K/V are fanned out to two destinations in the same kernel:
+    //   - padded k_output/v_output buffers consumed by flash_attn_varlen_func
+    //     in this prefill call (this flag);
+    //   - paged kv_cache for subsequent decode (store_cache below).
+    // This double write is currently unavoidable on the varlen path; folding
+    // into the paged batch_prefill path (AiterPrefillImplPaged) would
+    // eliminate it but is tracked as a separate follow-up.
+    bool store_kv    = true;
     bool store_cache = kv_cache.has_value();
 
     // int8

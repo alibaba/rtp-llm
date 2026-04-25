@@ -1,4 +1,3 @@
-import logging
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
@@ -251,18 +250,6 @@ def split_qkvz_channel_scale(
         load_config.tp_rank
     ].contiguous()
     return torch.cat([q, k, v, z], dim=0)
-
-
-def split_out_linear_channel_scale(
-    t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
-) -> torch.Tensor:
-    """Split per-channel scale [out_dim, 1] along dim=0 by value heads."""
-    second_dim = t.shape[1]
-    t_squeezed = t.view(linear_config.linear_num_value_heads, -1, second_dim)
-    local_head_num_v = linear_config.linear_num_value_heads // load_config.tp_size
-    start_head_num_v = local_head_num_v * load_config.tp_rank
-    end_head_num_v = start_head_num_v + local_head_num_v
-    return t_squeezed[start_head_num_v:end_head_num_v, :, :].reshape(-1, second_dim)
 
 
 _linear_attn_w8a8_per_channel_split_strategy = {
