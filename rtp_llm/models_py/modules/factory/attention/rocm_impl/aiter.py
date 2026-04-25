@@ -105,6 +105,8 @@ class FMHAParams(ParamsBase):
                 and self.graph_max_seq_len > 0
             ):
                 self.max_seq_len = self.graph_max_seq_len
+            elif sequence_lengths is not None:
+                self.max_seq_len = sequence_lengths.max().item() + 1
             else:
                 self.max_seq_len = input_lengths.max().item() + 1
 
@@ -290,45 +292,43 @@ class AiterPrefillAttnOp:
         if kv_cache is None:
             return self._forward_varlen(qkv, fmha_params)
 
-        # Unified path: always use mha_batch_prefill from paged KV cache
-        k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
-        block_table = fmha_params.kv_cache_block_id_device
+        assert isinstance(qkv, (tuple, list)) and len(qkv) == 3, (
+            "kv_cache path expects qkv=(q, k_padded, v_padded) tuple from "
+            "FusedRopeKVCachePrefillOp"
+        )
+        k_padded = qkv[1]
+        v_padded = qkv[2]
+
         cu_seqlens_q = fmha_params.cu_seqlens_q.to(q_tensor.device)
+        cu_seqlens_k = fmha_params.cu_seqlens_k.to(q_tensor.device)
 
-        # prefix_lengths: default to zeros when no prefix (unified logic)
+        # Unpad K/V from [batch_size, num_kv_heads, max_seqlen_k, head_dim]
+        # to packed [total_kv_tokens, num_kv_heads, head_dim]
         batch_size = cu_seqlens_q.shape[0] - 1
-        if (
-            fmha_params.prefix_lengths is not None
-            and fmha_params.prefix_lengths.numel() > 0
-        ):
-            prefix_lengths_device = fmha_params.prefix_lengths.to(q_tensor.device)
-        else:
-            prefix_lengths_device = torch.zeros(
-                batch_size, dtype=torch.int32, device=q_tensor.device
+        kv_lengths = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).cpu()
+        key_packed_list = []
+        value_packed_list = []
+        for i in range(batch_size):
+            seq_len_i = kv_lengths[i].item()
+            key_packed_list.append(
+                k_padded[i, :, :seq_len_i, :].transpose(0, 1).contiguous()
             )
-
-        input_lengths = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        seqlen_k = (prefix_lengths_device + input_lengths).to(torch.int32)
-
-        softmax_scale = 1.0 / math.sqrt(self.head_dim)
-        kv_indptr = cu_seqlens_q
-        kv_page_indices = torch.empty(0, dtype=torch.int32, device=q_tensor.device)
-
-        res = aiter.mha_batch_prefill_func(
+            value_packed_list.append(
+                v_padded[i, :, :seq_len_i, :].transpose(0, 1).contiguous()
+            )
+        key_packed = torch.cat(key_packed_list, dim=0)
+        value_packed = torch.cat(value_packed_list, dim=0)
+        print("flash attn varlen func----------", flush=True)
+        res = aiter.flash_attn_varlen_func(
             q_tensor,
-            k_cache,
-            v_cache,
+            key_packed,
+            value_packed,
             cu_seqlens_q,
-            kv_indptr,
-            kv_page_indices,
+            cu_seqlens_k,
             fmha_params.max_seqlen_q,
             fmha_params.max_seqlen_k,
             dropout_p=0.0,
-            softmax_scale=softmax_scale,
             causal=self.is_causal,
-            window_size=(-1, 0),
-            block_table=block_table,
-            seqlen_k=seqlen_k,
         )
         return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
 
@@ -733,6 +733,18 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         # - FP8 KV cache use kv_cache.kv_scale_base directly.
         # - non-FP8 KV cache: pass a pre-allocated unit scale (1.0) as fallback.
         self.alloc_scale = attn_configs.kv_cache_dtype != KvCacheDataType.FP8
+        # Per-instance so TP ranks on different devices don't share a tensor
+        # pinned to the first caller's device.
+        self._default_scale: Optional[torch.Tensor] = None
+
+    def _get_default_scale(self, query: torch.Tensor) -> torch.Tensor:
+        if self._default_scale is None:
+            # paged_attention_rocm requires k_scale / v_scale in float32
+            # (matches K_QScale / V_QScale dtype from kv_scale_base).
+            self._default_scale = torch.tensor(
+                1.0, device=query.device, dtype=torch.float32
+            )
+        return self._default_scale
 
     def forward(
         self, query: torch.Tensor, kv_cache: Optional[LayerKVCache], fmha_params
@@ -761,7 +773,7 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         num_seqs, num_heads, head_size = query.shape
         block_size = value_cache.shape[2]
         output = self._get_output(query).view((num_seqs, num_heads, head_size))
-        if max_seq_len <= 16384 and (not using_fp8_kvcache):
+        if max_seq_len <= 16384 and (not using_fp8_kvcache) and head_size <= 128:
             _PARTITION_SIZE_ROCM = 512
             max_num_partitions = (
                 max_seq_len + _PARTITION_SIZE_ROCM - 1
@@ -829,12 +841,9 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
             max_logits = torch.ones_like(exp_sums)
 
             kv_cache_dtype = "auto"
-            k_scale = (
-                K_QScale if kv_cache and K_QScale is not None else fmha_params.kv_scale
-            )
-            v_scale = (
-                V_QScale if kv_cache and V_QScale is not None else fmha_params.kv_scale
-            )
+            default_scale = self._get_default_scale(query)
+            k_scale = K_QScale if kv_cache and K_QScale is not None else default_scale
+            v_scale = V_QScale if kv_cache and V_QScale is not None else default_scale
             aiter.paged_attention_rocm(
                 output,
                 exp_sums,

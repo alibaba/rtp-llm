@@ -87,6 +87,14 @@ def init_fmha_group_args(parser, fmha_config):
         help="Rocm是否使用AITER ASM Attention",
     )
     fmha_group.add_argument(
+        "--use_triton_pa",
+        env_name="USE_TRITON_PA",
+        bind_to=(fmha_config, "use_triton_pa"),
+        type=str2bool,
+        default=False,
+        help="Rocm decode阶段是否使用Triton PA",
+    )
+    fmha_group.add_argument(
         "--absorb_opt_len",
         env_name="RTP_LLM_ABSORB_OPT_LEN",
         bind_to=(fmha_config, "absorb_opt_len"),

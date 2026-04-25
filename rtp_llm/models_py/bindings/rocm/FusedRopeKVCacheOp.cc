@@ -163,9 +163,23 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     }
     // FP8 path: keep original behavior (store QKV linearly for flash_attn_varlen_fp8)
     // Non-FP8 path: paged layout only (Q packed-token, K/V in paged cache)
-    bool store_qkv   = use_fmha_fp8 ? !use_paged_fmha : false;
-    bool store_q     = true;
-    bool store_kv    = use_fmha_fp8 ? !use_paged_fmha : false;
+    bool store_qkv = use_fmha_fp8 ? !use_paged_fmha : false;
+    bool store_q   = true;
+    // K/V are fanned out to two destinations in the same kernel:
+    //   - padded k_output/v_output buffers consumed by flash_attn_varlen_func
+    //     in the same prefill call (this flag);
+    //   - paged kv_cache for subsequent decode (store_cache below).
+    //
+    // Why the double write (perf regression vs the old paged path):
+    // The previous default was store_kv = use_fmha_fp8 ? !use_paged_fmha : false,
+    // non-FP8: kept true. mha_batch_prefill_func on paged K/V is wrong at
+    // head_dim=256, so the prefill attn was switched to flash_attn_varlen_func
+    // + unpad, which consumes the padded k/v_output buffers (extra HBM write
+    // accepted as a correctness tradeoff; revisit if a paged kernel that
+    // supports head_dim=256 lands).
+    // FP8:     forced false. The FP8 branch returns qkv_buf_fp8 and never
+    // reads k_output/v_output, so writing them is pure wasted bandwidth.
+    bool store_kv    = !use_fmha_fp8;
     bool store_cache = kv_cache.has_value();
 
     // int8
@@ -184,8 +198,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
             torchDTypeToDataType(qkv.dtype()),
             invokeAddFusedQKVBiasTransposePrefill,
             q_output.data_ptr(),
-            use_fmha_fp8 ? k_output.data_ptr() : nullptr,
-            use_fmha_fp8 ? v_output.data_ptr() : nullptr,
+            k_output.data_ptr(),
+            v_output.data_ptr(),
             &prefix_prompt_param,
             qkv.data_ptr(),
             paged_fp8 ? q_fp8_buf.data_ptr() :
@@ -249,12 +263,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     if (use_fmha_fp8) {
         return std::make_tuple(qkv_buf_fp8, torch::Tensor(), torch::Tensor());
     }
-    // Non-FP8 paged path: return packed-token Q only (K/V in paged cache)
-    if (use_paged_fmha) {
-        return std::make_tuple(q_output, torch::Tensor(), torch::Tensor());
-    }
-
-    return std::make_tuple(q_output, torch::Tensor(), torch::Tensor());
+    // Non-FP8 path: return Q, K, V for flash_attn_varlen_func
+    return std::make_tuple(q_output, k_output, v_output);
 }
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
