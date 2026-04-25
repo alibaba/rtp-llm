@@ -15,6 +15,13 @@ __all__ = [
     "bf16_gemm_nt",
     "m_grouped_bf16_gemm_nt_contiguous",
     "m_grouped_bf16_gemm_nt_masked",
+    "fp8_fp4_gemm_nt",
+    "m_grouped_fp8_fp4_gemm_nt_contiguous",
+    "m_grouped_fp8_fp4_gemm_nt_masked",
+    "fp8_fp4_paged_mqa_logits",
+    "per_token_cast_to_fp4",
+    "cast_back_from_fp4",
+    "transpose_packed_fp4",
     "has_deep_gemm",
     "is_deep_gemm_e8m0_used",
     "configure_deep_gemm_num_sms",
@@ -28,6 +35,13 @@ _deep_gemm_impl_new_map = {
     "bf16_gemm_nt": "bf16_gemm_nt",
     "m_grouped_bf16_gemm_nt_contiguous": "m_grouped_bf16_gemm_nt_contiguous",
     "m_grouped_bf16_gemm_nt_masked": "m_grouped_bf16_gemm_nt_masked",
+    "fp8_fp4_gemm_nt": "fp8_fp4_gemm_nt",
+    "m_grouped_fp8_fp4_gemm_nt_contiguous": "m_grouped_fp8_fp4_gemm_nt_contiguous",
+    "m_grouped_fp8_fp4_gemm_nt_masked": "m_grouped_fp8_fp4_gemm_nt_masked",
+    "fp8_fp4_paged_mqa_logits": "fp8_fp4_paged_mqa_logits",
+    "per_token_cast_to_fp4": "per_token_cast_to_fp4",
+    "cast_back_from_fp4": "cast_back_from_fp4",
+    "transpose_packed_fp4": "transpose_packed_fp4",
 }
 
 _deep_gemm_impl_old_map = {
@@ -37,6 +51,13 @@ _deep_gemm_impl_old_map = {
     "bf16_gemm_nt": "bf16_gemm_nt",
     "m_grouped_bf16_gemm_nt_contiguous": "m_grouped_bf16_gemm_nt_contiguous",
     "m_grouped_bf16_gemm_nt_masked": "m_grouped_bf16_gemm_nt_masked",
+    "fp8_fp4_gemm_nt": "fp8_fp4_gemm_nt",
+    "m_grouped_fp8_fp4_gemm_nt_contiguous": "m_grouped_fp8_fp4_gemm_nt_contiguous",
+    "m_grouped_fp8_fp4_gemm_nt_masked": "m_grouped_fp8_fp4_gemm_nt_masked",
+    "fp8_fp4_paged_mqa_logits": "fp8_fp4_paged_mqa_logits",
+    "per_token_cast_to_fp4": "per_token_cast_to_fp4",
+    "cast_back_from_fp4": "cast_back_from_fp4",
+    "transpose_packed_fp4": "transpose_packed_fp4",
 }
 
 
@@ -46,6 +67,13 @@ _m_grouped_fp8_gemm_nt_masked_impl: Callable[..., Any] | None = None
 _bf16_gemm_nt_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
+_fp8_fp4_gemm_nt_impl: Callable[..., Any] | None = None
+_m_grouped_fp8_fp4_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
+_m_grouped_fp8_fp4_gemm_nt_masked_impl: Callable[..., Any] | None = None
+_fp8_fp4_paged_mqa_logits_impl: Callable[..., Any] | None = None
+_per_token_cast_to_fp4_impl: Callable[..., Any] | None = None
+_cast_back_from_fp4_impl: Callable[..., Any] | None = None
+_transpose_packed_fp4_impl: Callable[..., Any] | None = None
 
 
 @functools.cache
@@ -90,6 +118,8 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     """Import deep_gemm and resolve symbols on first use."""
     global _fp8_gemm_nt_impl, _m_grouped_fp8_gemm_nt_contiguous_impl, _m_grouped_fp8_gemm_nt_masked_impl
     global _bf16_gemm_nt_impl, _m_grouped_bf16_gemm_nt_contiguous_impl, _m_grouped_bf16_gemm_nt_masked_impl
+    global _fp8_fp4_gemm_nt_impl, _m_grouped_fp8_fp4_gemm_nt_contiguous_impl, _m_grouped_fp8_fp4_gemm_nt_masked_impl
+    global _fp8_fp4_paged_mqa_logits_impl, _per_token_cast_to_fp4_impl, _cast_back_from_fp4_impl, _transpose_packed_fp4_impl
 
     symbol_impls = [f"_{symbol}_impl" for symbol in symbols]
     # check if the symbols are valid
@@ -131,6 +161,13 @@ def _lazy_init_deep_gemm_once():
             "bf16_gemm_nt",
             "m_grouped_bf16_gemm_nt_contiguous",
             "m_grouped_bf16_gemm_nt_masked",
+            "fp8_fp4_gemm_nt",
+            "m_grouped_fp8_fp4_gemm_nt_contiguous",
+            "m_grouped_fp8_fp4_gemm_nt_masked",
+            "fp8_fp4_paged_mqa_logits",
+            "per_token_cast_to_fp4",
+            "cast_back_from_fp4",
+            "transpose_packed_fp4",
         ]
     )
 
@@ -590,3 +627,174 @@ def m_grouped_bf16_gemm_nt_masked(
         expected_m,
         compiled_dims,
     )
+
+
+# --- FP8 activation × FP4 weight (UE8M0 block-scale) ---
+#
+# DeepGEMM's fp8_fp4 family consumes packed-int8 FP4 weights (2 FP4/byte)
+# with UE8M0 block-32 scale along K, matching the DeepSeek-native FP4
+# recipe shipped by V3.2/V4 routed experts. Activation is FP8 e4m3fn with
+# per-token block-128 UE8M0 scale. SM100 only.
+
+
+def fp8_fp4_gemm_nt(
+    a: Tuple[torch.Tensor, torch.Tensor],
+    b: Tuple[torch.Tensor, torch.Tensor],
+    output: torch.Tensor,
+    c: Optional[torch.Tensor] = None,
+    recipe: Optional[Tuple[int, int, int]] = None,
+    recipe_a: Optional[Tuple[int, int]] = None,
+    recipe_b: Optional[Tuple[int, int]] = None,
+    compiled_dims: str = "nk",
+    disable_ue8m0_cast: Optional[bool] = None,
+) -> None:
+    """Dense FP8-act × packed-FP4-weight GEMM with UE8M0 block scales."""
+    global _fp8_fp4_gemm_nt_impl
+    if _fp8_fp4_gemm_nt_impl is None:
+        return _missing_deep_gemm()
+    _fp8_fp4_gemm_nt_impl(
+        a,
+        b,
+        output,
+        c,
+        recipe=recipe,
+        recipe_a=recipe_a,
+        recipe_b=recipe_b,
+        compiled_dims=compiled_dims,
+        disable_ue8m0_cast=(
+            disable_ue8m0_cast
+            if disable_ue8m0_cast is not None
+            else not is_deep_gemm_e8m0_used()
+        ),
+    )
+
+
+def m_grouped_fp8_fp4_gemm_nt_contiguous(
+    a: Tuple[torch.Tensor, torch.Tensor],
+    b: Tuple[torch.Tensor, torch.Tensor],
+    output: torch.Tensor,
+    grouped_layout: torch.Tensor,
+    recipe: Optional[Tuple[int, int, int]] = None,
+    recipe_a: Optional[Tuple[int, int]] = None,
+    recipe_b: Optional[Tuple[int, int]] = None,
+    compiled_dims: str = "nk",
+    disable_ue8m0_cast: Optional[bool] = None,
+    use_psum_layout: bool = False,
+    expected_m_for_psum: int = 0,
+) -> None:
+    """Grouped FP8×FP4 GEMM with contiguous per-expert token layout.
+
+    `grouped_layout` is a `[num_tokens]` int tensor: `grouped_layout[i]` is
+    the expert index owning token `i`. Tokens must already be permuted so
+    each expert's rows are contiguous.
+    """
+    global _m_grouped_fp8_fp4_gemm_nt_contiguous_impl
+    if _m_grouped_fp8_fp4_gemm_nt_contiguous_impl is None:
+        return _missing_deep_gemm()
+    _m_grouped_fp8_fp4_gemm_nt_contiguous_impl(
+        a,
+        b,
+        output,
+        grouped_layout,
+        recipe=recipe,
+        recipe_a=recipe_a,
+        recipe_b=recipe_b,
+        compiled_dims=compiled_dims,
+        disable_ue8m0_cast=(
+            disable_ue8m0_cast
+            if disable_ue8m0_cast is not None
+            else not is_deep_gemm_e8m0_used()
+        ),
+        use_psum_layout=use_psum_layout,
+        expected_m_for_psum=expected_m_for_psum,
+    )
+
+
+def m_grouped_fp8_fp4_gemm_nt_masked(
+    a: Tuple[torch.Tensor, torch.Tensor],
+    b: Tuple[torch.Tensor, torch.Tensor],
+    output: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
+    recipe: Optional[Tuple[int, int, int]] = None,
+    recipe_a: Optional[Tuple[int, int]] = None,
+    recipe_b: Optional[Tuple[int, int]] = None,
+    compiled_dims: str = "nk",
+    disable_ue8m0_cast: Optional[bool] = None,
+) -> None:
+    """Grouped FP8×FP4 GEMM with masked layout (data-dependent per-expert
+    token counts; avoids a D2H sync, suitable for decode)."""
+    global _m_grouped_fp8_fp4_gemm_nt_masked_impl
+    if _m_grouped_fp8_fp4_gemm_nt_masked_impl is None:
+        return _missing_deep_gemm()
+    _m_grouped_fp8_fp4_gemm_nt_masked_impl(
+        a,
+        b,
+        output,
+        masked_m,
+        expected_m,
+        recipe=recipe,
+        recipe_a=recipe_a,
+        recipe_b=recipe_b,
+        compiled_dims=compiled_dims,
+        disable_ue8m0_cast=(
+            disable_ue8m0_cast
+            if disable_ue8m0_cast is not None
+            else not is_deep_gemm_e8m0_used()
+        ),
+    )
+
+
+def fp8_fp4_paged_mqa_logits(
+    q: Tuple[torch.Tensor, Optional[torch.Tensor]],
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_table: torch.Tensor,
+    schedule_meta: torch.Tensor,
+    max_context_len: int,
+    clean_logits: bool = False,
+    logits_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """FP8-query × FP4-packed paged-KV MQA logits — same kernel V3.2 DSA
+    uses for the lightning indexer score step."""
+    global _fp8_fp4_paged_mqa_logits_impl
+    if _fp8_fp4_paged_mqa_logits_impl is None:
+        return _missing_deep_gemm()
+    return _fp8_fp4_paged_mqa_logits_impl(
+        q,
+        kv_cache,
+        weights,
+        context_lens,
+        block_table,
+        schedule_meta,
+        max_context_len,
+        clean_logits,
+        logits_dtype,
+    )
+
+
+def per_token_cast_to_fp4(*args: Any, **kwargs: Any) -> Any:
+    """DeepGEMM helper: cast BF16 activations to packed-FP4 + UE8M0 scale.
+    Thin passthrough — signature/kwargs owned by deep_gemm."""
+    global _per_token_cast_to_fp4_impl
+    if _per_token_cast_to_fp4_impl is None:
+        return _missing_deep_gemm()
+    return _per_token_cast_to_fp4_impl(*args, **kwargs)
+
+
+def cast_back_from_fp4(*args: Any, **kwargs: Any) -> Any:
+    """DeepGEMM helper: dequant packed-FP4 → BF16 (debug/inspection path)."""
+    global _cast_back_from_fp4_impl
+    if _cast_back_from_fp4_impl is None:
+        return _missing_deep_gemm()
+    return _cast_back_from_fp4_impl(*args, **kwargs)
+
+
+def transpose_packed_fp4(*args: Any, **kwargs: Any) -> Any:
+    """DeepGEMM helper: transpose a packed-FP4 weight in its int8 storage,
+    preserving nibble ordering."""
+    global _transpose_packed_fp4_impl
+    if _transpose_packed_fp4_impl is None:
+        return _missing_deep_gemm()
+    return _transpose_packed_fp4_impl(*args, **kwargs)
