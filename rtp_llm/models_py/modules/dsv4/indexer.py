@@ -7,7 +7,7 @@ Has its own dedicated Compressor (rotate=True in official code; we keep
 the parameter for ckpt-loader symmetry but don't apply Hadamard).
 """
 
-from typing import Optional
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -30,6 +30,8 @@ class Indexer(nn.Module):
         max_batch_size: int,
         max_seq_len: int,
         norm_eps: float = 1e-6,
+        weights: Optional[Dict[str, torch.Tensor]] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.dim = dim
@@ -40,9 +42,23 @@ class Indexer(nn.Module):
         self.q_lora_rank = q_lora_rank
         self.softmax_scale = self.head_dim ** -0.5
         self.compress_ratio = compress_ratio
+        self._factory_mode = weights is not None
 
-        self.wq_b = QuantizedLinear(q_lora_rank, index_n_heads * index_head_dim, storage="fp8")
-        self.weights_proj = nn.Linear(dim, index_n_heads, bias=False)
+        if self._factory_mode:
+            from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear_from_dict
+            self.wq_b = _v4_fp8_linear_from_dict(
+                weights, f"{prefix}.wq_b.weight", f"{prefix}.wq_b.scale",
+            )
+            self.weights_proj = nn.Linear(dim, index_n_heads, bias=False)
+            # weights_proj stays in the ckpt dtype (BF16); the legacy path
+            # used `nn.Linear(...)` under `torch.set_default_dtype(bf16)`
+            # context in DeepSeekV4Model, so BF16 matches behavior.
+            self.weights_proj.weight = nn.Parameter(
+                weights[f"{prefix}.weights_proj.weight"], requires_grad=False,
+            )
+        else:
+            self.wq_b = QuantizedLinear(q_lora_rank, index_n_heads * index_head_dim, storage="fp8")
+            self.weights_proj = nn.Linear(dim, index_n_heads, bias=False)
 
         self.compressor = Compressor(
             dim=dim,
@@ -52,6 +68,8 @@ class Indexer(nn.Module):
             max_batch_size=max_batch_size,
             norm_eps=norm_eps,
             rotate=True,
+            weights=weights,
+            prefix=f"{prefix}.compressor" if self._factory_mode else "",
         )
         self.register_buffer(
             "kv_cache",
@@ -71,7 +89,13 @@ class Indexer(nn.Module):
             self.compressor.kv_cache = self.kv_cache
             self.compressor.freqs_cis = self.freqs_cis
 
-        q = self.wq_b(qr)
+        if self._factory_mode and qr.dim() > 2:
+            shape = qr.shape
+            q = self.wq_b(qr.reshape(-1, shape[-1])).view(
+                *shape[:-1], self.n_heads * self.head_dim,
+            )
+        else:
+            q = self.wq_b(qr)
         q = q.unflatten(-1, (self.n_heads, self.head_dim))
         apply_rotary_emb(q[..., -rd:], freqs_cis)
         # Skip rotate_activation + fp4_act_quant in this BF16 path
