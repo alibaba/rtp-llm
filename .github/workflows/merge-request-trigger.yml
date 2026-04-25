@@ -7,6 +7,7 @@ on:
 
 jobs:
   trigger-on-merge:
+    if: github.event.pull_request.merged == true
     runs-on: [self-hosted, Linux]
     defaults:
       run:
@@ -26,35 +27,27 @@ jobs:
 
       - name: Checkout repository (attempt 3)
         if: steps.checkout2.outcome == 'failure'
-        id: checkout3
         uses: actions/checkout@v4
 
-      - name: Make scripts executable
-        run: chmod +x trigger-merge.sh get-merge-result.sh
+      - name: Check Python
+        run: python3 --version
 
       - name: Trigger Aone Merge Task
-        id: trigger
         run: |
           echo "Triggering Aone merge for commit ${{ github.event.pull_request.head.sha }}"
-          echo "$GITHUB_REF"
-          PR_ID="${{ github.event.pull_request.number }}"
-          echo "PR ID is $PR_ID"
-          if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
-            ./trigger-merge.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.actor_id }}${{ github.actor }}@users.github.com" "${{ github.actor }}" "auto-merge: github commit ${{ github.event.pull_request.head.sha }}" "$PR_ID"
-          else
-            echo "Pull request was closed without merge."
-            exit 0
-          fi
-        env:
-          AONE_PROJECT_ID: "3512232" 
-          GITHUB_REPOSITORY: ${{ github.repository }}
+          python3 -m ci_gate trigger-merge \
+            "${{ github.event.pull_request.head.sha }}" \
+            "${{ secrets.CI_SECRET }}" \
+            --repository "${{ github.repository }}" \
+            --pr-id "${{ github.event.pull_request.number }}" \
+            --author-email "${{ github.actor_id }}${{ github.actor }}@users.github.com" \
+            --author-name "${{ github.actor }}" \
+            --merge-message "auto-merge: github commit ${{ github.event.pull_request.head.sha }}"
 
       - name: Get Merge Result
         run: |
           echo "Polling for merge result of commit ${{ github.event.pull_request.head.sha }}"
-          if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
-            ./get-merge-result.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.repository }}"
-          else
-            echo "Pull request was closed without merge."
-            exit 0
-          fi
+          python3 -m ci_gate wait-merge \
+            "${{ github.event.pull_request.head.sha }}" \
+            "${{ secrets.CI_SECRET }}" \
+            "${{ github.repository }}"

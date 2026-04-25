@@ -1,144 +1,167 @@
-# This is a basic workflow to help you get started with Actions
-
 name: CI Request Trigger
 
-# Controls when the workflow will run
 on:
-  # Trigger CI only after a PR review is submitted (approved)
   pull_request_review:
     types: [submitted]
     branches: ["main"]
-
-  # Allows you to run this workflow manually from the Actions tab
+  # synchronize fires on force-push / new commits. Fresh-review gate will
+  # reject it unless a reviewer has already approved the *new* HEAD SHA,
+  # which is the intended safety behavior: un-reviewed changes don't get CI.
+  # The main-push-scan workflow provides a catch-all for PRs that gain a
+  # fresh review before the next synchronize event.
+  pull_request:
+    types: [synchronize]
+    branches: ["main"]
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to trigger CI for"
+        required: true
+        type: string
+      head_sha:
+        description: "PR HEAD SHA to trigger CI for"
+        required: true
+        type: string
+      skip_review_check:
+        description: "Skip review qualification check (maintainer override)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  pull-requests: read
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: >-
+    ${{ github.workflow }}-${{
+      github.event_name == 'workflow_dispatch'
+        && inputs.pr_number
+        || github.event.pull_request.number
+    }}
   cancel-in-progress: true
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
   build:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request_review' &&
-       github.event.review.state == 'approved')
-    # The type of runner that the job will run on
+       (github.event.review.state == 'approved' ||
+        (github.event.review.user.login == 'LLLLKKKK' &&
+         github.event.review.state == 'commented'))) ||
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'synchronize')
     runs-on: [self-hosted, Linux]
-    # work on CI script dir
     defaults:
       run:
         working-directory: .github/scripts
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - name: Checkout repository (attempt 1)
         id: checkout1
         continue-on-error: true
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'main' }}
 
       - name: Checkout repository (attempt 2)
         if: steps.checkout1.outcome == 'failure'
         id: checkout2
         continue-on-error: true
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'main' }}
 
       - name: Checkout repository (attempt 3)
         if: steps.checkout2.outcome == 'failure'
-        id: checkout3
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'main' }}
 
-      # Runs trigger CI
-      - name: Make the script files executable
-        run: chmod +x pre-check-CI-result.sh trigger-CI.sh get-CI-result.sh get-branch-info.sh add-comment.sh check-merge-conflicts.sh
+      - name: Check Python
+        run: python3 --version
+
+      - name: Check review qualification
+        id: review-gate
+        run: |
+          python3 -m ci_gate resolve-context \
+            --github-token "${{ secrets.GITHUB_TOKEN }}" \
+            --event-name "${{ github.event_name }}" \
+            --repository "${{ github.repository }}" \
+            --input-pr-number "${{ inputs.pr_number }}" \
+            --input-head-sha "${{ inputs.head_sha }}" \
+            --input-skip-review "${{ inputs.skip_review_check }}" \
+            --event-head-sha "${{ github.event.pull_request.head.sha }}" \
+            --event-pr-number "${{ github.event.pull_request.number }}" \
+            --event-clone-url "${{ github.event.pull_request.head.repo.clone_url }}" \
+            --output-file "$GITHUB_OUTPUT"
 
       - name: Check merge conflicts
-        if: github.event_name == 'pull_request_review'
+        if: steps.review-gate.outputs.qualified == 'true'
         run: |
-          COMMIT_ID="${{ github.event.pull_request.head.sha }}"
-          PR_NUMBER="${{ github.event.pull_request.number }}"
-          ./check-merge-conflicts.sh "$PR_NUMBER" "$COMMIT_ID" "${{ github.repository }}"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          python3 -m ci_gate check-merge \
+            "${{ steps.review-gate.outputs.pr_number }}" \
+            "${{ steps.review-gate.outputs.head_sha }}" \
+            "${{ github.repository }}" \
+            --github-token "${{ secrets.GITHUB_TOKEN }}"
 
-      # Pre-check if CI already completed
       - name: Pre-check CI status
         id: pre-check
+        if: steps.review-gate.outputs.qualified == 'true'
         run: |
           echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
-          COMMIT_ID=$([ "${{ github.event_name }}" == "pull_request_review" ] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}")
-          echo "Pre-checking CI status for Commit ID: $COMMIT_ID"
-          
-          if ./pre-check-CI-result.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}" "${{ github.repository }}"; then
+          echo "Pre-checking CI status for Commit ID: ${{ steps.review-gate.outputs.head_sha }}"
+          if python3 -m ci_gate pre-check-status \
+            "${{ steps.review-gate.outputs.head_sha }}" \
+            "${{ secrets.CI_SECRET }}" \
+            "${{ github.repository }}" \
+            --max-attempts 6 \
+            --sleep-interval 20; then
             echo "skip_ci=true" >> $GITHUB_OUTPUT
-            echo "CI already completed, will skip trigger"
+            echo "CI already completed or running, will skip trigger"
           else
             echo "skip_ci=false" >> $GITHUB_OUTPUT
             echo "CI not completed, will trigger new CI"
           fi
-      - name: trigger a CI
-        if: steps.pre-check.outputs.skip_ci != 'true'
+
+      - name: Trigger CI
+        if: steps.review-gate.outputs.qualified == 'true' && steps.pre-check.outputs.skip_ci != 'true'
         run: |
           echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
-          COMMIT_ID=$([ "${{ github.event_name }}" == "pull_request_review" ] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}")
-          echo "Using Commit ID: $COMMIT_ID"
-          echo "$GITHUB_REF"
-          PR_ID=$(echo "$GITHUB_REF" | sed 's@refs/pull/\([0-9]\+\)/.*@\1@')
-          echo "PR ID is $PR_ID"
-          ./trigger-CI.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}" "${{ github.event.pull_request.head.repo.clone_url }}" "$PR_ID" "${{ github.run_id }}"
-          sleep 150
+          echo "Using Commit ID: ${{ steps.review-gate.outputs.head_sha }}"
+          python3 -m ci_gate trigger-ci \
+            "${{ steps.review-gate.outputs.head_sha }}" \
+            "${{ secrets.CI_SECRET }}" \
+            "${{ steps.review-gate.outputs.clone_url }}" \
+            "${{ steps.review-gate.outputs.pr_number }}" \
+            "${{ github.run_id }}" \
+            --repository "${{ github.repository }}"
+          sleep 30
+
       - name: Add comment via REST API
+        if: steps.review-gate.outputs.qualified == 'true' && steps.review-gate.outputs.pr_number != '' && steps.pre-check.outputs.skip_ci != 'true'
         continue-on-error: true
         run: |
           echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
-          PR_ID=${{ github.event.pull_request.number }}
-          BRANCH_NAME="open_merge/${PR_ID}"
-          REPOSITORY="${{ github.repository }}"
-          COMMENT="internal source has been updated, please review the changes!"
-          SOURCE="RTP"
-          MAIN_BRANCH="main-internal"
-          COMMIT_ID=$([ "${{ github.event_name }}" == "pull_request_review" ] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}")
-          echo "BRANCH_NAME is $BRANCH_NAME"
+          python3 -m ci_gate sync-comment \
+            "${{ steps.review-gate.outputs.pr_number }}" \
+            "${{ github.repository }}" \
+            "${{ steps.review-gate.outputs.head_sha }}" \
+            "${{ secrets.CI_SECRET }}" \
+            --comment "internal source has been updated, please review the changes!" \
+            --source "RTP" \
+            --main-branch "main-internal" \
+            --max-retries 5 \
+            --retry-interval 5
 
-          BRANCH_INFO=$(./get-branch-info.sh "${BRANCH_NAME}" "${REPOSITORY}" "${COMMIT_ID}")
-          if [ $? -ne 0 ]; then
-              echo "Error: Failed to query branch info for ${BRANCH_NAME}"
-              exit 0
-          fi
-
-          echo "get branch info : $BRANCH_INFO"
-          CURRENT_INTERNAL_COMMITID=$(echo "$BRANCH_INFO" | jq -r '.commit.id')
-          if [ -z "$CURRENT_INTERNAL_COMMITID" ] || [ "$CURRENT_INTERNAL_COMMITID" = "null" ]; then
-              echo "Error: Failed to extract commit ID from branch info"
-              exit 0
-          fi
-          echo "Current internal commit ID: $CURRENT_INTERNAL_COMMITID"
-
-          MAIN_BRANCH_INFO=$(./get-branch-info.sh "$MAIN_BRANCH" "${REPOSITORY}" "${COMMIT_ID}")
-          if [ $? -ne 0 ]; then
-              echo "Error: Failed to query branch info for ${MAIN_BRANCH}"
-              exit 0
-          fi
-
-          MAIN_INTERNAL_COMMITID=$(echo "$MAIN_BRANCH_INFO" | jq -r '.commit.id')
-          if [ -z "$MAIN_INTERNAL_COMMITID" ] || [ "$MAIN_INTERNAL_COMMITID" = "null" ]; then
-              echo "Error: Failed to extract commit ID from main branch info"
-              exit 0
-          fi
-          echo "Main internal commit ID: $MAIN_INTERNAL_COMMITID"
-
-          if [ "${CURRENT_INTERNAL_COMMITID}" != "${MAIN_INTERNAL_COMMITID}" ]; then
-              echo "Commit IDs differ, adding comment..."
-              ./add-comment.sh "$BRANCH_NAME" "$PR_ID" "$REPOSITORY" "$COMMENT" "$SOURCE" "$MAIN_BRANCH" "$COMMIT_ID"
-          else
-              echo "Commit IDs are the same, no comment needed"
-          fi
-      # Runs get CI result
       - name: Get CI result
-        if: steps.pre-check.outputs.skip_ci != 'true'
+        if: steps.review-gate.outputs.qualified == 'true' && steps.pre-check.outputs.skip_ci != 'true'
         run: |
           echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
-          COMMIT_ID=$([ "${{ github.event_name }}" == "pull_request_review" ] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}")
-          echo "Using Commit ID: $COMMIT_ID"
-          ./get-CI-result.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}" "${{ github.repository }}"
+          echo "Using Commit ID: ${{ steps.review-gate.outputs.head_sha }}"
+          python3 -m ci_gate wait-status \
+            "${{ steps.review-gate.outputs.head_sha }}" \
+            "${{ secrets.CI_SECRET }}" \
+            "${{ github.repository }}" \
+            --max-wait-time 28800 \
+            --max-wait-pending-time 21600 \
+            --max-wait-running-time 7200
