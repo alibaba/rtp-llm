@@ -29,35 +29,11 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-class _AttnInputsWrapper:
-    """Thin wrapper to override readonly pybind11 attributes for testing."""
-
-    def __init__(self, wrapped, overrides: dict):
-        object.__setattr__(self, "_wrapped", wrapped)
-        object.__setattr__(self, "_overrides", overrides)
-
-    def __getattr__(self, name):
-        overrides = object.__getattribute__(self, "_overrides")
-        if name in overrides:
-            return overrides[name]
-        return getattr(object.__getattribute__(self, "_wrapped"), name)
-
-    def __setattr__(self, name, value):
-        try:
-            setattr(object.__getattribute__(self, "_wrapped"), name, value)
-        except AttributeError:
-            object.__getattribute__(self, "_overrides")[name] = value
-
-
 def _add_device_tensors(inputs, device: torch.device):
-    """Wrap PyAttentionInputs with device tensors that C++ normally creates."""
-    return _AttnInputsWrapper(
-        inputs,
-        {
-            "prefix_lengths_d": inputs.prefix_lengths.to(device),
-            "input_lengths_d": inputs.input_lengths.to(device),
-        },
-    )
+    """Move length tensors to the device, matching C++ PyAttentionInputs."""
+    inputs.prefix_lengths = inputs.prefix_lengths.to(device)
+    inputs.input_lengths = inputs.input_lengths.to(device)
+    return inputs
 
 
 class TestCPLinearAttnIndexMath(unittest.TestCase):

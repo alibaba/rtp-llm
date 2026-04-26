@@ -21,6 +21,9 @@ cc_library(
 
 cc_library(
     name = "cache_types",
+    srcs = [
+        "Types.cc",
+    ],
     hdrs = [
         "BufferTypes.h",
         "CacheConfig.h",
@@ -41,6 +44,7 @@ cc_library(
         ":batch_kv_cache_resource",
         ":cache_group_type",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/models_py/bindings/core:types",
     ] + torch_deps(),

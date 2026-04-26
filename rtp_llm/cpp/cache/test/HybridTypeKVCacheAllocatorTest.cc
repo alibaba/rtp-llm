@@ -269,7 +269,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReu
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/12, /*seq_size_per_block=*/4);
     token_ids->setReserveStep(2);
 
-    // Reuse disabled: linear group keeps only tail for common blocks; reserve_step contributes extra blocks.
+    // Reuse disabled: linear group keeps tail and tail-1 for common blocks; reserve_step contributes extra blocks.
     // full group contributes common=3, extra=1.
     {
         auto       batch_res = makeBatchResource(/*batch_size=*/2,
@@ -280,13 +280,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReu
         MallocInfo info{batch_res, token_ids};
         info.enable_device_cache = false;
         info.reuse_cache         = false;
-        // common_total = full(3) + linear(1) = 4
+        // common_total = full(3) + linear(2) = 5
         // extra_total  = full(1) + linear(reserve_step-1=1) = 2
-        // total = 4 + 2*2 = 8
-        EXPECT_EQ(allocator->getNeedBlocks(info), 8);
+        // total = 5 + 2*2 = 9
+        EXPECT_EQ(allocator->getNeedBlocks(info), 9);
     }
 
-    // Reuse enabled but no existing blocks: linear group uses sparse counting from begin=0.
+    // Reuse enabled but no existing blocks: linear group keeps step hits plus tail/tail-1.
     {
         auto       batch_res = makeBatchResource(/*batch_size=*/2,
                                            /*group_nums=*/2,
@@ -297,7 +297,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReu
         info.enable_device_cache = true;
         info.reuse_cache         = true;
         // full: common=3 extra=1
-        // linear: common=count(0,3]=2, extra=reserve_step-1(=1)
+        // linear: common=2, extra=reserve_step-1(=1)
         // common_total = 3 + 2 = 5
         // extra_total  = 1 + 1 = 2
         // total = 5 + 2*2 = 9
@@ -359,7 +359,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     EXPECT_FALSE(isNullBlockIdx(linear_out[2]));  // allocated tail for common length
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMalloc) {
+TEST_F(HybridTypeKVCacheAllocatorTest, DisableReuseKeepsLinearTailAndTailMinusOneOnInitMalloc) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -379,15 +379,15 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMall
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
-    // Linear group should keep only the tail block across common length slots.
+    // Linear group should keep tail and tail-1 across common length slots.
     const auto& linear_out = batch_res->blocks(0, /*group_id=*/0);
     ASSERT_EQ(linear_out.size(), 3u);
     EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
-    EXPECT_TRUE(isNullBlockIdx(linear_out[1]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[1]));
     EXPECT_FALSE(isNullBlockIdx(linear_out[2]));
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAllocatesOnlyLinearTail) {
+TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAllocatesLinearTailAndTailMinusOne) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -435,13 +435,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAlloc
     EXPECT_NE(full_out[1], full_blocks[1]);
     EXPECT_NE(full_out[2], full_blocks[2]);
 
-    // Linear group keeps only tail block (others NULL) when reuse is disabled.
+    // Linear group keeps tail and tail-1 when reuse is disabled.
     const auto& linear_out = batch_res->blocks(0, gid_linear);
     ASSERT_EQ(linear_out.size(), 3u);
     EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
-    EXPECT_TRUE(isNullBlockIdx(linear_out[1]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[1]));
     EXPECT_FALSE(isNullBlockIdx(linear_out[2]));
-    EXPECT_EQ(countValidBlocks(linear_out), 1u);
+    EXPECT_EQ(countValidBlocks(linear_out), 2u);
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedValidBlocksAcrossGroups) {
@@ -521,9 +521,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     EXPECT_TRUE(block_cache->contains(101, gid_full));
     EXPECT_FALSE(block_cache->contains(102, gid_full));
 
-    // Linear group has NULL in early slots when reuse disabled, thus should not insert these full blocks.
+    // Linear group has NULL in pos 0, but pos 1 is materialized as tail-1 and is a full block.
     EXPECT_FALSE(block_cache->contains(100, gid_linear));
-    EXPECT_FALSE(block_cache->contains(101, gid_linear));
+    EXPECT_TRUE(block_cache->contains(101, gid_linear));
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {
@@ -557,7 +557,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
                                        /*layer_num=*/static_cast<int>(config.layer_all_num),
                                        /*layer_to_group_id=*/config.layer_to_group_id,
                                        CacheKeysType{100, 101, 102});
-    // Disable device cache reuse (makes linear group allocate only tail for new slots).
+    // Disable device cache reuse (linear group still materializes tail and tail-1).
 
     // Initial small allocation: seq_len=4 => 1 slot per group.
     auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);

@@ -188,7 +188,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             query_start_loc=cu_seqlen_without_padding,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            prefix_lengths=attn_inputs.prefix_lengths_d,
+            prefix_lengths=attn_inputs.prefix_lengths,
             metadata=metadata,
         ).transpose(0, 1)
         return out
@@ -227,7 +227,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
                 dtype=self.ssm_state_dtype,
             )
             load_initial_state_from_block_map(
-                attn_inputs.prefix_lengths_d,
+                attn_inputs.prefix_lengths,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 initial_states,
@@ -288,7 +288,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             store_ssm_state_to_block_map(
                 h_for_store,
                 final_state,
-                attn_inputs.prefix_lengths_d,
+                attn_inputs.prefix_lengths,
                 cu_seqlens_without_padding,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
