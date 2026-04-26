@@ -1,56 +1,11 @@
 #include "rtp_llm/cpp/cache/DSV4ConfigCreator.h"
 
-#include <algorithm>
-
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
-
-namespace {
-
-KVCacheAttnType toKVCacheAttnType(DSV4CacheType type) {
-    switch (type) {
-        case DSV4CacheType::CSA_KV:
-            return KVCacheAttnType::CSA_KV;
-        case DSV4CacheType::HCA_KV:
-            return KVCacheAttnType::HCA_KV;
-        case DSV4CacheType::INDEXER_KV:
-            return KVCacheAttnType::INDEXER_KV;
-        case DSV4CacheType::INDEXER_STATE:
-            return KVCacheAttnType::INDEXER_STATE;
-        case DSV4CacheType::CSA_STATE:
-            return KVCacheAttnType::CSA_STATE;
-        case DSV4CacheType::HCA_STATE:
-            return KVCacheAttnType::HCA_STATE;
-        case DSV4CacheType::SWA_KV:
-            return KVCacheAttnType::SWA_KV;
-    }
-    return KVCacheAttnType::DEFAULT;
-}
-
-void setLayerAttnMapping(CacheConfig& config, int layer_id, KVCacheAttnType attn_type, int group_id) {
-    const size_t layer = static_cast<size_t>(layer_id);
-    const size_t attn  = static_cast<size_t>(attn_type);
-    RTP_LLM_CHECK_WITH_INFO(layer < config.layer_attn_to_group_id.size(),
-                            "layer %zu out of layer_attn_to_group_id range %zu",
-                            layer,
-                            config.layer_attn_to_group_id.size());
-    RTP_LLM_CHECK_WITH_INFO(attn < config.layer_attn_to_group_id[layer].size(),
-                            "attn %zu out of layer_attn_to_group_id[%zu] range %zu",
-                            attn,
-                            layer,
-                            config.layer_attn_to_group_id[layer].size());
-    config.layer_attn_to_group_id[layer][attn] = group_id;
-    auto& groups = config.layer_to_group_ids[layer];
-    if (std::find(groups.begin(), groups.end(), group_id) == groups.end()) {
-        groups.push_back(group_id);
-    }
-}
-
-}  // namespace
 
 void DSV4ConfigCreator::classifyLayers(const std::vector<int>& compress_ratios, DSV4CacheConfig& dsv4_config) {
     size_t num_layers = compress_ratios.size();
@@ -89,37 +44,41 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
     uint32_t num_hca = dsv4_config.num_hca_layers();
     uint32_t num_all = dsv4_config.num_all_layers();
 
-    // Pool 0: CSA KV
+    // All groups use TOKENS_PER_BLOCK = 256
+    // Pool 0/1/2: variable num_blocks (large), entries_per_block = 256/ratio
+    // Pool 3/4/5/6: fixed 2 blocks per request
+
+    // Pool 0: CSA KV (ratio=4, 64 entries per block)
     dsv4_config.pool_specs[0] = {
         DSV4CacheType::CSA_KV,
         num_csa,
         DSV4CacheConfig::KV_ENTRY_BYTES,
-        DSV4CacheConfig::VARIABLE_TOKENS_PER_BLOCK / 4,
+        DSV4CacheConfig::TOKENS_PER_BLOCK / 4,
         DataType::TYPE_UINT8,
         true,
         0,
     };
-    // Pool 1: HCA KV
+    // Pool 1: HCA KV (ratio=128, 2 entries per block)
     dsv4_config.pool_specs[1] = {
         DSV4CacheType::HCA_KV,
         num_hca,
         DSV4CacheConfig::KV_ENTRY_BYTES,
-        DSV4CacheConfig::VARIABLE_TOKENS_PER_BLOCK / 128,
+        DSV4CacheConfig::TOKENS_PER_BLOCK / 128,
         DataType::TYPE_UINT8,
         true,
         0,
     };
-    // Pool 2: Indexer KV
+    // Pool 2: Indexer KV (ratio=4, 64 entries per block)
     dsv4_config.pool_specs[2] = {
         DSV4CacheType::INDEXER_KV,
         num_csa,
         DSV4CacheConfig::INDEXER_ENTRY_BYTES,
-        DSV4CacheConfig::VARIABLE_TOKENS_PER_BLOCK / 4,
+        DSV4CacheConfig::TOKENS_PER_BLOCK / 4,
         DataType::TYPE_UINT8,
         true,
         0,
     };
-    // Pool 3: Indexer State
+    // Pool 3: Indexer State — fixed 2 blocks per request
     uint32_t idx_coff         = 2;
     uint32_t idx_state_dim    = idx_coff * idx_head_dim;
     dsv4_config.pool_specs[3] = {
@@ -131,7 +90,7 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
         false,
         2,
     };
-    // Pool 4: CSA State
+    // Pool 4: CSA State — fixed 2 blocks per request
     uint32_t csa_coff         = 2;
     uint32_t csa_state_dim    = csa_coff * head_dim;
     dsv4_config.pool_specs[4] = {
@@ -143,7 +102,7 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
         false,
         2,
     };
-    // Pool 5: HCA State
+    // Pool 5: HCA State — fixed 2 blocks per request
     uint32_t hca_state_dim    = head_dim;
     dsv4_config.pool_specs[5] = {
         DSV4CacheType::HCA_STATE,
@@ -152,17 +111,17 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
         8,
         DataType::TYPE_FP32,
         false,
-        16,
+        2,
     };
-    // Pool 6: SWA KV
+    // Pool 6: SWA KV — 256 tokens/block (same as other groups), fixed 2 blocks per request
     dsv4_config.pool_specs[6] = {
         DSV4CacheType::SWA_KV,
         num_all,
         DSV4CacheConfig::KV_ENTRY_BYTES,
-        DSV4CacheConfig::SWA_TOKENS_PER_BLOCK,
+        DSV4CacheConfig::TOKENS_PER_BLOCK,
         DataType::TYPE_UINT8,
-        true,
-        0,
+        false,
+        2,
     };
 }
 
@@ -178,8 +137,8 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
     config.dtype                     = dtype;
     config.use_mla                   = false;
     config.is_sparse                 = true;
-    config.seq_size_per_block        = DSV4CacheConfig::VARIABLE_TOKENS_PER_BLOCK;
-    config.kernel_seq_size_per_block = DSV4CacheConfig::VARIABLE_TOKENS_PER_BLOCK;
+    config.seq_size_per_block        = DSV4CacheConfig::TOKENS_PER_BLOCK;
+    config.kernel_seq_size_per_block = DSV4CacheConfig::TOKENS_PER_BLOCK;
 
     // 7 groups, each with its own DSV4KVCacheSpec
     // Layer assignments per group:
@@ -205,32 +164,21 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
     config.cache_specs.clear();
     config.group_types.clear();
 
-    // Keep the max stride only as a legacy fallback; independent pools use per-group strides.
+    // Find max block_size_bytes across all specs for uniform physical stride
     size_t max_block_stride = 0;
     for (int i = 0; i < DSV4_NUM_POOLS; i++) {
         KVCacheSpecPtr spec;
         const auto&    pool = dsv4_config.pool_specs[i];
-        const uint32_t group_seq_size = DSV4CacheConfig::VARIABLE_TOKENS_PER_BLOCK;
         if (pool.is_paged) {
-            spec = std::make_shared<DSV4KVSpec>(pool, group_seq_size);
+            spec = std::make_shared<DSV4KVSpec>(pool, static_cast<uint32_t>(DSV4CacheConfig::TOKENS_PER_BLOCK));
         } else {
-            spec = std::make_shared<DSV4StateSpec>(pool, group_seq_size);
+            spec = std::make_shared<DSV4StateSpec>(pool, static_cast<uint32_t>(DSV4CacheConfig::TOKENS_PER_BLOCK));
         }
         config.cache_specs.push_back(spec);
         config.global_layer_ids.push_back(*group_layers[i]);
         config.layer_ids.push_back(*group_layers[i]);
-        config.group_attn_types.push_back(toKVCacheAttnType(pool.type));
-        config.group_seq_size_per_block.push_back(group_seq_size);
-        config.group_kv_block_stride_bytes.push_back(spec->block_size_bytes());
-        config.group_kv_scale_stride_bytes.push_back(0);
-        config.group_block_size_bytes.push_back(static_cast<size_t>(pool.layer_num) * spec->block_size_bytes());
-        config.group_block_nums.push_back(0);
-        if (pool.type == DSV4CacheType::CSA_KV || pool.type == DSV4CacheType::HCA_KV
-            || pool.type == DSV4CacheType::INDEXER_KV) {
-            config.group_types.push_back(CacheGroupType::FULL);
-        } else {
-            config.group_types.push_back(CacheGroupType::LINEAR);
-        }
+        // All 7 groups participate in reuse cache
+        config.group_types.push_back(CacheGroupType::FULL);
         max_block_stride = std::max(max_block_stride, spec->block_size_bytes());
     }
 
@@ -241,43 +189,20 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
         max_group_layers = std::max(max_group_layers, dsv4_config.pool_specs[i].layer_num);
     }
     config.group_layer_num  = static_cast<int>(max_group_layers);
-    config.full_group_num   = 3;
-    config.linear_group_num = 4;
-    config.use_independent_block_pools = true;
+    config.full_group_num   = DSV4_NUM_POOLS;
+    config.linear_group_num = 0;
 
-    config.kv_block_stride_bytes = config.group_kv_block_stride_bytes.empty() ? max_block_stride :
-                                                                            config.group_kv_block_stride_bytes[0];
-    config.kv_block_size_bytes   = config.group_block_size_bytes.empty() ? 0 : config.group_block_size_bytes[0];
+    // Physical sizes: use max stride so all groups fit in uniform blocks
+    config.kv_block_stride_bytes = max_block_stride;
+    config.kv_block_size_bytes   = static_cast<size_t>(max_group_layers) * max_block_stride;
     config.kv_scale_stride_bytes = 0;
     config.kv_scale_size_bytes   = 0;
-    config.block_size_bytes      = 0;
-    for (int i = 0; i < DSV4_NUM_POOLS; ++i) {
-        config.block_size_bytes += config.group_block_size_bytes[static_cast<size_t>(i)];
-    }
+    config.block_size_bytes      = config.kv_block_size_bytes;
 
     // Per-layer group mapping
     config.layer_to_group_id.assign(num_layers, 6);  // default to SWA group
     config.layer_attn_types.assign(num_layers, CacheGroupType::FULL);
-    config.layer_to_group_ids.assign(num_layers, {});
-    config.layer_attn_to_group_id.assign(
-        num_layers, std::vector<int>(static_cast<size_t>(KVCacheAttnType::TYPE_COUNT), -1));
-    config.layer_to_block_stride_bytes.assign(num_layers, static_cast<int>(config.group_block_size_bytes[6]));
-
-    for (int layer_id : dsv4_config.csa_layer_ids) {
-        setLayerAttnMapping(config, layer_id, KVCacheAttnType::CSA_KV, 0);
-        setLayerAttnMapping(config, layer_id, KVCacheAttnType::INDEXER_KV, 2);
-        setLayerAttnMapping(config, layer_id, KVCacheAttnType::INDEXER_STATE, 3);
-        setLayerAttnMapping(config, layer_id, KVCacheAttnType::CSA_STATE, 4);
-        setLayerAttnMapping(config, layer_id, KVCacheAttnType::SWA_KV, 6);
-    }
-    for (int layer_id : dsv4_config.hca_layer_ids) {
-        setLayerAttnMapping(config, layer_id, KVCacheAttnType::HCA_KV, 1);
-        setLayerAttnMapping(config, layer_id, KVCacheAttnType::HCA_STATE, 5);
-        setLayerAttnMapping(config, layer_id, KVCacheAttnType::SWA_KV, 6);
-    }
-    for (int layer_id : dsv4_config.swa_only_layer_ids) {
-        setLayerAttnMapping(config, layer_id, KVCacheAttnType::SWA_KV, 6);
-    }
+    config.layer_to_block_stride_bytes.assign(num_layers, static_cast<int>(max_block_stride));
 }
 
 DSV4CacheConfig DSV4ConfigCreator::buildDSV4Config(const ModelConfig& model_config) {
