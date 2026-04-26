@@ -11,13 +11,37 @@ from rtp_llm.bailian.bailian_grpc_real_infer import (
 from rtp_llm.bailian.bailian_grpc_request import parse_bailian_grpc_request
 from rtp_llm.bailian.bailian_grpc_response_fake import iter_fake_model_stream_infer
 from rtp_llm.bailian.proto import predict_v2_pb2, predict_v2_pb2_grpc
+from rtp_llm.frontend.request_id_generator import generate_request_id
+from rtp_llm.utils.util import AtomicCounter
 
 
 class BailianGrpcInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
-    """ModelStreamInfer: fake mode (mock) or real mode (backend_visitor.enqueue)."""
+    """ModelStreamInfer: fake mode (mock) or real mode (backend_visitor.enqueue).
 
-    def __init__(self, backend_visitor=None):
+    ``ip`` / ``port`` / ``server_id`` are used to derive the snowflake-style
+    ``GenerateInput.request_id`` via ``generate_request_id`` — same scheme as the HTTP path
+    in ``FrontendServer`` so the backend sees a single request_id generation policy.
+    ``port`` should be the bailian gRPC listening port. The per-servicer sequence counter
+    is intentionally independent of ``FrontendServer._global_controller``.
+    """
+
+    def __init__(
+        self,
+        backend_visitor=None,
+        *,
+        ip: str = "",
+        port: int = 0,
+        server_id: str = "",
+    ):
         self._backend_visitor = backend_visitor
+        self._ip = ip
+        self._port = port
+        self._server_id = server_id
+        self._seq_counter = AtomicCounter()
+
+    def _next_rtp_llm_request_id(self) -> int:
+        sequence = self._seq_counter.increment() % 4096  # 12 bits
+        return generate_request_id(self._ip, self._port, self._server_id, sequence)
 
     def ModelStreamInfer(self, request_iterator, context):
         for request in request_iterator:
@@ -44,5 +68,6 @@ class BailianGrpcInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServi
                     sampling,
                     other,
                     self._backend_visitor,
+                    rtp_llm_request_id=self._next_rtp_llm_request_id(),
                     run_enqueue_sync=_iter_enqueue_sync,
                 )

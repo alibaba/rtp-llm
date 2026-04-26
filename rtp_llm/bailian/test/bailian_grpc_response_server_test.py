@@ -11,7 +11,6 @@ import torch
 from rtp_llm.bailian import bailian_grpc_server as bgs
 from rtp_llm.bailian import bailian_grpc_service as bg_svc
 from rtp_llm.bailian.bailian_grpc_real_infer import (
-    _derive_rtp_llm_request_id,
     iter_real_model_stream_infer,
     stream_log_tag,
 )
@@ -177,13 +176,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         self.assertEqual(list(infer.outputs[0].shape), [1, 0])
 
 
-class DeriveRequestIdAndTagTest(TestCase):
-    def test_derive_stable(self) -> None:
-        a = _derive_rtp_llm_request_id("same")
-        b = _derive_rtp_llm_request_id("same")
-        self.assertEqual(a, b)
-        self.assertNotEqual(_derive_rtp_llm_request_id("other"), a)
-
+class StreamLogTagTest(TestCase):
     def test_stream_log_tag_format(self) -> None:
         self.assertEqual(
             stream_log_tag(request_id_numeric=-1, trace_id="tid"),
@@ -219,6 +212,7 @@ class IterRealModelStreamInferTest(TestCase):
                 sampling,
                 other,
                 MagicMock(),
+                rtp_llm_request_id=1,
                 run_enqueue_sync=fake_sync,
             )
         )
@@ -245,6 +239,7 @@ class IterRealModelStreamInferTest(TestCase):
                 SamplingParams(),
                 OtherParams(),
                 MagicMock(),
+                rtp_llm_request_id=1,
                 run_enqueue_sync=empty_sync,
             )
         )
@@ -264,6 +259,7 @@ class IterRealModelStreamInferTest(TestCase):
                 SamplingParams(),
                 OtherParams(),
                 MagicMock(),
+                rtp_llm_request_id=1,
                 run_enqueue_sync=boom,
             )
         )
@@ -322,6 +318,32 @@ class BailianGrpcInferenceServicerTest(TestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [9])
+
+    def test_real_mode_request_id_matches_generate_request_id(self) -> None:
+        """Backend ``GenerateInput.request_id`` follows the same snowflake scheme as HTTP path."""
+        from rtp_llm.frontend import request_id_generator as rig
+
+        captured: list[int] = []
+
+        def _capture(_visitor, gi):
+            captured.append(gi.request_id)
+            return []
+
+        servicer = bg_svc.BailianGrpcInferenceServicer(
+            backend_visitor=MagicMock(),
+            ip="10.0.0.1",
+            port=12345,
+            server_id="srv-xyz",
+        )
+        # Pin time so the servicer-side and expected-side generate_request_id share the same timestamp bits.
+        with patch.object(rig.time, "time", return_value=1_700_000_000.0), patch.object(
+            bg_svc, "_iter_enqueue_sync", side_effect=_capture
+        ):
+            list(servicer.ModelStreamInfer(iter([self._valid_infer_request()]), MagicMock()))
+            expected = rig.generate_request_id("10.0.0.1", 12345, "srv-xyz", 1)
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0], expected)
 
 
 if __name__ == "__main__":
