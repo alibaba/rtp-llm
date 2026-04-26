@@ -226,7 +226,7 @@ std::string MoeConfig::to_string() const {
 // ModelSpecificConfig
 std::string ModelSpecificConfig::to_string() const {
     std::ostringstream oss;
-    // Empty struct — no fields remaining.
+    oss << "load_python_model: " << load_python_model;
     return oss.str();
 }
 
