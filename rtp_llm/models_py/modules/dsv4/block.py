@@ -54,6 +54,7 @@ def _use_tk_mhc(residual: torch.Tensor, hc_mult: int) -> bool:
 
 class _RMSNorm(nn.Module):
     """Standalone RMSNorm with FP32 weight, matches `inference/model.py:RMSNorm`."""
+
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
@@ -121,26 +122,44 @@ class Block(nn.Module):
 
         self.attn = Attention(
             layer_id=layer_id,
-            dim=dim, n_heads=n_heads, q_lora_rank=q_lora_rank,
-            head_dim=head_dim, rope_head_dim=rope_head_dim,
-            o_lora_rank=o_lora_rank, o_groups=o_groups,
-            window_size=window_size, compress_ratio=compress_ratio,
-            compress_rope_theta=compress_rope_theta, rope_theta=rope_theta,
-            rope_factor=rope_factor, beta_fast=beta_fast, beta_slow=beta_slow,
+            dim=dim,
+            n_heads=n_heads,
+            q_lora_rank=q_lora_rank,
+            head_dim=head_dim,
+            rope_head_dim=rope_head_dim,
+            o_lora_rank=o_lora_rank,
+            o_groups=o_groups,
+            window_size=window_size,
+            compress_ratio=compress_ratio,
+            compress_rope_theta=compress_rope_theta,
+            rope_theta=rope_theta,
+            rope_factor=rope_factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
             original_seq_len=original_seq_len,
-            max_batch_size=max_batch_size, max_seq_len=max_seq_len,
-            index_n_heads=index_n_heads, index_head_dim=index_head_dim,
-            index_topk=index_topk, norm_eps=norm_eps,
+            max_batch_size=max_batch_size,
+            max_seq_len=max_seq_len,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
+            norm_eps=norm_eps,
             weights=weights,
             prefix=f"{prefix}.attn" if self._factory_mode else "",
-            tp_size=tp_size, tp_rank=tp_rank,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
         )
         self.ffn = MoE(
-            layer_id=layer_id, dim=dim, moe_inter_dim=moe_inter_dim,
-            n_routed_experts=n_routed_experts, n_activated_experts=n_activated_experts,
-            n_shared_experts=n_shared_experts, score_func=score_func,
-            route_scale=route_scale, swiglu_limit=swiglu_limit,
-            n_hash_layers=n_hash_layers, vocab_size=vocab_size,
+            layer_id=layer_id,
+            dim=dim,
+            moe_inter_dim=moe_inter_dim,
+            n_routed_experts=n_routed_experts,
+            n_activated_experts=n_activated_experts,
+            n_shared_experts=n_shared_experts,
+            score_func=score_func,
+            route_scale=route_scale,
+            swiglu_limit=swiglu_limit,
+            n_hash_layers=n_hash_layers,
+            vocab_size=vocab_size,
             weights=weights,
             prefix=f"{prefix}.ffn" if self._factory_mode else "",
             ep_size=ep_size, ep_rank=ep_rank,
@@ -150,25 +169,43 @@ class Block(nn.Module):
         self.ffn_norm = _RMSNorm(dim, norm_eps)
         if self._factory_mode:
             self.attn_norm.weight = nn.Parameter(
-                weights[f"{prefix}.attn_norm.weight"].float(), requires_grad=False,
+                weights[f"{prefix}.attn_norm.weight"].float(),
+                requires_grad=False,
             )
             self.ffn_norm.weight = nn.Parameter(
-                weights[f"{prefix}.ffn_norm.weight"].float(), requires_grad=False,
+                weights[f"{prefix}.ffn_norm.weight"].float(),
+                requires_grad=False,
             )
 
         mix_hc = (2 + hc_mult) * hc_mult
         hc_dim = hc_mult * dim
         if self._factory_mode:
-            self.hc_attn_fn = nn.Parameter(weights[f"{prefix}.hc_attn_fn"].float(), requires_grad=False)
-            self.hc_ffn_fn = nn.Parameter(weights[f"{prefix}.hc_ffn_fn"].float(), requires_grad=False)
-            self.hc_attn_base = nn.Parameter(weights[f"{prefix}.hc_attn_base"].float(), requires_grad=False)
-            self.hc_ffn_base = nn.Parameter(weights[f"{prefix}.hc_ffn_base"].float(), requires_grad=False)
-            self.hc_attn_scale = nn.Parameter(weights[f"{prefix}.hc_attn_scale"].float(), requires_grad=False)
-            self.hc_ffn_scale = nn.Parameter(weights[f"{prefix}.hc_ffn_scale"].float(), requires_grad=False)
+            self.hc_attn_fn = nn.Parameter(
+                weights[f"{prefix}.hc_attn_fn"].float(), requires_grad=False
+            )
+            self.hc_ffn_fn = nn.Parameter(
+                weights[f"{prefix}.hc_ffn_fn"].float(), requires_grad=False
+            )
+            self.hc_attn_base = nn.Parameter(
+                weights[f"{prefix}.hc_attn_base"].float(), requires_grad=False
+            )
+            self.hc_ffn_base = nn.Parameter(
+                weights[f"{prefix}.hc_ffn_base"].float(), requires_grad=False
+            )
+            self.hc_attn_scale = nn.Parameter(
+                weights[f"{prefix}.hc_attn_scale"].float(), requires_grad=False
+            )
+            self.hc_ffn_scale = nn.Parameter(
+                weights[f"{prefix}.hc_ffn_scale"].float(), requires_grad=False
+            )
         else:
             # Match official param naming for ckpt loading.
-            self.hc_attn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim, dtype=torch.float32))
-            self.hc_ffn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim, dtype=torch.float32))
+            self.hc_attn_fn = nn.Parameter(
+                torch.empty(mix_hc, hc_dim, dtype=torch.float32)
+            )
+            self.hc_ffn_fn = nn.Parameter(
+                torch.empty(mix_hc, hc_dim, dtype=torch.float32)
+            )
             self.hc_attn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
             self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
             self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
@@ -197,8 +234,12 @@ class Block(nn.Module):
         rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
         mixes = F.linear(x_flat, hc_fn) * rsqrt
         pre, post, comb = hc_split_sinkhorn(
-            mixes, hc_scale, hc_base,
-            hc_mult=self.hc_mult, sinkhorn_iters=self.hc_sinkhorn_iters, eps=self.hc_eps,
+            mixes,
+            hc_scale,
+            hc_base,
+            hc_mult=self.hc_mult,
+            sinkhorn_iters=self.hc_sinkhorn_iters,
+            eps=self.hc_eps,
         )
         y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=2)
         return y.to(dtype), post, comb
@@ -223,20 +264,63 @@ class Block(nn.Module):
              + torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2))
         return y.type_as(x)
 
-    def forward(self, x: torch.Tensor, start_pos: int, input_ids: Optional[torch.Tensor]) -> torch.Tensor:
+    def forward_decode(
+        self,
+        x: torch.Tensor,  # [B, 1, hc, dim]
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        input_ids: torch.Tensor,  # [B, 1]
+    ) -> torch.Tensor:
+        """Decode-only block forward — mirrors prefill ``forward`` but
+        delegates attention to ``Attention.forward_decode``. Prefill
+        ``forward`` is byte-identical for PD-disagg cleanliness.
+        """
         # Attention path
         residual = x
-        x_pre, post, comb = self._hc_pre(x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
+        x_pre, post, comb = self._hc_pre(
+            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+        )
+        x_pre = self.attn_norm(x_pre)
+        attn_out = self.attn.forward_decode(x_pre, attn_metadata)
+        x = self._hc_post(attn_out, residual, post, comb)
+
+        # FFN path — MoE has no per-step state, reuse existing forward
+        residual = x
+        x_pre, post, comb = self._hc_pre(
+            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+        )
+        x_pre = self.ffn_norm(x_pre)
+        ffn_out = self.ffn(x_pre, input_ids)
+        x = self._hc_post(ffn_out, residual, post, comb)
+        return x
+
+    def forward(
+        self, x: torch.Tensor, start_pos: int, input_ids: Optional[torch.Tensor]
+    ) -> torch.Tensor:
+        # Attention path
+        residual = x
+        x_pre, post, comb = self._hc_pre(
+            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+        )
         x_pre = self.attn_norm(x_pre)
         attn_out = self.attn(x_pre, start_pos)
         x = self._hc_post(attn_out, residual, post, comb)
 
         # FFN path
         residual = x
-        x_pre, post, comb = self._hc_pre(x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
+        x_pre, post, comb = self._hc_pre(
+            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+        )
         x_pre = self.ffn_norm(x_pre)
-        ffn_out = self.ffn(x_pre, input_ids if input_ids is not None
-                           else torch.zeros(x.size(0), x.size(1), dtype=torch.long, device=x.device))
+        ffn_out = self.ffn(
+            x_pre,
+            (
+                input_ids
+                if input_ids is not None
+                else torch.zeros(
+                    x.size(0), x.size(1), dtype=torch.long, device=x.device
+                )
+            ),
+        )
         x = self._hc_post(ffn_out, residual, post, comb)
         return x
 
@@ -265,16 +349,40 @@ class MTPBlock(Block):
     """
 
     def __init__(
-        self, layer_id: int, dim: int, n_heads: int, q_lora_rank: int,
-        head_dim: int, rope_head_dim: int, o_lora_rank: int, o_groups: int,
-        window_size: int, compress_ratio: int, compress_rope_theta: float,
-        rope_theta: float, rope_factor: float, beta_fast: int, beta_slow: int,
-        original_seq_len: int, max_batch_size: int, max_seq_len: int,
-        index_n_heads: int, index_head_dim: int, index_topk: int,
-        moe_inter_dim: int, n_routed_experts: int, n_activated_experts: int,
-        n_shared_experts: int, score_func: str, route_scale: float,
-        swiglu_limit: float, n_hash_layers: int, vocab_size: int,
-        hc_mult: int, hc_sinkhorn_iters: int, hc_eps: float,
+        self,
+        layer_id: int,
+        dim: int,
+        n_heads: int,
+        q_lora_rank: int,
+        head_dim: int,
+        rope_head_dim: int,
+        o_lora_rank: int,
+        o_groups: int,
+        window_size: int,
+        compress_ratio: int,
+        compress_rope_theta: float,
+        rope_theta: float,
+        rope_factor: float,
+        beta_fast: int,
+        beta_slow: int,
+        original_seq_len: int,
+        max_batch_size: int,
+        max_seq_len: int,
+        index_n_heads: int,
+        index_head_dim: int,
+        index_topk: int,
+        moe_inter_dim: int,
+        n_routed_experts: int,
+        n_activated_experts: int,
+        n_shared_experts: int,
+        score_func: str,
+        route_scale: float,
+        swiglu_limit: float,
+        n_hash_layers: int,
+        vocab_size: int,
+        hc_mult: int,
+        hc_sinkhorn_iters: int,
+        hc_eps: float,
         norm_eps: float = 1e-6,
         weights: Optional[Dict[str, torch.Tensor]] = None,
         prefix: str = "",
@@ -283,20 +391,35 @@ class MTPBlock(Block):
         max_tokens_per_rank: int = 8192,
     ):
         super().__init__(
-            layer_id=layer_id, dim=dim, n_heads=n_heads, q_lora_rank=q_lora_rank,
-            head_dim=head_dim, rope_head_dim=rope_head_dim,
-            o_lora_rank=o_lora_rank, o_groups=o_groups,
-            window_size=window_size, compress_ratio=compress_ratio,
-            compress_rope_theta=compress_rope_theta, rope_theta=rope_theta,
-            rope_factor=rope_factor, beta_fast=beta_fast, beta_slow=beta_slow,
+            layer_id=layer_id,
+            dim=dim,
+            n_heads=n_heads,
+            q_lora_rank=q_lora_rank,
+            head_dim=head_dim,
+            rope_head_dim=rope_head_dim,
+            o_lora_rank=o_lora_rank,
+            o_groups=o_groups,
+            window_size=window_size,
+            compress_ratio=compress_ratio,
+            compress_rope_theta=compress_rope_theta,
+            rope_theta=rope_theta,
+            rope_factor=rope_factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
             original_seq_len=original_seq_len,
-            max_batch_size=max_batch_size, max_seq_len=max_seq_len,
-            index_n_heads=index_n_heads, index_head_dim=index_head_dim,
+            max_batch_size=max_batch_size,
+            max_seq_len=max_seq_len,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
             index_topk=index_topk,
-            moe_inter_dim=moe_inter_dim, n_routed_experts=n_routed_experts,
-            n_activated_experts=n_activated_experts, n_shared_experts=n_shared_experts,
-            score_func=score_func, route_scale=route_scale,
-            swiglu_limit=swiglu_limit, n_hash_layers=n_hash_layers,
+            moe_inter_dim=moe_inter_dim,
+            n_routed_experts=n_routed_experts,
+            n_activated_experts=n_activated_experts,
+            n_shared_experts=n_shared_experts,
+            score_func=score_func,
+            route_scale=route_scale,
+            swiglu_limit=swiglu_limit,
+            n_hash_layers=n_hash_layers,
             vocab_size=vocab_size,
             hc_mult=hc_mult, hc_sinkhorn_iters=hc_sinkhorn_iters, hc_eps=hc_eps,
             norm_eps=norm_eps, weights=weights, prefix=prefix,
@@ -308,12 +431,19 @@ class MTPBlock(Block):
 
         self.dim = dim
         if self._factory_mode:
-            from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear_from_dict
+            from rtp_llm.models_py.modules.dsv4.attention import (
+                _v4_fp8_linear_from_dict,
+            )
+
             self.e_proj = _v4_fp8_linear_from_dict(
-                weights, f"{prefix}.e_proj.weight", f"{prefix}.e_proj.scale",
+                weights,
+                f"{prefix}.e_proj.weight",
+                f"{prefix}.e_proj.scale",
             )
             self.h_proj = _v4_fp8_linear_from_dict(
-                weights, f"{prefix}.h_proj.weight", f"{prefix}.h_proj.scale",
+                weights,
+                f"{prefix}.h_proj.weight",
+                f"{prefix}.h_proj.scale",
             )
             self._h_proj_is_factory = True
         else:
@@ -327,14 +457,28 @@ class MTPBlock(Block):
 
         hc_dim = hc_mult * dim
         if self._factory_mode:
-            self.enorm.weight = nn.Parameter(weights[f"{prefix}.enorm.weight"].float(), requires_grad=False)
-            self.hnorm.weight = nn.Parameter(weights[f"{prefix}.hnorm.weight"].float(), requires_grad=False)
-            self.norm.weight = nn.Parameter(weights[f"{prefix}.norm.weight"].float(), requires_grad=False)
-            self.hc_head_fn = nn.Parameter(weights[f"{prefix}.hc_head_fn"].float(), requires_grad=False)
-            self.hc_head_base = nn.Parameter(weights[f"{prefix}.hc_head_base"].float(), requires_grad=False)
-            self.hc_head_scale = nn.Parameter(weights[f"{prefix}.hc_head_scale"].float(), requires_grad=False)
+            self.enorm.weight = nn.Parameter(
+                weights[f"{prefix}.enorm.weight"].float(), requires_grad=False
+            )
+            self.hnorm.weight = nn.Parameter(
+                weights[f"{prefix}.hnorm.weight"].float(), requires_grad=False
+            )
+            self.norm.weight = nn.Parameter(
+                weights[f"{prefix}.norm.weight"].float(), requires_grad=False
+            )
+            self.hc_head_fn = nn.Parameter(
+                weights[f"{prefix}.hc_head_fn"].float(), requires_grad=False
+            )
+            self.hc_head_base = nn.Parameter(
+                weights[f"{prefix}.hc_head_base"].float(), requires_grad=False
+            )
+            self.hc_head_scale = nn.Parameter(
+                weights[f"{prefix}.hc_head_scale"].float(), requires_grad=False
+            )
         else:
-            self.hc_head_fn = nn.Parameter(torch.empty(hc_mult, hc_dim, dtype=torch.float32))
+            self.hc_head_fn = nn.Parameter(
+                torch.empty(hc_mult, hc_dim, dtype=torch.float32)
+            )
             self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
             self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
@@ -347,29 +491,31 @@ class MTPBlock(Block):
 
     def forward_draft(
         self,
-        x: torch.Tensor,                            # [B, S, hc, dim]
+        x: torch.Tensor,  # [B, S, hc, dim]
         start_pos: int,
-        input_ids: torch.Tensor,                    # [B, S] shifted one step
-        embed: nn.Module,                           # shared V4Transformer.embed
-        lm_head_weight: torch.Tensor,               # shared [vocab, dim] FP32
+        input_ids: torch.Tensor,  # [B, S] shifted one step
+        embed: nn.Module,  # shared V4Transformer.embed
+        lm_head_weight: torch.Tensor,  # shared [vocab, dim] FP32
     ) -> torch.Tensor:
         """Draft-token logits. See class docstring."""
-        e = embed(input_ids)                              # [B, S, dim]
+        e = embed(input_ids)  # [B, S, dim]
         e = self.enorm(e)
-        x_norm = self.hnorm(x)                            # [B, S, hc, dim] (norm over last dim)
-        e_proj_out = self._apply_proj(self.e_proj, e).unsqueeze(2)     # [B, S, 1, dim]
-        h_proj_out = self._apply_proj(self.h_proj, x_norm)             # [B, S, hc, dim]
-        x_fused = e_proj_out + h_proj_out                              # [B, S, hc, dim]
+        x_norm = self.hnorm(x)  # [B, S, hc, dim] (norm over last dim)
+        e_proj_out = self._apply_proj(self.e_proj, e).unsqueeze(2)  # [B, S, 1, dim]
+        h_proj_out = self._apply_proj(self.h_proj, x_norm)  # [B, S, hc, dim]
+        x_fused = e_proj_out + h_proj_out  # [B, S, hc, dim]
 
         # Parent Block runs attn + FFN + mHC on [B, S, hc, dim]
-        x_after = super().forward(x_fused, start_pos, input_ids)       # [B, S, hc, dim]
+        x_after = super().forward(x_fused, start_pos, input_ids)  # [B, S, hc, dim]
 
         # hc_head_reduce (same math as V4Transformer._hc_head_reduce)
         shape, dtype = x_after.size(), x_after.dtype
-        x_flat = x_after.flatten(2).float()                             # [B, S, hc*dim]
+        x_flat = x_after.flatten(2).float()  # [B, S, hc*dim]
         rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
         mixes = F.linear(x_flat, self.hc_head_fn) * rsqrt
-        pre = torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
-        h = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=2)    # [B, S, dim]
-        h = self.norm(h.to(dtype))                                      # [B, S, dim]
-        return F.linear(h.float(), lm_head_weight)                      # [B, S, vocab]
+        pre = (
+            torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
+        )
+        h = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=2)  # [B, S, dim]
+        h = self.norm(h.to(dtype))  # [B, S, dim]
+        return F.linear(h.float(), lm_head_weight)  # [B, S, vocab]
