@@ -3,6 +3,7 @@
 Direct port of `inference/model.py:Gate / Expert / MoE` (BF16-only).
 """
 
+import os
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -27,6 +28,36 @@ FP8_BLOCK = 128
 # and the padding slots are silently dropped by the per-expert loop
 # (``torch.where(idx == -1)`` never matches a real expert index).
 _DEEPEP_SUPPORTED_TOPK = (2, 4, 8, 16)
+
+
+def _mega_moe_available() -> bool:
+    """Whether DeepGEMM's ``fp8_fp4_mega_moe`` (symm-mem fused dispatch +
+    L1 GEMM + SwiGLU + L2 GEMM + combine, SM100-only) is usable here.
+
+    Requires: deep_gemm ≥ 2.5 (commit 891d57b introduced it), torch ≥ 2.9
+    for ``torch.distributed._symmetric_memory``, CUDA device SM100+, and
+    an initialised world-size process group of size > 1."""
+    try:
+        import deep_gemm
+        if not hasattr(deep_gemm, "fp8_fp4_mega_moe"):
+            return False
+    except Exception:
+        return False
+    try:
+        import torch.distributed as dist
+        if not dist.is_initialized() or dist.get_world_size() <= 1:
+            return False
+    except Exception:
+        return False
+    if not torch.cuda.is_available():
+        return False
+    cap = torch.cuda.get_device_capability()
+    return cap[0] >= 10
+
+
+def _mega_moe_enabled() -> bool:
+    """Gated on env ``DSV4_USE_MEGA_MOE=1`` + availability."""
+    return os.environ.get("DSV4_USE_MEGA_MOE", "0") == "1" and _mega_moe_available()
 
 
 def _has_fp8_fp4_grouped_kernel() -> bool:
@@ -240,6 +271,7 @@ class MoE(nn.Module):
         prefix: str = "",
         ep_size: int = 1,
         ep_rank: int = 0,
+        max_tokens_per_rank: int = 8192,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -249,6 +281,7 @@ class MoE(nn.Module):
         self._factory_mode = weights is not None
         self.moe_inter_dim = moe_inter_dim
         self.swiglu_limit = swiglu_limit
+        self.max_tokens_per_rank = max_tokens_per_rank
 
         assert n_routed_experts % max(ep_size, 1) == 0, (
             f"n_routed_experts={n_routed_experts} must divide ep_size={ep_size}")
@@ -277,7 +310,26 @@ class MoE(nn.Module):
         # (works on any DeepGEMM but keeps FP4 dequant-per-call).
         self._use_grouped_fp4 = self._factory_mode and _has_fp8_fp4_grouped_kernel()
 
-        if self._use_grouped_fp4:
+        # Mega MoE: single DeepGEMM kernel fuses dispatch + L1 + SwiGLU +
+        # L2 + combine, replacing the ACCL/DeepEP round-trip + per-expert
+        # FP4 GEMM loop (``_routed_experts_deepep`` + ``_routed_experts_local``).
+        # Applies only when EP > 1 and the kernel is available — env gated.
+        self._use_mega_moe = (
+            self._factory_mode
+            and ep_size > 1
+            and not self._use_grouped_fp4
+            and _mega_moe_enabled()
+        )
+
+        if self._use_mega_moe:
+            # Mega MoE: stack EP-local experts, repack SFs to the int32
+            # layout required by ``fp8_fp4_mega_moe``, and allocate the
+            # symmetric-memory dispatch/combine buffer.  Per-expert
+            # ``ModuleList`` is dropped (Mega MoE owns the per-expert
+            # compute internally).
+            self._setup_mega_moe(weights, prefix)
+            self.experts = None
+        elif self._use_grouped_fp4:
             # Grouped-GEMM path: stack routed expert weights into 3-D tensors
             # along the expert dim and drop the per-expert ModuleList entirely.
             # `_w13` holds w1 (gate) and w3 (up) concatenated along the N-dim so
@@ -322,6 +374,160 @@ class MoE(nn.Module):
                 for i in range(n_routed_experts)
             ])
             self._w13 = self._s13 = self._w2 = self._s2 = None
+
+    # --- Mega MoE ---------------------------------------------------------
+
+    def _setup_mega_moe(
+        self, weights: Dict[str, torch.Tensor], prefix: str,
+    ) -> None:
+        """Stack EP-local routed expert weights, convert SFs to the
+        int32 UTCCP-transposed layout required by ``fp8_fp4_mega_moe``,
+        and register the symmetric-memory dispatch buffer.
+
+        V4 ckpt stores, per expert i:
+          w1.weight [inter, dim//2] int8  (FP4 gate)
+          w3.weight [inter, dim//2] int8  (FP4 up)
+          w2.weight [dim, inter//2] int8  (FP4 down)
+          ... .scale [inter, dim//FP4_BLOCK] / [dim, inter//FP4_BLOCK] UE8M0
+
+        Mega MoE expects, per expert:
+          L1 w [2*inter, dim//2] int8 (gate | up rows concatenated)
+          L1 sf [2*inter, ...] int32  (post-``transform_sf_into_required_layout``
+            + ``transform_weights_for_mega_moe``: gate/up interleaved gran=8
+            along N, SF UTCCP-transposed)
+          L2 w [dim, inter//2] int8
+          L2 sf [dim, ...] int32
+
+        The kernel runs a full dispatch + two grouped FP4 GEMMs + SwiGLU
+        + combine; we only need to feed it the token activations and the
+        topk routing decisions at forward time.
+        """
+        import torch.distributed as dist
+        import deep_gemm
+
+        E = self.n_local_experts
+        D = self.dim
+        inter = self.moe_inter_dim
+        start = self.local_expert_start
+        device = weights[f"{prefix}.experts.{start}.w1.weight"].device
+
+        # (1) Stack EP-local experts into [E_local, ...] tensors.  SF is
+        # kept as fp32 initially — ``transform_sf_into_required_layout``
+        # is the only entry point that produces the int32 layout the
+        # kernel consumes.
+        w13 = torch.empty((E, 2 * inter, D // 2), dtype=torch.int8, device=device)
+        s13 = torch.empty((E, 2 * inter, D // FP4_BLOCK), dtype=torch.float32, device=device)
+        w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
+        s2 = torch.empty((E, D, inter // FP4_BLOCK), dtype=torch.float32, device=device)
+        for local_i in range(E):
+            p = f"{prefix}.experts.{start + local_i}"
+            w13[local_i, :inter].copy_(weights.pop(f"{p}.w1.weight"))
+            s13[local_i, :inter].copy_(weights.pop(f"{p}.w1.scale").float())
+            w13[local_i, inter:].copy_(weights.pop(f"{p}.w3.weight"))
+            s13[local_i, inter:].copy_(weights.pop(f"{p}.w3.scale").float())
+            w2[local_i].copy_(weights.pop(f"{p}.w2.weight"))
+            s2[local_i].copy_(weights.pop(f"{p}.w2.scale").float())
+
+        # (2) Repack SFs to the kernel's required int32 layout (MN-major,
+        # TMA-aligned, packed 4-UE8M0-per-int32).
+        s13_int = deep_gemm.transform_sf_into_required_layout(
+            s13, 2 * inter, D, (1, FP4_BLOCK), E)
+        s2_int = deep_gemm.transform_sf_into_required_layout(
+            s2, D, inter, (1, FP4_BLOCK), E)
+
+        # (3) Apply Mega MoE-specific transforms: L1 gate/up interleave
+        # (gran=8 along N) + both SFs UTCCP-transposed.  Returns the
+        # final weights that the kernel reads directly each forward.
+        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
+            (w13, s13_int), (w2, s2_int),
+        )
+
+        # Stash as plain attributes (not Parameters — the kernel reads
+        # raw int8/int32 buffers with no autograd).  Original stacked
+        # fp32 SFs are dropped now that the int layout has been derived.
+        self._mega_l1_w = l1_w
+        self._mega_l1_sf = l1_sf
+        self._mega_l2_w = l2_w
+        self._mega_l2_sf = l2_sf
+
+        # (4) Allocate the symmetric-memory buffer.  Uses
+        # ``torch.distributed.group.WORLD`` because our DP+EP layout has
+        # ``ep_size == world_size`` — every rank holds a distinct 64/256
+        # slice.  ``num_max_tokens_per_rank`` caps per-rank token count
+        # fed into the MoE; bounded from ``max_tokens_per_rank`` (plumbed
+        # from ``V4Args.max_seq_len`` upstream).  The library aligns this
+        # up to ``get_token_alignment_for_mega_moe()`` internally (384 on
+        # SM100).
+        assert dist.is_initialized(), (
+            "Mega MoE requires torch.distributed initialised; "
+            "_mega_moe_available() should have gated this earlier"
+        )
+        group = dist.group.WORLD
+        self._mega_buf = deep_gemm.get_symm_buffer_for_mega_moe(
+            group=group,
+            num_experts=self.n_routed_experts,
+            num_max_tokens_per_rank=max(self.max_tokens_per_rank, 1),
+            num_topk=self.n_activated_experts,
+            hidden=D,
+            intermediate_hidden=inter,
+            use_fp8_dispatch=True,
+            activation="swiglu",
+        )
+
+    def _routed_experts_mega_moe(
+        self,
+        x: torch.Tensor,                  # [T, D] BF16 local-rank tokens
+        weights: torch.Tensor,            # [T, topk] FP32 router weights
+        indices: torch.Tensor,            # [T, topk] int64 GLOBAL expert IDs
+    ) -> torch.Tensor:
+        """Run the fused DeepGEMM Mega MoE kernel: dispatch + L1 GEMM +
+        SwiGLU + L2 GEMM + combine — all fused, symm-mem backed.
+
+        Returns the combined routed-expert output in FP32 (to match the
+        contract of ``_routed_experts_deepep`` / ``_routed_experts_local``).
+        """
+        import deep_gemm
+        from deep_gemm.utils import per_token_cast_to_fp8
+
+        T = x.size(0)
+        buf = self._mega_buf
+        if T > buf.num_max_tokens_per_rank:
+            raise RuntimeError(
+                f"Mega MoE input tokens={T} exceeds num_max_tokens_per_rank="
+                f"{buf.num_max_tokens_per_rank} (derived from max_seq_len / "
+                f"max_tokens_per_rank). Raise the budget at startup."
+            )
+        if T == 0:
+            return torch.zeros_like(x, dtype=torch.float32)
+
+        # Per-token FP8 cast with packed UE8M0 group-32 scale — the
+        # dispatch side of Mega MoE reads this layout directly.
+        x_fp8, x_sf = per_token_cast_to_fp8(
+            x.contiguous(), use_ue8m0=True, gran_k=32, use_packed_ue8m0=True,
+        )
+        # Fill the symm-mem buffer slots.  Only the first T rows are
+        # meaningful; the remainder was zero-initialised at buffer
+        # alloc (0 is expert 0, but tokens past T aren't read because
+        # the kernel uses y.size(0) as the effective token count).
+        buf.x[:T].copy_(x_fp8)
+        buf.x_sf[:T].copy_(x_sf)
+        buf.topk_idx[:T].copy_(indices.to(torch.int64).contiguous())
+        buf.topk_weights[:T].copy_(weights.to(torch.float32).contiguous())
+
+        y = torch.empty((T, self.dim), dtype=torch.bfloat16, device=x.device)
+        deep_gemm.fp8_fp4_mega_moe(
+            y,
+            (self._mega_l1_w, self._mega_l1_sf),
+            (self._mega_l2_w, self._mega_l2_sf),
+            buf,
+            recipe=(1, 1, FP4_BLOCK),
+            activation="swiglu",
+            activation_clamp=self.swiglu_limit if self.swiglu_limit > 0 else None,
+            fast_math=True,
+        )
+        return y.float()
+
+    # --- Grouped FP4 (dormant; retained for future enabling) ---
 
     def _grouped_routed_experts(
         self, x: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor,
@@ -550,7 +756,9 @@ class MoE(nn.Module):
         x = x.view(-1, self.dim)
         weights, indices = self.gate(x, input_ids.flatten())
 
-        if self._use_grouped_fp4:
+        if self._use_mega_moe:
+            y = self._routed_experts_mega_moe(x, weights, indices)
+        elif self._use_grouped_fp4:
             assert self.ep_size == 1, (
                 "grouped FP4 path + ep_size>1 not supported; gated off anyway")
             y = self._grouped_routed_experts(x, weights, indices)
