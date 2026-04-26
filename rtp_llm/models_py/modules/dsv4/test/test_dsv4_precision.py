@@ -383,6 +383,179 @@ class TestDSV4KVCachePrecision:
             # Slot 0 should have been overwritten by decode token
             assert attn.kv_cache[:, 0].abs().sum() > 0
 
+    def test_rebind_kv_cache_prefill_match(self):
+        """Internal register_buffer vs rebind external tensor — prefill output matches."""
+        model_internal, args = self._make_model()
+        model_rebind = copy.deepcopy(model_internal)
+
+        # Rebind: replace each layer's kv_cache with an external tensor of same shape
+        for layer in model_rebind.layers:
+            attn = layer.attn
+            ext_cache = torch.zeros_like(attn.kv_cache)
+            attn.kv_cache = ext_cache
+            # Force compressor/indexer to rebind on next forward
+            if attn.compressor is not None:
+                attn.compressor.kv_cache = None
+            if attn.indexer is not None:
+                attn.indexer.compressor.kv_cache = None
+
+        input_ids = torch.randint(0, args.vocab_size, (1, 8))
+
+        with torch.inference_mode():
+            out_internal = model_internal(input_ids, start_pos=0, apply_lm_head=False)
+            out_rebind = model_rebind(input_ids, start_pos=0, apply_lm_head=False)
+
+        diff = (out_internal.float() - out_rebind.float()).abs().max().item()
+        assert diff == 0.0, f"Rebind prefill output diff={diff}"
+
+    def test_rebind_kv_cache_decode_match(self):
+        """Internal vs rebind — prefill + decode output matches."""
+        model_internal, args = self._make_model()
+        model_rebind = copy.deepcopy(model_internal)
+
+        # Rebind external tensors
+        for layer in model_rebind.layers:
+            attn = layer.attn
+            ext_cache = torch.zeros_like(attn.kv_cache)
+            attn.kv_cache = ext_cache
+            if attn.compressor is not None:
+                attn.compressor.kv_cache = None
+            if attn.indexer is not None:
+                attn.indexer.compressor.kv_cache = None
+
+        input_ids = torch.randint(0, args.vocab_size, (1, 8))
+
+        with torch.inference_mode():
+            model_internal(input_ids, start_pos=0, apply_lm_head=False)
+            model_rebind(input_ids, start_pos=0, apply_lm_head=False)
+
+            for pos in range(8, 12):
+                dec_ids = torch.randint(0, args.vocab_size, (1, 1))
+                out_i = model_internal(dec_ids, start_pos=pos, apply_lm_head=False)
+                out_r = model_rebind(dec_ids, start_pos=pos, apply_lm_head=False)
+
+                diff = (out_i.float() - out_r.float()).abs().max().item()
+                assert diff < 1e-3, f"Rebind decode pos={pos} diff={diff}"
+
+    def test_rebind_kv_cache_content_identical(self):
+        """After prefill, rebind cache content matches internal cache content."""
+        model_internal, args = self._make_model()
+        model_rebind = copy.deepcopy(model_internal)
+
+        for layer in model_rebind.layers:
+            attn = layer.attn
+            ext_cache = torch.zeros_like(attn.kv_cache)
+            attn.kv_cache = ext_cache
+            if attn.compressor is not None:
+                attn.compressor.kv_cache = None
+            if attn.indexer is not None:
+                attn.indexer.compressor.kv_cache = None
+
+        input_ids = torch.randint(0, args.vocab_size, (1, 8))
+
+        with torch.inference_mode():
+            model_internal(input_ids, start_pos=0, apply_lm_head=False)
+            model_rebind(input_ids, start_pos=0, apply_lm_head=False)
+
+        for i in range(len(model_internal.layers)):
+            ci = model_internal.layers[i].attn.kv_cache
+            cr = model_rebind.layers[i].attn.kv_cache
+            mask = torch.isfinite(ci) & torch.isfinite(cr)
+            if mask.any():
+                diff = (ci[mask].float() - cr[mask].float()).abs().max().item()
+                assert diff < 0.1, f"Layer {i} kv_cache diff={diff}"
+
+    def test_rebind_logits_match(self):
+        """Internal vs rebind — logits match for prefill + decode."""
+        model_internal, args = self._make_model()
+        model_rebind = copy.deepcopy(model_internal)
+
+        for layer in model_rebind.layers:
+            attn = layer.attn
+            ext_cache = torch.zeros_like(attn.kv_cache)
+            attn.kv_cache = ext_cache
+            if attn.compressor is not None:
+                attn.compressor.kv_cache = None
+            if attn.indexer is not None:
+                attn.indexer.compressor.kv_cache = None
+
+        input_ids = torch.randint(0, args.vocab_size, (1, 8))
+
+        with torch.inference_mode():
+            logits_i = model_internal(input_ids, start_pos=0, apply_lm_head=True)
+            logits_r = model_rebind(input_ids, start_pos=0, apply_lm_head=True)
+
+            diff = (logits_i.float() - logits_r.float()).abs().max().item()
+            assert diff == 0.0, f"Rebind prefill logits diff={diff}"
+
+            for pos in range(8, 12):
+                dec_ids = torch.randint(0, args.vocab_size, (1, 1))
+                logits_i = model_internal(dec_ids, start_pos=pos, apply_lm_head=True)
+                logits_r = model_rebind(dec_ids, start_pos=pos, apply_lm_head=True)
+
+                diff = (logits_i.float() - logits_r.float()).abs().max().item()
+                assert diff < 1e-3, f"Rebind decode pos={pos} logits diff={diff}"
+
+    def test_rebind_compressor_state_match(self):
+        """After prefill + decode, compressor states match between internal and rebind."""
+        model_internal, args = self._make_model()
+        model_rebind = copy.deepcopy(model_internal)
+
+        for layer in model_rebind.layers:
+            attn = layer.attn
+            ext_cache = torch.zeros_like(attn.kv_cache)
+            attn.kv_cache = ext_cache
+            if attn.compressor is not None:
+                attn.compressor.kv_cache = None
+            if attn.indexer is not None:
+                attn.indexer.compressor.kv_cache = None
+
+        input_ids = torch.randint(0, args.vocab_size, (1, 8))
+
+        with torch.inference_mode():
+            model_internal(input_ids, start_pos=0, apply_lm_head=False)
+            model_rebind(input_ids, start_pos=0, apply_lm_head=False)
+
+            # Decode 4 tokens to exercise state accumulation
+            for pos in range(8, 12):
+                dec_ids = torch.randint(0, args.vocab_size, (1, 1))
+                model_internal(dec_ids, start_pos=pos, apply_lm_head=False)
+                model_rebind(dec_ids, start_pos=pos, apply_lm_head=False)
+
+        # Compare compressor states
+        for i in range(len(model_internal.layers)):
+            comp_i = model_internal.layers[i].attn.compressor
+            comp_r = model_rebind.layers[i].attn.compressor
+            if comp_i is None:
+                continue
+
+            # kv_state
+            mask = torch.isfinite(comp_i.kv_state) & torch.isfinite(comp_r.kv_state)
+            if mask.any():
+                diff = (
+                    (comp_i.kv_state[mask].float() - comp_r.kv_state[mask].float())
+                    .abs()
+                    .max()
+                    .item()
+                )
+                assert diff < 0.1, f"Layer {i} compressor kv_state diff={diff}"
+
+            # score_state (compare finite positions only)
+            mask = torch.isfinite(comp_i.score_state) & torch.isfinite(
+                comp_r.score_state
+            )
+            if mask.any():
+                diff = (
+                    (
+                        comp_i.score_state[mask].float()
+                        - comp_r.score_state[mask].float()
+                    )
+                    .abs()
+                    .max()
+                    .item()
+                )
+                assert diff < 0.1, f"Layer {i} compressor score_state diff={diff}"
+
 
 # ============================================================
 # Run
