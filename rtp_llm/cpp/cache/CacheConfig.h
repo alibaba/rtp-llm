@@ -7,6 +7,7 @@
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/DSV4CacheConfig.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 
@@ -62,6 +63,9 @@ struct CacheConfig {
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
+
+    // DSV4 7-pool configuration (set by DSV4ConfigCreator, empty for non-DSV4 models)
+    std::optional<DSV4CacheConfig> dsv4_config;
 
     CacheConfig() {}
 

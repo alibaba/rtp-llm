@@ -42,7 +42,13 @@ bool HybridTypeKVCacheAllocator::doInit() {
             linear_group_ids_.push_back(gid);
         } else {
             group = std::make_shared<FullKVCacheGroup>(ids, spec, block_pool_, gid);
-            full_group_ids_.push_back(gid);
+            // FIXED groups (e.g. DSV4 state pools) are not prefix-cacheable
+            if (gid < static_cast<int>(config_.group_types.size())
+                && config_.group_types[static_cast<size_t>(gid)] == CacheGroupType::FIXED) {
+                // Don't add to full_group_ids_ — excluded from prefix cache match/insert
+            } else {
+                full_group_ids_.push_back(gid);
+            }
         }
 
         RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize KVCacheGroup gid %d", gid);
@@ -116,7 +122,12 @@ int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, Batc
 
     // Write matched blocks into batch 0 blocks, per group.
     // NOTE: for linear groups we only reuse the tail block; other slots are set to NULL_BLOCK_IDX.
+    // Skip FIXED groups — they don't participate in prefix cache reuse.
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
+        if (gid < static_cast<int>(config_.group_types.size())
+            && config_.group_types[static_cast<size_t>(gid)] == CacheGroupType::FIXED) {
+            continue;
+        }
         kv_resource.mutableBlockIds(0, gid).assign(
             BlockIndicesType(static_cast<size_t>(reuse_blocks_len), NULL_BLOCK_IDX));
     }
@@ -325,6 +336,11 @@ void HybridTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
 
         CacheKeysType put_cache_keys(cache_keys.begin(), cache_keys.begin() + n);
         for (int gid = 0; gid < kv_cache_resource->groupNums(); ++gid) {
+            // Skip FIXED groups (e.g. DSV4 state pools) — not prefix-cacheable
+            if (gid < static_cast<int>(config_.group_types.size())
+                && config_.group_types[static_cast<size_t>(gid)] == CacheGroupType::FIXED) {
+                continue;
+            }
             const auto&      blocks = kv_cache_resource->blocks(batch_id, gid);
             BlockIndicesType put_blocks;
             put_blocks.reserve(n);

@@ -25,6 +25,8 @@ cc_library(
         "BufferTypes.h",
         "CacheConfig.h",
         "CacheGroupType.h",
+        "DSV4CacheConfig.h",
+        "DSV4KVCacheSpec.h",
         "KVCacheSpec.h",
         "KVCacheSpecBase.h",
         "MHAKVCacheSpec.h",
@@ -132,6 +134,7 @@ cc_library(
     name = "cache_core",
     srcs = [
         "CacheConfigCreator.cc",
+        "DSV4ConfigCreator.cc",
         "HybridConfigCreator.cc",
         "KVCacheHashUtil.cc",
         "MemoryEvaluationHelper.cc",
@@ -139,6 +142,7 @@ cc_library(
     ],
     hdrs = [
         "CacheConfigCreator.h",
+        "DSV4ConfigCreator.h",
         "HybridConfigCreator.h",
         "KVCacheHashUtil.h",
         "MemoryEvaluationHelper.h",
