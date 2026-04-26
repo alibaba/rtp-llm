@@ -22,7 +22,6 @@ def _get_autotune_configs():
             triton.Config({"BV": 8}, num_stages=3, num_warps=1),
         ]
     else:
-        # ROCm/HIP: larger BV and different launch params for better occupancy
         return [
             triton.Config({"BV": 64}, num_stages=1, num_warps=4),
         ]
@@ -211,19 +210,16 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         b_o = tl.sum(b_h * b_q[:, None], 0)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
-        # Store intermediate states for continuous batching
+        # Write state back to the same block it was read from.
+        # Linear attention block_map may not have new blocks allocated during decode.
         if INPLACE_FINAL_STATE and IS_CONTINUOUS_BATCHING:
-            write_block_offset = (
-                cal_block_idx(sequence_length, SEQ_SIZE_PER_BLOCK) + i_t
-            )
-            write_block_id = tl.load(
-                block_map + i_n * max_block_size + write_block_offset
-            ).to(tl.int64)
-            p_ht = ht + write_block_id * stride_final_state_token
+            p_ht = ht + read_block_id * stride_final_state_token
+            p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
-        p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+            p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
         # Advance pointers for next timestep
         p_q += stride_qs
@@ -288,16 +284,50 @@ def fused_sigmoid_gating_delta_rule_update(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK = triton.next_power_of_2(K)
-    NK = triton.cdiv(K, BK)
-    assert NK == 1, "NK > 1 is not supported yet"
 
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
-    # Reshape b and a to match expected layout: [B*T, HV]
-    b_flat = b.reshape(B * T, HV)
-    a_flat = a.reshape(B * T, HV)
+    # Batched decode: process each sequence independently to avoid
+    # cross-sequence precision issues in the Triton kernel on ROCm.
+    if B > 1 and T == 1 and block_map is not None and cu_seqlens is None:
+        b_contig = b.contiguous()
+        a_contig = a.contiguous()
+        o_list = []
+        for i in range(B):
+            o_i, _ = fused_sigmoid_gating_delta_rule_update(
+                A_log=A_log,
+                a=a_contig[i : i + 1],
+                dt_bias=dt_bias,
+                q=q[i : i + 1],
+                k=k[i : i + 1],
+                v=v[i : i + 1],
+                b=b_contig[i : i + 1],
+                scale=scale,
+                initial_state=initial_state,
+                inplace_final_state=inplace_final_state,
+                cu_seqlens=None,
+                block_map=block_map[i : i + 1],
+                seq_size_per_block=seq_size_per_block,
+                sequence_lengths=sequence_lengths[i : i + 1]
+                if sequence_lengths is not None
+                else None,
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                softplus_beta=softplus_beta,
+                softplus_threshold=softplus_threshold,
+            )
+            o_list.append(o_i)
+        o = torch.cat(o_list, dim=0)
+        return o, initial_state if inplace_final_state else None
+
+    BK = triton.next_power_of_2(K)
+    NK = triton.cdiv(K, BK)
+    assert NK == 1, "NK > 1 is not supported yet"
+
+    # Ensure b and a are contiguous before reshaping.
+    # They may come from torch.split and have stride(0) = 2*HV instead of HV.
+    b_flat = b.contiguous().reshape(B * T, HV)
+    a_flat = a.contiguous().reshape(B * T, HV)
 
     o = q.new_empty(NK, *v.shape)
     if inplace_final_state:

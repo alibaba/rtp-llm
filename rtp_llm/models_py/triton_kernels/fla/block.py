@@ -171,7 +171,7 @@ def store_ssm_state_to_block_map_kernel(
         (1, 0),
     )
 
-    tl.store(p_out, tl.load(p_in, boundary_check=(0, 1)), boundary_check=(0, 1))
+    tl.store(p_out, tl.load(p_in, boundary_check=(0, 1)).to(tl.float32), boundary_check=(0, 1))
 
 
 def store_ssm_state_to_block_map(

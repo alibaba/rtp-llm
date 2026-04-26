@@ -97,7 +97,7 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
             self.linear_attn_config.linear_conv_kernel_dim
         )
         self.ssm_state_size: int = (
-            self.local_num_v_heads * self.head_k_dim * self.head_v_dim
+            2 * self.local_num_v_heads * self.head_k_dim * self.head_v_dim
         )
         self.qkv_size: int = (
             self.head_k_dim * self.local_num_k_heads * 2
@@ -134,26 +134,17 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         return conv_states
 
     def _get_ssm_states(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
-        # maybe should support smsm cahe with difference dtype(fp32/bf16/fp16)
         _, block_size = kv_cache_tensor.view(kv_cache_tensor.shape[0], -1).shape
         assert (
             block_size >= self.ssm_state_size + self.conv_state_size
         ), "block_size is too small, please check seq_size_per_block"
+        num_blocks = kv_cache_tensor.shape[0]
+        kv_fp32 = kv_cache_tensor.view(torch.float32)
         ssm_states = torch.as_strided(
-            kv_cache_tensor,
-            (
-                kv_cache_tensor.shape[0],
-                self.local_num_v_heads,
-                self.head_v_dim,
-                self.head_k_dim,
-            ),
-            (
-                kv_cache_tensor.stride()[0],
-                self.head_k_dim * self.head_v_dim,
-                self.head_k_dim,
-                1,
-            ),
-            storage_offset=kv_cache_tensor.storage_offset(),
+            kv_fp32,
+            (num_blocks, self.local_num_v_heads, self.head_v_dim, self.head_k_dim),
+            (kv_fp32.stride(0), self.head_v_dim * self.head_k_dim, self.head_k_dim, 1),
+            storage_offset=kv_fp32.storage_offset(),
         )
         return ssm_states
 
@@ -223,7 +214,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 self.head_v_dim,
                 self.head_k_dim,
                 device=mixed_qkv.device,
-                dtype=mixed_qkv.dtype,
+                dtype=torch.float32,
             )
 
             load_initial_state_from_block_map(
@@ -323,17 +314,37 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         )
         origin_shape = mixed_qkv.shape
         mixed_qkv = mixed_qkv.reshape(batch, seq, -1).transpose(1, 2)
-        out = causal_conv1d_update(
-            mixed_qkv,
-            conv_states.transpose(1, 2),
-            self.conv_weights,
-            bias=None,
-            activation="silu",
-            cache_seqlens=None,
-            block_map=attn_inputs.kv_cache_kernel_block_id_device,
-            seq_size_per_block=seq_size_per_block,
-            sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
-        )
+        block_map_t = attn_inputs.kv_cache_kernel_block_id_device
+        seq_lens_t = attn_inputs.sequence_lengths_plus_1_d
+        conv_states_t = conv_states.transpose(1, 2)
+        if batch > 1 and seq == 1:
+            out_list = []
+            for i in range(batch):
+                out_i = causal_conv1d_update(
+                    mixed_qkv[i : i + 1],
+                    conv_states_t,
+                    self.conv_weights,
+                    bias=None,
+                    activation="silu",
+                    cache_seqlens=None,
+                    block_map=block_map_t[i : i + 1],
+                    seq_size_per_block=seq_size_per_block,
+                    sequence_lengths=seq_lens_t[i : i + 1],
+                )
+                out_list.append(out_i)
+            out = torch.cat(out_list, dim=0)
+        else:
+            out = causal_conv1d_update(
+                mixed_qkv,
+                conv_states_t,
+                self.conv_weights,
+                bias=None,
+                activation="silu",
+                cache_seqlens=None,
+                block_map=block_map_t,
+                seq_size_per_block=seq_size_per_block,
+                sequence_lengths=seq_lens_t,
+            )
         out = out.transpose(1, 2).reshape(origin_shape)
         return out
 
