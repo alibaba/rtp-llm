@@ -44,10 +44,14 @@ def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
                 continue
             if buf.device.type == "meta":
                 mod._buffers[name] = torch.zeros(
-                    buf.shape, dtype=buf.dtype, device=device,
+                    buf.shape,
+                    dtype=buf.dtype,
+                    device=device,
                 )
                 count += 1
     return count
+
+
 from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 
 
@@ -76,7 +80,9 @@ def _args_from_model_config(mc: ModelConfig) -> V4Args:
         index_n_heads=ac.indexer_head_num,
         index_head_dim=ac.indexer_head_dim,
         index_topk=ac.indexer_topk,
-        moe_inter_dim=mc.inter_size // max(1, mc.moe_k or 1) if False else mc.inter_size // 1,
+        moe_inter_dim=(
+            mc.inter_size // max(1, mc.moe_k or 1) if False else mc.inter_size // 1
+        ),
         n_routed_experts=mc.expert_num,
         n_shared_experts=1,
         n_activated_experts=mc.moe_k,
@@ -88,6 +94,9 @@ def _args_from_model_config(mc: ModelConfig) -> V4Args:
         hc_sinkhorn_iters=int(mc.hc_sinkhorn_iters),
         hc_eps=float(mc.hc_eps),
         norm_eps=float(mc.layernorm_eps),
+        # max_batch_size is overridden in DeepSeekV4Model.__init__ from the
+        # framework-supplied max_generate_batch_size — this default is only
+        # used when V4Args is built outside the model (e.g. unit tests).
         max_batch_size=1,
         max_seq_len=int(mc.max_seq_len) or 4096,
         # Mega MoE sizes its symm-mem dispatch buffer from this bound.
@@ -112,18 +121,29 @@ class DeepSeekV4Model(GptModelBase):
         device_resource_config=None,
     ):
         super().__init__(
-            model_config, parallelism_config, weights,
+            model_config,
+            parallelism_config,
+            weights,
             max_generate_batch_size=max_generate_batch_size,
-            fmha_config=fmha_config, py_hw_kernel_config=py_hw_kernel_config,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
 
         # Build V4Transformer with matching args.
         args = _args_from_model_config(model_config)
+        # Decode KV/state buffers must be sized for the real max generate
+        # batch — Phase 2 onwards. Prefill arm runs B=1 so this is purely
+        # additive (no prefill behavior change).
+        if max_generate_batch_size and max_generate_batch_size > 1:
+            args.max_batch_size = int(max_generate_batch_size)
         # MoE inter dim from V4 config: explicit (not inter_size which in RTP-LLM
         # is n_shared_experts * moe_intermediate_size for DeepSeek). Use moe_config
         # if available; else read from config's hidden_size-derived fallback.
-        if moe_config is not None and getattr(moe_config, "moe_inter_padding_size", 0) > 0:
+        if (
+            moe_config is not None
+            and getattr(moe_config, "moe_inter_padding_size", 0) > 0
+        ):
             args.moe_inter_dim = int(moe_config.moe_inter_padding_size)
         else:
             # V4-Flash = 2048. config.inter_size = n_shared * 2048 = 2048 (since n_shared=1).
@@ -158,8 +178,13 @@ class DeepSeekV4Model(GptModelBase):
                 "[DeepSeekV4Model] parallelism: world=%d tp=%d/%d ep=%d/%d dp=%d/%d "
                 "(scaffold only — V4 sharding not yet implemented; see "
                 "docs/dsv4/parallel_design.md)",
-                args.world_size, args.tp_rank, args.tp_size,
-                args.ep_rank, args.ep_size, args.dp_rank, args.dp_size,
+                args.world_size,
+                args.tp_rank,
+                args.tp_size,
+                args.ep_rank,
+                args.ep_size,
+                args.dp_rank,
+                args.dp_size,
             )
 
         # CP-aware Mega MoE buffer sizing.  When CP is on, each rank only
@@ -192,10 +217,19 @@ class DeepSeekV4Model(GptModelBase):
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d "
             "o_groups=%d n_experts=%d n_act=%d moe_inter=%d win=%d hc_mult=%d "
             "compress_ratios[:8]=%s score=%s route_scale=%g swiglu_limit=%g",
-            args.n_layers, args.n_heads, args.head_dim, args.q_lora_rank,
-            args.o_groups, args.n_routed_experts, args.n_activated_experts,
-            args.moe_inter_dim, args.window_size, args.hc_mult,
-            list(args.compress_ratios)[:8], args.score_func, args.route_scale,
+            args.n_layers,
+            args.n_heads,
+            args.head_dim,
+            args.q_lora_rank,
+            args.o_groups,
+            args.n_routed_experts,
+            args.n_activated_experts,
+            args.moe_inter_dim,
+            args.window_size,
+            args.hc_mult,
+            list(args.compress_ratios)[:8],
+            args.score_func,
+            args.route_scale,
             args.swiglu_limit,
         )
         self._v4_args = args
@@ -219,9 +253,12 @@ class DeepSeekV4Model(GptModelBase):
         self._profile_trigger = "/tmp/dsv4_profile_trigger"
         self._profile_done = False
         if self._profile_path:
-            logging.info("[DeepSeekV4Model] timeline trigger: `touch %s` — "
-                         "next forward captures to %s",
-                         self._profile_trigger, self._profile_path)
+            logging.info(
+                "[DeepSeekV4Model] timeline trigger: `touch %s` — "
+                "next forward captures to %s",
+                self._profile_trigger,
+                self._profile_path,
+            )
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
@@ -229,15 +266,24 @@ class DeepSeekV4Model(GptModelBase):
         if self._materialized:
             return True
 
-        device = next(iter(self.weight.global_weights.values())).device if self.weight.global_weights else "cuda:0"
+        device = (
+            next(iter(self.weight.global_weights.values())).device
+            if self.weight.global_weights
+            else "cuda:0"
+        )
         device_str = str(device)
 
-        logging.info("[DeepSeekV4Model] loading ckpt dict from %s to %s "
-                     "(ep_size=%d ep_rank=%d) ...",
-                     self._ckpt_path, device_str,
-                     self._v4_args.ep_size, self._v4_args.ep_rank)
+        logging.info(
+            "[DeepSeekV4Model] loading ckpt dict from %s to %s "
+            "(ep_size=%d ep_rank=%d) ...",
+            self._ckpt_path,
+            device_str,
+            self._v4_args.ep_size,
+            self._v4_args.ep_rank,
+        )
         weights = load_v4_weights_dict(
-            self._ckpt_path, device=device_str,
+            self._ckpt_path,
+            device=device_str,
             ep_size=self._v4_args.ep_size,
             ep_rank=self._v4_args.ep_rank,
             n_routed_experts=self._v4_args.n_routed_experts,
@@ -258,7 +304,9 @@ class DeepSeekV4Model(GptModelBase):
             torch.set_default_dtype(prev_dtype)
 
         n = _materialize_meta_buffers(self.v4, device_str)
-        logging.info("[DeepSeekV4Model] materialized %d meta buffers on %s", n, device_str)
+        logging.info(
+            "[DeepSeekV4Model] materialized %d meta buffers on %s", n, device_str
+        )
 
         # Recompute RoPE cache on real device (precompute_freqs_cis under
         # meta context yields zeros; we need real values).
@@ -276,21 +324,138 @@ class DeepSeekV4Model(GptModelBase):
         self._running_pos = 0
         return True
 
-    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False) -> Any:
+    def prepare_fmha_impl(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ) -> Any:
         """V4 uses its own sparse/compressed attention internally — no standard FMHA
         backend fits (64 Q heads × 1 KV head × head_dim=512 with CSA/HCA/SWA per-layer
-        variants). Return None so the framework's fmha machinery is bypassed."""
-        return None
+        variants). Return None when CUDA graph is OFF (Phase 2 eager path
+        builds metadata inline). Return a ``DSv4DecodeFmhaImpl`` when CUDA
+        graph is ON — that impl owns persistent metadata buffers updated
+        in place by ``prepare_cuda_graph`` between replays."""
+        if not is_cuda_graph:
+            return None
+
+        # Phase 3 stage 3A: build the impl with geometry derived from
+        # V4Args + the framework-provided BS (== inputs.attention_inputs
+        # batch dimension at capture time; each captured graph is per-BS
+        # so this is fixed for the impl's lifetime).
+        from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
+            DSv4DecodeFmhaImpl,
+            DSv4DecodeFmhaImplConfig,
+        )
+
+        attn = inputs.attention_inputs
+        # input_lengths is sized [batch_size] at this entry point (the C++
+        # capture path slices it down to the captured BS before invoking).
+        bs = int(attn.input_lengths.size(0)) if attn.input_lengths.numel() > 0 else 1
+        device = (
+            attn.sequence_lengths.device
+            if attn.sequence_lengths.numel() > 0
+            else next(self.v4.parameters()).device
+        )
+        cfg = DSv4DecodeFmhaImplConfig(
+            max_batch_size=bs,
+            q_len=1,
+            window_size=int(self._v4_args.window_size),
+            head_dim=int(self._v4_args.head_dim),
+            max_seq_len=int(self._v4_args.max_seq_len),
+            compress_ratios=list(self._v4_args.compress_ratios)[
+                : self._v4_args.n_layers
+            ],
+            index_topk=int(self._v4_args.index_topk),
+        )
+        return DSv4DecodeFmhaImpl(cfg, device=device)
+
+    def _forward_decode(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
+        """Phase 2 batched decode arm. Builds DSv4DecodeAttnMetadata from
+        the framework's per-request sequence_lengths, then runs through
+        ``V4Transformer.forward_decode``. Prefill path is untouched.
+        """
+        from rtp_llm.models_py.modules.dsv4.decode.decode_attn_metadata import (
+            build_decode_metadata,
+        )
+
+        attn = inputs.attention_inputs
+        # sequence_lengths[r] = stream->seqLength() - 1 = absolute pos of NEW token's predecessor
+        # (per NormalModelInputGatherer.cc:255). That IS our start_pos.
+        seq_lens_d = attn.sequence_lengths
+        if seq_lens_d.device.type == "cpu":
+            seq_lens_d = seq_lens_d.to(next(self.v4.parameters()).device)
+        start_pos = seq_lens_d.to(torch.int32)
+        B = start_pos.shape[0]
+
+        # input_ids: framework packs as flat [T_total] for B requests, q_len=1.
+        input_ids = inputs.input_ids
+        if input_ids.dim() == 0:
+            input_ids = input_ids.unsqueeze(0)
+        param_dev = next(self.v4.parameters()).device
+        if input_ids.device != param_dev:
+            input_ids = input_ids.to(param_dev)
+        # Pad-empty safety: if B==0, skip everything (no requests).
+        if B == 0:
+            return PyModelOutputs(
+                torch.zeros(
+                    (0, self._v4_args.dim), dtype=torch.bfloat16, device=param_dev
+                ),
+            )
+
+        # Clamp out-of-range start_pos for warmup safety (prefill probes at
+        # max_seq_len then decode shifts start_pos past freqs_cis range).
+        max_s = self._v4_args.max_seq_len
+        start_pos = torch.clamp(start_pos, min=0, max=max(0, max_s - 1))
+
+        # Phase 3 stage 3A: when a CUDA-graph impl is supplied, read its
+        # in-place-updated metadata (the C++ runner has already called
+        # ``prepare_cuda_graph(attn_inputs)`` on it before replay).
+        # Otherwise build a fresh metadata inline (Phase 2 eager path).
+        from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
+            DSv4DecodeFmhaImpl,
+        )
+
+        if isinstance(fmha_impl, DSv4DecodeFmhaImpl):
+            meta = fmha_impl.metadata
+        else:
+            meta = build_decode_metadata(
+                start_pos=start_pos,
+                q_len=1,
+                window_size=self._v4_args.window_size,
+                head_dim=self._v4_args.head_dim,
+                max_seq_len=max_s,
+                compress_ratios=list(self._v4_args.compress_ratios)[
+                    : self._v4_args.n_layers
+                ],
+                index_topk=self._v4_args.index_topk,
+                device=param_dev,
+            )
+
+        hidden = self.v4.forward_decode(input_ids, meta)  # [B, dim] packed
+        return PyModelOutputs(hidden)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        # Framework expects flat [total_tokens] input_ids (cu_seqlens-packed batching).
-        # We support B=1 only; extract as [1, S].
+        attn = inputs.attention_inputs
+        is_prefill = (
+            bool(attn.is_prefill)
+            if attn is not None
+            else (inputs.input_ids.dim() > 0 and inputs.input_ids.size(0) > 1)
+        )
+        # Decode arm — Phase 2: batched per-request via DSv4DecodeAttnMetadata.
+        # Phase 3: when fmha_impl is a DSv4DecodeFmhaImpl, _forward_decode
+        # consumes its persistent metadata (CUDA-graph replay).
+        if (
+            not is_prefill
+            and attn is not None
+            and attn.sequence_lengths is not None
+            and attn.sequence_lengths.numel() > 0
+        ):
+            return self._forward_decode(inputs, fmha_impl)
+
+        # Prefill arm — bit-identical to pre-Phase-2 (PD-disagg later). B=1 only.
         input_ids: torch.Tensor = inputs.input_ids
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)  # [1, S]
-
-        attn = inputs.attention_inputs
-        is_prefill = bool(attn.is_prefill) if attn is not None else (input_ids.size(1) > 1)
         start_pos = 0 if is_prefill else self._running_pos
 
         # --- Context Parallel (prefill) — scaffold integration ----------
@@ -369,7 +534,7 @@ class DeepSeekV4Model(GptModelBase):
         # is a collective that ALL ranks must enter.  Instead, pad S=0
         # → S=1 with a dummy token, run through the full layer stack
         # (including DeepEP), then discard the dummy's output.
-        pad_empty = (S_local == 0)
+        pad_empty = S_local == 0
         if pad_empty:
             # Create the dummy on the model's device (not input_ids.device
             # — the framework may pass a CPU tensor for empty inputs).
@@ -379,7 +544,8 @@ class DeepSeekV4Model(GptModelBase):
 
         # On-demand timeline capture for exactly one forward when trigger file exists.
         should_capture = (
-            self._profile_path and not self._profile_done
+            self._profile_path
+            and not self._profile_done
             and os.path.exists(self._profile_trigger)
         )
         if should_capture:
@@ -388,19 +554,26 @@ class DeepSeekV4Model(GptModelBase):
             except OSError:
                 pass
             with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CPU,
-                            torch.profiler.ProfilerActivity.CUDA],
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
                 record_shapes=False,
                 with_stack=False,
             ) as prof:
                 with torch.profiler.record_function(
                     f"V4_forward_prefill={is_prefill}_S={input_ids.size(1)}"
                 ):
-                    hidden = self.v4(input_ids, start_pos=start_pos, apply_lm_head=False)
+                    hidden = self.v4(
+                        input_ids, start_pos=start_pos, apply_lm_head=False
+                    )
                     torch.cuda.synchronize()
             prof.export_chrome_trace(self._profile_path)
-            logging.info("[DeepSeekV4Model] timeline exported: %s (%d events)",
-                         self._profile_path, len(prof.key_averages()))
+            logging.info(
+                "[DeepSeekV4Model] timeline exported: %s (%d events)",
+                self._profile_path,
+                len(prof.key_averages()),
+            )
             self._profile_done = True
         else:
             hidden = self.v4(input_ids, start_pos=start_pos, apply_lm_head=False)

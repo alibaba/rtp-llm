@@ -14,13 +14,24 @@ import math
 import torch
 
 
-def precompute_freqs_cis(dim: int, seqlen: int, original_seq_len: int,
-                         base: float, factor: float, beta_fast: int, beta_slow: int) -> torch.Tensor:
+def precompute_freqs_cis(
+    dim: int,
+    seqlen: int,
+    original_seq_len: int,
+    base: float,
+    factor: float,
+    beta_fast: int,
+    beta_slow: int,
+) -> torch.Tensor:
     """Returns complex cis tensor `[seqlen, dim/2]`.
     When `original_seq_len > 0`, applies YaRN frequency interpolation."""
 
     def find_correction_dim(num_rotations, dim_, base_, max_seq_len_):
-        return dim_ * math.log(max_seq_len_ / (num_rotations * 2 * math.pi)) / (2 * math.log(base_))
+        return (
+            dim_
+            * math.log(max_seq_len_ / (num_rotations * 2 * math.pi))
+            / (2 * math.log(base_))
+        )
 
     def find_correction_range(low_rot, high_rot, dim_, base_, max_seq_len_):
         low = math.floor(find_correction_dim(low_rot, dim_, base_, max_seq_len_))
@@ -35,7 +46,9 @@ def precompute_freqs_cis(dim: int, seqlen: int, original_seq_len: int,
 
     freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
     if original_seq_len > 0:
-        low, high = find_correction_range(beta_fast, beta_slow, dim, base, original_seq_len)
+        low, high = find_correction_range(
+            beta_fast, beta_slow, dim, base, original_seq_len
+        )
         smooth = 1 - linear_ramp_factor(low, high, dim // 2)
         freqs = freqs / factor * (1 - smooth) + freqs * smooth
 
@@ -45,7 +58,45 @@ def precompute_freqs_cis(dim: int, seqlen: int, original_seq_len: int,
     return freqs_cis
 
 
-def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+def apply_rotary_emb_batched(
+    x: torch.Tensor, freqs_cis_per_b: torch.Tensor, inverse: bool = False
+) -> torch.Tensor:
+    """In-place partial RoPE with PER-REQUEST freqs_cis (Stage 3B).
+
+    Identical to :func:`apply_rotary_emb` except ``freqs_cis_per_b`` is
+    ``[B, freqs_dim]`` (one row per batch entry) rather than ``[S, freqs_dim]``
+    (broadcast across batch). Used by the CUDA-graph decode path where each
+    request has its own ``start_pos`` and therefore its own RoPE row.
+
+    Shapes:
+        x                : ``[B, S, ..., 2k]`` (S typically 1 for decode)
+        freqs_cis_per_b  : ``[B, k]`` complex64
+    """
+    if x.numel() == 0 or freqs_cis_per_b.numel() == 0:
+        return x
+    y = x
+    B = x.size(0)
+    S = x.size(1)
+    last = x.size(-1)
+    x = torch.view_as_complex(x.float().unflatten(-1, (last // 2, 2)))
+    if inverse:
+        freqs_cis_per_b = freqs_cis_per_b.conj()
+    # freqs_cis_per_b: [B, k] -> broadcastable shape [B, S, ..., k]
+    if x.ndim == 3:
+        freqs_cis = freqs_cis_per_b.view(B, 1, last // 2).expand(B, S, last // 2)
+    else:
+        # x.ndim == 4 (B, S, H, k)
+        freqs_cis = freqs_cis_per_b.view(B, 1, 1, last // 2).expand(
+            B, S, x.size(2), last // 2
+        )
+    x = torch.view_as_real(x * freqs_cis).flatten(-2)
+    y.copy_(x)
+    return y
+
+
+def apply_rotary_emb(
+    x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = False
+) -> torch.Tensor:
     """In-place partial RoPE. x: [..., S, (..., 2k)]; rotates last dim only.
     `inverse=True` applies the conjugate rotation (used on attention output).
 
