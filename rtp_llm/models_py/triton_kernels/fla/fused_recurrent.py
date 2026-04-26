@@ -152,19 +152,16 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_o = tl.sum(b_h * b_q[:, None], 0)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
-        # keep the states for multi-query tokens
+        # Write state back to the same block it was read from.
+        # Linear attention block_map may not have new blocks allocated during decode.
         if INPLACE_FINAL_STATE and IS_CONTINUOUS_BATCHING:
-            write_block_offset = (
-                cal_block_idx(sequence_length, SEQ_SIZE_PER_BLOCK) + i_t
-            )
-            write_block_id = tl.load(
-                block_map + i_n * max_block_size + write_block_offset
-            ).to(tl.int64)
-            p_ht = ht + write_block_id * stride_final_state_token
+            p_ht = ht + read_block_id * stride_final_state_token
+            p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
-        p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+            p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
         p_q += stride_qs
         p_k += stride_ks
