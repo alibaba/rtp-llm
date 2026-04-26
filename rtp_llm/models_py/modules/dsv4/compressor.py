@@ -14,7 +14,9 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.modules.dsv4.cp import cp_all_gather_to_full, cp_should_gather
+from rtp_llm.models_py.modules.dsv4.cp import (
+    CPContext, cp_all_gather_full, cp_should_gather,
+)
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
 
 
@@ -90,6 +92,9 @@ class Compressor(nn.Module):
         )
         self.kv_cache: Optional[torch.Tensor] = None  # bind from caller (Attention)
         self.freqs_cis: Optional[torch.Tensor] = None
+        # CP context bound per-forward by V4Transformer.  None = no CP,
+        # falls through to single-rank path unchanged.
+        self._cp_ctx: Optional[CPContext] = None
 
     def _rmsnorm(self, x: torch.Tensor) -> torch.Tensor:
         dtype = x.dtype
@@ -107,16 +112,14 @@ class Compressor(nn.Module):
         new_tensor[:, 1:, :ratio] = tensor[:, :-1, :, :d]
         return new_tensor
 
-    def set_cp_info(self, cp_info, cp_size: int, cp_rank: int) -> None:
-        """Bind CP metadata for the next prefill forward.  When set and
-        ``cp_size > 1`` and ``start_pos == 0``, the rank-local wkv / wgate
-        projections are all-gathered to the full sequence before the
-        S-dim pool step — so every rank's local ``kv_cache`` ends up
-        holding the SAME full compressed KV, which lets attention run
-        with rank-local Q × full-KV downstream."""
-        self._cp_info = cp_info
-        self._cp_size = int(cp_size)
-        self._cp_rank = int(cp_rank)
+    def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
+        """Bind CP context for the next prefill forward.  When set and
+        ``cp_ctx.cp_size > 1`` and ``start_pos == 0``, the rank-local
+        wkv / wgate projections are all-gathered to the full sequence
+        before the S-dim pool step — so every rank's local ``kv_cache``
+        ends up holding the SAME full compressed KV, which lets
+        attention run with rank-local Q × full-KV downstream."""
+        self._cp_ctx = cp_ctx
 
     def forward(self, x: torch.Tensor, start_pos: int) -> Optional[torch.Tensor]:
         assert self.kv_cache is not None, "Compressor.kv_cache must be bound by caller"
@@ -132,15 +135,14 @@ class Compressor(nn.Module):
         # before the S-pool step so the pool sees all tokens in logical
         # order.  Decode (start_pos > 0) runs rank-local as usual — the
         # kv_cache was already populated with the full KV during prefill.
-        cp_info = getattr(self, "_cp_info", None)
-        cp_size = getattr(self, "_cp_size", 1)
-        cp_rank = getattr(self, "_cp_rank", 0)
-        if cp_should_gather(cp_info, cp_size, start_pos):
-            kv = cp_all_gather_to_full(kv, cp_info, cp_size, cp_rank)
-            score = cp_all_gather_to_full(score, cp_info, cp_size, cp_rank)
-            # After gather the effective seqlen is the FULL prefill len;
-            # the caller's ``seqlen`` / ``bsz`` above reflect the rank-
-            # local slice.  Rebind so downstream logic operates on full.
+        cp_ctx = self._cp_ctx
+        if cp_should_gather(cp_ctx, start_pos):
+            kv = cp_all_gather_full(kv, cp_ctx)
+            score = cp_all_gather_full(score, cp_ctx)
+            # After gather the effective seqlen is the FULL un-padded
+            # prefill len; the caller's ``seqlen`` / ``bsz`` above
+            # reflected the rank-local padded slice.  Rebind so
+            # downstream pool/pooling-mask/RoPE math operates on full.
             bsz, seqlen = kv.size(0), kv.size(1)
 
         if start_pos == 0:

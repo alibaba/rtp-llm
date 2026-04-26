@@ -21,6 +21,9 @@ import torch.nn.functional as F
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
+from rtp_llm.models_py.modules.dsv4.cp import (
+    CPContext, cp_all_gather_full, cp_freqs_cis_local,
+)
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
@@ -87,6 +90,45 @@ def _get_window_topk_idxs(window_size: int, bsz: int, seqlen: int, start_pos: in
     return matrix.unsqueeze(0).expand(bsz, -1, -1).contiguous()
 
 
+def _get_window_topk_idxs_cp(
+    window_size: int, bsz: int, seq_len_full: int, global_positions: torch.Tensor,
+) -> torch.Tensor:
+    """CP-prefill variant: each rank-local Q token at local index i sits
+    at GLOBAL position g = global_positions[i].  Its sliding window
+    reads KV at global positions [max(0, g-win+1), g+1), which — after
+    the attention-side all-gather has stripped padding — live at
+    indices [max(0, g-win+1), g+1) in the full uncompressed KV tensor
+    ``kv[:, :seq_len_full]``.
+
+    Returns [bsz, S_local, min(window_size, seq_len_full)] int64.
+    Entries whose global position is out-of-range (padding local idxs
+    with g >= seq_len_full, or ``(g-win+1)+j > g`` for i/w edge rows)
+    are set to -1 so the sparse_attn kernel masks them out.
+    """
+    device = global_positions.device
+    S_local = int(global_positions.shape[0])
+    W = min(window_size, max(seq_len_full, 1))
+    # base: [S_local, 1] the global KV "right edge" (= g for row i).
+    base = global_positions.unsqueeze(1)                            # [S_local, 1]
+    offs = torch.arange(W, device=device)                           # [W]
+    # kv_pos[i, j] = (g_i - W + 1) + j
+    kv_pos = (base - W + 1) + offs                                  # [S_local, W]
+    # Mask-out:
+    #   - kv_pos < 0   (Q too early, window begins before seq start)
+    #   - kv_pos > g   (impossible given our window-length design, but
+    #                   included for defense)
+    #   - kv_pos >= seq_len_full (Q at a padding slot, or short seq)
+    valid = (kv_pos >= 0) & (kv_pos <= base) & (kv_pos < seq_len_full)
+    kv_pos = torch.where(valid, kv_pos, torch.full_like(kv_pos, -1))
+    if W < window_size:
+        # Pad trailing columns with -1 so concat with compressed topk is
+        # a fixed width across calls (sparse_attn_kernel takes symbolic
+        # topk but we keep layout consistent with the non-CP path).
+        pad = torch.full((S_local, window_size - W), -1, dtype=kv_pos.dtype, device=device)
+        kv_pos = torch.cat([kv_pos, pad], dim=1)
+    return kv_pos.unsqueeze(0).expand(bsz, -1, -1).contiguous()
+
+
 def _get_compress_topk_idxs(ratio: int, bsz: int, seqlen: int, start_pos: int, offset: int, device) -> torch.Tensor:
     if start_pos > 0:
         n = (start_pos + 1) // ratio
@@ -95,6 +137,31 @@ def _get_compress_topk_idxs(ratio: int, bsz: int, seqlen: int, start_pos: int, o
         matrix = torch.arange(seqlen // ratio, device=device).repeat(seqlen, 1)
         mask = matrix >= torch.arange(1, seqlen + 1, device=device).unsqueeze(1) // ratio
         matrix = torch.where(mask, -1, matrix + offset)
+    return matrix.unsqueeze(0).expand(bsz, -1, -1).contiguous()
+
+
+def _get_compress_topk_idxs_cp(
+    ratio: int, bsz: int, seq_len_full: int, offset: int,
+    global_positions: torch.Tensor,
+) -> torch.Tensor:
+    """CP-prefill variant of the dense HCA compressed-KV index list
+    (the branch used when no Indexer is present — compress_ratio == 128).
+    Q at GLOBAL position g reads compressed KV blocks [0, (g+1)//ratio),
+    which live at offsets [offset, offset + (g+1)//ratio) inside the
+    attention-side concatenated [sliding | compressed] tensor.  Return
+    shape [bsz, S_local, seq_len_full // ratio]."""
+    device = global_positions.device
+    S_local = int(global_positions.shape[0])
+    T_comp = max(seq_len_full // ratio, 0)
+    if T_comp == 0:
+        return torch.full((bsz, S_local, 0), -1, dtype=torch.long, device=device)
+    cols = torch.arange(T_comp, device=device)                              # [T_comp]
+    max_allowed = (global_positions + 1) // ratio                            # [S_local]
+    mask = cols.unsqueeze(0) >= max_allowed.unsqueeze(1)                     # [S_local, T_comp]
+    matrix = torch.where(
+        mask, torch.full_like(cols, -1).expand(S_local, -1),
+        cols.expand(S_local, -1) + offset,
+    )
     return matrix.unsqueeze(0).expand(bsz, -1, -1).contiguous()
 
 
@@ -356,6 +423,20 @@ class Attention(nn.Module):
         )
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
 
+        # CP context bound per-forward by V4Transformer.  None = no CP.
+        self._cp_ctx: Optional[CPContext] = None
+
+    def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
+        """Bind CP context.  When active on a prefill call, ``forward``
+        does rank-local Q × FULL-KV attention: RoPE uses global
+        positions; the rank-local KV is all-gathered + padding-stripped
+        so every rank sees the same full sliding-window KV; the
+        sliding-window + compressed topk indices are computed relative
+        to that full-KV layout; sparse_attn runs on rank-local Q rows
+        only so the output is ``[B, chunk_length, H, D]`` — the frame-
+        work then all-gathers across ranks and strips padding."""
+        self._cp_ctx = cp_ctx
+
     def reset_rope_cache(self, device=None):
         """Recompute `freqs_cis` on the actual device — MUST be called after
         `model.to_empty(device=...)` since meta-tensor construction leaves the
@@ -392,11 +473,21 @@ class Attention(nn.Module):
 
     def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
         bsz, seqlen, _ = x.size()
-        freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
         win = self.window_size
         ratio = self.compress_ratio
         rd = self.rope_head_dim
         device = x.device
+
+        cp_ctx = self._cp_ctx
+        cp_on = cp_ctx is not None and cp_ctx.cp_size > 1 and start_pos == 0
+
+        # Per-token RoPE angles.  Non-CP uses the contiguous window
+        # freqs_cis[start_pos:start_pos+seqlen]; CP selects at each
+        # rank-local token's GLOBAL position.
+        if cp_on:
+            freqs_cis = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
+        else:
+            freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
 
         # bind compressor cache + freqs on first call
         if self.compress_ratio and self.compressor.kv_cache is None:
@@ -412,20 +503,45 @@ class Attention(nn.Module):
         q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.eps).to(q.dtype)
         apply_rotary_emb(q[..., -rd:], freqs_cis)
 
-        # KV path (single KV head)
-        kv = self._rmsnorm_weighted(self._lin(self.wkv, x), self.kv_norm.weight)  # [B, S, head_dim]
+        # KV path (single KV head) — rank-local under CP.
+        kv = self._rmsnorm_weighted(self._lin(self.wkv, x), self.kv_norm.weight)  # [B, S_local, head_dim]
         apply_rotary_emb(kv[..., -rd:], freqs_cis)
 
-        # build topk_idxs
-        topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, start_pos, device)
+        # Under CP prefill, all-gather KV across the CP (== TP) group
+        # and strip padding so every rank has the FULL uncompressed
+        # sliding KV in logical order; attention then runs with rank-
+        # local Q × full-KV.
+        if cp_on:
+            kv_full = cp_all_gather_full(kv, cp_ctx)                # [1, seq_len_full, head_dim]
+            seqlen_full = cp_ctx.seq_len_full
+        else:
+            kv_full = kv
+            seqlen_full = seqlen
+
+        # Build topk_idxs — rows = rank-local Q; columns reference the
+        # concatenated [sliding | compressed] KV tensor (under CP the
+        # sliding portion has ``seqlen_full`` entries, not
+        # ``chunk_length``).
+        if cp_on:
+            topk_idxs = _get_window_topk_idxs_cp(
+                win, bsz, seqlen_full, cp_ctx.global_positions,
+            )
+        else:
+            topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, start_pos, device)
         if self.compress_ratio:
-            # During prefill, the concatenated KV is [sliding kv (seqlen tokens), compressed tail].
-            # The compressed entries start at index `seqlen` in the cat'd sequence.
-            # During decode, the persistent layout is [0:win] = sliding ring buffer,
-            # [win:] = compressed entries, so offset = win.
-            offset = seqlen if start_pos == 0 else win
+            # The concatenated prefill KV is [sliding (seqlen_full), compressed tail].
+            # Compressed block start-index is seqlen_full in prefill,
+            # win in decode (ring-buffer layout).
+            if start_pos == 0:
+                offset = seqlen_full
+            else:
+                offset = win
             if self.indexer is not None:
                 compress_idxs = self.indexer(x, qr, start_pos, offset)
+            elif cp_on:
+                compress_idxs = _get_compress_topk_idxs_cp(
+                    ratio, bsz, seqlen_full, offset, cp_ctx.global_positions,
+                )
             else:
                 compress_idxs = _get_compress_topk_idxs(ratio, bsz, seqlen, start_pos, offset, device)
             topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
@@ -433,21 +549,27 @@ class Attention(nn.Module):
 
         # Write KV cache + sparse attn
         if start_pos == 0:
-            if seqlen <= win:
-                self.kv_cache[:bsz, :seqlen] = kv
+            if seqlen_full <= win:
+                self.kv_cache[:bsz, :seqlen_full] = kv_full
             else:
-                cutoff = seqlen % win
+                cutoff = seqlen_full % win
                 # Place the last `win` tokens into the ring buffer in correct order.
                 self.kv_cache[:bsz, cutoff:win], self.kv_cache[:bsz, :cutoff] = \
-                    kv[:, -win:].split([win - cutoff, cutoff], dim=1)
+                    kv_full[:, -win:].split([win - cutoff, cutoff], dim=1)
             if self.compress_ratio:
+                # Compressor reads x rank-local, all-gathers internally,
+                # writes full compressed KV into self.kv_cache[:, win:].
                 kv_compress = self.compressor(x, start_pos)
                 if kv_compress is not None:
-                    kv = torch.cat([kv, kv_compress], dim=1)
-            if _tl_kernels.tilelang_available():
-                o = _tl_kernels.sparse_attn(q, kv, self.attn_sink, topk_idxs, self.softmax_scale)
+                    kv_cat = torch.cat([kv_full, kv_compress], dim=1)
+                else:
+                    kv_cat = kv_full
             else:
-                o = _sparse_attn(q, kv, self.attn_sink, topk_idxs, self.softmax_scale)
+                kv_cat = kv_full
+            if _tl_kernels.tilelang_available():
+                o = _tl_kernels.sparse_attn(q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale)
+            else:
+                o = _sparse_attn(q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale)
         else:
             self.kv_cache[:bsz, start_pos % win] = kv.squeeze(1)
             if self.compress_ratio:
