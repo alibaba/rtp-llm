@@ -145,6 +145,8 @@ class FrontendApp(object):
                 self._bailian_grpc_port,
                 backend_visitor=getattr(self, "_bailian_grpc_backend_visitor", None),
                 bailian_grpc_config=self.bailian_grpc_config,
+                ip=self.server_config.ip,
+                server_id=self.server_config.frontend_server_id,
             )
             logging.info(
                 "Started Bailian gRPC server on port %s (enqueue_event_loop=uvicorn)",
