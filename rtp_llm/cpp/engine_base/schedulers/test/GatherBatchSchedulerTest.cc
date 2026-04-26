@@ -18,7 +18,7 @@ public:
 protected:
     // Build a scheduler with enough KV blocks to admit a few short streams. We do not need any
     // particular cache layout — we only care about the gather-vs-defer scheduling decision.
-    std::shared_ptr<GatherBatchScheduler> makeScheduler(bool load_python_model) {
+    std::shared_ptr<GatherBatchScheduler> makeScheduler() {
         cache_config_  = makeMhaCacheConfig(1, 32, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
         cache_manager_ = std::make_shared<KVCacheManager>(cache_config_);
         EXPECT_TRUE(cache_manager_->init());
@@ -27,7 +27,6 @@ protected:
         model_config_.max_seq_len                                   = 8192;
         runtime_config_.max_generate_batch_size                     = 100;
         runtime_config_.fifo_scheduler_config.max_batch_tokens_size = 8192;
-        model_specific_config_.load_python_model                    = load_python_model;
 
         return std::make_shared<GatherBatchScheduler>(runtime_config_,
                                                       model_config_,
@@ -63,7 +62,7 @@ protected:
 
 // Baseline: a single stream is gathered into running on the first schedule call.
 TEST_F(GatherBatchSchedulerTest, testSingleStreamGather) {
-    auto scheduler = makeScheduler(/*load_python_model=*/false);
+    auto scheduler = makeScheduler();
     auto stream    = makeStream();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
 
@@ -76,7 +75,7 @@ TEST_F(GatherBatchSchedulerTest, testSingleStreamGather) {
 // updateSchedulerInfo({"batch_size":N}) makes the scheduler wait until N streams accumulate
 // before gathering them all in one shot. With only one stream waiting, no gather happens.
 TEST_F(GatherBatchSchedulerTest, testGatherBatchAccumulatesBeforeRunning) {
-    auto scheduler = makeScheduler(/*load_python_model=*/false);
+    auto scheduler = makeScheduler();
     setGatherBatchSize(*scheduler, 2);
 
     auto stream1 = makeStream();
@@ -98,33 +97,9 @@ TEST_F(GatherBatchSchedulerTest, testGatherBatchAccumulatesBeforeRunning) {
     ASSERT_EQ(scheduler->runningStreamsSize(), 2);
 }
 
-// Without load_python_model the scheduler is allowed to add new streams to a non-empty running
-// set (the prefill+decode mix is fine for the regular C++ path). This pins down that the new
-// guard does not regress the non-py_model behaviour.
-TEST_F(GatherBatchSchedulerTest, testNonPyModelAllowsGatherWhileRunning) {
-    auto scheduler = makeScheduler(/*load_python_model=*/false);
-
-    auto stream1 = makeStream();
-    ASSERT_TRUE(scheduler->enqueue(stream1).ok());
-    auto streams_status1 = scheduler->schedule();
-    ASSERT_TRUE(streams_status1.ok());
-    ASSERT_EQ(scheduler->runningStreamsSize(), 1);
-
-    // Stream1 stays in running (still "decoding"). Enqueue a second stream and re-schedule.
-    auto stream2 = makeStream();
-    ASSERT_TRUE(scheduler->enqueue(stream2).ok());
-
-    auto streams_status2 = scheduler->schedule();
-    ASSERT_TRUE(streams_status2.ok());
-    // Without the py_model guard, stream2 is allowed to join running alongside stream1.
-    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
-    ASSERT_EQ(scheduler->runningStreamsSize(), 2);
-}
-
-// load_python_model=true with empty running is the happy path — the guard does not fire and
-// the new stream is gathered immediately.
+// With empty running the guard does not fire and the new stream is gathered immediately.
 TEST_F(GatherBatchSchedulerTest, testPyModelGuardAllowsGatherWhenRunningEmpty) {
-    auto scheduler = makeScheduler(/*load_python_model=*/true);
+    auto scheduler = makeScheduler();
 
     auto stream = makeStream();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
@@ -135,13 +110,13 @@ TEST_F(GatherBatchSchedulerTest, testPyModelGuardAllowsGatherWhenRunningEmpty) {
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
 }
 
-// The core regression test for the fix: with load_python_model=true and a stream already
-// running (i.e. potentially decoding), a freshly enqueued stream must NOT be gathered. Mixing
-// a context (prefill) stream into a running decode batch is what triggered the
+// The core regression test for the fix: with a stream already running (i.e. potentially
+// decoding), a freshly enqueued stream must NOT be gathered. Mixing a context (prefill)
+// stream into a running decode batch is what triggered the
 // `output with shape [1] doesn't match the broadcast shape [2]` crash inside
 // PyWrappedModel::buildPyAttentionInputs.
 TEST_F(GatherBatchSchedulerTest, testPyModelGuardDefersGatherWhileRunningBusy) {
-    auto scheduler = makeScheduler(/*load_python_model=*/true);
+    auto scheduler = makeScheduler();
 
     // Step 1: stream1 enters running.
     auto stream1 = makeStream();
@@ -166,7 +141,7 @@ TEST_F(GatherBatchSchedulerTest, testPyModelGuardDefersGatherWhileRunningBusy) {
 // After the guard defers a gather, the deferred stream must be picked up as soon as the
 // previously-running stream finishes — otherwise the scheduler would be stuck.
 TEST_F(GatherBatchSchedulerTest, testPyModelGuardResumesGatherAfterRunningDrains) {
-    auto scheduler = makeScheduler(/*load_python_model=*/true);
+    auto scheduler = makeScheduler();
 
     auto stream1 = makeStream();
     ASSERT_TRUE(scheduler->enqueue(stream1).ok());
@@ -192,10 +167,10 @@ TEST_F(GatherBatchSchedulerTest, testPyModelGuardResumesGatherAfterRunningDrains
 }
 
 // A pure prompt_batch arrival (the smoke-test scenario): N streams enqueued at once with
-// gather_batch_size=N. With load_python_model=true and running empty, the guard does not fire
-// and all N streams are gathered together as a single prefill batch.
+// gather_batch_size=N. With running empty, the guard does not fire and all N streams are
+// gathered together as a single prefill batch.
 TEST_F(GatherBatchSchedulerTest, testPyModelGuardAllowsBatchGatherWhenRunningEmpty) {
-    auto scheduler = makeScheduler(/*load_python_model=*/true);
+    auto scheduler = makeScheduler();
     setGatherBatchSize(*scheduler, 3);
 
     auto stream1 = makeStream();
