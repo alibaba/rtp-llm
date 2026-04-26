@@ -132,10 +132,21 @@ class DeepSeekV4Model(GptModelBase):
         # S7 scaffold: thread the framework's parallelism config into V4Args.
         # No behavior change at TP=1; the fields are read by future patches
         # (see docs/dsv4/parallel_design.md) when sharding lands per-module.
+        #
+        # When CP is enabled (``prefill_cp_config.is_enabled()``), RTP-LLM
+        # REPURPOSES the TP process group as the CP group — every attn
+        # module must see ``tp_size = 1`` so it does NOT shard heads, and
+        # the sequence-axis work instead runs via CP.  The helper
+        # ``ParallelismConfig.get_attn_tp_size()`` already returns 1 in
+        # that case; use it instead of raw ``tp_size``.
         pc = parallelism_config
         if pc is not None:
-            args.tp_size = int(getattr(pc, "tp_size", 1) or 1)
-            args.tp_rank = int(getattr(pc, "tp_rank", 0) or 0)
+            if hasattr(pc, "get_attn_tp_size"):
+                args.tp_size = int(pc.get_attn_tp_size() or 1)
+                args.tp_rank = int(pc.get_attn_tp_rank() or 0)
+            else:
+                args.tp_size = int(getattr(pc, "tp_size", 1) or 1)
+                args.tp_rank = int(getattr(pc, "tp_rank", 0) or 0)
             args.ep_size = int(getattr(pc, "ep_size", 1) or 1)
             args.ep_rank = int(getattr(pc, "ep_rank", 0) or 0)
             args.dp_size = int(getattr(pc, "dp_size", 1) or 1)
@@ -299,6 +310,17 @@ class DeepSeekV4Model(GptModelBase):
                 cp_size=int(pc_cfg.tp_size),
                 cp_rank=int(pc_cfg.tp_rank),
             )
+            if os.environ.get("DSV4_LOG_CP", "0") == "1":
+                cpi = attn.context_parallel_info
+                logging.info(
+                    "[DeepSeekV4Model] CP forward: input_ids.shape=%s "
+                    "cp_size=%d cp_rank=%d padding_mask.shape=%s "
+                    "restore_indices.shape=%s is_prefill=%s start_pos=%d",
+                    tuple(input_ids.shape), int(pc_cfg.tp_size), int(pc_cfg.tp_rank),
+                    tuple(cpi.prefill_qkv_padding_mask.shape),
+                    tuple(cpi.prefill_qkv_restore_indice.shape),
+                    is_prefill, start_pos,
+                )
         else:
             self.v4.set_cp_info(None, 1, 0)
 
@@ -357,12 +379,21 @@ class DeepSeekV4Model(GptModelBase):
         else:
             hidden = self.v4(input_ids, start_pos=start_pos, apply_lm_head=False)
 
-        # Advance running position
-        S = input_ids.size(1)
+        # Advance running position.  Under CP the rank-local ``S`` is
+        # ``chunk_length`` (~ S_full / cp_size) — bookkeeping ``_running_pos``
+        # against it would leave decode reading the wrong kv_cache slots.
+        # Use the REAL prefill length from ``cp_info.prefill_actual_input_lengths_cpu``
+        # when CP is enabled, else fall back to ``S``.
         if is_prefill:
-            self._running_pos = S
+            if cp_enabled:
+                # prefill_actual_input_lengths_cpu: int32 [num_prefill_streams]
+                # V4 is B=1, single stream.
+                actual_lens = attn.context_parallel_info.prefill_actual_input_lengths_cpu
+                self._running_pos = int(actual_lens[-1].item())
+            else:
+                self._running_pos = input_ids.size(1)
         else:
-            self._running_pos += S
+            self._running_pos += input_ids.size(1)
 
         # Discard the dummy token we padded in for the empty-batch case.
         if pad_empty:
@@ -370,4 +401,10 @@ class DeepSeekV4Model(GptModelBase):
 
         # Return flat [total_tokens, hidden_dim] for engine
         flat = hidden.reshape(-1, hidden.size(-1))
+        if os.environ.get("DSV4_LOG_CP", "0") == "1":
+            logging.info(
+                "[DeepSeekV4Model] forward return: hidden.shape=%s flat.shape=%s "
+                "cp_enabled=%s is_prefill=%s",
+                tuple(hidden.shape), tuple(flat.shape), cp_enabled, is_prefill,
+            )
         return PyModelOutputs(flat)

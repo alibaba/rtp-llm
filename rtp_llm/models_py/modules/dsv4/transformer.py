@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4.block import Block, MTPBlock, _RMSNorm
+from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
 
 
 class _LMHead(nn.Module):
@@ -192,29 +193,30 @@ class V4Transformer(nn.Module):
 
     def set_cp_info(self, cp_info, cp_size: int, cp_rank: int) -> None:
         """Bind / clear the framework's Context-Parallel metadata for the
-        next forward.  When ``cp_info`` is non-None and ``cp_size > 1``,
-        per-layer Compressor / Indexer modules inject all-gather of their
-        rank-local projected KV / score into the full sequence before the
-        S-dim pooling step — so each rank's mock per-layer kv_cache holds
-        the FULL compressed KV even though each rank's input_ids covers
-        only its zigzag-split slice.
-        """
+        NEXT forward.  Only stashes the raw metadata; the derived
+        ``CPContext`` (global positions, stripped restore indices, etc.)
+        is built inside ``forward`` once chunk_length is known and then
+        propagated to every layer's attn + compressor + indexer via
+        ``set_cp_ctx``."""
         self._cp_info = cp_info
         self._cp_size = int(cp_size)
         self._cp_rank = int(cp_rank)
+
+    def _propagate_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         for layer in self.layers:
-            if hasattr(layer, "attn"):
-                c = getattr(layer.attn, "compressor", None)
-                if c is not None:
-                    c.set_cp_info(cp_info, cp_size, cp_rank)
-                idx = getattr(layer.attn, "indexer", None)
-                if idx is not None:
-                    idx.set_cp_info(cp_info, cp_size, cp_rank)
-                    # Indexer has its own nested Compressor (for K_R path)
-                    # that also pools over S and needs the same gather.
-                    ic = getattr(idx, "compressor", None)
-                    if ic is not None:
-                        ic.set_cp_info(cp_info, cp_size, cp_rank)
+            attn = getattr(layer, "attn", None)
+            if attn is None:
+                continue
+            attn.set_cp_ctx(cp_ctx)
+            c = getattr(attn, "compressor", None)
+            if c is not None:
+                c.set_cp_ctx(cp_ctx)
+            idx = getattr(attn, "indexer", None)
+            if idx is not None:
+                idx.set_cp_ctx(cp_ctx)
+                ic = getattr(idx, "compressor", None)
+                if ic is not None:
+                    ic.set_cp_ctx(cp_ctx)
 
     def _hc_head_reduce(self, x: torch.Tensor) -> torch.Tensor:
         """[B, S, hc, d] -> [B, S, d]"""
@@ -261,6 +263,22 @@ class V4Transformer(nn.Module):
             if apply_lm_head:
                 return torch.zeros((B, self.head.weight.size(0)), dtype=torch.float32, device=device)
             return torch.zeros((B, 0, self.args.dim), dtype=torch.bfloat16, device=device)
+
+        # Build + propagate CP context once per forward.  When CP is
+        # active (set_cp_info previously called with a real cp_info +
+        # cp_size>1 + this is a prefill step), every layer's attn /
+        # compressor / indexer gets a fresh CPContext with the derived
+        # global_positions + unpad_restore tensors.  Otherwise we clear
+        # any stale context with None so the modules fall through to
+        # the single-rank path unchanged.
+        _cp_info = getattr(self, "_cp_info", None)
+        _cp_size = getattr(self, "_cp_size", 1)
+        _cp_rank = getattr(self, "_cp_rank", 0)
+        cp_ctx: Optional[CPContext] = None
+        if _cp_info is not None and _cp_size > 1 and start_pos == 0 and S > 0:
+            device = input_ids.device
+            cp_ctx = build_cp_context(_cp_info, _cp_size, _cp_rank, S, device)
+        self._propagate_cp_ctx(cp_ctx)
 
         h = self.embed(input_ids)                                  # [B, S, d]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)           # [B, S, hc, d]
