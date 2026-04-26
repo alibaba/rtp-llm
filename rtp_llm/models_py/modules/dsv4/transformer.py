@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
 
 class _LMHead(nn.Module):
     """LM head — single weight matrix [vocab_size, dim] in FP32."""
+
     def __init__(self, vocab_size: int, dim: int):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(vocab_size, dim, dtype=torch.float32))
@@ -40,7 +41,9 @@ class V4Args:
     o_groups: int = 8
     o_lora_rank: int = 1024
     window_size: int = 128
-    compress_ratios: List[int] = field(default_factory=lambda: [0, 0] + [4, 128] * 20 + [4, 0])
+    compress_ratios: List[int] = field(
+        default_factory=lambda: [0, 0] + [4, 128] * 20 + [4, 0]
+    )
     # rope
     rope_theta: float = 10000.0
     compress_rope_theta: float = 160000.0
@@ -89,8 +92,9 @@ class V4Args:
     world_rank: int = 0
 
 
-def _block_kwargs(layer_id: int, args: V4Args,
-                  weights: Optional[Dict[str, torch.Tensor]], prefix: str) -> Dict:
+def _block_kwargs(
+    layer_id: int, args: V4Args, weights: Optional[Dict[str, torch.Tensor]], prefix: str
+) -> Dict:
     """Kwargs common to Block and MTPBlock construction.
 
     ``compress_ratios`` is sized ``n_layers + n_mtp_layers`` (44 for
@@ -99,23 +103,38 @@ def _block_kwargs(layer_id: int, args: V4Args,
     """
     return dict(
         layer_id=layer_id,
-        dim=args.dim, n_heads=args.n_heads, q_lora_rank=args.q_lora_rank,
-        head_dim=args.head_dim, rope_head_dim=args.rope_head_dim,
-        o_lora_rank=args.o_lora_rank, o_groups=args.o_groups,
+        dim=args.dim,
+        n_heads=args.n_heads,
+        q_lora_rank=args.q_lora_rank,
+        head_dim=args.head_dim,
+        rope_head_dim=args.rope_head_dim,
+        o_lora_rank=args.o_lora_rank,
+        o_groups=args.o_groups,
         window_size=args.window_size,
         compress_ratio=args.compress_ratios[layer_id],
-        compress_rope_theta=args.compress_rope_theta, rope_theta=args.rope_theta,
-        rope_factor=args.rope_factor, beta_fast=args.beta_fast, beta_slow=args.beta_slow,
+        compress_rope_theta=args.compress_rope_theta,
+        rope_theta=args.rope_theta,
+        rope_factor=args.rope_factor,
+        beta_fast=args.beta_fast,
+        beta_slow=args.beta_slow,
         original_seq_len=args.original_seq_len,
-        max_batch_size=args.max_batch_size, max_seq_len=args.max_seq_len,
-        index_n_heads=args.index_n_heads, index_head_dim=args.index_head_dim,
+        max_batch_size=args.max_batch_size,
+        max_seq_len=args.max_seq_len,
+        index_n_heads=args.index_n_heads,
+        index_head_dim=args.index_head_dim,
         index_topk=args.index_topk,
-        moe_inter_dim=args.moe_inter_dim, n_routed_experts=args.n_routed_experts,
-        n_activated_experts=args.n_activated_experts, n_shared_experts=args.n_shared_experts,
-        score_func=args.score_func, route_scale=args.route_scale,
-        swiglu_limit=args.swiglu_limit, n_hash_layers=args.n_hash_layers,
+        moe_inter_dim=args.moe_inter_dim,
+        n_routed_experts=args.n_routed_experts,
+        n_activated_experts=args.n_activated_experts,
+        n_shared_experts=args.n_shared_experts,
+        score_func=args.score_func,
+        route_scale=args.route_scale,
+        swiglu_limit=args.swiglu_limit,
+        n_hash_layers=args.n_hash_layers,
         vocab_size=args.vocab_size,
-        hc_mult=args.hc_mult, hc_sinkhorn_iters=args.hc_sinkhorn_iters, hc_eps=args.hc_eps,
+        hc_mult=args.hc_mult,
+        hc_sinkhorn_iters=args.hc_sinkhorn_iters,
+        hc_eps=args.hc_eps,
         norm_eps=args.norm_eps,
         weights=weights, prefix=prefix,
         tp_size=args.tp_size, tp_rank=args.tp_rank,
@@ -124,15 +143,21 @@ def _block_kwargs(layer_id: int, args: V4Args,
     )
 
 
-def _build_block(layer_id: int, args: V4Args,
-                 weights: Optional[Dict[str, torch.Tensor]] = None,
-                 prefix: str = "") -> Block:
+def _build_block(
+    layer_id: int,
+    args: V4Args,
+    weights: Optional[Dict[str, torch.Tensor]] = None,
+    prefix: str = "",
+) -> Block:
     return Block(**_block_kwargs(layer_id, args, weights, prefix))
 
 
-def _build_mtp_block(layer_id: int, args: V4Args,
-                     weights: Optional[Dict[str, torch.Tensor]] = None,
-                     prefix: str = "") -> MTPBlock:
+def _build_mtp_block(
+    layer_id: int,
+    args: V4Args,
+    weights: Optional[Dict[str, torch.Tensor]] = None,
+    prefix: str = "",
+) -> MTPBlock:
     return MTPBlock(**_block_kwargs(layer_id, args, weights, prefix))
 
 
@@ -150,14 +175,17 @@ class V4Transformer(nn.Module):
 
         self.embed = nn.Embedding(args.vocab_size, args.dim)
 
-        self.layers = nn.ModuleList([
-            _build_block(
-                i, args,
-                weights=weights,
-                prefix=f"layers.{i}" if self._factory_mode else "",
-            )
-            for i in range(args.n_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                _build_block(
+                    i,
+                    args,
+                    weights=weights,
+                    prefix=f"layers.{i}" if self._factory_mode else "",
+                )
+                for i in range(args.n_layers)
+            ]
+        )
         self.norm = _RMSNorm(args.dim, args.norm_eps)
 
         # MTP layers — draft heads for speculative decoding.  Full impl
@@ -169,8 +197,9 @@ class V4Transformer(nn.Module):
         self.mtp = nn.ModuleList()
         for i in range(args.n_mtp_layers):
             prefix = f"mtp.{i}" if self._factory_mode else ""
-            blk = _build_mtp_block(args.n_layers + i, args,
-                                   weights=weights, prefix=prefix)
+            blk = _build_mtp_block(
+                args.n_layers + i, args, weights=weights, prefix=prefix
+            )
             self.mtp.append(blk)
 
         # Final LM head + hc_head reduce
@@ -180,15 +209,31 @@ class V4Transformer(nn.Module):
         if self._factory_mode:
             # Embedding + LM head are BF16 in ckpt; cast to FP32 head (match
             # official ParallelHead.weight.dtype) but keep embed in BF16.
-            self.embed.weight = nn.Parameter(weights["embed.weight"], requires_grad=False)
-            self.head.weight = nn.Parameter(weights["head.weight"].float(), requires_grad=False)
-            self.norm.weight = nn.Parameter(weights["norm.weight"].float(), requires_grad=False)
-            self.hc_head_fn = nn.Parameter(weights["hc_head_fn"].float(), requires_grad=False)
-            self.hc_head_base = nn.Parameter(weights["hc_head_base"].float(), requires_grad=False)
-            self.hc_head_scale = nn.Parameter(weights["hc_head_scale"].float(), requires_grad=False)
+            self.embed.weight = nn.Parameter(
+                weights["embed.weight"], requires_grad=False
+            )
+            self.head.weight = nn.Parameter(
+                weights["head.weight"].float(), requires_grad=False
+            )
+            self.norm.weight = nn.Parameter(
+                weights["norm.weight"].float(), requires_grad=False
+            )
+            self.hc_head_fn = nn.Parameter(
+                weights["hc_head_fn"].float(), requires_grad=False
+            )
+            self.hc_head_base = nn.Parameter(
+                weights["hc_head_base"].float(), requires_grad=False
+            )
+            self.hc_head_scale = nn.Parameter(
+                weights["hc_head_scale"].float(), requires_grad=False
+            )
         else:
-            self.hc_head_fn = nn.Parameter(torch.empty(args.hc_mult, hc_dim, dtype=torch.float32))
-            self.hc_head_base = nn.Parameter(torch.empty(args.hc_mult, dtype=torch.float32))
+            self.hc_head_fn = nn.Parameter(
+                torch.empty(args.hc_mult, hc_dim, dtype=torch.float32)
+            )
+            self.hc_head_base = nn.Parameter(
+                torch.empty(args.hc_mult, dtype=torch.float32)
+            )
             self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
     def set_cp_info(self, cp_info, cp_size: int, cp_rank: int) -> None:
@@ -242,8 +287,35 @@ class V4Transformer(nn.Module):
         return y.to(dtype)
 
     @torch.inference_mode()
-    def forward(self, input_ids: torch.Tensor, start_pos: int = 0,
-                apply_lm_head: bool = True) -> torch.Tensor:
+    def forward_decode(
+        self,
+        input_ids: torch.Tensor,  # [T_total] int (== [B] for q_len=1)
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+    ) -> torch.Tensor:
+        """Decode-only forward.
+
+        Returns ``hidden [T_total, dim]`` (caller applies lm_head).
+        Prefill ``forward`` is untouched — PD-disagg later splits cleanly.
+        """
+        B = attn_metadata.batch_size
+        q_len = attn_metadata.q_len_per_req
+        if input_ids.dim() == 1:
+            input_ids_2d = input_ids.view(B, q_len)
+        else:
+            input_ids_2d = input_ids
+        h = self.embed(input_ids_2d)  # [B, q_len, dim]
+        h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
+        for layer in self.layers:
+            h = layer.forward_decode(h, attn_metadata, input_ids_2d)
+        h = self._hc_head_reduce(h)  # [B, q_len, dim]
+        h = self.norm(h)  # [B, q_len, dim]
+        # Return packed [T_total, dim] for the framework.
+        return h.reshape(B * q_len, self.args.dim)
+
+    @torch.inference_mode()
+    def forward(
+        self, input_ids: torch.Tensor, start_pos: int = 0, apply_lm_head: bool = True
+    ) -> torch.Tensor:
         """Standalone forward.
 
         Returns:
@@ -274,8 +346,12 @@ class V4Transformer(nn.Module):
         if S == 0 and self.args.ep_size <= 1:
             device = next(self.parameters()).device
             if apply_lm_head:
-                return torch.zeros((B, self.head.weight.size(0)), dtype=torch.float32, device=device)
-            return torch.zeros((B, 0, self.args.dim), dtype=torch.bfloat16, device=device)
+                return torch.zeros(
+                    (B, self.head.weight.size(0)), dtype=torch.float32, device=device
+                )
+            return torch.zeros(
+                (B, 0, self.args.dim), dtype=torch.bfloat16, device=device
+            )
 
         # Build + propagate CP context once per forward.  When CP is
         # active (set_cp_info previously called with a real cp_info +
@@ -297,7 +373,7 @@ class V4Transformer(nn.Module):
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)           # [B, S, hc, d]
         for layer in self.layers:
             h = layer(h, start_pos, input_ids)
-        h = self._hc_head_reduce(h)                                # [B, S, d]
+        h = self._hc_head_reduce(h)  # [B, S, d]
         h = self.norm(h)
         if apply_lm_head:
             return F.linear(h[:, -1].float(), self.head.weight)
