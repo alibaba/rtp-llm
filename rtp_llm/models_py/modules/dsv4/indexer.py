@@ -103,8 +103,40 @@ class Indexer(nn.Module):
         self.compressor(x, start_pos)
         weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads ** -0.5)
 
-        index_score = torch.einsum("bshd,btd->bsht", q.float(), self.kv_cache[:bsz, :end_pos // ratio].float())
-        index_score = (index_score.relu_() * weights.float().unsqueeze(-1)).sum(dim=2)
+        # Per-token index score: for each Q token we score every key in
+        # ``kv_cache[:, :end_pos//ratio]``, ReLU, weight-sum over heads.
+        # The naive einsum materializes ``[B, S, n_heads, T]`` fp32 which
+        # is ``O(S*T*H)`` — 64 GB at S=64K, T=16K, H=64.  Chunk in S to
+        # keep peak memory bounded (under a few GB) at any seqlen.
+        # Without this, warmup prefill at max_seq_len ≥ 32K OOMs.
+        # TODO(K9 in kernel_audit): port V4-official ``index_score_kernel``
+        # TileLang kernel — eliminates the materialized intermediate
+        # entirely (online ReLU+reduce in shared memory).
+        kv = self.kv_cache[:bsz, :end_pos // ratio]
+        q_f = q.float()
+        w_f = weights.float()
+        S = q_f.size(1)
+        # Chunk size picked so peak = chunk_size * n_heads * T * 4 bytes
+        # stays under ~2 GB for typical T up to 32K.
+        max_chunk_bytes = 2 * (1 << 30)
+        T = kv.size(1)
+        denom = max(self.n_heads * max(T, 1) * 4, 1)
+        chunk_size = max(1, min(S, max_chunk_bytes // denom))
+        if chunk_size >= S:
+            index_score = torch.einsum("bshd,btd->bsht", q_f, kv.float())
+            index_score = (index_score.relu_() * w_f.unsqueeze(-1)).sum(dim=2)
+        else:
+            parts = []
+            kv_f = kv.float()
+            for i in range(0, S, chunk_size):
+                end = min(i + chunk_size, S)
+                score = torch.einsum(
+                    "bshd,btd->bsht", q_f[:, i:end], kv_f,
+                )
+                score = (score.relu_() * w_f[:, i:end].unsqueeze(-1)).sum(dim=2)
+                parts.append(score)
+            index_score = torch.cat(parts, dim=1)
+            del parts, kv_f
 
         if start_pos == 0:
             mask = torch.arange(seqlen // ratio, device=x.device).repeat(seqlen, 1) >= \
