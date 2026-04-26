@@ -22,6 +22,7 @@ py_library(
         "bailian_grpc_response_real.py",
         "bailian_grpc_real_infer.py",
         "bailian_grpc_service.py",
+        "bailian_grpc_pure_forward_service.py",
         "bailian_grpc_server.py",
         "bailian_grpc_client.py",
     ],
