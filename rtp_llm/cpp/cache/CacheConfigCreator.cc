@@ -2,6 +2,7 @@
 
 #include <numeric>
 
+#include "rtp_llm/cpp/cache/DSV4ConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
@@ -13,7 +14,9 @@ namespace rtp_llm {
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   bool                     is_mtp) {
-    if (model_config.hybrid_attention_config.enable_hybrid_attention) {
+    if (!model_config.attn_config.layer_compress_ratios.empty()) {
+        return DSV4ConfigCreator::createConfig(model_config, parallelism_config, is_mtp);
+    } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
         return HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp);
     } else {
         return SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp);
