@@ -21,10 +21,29 @@ FP8_BLOCK = 128
 
 
 def _has_fp8_fp4_grouped_kernel() -> bool:
-    """True iff the installed DeepGEMM exposes m_grouped_fp8_fp4_gemm_nt_*.
-    DeepGEMM ≥ 2.4 is required; 2.1.x ships only FP8-only kernels."""
-    from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper as _w
-    return _w._m_grouped_fp8_fp4_gemm_nt_contiguous_impl is not None
+    """True iff the installed DeepGEMM exposes ``m_grouped_fp8_fp4_gemm_nt_*``.
+
+    Currently HARD-WIRED to False — the ``_grouped_routed_experts`` path
+    below doesn't honor ``get_mk_alignment_for_contiguous_layout()``'s
+    per-group padding requirement (128-row default on SM100): the kernel
+    expects each group's rows padded up to alignment with ``-1`` entries
+    in ``grouped_layout`` and zeroed activation rows (see
+    ``deepgemm/tests/generators.py::generate_m_grouped_contiguous``).
+
+    On synthetic test data the violation is absorbed by the 5% BF16
+    rel-diff tolerance (``grouped_moe_equivalence_test``), but in
+    real-model flow (V4-Flash, E=256, 60 layers) the per-layer error
+    compounds catastrophically and produces garbage output (verified on
+    the SM100_ARM smoke after bumping deep_gemm to 2.5.0).
+
+    V4-official ``inference/model.py`` itself uses a per-expert loop
+    (``torch.where(indices == i); expert(x[idx])``) — no grouped kernel.
+    The K4 perf win instead comes from replacing ``QuantizedLinear``'s
+    dequant-to-BF16 forward with ``deep_gemm.fp8_fp4_gemm_nt`` (single-
+    group, no alignment constraint) inside each expert's ``w1``/``w2``/
+    ``w3``. See ``qlinear.py:QuantizedLinear.forward``.
+    """
+    return False
 
 
 class Gate(nn.Module):
