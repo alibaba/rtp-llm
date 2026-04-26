@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.dsv4.block import Block, _RMSNorm
+from rtp_llm.models_py.modules.dsv4.block import Block, MTPBlock, _RMSNorm
 
 
 class _LMHead(nn.Module):
@@ -82,10 +82,15 @@ class V4Args:
     world_rank: int = 0
 
 
-def _build_block(layer_id: int, args: V4Args,
-                 weights: Optional[Dict[str, torch.Tensor]] = None,
-                 prefix: str = "") -> Block:
-    return Block(
+def _block_kwargs(layer_id: int, args: V4Args,
+                  weights: Optional[Dict[str, torch.Tensor]], prefix: str) -> Dict:
+    """Kwargs common to Block and MTPBlock construction.
+
+    ``compress_ratios`` is sized ``n_layers + n_mtp_layers`` (44 for
+    V4-Flash default) so ``compress_ratios[layer_id]`` works directly
+    for both main layers and MTP layers.
+    """
+    return dict(
         layer_id=layer_id,
         dim=args.dim, n_heads=args.n_heads, q_lora_rank=args.q_lora_rank,
         head_dim=args.head_dim, rope_head_dim=args.rope_head_dim,
@@ -108,6 +113,18 @@ def _build_block(layer_id: int, args: V4Args,
         weights=weights, prefix=prefix,
         tp_size=args.tp_size, tp_rank=args.tp_rank,
     )
+
+
+def _build_block(layer_id: int, args: V4Args,
+                 weights: Optional[Dict[str, torch.Tensor]] = None,
+                 prefix: str = "") -> Block:
+    return Block(**_block_kwargs(layer_id, args, weights, prefix))
+
+
+def _build_mtp_block(layer_id: int, args: V4Args,
+                     weights: Optional[Dict[str, torch.Tensor]] = None,
+                     prefix: str = "") -> MTPBlock:
+    return MTPBlock(**_block_kwargs(layer_id, args, weights, prefix))
 
 
 class V4Transformer(nn.Module):
@@ -134,14 +151,17 @@ class V4Transformer(nn.Module):
         ])
         self.norm = _RMSNorm(args.dim, args.norm_eps)
 
-        # MTP layers
+        # MTP layers — draft heads for speculative decoding.  Full impl
+        # in block.py::MTPBlock; each layer owns its own e_proj/h_proj +
+        # enorm/hnorm/norm + per-layer hc_head_*, plus all the regular
+        # Block machinery (attn, ffn, mHC). The shared embedding and LM
+        # head flow through ``forward_draft`` explicitly at inference
+        # time rather than being stashed on the MTPBlock instance.
         self.mtp = nn.ModuleList()
         for i in range(args.n_mtp_layers):
-            mtp_args = args
-            # NOTE: MTPBlock ckpt keys live under `mtp.{i}.*`. Loading not
-            # yet implemented — the block is a placeholder today. Pass
-            # weights=None to keep legacy empty-param construction.
-            blk = _build_block(args.n_layers + i, mtp_args, weights=None, prefix="")
+            prefix = f"mtp.{i}" if self._factory_mode else ""
+            blk = _build_mtp_block(args.n_layers + i, args,
+                                   weights=weights, prefix=prefix)
             self.mtp.append(blk)
 
         # Final LM head + hc_head reduce

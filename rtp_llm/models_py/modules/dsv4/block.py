@@ -166,3 +166,133 @@ class Block(nn.Module):
                            else torch.zeros(x.size(0), x.size(1), dtype=torch.long, device=x.device))
         x = self._hc_post(ffn_out, residual, post, comb)
         return x
+
+
+class MTPBlock(Block):
+    """Multi-Token Prediction draft block — V4 speculative decode head.
+
+    Given the last-layer hidden ``x [B, S, hc, dim]`` (from the main model)
+    and the NEXT-step ``input_ids`` (shifted one position), this block
+    fuses the shifted embed with the hidden state via ``e_proj + h_proj +
+    enorm/hnorm``, runs the fused tensor through the standard V4 Block
+    (attention + MoE-FFN + mHC), then produces per-position logits via
+    its own ``hc_head_*`` reduce and the shared LM head.
+
+    Ckpt keys live under ``mtp.{i}.*`` and mirror the regular block keys
+    plus:
+      - ``e_proj.{weight,scale}`` — FP8 e4m3fn + UE8M0 block-128 scale
+      - ``h_proj.{weight,scale}`` — same format
+      - ``enorm.weight``, ``hnorm.weight``, ``norm.weight`` — BF16 (cast
+        to FP32 on load, matching regular block norm params)
+      - ``hc_head_{fn,base,scale}`` — FP32
+
+    Mirrors ``inference/model.py:MTPBlock``; the speculative-decoding
+    driver (prefill + draft-step sampler) is a framework-side concern and
+    lives outside this class.
+    """
+
+    def __init__(
+        self, layer_id: int, dim: int, n_heads: int, q_lora_rank: int,
+        head_dim: int, rope_head_dim: int, o_lora_rank: int, o_groups: int,
+        window_size: int, compress_ratio: int, compress_rope_theta: float,
+        rope_theta: float, rope_factor: float, beta_fast: int, beta_slow: int,
+        original_seq_len: int, max_batch_size: int, max_seq_len: int,
+        index_n_heads: int, index_head_dim: int, index_topk: int,
+        moe_inter_dim: int, n_routed_experts: int, n_activated_experts: int,
+        n_shared_experts: int, score_func: str, route_scale: float,
+        swiglu_limit: float, n_hash_layers: int, vocab_size: int,
+        hc_mult: int, hc_sinkhorn_iters: int, hc_eps: float,
+        norm_eps: float = 1e-6,
+        weights: Optional[Dict[str, torch.Tensor]] = None,
+        prefix: str = "",
+        tp_size: int = 1, tp_rank: int = 0,
+    ):
+        super().__init__(
+            layer_id=layer_id, dim=dim, n_heads=n_heads, q_lora_rank=q_lora_rank,
+            head_dim=head_dim, rope_head_dim=rope_head_dim,
+            o_lora_rank=o_lora_rank, o_groups=o_groups,
+            window_size=window_size, compress_ratio=compress_ratio,
+            compress_rope_theta=compress_rope_theta, rope_theta=rope_theta,
+            rope_factor=rope_factor, beta_fast=beta_fast, beta_slow=beta_slow,
+            original_seq_len=original_seq_len,
+            max_batch_size=max_batch_size, max_seq_len=max_seq_len,
+            index_n_heads=index_n_heads, index_head_dim=index_head_dim,
+            index_topk=index_topk,
+            moe_inter_dim=moe_inter_dim, n_routed_experts=n_routed_experts,
+            n_activated_experts=n_activated_experts, n_shared_experts=n_shared_experts,
+            score_func=score_func, route_scale=route_scale,
+            swiglu_limit=swiglu_limit, n_hash_layers=n_hash_layers,
+            vocab_size=vocab_size,
+            hc_mult=hc_mult, hc_sinkhorn_iters=hc_sinkhorn_iters, hc_eps=hc_eps,
+            norm_eps=norm_eps, weights=weights, prefix=prefix,
+            tp_size=tp_size, tp_rank=tp_rank,
+        )
+        from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
+
+        self.dim = dim
+        if self._factory_mode:
+            from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear_from_dict
+            self.e_proj = _v4_fp8_linear_from_dict(
+                weights, f"{prefix}.e_proj.weight", f"{prefix}.e_proj.scale",
+            )
+            self.h_proj = _v4_fp8_linear_from_dict(
+                weights, f"{prefix}.h_proj.weight", f"{prefix}.h_proj.scale",
+            )
+            self._h_proj_is_factory = True
+        else:
+            self.e_proj = QuantizedLinear(dim, dim, storage="fp8")
+            self.h_proj = QuantizedLinear(dim, dim, storage="fp8")
+            self._h_proj_is_factory = False
+
+        self.enorm = _RMSNorm(dim, norm_eps)
+        self.hnorm = _RMSNorm(dim, norm_eps)
+        self.norm = _RMSNorm(dim, norm_eps)
+
+        hc_dim = hc_mult * dim
+        if self._factory_mode:
+            self.enorm.weight = nn.Parameter(weights[f"{prefix}.enorm.weight"].float(), requires_grad=False)
+            self.hnorm.weight = nn.Parameter(weights[f"{prefix}.hnorm.weight"].float(), requires_grad=False)
+            self.norm.weight = nn.Parameter(weights[f"{prefix}.norm.weight"].float(), requires_grad=False)
+            self.hc_head_fn = nn.Parameter(weights[f"{prefix}.hc_head_fn"].float(), requires_grad=False)
+            self.hc_head_base = nn.Parameter(weights[f"{prefix}.hc_head_base"].float(), requires_grad=False)
+            self.hc_head_scale = nn.Parameter(weights[f"{prefix}.hc_head_scale"].float(), requires_grad=False)
+        else:
+            self.hc_head_fn = nn.Parameter(torch.empty(hc_mult, hc_dim, dtype=torch.float32))
+            self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
+            self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
+
+    def _apply_proj(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
+        """Factory FP8 linears want 2D input; QuantizedLinear accepts N-D."""
+        if self._h_proj_is_factory and x.dim() > 2:
+            shape = x.shape
+            return layer(x.reshape(-1, shape[-1])).view(*shape[:-1], -1)
+        return layer(x)
+
+    def forward_draft(
+        self,
+        x: torch.Tensor,                            # [B, S, hc, dim]
+        start_pos: int,
+        input_ids: torch.Tensor,                    # [B, S] shifted one step
+        embed: nn.Module,                           # shared V4Transformer.embed
+        lm_head_weight: torch.Tensor,               # shared [vocab, dim] FP32
+    ) -> torch.Tensor:
+        """Draft-token logits. See class docstring."""
+        e = embed(input_ids)                              # [B, S, dim]
+        e = self.enorm(e)
+        x_norm = self.hnorm(x)                            # [B, S, hc, dim] (norm over last dim)
+        e_proj_out = self._apply_proj(self.e_proj, e).unsqueeze(2)     # [B, S, 1, dim]
+        h_proj_out = self._apply_proj(self.h_proj, x_norm)             # [B, S, hc, dim]
+        x_fused = e_proj_out + h_proj_out                              # [B, S, hc, dim]
+
+        # Parent Block runs attn + FFN + mHC on [B, S, hc, dim]
+        x_after = super().forward(x_fused, start_pos, input_ids)       # [B, S, hc, dim]
+
+        # hc_head_reduce (same math as V4Transformer._hc_head_reduce)
+        shape, dtype = x_after.size(), x_after.dtype
+        x_flat = x_after.flatten(2).float()                             # [B, S, hc*dim]
+        rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
+        mixes = F.linear(x_flat, self.hc_head_fn) * rsqrt
+        pre = torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
+        h = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=2)    # [B, S, dim]
+        h = self.norm(h.to(dtype))                                      # [B, S, dim]
+        return F.linear(h.float(), lm_head_weight)                      # [B, S, vocab]
