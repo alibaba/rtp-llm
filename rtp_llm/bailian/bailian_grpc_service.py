@@ -39,6 +39,9 @@ class BailianGrpcInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServi
         self._server_id = server_id
         self._seq_counter = AtomicCounter()
 
+    def close(self):
+        pass
+
     def _next_rtp_llm_request_id(self) -> int:
         sequence = self._seq_counter.increment() % 4096  # 12 bits
         return generate_request_id(self._ip, self._port, self._server_id, sequence)
