@@ -5,8 +5,7 @@ from .chatglm45_renderer import ChatGlm45Renderer
 from .deepseek_vl2_renderer import DeepSeekVLV2Renderer
 from .deepseekv31_renderer import DeepseekV31Renderer
 from .deepseekv32_renderer import DeepseekV32Renderer
-# Temporarily disabled to debug ChatService crash — fallback to BasicRenderer via chat_template.jinja
-# from .deepseekv4_renderer import DeepseekV4Renderer
+from .deepseekv4_renderer import DeepseekV4Renderer
 from .internvl_renderer import InternVLRenderer
 from .kimi_k25_renderer import KimiK25Renderer
 from .kimik2_renderer import KimiK2Renderer
