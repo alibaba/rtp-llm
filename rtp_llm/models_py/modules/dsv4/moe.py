@@ -56,8 +56,11 @@ def _mega_moe_available() -> bool:
 
 
 def _mega_moe_enabled() -> bool:
-    """Gated on env ``DSV4_USE_MEGA_MOE=1`` + availability."""
-    return os.environ.get("DSV4_USE_MEGA_MOE", "0") == "1" and _mega_moe_available()
+    """Default on when ``_mega_moe_available()`` holds; set
+    ``DSV4_USE_MEGA_MOE=0`` to force the pre-mega per-expert path."""
+    if os.environ.get("DSV4_USE_MEGA_MOE", "1") == "0":
+        return False
+    return _mega_moe_available()
 
 
 def _has_fp8_fp4_grouped_kernel() -> bool:
