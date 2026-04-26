@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps", "fa_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 package(default_visibility=["//rtp_llm:__subpackages__"])
 
@@ -61,8 +61,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-fa_deps()
-
 cc_library(
     name = "trt_v2_attn",
     srcs = [
@@ -74,7 +72,6 @@ cc_library(
         "cufmha/TRTAttn.h",
     ],
     deps = [
-        ":fa_hdrs",
         ":cuda_host_utils",
         "//rtp_llm/models_py/bindings/core:types",
         "//rtp_llm/models_py/bindings/core:types_hdr",
@@ -89,36 +86,6 @@ cc_library(
     ],
     # for fused_multihead_attention_utils.h: alpha = reinterpret_cast<uint32_t const&>(h2)
     copts = copts() + ["-fno-strict-aliasing"],
-)
-
-cc_library(
-    name = "cufmha",
-    srcs = [
-        "cufmha/cufmha.cc",
-        ":fa",
-    ],
-    hdrs = [
-        "cufmha/cufmha.h",
-        "cufmha/fmha_profiling_interface.h"
-    ],
-    deps = [
-        ":fa_hdrs",
-        ":cuda_host_utils",
-        "//rtp_llm/models_py/bindings/core:types",
-        "//rtp_llm/models_py/bindings/core:types_hdr",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/config:model_config",
-        "//rtp_llm/cpp/config:special_tokens",
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_tensor_ops",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_header",
-        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
-        "//rtp_llm/models_py/bindings/core:device_data",
-        ":trt_v2_attn"
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -140,7 +107,7 @@ cc_library(
     srcs = [
     ],
     deps = [
-        ":cufmha",
+        ":trt_v2_attn",
         ":cuda_host_utils",
         "//rtp_llm/cpp/utils:core_utils",
         "@local_config_cuda//cuda:cuda_headers",
