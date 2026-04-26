@@ -21,8 +21,17 @@ struct CacheConfig {
     std::vector<std::vector<int>> full_groups;    // for hybrid attention
     std::vector<CacheGroupType>   group_types;    // for hybrid attention
     std::vector<CacheGroupType>   layer_attn_types;
+    std::vector<KVCacheAttnType>  group_attn_types;            // group id -> cache identity
+    std::vector<std::vector<int>> layer_to_group_ids;          // layer id -> all group ids needed by the layer
+    std::vector<std::vector<int>> layer_attn_to_group_id;      // layer id -> attn type id -> group id
     std::vector<int>              layer_to_group_id;
     std::vector<int>              layer_to_block_stride_bytes;
+    std::vector<size_t>           group_seq_size_per_block;
+    std::vector<size_t>           group_kv_block_stride_bytes;
+    std::vector<size_t>           group_kv_scale_stride_bytes;
+    std::vector<size_t>           group_block_size_bytes;
+    std::vector<uint32_t>         group_block_nums;
+    bool                          use_independent_block_pools = false;
 
     // Model configuration
     rtp_llm::DataType dtype;
@@ -146,6 +155,17 @@ struct CacheConfig {
             }
         }
         os << "]\n";
+        OUTPUT_FIELD_EXPR("group_attn_types.size()", group_attn_types.size());
+        os << indent1 << "group_attn_types=[";
+        for (size_t i = 0; i < group_attn_types.size(); ++i) {
+            os << static_cast<int>(group_attn_types[i]);
+            if (i + 1 < group_attn_types.size()) {
+                os << ",";
+            }
+        }
+        os << "]\n";
+        OUTPUT_FIELD_EXPR("layer_to_group_ids.size()", layer_to_group_ids.size());
+        os << indent1 << "layer_to_group_ids=" << rtp_llm::vectorsToString(layer_to_group_ids) << "\n";
         OUTPUT_FIELD_EXPR("layer_attn_types.size()", layer_attn_types.size());
         os << indent1 << "layer_attn_types=[";
         for (size_t i = 0; i < layer_attn_types.size(); ++i) {

@@ -12,4 +12,19 @@ enum class CacheGroupType : int8_t {
     FULL   = 1,
 };
 
+// Cache identity for models where one logical layer owns multiple cache entries.
+// CacheGroupType describes allocation/reuse policy, while KVCacheAttnType
+// describes which cache object a layer wants to access.
+enum class KVCacheAttnType : int8_t {
+    DEFAULT       = 0,
+    CSA_KV        = 1,
+    HCA_KV        = 2,
+    INDEXER_KV    = 3,
+    INDEXER_STATE = 4,
+    CSA_STATE     = 5,
+    HCA_STATE     = 6,
+    SWA_KV        = 7,
+    TYPE_COUNT    = 8,
+};
+
 }  // namespace rtp_llm

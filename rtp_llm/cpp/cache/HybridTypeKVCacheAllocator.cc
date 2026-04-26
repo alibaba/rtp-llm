@@ -418,7 +418,8 @@ std::shared_ptr<KVCacheResource> HybridTypeKVCacheAllocator::incrKVCacheRef(cons
                                   static_cast<int>(config_.layer_all_num),
                                   config_.layer_to_group_id,
                                   config_.kernelBlocksPerKvBlock(),
-                                  config_.group_types);
+                                  config_.group_types,
+                                  config_.layer_attn_to_group_id);
 
     CacheKeysType&                selected_keys = selected_resource->cacheKeys();
     std::vector<BlockIndicesType> selected_blocks(static_cast<size_t>(group_nums));

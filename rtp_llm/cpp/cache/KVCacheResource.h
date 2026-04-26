@@ -69,6 +69,7 @@ private:
 
 using GroupBlockIds = std::vector<std::shared_ptr<BlockIds>>;
 using LayerBlockIds = std::vector<std::shared_ptr<BlockIds>>;
+using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 
 class KVCacheResource {
 public:
@@ -76,13 +77,17 @@ public:
                     int                                layer_num,
                     const std::vector<int>&            layer_to_group_id          = {},
                     size_t                             kernel_blocks_per_kv_block = 1,
-                    const std::vector<CacheGroupType>& group_types                = {});
+                    const std::vector<CacheGroupType>& group_types                = {},
+                    const std::vector<std::vector<int>>& layer_attn_to_group_id    = {});
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int                     blocksNum(int group_id = 0) const;
     const BlockIndicesType& blocks(int group_id = 0) const;
+    const BlockIndicesType& blocks(int layer_id, KVCacheAttnType attn_type) const;
     const BlockIndicesType& kernelBlocks(int group_id = 0) const;
+    const BlockIndicesType& kernelBlocks(int layer_id, KVCacheAttnType attn_type) const;
     BlockIds&               mutableBlockIds(int group_id = 0) const;
+    BlockIds&               mutableBlockIds(int layer_id, KVCacheAttnType attn_type) const;
 
     int groupNums() const;
 
@@ -90,6 +95,8 @@ public:
     const GroupBlockIds& groupBlocks() const;
 
     const LayerBlockIds& layerBlocks() const;
+    const LayerAttnBlockIds& layerAttnBlocks() const;
+    int groupId(int layer_id, KVCacheAttnType attn_type) const;
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
@@ -118,6 +125,8 @@ public:
 private:
     // layer_id -> block_indices
     LayerBlockIds layer_block_ids;
+    // layer_id -> attn_type -> block_indices
+    LayerAttnBlockIds layer_attn_block_ids;
     // group_id -> block_indices
     GroupBlockIds group_block_ids;
     CacheKeysType cache_keys;

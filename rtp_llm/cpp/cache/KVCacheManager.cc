@@ -6,6 +6,7 @@
 
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
@@ -62,7 +63,11 @@ bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "cache specs must not be empty");
 
     const bool is_hybrid = config_.groupNums() > 1;
-    if (is_hybrid) {
+    if (config_.use_independent_block_pools) {
+        allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(
+            config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
+        RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "HybridPoolKVCacheAllocator init failed");
+    } else if (is_hybrid) {
         allocator_ = std::make_shared<rtp_llm::HybridTypeKVCacheAllocator>(
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
         RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "HybridTypeKVCacheAllocator init failed");
@@ -241,6 +246,24 @@ KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int partitio
     return allocator_->convertIndexToBuffer(layer_id, block_index, partition_count, partition_id);
 }
 
+BlockAddrInfo
+KVCacheManager::convertIndexToAddr(int block_index, int layer_id, KVCacheAttnType attn_type) const {
+    return allocator_->convertIndexToAddr(layer_id, attn_type, block_index);
+}
+
+std::vector<BlockInfo>
+KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, KVCacheAttnType attn_type) const {
+    return allocator_->convertIndexToBuffer(layer_id, attn_type, block_index);
+}
+
+std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int             block_index,
+                                                            int             layer_id,
+                                                            KVCacheAttnType attn_type,
+                                                            int             partition_count,
+                                                            int             partition_id) const {
+    return allocator_->convertIndexToBuffer(layer_id, attn_type, block_index, partition_count, partition_id);
+}
+
 CacheLayerLayout KVCacheManager::allLayerCacheBase() const {
     return allocator_->allLayerCacheBase();
 }
@@ -258,9 +281,14 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
         layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
     }
 
-    layout.layer_to_groups = config_.layer_to_group_id;
-    layout.group_types     = config_.group_types;
+    layout.layer_to_groups      = config_.layer_to_group_id;
+    layout.layer_to_group_ids   = config_.layer_to_group_ids;
+    layout.layer_attn_to_group_id = config_.layer_attn_to_group_id;
+    layout.group_types          = config_.group_types;
+    layout.group_attn_types     = config_.group_attn_types;
     layout.layer_attn_types.resize(config_.layer_num, CacheGroupType::FULL);
+    layout.layers_to_kv_buffer_ptrs_by_attn    = all_layout.layers_to_kv_buffer_ptrs_by_attn;
+    layout.layers_to_scale_buffer_ptrs_by_attn = all_layout.layers_to_scale_buffer_ptrs_by_attn;
 
     RTP_LLM_CHECK_WITH_INFO(config_.layer_num <= all_layer_tensors.size(),
                             "config_.layer_num[%d] > all_layer_tensors.size()[%ld]",

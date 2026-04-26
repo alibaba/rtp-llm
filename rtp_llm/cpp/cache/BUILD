@@ -96,11 +96,13 @@ cc_library(
 cc_library(
     name = "kv_cache_allocator",
     srcs = [
+        "HybridPoolKVCacheAllocator.cc",
         "HybridTypeKVCacheAllocator.cc",
         "KVCacheAllocator.cc",
         "SingleTypeKVCacheAllocator.cc",
     ],
     hdrs = [
+        "HybridPoolKVCacheAllocator.h",
         "HybridTypeKVCacheAllocator.h",
         "KVCacheAllocator.h",
         "SingleTypeKVCacheAllocator.h",
