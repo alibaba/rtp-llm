@@ -33,6 +33,7 @@ def http_json(
     headers=None,   # type: Optional[Dict[str, str]]
     payload=None,   # type: Optional[Dict[str, Any]]
     context="",     # type: str
+    method=None,    # type: Optional[str]
 ):
     # type: (...) -> Tuple[int, Any, str]
     data = None
@@ -42,6 +43,8 @@ def http_json(
         request_headers = dict({"Content-Type": "application/json"}, **request_headers)
 
     request = urllib.request.Request(url, data=data, headers=request_headers)
+    if method is not None:
+        request.method = method
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             body = response.read().decode("utf-8")

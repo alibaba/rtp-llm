@@ -64,6 +64,7 @@ def github_post(repo, path, context, github_token, payload=None):
         headers=github_headers(github_token),
         payload=payload,
         context=context,
+        method="POST",
     )
     return status, body
 
