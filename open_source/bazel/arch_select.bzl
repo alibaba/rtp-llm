@@ -10,20 +10,6 @@ def copy_all_so():
     copy_so("//:th_transformer")
     copy_so("//:th_transformer_config")
     copy_so("//:rtp_compute_ops")
-    copy_so("//rtp_llm/models_py/bindings/cuda:fa")
-    copy_so("@flashinfer_cpp//:flashinfer_single_prefill")
-    copy_so("@flashinfer_cpp//:flashinfer_single_decode")
-    copy_so("@flashinfer_cpp//:flashinfer_batch_paged_prefill")
-    copy_so("@flashinfer_cpp//:flashinfer_batch_paged_decode")
-    copy_so("@flashinfer_cpp//:flashinfer_batch_ragged_prefill")
-    copy_so("@flashinfer_cpp//:flashinfer_single_prefill_256")
-    copy_so("@flashinfer_cpp//:flashinfer_single_decode_256")
-    copy_so("@flashinfer_cpp//:flashinfer_batch_paged_prefill_256")
-    copy_so("@flashinfer_cpp//:flashinfer_batch_paged_decode_256")
-    copy_so("@flashinfer_cpp//:flashinfer_batch_ragged_prefill_256")
-    # flashinfer SM90 kernel (hopper-specific fused attention)
-    copy_so("@flashinfer_cpp//:flashinfer_sm90")
-    copy_so("@deep_ep//:deep_ep_cu")
 
 def requirement(names):
     for name in names:
@@ -114,17 +100,6 @@ def torch_deps():
     })
     return deps
 
-def fa_deps():
-    native.alias(
-        name = "fa",
-        actual = "@flash_attention//:fa"
-    )
-
-    native.alias(
-        name = "fa_hdrs",
-        actual = "@flash_attention//:fa_hdrs",
-    )
-
 def flashinfer_deps():
     native.alias(
         name = "flashinfer",
@@ -137,32 +112,11 @@ def flashmla_deps():
         actual = "@flashmla//:flashmla"
     )
 
-def deep_ep_deps():
-    native.alias(
-        name = "deep_ep",
-        actual = "@deep_ep//:deep_ep"
-    )
-
 def deep_ep_py_deps():
     native.alias(
         name = "deep_ep_py",
         actual = "//rtp_llm:empty_target",
     )
-
-def kernel_so_deps():
-    return select({
-        "@//:using_cuda": [":libfa_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libflashinfer_single_prefill_256_so", ":libflashinfer_single_decode_256_so", ":libflashinfer_batch_paged_prefill_256_so", ":libflashinfer_batch_paged_decode_256_so", ":libflashinfer_batch_ragged_prefill_256_so"],
-        "@//:using_rocm": [],
-        "//conditions:default":[],
-    })
-
-def arpc_deps():
-    native.cc_library(
-        name = ""
-    )
-
-def trt_plugins():
-    pass
 
 def cuda_register():
     native.alias(

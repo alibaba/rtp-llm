@@ -231,9 +231,6 @@ struct AttentionCommonInputs {
     ParamsPtr decode_flash_infer_attn;
     ParamsPtr prefill_trt_attn;
     ParamsPtr decode_trt_attn;
-
-    // rocm
-    ParamsPtr decode_aiter_attn;
 };
 
 struct AttentionModuleParams {

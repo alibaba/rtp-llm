@@ -175,7 +175,6 @@ build:rocm --host_action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/cond
 build:rocm --copt="-DUSE_ROCM=1"
 build:rocm --copt="-DFORCE_NVSHMEM_API=1"
 build:rocm --copt="-DFLASHINFER_CUB_SUBTRACTLEFT_DEFINED"  # ROCm 7.2 hipcub uses SubtractLeft instead of FlagHeads
-build:aiter_src --define=using_aiter_src=true
 test:rocm --test_env="/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/"
 
 build:arm --copt="-DENABLE_BF16=1"

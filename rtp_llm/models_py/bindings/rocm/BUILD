@@ -35,12 +35,7 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@havenask//aios/autil:scope",
-    ] + select({
-        "@//:using_aiter_src": [
-            "@aiter_src//:module_mha_fwd",
-        ],
-        "//conditions:default": ["@aiter//:module_mha_fwd",],
-    }),
+    ],
     copts = rocm_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
