@@ -1,14 +1,13 @@
 #include <gtest/gtest.h>
+
 #include <vector>
 
-#include "rtp_llm/cpp/cache/DSV4CacheConfig.h"
-#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
-#include "rtp_llm/cpp/cache/DSV4ConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
-#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/cache/DSV4ConfigCreator.h"
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -28,13 +27,14 @@ static ModelConfig makeProModelConfig() {
     mc.attn_config.indexer_topk     = 1024;
     mc.attn_config.o_groups         = 16;
     mc.attn_config.o_lora_rank      = 1024;
+
     std::vector<int> ratios;
     ratios.push_back(128);
     ratios.push_back(128);
-    for (int i = 2; i < 61; i++) {
+    for (int i = 2; i < 61; ++i) {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
-    ratios.push_back(0);
+    ratios.push_back(0);  // MTP tail marker stripped by DSV4ConfigCreator
     mc.attn_config.layer_compress_ratios = ratios;
     return mc;
 }
@@ -53,8 +53,9 @@ static ModelConfig makeFlashModelConfig() {
     mc.attn_config.indexer_topk     = 512;
     mc.attn_config.o_groups         = 8;
     mc.attn_config.o_lora_rank      = 1024;
-    std::vector<int> ratios         = {0, 0};
-    for (int i = 2; i < 43; i++) {
+
+    std::vector<int> ratios = {0, 0};
+    for (int i = 2; i < 43; ++i) {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
     ratios.push_back(0);
@@ -62,1069 +63,382 @@ static ModelConfig makeFlashModelConfig() {
     return mc;
 }
 
-// ============================================================
-// Layer classification
-// ============================================================
-
-TEST(DSV4ConfigCreatorTest, ProLayerClassification) {
-    auto mc   = makeProModelConfig();
-    auto dsv4 = DSV4ConfigCreator::buildDSV4Config(mc);
-    EXPECT_EQ(dsv4.num_all_layers(), 61u);
-    EXPECT_EQ(dsv4.num_swa_only_layers(), 0u);
-    EXPECT_EQ(dsv4.num_csa_layers(), 30u);
-    EXPECT_EQ(dsv4.num_hca_layers(), 31u);
-    EXPECT_EQ(dsv4.num_csa_layers() + dsv4.num_hca_layers() + dsv4.num_swa_only_layers(), 61u);
-}
-
-TEST(DSV4ConfigCreatorTest, FlashLayerClassification) {
-    auto mc   = makeFlashModelConfig();
-    auto dsv4 = DSV4ConfigCreator::buildDSV4Config(mc);
-    EXPECT_EQ(dsv4.num_all_layers(), 43u);
-    EXPECT_EQ(dsv4.num_swa_only_layers(), 2u);
-    EXPECT_EQ(dsv4.num_csa_layers(), 21u);
-    EXPECT_EQ(dsv4.num_hca_layers(), 20u);
-    EXPECT_EQ(dsv4.num_csa_layers() + dsv4.num_hca_layers() + dsv4.num_swa_only_layers(), 43u);
-}
-
-// ============================================================
-// Pool specs
-// ============================================================
-
-TEST(DSV4ConfigCreatorTest, ProPoolSpecs) {
-    auto mc   = makeProModelConfig();
-    auto dsv4 = DSV4ConfigCreator::buildDSV4Config(mc);
-
-    EXPECT_EQ(dsv4.pool_specs[0].layer_num, 30u);
-    EXPECT_EQ(dsv4.pool_specs[0].entry_elems, 584u);
-    EXPECT_EQ(dsv4.pool_specs[0].entries_per_block, 64u);
-    EXPECT_TRUE(dsv4.pool_specs[0].is_paged);
-
-    EXPECT_EQ(dsv4.pool_specs[1].layer_num, 31u);
-    EXPECT_EQ(dsv4.pool_specs[1].entries_per_block, 2u);
-
-    EXPECT_EQ(dsv4.pool_specs[2].layer_num, 30u);
-    EXPECT_EQ(dsv4.pool_specs[2].entry_elems, 132u);
-
-    EXPECT_EQ(dsv4.pool_specs[3].layer_num, 30u);
-    EXPECT_FALSE(dsv4.pool_specs[3].is_paged);
-    EXPECT_EQ(dsv4.pool_specs[3].fixed_blocks_per_req, 2u);
-
-    EXPECT_EQ(dsv4.pool_specs[4].layer_num, 30u);
-    EXPECT_EQ(dsv4.pool_specs[4].fixed_blocks_per_req, 2u);
-
-    EXPECT_EQ(dsv4.pool_specs[5].layer_num, 31u);
-    EXPECT_EQ(dsv4.pool_specs[5].fixed_blocks_per_req, 16u);
-
-    EXPECT_EQ(dsv4.pool_specs[6].layer_num, 61u);
-    EXPECT_EQ(dsv4.pool_specs[6].entries_per_block, 64u);
-}
-
-TEST(DSV4ConfigCreatorTest, FlashPoolSpecs) {
-    auto mc   = makeFlashModelConfig();
-    auto dsv4 = DSV4ConfigCreator::buildDSV4Config(mc);
-    EXPECT_EQ(dsv4.pool_specs[0].layer_num, 21u);
-    EXPECT_EQ(dsv4.pool_specs[1].layer_num, 20u);
-    EXPECT_EQ(dsv4.pool_specs[6].layer_num, 43u);
-}
-
-// ============================================================
-// Block size bytes
-// ============================================================
-
-TEST(DSV4ConfigCreatorTest, BlockSizeBytes) {
-    auto mc   = makeProModelConfig();
-    auto dsv4 = DSV4ConfigCreator::buildDSV4Config(mc);
-    EXPECT_EQ(dsv4.pool_specs[0].block_size_bytes(), 64u * 584u);
-    EXPECT_EQ(dsv4.pool_specs[1].block_size_bytes(), 2u * 584u);
-    EXPECT_EQ(dsv4.pool_specs[2].block_size_bytes(), 64u * 132u);
-    EXPECT_EQ(dsv4.pool_specs[3].block_size_bytes(), 4u * 512u * 4u);
-    EXPECT_EQ(dsv4.pool_specs[4].block_size_bytes(), 4u * 2048u * 4u);
-    EXPECT_EQ(dsv4.pool_specs[5].block_size_bytes(), 8u * 1024u * 4u);
-    EXPECT_EQ(dsv4.pool_specs[6].block_size_bytes(), 64u * 584u);
-}
-
-// ============================================================
-// CacheConfig output
-// ============================================================
-
-TEST(DSV4ConfigCreatorTest, CreateCacheConfig) {
-    auto              mc = makeProModelConfig();
-    ParallelismConfig pc;
-    auto              config = DSV4ConfigCreator::createConfig(mc, pc);
-
-    EXPECT_TRUE(config.dsv4_config.has_value());
-    // 7 groups -> groupNums() > 1 -> HybridTypeKVCacheAllocator path
-    EXPECT_EQ(config.groupNums(), 7);
-    EXPECT_EQ(config.global_layer_ids.size(), 7u);
-    EXPECT_EQ(config.cache_specs.size(), 7u);
-    EXPECT_EQ(config.group_types.size(), 7u);
-    EXPECT_EQ(config.layer_num, 61u);
-    EXPECT_TRUE(config.is_sparse);
-    EXPECT_FALSE(config.use_mla);
-}
-
-TEST(DSV4ConfigCreatorTest, FlashCacheConfig) {
-    auto              mc = makeFlashModelConfig();
-    ParallelismConfig pc;
-    auto              config = DSV4ConfigCreator::createConfig(mc, pc);
-
-    EXPECT_EQ(config.groupNums(), 7);
-    EXPECT_EQ(config.layer_num, 43u);
-    // Group 6 (SWA) should have all 43 layers
-    EXPECT_EQ(config.global_layer_ids[6].size(), 43u);
-    // Group 0 (CSA KV) should have 21 layers
-    EXPECT_EQ(config.global_layer_ids[0].size(), 21u);
-}
-
-// ============================================================
-// DSV4KVCacheSpec
-// ============================================================
-
-TEST(DSV4KVCacheSpecTest, KVSpecFromPoolSpec) {
-    DSV4PoolSpec pool_spec = {
-        DSV4CacheType::CSA_KV,
-        30,
-        584,
-        64,
-        DataType::TYPE_UINT8,
-        true,
-        0,
-    };
-    DSV4KVSpec spec(pool_spec, 256);
-
-    EXPECT_EQ(spec.layer_num, 30u);
-    EXPECT_EQ(spec.block_size(), 64u * 584u);
-    EXPECT_EQ(spec.block_size_bytes(), 64u * 584u * 1u);  // uint8 = 1 byte
-    EXPECT_EQ(spec.cache_type, DSV4CacheType::CSA_KV);
-    EXPECT_EQ(spec.entry_elems, 584u);
-    EXPECT_EQ(spec.entries_per_block, 64u);
-}
-
-TEST(DSV4KVCacheSpecTest, StateSpecFloat32) {
-    DSV4PoolSpec pool_spec = {
-        DSV4CacheType::CSA_STATE,
-        30,
-        2048,
-        4,
-        DataType::TYPE_FP32,
-        false,
-        2,
-    };
-    DSV4StateSpec spec(pool_spec, 256);
-
-    EXPECT_EQ(spec.block_size(), 4u * 2048u);
-    EXPECT_EQ(spec.block_size_bytes(), 4u * 2048u * 4u);  // float32 = 4 bytes
-    EXPECT_EQ(spec.cache_type, DSV4CacheType::CSA_STATE);
-    EXPECT_EQ(spec.state_dim, 2048u);
-    EXPECT_EQ(spec.fixed_blocks_per_req, 2u);
-}
-
-TEST(DSV4KVCacheSpecTest, IndexerKVSpec) {
-    DSV4PoolSpec pool_spec = {
-        DSV4CacheType::INDEXER_KV,
-        30,
-        132,
-        64,
-        DataType::TYPE_UINT8,
-        true,
-        0,
-    };
-    DSV4KVSpec spec(pool_spec, 256);
-
-    EXPECT_EQ(spec.block_size(), 64u * 132u);
-    EXPECT_EQ(spec.block_size_bytes(), 64u * 132u);
-    EXPECT_EQ(spec.cache_type, DSV4CacheType::INDEXER_KV);
-}
-
-TEST(DSV4KVCacheSpecTest, HCAStateSpec) {
-    DSV4PoolSpec pool_spec = {
-        DSV4CacheType::HCA_STATE,
-        31,
-        1024,
-        8,
-        DataType::TYPE_FP32,
-        false,
-        16,
-    };
-    DSV4StateSpec spec(pool_spec, 256);
-
-    EXPECT_EQ(spec.block_size_bytes(), 8u * 1024u * 4u);
-    EXPECT_EQ(spec.fixed_blocks_per_req, 16u);
-    EXPECT_EQ(spec.cache_type, DSV4CacheType::HCA_STATE);
-}
-
-// ============================================================
-// Pool 0/1/2 shared properties: same tokens_per_block, same num_blocks
-// ============================================================
-
-TEST(DSV4ConfigCreatorTest, PagedPoolsShareTokensPerBlock) {
-    // Pro config
-    {
-        auto mc   = makeProModelConfig();
-        auto dsv4 = DSV4ConfigCreator::buildDSV4Config(mc);
-        // Pool 0 (CSA KV), Pool 1 (HCA KV), Pool 2 (Indexer KV) all use
-        // VARIABLE_TOKENS_PER_BLOCK / compress_ratio as entries_per_block.
-        // But they all track the same token stream — their block boundaries align.
-        // entries_per_block differs (64 vs 2) because compress_ratio differs,
-        // but tokens_per_block is the same: 256 tokens per block for all.
-        EXPECT_EQ(dsv4.pool_specs[0].entries_per_block, 256u / 4u);    // CSA: 64
-        EXPECT_EQ(dsv4.pool_specs[1].entries_per_block, 256u / 128u);  // HCA: 2
-        EXPECT_EQ(dsv4.pool_specs[2].entries_per_block, 256u / 4u);    // Indexer: 64
-
-        // Pool 6 (SWA) uses SWA_TOKENS_PER_BLOCK = 64
-        EXPECT_EQ(dsv4.pool_specs[6].entries_per_block, DSV4CacheConfig::SWA_TOKENS_PER_BLOCK);
-    }
-    // Flash config
-    {
-        auto mc   = makeFlashModelConfig();
-        auto dsv4 = DSV4ConfigCreator::buildDSV4Config(mc);
-        EXPECT_EQ(dsv4.pool_specs[0].entries_per_block, 256u / 4u);
-        EXPECT_EQ(dsv4.pool_specs[1].entries_per_block, 256u / 128u);
-        EXPECT_EQ(dsv4.pool_specs[2].entries_per_block, 256u / 4u);
-    }
-}
-
-TEST(DSV4ConfigCreatorTest, AllPagedPoolsShareBlockNum) {
-    // When block_num is set, all 7 groups share the same BlockPool,
-    // so they all have the same physical block_num.
-    auto              mc = makeProModelConfig();
-    ParallelismConfig pc;
-    auto              config = DSV4ConfigCreator::createConfig(mc, pc);
-    config.block_num         = 100;
-
-    // All 7 groups share one BlockPool — same block_num
-    // This is verified by the allocator init test, but let's also verify
-    // the CacheConfig structure is consistent
-    EXPECT_EQ(config.groupNums(), 7);
-    // All specs should produce valid block_size_bytes
-    for (int i = 0; i < 7; i++) {
-        EXPECT_GT(config.cache_specs[i]->block_size_bytes(), 0u) << "pool " << i;
-    }
-}
-
-TEST(DSV4ConfigCreatorTest, BlockIdConsistencyAcrossGroups) {
-    // Critical for model integration: when the framework allocates block_id=X,
-    // all 7 groups use the same block_id to index into their respective tensors.
-    // The physical memory layout is: [block_num, group_layer_num, kv_block_stride_bytes]
-    // Each group's layer tensor is a view into this shared buffer.
-    //
-    // For DSV4 model to work:
-    //   block_table[group_0][i] == block_table[group_1][i] == ... == block_table[group_6][i]
-    //   (same block_id for the same token position across all groups)
-    //
-    // This is guaranteed by HybridTypeKVCacheAllocator which allocates from a single BlockPool.
-    auto              mc = makeProModelConfig();
-    ParallelismConfig pc;
-    auto              config = DSV4ConfigCreator::createConfig(mc, pc);
-
-    // Verify layer_to_group_id mapping: each layer maps to group 6 (SWA) by default
-    EXPECT_EQ(config.layer_to_group_id.size(), 61u);
-    for (size_t i = 0; i < config.layer_to_group_id.size(); i++) {
-        EXPECT_EQ(config.layer_to_group_id[i], 6) << "layer " << i << " should map to SWA group";
-    }
-
-    // Verify global_layer_ids: each group has the correct layer list
-    // Group 0 (CSA KV) and Group 2 (Indexer KV) should have identical layer lists
-    EXPECT_EQ(config.global_layer_ids[0], config.global_layer_ids[2]);
-    // Group 0 (CSA KV) and Group 3 (Indexer State) should have identical layer lists
-    EXPECT_EQ(config.global_layer_ids[0], config.global_layer_ids[3]);
-    // Group 0 (CSA KV) and Group 4 (CSA State) should have identical layer lists
-    EXPECT_EQ(config.global_layer_ids[0], config.global_layer_ids[4]);
-    // Group 1 (HCA KV) and Group 5 (HCA State) should have identical layer lists
-    EXPECT_EQ(config.global_layer_ids[1], config.global_layer_ids[5]);
-}
-
-// ============================================================
-// Helper: build a DSV4 CacheConfig with block_num set for allocator tests
-// ============================================================
-
-static CacheConfig makeDSV4AllocatorConfig(bool use_flash = false) {
+static CacheConfig makeAllocatorConfig(bool use_flash = false) {
     auto              mc = use_flash ? makeFlashModelConfig() : makeProModelConfig();
     ParallelismConfig pc;
     auto              config = DSV4ConfigCreator::createConfig(mc, pc);
-    // Set enough blocks for tests (7 groups × N blocks each)
-    config.block_num = 200;
+    config.block_num         = 32;
+    config.group_block_nums.assign(config.groupNums(), config.block_num);
     return config;
 }
 
-// ============================================================
-// HybridTypeKVCacheAllocator integration tests with DSV4 7-group config
-// ============================================================
-
-class DSV4AllocatorTest: public ::testing::Test {
-protected:
-    void SetUp() override {
-        rtp_llm::initLogger();
-        createDevice();
-    }
-};
-
-TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
-    auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator->init());
-
-    // 7 groups → HybridTypeKVCacheAllocator path
-    EXPECT_EQ(config.groupNums(), 7);
-    EXPECT_EQ(allocator->seqSizePerBlock(), static_cast<int>(config.seq_size_per_block));
-    EXPECT_EQ(allocator->totalBlocksNum(), config.block_num - 1);
-    EXPECT_EQ(allocator->freeBlocksNum(), config.block_num - 1);
+static CompleteTokenIdsPtr makeCompleteTokenIds(int token_num, int seq_size_per_block) {
+    auto complete_token_ids = std::make_shared<CompleteTokenIds>(1, 1, 4096, seq_size_per_block);
+    auto generate_input     = std::make_shared<GenerateInput>();
+    generate_input->input_ids = torch::arange(token_num, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    complete_token_ids->init(generate_input);
+    return complete_token_ids;
 }
 
-TEST_F(DSV4AllocatorTest, FlashInitAndBasicProperties) {
-    auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator->init());
-
-    EXPECT_EQ(config.groupNums(), 7);
-    EXPECT_EQ(config.layer_num, 43u);
-    EXPECT_EQ(allocator->totalBlocksNum(), config.block_num - 1);
+static BatchKVCacheResourcePtr makeBatchResource(const CacheConfig& config, int batch_size = 1) {
+    auto batch_resource = std::make_shared<BatchKVCacheResource>();
+    batch_resource->resetBatchSize(static_cast<size_t>(batch_size));
+    batch_resource->initGroups(config.groupNums(),
+                               static_cast<int>(config.layer_all_num),
+                               config.layer_to_group_id,
+                               config.kernelBlocksPerKvBlock(),
+                               config.group_types,
+                               config.layer_attn_to_group_id);
+    return batch_resource;
 }
 
-TEST_F(DSV4AllocatorTest, AddressLookupAllGroups) {
-    auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator->init());
-
-    // Verify address lookup works for a layer in each group
-    // Group 0 (CSA KV): csa_layer_ids[0]
-    // Group 1 (HCA KV): hca_layer_ids[0]
-    // Group 6 (SWA KV): all_layer_ids[0]
-    for (int gid = 0; gid < 7; gid++) {
-        ASSERT_FALSE(config.global_layer_ids[gid].empty()) << "group " << gid << " has no layers";
-        int  layer_id = config.global_layer_ids[gid][0];
-        auto addr     = allocator->convertIndexToAddr(layer_id, /*block_id=*/1);
-        EXPECT_NE(addr.kv_addr, nullptr) << "null kv_addr for group " << gid << " layer " << layer_id;
-    }
+static size_t dtypeSize(DataType dtype) {
+    return getTypeSize(dtype);
 }
 
-TEST_F(DSV4AllocatorTest, BlockPoolCreatedWithCorrectTensors) {
-    auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator->init());
+TEST(DSV4ConfigCreatorTest, ClassifiesProAndFlashLayers) {
+    auto pro = DSV4ConfigCreator::buildDSV4Config(makeProModelConfig());
+    EXPECT_EQ(pro.num_all_layers(), 61u);
+    EXPECT_EQ(pro.num_csa_layers(), 30u);
+    EXPECT_EQ(pro.num_hca_layers(), 31u);
+    EXPECT_EQ(pro.num_swa_only_layers(), 0u);
 
-    auto block_pool = allocator->getBlockPool();
-    ASSERT_NE(block_pool, nullptr);
-
-    // allLayerCacheBase should return tensors for all 61 layers
-    auto layout = allocator->allLayerCacheBase();
-    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs.size(), static_cast<size_t>(config.layer_num));
-    for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
-        EXPECT_TRUE(layout.layers_to_kv_buffer_ptrs[i].defined()) << "undefined kv buffer for layer " << i;
-    }
+    auto flash = DSV4ConfigCreator::buildDSV4Config(makeFlashModelConfig());
+    EXPECT_EQ(flash.num_all_layers(), 43u);
+    EXPECT_EQ(flash.num_csa_layers(), 21u);
+    EXPECT_EQ(flash.num_hca_layers(), 20u);
+    EXPECT_EQ(flash.num_swa_only_layers(), 2u);
 }
 
-TEST_F(DSV4AllocatorTest, ConvertIndexToBufferAllGroups) {
-    auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator->init());
-
-    // convertIndexToBuffer should work for layers in each of the 7 groups
-    for (int gid = 0; gid < 7; gid++) {
-        int  layer_id = config.global_layer_ids[gid][0];
-        auto buf      = allocator->convertIndexToBuffer(layer_id, /*block_id=*/1);
-        ASSERT_FALSE(buf.empty()) << "empty buffer for group " << gid;
-        EXPECT_NE(buf[0].addr, nullptr) << "null addr for group " << gid;
-    }
-}
-
-TEST_F(DSV4AllocatorTest, MallocAndFreeBlocks) {
-    auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator->init());
-
-    auto block_pool = allocator->getBlockPool();
-    ASSERT_NE(block_pool, nullptr);
-
-    size_t free_before = allocator->freeBlocksNum();
-    ASSERT_GT(free_before, 3u);
-
-    // Direct block pool malloc/free
-    auto blocks = block_pool->malloc(3);
-    ASSERT_EQ(blocks.size(), 3u);
-    EXPECT_EQ(allocator->freeBlocksNum(), free_before - 3);
-
-    block_pool->requestFree(blocks);
-    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
-}
-
-TEST_F(DSV4AllocatorTest, SevenGroupLayerMapping) {
-    auto config = makeDSV4AllocatorConfig();
+TEST(DSV4ConfigCreatorTest, CreatesSevenGroupsWithExpectedPolicies) {
+    auto config = makeAllocatorConfig();
     ASSERT_TRUE(config.dsv4_config.has_value());
-    const auto& dsv4 = config.dsv4_config.value();
 
-    // Verify group layer assignments match DSV4 classification
-    // Group 0: CSA KV → csa_layer_ids (30 layers)
-    EXPECT_EQ(config.global_layer_ids[0].size(), dsv4.num_csa_layers());
-    // Group 1: HCA KV → hca_layer_ids (31 layers)
-    EXPECT_EQ(config.global_layer_ids[1].size(), dsv4.num_hca_layers());
-    // Group 2: Indexer KV → csa_layer_ids
-    EXPECT_EQ(config.global_layer_ids[2].size(), dsv4.num_csa_layers());
-    // Group 3: Indexer State → csa_layer_ids
-    EXPECT_EQ(config.global_layer_ids[3].size(), dsv4.num_csa_layers());
-    // Group 4: CSA State → csa_layer_ids
-    EXPECT_EQ(config.global_layer_ids[4].size(), dsv4.num_csa_layers());
-    // Group 5: HCA State → hca_layer_ids
-    EXPECT_EQ(config.global_layer_ids[5].size(), dsv4.num_hca_layers());
-    // Group 6: SWA KV → all_layer_ids
-    EXPECT_EQ(config.global_layer_ids[6].size(), dsv4.num_all_layers());
-
-    // Paged groups (0,1,2,6) should be FULL, fixed state groups (3,4,5) should be FIXED
+    EXPECT_TRUE(config.use_independent_block_pools);
+    EXPECT_EQ(config.groupNums(), 7);
     EXPECT_EQ(config.group_types[0], CacheGroupType::FULL);
     EXPECT_EQ(config.group_types[1], CacheGroupType::FULL);
     EXPECT_EQ(config.group_types[2], CacheGroupType::FULL);
-    EXPECT_EQ(config.group_types[3], CacheGroupType::FIXED);
-    EXPECT_EQ(config.group_types[4], CacheGroupType::FIXED);
-    EXPECT_EQ(config.group_types[5], CacheGroupType::FIXED);
-    EXPECT_EQ(config.group_types[6], CacheGroupType::FULL);
-}
+    EXPECT_EQ(config.group_types[3], CacheGroupType::LINEAR);
+    EXPECT_EQ(config.group_types[4], CacheGroupType::LINEAR);
+    EXPECT_EQ(config.group_types[5], CacheGroupType::LINEAR);
+    EXPECT_EQ(config.group_types[6], CacheGroupType::LINEAR);
 
-TEST_F(DSV4AllocatorTest, SpecBlockSizesMatchPoolSpecs) {
-    auto config = makeDSV4AllocatorConfig();
-    ASSERT_TRUE(config.dsv4_config.has_value());
-    const auto& dsv4 = config.dsv4_config.value();
+    EXPECT_EQ(config.group_attn_types[0], KVCacheAttnType::CSA_KV);
+    EXPECT_EQ(config.group_attn_types[1], KVCacheAttnType::HCA_KV);
+    EXPECT_EQ(config.group_attn_types[2], KVCacheAttnType::INDEXER_KV);
+    EXPECT_EQ(config.group_attn_types[3], KVCacheAttnType::INDEXER_STATE);
+    EXPECT_EQ(config.group_attn_types[4], KVCacheAttnType::CSA_STATE);
+    EXPECT_EQ(config.group_attn_types[5], KVCacheAttnType::HCA_STATE);
+    EXPECT_EQ(config.group_attn_types[6], KVCacheAttnType::SWA_KV);
 
-    // Each cache_spec's block_size_bytes should match the corresponding pool_spec
-    ASSERT_EQ(config.cache_specs.size(), 7u);
-    for (int i = 0; i < DSV4_NUM_POOLS; i++) {
-        EXPECT_EQ(config.cache_specs[i]->block_size_bytes(), dsv4.pool_specs[i].block_size_bytes())
-            << "mismatch at pool " << i;
+    ASSERT_EQ(config.group_seq_size_per_block.size(), static_cast<size_t>(config.groupNums()));
+    for (auto group_seq_size : config.group_seq_size_per_block) {
+        EXPECT_EQ(group_seq_size, config.seq_size_per_block);
     }
 }
 
-TEST_F(DSV4AllocatorTest, KVBlockStrideIsMaxAcrossGroups) {
-    auto config = makeDSV4AllocatorConfig();
-    ASSERT_TRUE(config.dsv4_config.has_value());
+TEST(DSV4ConfigCreatorTest, LayerToGroupIsMultiMapping) {
+    auto config = makeAllocatorConfig();
     const auto& dsv4 = config.dsv4_config.value();
 
-    // kv_block_stride_bytes should be the max block_size_bytes across all 7 pools
-    size_t expected_max = 0;
-    for (int i = 0; i < DSV4_NUM_POOLS; i++) {
-        expected_max = std::max(expected_max, dsv4.pool_specs[i].block_size_bytes());
-    }
-    EXPECT_EQ(config.kv_block_stride_bytes, expected_max);
-    // For Pro: max is Pool 0 or Pool 6 = 64*584 = 37376
-    EXPECT_EQ(expected_max, 64u * 584u);
+    const int csa_layer = dsv4.csa_layer_ids.front();
+    EXPECT_EQ(config.layer_attn_to_group_id[csa_layer][static_cast<size_t>(KVCacheAttnType::CSA_KV)], 0);
+    EXPECT_EQ(config.layer_attn_to_group_id[csa_layer][static_cast<size_t>(KVCacheAttnType::INDEXER_KV)], 2);
+    EXPECT_EQ(config.layer_attn_to_group_id[csa_layer][static_cast<size_t>(KVCacheAttnType::INDEXER_STATE)], 3);
+    EXPECT_EQ(config.layer_attn_to_group_id[csa_layer][static_cast<size_t>(KVCacheAttnType::CSA_STATE)], 4);
+    EXPECT_EQ(config.layer_attn_to_group_id[csa_layer][static_cast<size_t>(KVCacheAttnType::SWA_KV)], 6);
+    EXPECT_EQ(config.layer_to_group_ids[csa_layer].size(), 5u);
+
+    const int hca_layer = dsv4.hca_layer_ids.front();
+    EXPECT_EQ(config.layer_attn_to_group_id[hca_layer][static_cast<size_t>(KVCacheAttnType::HCA_KV)], 1);
+    EXPECT_EQ(config.layer_attn_to_group_id[hca_layer][static_cast<size_t>(KVCacheAttnType::HCA_STATE)], 5);
+    EXPECT_EQ(config.layer_attn_to_group_id[hca_layer][static_cast<size_t>(KVCacheAttnType::SWA_KV)], 6);
+    EXPECT_EQ(config.layer_to_group_ids[hca_layer].size(), 3u);
 }
 
-TEST_F(DSV4AllocatorTest, FixedGroupsExcludedFromPrefixCache) {
-    auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+TEST(KVCacheResourceTest, LayerAttnTypeIndexesDifferentGroups) {
+    auto config = makeAllocatorConfig();
+    const int csa_layer = config.dsv4_config->csa_layer_ids.front();
+
+    KVCacheResource resource;
+    resource.initGroups(config.groupNums(),
+                        static_cast<int>(config.layer_all_num),
+                        config.layer_to_group_id,
+                        config.kernelBlocksPerKvBlock(),
+                        config.group_types,
+                        config.layer_attn_to_group_id);
+
+    resource.mutableBlockIds(0).assign({10, 11});
+    resource.mutableBlockIds(2).assign({20, 21});
+    resource.mutableBlockIds(6).assign({60, 61});
+
+    EXPECT_EQ(resource.groupId(csa_layer, KVCacheAttnType::CSA_KV), 0);
+    EXPECT_EQ(resource.groupId(csa_layer, KVCacheAttnType::INDEXER_KV), 2);
+    EXPECT_EQ(resource.groupId(csa_layer, KVCacheAttnType::SWA_KV), 6);
+    EXPECT_EQ(resource.blocks(csa_layer, KVCacheAttnType::CSA_KV)[0], 10);
+    EXPECT_EQ(resource.blocks(csa_layer, KVCacheAttnType::INDEXER_KV)[0], 20);
+    EXPECT_EQ(resource.blocks(csa_layer, KVCacheAttnType::SWA_KV)[0], 60);
+}
+
+class DSV4HybridPoolAllocatorTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        rtp_llm::initLogger();
+    }
+};
+
+TEST_F(DSV4HybridPoolAllocatorTest, InitUsesIndependentPoolAccounting) {
+    auto config    = makeAllocatorConfig();
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool  = allocator->getBlockPool();
-    auto block_cache = block_pool->blockCache();
-    ASSERT_NE(block_pool, nullptr);
-    ASSERT_NE(block_cache, nullptr);
-
-    // Insert blocks into cache for paged groups (0,1,2,6) only
-    CacheKeysType keys = {100, 101, 102};
-    for (int gid : {0, 1, 2, 6}) {
-        auto blocks = block_pool->malloc(static_cast<int>(keys.size()));
-        ASSERT_EQ(blocks.size(), keys.size());
-        for (size_t i = 0; i < keys.size(); ++i) {
-            BlockCache::CacheItem item;
-            item.cache_key   = keys[i];
-            item.group_id    = gid;
-            item.block_index = blocks[i];
-            item.is_resident = true;
-            EXPECT_TRUE(block_cache->put(item));
-            block_pool->blockCacheReference(blocks[i]);
-        }
-        block_pool->requestFree(blocks);
+    size_t expected_total_blocks = 0;
+    for (auto block_num : config.group_block_nums) {
+        expected_total_blocks += block_num - 1;  // block 0 reserved in each pool
     }
-
-    // Fixed groups (3,4,5) have nothing in cache — this should NOT block reuse
-    EXPECT_TRUE(block_cache->contains(100, 0));
-    EXPECT_TRUE(block_cache->contains(100, 1));
-    EXPECT_FALSE(block_cache->contains(100, 3));  // FIXED group not cached
-    EXPECT_FALSE(block_cache->contains(100, 4));
-    EXPECT_FALSE(block_cache->contains(100, 5));
+    EXPECT_EQ(allocator->totalBlocksNum(), expected_total_blocks);
+    EXPECT_EQ(allocator->freeBlocksNum(), expected_total_blocks);
 }
 
-// ============================================================
-// Flash config: allocator integration
-// ============================================================
+TEST_F(DSV4HybridPoolAllocatorTest, AvailableTokensUsesBottleneckGroupPool) {
+    auto config = makeAllocatorConfig();
+    config.group_block_nums.assign(config.groupNums(), 8);
+    config.group_block_nums[static_cast<size_t>(DSV4CacheType::SWA_KV)] = 5;
 
-TEST_F(DSV4AllocatorTest, FlashGroupTypes) {
-    auto config = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    ASSERT_TRUE(config.dsv4_config.has_value());
-    const auto& dsv4 = config.dsv4_config.value();
-
-    // Flash: 21 CSA + 20 HCA + 2 SWA-only = 43 layers
-    EXPECT_EQ(dsv4.num_csa_layers(), 21u);
-    EXPECT_EQ(dsv4.num_hca_layers(), 20u);
-    EXPECT_EQ(dsv4.num_swa_only_layers(), 2u);
-
-    // Same group type pattern: paged=FULL, fixed=FIXED
-    EXPECT_EQ(config.group_types[0], CacheGroupType::FULL);   // CSA KV
-    EXPECT_EQ(config.group_types[1], CacheGroupType::FULL);   // HCA KV
-    EXPECT_EQ(config.group_types[2], CacheGroupType::FULL);   // Indexer KV
-    EXPECT_EQ(config.group_types[3], CacheGroupType::FIXED);  // Indexer State
-    EXPECT_EQ(config.group_types[4], CacheGroupType::FIXED);  // CSA State
-    EXPECT_EQ(config.group_types[5], CacheGroupType::FIXED);  // HCA State
-    EXPECT_EQ(config.group_types[6], CacheGroupType::FULL);   // SWA KV
-}
-
-TEST_F(DSV4AllocatorTest, FlashAddressLookupAllGroups) {
-    auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
-    for (int gid = 0; gid < 7; gid++) {
-        ASSERT_FALSE(config.global_layer_ids[gid].empty()) << "Flash group " << gid << " has no layers";
-        int  layer_id = config.global_layer_ids[gid][0];
-        auto addr     = allocator->convertIndexToAddr(layer_id, /*block_id=*/1);
-        EXPECT_NE(addr.kv_addr, nullptr) << "Flash null kv_addr for group " << gid;
-    }
+    const size_t expected_total_blocks = 6 * (8 - 1) + (5 - 1);
+    const size_t expected_tokens       = (5 - 1) * config.seq_size_per_block;
+    EXPECT_EQ(allocator->totalBlocksNum(), expected_total_blocks);
+    EXPECT_EQ(allocator->availableTokensNum(), expected_tokens);
+    EXPECT_EQ(allocator->maxAvailableTokensNum(), expected_tokens);
 }
 
-TEST_F(DSV4AllocatorTest, FlashBlockPoolTensors) {
-    auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+TEST_F(DSV4HybridPoolAllocatorTest, TypedAddressLookupReturnsDifferentGroupBuffers) {
+    auto config    = makeAllocatorConfig();
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    const int csa_layer = config.dsv4_config->csa_layer_ids.front();
+    auto csa_buf = allocator->convertIndexToBuffer(csa_layer, KVCacheAttnType::CSA_KV, /*block_id=*/1);
+    auto swa_buf = allocator->convertIndexToBuffer(csa_layer, KVCacheAttnType::SWA_KV, /*block_id=*/1);
+    ASSERT_FALSE(csa_buf.empty());
+    ASSERT_FALSE(swa_buf.empty());
+    ASSERT_NE(csa_buf[0].addr, nullptr);
+    ASSERT_NE(swa_buf[0].addr, nullptr);
+    EXPECT_NE(csa_buf[0].addr, swa_buf[0].addr);
+    EXPECT_EQ(csa_buf[0].size_bytes, config.cache_specs[0]->block_size_bytes());
+    EXPECT_EQ(swa_buf[0].size_bytes, config.cache_specs[6]->block_size_bytes());
+}
+
+TEST_F(DSV4HybridPoolAllocatorTest, AllLayerCacheBaseExposesPerAttnRawGroupTensors) {
+    auto config    = makeAllocatorConfig();
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     auto layout = allocator->allLayerCacheBase();
-    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs.size(), 43u);
-    for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
-        EXPECT_TRUE(layout.layers_to_kv_buffer_ptrs[i].defined()) << "Flash undefined kv buffer for layer " << i;
-    }
+    ASSERT_EQ(layout.layers_to_kv_buffer_ptrs_by_attn.size(), static_cast<size_t>(config.layer_all_num));
+    ASSERT_EQ(layout.layer_attn_to_group_id.size(), static_cast<size_t>(config.layer_all_num));
+
+    const int csa_layer = config.dsv4_config->csa_layer_ids.front();
+    const auto& csa_attn_tensors = layout.layers_to_kv_buffer_ptrs_by_attn[static_cast<size_t>(csa_layer)];
+    ASSERT_GT(csa_attn_tensors.size(), static_cast<size_t>(KVCacheAttnType::SWA_KV));
+
+    const auto& csa_kv = csa_attn_tensors[static_cast<size_t>(KVCacheAttnType::CSA_KV)];
+    const auto& indexer_kv = csa_attn_tensors[static_cast<size_t>(KVCacheAttnType::INDEXER_KV)];
+    const auto& csa_state = csa_attn_tensors[static_cast<size_t>(KVCacheAttnType::CSA_STATE)];
+    const auto& swa_kv = csa_attn_tensors[static_cast<size_t>(KVCacheAttnType::SWA_KV)];
+
+    ASSERT_TRUE(csa_kv.defined());
+    ASSERT_TRUE(indexer_kv.defined());
+    ASSERT_TRUE(csa_state.defined());
+    ASSERT_TRUE(swa_kv.defined());
+
+    EXPECT_EQ(csa_kv.scalar_type(), torch::kUInt8);
+    EXPECT_EQ(indexer_kv.scalar_type(), torch::kUInt8);
+    EXPECT_EQ(swa_kv.scalar_type(), torch::kUInt8);
+    EXPECT_EQ(csa_state.scalar_type(), torch::kFloat32);
+
+    EXPECT_EQ(csa_kv.dim(), 2);
+    EXPECT_EQ(indexer_kv.dim(), 2);
+    EXPECT_EQ(csa_state.dim(), 2);
+    EXPECT_EQ(swa_kv.dim(), 2);
+    EXPECT_EQ(csa_kv.size(0), config.block_num);
+    EXPECT_EQ(indexer_kv.size(0), config.block_num);
+    EXPECT_EQ(csa_state.size(0), config.block_num);
+    EXPECT_EQ(swa_kv.size(0), config.block_num);
+
+    auto expect_stride_elems = [&](size_t gid) {
+        return static_cast<int64_t>(config.cache_specs[gid]->block_size_bytes() / dtypeSize(config.cache_specs[gid]->dtype));
+    };
+    EXPECT_EQ(csa_kv.size(1), expect_stride_elems(0));
+    EXPECT_EQ(indexer_kv.size(1), expect_stride_elems(2));
+    EXPECT_EQ(csa_state.size(1), expect_stride_elems(4));
+    EXPECT_EQ(swa_kv.size(1), expect_stride_elems(6));
+
+    ASSERT_TRUE(layout.layers_to_kv_buffer_ptrs[static_cast<size_t>(csa_layer)].defined());
+    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs[static_cast<size_t>(csa_layer)].data_ptr(), swa_kv.data_ptr());
 }
 
-TEST_F(DSV4AllocatorTest, FlashLayerMapping) {
-    auto config = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    ASSERT_TRUE(config.dsv4_config.has_value());
-
-    EXPECT_EQ(config.global_layer_ids[0].size(), 21u);  // CSA KV
-    EXPECT_EQ(config.global_layer_ids[1].size(), 20u);  // HCA KV
-    EXPECT_EQ(config.global_layer_ids[2].size(), 21u);  // Indexer KV
-    EXPECT_EQ(config.global_layer_ids[3].size(), 21u);  // Indexer State
-    EXPECT_EQ(config.global_layer_ids[4].size(), 21u);  // CSA State
-    EXPECT_EQ(config.global_layer_ids[5].size(), 20u);  // HCA State
-    EXPECT_EQ(config.global_layer_ids[6].size(), 43u);  // SWA KV (all layers)
-}
-
-TEST_F(DSV4AllocatorTest, FlashSpecBlockSizes) {
-    auto config = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    ASSERT_TRUE(config.dsv4_config.has_value());
-    const auto& dsv4 = config.dsv4_config.value();
-
-    ASSERT_EQ(config.cache_specs.size(), 7u);
-    for (int i = 0; i < DSV4_NUM_POOLS; i++) {
-        EXPECT_EQ(config.cache_specs[i]->block_size_bytes(), dsv4.pool_specs[i].block_size_bytes())
-            << "Flash mismatch at pool " << i;
-    }
-}
-
-TEST_F(DSV4AllocatorTest, FlashMallocAndFree) {
-    auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+TEST_F(DSV4HybridPoolAllocatorTest, HcaLayerHasHcaStateAndSwaButNoCsaKvTensor) {
+    auto config    = makeAllocatorConfig();
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
-    auto   block_pool  = allocator->getBlockPool();
-    size_t free_before = allocator->freeBlocksNum();
-    ASSERT_GT(free_before, 5u);
+    auto layout = allocator->allLayerCacheBase();
+    const int hca_layer = config.dsv4_config->hca_layer_ids.front();
+    const auto& hca_attn_tensors = layout.layers_to_kv_buffer_ptrs_by_attn[static_cast<size_t>(hca_layer)];
 
-    auto blocks = block_pool->malloc(5);
-    ASSERT_EQ(blocks.size(), 5u);
-    EXPECT_EQ(allocator->freeBlocksNum(), free_before - 5);
+    EXPECT_FALSE(hca_attn_tensors[static_cast<size_t>(KVCacheAttnType::CSA_KV)].defined());
+    EXPECT_TRUE(hca_attn_tensors[static_cast<size_t>(KVCacheAttnType::HCA_KV)].defined());
+    EXPECT_TRUE(hca_attn_tensors[static_cast<size_t>(KVCacheAttnType::HCA_STATE)].defined());
+    EXPECT_TRUE(hca_attn_tensors[static_cast<size_t>(KVCacheAttnType::SWA_KV)].defined());
 
-    block_pool->requestFree(blocks);
+    EXPECT_EQ(layout.layer_attn_to_group_id[static_cast<size_t>(hca_layer)]
+                                      [static_cast<size_t>(KVCacheAttnType::HCA_KV)],
+              1);
+    EXPECT_EQ(layout.layer_attn_to_group_id[static_cast<size_t>(hca_layer)]
+                                      [static_cast<size_t>(KVCacheAttnType::HCA_STATE)],
+              5);
+    EXPECT_EQ(layout.layer_attn_to_group_id[static_cast<size_t>(hca_layer)]
+                                      [static_cast<size_t>(KVCacheAttnType::SWA_KV)],
+              6);
+}
+
+TEST_F(DSV4HybridPoolAllocatorTest, MallocAndFreeAllGroups) {
+    auto config    = makeAllocatorConfig();
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    auto batch_resource = makeBatchResource(config);
+
+    auto complete_token_ids = makeCompleteTokenIds(/*token_num=*/300, static_cast<int>(config.seq_size_per_block));
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
+    malloc_info.reuse_cache         = false;
+    malloc_info.enable_device_cache = false;
+
+    const size_t free_before = allocator->freeBlocksNum();
+    auto         result      = allocator->malloc(malloc_info);
+    ASSERT_TRUE(result.success);
+
+    for (int gid = 0; gid < config.groupNums(); ++gid) {
+        EXPECT_GT(batch_resource->blocksNum(0, gid), 0) << "group " << gid;
+    }
+    EXPECT_LT(allocator->freeBlocksNum(), free_before);
+
+    allocator->free(FreeInfo{batch_resource, complete_token_ids});
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
-// ============================================================
-// Prefix cache: insertIntoCache skips FIXED groups
-// ============================================================
-
-TEST_F(DSV4AllocatorTest, InsertIntoCacheSkipsFixedGroups) {
-    auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+TEST_F(DSV4HybridPoolAllocatorTest, InsertThenDeviceReuseUsesFullGroupsAndLinearTail) {
+    auto config    = makeAllocatorConfig();
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool  = allocator->getBlockPool();
-    auto block_cache = block_pool->blockCache();
+    auto cached_resource = makeBatchResource(config);
+    cached_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
+    auto cached_tokens = makeCompleteTokenIds(/*token_num=*/513, static_cast<int>(config.seq_size_per_block));
+    MallocInfo cached_malloc{cached_resource, cached_tokens};
+    cached_malloc.reuse_cache         = true;
+    cached_malloc.enable_device_cache = false;
+    ASSERT_TRUE(allocator->malloc(cached_malloc).success);
 
-    // Manually set up a BatchKVCacheResource with blocks for all 7 groups
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
+    allocator->insertIntoCache(InsertInfo{cached_resource, cached_tokens, /*is_resident=*/false});
+    EXPECT_GT(allocator->blockCacheRefBlocksNum(), 0);
 
-    CacheKeysType keys = {200, 201, 202, 203};
-    batch_res->setBatchCacheKeys(0, keys);
+    auto reuse_resource = makeBatchResource(config);
+    reuse_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
+    auto reuse_tokens = makeCompleteTokenIds(/*token_num=*/513, static_cast<int>(config.seq_size_per_block));
+    MallocInfo reuse_malloc{reuse_resource, reuse_tokens};
+    reuse_malloc.reuse_cache         = true;
+    reuse_malloc.enable_device_cache = true;
 
-    // Allocate 3 blocks per group (simulating 3 full blocks)
-    for (int gid = 0; gid < 7; gid++) {
-        auto blocks = block_pool->malloc(3);
-        ASSERT_EQ(blocks.size(), 3u);
-        batch_res->mutableBlockIds(0, gid).assign(BlockIndicesType(blocks.begin(), blocks.end()));
-    }
-
-    // Create CompleteTokenIds: 3 full blocks * seq_size_per_block tokens + partial
-    int  seq_size_per_block         = allocator->seqSizePerBlock();
-    auto complete_token_ids         = std::make_shared<CompleteTokenIds>(1, 1, 4096, seq_size_per_block);
-    auto generate_input             = std::make_shared<GenerateInput>();
-    int  total_tokens               = 3 * seq_size_per_block + 1;  // 3 full blocks + 1 partial
-    generate_input->input_ids       = torch::arange(total_tokens, torch::kInt32);
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
-    complete_token_ids->init(generate_input);
-
-    InsertInfo insert_info{batch_res, complete_token_ids, /*is_resident=*/false};
-    allocator->insertIntoCache(insert_info);
-
-    // Paged groups (0,1,2,6) should have entries in block cache
-    EXPECT_TRUE(block_cache->contains(200, 0));  // CSA KV
-    EXPECT_TRUE(block_cache->contains(200, 1));  // HCA KV
-    EXPECT_TRUE(block_cache->contains(200, 2));  // Indexer KV
-    EXPECT_TRUE(block_cache->contains(200, 6));  // SWA KV
-
-    // FIXED groups (3,4,5) should NOT have entries
-    EXPECT_FALSE(block_cache->contains(200, 3));  // Indexer State
-    EXPECT_FALSE(block_cache->contains(200, 4));  // CSA State
-    EXPECT_FALSE(block_cache->contains(200, 5));  // HCA State
-
-    // Free all blocks
-    for (int gid = 0; gid < 7; gid++) {
-        const auto& blocks = batch_res->blocks(0, gid);
-        block_pool->requestFree(blocks);
-    }
-}
-
-// ============================================================
-// Prefix cache: Flash config insertIntoCache also skips FIXED
-// ============================================================
-
-TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheSkipsFixedGroups) {
-    auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator->init());
-
-    auto block_pool  = allocator->getBlockPool();
-    auto block_cache = block_pool->blockCache();
-
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
-
-    CacheKeysType keys = {300, 301, 302, 303};
-    batch_res->setBatchCacheKeys(0, keys);
-
-    for (int gid = 0; gid < 7; gid++) {
-        auto blocks = block_pool->malloc(3);
-        ASSERT_EQ(blocks.size(), 3u);
-        batch_res->mutableBlockIds(0, gid).assign(BlockIndicesType(blocks.begin(), blocks.end()));
-    }
-
-    int  seq_size_per_block         = allocator->seqSizePerBlock();
-    auto complete_token_ids         = std::make_shared<CompleteTokenIds>(1, 1, 4096, seq_size_per_block);
-    auto generate_input             = std::make_shared<GenerateInput>();
-    int  total_tokens               = 3 * seq_size_per_block + 1;
-    generate_input->input_ids       = torch::arange(total_tokens, torch::kInt32);
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
-    complete_token_ids->init(generate_input);
-
-    InsertInfo insert_info{batch_res, complete_token_ids, /*is_resident=*/false};
-    allocator->insertIntoCache(insert_info);
-
-    // Paged groups cached
-    EXPECT_TRUE(block_cache->contains(300, 0));
-    EXPECT_TRUE(block_cache->contains(300, 6));
-
-    // FIXED groups not cached
-    EXPECT_FALSE(block_cache->contains(300, 3));
-    EXPECT_FALSE(block_cache->contains(300, 4));
-    EXPECT_FALSE(block_cache->contains(300, 5));
-
-    for (int gid = 0; gid < 7; gid++) {
-        block_pool->requestFree(batch_res->blocks(0, gid));
-    }
-}
-
-// ============================================================
-// Prefix cache: full reuse flow — paged groups reuse, FIXED groups don't block
-// ============================================================
-
-TEST_F(DSV4AllocatorTest, PrefixCacheReuseNotBlockedByFixedGroups) {
-    auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator->init());
-
-    auto block_pool  = allocator->getBlockPool();
-    auto block_cache = block_pool->blockCache();
-
-    // Pre-populate cache for all paged groups (0,1,2,6) with keys {100,101,102}
-    CacheKeysType                          cached_keys = {100, 101, 102};
-    std::vector<std::vector<BlockIdxType>> cached_blocks(7);
-    for (int gid : {0, 1, 2, 6}) {
-        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
-        ASSERT_EQ(blocks.size(), cached_keys.size());
-        for (size_t i = 0; i < cached_keys.size(); ++i) {
-            BlockCache::CacheItem item;
-            item.cache_key   = cached_keys[i];
-            item.group_id    = gid;
-            item.block_index = blocks[i];
-            item.is_resident = true;
-            EXPECT_TRUE(block_cache->put(item));
-            block_pool->blockCacheReference(blocks[i]);
-        }
-        cached_blocks[gid] = blocks;
-        block_pool->requestFree(blocks);
-    }
-
-    // Now do a malloc with reuse enabled — keys {100,101,102,103}
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
-    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
-
-    int  seq_size_per_block         = allocator->seqSizePerBlock();
-    int  seq_len                    = 3 * seq_size_per_block + 1;  // 3 full + partial
-    auto complete_token_ids         = std::make_shared<CompleteTokenIds>(1, 1, 4096, seq_size_per_block);
-    auto generate_input             = std::make_shared<GenerateInput>();
-    generate_input->input_ids       = torch::arange(seq_len, torch::kInt32);
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
-    complete_token_ids->init(generate_input);
-
-    MallocInfo info{batch_res, complete_token_ids};
-    info.enable_device_cache = true;
-    info.reuse_cache         = true;
-    auto result              = allocator->malloc(info);
+    auto result = allocator->malloc(reuse_malloc);
     ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 2 * static_cast<int>(config.seq_size_per_block));
+    EXPECT_EQ(reuse_resource->cacheResource(0).deviceReuseBlockNum(), 2u);
 
-    // reuse_len should be > 0 (FIXED groups don't block it)
-    EXPECT_GT(result.reuse_len, 0) << "Prefix cache reuse should work with FIXED groups excluded";
-
-    // Paged groups should have reused cached blocks
-    for (int gid : {0, 1, 2, 6}) {
-        const auto& out_blocks = batch_res->blocks(0, gid);
-        ASSERT_GE(out_blocks.size(), 3u) << "group " << gid << " should have >= 3 blocks";
-        // First 2 blocks should be reused from cache (last cached block may not be reused)
-        EXPECT_EQ(out_blocks[0], cached_blocks[gid][0]) << "group " << gid << " block 0 should be reused";
-        EXPECT_EQ(out_blocks[1], cached_blocks[gid][1]) << "group " << gid << " block 1 should be reused";
+    for (int gid : {0, 1, 2}) {
+        ASSERT_GE(reuse_resource->blocksNum(0, gid), 2);
+        EXPECT_EQ(reuse_resource->blocks(0, gid)[0], cached_resource->blocks(0, gid)[0]) << "group " << gid;
+        EXPECT_EQ(reuse_resource->blocks(0, gid)[1], cached_resource->blocks(0, gid)[1]) << "group " << gid;
+    }
+    for (int gid : {3, 4, 5, 6}) {
+        ASSERT_GE(reuse_resource->blocksNum(0, gid), 2);
+        EXPECT_TRUE(isNullBlockIdx(reuse_resource->blocks(0, gid)[0])) << "group " << gid;
+        EXPECT_EQ(reuse_resource->blocks(0, gid)[1], cached_resource->blocks(0, gid)[1]) << "group " << gid;
     }
 
-    // Clean up
-    FreeInfo free_info{batch_res};
-    allocator->free(free_info);
+    allocator->free(FreeInfo{reuse_resource, reuse_tokens});
+    allocator->free(FreeInfo{cached_resource, cached_tokens});
 }
 
-TEST_F(DSV4AllocatorTest, FlashPrefixCacheReuseNotBlockedByFixedGroups) {
-    auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+TEST_F(DSV4HybridPoolAllocatorTest, BlockCacheFreeReleasesGroupLocalCacheRefs) {
+    auto config    = makeAllocatorConfig();
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool  = allocator->getBlockPool();
-    auto block_cache = block_pool->blockCache();
+    auto cached_resource = makeBatchResource(config);
+    cached_resource->setBatchCacheKeys(0, CacheKeysType{200, 201, 202});
+    auto tokens = makeCompleteTokenIds(/*token_num=*/513, static_cast<int>(config.seq_size_per_block));
+    MallocInfo malloc_info{cached_resource, tokens};
+    malloc_info.reuse_cache         = true;
+    malloc_info.enable_device_cache = false;
+    ASSERT_TRUE(allocator->malloc(malloc_info).success);
+    allocator->insertIntoCache(InsertInfo{cached_resource, tokens, /*is_resident=*/false});
 
-    CacheKeysType                          cached_keys = {500, 501, 502};
-    std::vector<std::vector<BlockIdxType>> cached_blocks(7);
-    for (int gid : {0, 1, 2, 6}) {
-        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
-        ASSERT_EQ(blocks.size(), cached_keys.size());
-        for (size_t i = 0; i < cached_keys.size(); ++i) {
-            BlockCache::CacheItem item;
-            item.cache_key   = cached_keys[i];
-            item.group_id    = gid;
-            item.block_index = blocks[i];
-            item.is_resident = true;
-            EXPECT_TRUE(block_cache->put(item));
-            block_pool->blockCacheReference(blocks[i]);
-        }
-        cached_blocks[gid] = blocks;
-        block_pool->requestFree(blocks);
+    const size_t block_cache_refs = allocator->blockCacheRefBlocksNum();
+    ASSERT_GT(block_cache_refs, 0);
+
+    auto evicted_resource = makeBatchResource(config);
+    for (int gid = 0; gid < config.groupNums(); ++gid) {
+        const auto& blocks = cached_resource->blocks(0, gid);
+        ASSERT_GE(blocks.size(), 2u);
+        evicted_resource->setBatchBlocks(0, gid, BlockIndicesType{blocks[0], blocks[1], blocks[1], NULL_BLOCK_IDX});
     }
 
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
-    batch_res->setBatchCacheKeys(0, CacheKeysType{500, 501, 502, 503});
+    allocator->blockCacheFree(evicted_resource);
+    EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 0u);
 
-    int  seq_size_per_block         = allocator->seqSizePerBlock();
-    int  seq_len                    = 3 * seq_size_per_block + 1;
-    auto complete_token_ids         = std::make_shared<CompleteTokenIds>(1, 1, 4096, seq_size_per_block);
-    auto generate_input             = std::make_shared<GenerateInput>();
-    generate_input->input_ids       = torch::arange(seq_len, torch::kInt32);
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
-    complete_token_ids->init(generate_input);
-
-    MallocInfo info{batch_res, complete_token_ids};
-    info.enable_device_cache = true;
-    info.reuse_cache         = true;
-    auto result              = allocator->malloc(info);
-    ASSERT_TRUE(result.success);
-
-    EXPECT_GT(result.reuse_len, 0) << "Flash prefix cache reuse should work";
-
-    for (int gid : {0, 1, 2, 6}) {
-        const auto& out_blocks = batch_res->blocks(0, gid);
-        ASSERT_GE(out_blocks.size(), 3u) << "Flash group " << gid;
-        EXPECT_EQ(out_blocks[0], cached_blocks[gid][0]) << "Flash group " << gid << " block 0 should be reused";
-    }
-
-    FreeInfo free_info{batch_res};
-    allocator->free(free_info);
+    allocator->free(FreeInfo{cached_resource, tokens});
 }
 
-// ============================================================
-// SWA (group 6) prefix cache: verify SWA blocks participate in reuse
-// ============================================================
-
-TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
-    auto config      = makeDSV4AllocatorConfig();
-    config.block_num = 100;
-    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+TEST_F(DSV4HybridPoolAllocatorTest, IncrKVCacheRefAddsAndReleasesRequestRefs) {
+    auto config    = makeAllocatorConfig();
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
-    auto block_pool  = allocator->getBlockPool();
-    auto block_cache = block_pool->blockCache();
+    auto batch_resource = makeBatchResource(config);
+    batch_resource->setBatchCacheKeys(0, CacheKeysType{300, 301});
+    auto tokens = makeCompleteTokenIds(/*token_num=*/300, static_cast<int>(config.seq_size_per_block));
+    MallocInfo malloc_info{batch_resource, tokens};
+    malloc_info.reuse_cache         = true;
+    malloc_info.enable_device_cache = false;
+    ASSERT_TRUE(allocator->malloc(malloc_info).success);
 
-    // Only populate SWA group (6) and one paged group (0) to verify SWA participates
-    CacheKeysType             cached_keys = {700, 701};
-    std::vector<BlockIdxType> swa_blocks, csa_blocks;
-
-    // Group 0 (CSA KV)
+    const size_t refs_before = allocator->requestRefBlocksNum();
+    const size_t free_before = allocator->freeBlocksNum();
     {
-        auto blocks = block_pool->malloc(2);
-        for (size_t i = 0; i < 2; ++i) {
-            BlockCache::CacheItem item{cached_keys[i], 0, blocks[i], true};
-            block_cache->put(item);
-            block_pool->blockCacheReference(blocks[i]);
+        auto selected = allocator->incrKVCacheRef(batch_resource->cacheResource(0), CacheKeysType{300});
+        ASSERT_NE(selected, nullptr);
+        EXPECT_EQ(selected->cacheKeys().size(), 1u);
+        ASSERT_EQ(selected->groupNums(), config.groupNums());
+
+        for (int gid = 0; gid < config.groupNums(); ++gid) {
+            ASSERT_EQ(selected->blocks(gid).size(), 1u) << "group " << gid;
+            ASSERT_FALSE(batch_resource->blocks(0, gid).empty()) << "group " << gid;
+            EXPECT_EQ(selected->blocks(gid)[0], batch_resource->blocks(0, gid)[0]) << "group " << gid;
         }
-        csa_blocks = blocks;
-        block_pool->requestFree(blocks);
+        EXPECT_EQ(allocator->requestRefBlocksNum(), refs_before);
+        EXPECT_EQ(allocator->freeBlocksNum(), free_before);
     }
-    // Group 6 (SWA KV)
-    {
-        auto blocks = block_pool->malloc(2);
-        for (size_t i = 0; i < 2; ++i) {
-            BlockCache::CacheItem item{cached_keys[i], 6, blocks[i], true};
-            block_cache->put(item);
-            block_pool->blockCacheReference(blocks[i]);
-        }
-        swa_blocks = blocks;
-        block_pool->requestFree(blocks);
-    }
-
-    // Verify both groups have cache entries
-    EXPECT_TRUE(block_cache->contains(700, 0));
-    EXPECT_TRUE(block_cache->contains(700, 6));
-    EXPECT_TRUE(block_cache->contains(701, 0));
-    EXPECT_TRUE(block_cache->contains(701, 6));
-
-    // Groups 1,2 not populated — they will limit reuse to 0
-    // But this verifies SWA group 6 IS in the reuse path (not excluded like FIXED)
-    EXPECT_FALSE(block_cache->contains(700, 3));  // FIXED — excluded
-    EXPECT_FALSE(block_cache->contains(700, 4));
-    EXPECT_FALSE(block_cache->contains(700, 5));
-}
-
-// ============================================================
-// SWA prefix cache: full reuse with all paged groups including SWA
-// ============================================================
-
-TEST_F(DSV4AllocatorTest, SWAPrefixCacheFullReuse) {
-    auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator->init());
-
-    auto block_pool  = allocator->getBlockPool();
-    auto block_cache = block_pool->blockCache();
-
-    // Populate ALL paged groups (0,1,2,6) with same keys
-    CacheKeysType                          cached_keys = {800, 801};
-    std::vector<std::vector<BlockIdxType>> cached_blocks(7);
-    for (int gid : {0, 1, 2, 6}) {
-        auto blocks = block_pool->malloc(2);
-        for (size_t i = 0; i < 2; ++i) {
-            BlockCache::CacheItem item{cached_keys[i], gid, blocks[i], true};
-            block_cache->put(item);
-            block_pool->blockCacheReference(blocks[i]);
-        }
-        cached_blocks[gid] = blocks;
-        block_pool->requestFree(blocks);
-    }
-
-    // Malloc with reuse — keys {800, 801, 802}
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
-    batch_res->setBatchCacheKeys(0, CacheKeysType{800, 801, 802});
-
-    int  spb            = allocator->seqSizePerBlock();
-    int  seq_len        = 2 * spb + 1;
-    auto cti            = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
-    auto gi             = std::make_shared<GenerateInput>();
-    gi->input_ids       = torch::arange(seq_len, torch::kInt32);
-    gi->generate_config = std::make_shared<GenerateConfig>();
-    cti->init(gi);
-
-    MallocInfo info{batch_res, cti};
-    info.enable_device_cache = true;
-    info.reuse_cache         = true;
-    auto result              = allocator->malloc(info);
-    ASSERT_TRUE(result.success);
-    EXPECT_GT(result.reuse_len, 0);
-
-    // SWA group 6 should have reused block 0
-    const auto& swa_out = batch_res->blocks(0, 6);
-    ASSERT_GE(swa_out.size(), 2u);
-    EXPECT_EQ(swa_out[0], cached_blocks[6][0]) << "SWA block 0 should be reused from prefix cache";
-
-    FreeInfo free_info{batch_res};
-    allocator->free(free_info);
-}
-
-// ============================================================
-// incrMalloc: decode grows sequence after initial prefill
-// ============================================================
-
-TEST_F(DSV4AllocatorTest, IncrMallocDecodeGrowsBlocks) {
-    auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator->init());
-
-    int spb = allocator->seqSizePerBlock();
-
-    // Initial malloc: 1 block worth of tokens
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
-    batch_res->setBatchCacheKeys(0, CacheKeysType{900, 901});
-
-    auto cti            = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
-    auto gi             = std::make_shared<GenerateInput>();
-    gi->input_ids       = torch::arange(spb, torch::kInt32);
-    gi->generate_config = std::make_shared<GenerateConfig>();
-    cti->init(gi);
-
-    MallocInfo init_info{batch_res, cti};
-    init_info.enable_device_cache = false;
-    auto init_result              = allocator->malloc(init_info);
-    ASSERT_TRUE(init_result.success);
-
-    // All 7 groups should have 1 block each
-    for (int gid = 0; gid < 7; gid++) {
-        EXPECT_EQ(batch_res->blocksNum(0, gid), 1u) << "group " << gid << " should have 1 block after init";
-    }
-
-    size_t free_after_init = allocator->freeBlocksNum();
-
-    // incrMalloc: grow to 2 blocks
-    cti->setSeqLength(2 * spb);
-    MallocInfo incr_info{batch_res, cti};
-    incr_info.enable_device_cache = false;
-    auto incr_result              = allocator->malloc(incr_info);
-    ASSERT_TRUE(incr_result.success);
-
-    // All 7 groups should now have 2 blocks each
-    for (int gid = 0; gid < 7; gid++) {
-        EXPECT_EQ(batch_res->blocksNum(0, gid), 2u) << "group " << gid << " should have 2 blocks after incr";
-    }
-
-    // Should have consumed 7 more blocks (1 per group)
-    EXPECT_EQ(allocator->freeBlocksNum(), free_after_init - 7);
-
-    FreeInfo free_info{batch_res};
-    allocator->free(free_info);
-}
-
-// ============================================================
-// Free and reallocate: blocks return to pool
-// ============================================================
-
-TEST_F(DSV4AllocatorTest, FreeReturnsBlocksToPool) {
-    auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator->init());
-
-    size_t free_before = allocator->freeBlocksNum();
-    int    spb         = allocator->seqSizePerBlock();
-
-    // Allocate
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
-    batch_res->setBatchCacheKeys(0, CacheKeysType{1000, 1001});
-
-    auto cti            = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
-    auto gi             = std::make_shared<GenerateInput>();
-    gi->input_ids       = torch::arange(spb, torch::kInt32);
-    gi->generate_config = std::make_shared<GenerateConfig>();
-    cti->init(gi);
-
-    MallocInfo info{batch_res, cti};
-    info.enable_device_cache = false;
-    auto result              = allocator->malloc(info);
-    ASSERT_TRUE(result.success);
-
-    size_t free_after_alloc = allocator->freeBlocksNum();
-    EXPECT_LT(free_after_alloc, free_before);
-
-    // Free
-    FreeInfo free_info{batch_res};
-    allocator->free(free_info);
-
-    // All blocks should be returned
+    EXPECT_EQ(allocator->requestRefBlocksNum(), refs_before);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 
-    // Can allocate again
-    auto batch_res2 = std::make_shared<BatchKVCacheResource>();
-    batch_res2->resetBatchSize(1);
-    batch_res2->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
-    batch_res2->setBatchCacheKeys(0, CacheKeysType{1100, 1101});
-
-    MallocInfo info2{batch_res2, cti};
-    info2.enable_device_cache = false;
-    auto result2              = allocator->malloc(info2);
-    ASSERT_TRUE(result2.success);
-
-    FreeInfo free_info2{batch_res2};
-    allocator->free(free_info2);
-    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
-}
-
-// ============================================================
-// Flash: incrMalloc decode path
-// ============================================================
-
-TEST_F(DSV4AllocatorTest, FlashIncrMallocDecode) {
-    auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator->init());
-
-    int spb = allocator->seqSizePerBlock();
-
-    auto batch_res = std::make_shared<BatchKVCacheResource>();
-    batch_res->resetBatchSize(1);
-    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
-    batch_res->setBatchCacheKeys(0, CacheKeysType{1200, 1201});
-
-    auto cti            = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
-    auto gi             = std::make_shared<GenerateInput>();
-    gi->input_ids       = torch::arange(spb, torch::kInt32);
-    gi->generate_config = std::make_shared<GenerateConfig>();
-    cti->init(gi);
-
-    MallocInfo init_info{batch_res, cti};
-    init_info.enable_device_cache = false;
-    ASSERT_TRUE(allocator->malloc(init_info).success);
-
-    for (int gid = 0; gid < 7; gid++) {
-        EXPECT_EQ(batch_res->blocksNum(0, gid), 1u) << "Flash group " << gid;
-    }
-
-    // Grow to 3 blocks
-    cti->setSeqLength(3 * spb);
-    MallocInfo incr_info{batch_res, cti};
-    incr_info.enable_device_cache = false;
-    ASSERT_TRUE(allocator->malloc(incr_info).success);
-
-    for (int gid = 0; gid < 7; gid++) {
-        EXPECT_EQ(batch_res->blocksNum(0, gid), 3u) << "Flash group " << gid << " after incr";
-    }
-
-    FreeInfo free_info{batch_res};
-    allocator->free(free_info);
+    allocator->free(FreeInfo{batch_resource, tokens});
 }
 
 }  // namespace test

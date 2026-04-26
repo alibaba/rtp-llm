@@ -8,12 +8,24 @@ void registerPyOpDefs(pybind11::module& m) {
         .value("FULL", rtp_llm::CacheGroupType::FULL)
         .export_values();
 
+    pybind11::enum_<rtp_llm::KVCacheAttnType>(m, "KVCacheAttnType")
+        .value("DEFAULT", rtp_llm::KVCacheAttnType::DEFAULT)
+        .value("CSA_KV", rtp_llm::KVCacheAttnType::CSA_KV)
+        .value("HCA_KV", rtp_llm::KVCacheAttnType::HCA_KV)
+        .value("INDEXER_KV", rtp_llm::KVCacheAttnType::INDEXER_KV)
+        .value("INDEXER_STATE", rtp_llm::KVCacheAttnType::INDEXER_STATE)
+        .value("CSA_STATE", rtp_llm::KVCacheAttnType::CSA_STATE)
+        .value("HCA_STATE", rtp_llm::KVCacheAttnType::HCA_STATE)
+        .value("SWA_KV", rtp_llm::KVCacheAttnType::SWA_KV)
+        .export_values();
+
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
         .def(pybind11::init<>())
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
-        .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id");
+        .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
+        .def_readonly("attn_type", &LayerKVCache::attn_type, "KV cache attention type");
 
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
@@ -32,9 +44,22 @@ void registerPyOpDefs(pybind11::module& m) {
                        &KVCache::layer_attn_types,
                        "Per-layer attention type (CacheGroupType::FULL or LINEAR). "
                        "Empty = all layers treated as FULL (backward compatibility).")
+        .def_readwrite("group_attn_types", &KVCache::group_attn_types, "Per-group KV cache attention types")
+        .def_readwrite("layer_attn_to_group_id",
+                       &KVCache::layer_attn_to_group_id,
+                       "Dense mapping from layer id and KVCacheAttnType to group id")
+        .def_readwrite("kv_cache_base_by_layer_attn",
+                       &KVCache::kv_cache_base_by_layer_attn,
+                       "Per-layer and per-attention-type KV cache tensors")
+        .def_readwrite("kv_scale_base_by_layer_attn",
+                       &KVCache::kv_scale_base_by_layer_attn,
+                       "Per-layer and per-attention-type KV scale tensors")
         .def("get_layer_cache",
-             &KVCache::getLayerCache,
-             "Return a per-layer LayerKVCache for the given global layer id");
+             pybind11::overload_cast<int>(&KVCache::getLayerCache),
+             "Return the legacy/default per-layer LayerKVCache for the given global layer id")
+        .def("get_layer_cache",
+             pybind11::overload_cast<int, rtp_llm::KVCacheAttnType>(&KVCache::getLayerCache),
+             "Return a raw per-layer LayerKVCache for the given global layer id and KV cache attention type");
 
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
