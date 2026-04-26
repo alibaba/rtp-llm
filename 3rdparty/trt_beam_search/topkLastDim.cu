@@ -25,6 +25,7 @@
 #include "topkLastDim.h"
 #include <cub/cub.cuh>
 #include <cuda/atomic>
+#include "3rdparty/cub_compat.h"
 
 namespace tensorrt_llm
 {
