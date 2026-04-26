@@ -78,6 +78,23 @@ class Indexer(nn.Module):
         )
         self.freqs_cis: Optional[torch.Tensor] = None
 
+    def set_cp_info(self, cp_info, cp_size: int, cp_rank: int) -> None:
+        """CP scaffold stub: the Indexer's own gather is delegated to its
+        nested ``self.compressor`` (which does the S-pool all-gather);
+        the outer indexer einsum runs rank-local-Q × full-KV naturally
+        once the nested compressor's kv_cache has been populated with
+        the full sequence.
+
+        ``V4Transformer.set_cp_info`` loops over layers and calls this
+        AND ``self.compressor.set_cp_info`` explicitly, so this method
+        only needs to stash the metadata for any future indexer-level
+        logic (e.g. correct causal mask / global-position RoPE) that
+        gets added during the perf pass (S8 Stage 2).
+        """
+        self._cp_info = cp_info
+        self._cp_size = int(cp_size)
+        self._cp_rank = int(cp_rank)
+
     def forward(self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, offset: int) -> torch.Tensor:
         bsz, seqlen, _ = x.size()
         freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
