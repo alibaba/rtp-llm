@@ -1,6 +1,6 @@
 """Pure gRPC forward servicer for predict_v2.proto.
 
-Supports multiple downstream addresses with round-robin connection pool.
+Supports multiple downstream addresses with random selection.
 """
 
 from __future__ import annotations
@@ -8,15 +8,15 @@ from __future__ import annotations
 import json
 import logging
 import os
-import threading
+import random
 from typing import List, Optional
 
 import grpc
 
 from rtp_llm.bailian.proto import predict_v2_pb2_grpc
-from rtp_llm.utils.util import AtomicCounter
 
 _FORWARD_ENV_KEY = "BAILIAN_GRPC_FORWARD_ADDR"
+_LOG_DEBUG_ENV_KEY = "BAILIAN_GRPC_FORWARD_LOG_DEBUG"
 
 
 def _parse_forward_addrs(env_value: str) -> List[str]:
@@ -31,7 +31,6 @@ def _parse_forward_addrs(env_value: str) -> List[str]:
     if not env_value:
         return []
 
-    # Try JSON array format
     if env_value.startswith("["):
         try:
             addrs = json.loads(env_value)
@@ -40,7 +39,6 @@ def _parse_forward_addrs(env_value: str) -> List[str]:
         except json.JSONDecodeError:
             pass
 
-    # Comma separated format
     return [a.strip() for a in env_value.split(",") if a.strip()]
 
 
@@ -62,10 +60,10 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 f"No forward addresses provided. Set {_FORWARD_ENV_KEY} env or pass forward_addrs."
             )
 
+        self._forward_addrs = forward_addrs
         self._channels: List[grpc.Channel] = []
         self._stubs: List[predict_v2_pb2_grpc.GRPCInferenceServiceStub] = []
-        self._lock = threading.Lock()
-        self._counter = AtomicCounter()
+        self._log_debug = os.environ.get(_LOG_DEBUG_ENV_KEY, "").lower() in ("true", "1", "on")
 
         for addr in forward_addrs:
             channel = grpc.insecure_channel(addr)
@@ -74,25 +72,50 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             self._stubs.append(stub)
 
         logging.info(
-            "[BailianGrpc] PureForwardServicer initialized with %d addresses: %s",
+            "[BailianGrpc] PureForwardServicer initialized with %d addresses: %s, log_debug=%s",
             len(forward_addrs),
             forward_addrs,
+            self._log_debug,
         )
 
-    def _next_stub(self) -> predict_v2_pb2_grpc.GRPCInferenceServiceStub:
-        """Round-robin selection of downstream stub."""
-        idx = self._counter.increment() % len(self._stubs)
-        return self._stubs[idx]
+    def _next_stub(self) -> tuple[predict_v2_pb2_grpc.GRPCInferenceServiceStub, int]:
+        idx = random.randrange(len(self._stubs))
+        return self._stubs[idx], idx
 
     def close(self):
-        with self._lock:
-            for channel in self._channels:
-                if channel is not None:
-                    channel.close()
-            self._channels.clear()
-            self._stubs.clear()
+        for channel in self._channels:
+            if channel is not None:
+                channel.close()
+        self._channels.clear()
+        self._stubs.clear()
 
     def ModelStreamInfer(self, request_iterator, context):
-        stub = self._next_stub()
-        for resp in stub.ModelStreamInfer(request_iterator):
-            yield resp
+        stub, idx = self._next_stub()
+        addr = self._forward_addrs[idx]
+
+        if self._log_debug:
+            req_count = 0
+            resp_count = 0
+            for req in request_iterator:
+                req_count += 1
+                logging.info(
+                    "[BailianGrpc] Forward req #%d to %s: model=%s id=%s inputs=%d",
+                    req_count,
+                    addr,
+                    req.model_name,
+                    req.id,
+                    len(req.inputs),
+                )
+                for resp in stub.ModelStreamInfer([req]):
+                    resp_count += 1
+                    logging.info(
+                        "[BailianGrpc] Forward resp #%d from %s: error=%s outputs=%d",
+                        resp_count,
+                        addr,
+                        resp.error_message or "none",
+                        len(resp.outputs),
+                    )
+                    yield resp
+        else:
+            for resp in stub.ModelStreamInfer(request_iterator):
+                yield resp
