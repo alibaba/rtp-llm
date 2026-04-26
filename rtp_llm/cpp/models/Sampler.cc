@@ -43,11 +43,11 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
-    // Move token_ids to CUDA once so sampleGreedy writes GPU→GPU (no blocking D2H sync).
+    // Move token_ids to CUDA once so sampleGreedy writes GPU->GPU (no blocking D2H sync).
+    // Production sampler inputs are allocated as pinned host tensors by NormalSamplerInputGatherer,
+    // so non_blocking H2D is safe on ROCm and preserves the async sampling path.
     // Callers that need CPU access should call .cpu() explicitly.
-    // Use blocking transfer: on ROCm, hipMemcpyAsync from pageable memory is truly async
-    // and can cause memory access faults if a kernel reads the buffer before transfer completes.
-    auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
+    auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA, true);
     auto all_token_ids_out     = variable_num_beams ?
                                      torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},
                                               torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)) :

@@ -75,6 +75,7 @@ cc_library(
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda:cuda",
+            "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
         ],
         "@//:using_rocm": [
             "@local_config_rocm//rocm:rocm_headers",

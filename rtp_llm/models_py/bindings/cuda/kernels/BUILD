@@ -140,6 +140,18 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "attention_input_metadata",
+    srcs = ["attention_input_metadata.cu"],
+    hdrs = ["attention_input_metadata.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Vendored from vLLM (csrc/persistent_topk.cuh + csrc/topk.cu @ b55d830).
 # Replaces torch.topk on the DSv4 indexer decode hot path:
 #   K=512 / T_max=2048: torch.topk ~30us → this kernel ~5-10us.
@@ -162,6 +174,18 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "cuda_graph_prepare",
+    srcs = ["cuda_graph_prepare.cu"],
+    hdrs = ["cuda_graph_prepare.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Per-row TopK for the prefill phase of the DeepSeek-V4 indexer.
 # Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill). Hybrid:
 # insertion-sort blocks for the first 12288 rows, radix-select beyond.
@@ -176,6 +200,31 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         ":cuda_utils_common",
         "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "mtp_target_verify_prepare",
+    srcs = ["mtp_target_verify_prepare.cu"],
+    hdrs = ["mtp_target_verify_prepare.h"],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "mha_paged_attn_plan",
+    srcs = ["mha_paged_attn_plan.cu"],
+    hdrs = ["mha_paged_attn_plan.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
     copts = cuda_copts(),
     visibility = ["//visibility:public"],
@@ -217,6 +266,22 @@ cc_library(
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
     copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_speculative_sampling",
+    srcs = glob(["speculative_sampling/*.cu"]),
+    hdrs = glob([
+        "speculative_sampling/*.h",
+        "speculative_sampling/*.cuh",
+    ]),
+    deps = cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 

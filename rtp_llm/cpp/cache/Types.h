@@ -61,6 +61,11 @@ struct MallocInfo {
     // Prefill init keeps reused prefix slots intact because model-path kernels
     // still read them by prefix_length.
     bool enable_remove_skipped_blocks = true;
+    // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
+    // Lets the state machine feed the publish-time value instead of racing with the async worker.
+    int incr_seq_len_override = -1;
+
+    int incrSeqLen() const;
 };
 
 struct MallocResult {
