@@ -113,11 +113,12 @@ class PyFlashinferPrefillPagedAttnOp(object):
         forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
         check_attention_inputs(attn_inputs)
-        self.fmha_params.fill_params(
+        # Fill FlashInfer paged-KV plus batch/position metadata on device.
+        self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.page_size,
             forbid_realloc,
         )
@@ -354,11 +355,12 @@ class PyFlashinferPrefillAttnOp(object):
         batch_size = attn_inputs.input_lengths.size(0)
         cu_seqlens = attn_inputs.cu_seqlens[: batch_size + 1]
 
-        self.params.fill_params(
+        # Ragged prefill also uses the device metadata planner.
+        self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.page_size,
         )
 
@@ -661,11 +663,13 @@ class PyFlashinferDecodeAttnOp(object):
             kv_datatype = torch.float8_e4m3fn
         else:  # BASE
             kv_datatype = get_scalar_type(attn_inputs.dtype)
-        flashinfer_decode_params = fill_mla_params(
+
+        # Steady-state decode drops the host metadata loop and H2D copy.
+        self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.seq_size_per_block,
         )
         # Get torch.dtype from attention configs
@@ -680,7 +684,36 @@ class PyFlashinferDecodeAttnOp(object):
             q_data_type=get_scalar_type(attn_inputs.dtype),
             kv_data_type=kv_datatype,
         )
-        return flashinfer_decode_params
+        return self.fmha_params
+
+    def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:
+        """Update CUDA graph replay buffers without calling plan().
+
+        Replay refreshes decode metadata in-place via fill_decode_cuda_graph_params,
+        falling back to the device MHA planner when the decode-only input is absent.
+        """
+        fill_decode = getattr(self.fmha_params, "fill_decode_cuda_graph_params", None)
+        if (
+            callable(fill_decode)
+            and attn_inputs.sequence_lengths_plus_1_d is not None
+            and attn_inputs.sequence_lengths_plus_1_d.numel() > 0
+        ):
+            fill_decode(
+                attn_inputs.sequence_lengths_plus_1_d,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                self.seq_size_per_block,
+            )
+            return
+
+        # CUDA graph replay fallback when sequence_lengths_plus_1_d is absent.
+        self.fmha_params.fill_params_mha_device(
+            attn_inputs.prefix_lengths,
+            attn_inputs.sequence_lengths,
+            attn_inputs.input_lengths,
+            attn_inputs.kv_cache_kernel_block_id_device,
+            self.seq_size_per_block,
+            forbid_realloc=True,
+        )
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True

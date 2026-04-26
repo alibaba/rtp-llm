@@ -194,7 +194,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             query_start_loc=cu_seqlen_without_padding,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            prefix_lengths=attn_inputs.prefix_lengths_d,
+            prefix_lengths=attn_inputs.prefix_lengths,
             metadata=metadata,
         ).transpose(0, 1)
         return out
@@ -229,7 +229,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             )
 
             load_initial_state_from_block_map(
-                attn_inputs.prefix_lengths_d,
+                attn_inputs.prefix_lengths,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 initial_states,
@@ -262,7 +262,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             store_ssm_state_to_block_map(
                 h,
                 final_state,
-                attn_inputs.prefix_lengths_d,
+                attn_inputs.prefix_lengths,
                 cu_seqlens_without_padding,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
@@ -605,7 +605,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             query_start_loc=full_cu,
             block_map=attention_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            prefix_lengths=attention_inputs.prefix_lengths_d,
+            prefix_lengths=attention_inputs.prefix_lengths,
             metadata=full_conv_meta,
         ).transpose(0, 1)
 
@@ -627,7 +627,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 dtype=gdn.ssm_state_dtype,
             )
             load_initial_state_from_block_map(
-                attention_inputs.prefix_lengths_d,
+                attention_inputs.prefix_lengths,
                 attention_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 initial_states,
@@ -663,7 +663,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             store_ssm_state_to_block_map(
                 h,
                 final_state,
-                attention_inputs.prefix_lengths_d,
+                attention_inputs.prefix_lengths,
                 full_cu,
                 attention_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,

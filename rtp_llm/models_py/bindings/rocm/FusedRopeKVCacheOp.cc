@@ -54,7 +54,8 @@ FusedRopeKVCachePrefillOpNonAsm::FusedRopeKVCachePrefillOpNonAsm(const Attention
 CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     int           batch_size = attn_inputs.input_lengths.size(0);
     torch::Tensor kv_cache_kernel_block_id_device;
-    if (attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0) {
+    if (attn_inputs.kv_cache_kernel_block_id_device.defined()
+        && attn_inputs.kv_cache_kernel_block_id_device.numel() > 0) {
         kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
 
@@ -269,7 +270,8 @@ FusedRopeKVCacheDecodeOpNonAsm::FusedRopeKVCacheDecodeOpNonAsm(const AttentionCo
 CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     int           batch_size = attn_inputs.sequence_lengths.size(0);
     torch::Tensor kv_cache_kernel_block_id_device;
-    if (attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0) {
+    if (attn_inputs.kv_cache_kernel_block_id_device.defined()
+        && attn_inputs.kv_cache_kernel_block_id_device.numel() > 0) {
         kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
 
@@ -282,7 +284,7 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     if (!params) {
         throw std::runtime_error("FusedRopeKVCacheDecodeOp::prepare: PrepareCKAttn failed. "
                                  "kv_cache_kernel_block_id_size="
-                                 + std::to_string(attn_inputs.kv_cache_kernel_block_id_host.size(0)));
+                                 + std::to_string(attn_inputs.kv_cache_kernel_block_id_device.size(0)));
     }
 
     attn_params                            = CKAttnPtr(params, (CKAttn*)params.get());
