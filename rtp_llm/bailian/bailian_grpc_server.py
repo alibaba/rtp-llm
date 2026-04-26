@@ -20,6 +20,7 @@ from rtp_llm.bailian.bailian_grpc_enqueue_loop import (
     get_bailian_grpc_enqueue_event_loop,
     set_bailian_grpc_enqueue_event_loop,
 )
+from rtp_llm.bailian.bailian_grpc_pure_forward_service import PureForwardServicer
 from rtp_llm.bailian.bailian_grpc_real_infer import _iter_enqueue_sync
 from rtp_llm.bailian.bailian_grpc_service import BailianGrpcInferenceServicer
 from rtp_llm.bailian.proto import predict_v2_pb2_grpc
@@ -47,6 +48,7 @@ def bailian_grpc_server_max_server_workers(bailian_grpc_config) -> int:
 
 
 _bailian_grpc_server: Optional[grpc.Server] = None
+_bailian_grpc_servicer: Optional[predict_v2_pb2_grpc.GRPCInferenceServiceServicer] = None
 _bailian_grpc_server_thread: Optional[threading.Thread] = None
 _bailian_grpc_server_lock = threading.Lock()
 
@@ -68,7 +70,7 @@ def start_bailian_grpc_server(
     the servicer so the backend ``GenerateInput.request_id`` follows the same snowflake scheme
     as the HTTP path in ``FrontendServer``.
     """
-    global _bailian_grpc_server
+    global _bailian_grpc_server, _bailian_grpc_servicer
     with _bailian_grpc_server_lock:
         if _bailian_grpc_server is not None:
             logging.warning("[BailianGrpc] server already started")
@@ -80,22 +82,27 @@ def start_bailian_grpc_server(
             futures.ThreadPoolExecutor(max_workers=pool_size),
             options=opts,
         )
-        predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(
-            BailianGrpcInferenceServicer(
+        if PureForwardServicer.has_forward_config():
+            servicer = PureForwardServicer()
+            mode = "pure forward"
+        else:
+            servicer = BailianGrpcInferenceServicer(
                 backend_visitor=backend_visitor,
                 ip=ip,
                 port=port,
                 server_id=server_id,
-            ),
-            server,
-        )
+            )
+            mode = "real" if backend_visitor else "fake"
+
+        predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(servicer, server)
         server.add_insecure_port(f"0.0.0.0:{port}")
         server.start()
         _bailian_grpc_server = server
+        _bailian_grpc_servicer = servicer
         logging.info(
             "[BailianGrpc] Listening on 0.0.0.0:%s (predict_v2.proto, %s, max_server_workers=%s)",
             port,
-            "real" if backend_visitor else "fake",
+            mode,
             pool_size,
         )
         return server
@@ -110,7 +117,7 @@ def stop_bailian_grpc_server(grace: Optional[float] = None) -> None:
     Holds ``_bailian_grpc_server_lock`` for the full ``stop()`` so ``start_*`` cannot race on
     the same listen port during shutdown.
     """
-    global _bailian_grpc_server, _bailian_grpc_server_thread
+    global _bailian_grpc_server, _bailian_grpc_servicer, _bailian_grpc_server_thread
     with _bailian_grpc_server_lock:
         server = _bailian_grpc_server
         if server is None:
@@ -123,8 +130,14 @@ def stop_bailian_grpc_server(grace: Optional[float] = None) -> None:
             )
         except Exception as e:
             logging.warning("[BailianGrpc] server.stop failed: %s", e, exc_info=True)
+        try:
+            if _bailian_grpc_servicer is not None:
+                _bailian_grpc_servicer.close()
+        except Exception as e:
+            logging.warning("[BailianGrpc] servicer.close failed: %s", e, exc_info=True)
         finally:
             _bailian_grpc_server = None
+            _bailian_grpc_servicer = None
             _bailian_grpc_server_thread = None
 
 
