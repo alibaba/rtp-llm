@@ -29,6 +29,7 @@
 #include <cuda_runtime_api.h>
 #include <cub/cub.cuh>
 #include <cuda/atomic>
+#include "3rdparty/cub_compat.h"
 #endif
 
 #include "topkLastDim.h"
