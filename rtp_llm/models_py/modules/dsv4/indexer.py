@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
+from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_freqs_cis_local
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
 
@@ -77,30 +78,42 @@ class Indexer(nn.Module):
             persistent=False,
         )
         self.freqs_cis: Optional[torch.Tensor] = None
+        # CP context bound per-forward by V4Transformer; None = no CP.
+        self._cp_ctx: Optional[CPContext] = None
 
-    def set_cp_info(self, cp_info, cp_size: int, cp_rank: int) -> None:
-        """CP scaffold stub: the Indexer's own gather is delegated to its
-        nested ``self.compressor`` (which does the S-pool all-gather);
-        the outer indexer einsum runs rank-local-Q × full-KV naturally
-        once the nested compressor's kv_cache has been populated with
-        the full sequence.
+    def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
+        """Bind CP context.  When active, rank-local Q applies RoPE at
+        GLOBAL positions (not rank-local row indices); the causal mask
+        over the compressed-KV axis uses global positions; and the score
+        einsum reads the nested compressor's ``kv_cache[:, :seq_len_full
+        // ratio]`` which was just populated with the full compressed KV
+        by ``Compressor.forward``'s all-gather path.
 
-        ``V4Transformer.set_cp_info`` loops over layers and calls this
-        AND ``self.compressor.set_cp_info`` explicitly, so this method
-        only needs to stash the metadata for any future indexer-level
-        logic (e.g. correct causal mask / global-position RoPE) that
-        gets added during the perf pass (S8 Stage 2).
-        """
-        self._cp_info = cp_info
-        self._cp_size = int(cp_size)
-        self._cp_rank = int(cp_rank)
+        The outer ``offset`` passed by ``Attention`` is the number of
+        sliding-window KV slots that precede the compressed-KV block in
+        the concatenated ``[sliding | compressed]`` layout — under CP
+        the sliding slots equal ``seq_len_full``, not ``chunk_length``.
+        ``Attention`` passes the already-computed offset; this method
+        only needs to expose the context so Indexer can position the
+        causal mask / topk-mask relative to global Q positions."""
+        self._cp_ctx = cp_ctx
 
     def forward(self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, offset: int) -> torch.Tensor:
         bsz, seqlen, _ = x.size()
-        freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
         ratio = self.compress_ratio
         rd = self.rope_head_dim
-        end_pos = start_pos + seqlen
+        cp_ctx = self._cp_ctx
+        cp_on = cp_ctx is not None and cp_ctx.cp_size > 1 and start_pos == 0
+
+        if cp_on:
+            # Rank-local Q at its GLOBAL positions.
+            freqs_cis = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
+            # Compressed KV spans [0, seq_len_full // ratio) after the
+            # nested compressor.forward populates kv_cache via gather.
+            end_pos = cp_ctx.seq_len_full
+        else:
+            freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
+            end_pos = start_pos + seqlen
 
         if self.compressor.kv_cache is None:
             self.compressor.kv_cache = self.kv_cache
@@ -117,6 +130,9 @@ class Indexer(nn.Module):
         apply_rotary_emb(q[..., -rd:], freqs_cis)
         # Skip rotate_activation + fp4_act_quant in this BF16 path
 
+        # Nested compressor: reads its own _cp_ctx set by V4Transformer,
+        # all-gathers rank-local kv/score → writes full compressed KV
+        # into our self.kv_cache (bound above).
         self.compressor(x, start_pos)
         weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads ** -0.5)
 
@@ -155,14 +171,31 @@ class Indexer(nn.Module):
             index_score = torch.cat(parts, dim=1)
             del parts, kv_f
 
+        # Causal mask: each Q token at GLOBAL position g can only read
+        # compressed KV blocks [0, (g+1)//ratio).  Single-rank uses the
+        # row-index (0..S-1) as the global position.  Under CP the rank-
+        # local row i's global position is cp_ctx.global_positions[i].
         if start_pos == 0:
-            mask = torch.arange(seqlen // ratio, device=x.device).repeat(seqlen, 1) >= \
-                   torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1) // ratio
+            T_comp = index_score.size(-1)
+            if cp_on:
+                q_pos_1b = (cp_ctx.global_positions + 1).unsqueeze(1)  # [chunk_length, 1]
+            else:
+                q_pos_1b = torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1)  # [S, 1]
+            kv_cols = torch.arange(T_comp, device=x.device)                           # [T_comp]
+            mask = kv_cols >= (q_pos_1b // ratio)                                     # [S_local, T_comp]
             index_score = index_score + torch.where(mask, float("-inf"), 0.0)
 
         topk_idxs = index_score.topk(min(self.index_topk, end_pos // ratio), dim=-1)[1]
         if start_pos == 0:
-            mask = topk_idxs >= torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1) // ratio
+            # topk_idxs are in compressed-KV space [0, T_comp).  Entries
+            # past this Q token's allowed window become -1 (masked).  The
+            # remaining ones shift by ``offset`` — the base index in the
+            # attention-side concatenated tensor (offset = S_sliding).
+            if cp_on:
+                q_pos_1b = (cp_ctx.global_positions + 1).unsqueeze(1)
+            else:
+                q_pos_1b = torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1)
+            mask = topk_idxs >= (q_pos_1b // ratio)
             topk_idxs = torch.where(mask, -1, topk_idxs + offset)
         else:
             topk_idxs = topk_idxs + offset
