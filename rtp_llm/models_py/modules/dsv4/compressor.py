@@ -14,6 +14,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.dsv4.cp import cp_all_gather_to_full, cp_should_gather
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
 
 
@@ -106,6 +107,17 @@ class Compressor(nn.Module):
         new_tensor[:, 1:, :ratio] = tensor[:, :-1, :, :d]
         return new_tensor
 
+    def set_cp_info(self, cp_info, cp_size: int, cp_rank: int) -> None:
+        """Bind CP metadata for the next prefill forward.  When set and
+        ``cp_size > 1`` and ``start_pos == 0``, the rank-local wkv / wgate
+        projections are all-gathered to the full sequence before the
+        S-dim pool step — so every rank's local ``kv_cache`` ends up
+        holding the SAME full compressed KV, which lets attention run
+        with rank-local Q × full-KV downstream."""
+        self._cp_info = cp_info
+        self._cp_size = int(cp_size)
+        self._cp_rank = int(cp_rank)
+
     def forward(self, x: torch.Tensor, start_pos: int) -> Optional[torch.Tensor]:
         assert self.kv_cache is not None, "Compressor.kv_cache must be bound by caller"
         assert self.freqs_cis is not None, "Compressor.freqs_cis must be bound by caller"
@@ -115,6 +127,21 @@ class Compressor(nn.Module):
         x32 = x.float()
         kv = torch.nn.functional.linear(x32, self.wkv.weight)
         score = torch.nn.functional.linear(x32, self.wgate.weight)
+
+        # CP prefill: all-gather rank-local kv / score to full sequence
+        # before the S-pool step so the pool sees all tokens in logical
+        # order.  Decode (start_pos > 0) runs rank-local as usual — the
+        # kv_cache was already populated with the full KV during prefill.
+        cp_info = getattr(self, "_cp_info", None)
+        cp_size = getattr(self, "_cp_size", 1)
+        cp_rank = getattr(self, "_cp_rank", 0)
+        if cp_should_gather(cp_info, cp_size, start_pos):
+            kv = cp_all_gather_to_full(kv, cp_info, cp_size, cp_rank)
+            score = cp_all_gather_to_full(score, cp_info, cp_size, cp_rank)
+            # After gather the effective seqlen is the FULL prefill len;
+            # the caller's ``seqlen`` / ``bsz`` above reflect the rank-
+            # local slice.  Rebind so downstream logic operates on full.
+            bsz, seqlen = kv.size(0), kv.size(1)
 
         if start_pos == 0:
             should_compress = seqlen >= ratio

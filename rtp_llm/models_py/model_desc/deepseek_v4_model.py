@@ -90,6 +90,10 @@ def _args_from_model_config(mc: ModelConfig) -> V4Args:
         norm_eps=float(mc.layernorm_eps),
         max_batch_size=1,
         max_seq_len=int(mc.max_seq_len) or 4096,
+        # Mega MoE sizes its symm-mem dispatch buffer from this bound.
+        # max_seq_len is the safest per-rank upper bound (one long prefill
+        # fully on one rank) — the buffer is allocated once and reused.
+        max_tokens_per_rank=int(mc.max_seq_len) or 4096,
     )
 
 
@@ -251,6 +255,53 @@ class DeepSeekV4Model(GptModelBase):
         attn = inputs.attention_inputs
         is_prefill = bool(attn.is_prefill) if attn is not None else (input_ids.size(1) > 1)
         start_pos = 0 if is_prefill else self._running_pos
+
+        # --- Context Parallel (prefill) — scaffold integration ----------
+        #
+        # When CP is enabled, the framework zigzag-splits the prefill
+        # tokens across the TP group (TP is repurposed as the CP group
+        # in RTP-LLM's CP design).  Each rank sees a rank-local slice
+        # plus an ``attention_inputs.context_parallel_info`` struct with
+        # the restore metadata.
+        #
+        # For V4 we run the attention/FFN/MoE path RANK-LOCAL (so MoE
+        # EP dispatch naturally sees only 1/cp_size of the tokens per
+        # rank, avoiding the 4× duplicated-dispatch bug that an adapter-
+        # level input-gather would cause).  Only the S-pooling ops
+        # (compressor, indexer) need the full sequence; they do their
+        # own all-gather internally (see ``Compressor`` and ``Indexer``
+        # forward, S8 CP scaffold).  The hidden passed back to the
+        # engine is therefore rank-local by construction — no exit
+        # gather / scatter needed here.
+        #
+        # What this scaffold does NOT do yet:
+        #   * per-rank-Q attention sharding (attention still runs on
+        #     full sequence → no compute speedup, only memory win)
+        #   * paged KV cache CP writes (V4 keeps a mock per-module
+        #     kv_cache; each rank holds the full KV, written from the
+        #     gathered compressor output)
+        # See docs/dsv4/parallel_design.md §S8 for the staged plan.
+        pc_cfg = getattr(self, "parallelism_config", None)
+        cp_enabled = (
+            pc_cfg is not None
+            and getattr(pc_cfg, "prefill_cp_config", None) is not None
+            and pc_cfg.prefill_cp_config.is_enabled()
+            and is_prefill
+            and attn is not None
+            and getattr(attn, "context_parallel_info", None) is not None
+        )
+        if cp_enabled:
+            # Bind CP metadata onto V4Transformer so nested modules
+            # (Compressor / Indexer) can pick it up without threading
+            # yet another argument through every forward signature.
+            self.v4.set_cp_info(
+                cp_info=attn.context_parallel_info,
+                cp_size=int(pc_cfg.tp_size),
+                cp_rank=int(pc_cfg.tp_rank),
+            )
+        else:
+            self.v4.set_cp_info(None, 1, 0)
+
         # Warmup safety: framework warmup probes with prefill(max_seq_len)
         # followed by decode(1), pushing start_pos out of our freqs_cis /
         # kv_cache range.  Under DP+EP, short-circuiting the forward to

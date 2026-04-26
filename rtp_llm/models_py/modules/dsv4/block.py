@@ -72,6 +72,7 @@ class Block(nn.Module):
         tp_rank: int = 0,
         ep_size: int = 1,
         ep_rank: int = 0,
+        max_tokens_per_rank: int = 8192,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -106,6 +107,7 @@ class Block(nn.Module):
             weights=weights,
             prefix=f"{prefix}.ffn" if self._factory_mode else "",
             ep_size=ep_size, ep_rank=ep_rank,
+            max_tokens_per_rank=max_tokens_per_rank,
         )
         self.attn_norm = _RMSNorm(dim, norm_eps)
         self.ffn_norm = _RMSNorm(dim, norm_eps)
@@ -210,6 +212,7 @@ class MTPBlock(Block):
         prefix: str = "",
         tp_size: int = 1, tp_rank: int = 0,
         ep_size: int = 1, ep_rank: int = 0,
+        max_tokens_per_rank: int = 8192,
     ):
         super().__init__(
             layer_id=layer_id, dim=dim, n_heads=n_heads, q_lora_rank=q_lora_rank,
@@ -231,6 +234,7 @@ class MTPBlock(Block):
             norm_eps=norm_eps, weights=weights, prefix=prefix,
             tp_size=tp_size, tp_rank=tp_rank,
             ep_size=ep_size, ep_rank=ep_rank,
+            max_tokens_per_rank=max_tokens_per_rank,
         )
         from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 
