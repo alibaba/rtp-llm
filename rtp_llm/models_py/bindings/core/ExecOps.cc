@@ -41,7 +41,6 @@ void             multiMergeCopy(const MultiMergeCopyParams& params);
 #include <cuda_profiler_api.h>
 #include <ATen/cuda/CUDAContext.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
-#include "rtp_llm/models_py/bindings/cuda/ops/CudaFlashInfer.h"
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
 #include <ATen/hip/HIPContext.h>

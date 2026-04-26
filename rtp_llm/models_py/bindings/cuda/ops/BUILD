@@ -23,17 +23,13 @@ cc_library(
 
 cc_library(
     name = "gpu_base",
-    hdrs = [
-        "CudaFlashInfer.h",
-    ] + select({
+    hdrs = select({
         "@//:using_cuda12": [
             "CudaXqa.h"
         ],
         "//conditions:default": [],
     }),
-    srcs = [
-        "CudaFlashInfer.cc",
-    ] + select({
+    srcs = select({
         "@//:using_cuda12": [
             "CudaXqa.cc"
         ],
@@ -65,8 +61,6 @@ cc_library(
         "@local_config_cuda//cuda:cuda_headers",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:profiling_scope",
-        ":flashinfer",
-        "//3rdparty/flashinfer:flashinfer",
         ":flashmla",
     ] + select({
         "@//:using_cuda12": [
@@ -120,6 +114,8 @@ cc_library(
         ":torch_beam_search_op_impl",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
         "//rtp_llm/cpp/utils:debug_utils",
+        ":flashinfer",
+        "//3rdparty/flashinfer:flashinfer",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

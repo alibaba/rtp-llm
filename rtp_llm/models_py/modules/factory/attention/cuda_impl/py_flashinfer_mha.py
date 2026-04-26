@@ -98,7 +98,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
-    def set_params(self, params: Any):
+    def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams):
         """Set the params object to be used by this op."""
         self.fmha_params = params
 
@@ -335,14 +335,14 @@ class PyFlashinferPrefillAttnOp(object):
             backend=backend,
         )
         self.datatype = attn_configs.dtype
-        self.params = None
+        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
-    def set_params(self, params: ParamsBase):
+    def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams):
         """Set the params object to be used by this op."""
-        self.params = params
+        self.fmha_params = params
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> ParamsBase:
         """
@@ -354,7 +354,7 @@ class PyFlashinferPrefillAttnOp(object):
         batch_size = attn_inputs.input_lengths.size(0)
         cu_seqlens = attn_inputs.cu_seqlens[: batch_size + 1]
 
-        self.params.fill_params(
+        self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
@@ -372,7 +372,7 @@ class PyFlashinferPrefillAttnOp(object):
             causal=True,
             q_data_type=get_scalar_type(attn_inputs.dtype),
         )
-        return self.params if self.params is not None else ParamsBase()
+        return self.fmha_params
 
     @staticmethod
     def support(attn_inputs: PyAttentionInputs) -> bool:
@@ -632,6 +632,7 @@ class PyFlashinferDecodeAttnOp(object):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
     ) -> None:
         self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs already has head_num and kv_head_num divided by tp_size
@@ -647,13 +648,26 @@ class PyFlashinferDecodeAttnOp(object):
             use_tensor_cores=self.use_tensor_core,
         )
         self.kv_cache_dtype = attn_configs.kv_cache_dtype
+        self.enable_cuda_graph = attn_inputs.is_cuda_graph
+        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
-    def prepare(self, attn_inputs: PyAttentionInputs):
-        # from rtp_llm.models_py.utils.debug import set_trace_on_tty
-        # set_trace_on_tty()
+    def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams) -> None:
+        """Set the params object to be used by this op."""
+        self.fmha_params = params
+
+    def prepare(
+        self,
+        attn_inputs: PyAttentionInputs,
+        forbid_realloc: bool = False,
+    ) -> ParamsBase:
+        """
+        Prepare the decode wrapper with paged KV cache parameters.
+
+        forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
+        """
         # Convert kv_cache_dtype to torch dtype
         if self.kv_cache_dtype == KvCacheDataType.INT8:
             kv_datatype = torch.int8
@@ -661,18 +675,31 @@ class PyFlashinferDecodeAttnOp(object):
             kv_datatype = torch.float8_e4m3fn
         else:  # BASE
             kv_datatype = get_scalar_type(attn_inputs.dtype)
-        flashinfer_decode_params = fill_mla_params(
+
+        self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
             attn_inputs.kv_cache_kernel_block_id_host,
             self.seq_size_per_block,
+            forbid_realloc=forbid_realloc,
         )
-        # Get torch.dtype from attention configs
+
+        if self.enable_cuda_graph and self.decode_wrapper._fixed_batch_size == 0:
+            self.decode_wrapper._use_cuda_graph = True
+            self.decode_wrapper._paged_kv_indptr_buf = (
+                self.fmha_params.decode_page_indptr_d
+            )
+            self.decode_wrapper._paged_kv_last_page_len_buf = (
+                self.fmha_params.paged_kv_last_page_len_d
+            )
+            self.decode_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
+            self.decode_wrapper._fixed_batch_size = attn_inputs.input_lengths.size(0)
+
         self.decode_wrapper.plan(
-            flashinfer_decode_params.decode_page_indptr_d,
-            flashinfer_decode_params.page_indice_d,
-            flashinfer_decode_params.paged_kv_last_page_len_d,
+            self.fmha_params.decode_page_indptr_d,
+            self.fmha_params.page_indice_d,
+            self.fmha_params.paged_kv_last_page_len_d,
             self.local_head_num,
             self.local_kv_head_num,
             self.head_dim_qk,
@@ -680,7 +707,25 @@ class PyFlashinferDecodeAttnOp(object):
             q_data_type=get_scalar_type(attn_inputs.dtype),
             kv_data_type=kv_datatype,
         )
-        return flashinfer_decode_params
+        return self.fmha_params
+
+    def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:
+        """Update buffer contents for CUDA graph replay without calling plan().
+
+        During CUDA graph replay, we must NOT call plan() because it may launch
+        GPU kernels on the current stream while the graph replays on the capture
+        stream, causing a race condition. We only need to update the page table
+        buffers in-place via fill_params — the pre-allocated buffers are already
+        wired into the decode_wrapper from the initial prepare() call.
+        """
+        self.fmha_params.fill_params(
+            attn_inputs.prefix_lengths,
+            attn_inputs.sequence_lengths,
+            attn_inputs.input_lengths,
+            attn_inputs.kv_cache_kernel_block_id_host,
+            self.seq_size_per_block,
+            forbid_realloc=True,
+        )
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -710,17 +755,30 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = PyFlashinferDecodeAttnOp(attn_configs)
+        self.fmha_impl = PyFlashinferDecodeAttnOp(attn_configs, attn_inputs)
         self.rope_impl = FusedRopeKVCacheDecodeOp(attn_configs)
         self.attn_configs = attn_configs
 
         # Store input info
         self.attn_inputs = attn_inputs
 
-        # Create params
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self.fmha_impl.set_params(self.fmha_params)
+        self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+        """Prepare for CUDA graph replay; only updates buffer contents, no plan()."""
+        self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)
+        # Update rope params for correct position encoding during cuda graph replay
+        new_rope_params = self.rope_impl.prepare(attn_inputs)
+        common.copy_kv_cache_offset(
+            self.rope_params.kv_cache_offset, new_rope_params.kv_cache_offset
+        )
+
+    def support_cuda_graph(self) -> bool:
+        return True
 
     @classmethod
     def support(
