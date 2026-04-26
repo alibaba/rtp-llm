@@ -54,7 +54,7 @@ void CudaGraphRunner::captureDecode() {
         // calculate context_total_kv_length
         int max_input_len  = inputs.attention_inputs.input_lengths.max().item<int>();
         int max_prefix_len = 0;
-        if (inputs.attention_inputs.prefix_lengths.defined()) {
+        if (inputs.attention_inputs.prefix_lengths.defined() && inputs.attention_inputs.prefix_lengths.size(0) > 0) {
             max_prefix_len = inputs.attention_inputs.prefix_lengths.max().item<int>();
         }
         inputs.attention_inputs.context_total_kv_length = bs * (max_input_len + max_prefix_len);

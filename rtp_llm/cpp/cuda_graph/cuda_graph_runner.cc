@@ -403,7 +403,7 @@ void CudaGraphRunner::initKernelInternalMemory() {
     auto prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
 
     cu_seqlens.slice(0, 1, max_bs_ + 1) = input_lengths.cumsum(0);
-    if (prefix_lengths.defined()) {
+    if (prefix_lengths.defined() && prefix_lengths.size(0) > 0) {
         cu_kv_seqlens.slice(0, 1, max_bs_ + 1) = input_lengths.add(prefix_lengths).cumsum(0);
     }
     capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host = cu_seqlens;
@@ -476,6 +476,9 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     } else if (is_prefill_cuda_graph_mode_) {
         inputs.attention_inputs.prefix_lengths   = torch::zeros({int(max_bs_)}, options_cpu_int32_).pin_memory();
         inputs.attention_inputs.prefix_lengths_d = inputs.attention_inputs.prefix_lengths.cuda();
+    } else {
+        // Decode CUDA graph mode: prefix_lengths should be empty tensor
+        inputs.attention_inputs.prefix_lengths = torch::empty({0}, options_cpu_int32_).pin_memory();
     }
     // padding_offset [max_num_token_, int32] (for attention padding)
     inputs.attention_inputs.padding_offset            = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
@@ -721,10 +724,15 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
 
     // Common slice operations for attention inputs
     if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.defined()) {
-        inputs.attention_inputs.prefix_lengths =
-            capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.slice(0, 0, batch_size);
-        inputs.attention_inputs.prefix_lengths_d =
-            capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths_d.slice(0, 0, batch_size);
+        if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.size(0) > 0) {
+            inputs.attention_inputs.prefix_lengths =
+                capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.slice(0, 0, batch_size);
+            inputs.attention_inputs.prefix_lengths_d =
+                capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths_d.slice(0, 0, batch_size);
+        } else {
+            // For decode CUDA graph mode: prefix_lengths is empty tensor
+            inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
+        }
     }
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);

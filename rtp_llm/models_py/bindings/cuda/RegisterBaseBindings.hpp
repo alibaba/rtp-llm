@@ -5,7 +5,6 @@
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
 #include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
-#include "rtp_llm/models_py/bindings/cuda/FlashInferOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/GroupTopKOp.h"

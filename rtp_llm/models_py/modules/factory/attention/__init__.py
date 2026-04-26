@@ -115,14 +115,6 @@ else:
         except (ImportError, AttributeError, ValueError):
             pass  # Skip SparseMlaImpl if CUDA < 12.9 or flash_mla not available
 
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
-            FlashInferDecodeImpl,
-            FlashInferPrefillImpl,
-        )
-
-        PREFILL_MHA_IMPS.append(FlashInferPrefillImpl)
-        DECODE_MHA_IMPS.append(FlashInferDecodeImpl)
-
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
         PyFlashinferDecodeImpl,
         PyFlashinferPagedPrefillImpl,
