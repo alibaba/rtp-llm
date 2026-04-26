@@ -59,6 +59,9 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     config.block_num            = static_cast<int>(block_num);
+    if (config.dsv4_config.has_value() && config.use_independent_block_pools) {
+        config.group_block_nums.assign(config.groupNums(), block_num);
+    }
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "

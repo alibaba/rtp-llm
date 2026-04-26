@@ -163,8 +163,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             kv_cache.kv_scale_base_by_layer.push_back(t);
         }
 
-        kv_cache.layer_attn_types = layout.layer_attn_types;
-        init_resources.kv_cache   = kv_cache;
+        kv_cache.layer_attn_types                 = layout.layer_attn_types;
+        kv_cache.group_attn_types                 = layout.group_attn_types;
+        kv_cache.layer_attn_to_group_id           = layout.layer_attn_to_group_id;
+        kv_cache.kv_cache_base_by_layer_attn      = layout.layers_to_kv_buffer_ptrs_by_attn;
+        kv_cache.kv_scale_base_by_layer_attn      = layout.layers_to_scale_buffer_ptrs_by_attn;
+        init_resources.kv_cache                   = kv_cache;
     }
 
     py::object py_init_result;
