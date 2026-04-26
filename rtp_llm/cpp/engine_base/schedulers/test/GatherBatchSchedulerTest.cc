@@ -3,7 +3,6 @@
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/engine_base/schedulers/GatherBatchScheduler.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
-#include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
