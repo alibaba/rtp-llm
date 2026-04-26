@@ -21,7 +21,7 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     uint32_t head_k_dim        = 0;
     uint32_t head_v_dim        = 0;
     uint32_t conv_kernel_dim   = 0;
-    DataType ssm_state_dtype   = DataType::TYPE_BF16;
+    DataType ssm_state_dtype   = DataType::TYPE_FP32;
     DataType conv_state_dtype  = DataType::TYPE_BF16;
 
     LinearKVCacheSpec() = default;
@@ -67,8 +67,9 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     }
 
     size_t ssm_state_size() const {
-        // Python: ssm_state_size = local_num_v_heads * head_k_dim * head_v_dim
-        return static_cast<size_t>(local_num_v_heads) * static_cast<size_t>(head_k_dim)
+        // Doubled to store float32 SSM state values in bf16-typed kv_cache blocks.
+        // Each float32 value occupies 2 bf16 slots.
+        return 2 * static_cast<size_t>(local_num_v_heads) * static_cast<size_t>(head_k_dim)
                * static_cast<size_t>(head_v_dim);
     }
 

@@ -1171,7 +1171,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
              pybind11::arg("linear_num_key_heads")   = 0,
              pybind11::arg("linear_num_value_heads") = 0,
              pybind11::arg("linear_value_head_dim")  = 0,
-             pybind11::arg("ssm_state_dtype")        = DataType::TYPE_BF16,
+             pybind11::arg("ssm_state_dtype")        = DataType::TYPE_FP32,
              pybind11::arg("conv_state_dtype")       = DataType::TYPE_BF16)
         .def("to_string", &LinearAttentionConfig::to_string)
         .def_readwrite("linear_conv_kernel_dim", &LinearAttentionConfig::linear_conv_kernel_dim)

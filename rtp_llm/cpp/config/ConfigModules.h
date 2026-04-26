@@ -153,7 +153,7 @@ struct KVCacheConfig {
     // Fields merged from PyKvCacheConfig
     int         int8_kv_cache             = 0;
     int         fp8_kv_cache              = 0;
-    std::string ssm_state_dtype           = "bf16";
+    std::string ssm_state_dtype           = "fp32";
     int64_t     kv_cache_mem_mb           = -1;
     int         seq_size_per_block        = 64;
     int         kernel_seq_size_per_block = 0;
@@ -529,7 +529,7 @@ struct LinearAttentionConfig {
     int         linear_num_key_heads   = 0;
     int         linear_num_value_heads = 0;
     int         linear_value_head_dim  = 0;
-    DataType    ssm_state_dtype        = DataType::TYPE_BF16;
+    DataType    ssm_state_dtype        = DataType::TYPE_FP32;
     DataType    conv_state_dtype       = DataType::TYPE_BF16;
     std::string to_string() const;
 };
