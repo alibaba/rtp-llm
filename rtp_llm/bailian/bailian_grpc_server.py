@@ -58,8 +58,16 @@ def start_bailian_grpc_server(
     port: int,
     backend_visitor=None,
     bailian_grpc_config=None,
+    *,
+    ip: str = "",
+    server_id: str = "",
 ) -> grpc.Server:
-    """Create and start Bailian gRPC server. backend_visitor=None -> fake (mock); else use enqueue."""
+    """Create and start Bailian gRPC server. backend_visitor=None -> fake (mock); else use enqueue.
+
+    ``ip`` / ``server_id`` plus the bailian gRPC ``port`` feed ``generate_request_id`` inside
+    the servicer so the backend ``GenerateInput.request_id`` follows the same snowflake scheme
+    as the HTTP path in ``FrontendServer``.
+    """
     global _bailian_grpc_server
     with _bailian_grpc_server_lock:
         if _bailian_grpc_server is not None:
@@ -73,7 +81,13 @@ def start_bailian_grpc_server(
             options=opts,
         )
         predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(
-            BailianGrpcInferenceServicer(backend_visitor=backend_visitor), server
+            BailianGrpcInferenceServicer(
+                backend_visitor=backend_visitor,
+                ip=ip,
+                port=port,
+                server_id=server_id,
+            ),
+            server,
         )
         server.add_insecure_port(f"0.0.0.0:{port}")
         server.start()
@@ -119,6 +133,8 @@ def start_bailian_grpc_server_in_thread(
     backend_visitor=None,
     bailian_grpc_config=None,
     *,
+    ip: str = "",
+    server_id: str = "",
     startup_timeout_s: float = _DEFAULT_BAILIAN_GRPC_STARTUP_TIMEOUT_S,
 ) -> None:
     """Start Bailian gRPC in a daemon thread and block until ``server.start()`` succeeds.
@@ -127,6 +143,9 @@ def start_bailian_grpc_server_in_thread(
     If bind/start fails or does not finish within ``startup_timeout_s``, raises the
     underlying exception or ``TimeoutError`` so callers (e.g. FastAPI startup) do not
     proceed while the port is not actually listening.
+
+    ``ip`` / ``server_id`` are forwarded to ``start_bailian_grpc_server`` for request_id
+    generation (see that function's docstring).
     """
     global _bailian_grpc_server, _bailian_grpc_server_thread
 
@@ -139,6 +158,8 @@ def start_bailian_grpc_server_in_thread(
                 port,
                 backend_visitor=backend_visitor,
                 bailian_grpc_config=bailian_grpc_config,
+                ip=ip,
+                server_id=server_id,
             )
         except BaseException as e:
             start_error.append(e)

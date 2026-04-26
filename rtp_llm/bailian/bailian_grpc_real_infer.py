@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import queue
 from collections.abc import Callable, Iterable, Iterator
@@ -18,13 +17,6 @@ from rtp_llm.bailian.bailian_grpc_response_real import (
 )
 from rtp_llm.bailian.proto import predict_v2_pb2
 from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
-
-
-def _derive_rtp_llm_request_id(request_id: str | Any) -> int:
-    """Stable int64 for ``GenerateInput.request_id`` / log tags (not ``hash()`` — salt varies per process)."""
-    s = request_id if isinstance(request_id, str) else str(request_id)
-    digest8 = hashlib.sha256(s.encode("utf-8")).digest()[:8]
-    return int.from_bytes(digest8, "little", signed=True)
 
 
 def stream_log_tag(*, request_id_numeric: int, trace_id: str) -> str:
@@ -78,11 +70,16 @@ def iter_real_model_stream_infer(
     other: OtherParams,
     backend_visitor: Any,
     *,
+    rtp_llm_request_id: int,
     run_enqueue_sync: Callable[[Any, GenerateInput], Iterable[GenerateOutputs]],
 ) -> Iterator[predict_v2_pb2.ModelStreamInferResponse]:
-    """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams."""
+    """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
+
+    ``rtp_llm_request_id`` is the int64 used for ``GenerateInput.request_id`` and log tags;
+    the upstream servicer generates it via ``generate_request_id`` (same scheme as HTTP path).
+    ``request.id`` (string) is preserved as the trace id.
+    """
     trace_str = str(request.id)
-    rtp_llm_request_id = _derive_rtp_llm_request_id(trace_str)
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
     logging.debug(
         "[BailianGrpc] [%s] real infer start: model_name=%s input_len=%s sampling=%s",
