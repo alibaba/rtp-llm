@@ -25,6 +25,37 @@ _log = _logging.getLogger(__name__)
 _TILELANG_AVAILABLE: bool = False
 _SPARSE_ATTN_KERNEL_CACHE: dict = {}
 
+
+def _ensure_libz3_loadable() -> None:
+    """z3-solver ships ``libz3.so`` inside its site-packages lib dir and
+    tilelang's internal Rewriter dlopens it by bare name (`libz3.so`),
+    which only works if the lib is on LD_LIBRARY_PATH or loaded eagerly.
+    Under bazel runfiles the pip_parse for z3-solver puts the library at
+    ``pip_cuda12_arm_torch_z3_solver/site-packages/z3/lib/libz3.so`` —
+    not on LD_LIBRARY_PATH — so the bare-name dlopen fails.  We pre-load
+    it via ctypes before tilelang imports; if the host has a system
+    libz3 this is a no-op."""
+    import ctypes
+    try:
+        ctypes.CDLL("libz3.so", mode=ctypes.RTLD_GLOBAL)
+        return
+    except OSError:
+        pass
+    try:
+        import z3
+        import os
+        lib_dir = os.path.join(os.path.dirname(z3.__file__), "lib")
+        for name in ("libz3.so", "libz3.so.4.13", "libz3.so.4"):
+            path = os.path.join(lib_dir, name)
+            if os.path.exists(path):
+                ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+                return
+    except Exception:
+        pass
+
+
+_ensure_libz3_loadable()
+
 try:  # noqa: broad except — ImportError / OSError (CDLL symbol miss) / RuntimeError
     import tilelang
     import tilelang.language as T
@@ -132,16 +163,13 @@ try:  # noqa: broad except — ImportError / OSError (CDLL symbol miss) / Runtim
         return sparse_attn_kernel_
 
 except (ImportError, OSError, RuntimeError) as _e:  # pragma: no cover
-    # tilelang can fail to import with OSError when libstdc++ symbols
-    # don't match between the pip-installed libtvm.so and the toolchain
-    # (e.g. bazel runfiles with __cxa_call_terminate undefined).  Fall
-    # back to the other sparse-attn paths silently.
-    import logging as _logging
-    _logging.getLogger(__name__).info(
-        "tilelang unavailable (%s); dsv4 sparse attention will fall "
-        "back to FlashMLA or the Python reference", type(_e).__name__,
+    _log.warning(
+        "[dsv4] tilelang unavailable (%s: %s); sparse attention falls "
+        "back to the Python reference", type(_e).__name__, _e,
     )
     _TILELANG_AVAILABLE = False
+
+_log.info("[dsv4] tilelang_kernels init: _TILELANG_AVAILABLE=%s", _TILELANG_AVAILABLE)
 
 
 def tilelang_available() -> bool:
@@ -179,7 +207,7 @@ def sparse_attn(
     key = (h_padded, d, float(softmax_scale))
     kernel = _SPARSE_ATTN_KERNEL_CACHE.get(key)
     if kernel is None:
-        _log.info("[dsv4] JIT-compiling V4 TileLang sparse_attn h=%d d=%d", h_padded, d)
+        _log.warning("[dsv4] JIT-compiling V4 TileLang sparse_attn h=%d d=%d", h_padded, d)
         kernel = _sparse_attn_kernel(h_padded, d, softmax_scale)
         _SPARSE_ATTN_KERNEL_CACHE[key] = kernel
 
