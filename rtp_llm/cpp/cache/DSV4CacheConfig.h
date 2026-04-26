@@ -54,10 +54,11 @@ struct DSV4CacheConfig {
 
     // Block counts
     uint32_t variable_num_blocks = 0;  // Pool 0/1/2 shared block count
-    uint32_t swa_num_blocks      = 0;  // Pool 6 block count = variable_num_blocks * 4
+    uint32_t swa_num_blocks      = 0;  // Legacy SWA block count hint; independent pools use group_block_nums.
 
-    // Tokens per block
+    // Logical tokens per cache block. DPSK V4 uses VARIABLE_TOKENS_PER_BLOCK for every group.
     static constexpr uint32_t VARIABLE_TOKENS_PER_BLOCK = 256;
+    // Physical SWA entries per block.
     static constexpr uint32_t SWA_TOKENS_PER_BLOCK      = 64;
     static constexpr uint32_t SLIDING_WINDOW            = 128;
 

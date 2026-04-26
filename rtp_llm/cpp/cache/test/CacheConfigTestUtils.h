@@ -45,6 +45,13 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     config.layer_ids.push_back(layer_ids);
     config.global_layer_ids.push_back(layer_ids);
     config.layer_to_group_id.assign(layer_num, 0);
+    config.layer_to_group_ids.assign(static_cast<size_t>(layer_num), std::vector<int>{0});
+    config.layer_attn_to_group_id.assign(
+        static_cast<size_t>(layer_num), std::vector<int>(static_cast<size_t>(KVCacheAttnType::TYPE_COUNT), -1));
+    for (int i = 0; i < layer_num; ++i) {
+        config.layer_attn_to_group_id[static_cast<size_t>(i)][static_cast<size_t>(KVCacheAttnType::DEFAULT)] = 0;
+    }
+    config.group_attn_types.push_back(KVCacheAttnType::DEFAULT);
     config.layer_attn_types.assign(layer_num, CacheGroupType::FULL);
 
     config.kv_block_stride_bytes = spec->block_size_bytes();
@@ -132,6 +139,9 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     config.group_types.clear();
 
     config.layer_to_group_id.assign(static_cast<size_t>(layer_num), 0);
+    config.layer_to_group_ids.assign(static_cast<size_t>(layer_num), {});
+    config.layer_attn_to_group_id.assign(
+        static_cast<size_t>(layer_num), std::vector<int>(static_cast<size_t>(KVCacheAttnType::TYPE_COUNT), -1));
     config.layer_attn_types.assign(static_cast<size_t>(layer_num), CacheGroupType::FULL);
 
     // Build groups: gid=0 linear, gid>=1 full.
@@ -142,6 +152,9 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
             const int layer_id = gid * config.group_layer_num + local;
             group_layers.push_back(layer_id);
             config.layer_to_group_id[static_cast<size_t>(layer_id)] = gid;
+            config.layer_to_group_ids[static_cast<size_t>(layer_id)] = {gid};
+            config.layer_attn_to_group_id[static_cast<size_t>(layer_id)]
+                                         [static_cast<size_t>(KVCacheAttnType::DEFAULT)] = gid;
             config.layer_attn_types[static_cast<size_t>(layer_id)] =
                 (gid == 0) ? CacheGroupType::LINEAR : CacheGroupType::FULL;
         }
@@ -151,10 +164,12 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
         if (gid == 0) {
             config.cache_specs.push_back(linear_spec);
             config.group_types.push_back(CacheGroupType::LINEAR);
+            config.group_attn_types.push_back(KVCacheAttnType::DEFAULT);
             config.linear_groups.push_back(group_layers);
         } else {
             config.cache_specs.push_back(full_spec);
             config.group_types.push_back(CacheGroupType::FULL);
+            config.group_attn_types.push_back(KVCacheAttnType::DEFAULT);
             config.full_groups.push_back(group_layers);
         }
     }

@@ -27,6 +27,7 @@ struct LayerKVCache {
     torch::Tensor kv_scale_base;
     int           seq_size_per_block = 0;
     int           layer_id           = -1;
+    rtp_llm::KVCacheAttnType attn_type = rtp_llm::KVCacheAttnType::DEFAULT;
 };
 
 // Whole-model KV cache holding tensors for all layers.
@@ -45,6 +46,10 @@ struct KVCache {
 
     // Per-layer attention type (CacheGroupType::FULL or LINEAR).
     std::vector<rtp_llm::CacheGroupType> layer_attn_types;
+    std::vector<rtp_llm::KVCacheAttnType> group_attn_types;
+    std::vector<std::vector<int>>         layer_attn_to_group_id;
+    std::vector<std::vector<torch::Tensor>> kv_cache_base_by_layer_attn;
+    std::vector<std::vector<torch::Tensor>> kv_scale_base_by_layer_attn;
 
     LayerKVCache getLayerCache(int idx) {
         LayerKVCache layer_cache;
@@ -109,6 +114,46 @@ struct KVCache {
                         scale.reshape({kernel_block_num, scale.size(1) / kernel_blocks_per_kv_block});
                 }
             }
+        }
+        return layer_cache;
+    }
+
+    LayerKVCache getLayerCache(int idx, rtp_llm::KVCacheAttnType attn_type) {
+        if (attn_type == rtp_llm::KVCacheAttnType::DEFAULT || kv_cache_base_by_layer_attn.empty()) {
+            auto layer_cache = getLayerCache(idx);
+            layer_cache.attn_type = attn_type;
+            return layer_cache;
+        }
+
+        const auto layer = static_cast<size_t>(idx);
+        const auto attn  = static_cast<size_t>(attn_type);
+        if (idx < 0 || layer >= kv_cache_base_by_layer_attn.size()) {
+            throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
+        }
+        if (attn >= kv_cache_base_by_layer_attn[layer].size()) {
+            throw std::runtime_error("Invalid KV cache attention type: " + std::to_string(attn));
+        }
+        if (!layer_attn_to_group_id.empty()
+            && (layer >= layer_attn_to_group_id.size() || attn >= layer_attn_to_group_id[layer].size()
+                || layer_attn_to_group_id[layer][attn] < 0)) {
+            throw std::runtime_error("Layer " + std::to_string(idx) + " does not own KV cache attention type "
+                                     + std::to_string(attn));
+        }
+
+        auto base = kv_cache_base_by_layer_attn[layer][attn];
+        if (!base.defined()) {
+            throw std::runtime_error("Missing KV cache tensor for layer " + std::to_string(idx) + ", attn type "
+                                     + std::to_string(attn));
+        }
+
+        LayerKVCache layer_cache;
+        layer_cache.layer_id            = idx;
+        layer_cache.attn_type           = attn_type;
+        layer_cache.seq_size_per_block  = seq_size_per_block;
+        layer_cache.kv_cache_base       = base;
+        if (!kv_scale_base_by_layer_attn.empty() && layer < kv_scale_base_by_layer_attn.size()
+            && attn < kv_scale_base_by_layer_attn[layer].size()) {
+            layer_cache.kv_scale_base = kv_scale_base_by_layer_attn[layer][attn];
         }
         return layer_cache;
     }
