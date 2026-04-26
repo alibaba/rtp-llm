@@ -171,9 +171,9 @@ struct PyAttentionInputs {
     // Shape: [group, batch, max_blocks] or [batch, max_blocks].
     torch::Tensor kv_cache_block_id_host;
     torch::Tensor kv_cache_block_id_device;
-    // Hybrid cache support:
-    // - kv_cache_kernel_block_id_*_by_group: vector of 2-D kernel block tables, each [batch, max_kernel_blocks].
-    std::vector<torch::Tensor> kv_cache_kernel_block_id_host_by_group;
+    // Hybrid cache support: per-group CUDA kernel block tables.
+    // Legacy CPU consumers still use singular kv_cache_kernel_block_id_host,
+    // which aliases group 0.
     std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
     caffe2::TypeMeta           dtype;
@@ -195,11 +195,8 @@ struct PyAttentionInputs {
 
     std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;
     bool                                       is_s_padded = false;
-    // Device-side mirrors of host tensors, managed by C++ for fused D2D copy in CUDA graph.
-    torch::Tensor prefix_lengths_d;
-    torch::Tensor sequence_lengths_plus_1_d;
-    torch::Tensor input_lengths_d;
-    torch::Tensor decode_cu_seqlens_d;
+    torch::Tensor                              sequence_lengths_plus_1_d;
+    torch::Tensor                              decode_cu_seqlens_d;
 
     // CUDA Graph mode flags
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)

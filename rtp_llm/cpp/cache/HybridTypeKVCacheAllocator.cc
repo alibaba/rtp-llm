@@ -140,15 +140,17 @@ int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, Batc
 MallocResult HybridTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     auto&     kv_resource  = malloc_info.batch_kv_cache_resource;
     const int batch_size   = kv_resource->batchSize();
-    const int seq_len      = malloc_info.complete_token_ids->seqLength();
+    const int seq_len      = malloc_info.incrSeqLen();
     const int reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
-    // Record original sizes for rollback in case any subsequent allocation fails
-    std::vector<std::vector<size_t>> original_sizes(batch_size);
+    // Record original block vectors for rollback in case any subsequent
+    // allocation fails. Linear groups can materialize existing NULL slots, so
+    // size-only rollback is not enough.
+    std::vector<std::vector<BlockIndicesType>> original_blocks(batch_size);
     for (int b = 0; b < batch_size; ++b) {
-        original_sizes[b].resize(static_cast<size_t>(kv_resource->groupNums()));
+        original_blocks[b].resize(static_cast<size_t>(kv_resource->groupNums()));
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            original_sizes[b][static_cast<size_t>(gid)] = kv_resource->blocksNum(b, gid);
+            original_blocks[b][static_cast<size_t>(gid)] = kv_resource->blocks(b, gid);
         }
     }
 
@@ -189,25 +191,29 @@ MallocResult HybridTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
         return {true, 0};
     }
 
-    // rollback kvcache blocks
+    // Roll back kvcache blocks. Free any valid block that was not present in
+    // the original vector, including backfilled existing NULL slots.
     BlockIndicesType blocks_to_free;
 
-    for (int b = 0; b < batch_size; ++b) {
+    for (int b = 0; b <= failed_batch && b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            auto&  block_ids    = kv_resource->mutableBlockIds(b, gid);
-            size_t original_num = original_sizes[b][static_cast<size_t>(gid)];
-            if (block_ids.blocksNum() > original_num) {
-                const auto& blk = block_ids.blocks();
-                for (size_t i = original_num; i < blk.size(); ++i) {
-                    if (!isNullBlockIdx(blk[i])) {
-                        blocks_to_free.push_back(blk[i]);
-                    }
+            auto&       block_ids = kv_resource->mutableBlockIds(b, gid);
+            const auto& original  = original_blocks[b][static_cast<size_t>(gid)];
+
+            std::unordered_set<BlockIdxType> original_valid_blocks;
+            original_valid_blocks.reserve(original.size());
+            for (auto block : original) {
+                if (!isNullBlockIdx(block)) {
+                    original_valid_blocks.insert(block);
                 }
-                block_ids.resize(original_num);
             }
-        }
-        if (b > failed_batch) {
-            break;
+
+            for (auto block : block_ids.blocks()) {
+                if (!isNullBlockIdx(block) && original_valid_blocks.find(block) == original_valid_blocks.end()) {
+                    blocks_to_free.push_back(block);
+                }
+            }
+            block_ids.assign(original);
         }
     }
     if (!blocks_to_free.empty()) {

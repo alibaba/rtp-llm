@@ -7,7 +7,9 @@
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
+#include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -48,6 +50,40 @@ public:
 
     bool updateEplbConfig(const EPLBConfig& config) override;
 
+protected:
+    // Stream-async dispatch gate. Reuses the same env var as MtpExecutor so a
+    // single launcher knob (`RTP_LLM_STREAM_ASYNC=1`) flips both paths.
+    // Default off — production behaviour unchanged unless explicitly enabled.
+    bool useStreamAsync() const;
+
+    // Skip the front-loaded previous-worker sync when DROP_BROAD_SYNC=1.
+    // Host stream state may still be mutating; NormalAsyncDeviceState only
+    // covers sampled token and seq_len for batch-1 decode.
+    bool useDropBroadSync() const;
+
+    // Stream-async dispatch. Records sampler_event on the main stream after
+    // sampler_->forward, then forks the bookkeeping worker to wait on the
+    // event and run dispatch + per-stream update off the main thread.
+    absl::Status dispatchOutputAsync(const StreamGroups&           stream_groups,
+                                     GptModelOutputs               model_output,
+                                     SamplerOutput                 sampler_output,
+                                     std::shared_ptr<torch::Event> sampler_event);
+
+    void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
+
+    // Mirror the use_normal_device_state condition in processDecodeStreams.
+    // When false, gather falls back to host accessors still mutated by the
+    // worker, so callers must sync before gather.
+    bool gatherCanUseDeviceState(const StreamGroups& stream_groups) const;
+
+    // Env-gated path that moves metadata tensors to CUDA before tpSyncModelInputs.
+    // This routes them through one GPU packed-buffer broadcast instead of CPU
+    // execBroadcastCpu plus per-rank unpack/copy work.
+    bool useDeviceInput() const;
+    bool checkDeviceInput() const;
+    void ensureModelInputsOnCuda(GptModelInputs& model_input, const char* tag);
+    void checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
+
 private:
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;
@@ -65,6 +101,14 @@ private:
     int               propose_model_index_ = 0;
     int               tp_rank_             = 0;
     ParallelismConfig parallelism_config_;
+
+    // Stream-async worker owns a CUDA stream/thread for pinned D2H,
+    // per-stream update, and KV release off the main thread.
+    AsyncRunner dispatch_runner_;
+
+    // Keeps async copy source tensors alive across release points. NormalExecutor
+    // uses this for model-input H2D staging and sampler-input staging.
+    TensorHolder buffer_holder_;
 };
 
 }  // namespace rtp_llm

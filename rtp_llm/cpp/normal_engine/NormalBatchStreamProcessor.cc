@@ -39,13 +39,19 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     return output_dispatcher_->dispatch(stream_groups, merge_outputs);
 }
 
-absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups) const {
-    return model_input_gatherer_->gather(stream_groups);
+absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups,
+                                                                            TensorHolder&       host_holder) const {
+    return model_input_gatherer_->gather(stream_groups, host_holder);
 }
 
 absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
     const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
     return sampler_input_gatherer_->gather(stream_groups, model_inputs, model_output);
+}
+
+absl::StatusOr<torch::Tensor> NormalBatchStreamProcessor::gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
+                                                                                     TensorHolder& host_holder) const {
+    return model_input_gatherer_->gatherKvCacheKernelBlockId(stream_groups, host_holder);
 }
 
 SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups& stream_groups,
