@@ -112,6 +112,7 @@ def _block_kwargs(layer_id: int, args: V4Args,
         norm_eps=args.norm_eps,
         weights=weights, prefix=prefix,
         tp_size=args.tp_size, tp_rank=args.tp_rank,
+        ep_size=args.ep_size, ep_rank=args.ep_rank,
     )
 
 
@@ -201,7 +202,33 @@ class V4Transformer(nn.Module):
           if apply_lm_head: logits of LAST token [B, vocab_size] (official behavior)
           else:            pre-lm-head hidden state of ALL tokens [B, S, d] — for
                            framework wrapper which applies lm_head externally
+
+        Empty-batch contract: when ``input_ids`` has zero tokens (S=0),
+        every downstream module — ``apply_rotary_emb`` in particular,
+        which does ``view_as_complex`` on an S=0 unflatten — would
+        crash.  Under DP/EP the framework routinely issues forwards to
+        ranks that have no local work to do; short-circuit with a
+        correctly-shaped empty output so those ranks still participate
+        in any collective that other ranks trigger (DeepEP dispatch,
+        all_reduce, etc.).
         """
+        B = input_ids.size(0)
+        S = input_ids.size(1) if input_ids.dim() > 1 else input_ids.size(0)
+        # S=0 short-circuit only applies for TP=EP=1.  With ep_size>1,
+        # DeepEP dispatch/combine are collectives that ALL ranks must
+        # enter together, even the ones with zero local tokens — else
+        # the missing rank's absence deadlocks the buffer with "CPU
+        # recv timeout".  The caller is responsible for clamping /
+        # padding ``start_pos`` so downstream indexing stays in range
+        # (see ``DeepSeekV4Model.forward``); individual layers are
+        # empty-batch-safe (``apply_rotary_emb`` and the sparse-attn
+        # path both short-circuit on zero-element inputs).
+        if S == 0 and self.args.ep_size <= 1:
+            device = next(self.parameters()).device
+            if apply_lm_head:
+                return torch.zeros((B, self.head.weight.size(0)), dtype=torch.float32, device=device)
+            return torch.zeros((B, 0, self.args.dim), dtype=torch.bfloat16, device=device)
+
         h = self.embed(input_ids)                                  # [B, S, d]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)           # [B, S, hc, d]
         for layer in self.layers:

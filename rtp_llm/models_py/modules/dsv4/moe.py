@@ -19,6 +19,15 @@ from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 FP4_BLOCK = 32
 FP8_BLOCK = 128
 
+# ACCL-EP's intranode dispatch kernel has a compile-time switch over
+# ``num_topk`` that only covers {2, 4, 8, 16} (asserts false on others —
+# intranode.cu:2237 "Unsupported num_topk").  V4-Flash uses
+# ``n_activated_experts = 6``; we pad both ``indices`` and ``weights``
+# up to 8 slots with ``-1`` and ``0.0`` so the dispatch accepts them,
+# and the padding slots are silently dropped by the per-expert loop
+# (``torch.where(idx == -1)`` never matches a real expert index).
+_DEEPEP_SUPPORTED_TOPK = (2, 4, 8, 16)
+
 
 def _has_fp8_fp4_grouped_kernel() -> bool:
     """True iff the installed DeepGEMM exposes ``m_grouped_fp8_fp4_gemm_nt_*``.
@@ -105,7 +114,15 @@ class Gate(nn.Module):
                 self.bias = nn.Parameter(torch.empty(n_routed_experts, dtype=torch.float32))
 
     def forward(self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        # x: [N, dim] flat
+        # x: [N, dim] flat.  Empty-batch safe — some paths (DP rank with
+        # zero local tokens; F.softplus on certain degenerate shapes)
+        # blow up with "unknown parameter type" on empty ``scores``, so
+        # short-circuit with correctly-shaped empty outputs.
+        if x.size(0) == 0:
+            return (
+                torch.zeros((0, self.topk), dtype=torch.float32, device=x.device),
+                torch.zeros((0, self.topk), dtype=torch.long, device=x.device),
+            )
         scores = F.linear(x.float(), self.weight.float())
         if self.score_func == "softmax":
             scores = scores.softmax(dim=-1)
@@ -221,6 +238,8 @@ class MoE(nn.Module):
         vocab_size: int,
         weights: Optional[Dict[str, torch.Tensor]] = None,
         prefix: str = "",
+        ep_size: int = 1,
+        ep_rank: int = 0,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -230,6 +249,15 @@ class MoE(nn.Module):
         self._factory_mode = weights is not None
         self.moe_inter_dim = moe_inter_dim
         self.swiglu_limit = swiglu_limit
+
+        assert n_routed_experts % max(ep_size, 1) == 0, (
+            f"n_routed_experts={n_routed_experts} must divide ep_size={ep_size}")
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.n_local_experts = n_routed_experts // max(ep_size, 1)
+        self.local_expert_start = ep_rank * self.n_local_experts
+        self.local_expert_end = self.local_expert_start + self.n_local_experts
+
         self.gate = Gate(
             layer_id, dim, n_routed_experts, n_activated_experts,
             score_func, route_scale, n_hash_layers, vocab_size,
@@ -279,14 +307,18 @@ class MoE(nn.Module):
             # No per-expert submodule.
             self.experts = None
         else:
-            # Legacy/per-expert path. Build 256 Experts and (in factory
-            # mode) copy their FP4 weight + scale into each QuantizedLinear.
+            # Legacy/per-expert path. EP sharding: only build the
+            # ``n_local_experts`` Experts that live on this rank; slots
+            # for non-local experts are None.  Preserves V4-official
+            # indexing convention (``self.experts[global_idx]``) so
+            # forward loops stay identical across ranks.
             self.experts = nn.ModuleList([
                 Expert(
                     dim, moe_inter_dim, swiglu_limit=swiglu_limit, storage="fp4",
                     weights=weights,
                     prefix=f"{prefix}.experts.{i}" if self._factory_mode else "",
                 )
+                if self.local_expert_start <= i < self.local_expert_end else None
                 for i in range(n_routed_experts)
             ])
             self._w13 = self._s13 = self._w2 = self._s2 = None
@@ -381,19 +413,155 @@ class MoE(nn.Module):
         unperm = down_out.index_select(0, inv_perm).view(N, topk, D)
         return unperm.float().sum(dim=1)                    # [N, D] fp32
 
+    def _routed_experts_local(
+        self,
+        x: torch.Tensor,                  # [N, D]
+        weights: torch.Tensor,            # [N, k] fp32
+        indices: torch.Tensor,            # [N, k] int64 — GLOBAL expert IDs
+        y: torch.Tensor,                  # [N, D] fp32, accumulator
+        local_start: int,
+        local_end: int,
+    ) -> torch.Tensor:
+        """Per-expert compute restricted to ``[local_start, local_end)``.
+
+        Accumulates into ``y`` in-place; returns ``y`` for chaining.
+        """
+        for i in range(local_start, local_end):
+            expert = self.experts[i]
+            if expert is None:
+                continue
+            idx, top = torch.where(indices == i)
+            if idx.numel() == 0:
+                continue
+            y[idx] = y[idx] + expert(x[idx], weights[idx, top, None]).float()
+        return y
+
+    @staticmethod
+    def _pad_topk_for_deepep(
+        indices: torch.Tensor, weights: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Pad ``(indices, weights)`` to the nearest supported topk width.
+
+        See ``_DEEPEP_SUPPORTED_TOPK`` docstring at module top.
+        """
+        n_act = indices.size(-1)
+        if n_act in _DEEPEP_SUPPORTED_TOPK:
+            return indices, weights
+        pad_to = next((k for k in _DEEPEP_SUPPORTED_TOPK if k > n_act), None)
+        if pad_to is None:
+            raise RuntimeError(
+                f"n_activated_experts={n_act} exceeds largest DeepEP-supported "
+                f"topk ({max(_DEEPEP_SUPPORTED_TOPK)})"
+            )
+        N = indices.size(0)
+        pad_n = pad_to - n_act
+        pad_idx = torch.full((N, pad_n), -1, dtype=indices.dtype, device=indices.device)
+        pad_w = torch.zeros((N, pad_n), dtype=weights.dtype, device=weights.device)
+        return (torch.cat([indices, pad_idx], dim=-1),
+                torch.cat([weights, pad_w], dim=-1))
+
+    def _routed_experts_deepep(
+        self,
+        x: torch.Tensor,                  # [N, D] local rank's tokens (BF16)
+        weights: torch.Tensor,            # [N, k] fp32
+        indices: torch.Tensor,            # [N, k] int64 global expert IDs
+    ) -> torch.Tensor:
+        """DP+EP path: DeepEP normal dispatch → local per-expert compute
+        → DeepEP combine.  Requires ``init_deepep_wrapper`` to have been
+        called by the engine (``backend_manager.py``).
+        """
+        from rtp_llm.models_py.distributed.deepep_wrapper import (
+            DeepEPWrapper, DeepEPMode,
+        )
+        if DeepEPWrapper._instance is None:
+            raise RuntimeError(
+                "DeepEPWrapper not initialised; ep_size>1 requires "
+                "init_deepep_wrapper() at engine startup (enable via "
+                "--use_deepep_moe 1)."
+            )
+        wrapper = DeepEPWrapper._instance
+        assert wrapper.mode == DeepEPMode.NORMAL, (
+            f"expected NORMAL DeepEP mode, got {wrapper.mode}")
+        buf = wrapper.buffer
+
+        # Pad topk to nearest supported value (V4's 6 → 8).
+        indices_p, weights_p = self._pad_topk_for_deepep(indices, weights)
+
+        # 1. Dispatch layout.  indices cast to int64 already.
+        (num_tokens_per_rank,
+         num_tokens_per_rdma_rank,
+         num_tokens_per_expert,
+         is_token_in_rank,
+         _,
+         ) = buf.get_dispatch_layout(indices_p, self.n_routed_experts)
+
+        # 2. Dispatch the BF16 tokens + topk scaffolding.
+        (recv_x,
+         recv_topk_idx,
+         recv_topk_weights,
+         num_recv_tokens_per_expert_list,
+         handle,
+         _,
+         ) = buf.dispatch(
+            x, None,
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            is_token_in_rank,
+            num_tokens_per_expert,
+            indices_p, weights_p,
+            expert_alignment=1,
+        )
+
+        # 3. Local per-expert compute.  ACCL-EP's dispatch returns
+        # ``recv_topk_idx`` in the LOCAL index space ``[0, n_local_experts)``
+        # (with -1 for tokens not destined for any local expert), NOT the
+        # global expert id.  Shift to global so the per-expert loop in
+        # ``_routed_experts_local`` indexes ``self.experts[global_i]``
+        # correctly.  Also force int64 and contiguous — the ACCL tensor
+        # sometimes comes back with a non-standard dtype that triggers
+        # ``torch.where(idx == i)`` with "unknown parameter type".
+        M = recv_x.size(0)
+        y_local = torch.zeros(M, self.dim, dtype=torch.float32, device=recv_x.device)
+        if M > 0:
+            global_topk_idx = recv_topk_idx.to(torch.int64).contiguous()
+            # Shift local→global; keep -1 as -1 (won't match any expert id).
+            global_topk_idx = torch.where(
+                global_topk_idx == -1,
+                global_topk_idx,
+                global_topk_idx + self.local_expert_start,
+            )
+            self._routed_experts_local(
+                recv_x.contiguous(),
+                recv_topk_weights.contiguous(),
+                global_topk_idx,
+                y_local,
+                self.local_expert_start, self.local_expert_end,
+            )
+
+        # 4. Combine back to source ranks.  combine expects the tensor
+        # dtype to match x (BF16) — cast the fp32 accumulator.
+        y_combined, _, _ = buf.combine(
+            y_local.to(x.dtype), handle,
+        )
+        return y_combined.float()
+
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         shape = x.size()
         x = x.view(-1, self.dim)
         weights, indices = self.gate(x, input_ids.flatten())
+
         if self._use_grouped_fp4:
+            assert self.ep_size == 1, (
+                "grouped FP4 path + ep_size>1 not supported; gated off anyway")
             y = self._grouped_routed_experts(x, weights, indices)
-        else:
+        elif self.ep_size == 1:
+            # Fast path: full 256 experts on this rank, plain per-expert loop.
             y = torch.zeros_like(x, dtype=torch.float32)
-            counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
-            for i in range(self.n_routed_experts):
-                if counts[i] == 0:
-                    continue
-                idx, top = torch.where(indices == i)
-                y[idx] = y[idx] + self.experts[i](x[idx], weights[idx, top, None]).float()
+            self._routed_experts_local(
+                x, weights, indices, y, 0, self.n_routed_experts,
+            )
+        else:
+            y = self._routed_experts_deepep(x, weights, indices)
+
         y = y + self.shared_experts(x).float()
         return y.type_as(x).view(shape)

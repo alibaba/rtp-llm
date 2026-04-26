@@ -47,9 +47,19 @@ def precompute_freqs_cis(dim: int, seqlen: int, original_seq_len: int,
 
 def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = False) -> torch.Tensor:
     """In-place partial RoPE. x: [..., S, (..., 2k)]; rotates last dim only.
-    `inverse=True` applies the conjugate rotation (used on attention output)."""
+    `inverse=True` applies the conjugate rotation (used on attention output).
+
+    Empty-batch safe: if either ``x`` or the sliced ``freqs_cis`` has zero
+    elements (DP rank with no local tokens, or start_pos past max_seq_len
+    during warmup), return ``x`` unchanged rather than crashing in ``.view``.
+    """
+    if x.numel() == 0 or freqs_cis.numel() == 0:
+        return x
     y = x
-    x = torch.view_as_complex(x.float().unflatten(-1, (-1, 2)))
+    # Use explicit size (last_dim // 2, 2) rather than (-1, 2).  Some
+    # torch paths (dynamo/fakemode, certain warmup shapes) reject the
+    # ``-1`` inferred dim to ``unflatten`` with "unknown parameter type".
+    x = torch.view_as_complex(x.float().unflatten(-1, (x.size(-1) // 2, 2)))
     if inverse:
         freqs_cis = freqs_cis.conj()
     if x.ndim == 3:
