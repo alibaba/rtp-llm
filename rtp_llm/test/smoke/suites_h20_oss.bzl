@@ -120,6 +120,12 @@ def h20_oss_suites():
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="moe_w4a8_int4_compressed",
+                task_info="data/model/qwen3_moe/q_r_30b_py_w4a8_int4_ptpc_compressed.json",
+                smoke_args="--quantization W4A8_INT4_PER_CHANNEL_COMPRESSED --warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
                 name="moe_deepep_continuous_dp2",
                 task_info="data/model/qwen3_moe/q_r_30b_py.json",
                 smoke_args="--warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --dp_size 2",

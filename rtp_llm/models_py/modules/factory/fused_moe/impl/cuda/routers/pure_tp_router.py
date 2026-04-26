@@ -226,7 +226,8 @@ class PureTpRouterW4a8Int4PerChannel(PureTpRouterBase):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(
-            quant_method in ["W4A8_INT4_PER_CHANNEL"]
+            quant_method
+            in ["W4A8_INT4_PER_CHANNEL", "W4A8_INT4_PER_CHANNEL_COMPRESSED"]
         )
 
     def _do_quant(

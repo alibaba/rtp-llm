@@ -6,7 +6,7 @@
 
 namespace rtp_llm {
 
-static const std::unordered_set<int> kValidGroupSizes = {16, 64, 128};
+static const std::unordered_set<int> kValidGroupSizes = {16, 32, 64, 128};
 
 void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int64_t group_size) {
     if (quant_method == "gptq") {

@@ -144,6 +144,17 @@ class QuantizationConfig(ABC):
         if config_json.get("quantization", None):
             quant_config = config_json["quantization"]
             quant_method = quant_config["quant_algo"].lower()
+
+        # Kimi-K2.5 nests `text_config.quantization_config` (compressed-tensors).
+        # Promote it so the unified parsing path below applies.
+        if quant_config is None:
+            text_config = config_json.get("text_config")
+            if isinstance(text_config, dict) and text_config.get(
+                "quantization_config", None
+            ):
+                quant_config = text_config["quantization_config"]
+                quant_method = quant_config["quant_method"].lower()
+
         if quant_config is None:
             return None
 
@@ -184,6 +195,26 @@ class QuantizationConfig(ABC):
                         "dynamic": activation_config["dynamic"],
                         "act_scale_suffix": ".input_scale",
                         "weight_scale_suffix": ".weight_scale",
+                    }
+                )
+            elif (
+                weights_config["type"] == "int"
+                and bits == 4
+                and weights_config["strategy"] == "group"
+            ):
+                # Kimi-K2.5 routed-expert MoE: int4 g32 symmetric, dyn fp8 act.
+                group_size = int(weights_config.get("group_size", 32))
+                ignore_patterns = quant_config.get("ignore", [])
+                quant_method = (
+                    CompressedW4A8Int4PerChannelQuantConfig.get_method()
+                )
+                return CompressedW4A8Int4PerChannelQuantConfig.from_config(
+                    {
+                        "bits": bits,
+                        "method": quant_method,
+                        "group_size": group_size,
+                        "is_quanted": True,
+                        "ignore_patterns": ignore_patterns,
                     }
                 )
 
@@ -649,7 +680,7 @@ class W4a8Int4PerChannelQuantConfig(QuantizationConfig):
     ):
         assert (
             bits == 4 and group_size > 0
-        ), f"invalid params {bits} != 4 or {group_size} > 0"
+        ), f"invalid params {bits} != 4 or {group_size} <= 0"
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
 
     @classmethod
@@ -669,6 +700,67 @@ class W4a8Int4PerChannelQuantConfig(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return W4a8Int4PerChannelQuantConfig(**config)
+
+
+class CompressedW4A8Int4PerChannelQuantConfig(QuantizationConfig):
+    """compressed-tensors INT4 (group=32) symmetric pre-quantized weights.
+
+    Used by Kimi-K2.5 routed-expert MoE:
+      - weights: int4 packed (`weight_packed`) + bf16 scales (`weight_scale`)
+      - input_activations: dynamic on-line per-token fp8 quant
+      - ignore: lm_head / self_attn / shared_experts / dense FFN keep BF16
+    """
+
+    DEFAULT_WEIGHT_PACK_SUFFIX = ".weight_packed"
+    DEFAULT_SCALE_SUFFIX = ".weight_scale"
+
+    def __init__(
+        self,
+        bits: int = 4,
+        group_size: int = 32,
+        is_quanted: bool = True,
+        **kwargs: Any,
+    ):
+        assert (
+            bits == 4 and group_size > 0
+        ), f"invalid params {bits} != 4 or {group_size} <= 0"
+        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        self._weight_pack_suffix = kwargs.get(
+            "weight_pack_suffix", self.DEFAULT_WEIGHT_PACK_SUFFIX
+        )
+        self._scale_suffix = kwargs.get("scale_suffix", self.DEFAULT_SCALE_SUFFIX)
+        self._ignore_patterns: List[str] = list(kwargs.get("ignore_patterns", []))
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "W4A8_INT4_PER_CHANNEL_COMPRESSED"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        # C++ reuses the existing W4A8 INT4 algo enum; group_size discriminates.
+        return "w4a8_int4_per_channel"
+
+    @property
+    def weight_pack_suffix(self) -> str:
+        return self._weight_pack_suffix
+
+    @property
+    def scale_suffix(self) -> str:
+        return self._scale_suffix
+
+    @property
+    def ignore_patterns(self) -> List[str]:
+        return self._ignore_patterns
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float8_e4m3fn, torch.float16, torch.bfloat16]
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return CompressedW4A8Int4PerChannelQuantConfig(**config)
 
 
 DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(
@@ -692,6 +784,10 @@ DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = W4a8Int4PerChannelQuantConfig(
     is_quanted=False
 )
 
+DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = (
+    CompressedW4A8Int4PerChannelQuantConfig(bits=4, group_size=32, is_quanted=True)
+)
+
 preset_quant_config = {
     "INT8": DEFAULT_WEIGHT_ONLY_INT8_PER_CHANNEL_QUANT_CONFIG,
     "FP8": DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG,
@@ -701,6 +797,9 @@ preset_quant_config = {
     "FP8_PER_CHANNEL_QUARK": DEFAULT_FP8_PER_CHANNEL_QUARK_QUANT_CONFIG,
     "MODELOPT_FP4": DEFAULT_MODELOPT_FP4_QUANT_CONFIG,
     "W4A8_INT4_PER_CHANNEL": DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG,
+    "W4A8_INT4_PER_CHANNEL_COMPRESSED": (
+        DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG
+    ),
 }
 
 
