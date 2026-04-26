@@ -69,6 +69,12 @@ class V4Args:
     # runtime
     max_batch_size: int = 4
     max_seq_len: int = 4096
+    # Peak per-rank token count that the routed-MoE path must budget
+    # for (Mega MoE's symmetric-memory dispatch buffer is sized from
+    # this at init).  Defaults to ``max_seq_len`` downstream when not
+    # explicitly set; kept separate so non-MoE engines can leave the
+    # buffer small.
+    max_tokens_per_rank: int = 8192
     # parallelism (S7 scaffold — currently unused; populated from
     # ParallelismConfig in deepseek_v4_model.py and threaded down so
     # downstream patches can shard without re-wiring the constructor.)
@@ -113,6 +119,7 @@ def _block_kwargs(layer_id: int, args: V4Args,
         weights=weights, prefix=prefix,
         tp_size=args.tp_size, tp_rank=args.tp_rank,
         ep_size=args.ep_size, ep_rank=args.ep_rank,
+        max_tokens_per_rank=args.max_tokens_per_rank,
     )
 
 
@@ -182,6 +189,32 @@ class V4Transformer(nn.Module):
             self.hc_head_fn = nn.Parameter(torch.empty(args.hc_mult, hc_dim, dtype=torch.float32))
             self.hc_head_base = nn.Parameter(torch.empty(args.hc_mult, dtype=torch.float32))
             self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
+
+    def set_cp_info(self, cp_info, cp_size: int, cp_rank: int) -> None:
+        """Bind / clear the framework's Context-Parallel metadata for the
+        next forward.  When ``cp_info`` is non-None and ``cp_size > 1``,
+        per-layer Compressor / Indexer modules inject all-gather of their
+        rank-local projected KV / score into the full sequence before the
+        S-dim pooling step — so each rank's mock per-layer kv_cache holds
+        the FULL compressed KV even though each rank's input_ids covers
+        only its zigzag-split slice.
+        """
+        self._cp_info = cp_info
+        self._cp_size = int(cp_size)
+        self._cp_rank = int(cp_rank)
+        for layer in self.layers:
+            if hasattr(layer, "attn"):
+                c = getattr(layer.attn, "compressor", None)
+                if c is not None:
+                    c.set_cp_info(cp_info, cp_size, cp_rank)
+                idx = getattr(layer.attn, "indexer", None)
+                if idx is not None:
+                    idx.set_cp_info(cp_info, cp_size, cp_rank)
+                    # Indexer has its own nested Compressor (for K_R path)
+                    # that also pools over S and needs the same gather.
+                    ic = getattr(idx, "compressor", None)
+                    if ic is not None:
+                        ic.set_cp_info(cp_info, cp_size, cp_rank)
 
     def _hc_head_reduce(self, x: torch.Tensor) -> torch.Tensor:
         """[B, S, hc, d] -> [B, S, d]"""
