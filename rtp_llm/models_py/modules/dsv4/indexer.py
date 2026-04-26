@@ -16,7 +16,10 @@ import torch.nn as nn
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_freqs_cis_local
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
-from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
+from rtp_llm.models_py.modules.dsv4.rope import (
+    apply_rotary_emb,
+    apply_rotary_emb_batched,
+)
 
 # P0 (prefill_opt/final_plan.md): fused indexer score Triton kernel.
 # Replaces einsum + relu + weighted-sum chunked path.  Set
@@ -58,24 +61,32 @@ class Indexer(nn.Module):
         self.rope_head_dim = rope_head_dim
         self.index_topk = index_topk
         self.q_lora_rank = q_lora_rank
-        self.softmax_scale = self.head_dim ** -0.5
+        self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
         self._factory_mode = weights is not None
 
         if self._factory_mode:
-            from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear_from_dict
+            from rtp_llm.models_py.modules.dsv4.attention import (
+                _v4_fp8_linear_from_dict,
+            )
+
             self.wq_b = _v4_fp8_linear_from_dict(
-                weights, f"{prefix}.wq_b.weight", f"{prefix}.wq_b.scale",
+                weights,
+                f"{prefix}.wq_b.weight",
+                f"{prefix}.wq_b.scale",
             )
             self.weights_proj = nn.Linear(dim, index_n_heads, bias=False)
             # weights_proj stays in the ckpt dtype (BF16); the legacy path
             # used `nn.Linear(...)` under `torch.set_default_dtype(bf16)`
             # context in DeepSeekV4Model, so BF16 matches behavior.
             self.weights_proj.weight = nn.Parameter(
-                weights[f"{prefix}.weights_proj.weight"], requires_grad=False,
+                weights[f"{prefix}.weights_proj.weight"],
+                requires_grad=False,
             )
         else:
-            self.wq_b = QuantizedLinear(q_lora_rank, index_n_heads * index_head_dim, storage="fp8")
+            self.wq_b = QuantizedLinear(
+                q_lora_rank, index_n_heads * index_head_dim, storage="fp8"
+            )
             self.weights_proj = nn.Linear(dim, index_n_heads, bias=False)
 
         self.compressor = Compressor(
@@ -115,7 +126,175 @@ class Indexer(nn.Module):
         causal mask / topk-mask relative to global Q positions."""
         self._cp_ctx = cp_ctx
 
-    def forward(self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, offset: int) -> torch.Tensor:
+    def forward_decode(
+        self,
+        x: torch.Tensor,  # [B, 1, dim] bf16 — single decode token per req
+        qr: torch.Tensor,  # [B, 1, q_lora_rank] bf16 — q_a output
+        start_pos: torch.Tensor,  # [B] int32 — abs pos per request
+        out_topk_buffer: torch.Tensor,  # [B, 1, K=index_topk] int32 — pre-allocated by metadata builder
+    ) -> torch.Tensor:
+        """Batched decode-time indexer.
+
+        Per request r: runs the small Compressor step (already
+        ``self.compressor.forward_decode``-friendly), computes per-token
+        index score against ``self.kv_cache[r, :compressed_len[r]]``,
+        and writes top-K indices into ``out_topk_buffer[r]``.
+
+        For requests with ``compressed_len < K``, the unused slots are
+        filled with -1 (downstream sparse_attn masks them).
+
+        Decode-only — does NOT touch the prefill ``forward`` arm.
+        """
+        assert x.shape[1] == 1, "decode-only: q_len must be 1"
+        bsz = x.size(0)
+        ratio = self.compress_ratio
+        rd = self.rope_head_dim
+        K = self.index_topk
+
+        # Compressor decode step writes new compressed K to its kv_cache
+        # (== self.kv_cache via bind in attention forward_decode).
+        # We don't use its return value here; we just need the cache to be
+        # current for the score computation below.
+        self.compressor.forward_decode(x, start_pos)
+
+        # qr -> wq_b -> [B, 1, n_heads * head_dim] -> unflatten
+        if self._factory_mode and qr.dim() > 2:
+            shape = qr.shape
+            q = self.wq_b(qr.reshape(-1, shape[-1])).view(
+                *shape[:-1],
+                self.n_heads * self.head_dim,
+            )
+        else:
+            q = self.wq_b(qr)
+        q = q.unflatten(-1, (self.n_heads, self.head_dim))  # [B, 1, H_idx, D_idx]
+
+        # Per-request RoPE on q_pe (each request has its own start_pos).
+        # Rather than loop, we gather per-request freqs_cis once.
+        freqs_cis_per_req = self.freqs_cis[start_pos.long()]  # [B, freqs_dim]
+        # apply_rotary_emb expects a contiguous [seq, freqs_dim] view to
+        # broadcast over [B, S, H, last_dim]. Loop over B for simplicity.
+        for r in range(bsz):
+            apply_rotary_emb(q[r : r + 1, :, :, -rd:], freqs_cis_per_req[r : r + 1])
+
+        # weights = weights_proj(x) * scale
+        weights = self.weights_proj(x) * (
+            self.softmax_scale * self.n_heads**-0.5
+        )  # [B, 1, H_idx]
+
+        # score against per-request compressed-K cache slice + topk.
+        # compressed_len[r] = (start_pos[r] + 1) // ratio (post-step length).
+        compressed_len = ((start_pos + 1) // ratio).to(torch.int64)  # [B]
+        out_topk_buffer.fill_(-1)
+        for r in range(bsz):
+            T_r = int(compressed_len[r].item())
+            if T_r <= 0:
+                continue
+            kv_r = self.kv_cache[r : r + 1, :T_r]  # [1, T_r, D_idx]
+            q_r = q[r : r + 1].float()  # [1, 1, H_idx, D_idx]
+            w_r = weights[r : r + 1].float()  # [1, 1, H_idx]
+            score = torch.einsum("bshd,btd->bsht", q_r, kv_r.float())
+            score = (score.relu_() * w_r.unsqueeze(-1)).sum(dim=2)  # [1, 1, T_r]
+            k_r = min(K, T_r)
+            topk_r = score.topk(k_r, dim=-1)[1].to(torch.int32)
+            out_topk_buffer[r : r + 1, :, :k_r] = topk_r
+        return out_topk_buffer
+
+    def forward_decode_vectorized(
+        self,
+        x: torch.Tensor,  # [B, 1, dim] bf16
+        qr: torch.Tensor,  # [B, 1, q_lora_rank] bf16
+        start_pos: torch.Tensor,  # [B] int32
+        out_topk_buffer: torch.Tensor,  # [B, 1, K]
+    ) -> torch.Tensor:
+        """Stage 3B vectorized variant of :meth:`forward_decode`.
+
+        No Python loops over B, no ``.item()`` calls. The compressor step
+        uses the vectorized variant; per-request RoPE uses
+        ``apply_rotary_emb_batched``; the score / topk is computed
+        batched across B with a length mask (positions beyond
+        ``compressed_len[r]`` are set to ``-inf`` so ``topk`` returns
+        valid indices for the leading prefix and arbitrary indices for
+        the masked tail). The caller masks via ``compressed_lens`` from
+        the metadata (already pre-computed).
+
+        Result shape: ``out_topk_buffer`` modified in place; returns
+        the same tensor for caller convenience.
+        """
+        assert x.shape[1] == 1, "decode-only: q_len must be 1"
+
+        bsz = x.size(0)
+        ratio = self.compress_ratio
+        rd = self.rope_head_dim
+        K = self.index_topk
+
+        # Compressor decode (vectorized) writes new compressed K.
+        self.compressor.forward_decode_vectorized(x, start_pos)
+
+        # qr -> wq_b -> [B, 1, n_heads * head_dim] -> [B, 1, H_idx, D_idx]
+        if self._factory_mode and qr.dim() > 2:
+            shape = qr.shape
+            q = self.wq_b(qr.reshape(-1, shape[-1])).view(
+                *shape[:-1],
+                self.n_heads * self.head_dim,
+            )
+        else:
+            q = self.wq_b(qr)
+        q = q.unflatten(-1, (self.n_heads, self.head_dim))  # [B, 1, H_idx, D_idx]
+
+        # Per-request batched RoPE on q_pe.
+        freqs_per_b = self.freqs_cis[start_pos.long()]  # [B, freqs_dim]
+        apply_rotary_emb_batched(q[..., -rd:], freqs_per_b)
+
+        weights = self.weights_proj(x) * (
+            self.softmax_scale * self.n_heads**-0.5
+        )  # [B, 1, H_idx]
+
+        # Batched score against the FULL kv_cache prefix (length
+        # max_seq_len // ratio). Mask invalid positions to -inf so topk
+        # only returns valid leading indices.
+        compressed_len = (
+            ((start_pos + 1) // ratio).to(torch.int64).view(bsz, 1, 1)
+        )  # [B, 1, 1]
+        T_max = self.kv_cache.shape[1]
+        kv_full = self.kv_cache[:bsz].float()  # [B, T_max, D_idx]
+        q32 = q.float()  # [B, 1, H_idx, D_idx]
+        w32 = weights.float()  # [B, 1, H_idx]
+        # einsum: [B, S, H, D] x [B, T, D] -> [B, S, H, T]
+        score = torch.einsum("bshd,btd->bsht", q32, kv_full)
+        score = (score.relu_() * w32.unsqueeze(-1)).sum(dim=2)  # [B, S=1, T_max]
+
+        # Mask T positions >= compressed_len[r] to -inf.
+        t_arange = torch.arange(T_max, device=score.device).view(1, 1, T_max)
+        score = torch.where(
+            t_arange < compressed_len,
+            score,
+            torch.full_like(score, float("-inf")),
+        )
+
+        # topk over T_max — returns valid indices for the leading
+        # prefix; for requests with compressed_len < K the tail of the
+        # topk result is meaningless (all scores were -inf so any tie
+        # is broken arbitrarily). Match the loop variant's contract by
+        # masking positions ``k >= compressed_len[r]`` back to -1.
+        K_eff = min(K, T_max)
+        out_topk_buffer.fill_(-1)
+        if K_eff > 0:
+            topk_idxs = score.topk(K_eff, dim=-1)[1].to(torch.int32)
+            out_topk_buffer[:, :, :K_eff].copy_(topk_idxs)
+            # Per-request: zero out positions beyond compressed_len[r].
+            # Loop variant writes only k_r = min(K, T_r) entries and leaves
+            # the rest at the initial -1; replicate that by masking.
+            k_arange = torch.arange(K, device=out_topk_buffer.device).view(1, 1, K)
+            out_topk_buffer.masked_fill_(
+                k_arange >= compressed_len,
+                -1,
+            )
+
+        return out_topk_buffer
+
+    def forward(
+        self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, offset: int
+    ) -> torch.Tensor:
         bsz, seqlen, _ = x.size()
         ratio = self.compress_ratio
         rd = self.rope_head_dim
@@ -139,7 +318,8 @@ class Indexer(nn.Module):
         if self._factory_mode and qr.dim() > 2:
             shape = qr.shape
             q = self.wq_b(qr.reshape(-1, shape[-1])).view(
-                *shape[:-1], self.n_heads * self.head_dim,
+                *shape[:-1],
+                self.n_heads * self.head_dim,
             )
         else:
             q = self.wq_b(qr)
@@ -151,7 +331,7 @@ class Indexer(nn.Module):
         # all-gathers rank-local kv/score → writes full compressed KV
         # into our self.kv_cache (bound above).
         self.compressor(x, start_pos)
-        weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads ** -0.5)
+        weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
 
         # Per-token index score: for each Q token we score every key in
         # ``kv_cache[:, :end_pos//ratio]``, ReLU, weight-sum over heads.
