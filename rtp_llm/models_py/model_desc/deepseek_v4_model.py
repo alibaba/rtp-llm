@@ -89,7 +89,7 @@ def _args_from_model_config(mc: ModelConfig) -> V4Args:
         hc_eps=float(mc.hc_eps),
         norm_eps=float(mc.layernorm_eps),
         max_batch_size=1,
-        max_seq_len=min(int(mc.max_seq_len) or 4096, 4096),
+        max_seq_len=int(mc.max_seq_len) or 4096,
     )
 
 
@@ -191,9 +191,16 @@ class DeepSeekV4Model(GptModelBase):
         device = next(iter(self.weight.global_weights.values())).device if self.weight.global_weights else "cuda:0"
         device_str = str(device)
 
-        logging.info("[DeepSeekV4Model] loading ckpt dict from %s to %s ...",
-                     self._ckpt_path, device_str)
-        weights = load_v4_weights_dict(self._ckpt_path, device=device_str)
+        logging.info("[DeepSeekV4Model] loading ckpt dict from %s to %s "
+                     "(ep_size=%d ep_rank=%d) ...",
+                     self._ckpt_path, device_str,
+                     self._v4_args.ep_size, self._v4_args.ep_rank)
+        weights = load_v4_weights_dict(
+            self._ckpt_path, device=device_str,
+            ep_size=self._v4_args.ep_size,
+            ep_rank=self._v4_args.ep_rank,
+            n_routed_experts=self._v4_args.n_routed_experts,
+        )
         logging.info("[DeepSeekV4Model] loaded %d tensors from ckpt", len(weights))
 
         logging.info("[DeepSeekV4Model] building V4Transformer via factory ...")
@@ -244,6 +251,32 @@ class DeepSeekV4Model(GptModelBase):
         attn = inputs.attention_inputs
         is_prefill = bool(attn.is_prefill) if attn is not None else (input_ids.size(1) > 1)
         start_pos = 0 if is_prefill else self._running_pos
+        # Warmup safety: framework warmup probes with prefill(max_seq_len)
+        # followed by decode(1), pushing start_pos out of our freqs_cis /
+        # kv_cache range.  Under DP+EP, short-circuiting the forward to
+        # a zero tensor would desync the DeepEP dispatch collective; so
+        # we instead clamp start_pos to the last valid slot. The warmup
+        # output is discarded anyway.
+        max_s = self._v4_args.max_seq_len
+        S_local = input_ids.size(1)
+        if start_pos + max(S_local, 1) > max_s:
+            start_pos = max(0, max_s - max(S_local, 1))
+
+        # Empty-batch handling (DP rank with zero local tokens):
+        # V4's attention/mHC/indexer contains many ops that crash on S=0
+        # (``.view``, ``.unflatten``, ``einsum`` on zero-element tensors,
+        # plus ``F.softplus`` returning "unknown parameter type").  We
+        # can't short-circuit the whole forward because DeepEP dispatch
+        # is a collective that ALL ranks must enter.  Instead, pad S=0
+        # → S=1 with a dummy token, run through the full layer stack
+        # (including DeepEP), then discard the dummy's output.
+        pad_empty = (S_local == 0)
+        if pad_empty:
+            # Create the dummy on the model's device (not input_ids.device
+            # — the framework may pass a CPU tensor for empty inputs).
+            param_dev = next(self.v4.parameters()).device
+            input_ids = torch.zeros((1, 1), dtype=torch.long, device=param_dev)
+            S_local = 1
 
         # On-demand timeline capture for exactly one forward when trigger file exists.
         should_capture = (
@@ -279,6 +312,10 @@ class DeepSeekV4Model(GptModelBase):
             self._running_pos = S
         else:
             self._running_pos += S
+
+        # Discard the dummy token we padded in for the empty-batch case.
+        if pad_empty:
+            hidden = hidden[:, :0]
 
         # Return flat [total_tokens, hidden_dim] for engine
         flat = hidden.reshape(-1, hidden.size(-1))

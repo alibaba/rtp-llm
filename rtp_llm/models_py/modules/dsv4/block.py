@@ -70,6 +70,8 @@ class Block(nn.Module):
         prefix: str = "",
         tp_size: int = 1,
         tp_rank: int = 0,
+        ep_size: int = 1,
+        ep_rank: int = 0,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -103,6 +105,7 @@ class Block(nn.Module):
             n_hash_layers=n_hash_layers, vocab_size=vocab_size,
             weights=weights,
             prefix=f"{prefix}.ffn" if self._factory_mode else "",
+            ep_size=ep_size, ep_rank=ep_rank,
         )
         self.attn_norm = _RMSNorm(dim, norm_eps)
         self.ffn_norm = _RMSNorm(dim, norm_eps)
@@ -206,6 +209,7 @@ class MTPBlock(Block):
         weights: Optional[Dict[str, torch.Tensor]] = None,
         prefix: str = "",
         tp_size: int = 1, tp_rank: int = 0,
+        ep_size: int = 1, ep_rank: int = 0,
     ):
         super().__init__(
             layer_id=layer_id, dim=dim, n_heads=n_heads, q_lora_rank=q_lora_rank,
@@ -226,6 +230,7 @@ class MTPBlock(Block):
             hc_mult=hc_mult, hc_sinkhorn_iters=hc_sinkhorn_iters, hc_eps=hc_eps,
             norm_eps=norm_eps, weights=weights, prefix=prefix,
             tp_size=tp_size, tp_rank=tp_rank,
+            ep_size=ep_size, ep_rank=ep_rank,
         )
         from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 
