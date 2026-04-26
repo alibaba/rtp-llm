@@ -152,7 +152,7 @@ private:
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
 public:
-    FakeFastTopKSampler() {}
+    FakeFastTopKSampler(): spec::FastTopKSampler(torch::Tensor()) {}
 
     spec::FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1) override {
         checkInputs(logits);
@@ -180,7 +180,7 @@ private:
 
 class FakeSpeculativeSampler: public spec::SpeculativeSampler {
 public:
-    FakeSpeculativeSampler(size_t propose_step): spec::SpeculativeSampler(propose_step) {}
+    FakeSpeculativeSampler(size_t propose_step): spec::SpeculativeSampler(torch::Tensor(), propose_step) {}
 
     spec::SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                            SamplerOutput&                      draft_sampler_output,
