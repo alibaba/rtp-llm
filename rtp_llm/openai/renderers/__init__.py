@@ -6,6 +6,7 @@ from .deepseek_vl2_renderer import DeepSeekVLV2Renderer
 from .deepseekv31_renderer import DeepseekV31Renderer
 from .deepseekv32_renderer import DeepseekV32Renderer
 from .internvl_renderer import InternVLRenderer
+from .kimi_k25_renderer import KimiK25Renderer
 from .kimik2_renderer import KimiK2Renderer
 from .llava_renderer import LlavaRenderer
 from .minicpmv_renderer import MiniCPMVRenderer

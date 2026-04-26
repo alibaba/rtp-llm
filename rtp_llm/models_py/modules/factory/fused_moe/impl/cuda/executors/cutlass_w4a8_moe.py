@@ -46,7 +46,10 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
 
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(quant_method in ["W4A8_INT4_PER_CHANNEL"])
+        checker.check(
+            quant_method
+            in ["W4A8_INT4_PER_CHANNEL", "W4A8_INT4_PER_CHANNEL_COMPRESSED"]
+        )
 
     def __init__(
         self,
@@ -306,7 +309,10 @@ class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
 
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(quant_method in ["W4A8_INT4_PER_CHANNEL"])
+        checker.check(
+            quant_method
+            in ["W4A8_INT4_PER_CHANNEL", "W4A8_INT4_PER_CHANNEL_COMPRESSED"]
+        )
 
     def __init__(
         self,

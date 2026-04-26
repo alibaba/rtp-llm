@@ -21,6 +21,7 @@ from .starcoder2 import StarCoder2
 
 if platform.processor() != "aarch64":
     from .chat_glm_v4_vision import ChatGlmV4Vision
+    from .kimi_k25.kimi_k25 import KimiK25
     from .llava import Llava
     from .qwen_vl import QWen_VL
     from .qwen2_vl.qwen2_vl import QWen2_VL

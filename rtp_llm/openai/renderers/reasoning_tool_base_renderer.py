@@ -188,11 +188,16 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             context: 模板渲染上下文
         """
         # 设置默认的tojson过滤器
-        env.filters["tojson"] = lambda value: (
-            value
-            if isinstance(value, str)
-            else json.dumps(value, sort_keys=False, ensure_ascii=False)
-        )
+        # 透传 json.dumps 支持的关键字参数（如 separators / indent / ensure_ascii），
+        # Kimi-K2 等模板会调用 `tojson(separators=(',', ':'))`。
+        def _tojson(value, **kwargs):
+            if isinstance(value, str):
+                return value
+            kwargs.setdefault("sort_keys", False)
+            kwargs.setdefault("ensure_ascii", False)
+            return json.dumps(value, **kwargs)
+
+        env.filters["tojson"] = _tojson
 
     async def _process_single_token_delta(
         self,

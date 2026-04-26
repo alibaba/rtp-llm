@@ -26,7 +26,10 @@ class CudaW4a8Int4PerChannelNoDPStrategy(MoeStrategy):
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(quant_method == "W4A8_INT4_PER_CHANNEL")
+        checker.check(
+            quant_method
+            in ("W4A8_INT4_PER_CHANNEL", "W4A8_INT4_PER_CHANNEL_COMPRESSED")
+        )
         checker.check(config.moe_strategy == "w4a8_int4_per_channel_no_dp" or config.moe_strategy == "auto")
 
     def get_attributes(self) -> StrategyAttributes:
@@ -55,7 +58,10 @@ class CudaW4a8Int4PerChannelEpLowLatencyStrategy(MoeStrategy):
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(quant_method == "W4A8_INT4_PER_CHANNEL")
+        checker.check(
+            quant_method
+            in ("W4A8_INT4_PER_CHANNEL", "W4A8_INT4_PER_CHANNEL_COMPRESSED")
+        )
         checker.check(config.moe_strategy == "w4a8_int4_per_channel_ep_low_latency" or config.moe_strategy == "auto")
 
     def get_attributes(self) -> StrategyAttributes:
@@ -84,7 +90,10 @@ class CudaW4a8Int4PerChannelEpNormalStrategy(MoeStrategy):
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(quant_method == "W4A8_INT4_PER_CHANNEL")
+        checker.check(
+            quant_method
+            in ("W4A8_INT4_PER_CHANNEL", "W4A8_INT4_PER_CHANNEL_COMPRESSED")
+        )
         checker.check(config.moe_strategy == "w4a8_int4_per_channel_ep_normal" or config.moe_strategy == "auto")
 
     def get_attributes(self) -> StrategyAttributes:
