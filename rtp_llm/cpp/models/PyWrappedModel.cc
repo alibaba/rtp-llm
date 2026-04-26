@@ -484,7 +484,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        if (device_props_.enable_prefill_cp) {
+        // CP exit-gather + strip-padding must only run when there's an
+        // actual CP-split prefill stream present.  A pure-decode batch
+        // (num_prefill_stream == 0) sets empty padding_mask /
+        // restore_indices in handleInputs; handleOutputs would then
+        // index_select([], empty) -> hidden_states = [0, D], which makes
+        // downstream Sampler::forward fail with a narrow OOB.  Detect
+        // this by reusing the standard "has any context stream" test
+        // already used by callForwardPostLayers.
+        const bool has_context_request =
+            inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        if (device_props_.enable_prefill_cp && has_context_request) {
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }
