@@ -686,6 +686,7 @@ class PyFlashinferDecodeAttnOp(object):
         )
 
         if self.enable_cuda_graph and self.decode_wrapper._fixed_batch_size == 0:
+            batch_size = attn_inputs.input_lengths.size(0)
             self.decode_wrapper._use_cuda_graph = True
             self.decode_wrapper._paged_kv_indptr_buf = (
                 self.fmha_params.decode_page_indptr_d
@@ -694,7 +695,13 @@ class PyFlashinferDecodeAttnOp(object):
                 self.fmha_params.paged_kv_last_page_len_d
             )
             self.decode_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
-            self.decode_wrapper._fixed_batch_size = attn_inputs.input_lengths.size(0)
+            self.decode_wrapper._fixed_batch_size = batch_size
+            if self.use_tensor_core:
+                self.decode_wrapper._qo_indptr_buf = torch.arange(
+                    batch_size + 1,
+                    dtype=torch.int32,
+                    device=self.g_workspace_buffer.device,
+                )
 
         self.decode_wrapper.plan(
             self.fmha_params.decode_page_indptr_d,
