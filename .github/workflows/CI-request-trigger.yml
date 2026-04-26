@@ -1,16 +1,38 @@
+# ┌─────────────────────────────────────────────────────────────────┐
+# │ CI Architecture — Request Trigger                               │
+# │                                                                 │
+# │ pull_request (opened/synchronize/reopened) — this workflow      │
+# │   → native "build" check run created on PR HEAD SHA             │
+# │   → resolve-context: check for fresh LGTM review/comment       │
+# │   → no fresh LGTM                                              │
+# │       → resolve-context exit 1                                  │
+# │       → build check = failure (blocks merge)                    │
+# │       → when LGTM arrives, CI-event-dispatcher.yml reruns this  │
+# │   → has fresh LGTM                                             │
+# │       → pre-check internal CI status                            │
+# │       → if not done → trigger internal CI                       │
+# │       → wait for internal CI result                             │
+# │       → CI pass → build check = success → PR mergeable          │
+# │       → CI fail → build check = failure                         │
+# │                                                                 │
+# │ LGTM review/comment                                            │
+# │   → CI-event-dispatcher.yml handles this event                  │
+# │   → finds this workflow's pull_request run for PR HEAD SHA      │
+# │   → reruns it (POST .../actions/runs/{id}/rerun)                │
+# │   → this workflow executes again with latest review state       │
+# │   → build check on PR HEAD is re-evaluated and updated          │
+# │                                                                 │
+# │ workflow_dispatch                                               │
+# │   → manual/debug fallback only                                  │
+# │   → does NOT update native PR HEAD "build" check                │
+# │   → writes commit status "CI Request Trigger" (non-required)    │
+# └─────────────────────────────────────────────────────────────────┘
 name: CI Request Trigger
 
 on:
-  # synchronize fires on force-push / new commits. Fresh-review gate will
-  # reject it unless a reviewer has already approved the *new* HEAD SHA,
-  # which is the intended safety behavior: un-reviewed changes don't get CI.
-  # The main-push-scan workflow provides a catch-all for PRs that gain a
-  # fresh review before the next synchronize event.
   pull_request:
-    types: [synchronize]
+    types: [opened, synchronize, reopened]
     branches: ["main"]
-  # All other events (pull_request_review, issue_comment) are dispatched
-  # here via CI-event-dispatcher.yml as workflow_dispatch calls.
   workflow_dispatch:
     inputs:
       pr_number:
@@ -45,8 +67,7 @@ jobs:
   build:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       github.event.action == 'synchronize')
+      github.event_name == 'pull_request'
     runs-on: [self-hosted, Linux]
     defaults:
       run:

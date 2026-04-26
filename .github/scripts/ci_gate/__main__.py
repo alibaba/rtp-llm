@@ -13,7 +13,7 @@ from .review import check_review_qualified, resolve_context
 from .merge import check_merge_conflicts, trigger_merge, wait_merge
 from .ci import pre_check_status, wait_status, trigger_ci
 from .comment import sync_comment
-from .scan import scan_and_trigger
+from .rerun import rerun_pr_build
 
 
 def main(argv):
@@ -85,18 +85,14 @@ def main(argv):
     sync_comment_parser.add_argument("--max-retries", type=int, default=5)
     sync_comment_parser.add_argument("--retry-interval", type=int, default=5)
 
-    scan = subparsers.add_parser("scan-and-trigger")
-    scan.add_argument("repository")
-    scan.add_argument("github_run_id")
-    scan.add_argument("--github-token", required=True)
-    scan.add_argument("--ci-secret", required=True)
-    scan.add_argument("--lgtm-user", default="LLLLKKKK")
-    scan.add_argument("--max-triggers", type=int, default=10)
-    scan.add_argument("--trigger-cooldown", type=int, default=10)
-    scan.add_argument("--merge-max-retries", type=int, default=3)
-    scan.add_argument("--merge-retry-interval", type=int, default=5)
-    scan.add_argument("--precheck-max-attempts", type=int, default=2)
-    scan.add_argument("--precheck-sleep-interval", type=int, default=5)
+    rerun = subparsers.add_parser("rerun-pr-build")
+    rerun.add_argument("--repository", required=True)
+    rerun.add_argument("--pr-number", required=True)
+    rerun.add_argument("--head-sha", required=True)
+    rerun.add_argument("--workflow-file", default="CI-request-trigger.yml")
+    rerun.add_argument("--github-token", required=True)
+    rerun.add_argument("--max-retries", type=int, default=3)
+    rerun.add_argument("--retry-backoff", type=float, default=2.0)
 
     merge_trigger = subparsers.add_parser("trigger-merge")
     merge_trigger.add_argument("commit_id")
@@ -134,8 +130,8 @@ def main(argv):
             return trigger_ci(args)
         if args.command == "sync-comment":
             return sync_comment(args)
-        if args.command == "scan-and-trigger":
-            return scan_and_trigger(args)
+        if args.command == "rerun-pr-build":
+            return rerun_pr_build(args)
         if args.command == "trigger-merge":
             return trigger_merge(args)
         if args.command == "wait-merge":

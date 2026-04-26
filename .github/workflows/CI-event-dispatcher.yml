@@ -1,3 +1,32 @@
+# ┌─────────────────────────────────────────────────────────────────┐
+# │ CI Architecture — Event Dispatcher                              │
+# │                                                                 │
+# │ pull_request (opened/synchronize/reopened)                      │
+# │   → CI-request-trigger.yml                                      │
+# │   → creates native "build" check run on PR HEAD SHA             │
+# │   → resolve-context checks for fresh LGTM                       │
+# │   → no LGTM → exit 1 → build check = failure (blocks merge)    │
+# │   → has LGTM → pre-check / trigger / wait internal CI           │
+# │   → CI pass → build check = success → PR mergeable              │
+# │                                                                 │
+# │ LGTM review/comment (this workflow)                             │
+# │   → filter: only approved review or LLLLKKKK "lgtm ready to ci"│
+# │   → resolve PR number and HEAD SHA from event                   │
+# │   → find existing CI-request-trigger.yml pull_request run       │
+# │     for this HEAD SHA                                           │
+# │   → rerun that run (POST .../actions/runs/{id}/rerun)           │
+# │   → rerun re-evaluates resolve-context with latest reviews      │
+# │   → native "build" check on PR HEAD SHA is updated              │
+# │   → required "build" can pass                                   │
+# │                                                                 │
+# │ workflow_dispatch                                               │
+# │   → manual/debug fallback only                                  │
+# │   → does NOT create native PR HEAD "build" check                │
+# │   → must not be used as the normal LGTM path                    │
+# │                                                                 │
+# │ This workflow must NOT start a parallel workflow_dispatch or     │
+# │ create a separate "build" check/status.                         │
+# └─────────────────────────────────────────────────────────────────┘
 name: CI Event Dispatcher
 
 on:
@@ -9,7 +38,7 @@ on:
 
 permissions:
   actions: write
-  pull-requests: read
+  pull-requests: write
   issues: read
 
 jobs:
@@ -43,12 +72,17 @@ jobs:
           echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
           echo "Dispatching CI for PR #${PR_NUMBER} @ ${HEAD_SHA:0:8}"
 
-      - name: Trigger CI workflow
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: .github/scripts
+
+      - name: Rerun PR build
         run: |
-          curl -sf -X POST \
-            -H "Authorization: token ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/CI-request-trigger.yml/dispatches" \
-            -d '{"ref":"main","inputs":{"pr_number":"${{ steps.ctx.outputs.pr_number }}","head_sha":"${{ steps.ctx.outputs.head_sha }}"}}'
+          python3 -m ci_gate rerun-pr-build \
+            --repository "${{ github.repository }}" \
+            --pr-number "${{ steps.ctx.outputs.pr_number }}" \
+            --head-sha "${{ steps.ctx.outputs.head_sha }}" \
+            --github-token "${{ secrets.GITHUB_TOKEN }}"
+        working-directory: .github/scripts
