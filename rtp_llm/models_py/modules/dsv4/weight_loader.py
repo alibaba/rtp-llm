@@ -73,6 +73,9 @@ def load_v4_weights_dict(
     keys_filter: Optional[Iterable[str]] = None,
     repack_fp8_scale: bool = True,
     cast_bf16_fp32_params: bool = True,
+    ep_size: int = 1,
+    ep_rank: int = 0,
+    n_routed_experts: int = 256,
 ) -> Dict[str, torch.Tensor]:
     """Load V4-Flash safetensors into a flat dict ready to feed into
     ``LinearFactory.create_linear_from_weights``.
@@ -87,6 +90,14 @@ def load_v4_weights_dict(
 
     Memory-efficient via ``safe_open(..., device=device)`` — tensors land
     straight in target-device memory with no CPU staging.
+
+    EP sharding: when ``ep_size > 1``, only experts in this rank's slice
+    ``[ep_rank * local, (ep_rank+1) * local)`` are loaded.  Matches both
+    the main-block experts (``layers.{i}.ffn.experts.{j}.*``) and the
+    MTP-block experts (``mtp.{i}.ffn.experts.{j}.*``).  Non-expert keys
+    (dense weights, norms, gate, shared experts) are replicated per
+    rank — DP for dense, EP for routed.  ``keys_filter`` is AND'd with
+    the EP filter.
     """
     idx_path = os.path.join(ckpt_dir, "model.safetensors.index.json")
     with open(idx_path) as f:
@@ -101,10 +112,34 @@ def load_v4_weights_dict(
             return True
         return any(key.startswith(p) for p in filters)
 
+    # EP filter: when ep_size > 1 drop non-local expert keys.  Pattern:
+    # ``.../ffn.experts.{j}.*`` anywhere in the key path (main layers
+    # and MTP layers both).  Shared-experts keys (`ffn.shared_experts.*`)
+    # pass through unchanged.
+    assert n_routed_experts % max(ep_size, 1) == 0, (
+        f"n_routed_experts={n_routed_experts} must divide ep_size={ep_size}")
+    local_num = n_routed_experts // max(ep_size, 1)
+    local_start = ep_rank * local_num
+    local_end = local_start + local_num
+
+    import re
+    _expert_pat = re.compile(r"\.ffn\.experts\.(\d+)\.")
+
+    def _is_local_expert(key: str) -> bool:
+        if ep_size <= 1:
+            return True
+        m = _expert_pat.search(key)
+        if not m:
+            return True  # non-expert key, replicate
+        idx = int(m.group(1))
+        return local_start <= idx < local_end
+
     # Group keys by shard for sequential reads per file.
     by_shard: Dict[str, list] = {}
     for key, shard in weight_map.items():
         if not _matches(key):
+            continue
+        if not _is_local_expert(key):
             continue
         by_shard.setdefault(shard, []).append(key)
 
