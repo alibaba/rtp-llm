@@ -173,9 +173,14 @@ class Expert(nn.Module):
                     lin.scale = nn.Parameter(weights[f"{prefix}.{name}.scale"], requires_grad=False)
         self.swiglu_limit = swiglu_limit
 
-    def _apply(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
         """Route through a factory LinearBase (expects 2D input) or legacy
-        QuantizedLinear (accepts N-D)."""
+        QuantizedLinear (accepts N-D).
+
+        NB: do **not** name this ``_apply`` — that shadows
+        ``nn.Module._apply``, breaking ``.to(device, dtype)`` for anything
+        containing an ``Expert``.
+        """
         if self._factory_mode_fp8 and x.dim() > 2:
             shape = x.shape
             return layer(x.reshape(-1, shape[-1])).view(*shape[:-1], -1)
@@ -183,15 +188,15 @@ class Expert(nn.Module):
 
     def forward(self, x: torch.Tensor, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
         dtype = x.dtype
-        gate = self._apply(self.w1, x).float()
-        up = self._apply(self.w3, x).float()
+        gate = self._apply_layer(self.w1, x).float()
+        up = self._apply_layer(self.w3, x).float()
         if self.swiglu_limit > 0:
             up = torch.clamp(up, min=-self.swiglu_limit, max=self.swiglu_limit)
             gate = torch.clamp(gate, max=self.swiglu_limit)
         x = F.silu(gate) * up
         if weights is not None:
             x = weights * x
-        return self._apply(self.w2, x.to(dtype))
+        return self._apply_layer(self.w2, x.to(dtype))
 
 
 class MoE(nn.Module):
