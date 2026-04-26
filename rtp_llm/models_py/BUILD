@@ -82,6 +82,7 @@ py_library(
         "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
         "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashmla,
+        "@//:using_cuda12_arm": flashmla,
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda13_x86": rtp_kernel,
