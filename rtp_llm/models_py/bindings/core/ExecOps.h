@@ -83,6 +83,8 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 GreedyOutput     execSampleGreedy(const GreedyParams& params);
 BeamSearchOutput execSampleBeamSearch(const BeamSearchParams& params);
 void             execChainSpeculativeSampling(const SpeculativeSamplingParams& params);
+void             execRejectionSampling(const RejectionSamplingParams& params);
+void             execMappingDraft2Target(const MappingDraft2TargetParams& params);
 
 // ===================================================================
 // Communication ops (backed by c10d ProcessGroup)

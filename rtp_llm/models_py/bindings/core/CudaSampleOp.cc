@@ -6,6 +6,8 @@
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
+#include "rtp_llm/models_py/bindings/common/kernels/vocab_prune/mapping.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include <cstddef>
@@ -280,6 +282,87 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                int64_t(stream));
 }
 
+void rejectionSampling(const RejectionSamplingParams& params) {
+    RTP_LLM_CHECK(params.draft_probs_d.is_cuda());
+    RTP_LLM_CHECK(params.draft_token_ids_d.is_cuda());
+    RTP_LLM_CHECK(params.target_probs_d.is_cuda());
+
+    int  batch_size             = params.draft_probs_d.size(0);
+    int  num_speculative_tokens = params.draft_probs_d.size(1);
+    int  target_vocab_size      = params.target_probs_d.size(2);
+    int  target_token_stride    = params.target_token_ids_d.size(1);
+    auto stream                 = at::cuda::getCurrentCUDAStream().stream();
+
+    RTP_LLM_CHECK(params.draft_probs_d.dim() == 3);
+    RTP_LLM_CHECK(params.draft_token_ids_d.dim() == 2);
+    RTP_LLM_CHECK(params.target_probs_d.dim() == 3);
+    RTP_LLM_CHECK(params.draft_token_ids_d.size(0) == batch_size);
+    RTP_LLM_CHECK(params.draft_token_ids_d.size(1) == num_speculative_tokens);
+    RTP_LLM_CHECK(params.target_probs_d.size(0) == batch_size);
+    RTP_LLM_CHECK(params.target_probs_d.size(1) == num_speculative_tokens + 1);
+    RTP_LLM_CHECK(params.draft_probs_d.size(2) == target_vocab_size);
+
+    check_cuda_value(invokeRejectionSampling(params.draft_probs_d.data_ptr<float>(),
+                                             params.draft_token_ids_d.data_ptr<int32_t>(),
+                                             params.uniform_samples_d.data_ptr<float>(),
+                                             params.target_probs_d.data_ptr<float>(),
+                                             params.target_token_ids_d.data_ptr<int32_t>(),
+                                             target_token_stride,
+                                             params.output_token_ids_d.data_ptr<int32_t>(),
+                                             params.output_accepted_token_num_d.data_ptr<int32_t>(),
+                                             params.do_sample_d.data_ptr<bool>(),
+                                             batch_size,
+                                             num_speculative_tokens,
+                                             target_vocab_size,
+                                             stream));
+}
+
+void mappingDraft2Target(const MappingDraft2TargetParams& params) {
+    if (!params.d2t_map.defined() || params.d2t_map.numel() == 0) {
+        return;
+    }
+
+    const int d2t_map_size = static_cast<int>(params.d2t_map.numel());
+
+    if (!params.tokens.is_cuda() && !params.d2t_map.is_cuda()) {
+        int*     tokens_ptr  = params.tokens.data_ptr<int32_t>();
+        int64_t* d2t_map_ptr = params.d2t_map.data_ptr<int64_t>();
+
+        for (int i = 0; i < params.batch_size; i++) {
+            for (int j = params.token_offset; j < params.token_stride; j++) {
+                int idx      = i * params.token_stride + j;
+                int token_id = tokens_ptr[idx];
+                if (token_id >= 0 && token_id < d2t_map_size) {
+                    tokens_ptr[idx] = d2t_map_ptr[token_id];
+                }
+            }
+        }
+    } else if (params.tokens.is_cuda() && params.d2t_map.is_cuda()) {
+        auto stream = at::cuda::getCurrentCUDAStream().stream();
+        if (params.tokens.dtype() == torch::kInt32) {
+            invokeMappingDraft2Target(params.tokens.data_ptr<int32_t>(),
+                                      params.batch_size,
+                                      params.token_offset,
+                                      params.token_stride,
+                                      params.d2t_map.data_ptr<int64_t>(),
+                                      d2t_map_size,
+                                      stream);
+        } else if (params.tokens.dtype() == torch::kInt64) {
+            invokeMappingDraft2Target(params.tokens.data_ptr<int64_t>(),
+                                      params.batch_size,
+                                      params.token_offset,
+                                      params.token_stride,
+                                      params.d2t_map.data_ptr<int64_t>(),
+                                      d2t_map_size,
+                                      stream);
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(false, "Unsupported token dtype for mappingDraft2Target");
+        }
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(false, "tokens and d2t_map must be on the same device");
+    }
+}
+
 #else  // !USING_CUDA — ROCm platform
 
 }  // namespace rtp_llm — temporarily close for includes
@@ -309,7 +392,34 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
                                        int          max_input_length,
                                        int          step,
                                        hipStream_t  stream);
+
+// Forward-declare vocab-prune mapping kernel (same reason — header pulls amd_bfloat16.h via cuda_shims.h)
+template<typename IdType>
+void invokeMappingDraft2Target(IdType*     tokens,
+                               int         batch_size,
+                               int         token_offset,
+                               int         token_stride,
+                               int64_t*    d2t_map,
+                               int         d2t_map_size,
+                               hipStream_t stream);
 }  // namespace rtp_llm
+
+// Forward-declare rejection-sampling kernel from rtp_llm/models_py/bindings/rocm/speculative_sampling/sampling.cu
+// (same amd_bfloat16.h transitive-include hazard — kept out of the include graph).
+template<typename DType, typename IdType>
+hipError_t invokeRejectionSampling(DType*      draft_probs,
+                                   IdType*     draft_token_ids,
+                                   DType*      uniform_samples,
+                                   DType*      target_probs,
+                                   IdType*     target_token_ids,
+                                   int         target_token_stride,
+                                   IdType*     output_token_ids,
+                                   IdType*     output_accepted_token_num,
+                                   bool*       do_sample,
+                                   int         batch_size,
+                                   int         num_speculative_tokens,
+                                   int         target_vocab_size,
+                                   hipStream_t stream);
 
 #include <ATen/hip/HIPContext.h>
 #include "rtp_llm/models_py/bindings/rocm/kernels/sampling/sampling.h"
@@ -525,6 +635,103 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                  params.output_emitted_token_num_d,
                                  true,
                                  int64_t(stream));
+}
+
+void rejectionSampling(const RejectionSamplingParams& params) {
+    RTP_LLM_CHECK(params.draft_probs_d.is_cuda());
+    RTP_LLM_CHECK(params.draft_token_ids_d.is_cuda());
+    RTP_LLM_CHECK(params.target_probs_d.is_cuda());
+
+    int  batch_size             = params.draft_probs_d.size(0);
+    int  num_speculative_tokens = params.draft_probs_d.size(1);
+    int  target_vocab_size      = params.target_probs_d.size(2);
+    int  target_token_stride    = params.target_token_ids_d.size(1);
+    auto stream                 = at::hip::getCurrentHIPStream().stream();
+
+    RTP_LLM_CHECK(params.draft_probs_d.dim() == 3);
+    RTP_LLM_CHECK(params.draft_token_ids_d.dim() == 2);
+    RTP_LLM_CHECK(params.target_probs_d.dim() == 3);
+    RTP_LLM_CHECK(params.draft_token_ids_d.size(0) == batch_size);
+    RTP_LLM_CHECK(params.draft_token_ids_d.size(1) == num_speculative_tokens);
+    RTP_LLM_CHECK(params.target_probs_d.size(0) == batch_size);
+    RTP_LLM_CHECK(params.target_probs_d.size(1) == num_speculative_tokens + 1);
+    RTP_LLM_CHECK(params.draft_probs_d.size(2) == target_vocab_size);
+
+    hipError_t err = ::invokeRejectionSampling(params.draft_probs_d.data_ptr<float>(),
+                                               params.draft_token_ids_d.data_ptr<int32_t>(),
+                                               params.uniform_samples_d.data_ptr<float>(),
+                                               params.target_probs_d.data_ptr<float>(),
+                                               params.target_token_ids_d.data_ptr<int32_t>(),
+                                               target_token_stride,
+                                               params.output_token_ids_d.data_ptr<int32_t>(),
+                                               params.output_accepted_token_num_d.data_ptr<int32_t>(),
+                                               params.do_sample_d.data_ptr<bool>(),
+                                               batch_size,
+                                               num_speculative_tokens,
+                                               target_vocab_size,
+                                               stream);
+    RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "invokeRejectionSampling failed: %s", hipGetErrorString(err));
+}
+
+void mappingDraft2Target(const MappingDraft2TargetParams& params) {
+    if (!params.d2t_map.defined() || params.d2t_map.numel() == 0) {
+        return;
+    }
+
+    const int d2t_map_size = static_cast<int>(params.d2t_map.numel());
+    RTP_LLM_CHECK_WITH_INFO(params.d2t_map.dtype() == torch::kInt64, "mappingDraft2Target: d2t_map must be int64");
+
+    if (!params.tokens.is_cuda() && !params.d2t_map.is_cuda()) {
+        int64_t* d2t_map_ptr = params.d2t_map.data_ptr<int64_t>();
+        if (params.tokens.dtype() == torch::kInt32) {
+            int32_t* tokens_ptr = params.tokens.data_ptr<int32_t>();
+            for (int i = 0; i < params.batch_size; i++) {
+                for (int j = params.token_offset; j < params.token_stride; j++) {
+                    int     idx      = i * params.token_stride + j;
+                    int64_t token_id = static_cast<int64_t>(tokens_ptr[idx]);
+                    if (token_id >= 0 && token_id < d2t_map_size) {
+                        tokens_ptr[idx] = static_cast<int32_t>(d2t_map_ptr[token_id]);
+                    }
+                }
+            }
+        } else if (params.tokens.dtype() == torch::kInt64) {
+            int64_t* tokens_ptr = params.tokens.data_ptr<int64_t>();
+            for (int i = 0; i < params.batch_size; i++) {
+                for (int j = params.token_offset; j < params.token_stride; j++) {
+                    int     idx      = i * params.token_stride + j;
+                    int64_t token_id = tokens_ptr[idx];
+                    if (token_id >= 0 && token_id < d2t_map_size) {
+                        tokens_ptr[idx] = d2t_map_ptr[token_id];
+                    }
+                }
+            }
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(false, "Unsupported token dtype for mappingDraft2Target");
+        }
+    } else if (params.tokens.is_cuda() && params.d2t_map.is_cuda()) {
+        auto stream = at::hip::getCurrentHIPStream().stream();
+        if (params.tokens.dtype() == torch::kInt32) {
+            invokeMappingDraft2Target(params.tokens.data_ptr<int32_t>(),
+                                      params.batch_size,
+                                      params.token_offset,
+                                      params.token_stride,
+                                      params.d2t_map.data_ptr<int64_t>(),
+                                      d2t_map_size,
+                                      stream);
+        } else if (params.tokens.dtype() == torch::kInt64) {
+            invokeMappingDraft2Target(params.tokens.data_ptr<int64_t>(),
+                                      params.batch_size,
+                                      params.token_offset,
+                                      params.token_stride,
+                                      params.d2t_map.data_ptr<int64_t>(),
+                                      d2t_map_size,
+                                      stream);
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(false, "Unsupported token dtype for mappingDraft2Target");
+        }
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(false, "tokens and d2t_map must be on the same device");
+    }
 }
 
 #endif  // USING_CUDA
