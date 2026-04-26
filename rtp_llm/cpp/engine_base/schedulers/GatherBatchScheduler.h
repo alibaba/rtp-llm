@@ -57,11 +57,8 @@ public:
         // RUNNING -> DONE: error / finished
         evaluateAndUpdateStreams(running_streams_);
 
-        // PyWrappedModel currently does not support a mixed prefill+decode batch (see
-        // FIFOScheduler::evaluateRunningMemory's load_python_model guard and
-        // PyWrappedModel::buildPyAttentionInputs cu_seqlens slicing). Defer the gather
-        // until running streams drain so the next batch is pure prefill.
-        const bool python_model_busy = model_specific_config_.load_python_model && !running_streams_.empty();
+        // Defer the gather until running streams drain so the next batch is pure prefill.
+        const bool python_model_busy = !running_streams_.empty();
         if (waiting_streams_.size() >= static_cast<size_t>(gather_batch_size_) && !python_model_busy) {
             // Gather exactly gather_batch_size_ streams
             std::list<GenerateStreamPtr> new_streams;
