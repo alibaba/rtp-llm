@@ -454,33 +454,47 @@ absl::Status NormalEngine::step() {
     }
 
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    // tick profiler BEFORE process() so that when a new profiling session is
+    // configured mid-request, the profiler is started in time to actually
+    // capture THIS step's kernels.  Torch profiler's start() does not
+    // retroactively capture kernels that already ran, so ticking after
+    // process() would always miss the first configured step (see
+    // TorchProfiler.cc StepWindowProfiler::tick — it creates+starts the
+    // profiler and returns on the first post-configure tick).  Cross-rank
+    // alignment concern from the original ordering is unchanged: TP ranks
+    // still synchronize inside process() via NCCL, so the windows remain
+    // tightly aligned; the only difference is each rank starts profiling
+    // a few microseconds earlier relative to its own step boundary.
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
 
     // If any stream in this batch requested gen_timeline AND no profiling session is
-    // already active, configure + tick BEFORE process() so the profiler is up before
-    // the actual work runs. This guarantees the trace captures THIS step's work, not
-    // the next step's. If a session is already active (e.g. external StartProfile RPC),
-    // skip — first-come-first-served.
+    // already active, configure BEFORE process() so the universal pre-tick below arms
+    // the profiler in time. If a session is already active (e.g. external StartProfile
+    // RPC), skip — first-come-first-served.
     if (!step_profiler_.enabled()) {
         for (const auto& stream : streams) {
             if (stream && stream->genTimeline()) {
                 const auto& cfg = stream->generateConfig();
                 step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step);
-                step_profiler_.tick();  // start profiler now (start_step=0)
                 break;
             }
         }
     }
 
+    // Universal pre-process tick: on the first call after a configure (either the
+    // gen_timeline auto-configure above or an external StartProfile RPC) this
+    // creates+starts the profiler so THIS step's kernels land inside the active
+    // window. On subsequent calls it counts the step and stops the profiler when
+    // num_steps is reached. Ticking before process() is required because Torch's
+    // StepWindowProfiler::tick cannot retroactively capture kernels already flushed.
+    // Cross-rank alignment via NCCL-in-process is unchanged — ranks still synchronize
+    // inside process(), the windows just open a few microseconds earlier per rank.
+    step_profiler_.tick();
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams);
     }
-
-    // tick profiler after process() to count this step (and stop when num_steps reached).
-    // All TP ranks synchronize inside process() via NCCL, so stop happens at aligned points.
-    step_profiler_.tick();
 
     // report step metrics
     if (parallelism_config.tp_rank == 0) {

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Union
 
@@ -160,7 +161,36 @@ class BatchPerfImpl(object):
             results = measurements[0]
 
         if self.profile:
+            # Pre-arm via /start_profile with enable_all_rank=true so that
+            # all TP/DP ranks profile the upcoming request.  Requires the
+            # NormalEngine::step() patch that ticks BEFORE process(), so
+            # the first post-configure tick starts the profiler in time
+            # for the next process() to be captured.  Controlled by env
+            # PERF_PREARM_PROFILE=1.
+            if os.environ.get("PERF_PREARM_PROFILE", "0") == "1":
+                try:
+                    num_steps = int(os.environ.get("PERF_PROFILE_NUM_STEPS", "3"))
+                    arm_sleep = float(os.environ.get("PERF_PROFILE_ARM_SLEEP", "2"))
+                    r = requests.post(
+                        f"http://127.0.0.1:{self.base_port}/start_profile",
+                        json={
+                            "gen_timeline": True,
+                            "trace_name": self.profile_trace_name or "perf_prearm",
+                            "start_step": 0,
+                            "num_steps": num_steps,
+                            "enable_all_rank": True,
+                        },
+                        timeout=60,
+                    )
+                    logging.info(
+                        f"[PERF_PREARM_PROFILE] num_steps={num_steps} arm_sleep={arm_sleep} "
+                        f"-> {r.status_code} {r.text[:200]}"
+                    )
+                    time.sleep(arm_sleep)
+                except Exception as e:
+                    logging.warning(f"[PERF_PREARM_PROFILE] failed: {e}")
             _ = self._curl_server(True)
+            time.sleep(int(os.environ.get("PERF_PROFILE_FLUSH_SLEEP", "60")))
         return results
 
     def _set_concurrency(self):
