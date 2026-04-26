@@ -182,6 +182,14 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                              torch::Tensor(),
                              torch::Tensor(),
                              torch::Tensor()});
+    {
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        generate_stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .epoch                 = 0,
+            .last_sample_token_gpu = new_tokens.reshape({1}).to(cuda_i32),
+            .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(generate_stream->seqLength()), cuda_i32),
+        });
+    }
     if (generate_request.position_ids_size() > 0) {
         auto context_position_ids = torch::from_blob(const_cast<int32_t*>(generate_request.position_ids().data()),
                                                      {(int64_t)generate_request.position_ids_size()},
@@ -190,26 +198,59 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         generate_stream->setContextPositionIds(context_position_ids);
     }
     if (propose_maga_init_params_) {
+        const size_t propose_step = propose_maga_init_params_->gen_num_per_circle;
+        RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
+        if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {
+            RTP_LLM_CHECK_WITH_INFO(propose_step == static_cast<size_t>(maga_init_params_.sp_config.gen_num_per_cycle),
+                                    "decode rpc propose_step mismatch, propose_params=%zu, sp_config=%ld",
+                                    propose_step,
+                                    maga_init_params_.sp_config.gen_num_per_cycle);
+        }
+
         generate_stream->setReuseLength(generate_stream->seqLength() - 1);
         generate_stream->setSpEditRun(false);
         generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
         generate_stream->setContainProposeToken(true);
         std::vector<int> propose_tokens;
         propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
+        RTP_LLM_CHECK_WITH_INFO(propose_tokens.size() >= 2,
+                                "decode rpc propose_tokens should contain target and draft token, count=%zu",
+                                propose_tokens.size());
         generate_stream->setProposeToken(propose_tokens);
 
-        auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
-        sp_output_buffer->tokens = torch::zeros({1, (int64_t)propose_tokens.size()}, torch::kInt32);
+        auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_output_buffer->propose_step = propose_step;
+        sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()},
+                                                torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
         memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
         auto propose_probs_t  = QueryConverter::transTensor(generate_request.propose_probs());
         auto propose_hidden_t = QueryConverter::transTensor(generate_request.propose_hidden());
 
-        auto& tensors_holder = sp_output_buffer->tensors_holder;
-        tensors_holder.emplace_back(std::move(propose_probs_t));
-        tensors_holder.emplace_back(std::move(propose_hidden_t));
+        const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
+        sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
+
+        auto propose_tokens_gpu = torch::empty({1}, cuda_i32);
+        auto accept_len         = torch::ones({1}, cuda_i32);
+        auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
+        accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
+        propose_tokens_gpu[0]   = sp_output_buffer->tokens[0][1];
+
+        auto next_seq_len = torch::ones({1}, cuda_i32);
+        next_seq_len[0]   = generate_stream->seqLength();
 
         generate_stream->setSPOutputBuffer(sp_output_buffer);
+        generate_stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
+            .epoch                  = 0,
+            .accept_len_gpu         = std::move(accept_len),
+            .accept_tokens_gpu      = std::move(accept_tokens),
+            .next_seq_len_gpu       = std::move(next_seq_len),
+            .propose_tokens_gpu     = std::move(propose_tokens_gpu),
+            .last_hidden_states_gpu = sp_output_buffer->hidden_states,
+            .draft_all_probs_gpu    = sp_output_buffer->all_probs,
+            .next_real_seq_len      = generate_stream->seqLength(),
+        });
     }
 
     generate_stream->resetBeginTime(currentTimeUs());

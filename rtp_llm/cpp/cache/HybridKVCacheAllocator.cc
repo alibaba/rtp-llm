@@ -44,13 +44,13 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVC
         full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
     }
 
-    int                       pos = min_full_reuse_blocks - 1;
-    std::vector<BlockIdxType>    linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
+    int                           pos = min_full_reuse_blocks - 1;
+    std::vector<BlockIdxType>     linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
     std::vector<BlockIndicesType> swa_tail_blocks(swa_group_ids_.size());
-    const bool                has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
+    const bool                    has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
     for (; pos >= 0 && has_tail_groups; --pos) {
-        bool                     all_tail_groups_matched = true;
-        std::vector<BlockIdxType> candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
+        bool                          all_tail_groups_matched = true;
+        std::vector<BlockIdxType>     candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
         std::vector<BlockIndicesType> candidate_swa_tail_blocks(swa_group_ids_.size());
         for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
             const int gid      = linear_group_ids_[i];
@@ -182,21 +182,14 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
 MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     auto&     kv_resource  = malloc_info.batch_kv_cache_resource;
     const int batch_size   = kv_resource->batchSize();
-    const int seq_len      = malloc_info.complete_token_ids->seqLength();
+    const int seq_len      = malloc_info.incrSeqLen();
     const int reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
-    std::vector<std::vector<size_t>> original_sizes(static_cast<size_t>(batch_size));
+    std::vector<std::vector<BlockIndicesType>> original_blocks(static_cast<size_t>(batch_size));
     for (int b = 0; b < batch_size; ++b) {
-        original_sizes[static_cast<size_t>(b)].resize(static_cast<size_t>(kv_resource->groupNums()));
+        original_blocks[static_cast<size_t>(b)].resize(static_cast<size_t>(kv_resource->groupNums()));
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            original_sizes[static_cast<size_t>(b)][static_cast<size_t>(gid)] = kv_resource->blocksNum(b, gid);
-        }
-    }
-
-    for (int b = 0; b < batch_size; ++b) {
-        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
-                kv_resource->mutableBlockIds(b, gid), malloc_info.reuse_cache, reserve_step);
+            original_blocks[static_cast<size_t>(b)][static_cast<size_t>(gid)] = kv_resource->blocks(b, gid);
         }
     }
 
@@ -220,10 +213,43 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     }
 
     if (all_success) {
+        if (!malloc_info.enable_remove_skipped_blocks) {
+            return {true, 0};
+        }
+        for (int b = 0; b < batch_size; ++b) {
+            for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
+                kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
+                    kv_resource->mutableBlockIds(b, gid), malloc_info.reuse_cache, reserve_step);
+            }
+        }
         return {true, 0};
     }
 
-    rollbackIncrMalloc(*kv_resource, original_sizes, failed_batch);
+    for (int b = 0; b <= failed_batch && b < batch_size; ++b) {
+        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
+            auto&       block_ids = kv_resource->mutableBlockIds(b, gid);
+            const auto& original  = original_blocks[static_cast<size_t>(b)][static_cast<size_t>(gid)];
+
+            std::unordered_set<BlockIdxType> original_valid_blocks;
+            original_valid_blocks.reserve(original.size());
+            for (auto block : original) {
+                if (!isNullBlockIdx(block)) {
+                    original_valid_blocks.insert(block);
+                }
+            }
+
+            BlockIndicesType blocks_to_free;
+            for (auto block : block_ids.blocks()) {
+                if (!isNullBlockIdx(block) && original_valid_blocks.find(block) == original_valid_blocks.end()) {
+                    blocks_to_free.push_back(block);
+                }
+            }
+            if (!blocks_to_free.empty()) {
+                freeBlocksInGroup(gid, blocks_to_free);
+            }
+            block_ids.assign(original);
+        }
+    }
     RTP_LLM_LOG_WARNING("Hybrid incrMalloc failed at batch=%d group=%d", failed_batch, failed_group);
     return {false, 0};
 }

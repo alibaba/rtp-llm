@@ -112,16 +112,15 @@ void KVCacheMemoryConnector::initBlockPool() {
 
 std::vector<KVCacheMemoryConnector::LayerRegionSlot> KVCacheMemoryConnector::layerRegionSlots() const {
     std::vector<LayerRegionSlot> slots;
-    const size_t               layer_num       = cache_config_.layer_all_num;
-    const size_t               region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
+    const size_t                 layer_num         = cache_config_.layer_all_num;
+    const size_t                 region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
 
     auto group_stride = [this](int gid, int layer_id) -> size_t {
         if (gid >= 0 && static_cast<size_t>(gid) < cache_config_.group_kv_block_stride_bytes.size()) {
-            const size_t kv_stride = cache_config_.group_kv_block_stride_bytes[static_cast<size_t>(gid)];
-            const size_t scale_stride =
-                static_cast<size_t>(gid) < cache_config_.group_kv_scale_stride_bytes.size() ?
-                    cache_config_.group_kv_scale_stride_bytes[static_cast<size_t>(gid)] :
-                    0;
+            const size_t kv_stride    = cache_config_.group_kv_block_stride_bytes[static_cast<size_t>(gid)];
+            const size_t scale_stride = static_cast<size_t>(gid) < cache_config_.group_kv_scale_stride_bytes.size() ?
+                                            cache_config_.group_kv_scale_stride_bytes[static_cast<size_t>(gid)] :
+                                            0;
             if (kv_stride + scale_stride > 0) {
                 return kv_stride + scale_stride;
             }
@@ -135,17 +134,17 @@ std::vector<KVCacheMemoryConnector::LayerRegionSlot> KVCacheMemoryConnector::lay
     for (size_t layer = 0; layer < layer_num; ++layer) {
         bool has_typed_slot = false;
         if (layer < cache_config_.layer_region_to_group_id.size()) {
-            const auto& dense = cache_config_.layer_region_to_group_id[layer];
-            const size_t n    = std::min(region_name_count, dense.size());
+            const auto&  dense = cache_config_.layer_region_to_group_id[layer];
+            const size_t n     = std::min(region_name_count, dense.size());
             for (size_t attn = 0; attn < n; ++attn) {
                 const int gid = dense[attn];
                 if (gid < 0) {
                     continue;
                 }
                 slots.push_back(LayerRegionSlot{static_cast<int>(layer),
-                                              static_cast<KVCacheRegionName>(attn),
-                                              gid,
-                                              group_stride(gid, static_cast<int>(layer))});
+                                                static_cast<KVCacheRegionName>(attn),
+                                                gid,
+                                                group_stride(gid, static_cast<int>(layer))});
                 has_typed_slot = true;
             }
         }
@@ -154,10 +153,8 @@ std::vector<KVCacheMemoryConnector::LayerRegionSlot> KVCacheMemoryConnector::lay
             if (layer < cache_config_.layer_to_group_id.size() && cache_config_.layer_to_group_id[layer] >= 0) {
                 gid = cache_config_.layer_to_group_id[layer];
             }
-            slots.push_back(LayerRegionSlot{static_cast<int>(layer),
-                                          KVCacheRegionName::DEFAULT,
-                                          gid,
-                                          group_stride(gid, static_cast<int>(layer))});
+            slots.push_back(LayerRegionSlot{
+                static_cast<int>(layer), KVCacheRegionName::DEFAULT, gid, group_stride(gid, static_cast<int>(layer))});
         }
     }
     return slots;
@@ -192,7 +189,7 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         return nullptr;
     }
 
-    const auto slots = layerRegionSlots();
+    const auto  slots                = layerRegionSlots();
     const auto& layer_attn_block_ids = resource->layerAttnBlocks();
     if (!checkLayerRegionBlocks(layer_attn_block_ids, slots, cache_keys_size)) {
         RTP_LLM_LOG_WARNING("async match failed, invalid layer_attn_block_ids, cache_keys_size=%zu", cache_keys_size);
@@ -255,9 +252,9 @@ bool KVCacheMemoryConnector::gpuBlocksAllValid(const LayerBlockIds& layer_block_
     return true;
 }
 
-bool KVCacheMemoryConnector::gpuBlocksAllValid(const LayerAttnBlockIds& layer_attn_block_ids,
+bool KVCacheMemoryConnector::gpuBlocksAllValid(const LayerAttnBlockIds&            layer_attn_block_ids,
                                                const std::vector<LayerRegionSlot>& slots,
-                                               size_t key_index) const {
+                                               size_t                              key_index) const {
     for (const auto& slot : slots) {
         const auto layer = static_cast<size_t>(slot.layer_id);
         const auto attn  = static_cast<size_t>(slot.region_name);
@@ -289,7 +286,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
 
     autil::ScopedTime2 timer;
 
-    const auto slots = layerRegionSlots();
+    const auto  slots                = layerRegionSlots();
     const auto& layer_attn_block_ids = resource->layerAttnBlocks();
     if (!checkLayerRegionBlocks(layer_attn_block_ids, slots, cache_keys_size)) {
         reportReadMetrics(false, timer.done_us(), cache_keys_size, 0);
@@ -307,8 +304,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         return nullptr;
     }
 
-    auto copy_plan = buildCopyPlanForRead(
-        cache_keys, layer_attn_block_ids, slots, start_read_block_index, read_block_num);
+    auto copy_plan =
+        buildCopyPlanForRead(cache_keys, layer_attn_block_ids, slots, start_read_block_index, read_block_num);
     if (!copy_plan || copy_plan->copy_infos.empty()) {
         reportReadMetrics(false, timer.done_us(), cache_keys_size, 0);
         return nullptr;
@@ -345,14 +342,14 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     return context;
 }
 
-std::shared_ptr<KVCacheMemoryConnector::CopyPlan> KVCacheMemoryConnector::buildCopyPlanForRead(
-    const CacheKeysType& cache_keys,
-    const LayerAttnBlockIds& layer_attn_block_ids,
-    const std::vector<LayerRegionSlot>& slots,
-    int start_index,
-    int read_num) {
+std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
+KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&                cache_keys,
+                                             const LayerAttnBlockIds&            layer_attn_block_ids,
+                                             const std::vector<LayerRegionSlot>& slots,
+                                             int                                 start_index,
+                                             int                                 read_num) {
     std::vector<CopyInfoPerKey> copy_infos;
-    bool                        success   = true;
+    bool                        success = true;
 
     for (int i = start_index; i < start_index + read_num; ++i) {
         const auto cache_key    = cache_keys.at(i);
@@ -411,7 +408,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
 
     autil::ScopedTime2 timer;
 
-    const auto slots = layerRegionSlots();
+    const auto  slots                = layerRegionSlots();
     const auto& layer_attn_block_ids = resource->layerAttnBlocks();
     if (!checkLayerRegionBlocks(layer_attn_block_ids, slots, cache_keys_size)) {
         reportWriteMetrics(false, timer.done_us(), cache_keys_size, 0);
@@ -455,9 +452,9 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
                     item.is_complete = copy_info.is_complete;
                     putToCache(item);
                 }
-                // reset resource to decrease block ref count in destructor
-                resource_copy.reset();
             }
+            // reset resource to decrease block ref count in destructor
+            resource_copy.reset();
             const int64_t write_block_num = success ? static_cast<int64_t>(copy_plan->copy_infos.size()) : 0;
             // reset copy plan to release memory block refs
             copy_plan.reset();
@@ -474,12 +471,12 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
 }
 
 std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
-KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType& cache_keys,
-                                              const LayerAttnBlockIds& layer_attn_block_ids,
+KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&                cache_keys,
+                                              const LayerAttnBlockIds&            layer_attn_block_ids,
                                               const std::vector<LayerRegionSlot>& slots,
-                                              int start_index,
-                                              int write_num,
-                                              bool& no_need_write) {
+                                              int                                 start_index,
+                                              int                                 write_num,
+                                              bool&                               no_need_write) {
     std::vector<CopyInfoPerKey> copy_infos;
     copy_infos.reserve(write_num);
 
@@ -495,9 +492,9 @@ KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType& cache_keys,
         gpu_blocks.reserve(slots.size());
         size_t null_block_num = 0;
         for (const auto& slot : slots) {
-            const auto layer = static_cast<size_t>(slot.layer_id);
-            const auto attn  = static_cast<size_t>(slot.region_name);
-            const int gpu_block_idx = layer_attn_block_ids.at(layer).at(attn)->blocks().at(i);
+            const auto layer         = static_cast<size_t>(slot.layer_id);
+            const auto attn          = static_cast<size_t>(slot.region_name);
+            const int  gpu_block_idx = layer_attn_block_ids.at(layer).at(attn)->blocks().at(i);
             // Do NOT skip NULL_BLOCK_IDX here. We must keep per-layer+attn stride slots in the merged big block.
             if (isNullBlockIdx(gpu_block_idx)) {
                 ++null_block_num;
@@ -565,9 +562,11 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
     if (stop_.load()) {
         return false;
     }
-    auto code = wait_done_thread_pool_->pushTask([this, context, copy_plan]() mutable {
-        auto send_result = sendCopyPlan(copy_plan);
+    auto task_copy_plan = copy_plan;
+    auto code           = wait_done_thread_pool_->pushTask([this, context, task_copy_plan]() mutable {
+        auto send_result = sendCopyPlan(task_copy_plan);
         context->setBroadcastResult(send_result);
+        task_copy_plan.reset();
         context->waitDone();
     });
     if (code != autil::ThreadPoolBase::ERROR_NONE) {
@@ -649,7 +648,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
 
     if (!dst_buffers.empty()) {
         MultiCopyParams mc{dst_buffers, src_buffers};
-        const bool can_use_split_kv_copy = !hasTypedLayerRegionSlots(layerRegionSlots());
+        const bool      can_use_split_kv_copy = !hasTypedLayerRegionSlots(layerRegionSlots());
         applySplitKvMultiCopyFieldsIfEligible(
             kv_cache_config_.enable_memory_cache_sm_copy && can_use_split_kv_copy, cache_config_, mc);
         execNoBlockCopy(mc);
@@ -692,9 +691,9 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(BlockIdxType                    
 
     size_t byte_off = 0;
     for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
-        const auto& slot = slots[slot_idx];
-        const auto gpu_block    = gpu_blocks.at(slot_idx);
-        const auto layer_stride = slot.stride_bytes;
+        const auto& slot         = slots[slot_idx];
+        const auto  gpu_block    = gpu_blocks.at(slot_idx);
+        const auto  layer_stride = slot.stride_bytes;
 
         if (isNullBlockIdx(gpu_block)) {
             byte_off += layer_stride;
@@ -790,9 +789,9 @@ bool KVCacheMemoryConnector::checkLayerBlocks(const LayerBlockIds& layer_block_i
     return true;
 }
 
-bool KVCacheMemoryConnector::checkLayerRegionBlocks(const LayerAttnBlockIds& layer_attn_block_ids,
-                                                  const std::vector<LayerRegionSlot>& slots,
-                                                  size_t required_len) const {
+bool KVCacheMemoryConnector::checkLayerRegionBlocks(const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                    const std::vector<LayerRegionSlot>& slots,
+                                                    size_t                              required_len) const {
     if (layer_attn_block_ids.empty()) {
         RTP_LLM_LOG_WARNING("check layer-attn blocks failed, layer_attn_block_ids is empty (required_len=%zu)",
                             required_len);

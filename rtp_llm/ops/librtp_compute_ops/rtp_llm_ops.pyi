@@ -2,10 +2,13 @@
 rtp llm custom ops
 """
 from __future__ import annotations
+
+import typing
+
 import librtp_compute_ops
 import libth_transformer_config
 import torch
-import typing
+
 __all__: list[str] = ['FlashInferAttnParams', 'FlashInferDecodeOp', 'FlashInferMlaAttnParams', 'FlashInferPrefillOp', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'TRTAttn', 'TRTAttnOp', 'TRTPagedAttnOp', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_scaled_fp4_mm', 'debug_kernel', 'dispose_communicator', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send', 'write_cache_store']
 
 
@@ -35,6 +38,10 @@ class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
     def fill_params(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_host: torch.Tensor, seq_size_per_block: int, forbid_realloc: bool = False) -> None:
         """
         Fill parameters for attention execution (forbid_realloc=true only when called from prepare_cuda_graph/replay)
+        """
+    def fill_decode_cuda_graph_params(self, sequence_lengths_plus_1_d: torch.Tensor, kv_cache_block_id_device: torch.Tensor, seq_size_per_block: int) -> None:
+        """
+        Update FlashInfer decode metadata on device during CUDA graph replay
         """
     @property
     def batch_indice_d(self) -> torch.Tensor:
@@ -281,6 +288,12 @@ class XQAAttnOp:
         ...
 
     def support(self, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> bool:
+        ...
+
+    def update(self, params: XQAParams, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> None:
+        ...
+
+    def update_kv_cache_offset(self, kv_cache_offset: torch.Tensor, kv_cache_block_id_device: torch.Tensor) -> None:
         ...
 
 
@@ -568,4 +581,3 @@ class TrtllmArFusionHandle:
         """
         AllReduce kernel
         """
-

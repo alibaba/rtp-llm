@@ -46,8 +46,18 @@ void BlockIds::remove(const std::vector<size_t>& indices) {
 }
 
 void BlockIds::swap(size_t pos_a, size_t pos_b) {
-    RTP_LLM_CHECK(pos_a < block_indices.size());
-    RTP_LLM_CHECK(pos_b < block_indices.size());
+    if (pos_a >= block_indices.size() || pos_b >= block_indices.size()) {
+        RTP_LLM_LOG_ERROR("BlockIds::swap: pos_a=%d or pos_b=%d is out of range, block_indices.size()=%d",
+                          pos_a,
+                          pos_b,
+                          block_indices.size());
+        RTP_LLM_CHECK_WITH_INFO(false,
+                                "BlockIds::swap: pos_a=%d or pos_b=%d is out of range, block_indices.size()=%d",
+                                pos_a,
+                                pos_b,
+                                block_indices.size());
+    }
+
     if (pos_a == pos_b) {
         return;
     }
@@ -111,11 +121,11 @@ void BlockIds::syncKernelBlocks() {
     }
 }
 
-void KVCacheResource::initGroups(int                                group_num,
-                                 int                                layer_num,
-                                 const std::vector<int>&            layer_to_group_id,
-                                 size_t                             kernel_blocks_per_kv_block,
-                                 const std::vector<CacheGroupType>& group_types,
+void KVCacheResource::initGroups(int                                  group_num,
+                                 int                                  layer_num,
+                                 const std::vector<int>&              layer_to_group_id,
+                                 size_t                               kernel_blocks_per_kv_block,
+                                 const std::vector<CacheGroupType>&   group_types,
                                  const std::vector<std::vector<int>>& layer_region_to_group_id) {
     group_block_ids.clear();
     layer_block_ids.clear();
@@ -156,8 +166,8 @@ void KVCacheResource::initGroups(int                                group_num,
                                         "KVCacheResource::initGroups: layer_region_to_group_id size %zu < layer_num %d",
                                         layer_region_to_group_id.size(),
                                         layer_num);
-                const auto& dense_groups = layer_region_to_group_id[static_cast<size_t>(layer)];
-                const size_t n           = std::min(region_name_count, dense_groups.size());
+                const auto&  dense_groups = layer_region_to_group_id[static_cast<size_t>(layer)];
+                const size_t n            = std::min(region_name_count, dense_groups.size());
                 for (size_t attn = 0; attn < n; ++attn) {
                     const int gid = dense_groups[attn];
                     if (gid < 0) {
@@ -173,7 +183,8 @@ void KVCacheResource::initGroups(int                                group_num,
                     attn_blocks[attn] = group_block_ids[static_cast<size_t>(gid)];
                 }
             } else {
-                attn_blocks[static_cast<size_t>(KVCacheRegionName::DEFAULT)] = layer_block_ids[static_cast<size_t>(layer)];
+                attn_blocks[static_cast<size_t>(KVCacheRegionName::DEFAULT)] =
+                    layer_block_ids[static_cast<size_t>(layer)];
             }
         }
     }
@@ -218,10 +229,8 @@ BlockIds& KVCacheResource::mutableBlockIds(int layer_id, KVCacheRegionName regio
     RTP_LLM_CHECK(static_cast<size_t>(layer_id) < layer_region_block_ids.size());
     RTP_LLM_CHECK(attn_id < layer_region_block_ids[static_cast<size_t>(layer_id)].size());
     auto block_ids = layer_region_block_ids[static_cast<size_t>(layer_id)][attn_id];
-    RTP_LLM_CHECK_WITH_INFO(block_ids != nullptr,
-                            "KVCacheResource: missing block ids for layer %d region_name %zu",
-                            layer_id,
-                            attn_id);
+    RTP_LLM_CHECK_WITH_INFO(
+        block_ids != nullptr, "KVCacheResource: missing block ids for layer %d region_name %zu", layer_id, attn_id);
     return *block_ids;
 }
 
