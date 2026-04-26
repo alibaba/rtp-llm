@@ -10,8 +10,16 @@ Memory footprint:
   FP8 weight:  [out, in] e4m3fn + [out//128, in//128] UE8M0  ≈ original + tiny scale
   BF16 weight: [out, in] bf16  — no scale
 
-For now, forward uses PyTorch reference dequant (slow but memory-correct).
-M6 will swap in TileLang fp4_gemm / fp8_gemm / act_quant kernels.
+FP4 forward goes through ``deep_gemm.fp8_fp4_gemm_nt`` (K2 in
+``docs/dsv4/kernel_audit.md``) when DeepGEMM ≥ 2.4 is installed and the
+input is on CUDA; otherwise it falls back to the PyTorch dequant path
+(slow but memory-correct, useful for CPU-only unit tests).  Matches V4
+official ``inference/model.py``'s per-expert ``Linear.forward`` which
+calls V4's own TileLang ``fp4_gemm`` — same math, different kernel.
+
+FP8 forward stays on the PyTorch dequant path for now; the factory-mode
+FP8 linears already migrated in S2 to ``CudaFp8DeepGEMMLinear`` and don't
+go through this class for attention/indexer/shared-expert linears.
 """
 
 from typing import Optional
@@ -23,6 +31,8 @@ import torch.nn.functional as F
 
 FP8_BLOCK = 128
 FP4_BLOCK = 32
+
+_WARNED_FP4_FALLBACK: bool = False
 
 # FP4 e2m1 lookup: 4-bit raw -> fp32 value
 _FP4_LUT = torch.tensor([
@@ -116,9 +126,57 @@ class QuantizedLinear(nn.Module):
             return _fp8_dequant_to_fp32(self.weight, self.scale).to(out_dtype)
         return self.weight
 
+    def _fp4_forward_deepgemm(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        """Try the native FP4 kernel.  Returns None to signal fall-back.
+
+        Matches V4 official ``inference/model.py``'s per-expert linear:
+        quant ``x`` to FP8 e4m3fn with UE8M0 block-128 scale along K,
+        then run FP8 × packed-FP4 GEMM against our stored weight/scale.
+        """
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            _fp8_fp4_gemm_nt_impl, fp8_fp4_gemm_nt,
+        )
+        if _fp8_fp4_gemm_nt_impl is None or not x.is_cuda:
+            return None
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+
+        orig_shape = x.shape
+        x_2d = x.reshape(-1, self.in_features).contiguous()
+        if x_2d.dtype != torch.bfloat16:
+            x_2d = x_2d.to(torch.bfloat16)
+        M = x_2d.shape[0]
+        if M == 0:
+            return x.new_empty(*orig_shape[:-1], self.out_features)
+
+        x_fp8, x_scale = sgl_per_token_group_quant_fp8(
+            x_2d, group_size=FP8_BLOCK, eps=1e-4,
+            column_major_scales=True, scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        out = torch.empty(M, self.out_features, dtype=torch.bfloat16, device=x.device)
+        fp8_fp4_gemm_nt(
+            (x_fp8, x_scale),
+            (self.weight, self.scale.float()),
+            out,
+            recipe_a=(1, FP8_BLOCK), recipe_b=(1, FP4_BLOCK),
+        )
+        return out.to(x.dtype).reshape(*orig_shape[:-1], self.out_features)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.storage == "bf16":
             return F.linear(x, self.weight)
-        # FP4/FP8: dequant to x's dtype on the fly.
+        if self.storage == "fp4":
+            y = self._fp4_forward_deepgemm(x)
+            if y is not None:
+                return y
+            global _WARNED_FP4_FALLBACK
+            if not _WARNED_FP4_FALLBACK:
+                _WARNED_FP4_FALLBACK = True
+                import logging as _lg
+                _lg.getLogger(__name__).warning(
+                    "[dsv4] deep_gemm.fp8_fp4_gemm_nt unavailable; FP4 "
+                    "linears fall back to PyTorch dequant (slow)",
+                )
+        # FP8, or FP4 fallback: dequant to x's dtype on the fly.
         w = self.dequant_weight(out_dtype=x.dtype)
         return F.linear(x, w)
