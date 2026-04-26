@@ -782,6 +782,18 @@ class DeepSeekV4Model(GptModelBase):
 
         self._materialized = True
         self._running_pos = 0
+
+        # Wire framework KV cache if enabled
+        if (
+            os.environ.get("DSV4_USE_FRAMEWORK_KV", "0") == "1"
+            and self.kv_cache is not None
+        ):
+            self._wire_framework_kv_cache(device_str)
+            logging.info(
+                "[DeepSeekV4Model] framework KV cache wired for %d layers",
+                len(self.v4.layers),
+            )
+
         return True
 
     def _update_slot_indices_for_batch(self, attn_inputs) -> int:
@@ -841,6 +853,34 @@ class DeepSeekV4Model(GptModelBase):
                 slots_needing_reset,
             )
         return len(slots)
+
+    def _wire_framework_kv_cache(self, device: str):
+        """Replace each Attention layer's register_buffer kv_cache with framework tensors.
+
+        The framework's KVCache (self.kv_cache) provides per-layer tensors via
+        kv_cache_base_by_layer. For DSV4, each layer's attention uses a single
+        contiguous [B, kv_cache_size, head_dim] buffer. We allocate matching
+        tensors and rebind them, so the attention forward reads/writes the
+        framework-managed memory instead of the internal register_buffer.
+
+        The compressor/indexer kv_cache references are set to None to force
+        rebinding on the next forward call (they bind to kv_cache[:, win:]).
+        """
+        for i, layer in enumerate(self.v4.layers):
+            attn = layer.attn
+            # Create framework-managed tensor with same shape as internal buffer
+            ext_cache = torch.zeros_like(attn.kv_cache)
+            attn.kv_cache = ext_cache
+
+            # Force compressor to rebind to new kv_cache slice on next forward
+            if attn.compressor is not None:
+                attn.compressor.kv_cache = None
+
+            # Force indexer's compressor to rebind too
+            if attn.indexer is not None:
+                idx_ext = torch.zeros_like(attn.indexer.kv_cache)
+                attn.indexer.kv_cache = idx_ext
+                attn.indexer.compressor.kv_cache = None
 
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
