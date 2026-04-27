@@ -111,6 +111,13 @@ def _append_aux_info_metrics_outputs(
     _append_int32_scalar_output(infer, "prompt_cached_token_num", reuse_len)
 
 
+def _set_incremental_output_param(
+    infer: predict_v2_pb2.ModelInferResponse, is_streaming: bool
+) -> None:
+    """``extra_params['incremental_output']`` 通过 proto ``parameters`` 回传：stream=1，非 stream=0。"""
+    infer.parameters["incremental_output"].int64_param = 1 if is_streaming else 0
+
+
 def build_stream_response_from_generate_outputs(
     bailian_request_id: str,
     model_name: str,
@@ -118,6 +125,7 @@ def build_stream_response_from_generate_outputs(
     request_log_tag: str,
     request_input_ids: list[int] | None = None,
     return_input_ids: bool = False,
+    is_streaming: bool = True,
     _request_shape: list[int] | None = None,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
@@ -152,15 +160,17 @@ def build_stream_response_from_generate_outputs(
     _append_finish_reason_output(infer, finished)
     _append_finished_output(infer, finished)
     _append_aux_info_metrics_outputs(infer, out_py)
+    _set_incremental_output_param(infer, is_streaming)
 
     logging.debug(
         "[BailianGrpc] [%s] generated_ids: %s", request_log_tag, generated_ids
     )
     logging.debug(
-        "[BailianGrpc] [%s] return_input_ids=%s prompt_len=%s",
+        "[BailianGrpc] [%s] return_input_ids=%s prompt_len=%s is_streaming=%s",
         request_log_tag,
         return_input_ids,
         len(request_input_ids or []),
+        is_streaming,
     )
 
     return stream_resp
