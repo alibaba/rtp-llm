@@ -20,6 +20,7 @@ from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.distributed_server import get_world_info
@@ -59,6 +60,7 @@ class FrontendApp(object):
         py_env_configs: PyEnvConfigs,
         separated_frontend: bool = False,
     ):
+        self.py_env_configs = py_env_configs
         self.server_config = py_env_configs.server_config
         self.frontend_server = FrontendServer(
             self.server_config.rank_id,
@@ -147,6 +149,9 @@ class FrontendApp(object):
                 bailian_grpc_config=self.bailian_grpc_config,
                 ip=self.server_config.ip,
                 server_id=self.server_config.frontend_server_id,
+                log_path=get_log_path(),
+                backup_count=self.py_env_configs.profiling_debug_logging_config.log_file_backup_count,
+                rank_id=self.server_config.rank_id,
             )
             logging.info(
                 "Started Bailian gRPC server on port %s (enqueue_event_loop=uvicorn)",

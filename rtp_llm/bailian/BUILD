@@ -16,6 +16,7 @@ py_library(
     name = "bailian_grpc_server",
     srcs = [
         "__init__.py",
+        "bailian_grpc_access_log.py",
         "bailian_grpc_enqueue_loop.py",
         "bailian_grpc_request.py",
         "bailian_grpc_response_fake.py",
@@ -31,6 +32,7 @@ py_library(
     deps = [
         "//rtp_llm/server:server",
         ":grpcio",
+        "//rtp_llm/access_logger:access_logger",
         "//rtp_llm/bailian/proto:predict_v2_py_proto",
     ],
 )
@@ -54,6 +56,14 @@ py_test(
 py_test(
     name = "bailian_grpc_pure_forward_service_test",
     srcs = ["test/bailian_grpc_pure_forward_service_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
+    name = "bailian_grpc_access_log_test",
+    srcs = ["test/bailian_grpc_access_log_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},
