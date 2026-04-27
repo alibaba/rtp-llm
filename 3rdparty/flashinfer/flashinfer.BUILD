@@ -1,6 +1,6 @@
 load("@//:def.bzl", "copts", "cuda_copts")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
-load("@//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 load("@//3rdparty/flashinfer:def.bzl", "sub_lib")
 
 common_copts = [

@@ -1,0 +1,174 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/mtp_reg/qwen2_14b_target",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nwhat is CAP Theorem ?<|im_end|>\n<|im_start|>assistant\n",
+                "generate_config": {
+                    "max_new_tokens": 50,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "top_p": 0
+                },
+                "_prompt_source": "chat-template wrapping $prompt:s1"
+            },
+            "result": {
+                "response": "The CAP Theorem, also known as Brewer's Theorem, is a fundamental concept in distributed systems that highlights the trade-offs between three desirable properties in a distributed computing system: Consistency, Availability, and Partition Tolerance. The theorem states that it",
+                "finished": true,
+                "aux_info": {
+                    "iter_count": 50,
+                    "output_len": 50,
+                    "input_len": 25
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n润色一下，使其更通顺，更有逻辑，更有专业性：In addition, the Doushantuo phosphorites are characterized by their rich microfossils and a certain amount of organic matter, which suggest that microbial degradation of organic matter could have been a crucial factor in facilitating the precipitation of phosphate in Zhangcunping phosphorites. However, it is important to note that the δ13Ccarb values of lower phosphorites (ca. -2.47‰) are lighter than those of upper phosphorites (ca. -0.71‰). This difference may be attributed the potential variation in the organic matter degradation process.\nOrganic matter degradation in marine sediments is mediated by a series of microbial redox reactions that decrease in energy yield, ranging from oxic respiration, denitrification, Mn reduction, Fe reduction, sulfate reduction, and methanogenesis (Jarvis et al., 1994; Pufahl and Groat, 2017). The lower phosphorites were formed in an anoxic water column where oxygen in overlying water was limited. In this scenario, bacteria-driven breakdown of organic matter is very efficient especially in the presence of microbial sulfate reduction (Arning et al., 2009; Hiatt et al., 2015). The presence of pyrite framboids in lower phosphorites is indicative of an authigenic microbial origin and suggests the presence of sulfate, which fuels sulfate reduction (Hiatt et al., 2015; Hiatt et al., 2020). The increased supply of sulfate from oxidative weathering into the Ediacaran ocean (Laakso et al., 2020) likely fueled the microbial sulfate reduction and, thus organic matter degradation (Chen et al., 2022). Pyrite precipitates in the zone of sulfate reduction when ferrous Fe from Fe(oxyhydr)oxides dissolution combines with bacterially reduced sulfide (Pufahl, 2010). In addition, the observation of sulfur bacteria in Zhangcunping lower phosphorites supports our view (Bailey et al., 2013).<|im_end|>\n<|im_start|>assistant\n",
+                "generate_config": {
+                    "max_new_tokens": 50,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "top_p": 0
+                },
+                "_prompt_source": "chat-template wrapping $prompt:l2"
+            },
+            "result": {
+                "response": "In addition, the Doushantuo phosphorites are characterized by their rich microfossil content and significant organic matter, suggesting that microbial degradation of organic matter played a crucial role in the precipitation of phosphate in the Zhangcunping phosphor",
+                "finished": true,
+                "aux_info": {
+                    "iter_count": 50,
+                    "output_len": 50,
+                    "input_len": 478
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nI really liked the way you describe that in terms of spirit and the memory but I still want you to improve the dialogue by talking about that in terms of three things first it is a spirit like what you said it's a spirit is like a butterfly and it's about flying into the sky we don't know where you go it's beautiful and also after that we are left with two things one is the body the other one is the memory as for the body the person who passed away will return the body to the nature so that is against the nature sustained the environment can be improved the nature can be renourished as for memory the person who passed away will leave the memory to us the memory will become our spiritual strength will give us hope will give us strength will guide us<|im_end|>\n<|im_start|>assistant\n",
+                "generate_config": {
+                    "max_new_tokens": 50,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "top_p": 0
+                },
+                "_prompt_source": "chat-template wrapping $prompt:m2"
+            },
+            "result": {
+                "response": "Certainly! Here’s an enhanced version of the dialogue incorporating your points about the spirit, body, and memory:\n\n---\n\n**Spirit:**  \nImagine the spirit as a delicate butterfly, fluttering its wings and soaring into the vast, unknown sky. It dances",
+                "finished": true,
+                "aux_info": {
+                    "iter_count": 50,
+                    "output_len": 50,
+                    "input_len": 174
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nI think I practice industriousness and excellence in my profession as an engineer at an early stage startup (Cyral). \n\nI joined Cyral as a software engineer immediately upon graduation from UCSB with a BS in statistical science. My coursework was more focused on statistical concepts, and happened to involve a bit of coding here and there to process data to derive statistical insight. I never really prioritized schoolwork — instead, i dedicated much of my time to leading the UCSB data science club organization as its president (the club’s founder selected me to take on his role when he graduated). Besides running the club, I dedicated a lot of time to working data science internships. I attribute whatever little coding ability I had at the time I was hired at Cyral to the time I dedicated to leading the club and working as an intern. \n\nDespite my lacking software engineering experience, Cyral’s cofounders, Srini (CTO) and Manav (CEO) took a bet and hired me as one of the first 10 engineers. It’s been nearly 4 years since then, and I’m now managing a team of 4 developers and a product designer.\n\nWhile I’ve demonstrated my ability to dedicate myself to work, there are a few things that worry me:\n1. I take adderall in a daily basis to help me focus on my work, and I don’t feel this is sustainable.\n2. I’m worried that over-optimizing on work leads to me falling short in other aspects of my life that I could be pursuing. For example, I used to cook regularly and derived great pleasure from doing so, but in the past 2 years, I’ve seldom cooked a meal and usually order in through Doordash (not frugal)\n\nAt this point, I realize I’m likely not providing a comprehensive answer to your question, so please feel free to question me about anything I’ve said, and perhaps more importantly, what I havent talked about yet in order to arrive at a more comprehensive response to your question.<|im_end|>\n<|im_start|>assistant\n",
+                "generate_config": {
+                    "max_new_tokens": 50,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "top_p": 0
+                },
+                "_prompt_source": "chat-template wrapping $prompt:l1"
+            },
+            "result": {
+                "response": "It sounds like you've made significant strides in your career, especially given your background and the challenges you've faced. Let's break down your concerns and explore some strategies to address them.\n\n### 1. Dependence on Adderall\n**Concern",
+                "finished": true,
+                "aux_info": {
+                    "iter_count": 50,
+                    "output_len": 50,
+                    "input_len": 433
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat are the issues involved in optimizing inefficient admin administration, risk from threats due to inefficient file access control, inefficient email signature management processes in Large enterprises using Google Workspace? I think this could e.g. be about software, processes, people & behaviour? Can you please help me think better about this? Please write in English (UK) language.<|im_end|>\n<|im_start|>assistant\n",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "top_p": 0
+                },
+                "_prompt_source": "chat-template wrapping $prompt:m1"
+            },
+            "result": {
+                "response": "Certainly! Optimising inefficient administration, managing risks from threats due to inefficient file access control, and improving",
+                "finished": true,
+                "aux_info": {
+                    "iter_count": 20,
+                    "output_len": 20,
+                    "input_len": 88
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhich recommended Flask alternative is most similar to Django North in syntax?<|im_end|>\n<|im_start|>assistant\n",
+                "generate_config": {
+                    "max_new_tokens": 50,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "top_p": 0
+                },
+                "_prompt_source": "chat-template wrapping $prompt:s5"
+            },
+            "result": {
+                "response": "When comparing Flask alternatives to Django North in terms of syntax and structure, it's important to note that Django North is a lightweight framework built on top of Django that aims to simplify certain aspects of Django's workflow. However, Flask is a micro web framework",
+                "finished": true,
+                "aux_info": {
+                    "iter_count": 50,
+                    "output_len": 50,
+                    "input_len": 32
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nNameError: name 'screen\\_manager' is not defined<|im_end|>\n<|im_start|>assistant\n",
+                "generate_config": {
+                    "max_new_tokens": 50,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "top_p": 0
+                },
+                "_prompt_source": "chat-template wrapping $prompt:s3"
+            },
+            "result": {
+                "response": "The `NameError: name 'screen_manager' is not defined` error occurs when you try to use a variable or object named `screen_manager` that hasn't been defined in your code. This is a common issue in Python, especially when working",
+                "finished": true,
+                "aux_info": {
+                    "iter_count": 50,
+                    "output_len": 50,
+                    "input_len": 31
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n提供新高考三年规划与升学指导服务，包括强基计划择校、综合评价咨询、志愿填报、海外院校申请等，为高中生提供学业与职业生涯的完整规划。<|im_end|>\n<|im_start|>assistant\n",
+                "generate_config": {
+                    "max_new_tokens": 50,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "top_p": 0
+                },
+                "_prompt_source": "chat-template wrapping $prompt:s6"
+            },
+            "result": {
+                "response": "新高考三年规划与升学指导服务旨在帮助高中生在高中阶段制定明确的学习目标，合理规划学业与职业生涯，为未来升学和就业打下坚实基础。以下是一些建议，涵盖强基计划择校、综合评价",
+                "finished": true,
+                "aux_info": {
+                    "iter_count": 44,
+                    "output_len": 50,
+                    "input_len": 58
+                }
+            }
+        }
+    ]
+}

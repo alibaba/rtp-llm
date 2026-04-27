@@ -1,0 +1,25 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "endpoint": "/rtp_llm/worker_status",
+            "query": {},
+            "result": {
+                "role": "RoleType.PDFUSION",
+                "server_port": 8888,
+                "http_port": 8888,
+                "grpc_port": 8888,
+                "running_task_info": [],
+                "finished_task_list": [],
+                "dp_size": 1,
+                "tp_size": 1,
+                "alive": true,
+                "version": 0,
+                "status_version": 1767691792803568,
+                "frontend_available_concurrency": 32
+            }
+        }
+    ]
+}

@@ -1,0 +1,59 @@
+{
+  "id": "chat-",
+  "object": "chat.completion",
+  "created": 1777092410,
+  "model": "",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "我理解您的需求，但目前我无法提供与新高考相关的规划与升学指导服务。如果您有其他问题或需要帮助，我很乐意为您提供支持。",
+        "reasoning_content": null,
+        "function_call": null,
+        "tool_calls": null,
+        "partial": false,
+        "tool_call_id": null
+      },
+      "finish_reason": "stop",
+      "logprobs": null
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 497,
+    "total_tokens": 531,
+    "completion_tokens": 34,
+    "completion_tokens_details": null,
+    "prompt_tokens_details": null
+  },
+  "debug_info": null,
+  "aux_info": {
+    "cost_time": 20591.975,
+    "iter_count": 34,
+    "prefix_len": 0,
+    "input_len": 497,
+    "output_len": 34,
+    "step_output_len": 34,
+    "first_token_cost_time": 13467.777,
+    "wait_time": 0.0,
+    "pd_sep": false,
+    "cum_log_probs": [],
+    "beam_responses": [],
+    "softmax_probs": [],
+    "reuse_len": 0,
+    "local_reuse_len": 0,
+    "remote_reuse_len": 0,
+    "memory_reuse_len": 0,
+    "prefill_total_reuse_len": 0,
+    "prefill_local_reuse_len": 0,
+    "prefill_remote_reuse_len": 0,
+    "prefill_memory_reuse_len": 0,
+    "decode_total_reuse_len": 0,
+    "decode_local_reuse_len": 0,
+    "decode_remote_reuse_len": 0,
+    "decode_memory_reuse_len": 0,
+    "role_addrs": [],
+    "aux_string": ""
+  },
+  "extra_outputs": null
+}

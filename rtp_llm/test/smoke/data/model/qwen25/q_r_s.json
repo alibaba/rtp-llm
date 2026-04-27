@@ -1,0 +1,127 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response": " Flask is a lightweight web framework for Python, and",
+                "iter_count": 10,
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s5",
+                    "$prompt:s3"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 9,
+                    "top_k": 1,
+                    "top_p": 0
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": " Flask is a lightweight web framework for Python,"
+                    },
+                    {
+                        "response": "\n\nI am trying to use the screen\\_"
+                    }
+                ],
+                "iter_count": 10,
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "num_return_sequences": 2,
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response": [
+                    " Flask is a lightweight web framework for Python, and",
+                    " Flask is a lightweight web framework for Python, and"
+                ],
+                "iter_count": 10,
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "stop_words_str": [
+                        "a lighthouse"
+                    ]
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response": " Flask is a lightweight web framework for Python, and",
+                "iter_count": 10,
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "stop_words_str": [
+                        "a lighthouse"
+                    ]
+                },
+                "yield_generator": false
+            },
+            "result": {
+                "response": " Flask is a lightweight web framework for Python, and",
+                "iter_count": 10,
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_incremental": true,
+                    "stop_words_str": [
+                        "a lighthouse"
+                    ]
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response": " Flask is a lightweight web framework for Python, and",
+                "iter_count": 10,
+                "finished": true
+            }
+        }
+    ]
+}

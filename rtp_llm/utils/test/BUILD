@@ -87,7 +87,7 @@ py_test(
     exec_properties = {'gpu':'H20'}
 )
 
-load("//bazel:arch_select.bzl", "requirement")
+load("@arch_config//:arch_select.bzl", "requirement")
 
 requirement([
     "grpcio",

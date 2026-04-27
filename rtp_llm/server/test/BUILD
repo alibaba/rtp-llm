@@ -1,4 +1,4 @@
-load("//bazel:arch_select.bzl", get_triton_deps = "triton_deps", "internal_deps")
+load("@arch_config//:arch_select.bzl", get_triton_deps = "triton_deps", "internal_deps")
 
 py_test(
     name = "schedule_meta_test",

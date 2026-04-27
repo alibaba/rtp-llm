@@ -1,0 +1,150 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "query_result": [
+        {
+            "query": {
+                "top_p": 0,
+                "yield_generator": false,
+                "generate_config": {
+                    "top_p": 0,
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "temperature": 0
+                },
+                "top_k": 1,
+                "temperature": 0,
+                "prompt": "<|im_start|>user\n润色一下，使其更通顺，更有逻辑，更有专业性：In addition, the Doushantuo phosphorites are characterized by their rich microfossils and a certain amount of organic matter, which suggest that microbial degradation of organic matter could have been a crucial factor in facilitating the precipitation of phosphate in Zhangcunping phosphorites. However, it is important to note that the δ13Ccarb values of lower phosphorites (ca. -2.47‰) are lighter than those of upper phosphorites (ca. -0.71‰). This difference may be attributed the potential variation in the organic matter degradation process.\nOrganic matter degradation in marine sediments is mediated by a series of microbial redox reactions that decrease in energy yield, ranging from oxic respiration, denitrification, Mn reduction, Fe reduction, sulfate reduction, and methanogenesis (Jarvis et al., 1994; Pufahl and Groat, 2017). The lower phosphorites were formed in an anoxic water column where oxygen in overlying water was limited. In this scenario, bacteria-driven breakdown of organic matter is very efficient especially in the presence of microbial sulfate reduction (Arning et al., 2009; Hiatt et al., 2015). The presence of pyrite framboids in lower phosphorites is indicative of an authigenic microbial origin and suggests the presence of sulfate, which fuels sulfate reduction (Hiatt et al., 2015; Hiatt et al., 2020). The increased supply of sulfate from oxidative weathering into the Ediacaran ocean (Laakso et al., 2020) likely fueled the microbial sulfate reduction and, thus organic matter degradation (Chen et al., 2022). Pyrite precipitates in the zone of sulfate reduction when ferrous Fe from Fe(oxyhydr)oxides dissolution combines with bacterially reduced sulfide (Pufahl, 2010). In addition, the observation of sulfur bacteria in Zhangcunping lower phosphorites supports our view (Bailey et al., 2013).<|im_end|>\n<|im_start|>assistant\n",
+                "_prompt_source": "chat-template wrapping $prompt:l2"
+            },
+            "result": {
+                "response": "<think>\n\n</think>\n\n这是一份经过深度润色的版本，旨在提升学术性、逻辑连贯性以及",
+                "response_alternatives": null,
+                "hidden_states": null,
+                "logits": null,
+                "loss": null,
+                "input_ids": null,
+                "output_ids": null,
+                "aux_info": {
+                    "input_len": 465,
+                    "prefix_len": 0,
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "output_len": 20,
+                    "step_output_len": 19,
+                    "iter_count": 7,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "pd_sep": true,
+                    "softmax_probs": []
+                }
+            }
+        },
+        {
+            "query": {
+                "top_p": 0,
+                "yield_generator": false,
+                "generate_config": {
+                    "top_p": 0,
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "temperature": 0
+                },
+                "top_k": 1,
+                "temperature": 0,
+                "prompt": "<|im_start|>user\n润色一下，使其更通顺，更有逻辑，更有专业性：In addition, the Doushantuo phosphorites are characterized by their rich microfossils and a certain amount of organic matter, which suggest that microbial degradation of organic matter could have been a crucial factor in facilitating the precipitation of phosphate in Zhangcunping phosphorites. However, it is important to note that the δ13Ccarb values of lower phosphorites (ca. -2.47‰) are lighter than those of upper phosphorites (ca. -0.71‰). This difference may be attributed the potential variation in the organic matter degradation process.\nOrganic matter degradation in marine sediments is mediated by a series of microbial redox reactions that decrease in energy yield, ranging from oxic respiration, denitrification, Mn reduction, Fe reduction, sulfate reduction, and methanogenesis (Jarvis et al., 1994; Pufahl and Groat, 2017). The lower phosphorites were formed in an anoxic water column where oxygen in overlying water was limited. In this scenario, bacteria-driven breakdown of organic matter is very efficient especially in the presence of microbial sulfate reduction (Arning et al., 2009; Hiatt et al., 2015). The presence of pyrite framboids in lower phosphorites is indicative of an authigenic microbial origin and suggests the presence of sulfate, which fuels sulfate reduction (Hiatt et al., 2015; Hiatt et al., 2020). The increased supply of sulfate from oxidative weathering into the Ediacaran ocean (Laakso et al., 2020) likely fueled the microbial sulfate reduction and, thus organic matter degradation (Chen et al., 2022). Pyrite precipitates in the zone of sulfate reduction when ferrous Fe from Fe(oxyhydr)oxides dissolution combines with bacterially reduced sulfide (Pufahl, 2010). In addition, the observation of sulfur bacteria in Zhangcunping lower phosphorites supports our view (Bailey et al., 2013).<|im_end|>\n<|im_start|>assistant\n",
+                "_prompt_source": "chat-template wrapping $prompt:l2"
+            },
+            "result": {
+                "response": "<think>\n\n</think>\n\n这是一份经过深度润色的版本，旨在提升学术性、逻辑连贯性以及",
+                "response_alternatives": null,
+                "hidden_states": null,
+                "logits": null,
+                "loss": null,
+                "input_ids": null,
+                "output_ids": null,
+                "aux_info": {
+                    "input_len": 465,
+                    "prefix_len": 0,
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "output_len": 20,
+                    "step_output_len": 19,
+                    "iter_count": 7,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "pd_sep": true,
+                    "softmax_probs": []
+                }
+            }
+        },
+        {
+            "query": {
+                "top_p": 0,
+                "yield_generator": false,
+                "generate_config": {
+                    "top_p": 0,
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "temperature": 0
+                },
+                "top_k": 1,
+                "temperature": 0,
+                "prompt": "<|im_start|>user\n润色一下，使其更通顺，更有逻辑，更有专业性：In addition, the Doushantuo phosphorites are characterized by their rich microfossils and a certain amount of organic matter, which suggest that microbial degradation of organic matter could have been a crucial factor in facilitating the precipitation of phosphate in Zhangcunping phosphorites. However, it is important to note that the δ13Ccarb values of lower phosphorites (ca. -2.47‰) are lighter than those of upper phosphorites (ca. -0.71‰). This difference may be attributed the potential variation in the organic matter degradation process.\nOrganic matter degradation in marine sediments is mediated by a series of microbial redox reactions that decrease in energy yield, ranging from oxic respiration, denitrification, Mn reduction, Fe reduction, sulfate reduction, and methanogenesis (Jarvis et al., 1994; Pufahl and Groat, 2017). The lower phosphorites were formed in an anoxic water column where oxygen in overlying water was limited. In this scenario, bacteria-driven breakdown of organic matter is very efficient especially in the presence of microbial sulfate reduction (Arning et al., 2009; Hiatt et al., 2015). The presence of pyrite framboids in lower phosphorites is indicative of an authigenic microbial origin and suggests the presence of sulfate, which fuels sulfate reduction (Hiatt et al., 2015; Hiatt et al., 2020). The increased supply of sulfate from oxidative weathering into the Ediacaran ocean (Laakso et al., 2020) likely fueled the microbial sulfate reduction and, thus organic matter degradation (Chen et al., 2022). Pyrite precipitates in the zone of sulfate reduction when ferrous Fe from Fe(oxyhydr)oxides dissolution combines with bacterially reduced sulfide (Pufahl, 2010). In addition, the observation of sulfur bacteria in Zhangcunping lower phosphorites supports our view (Bailey et al., 2013).<|im_end|>\n<|im_start|>assistant\n",
+                "_prompt_source": "chat-template wrapping $prompt:l2"
+            },
+            "result": {
+                "response": "<think>\n\n</think>\n\n这是一份经过深度润色的版本，旨在提升学术性、逻辑连贯性以及",
+                "response_alternatives": null,
+                "hidden_states": null,
+                "logits": null,
+                "loss": null,
+                "input_ids": null,
+                "output_ids": null,
+                "aux_info": {
+                    "input_len": 465,
+                    "prefix_len": 0,
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "output_len": 20,
+                    "step_output_len": 19,
+                    "iter_count": 7,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "pd_sep": true,
+                    "softmax_probs": []
+                }
+            }
+        }
+    ]
+}

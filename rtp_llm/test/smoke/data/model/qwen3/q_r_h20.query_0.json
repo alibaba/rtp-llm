@@ -1,0 +1,59 @@
+{
+  "id": "chat-",
+  "object": "chat.completion",
+  "created": 1777092411,
+  "model": "",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "我理解您想要一个全面的高考规划服务，包括强基计划择校、综合评价咨询、志愿填报和海外院校申请等。为了更好地帮助您，我需要了解一些具体的信息：\n\n1. 您的目标院校和专业是什么？\n2. 您的学业成绩和考试成绩如何？\n3. 您的综合素质和能力如何？\n4. 您的未来职业规划是什么？\n\n请提供这些信息，我将为您制定一个个性化的高考三年规划与升学指导服务。",
+        "reasoning_content": null,
+        "function_call": null,
+        "tool_calls": null,
+        "partial": false,
+        "tool_call_id": null
+      },
+      "finish_reason": "stop",
+      "logprobs": null
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 497,
+    "total_tokens": 602,
+    "completion_tokens": 105,
+    "completion_tokens_details": null,
+    "prompt_tokens_details": null
+  },
+  "debug_info": null,
+  "aux_info": {
+    "cost_time": 25202.956,
+    "iter_count": 105,
+    "prefix_len": 0,
+    "input_len": 497,
+    "output_len": 105,
+    "step_output_len": 105,
+    "first_token_cost_time": 11657.428,
+    "wait_time": 0.0,
+    "pd_sep": false,
+    "cum_log_probs": [],
+    "beam_responses": [],
+    "softmax_probs": [],
+    "reuse_len": 0,
+    "local_reuse_len": 0,
+    "remote_reuse_len": 0,
+    "memory_reuse_len": 0,
+    "prefill_total_reuse_len": 0,
+    "prefill_local_reuse_len": 0,
+    "prefill_remote_reuse_len": 0,
+    "prefill_memory_reuse_len": 0,
+    "decode_total_reuse_len": 0,
+    "decode_local_reuse_len": 0,
+    "decode_remote_reuse_len": 0,
+    "decode_memory_reuse_len": 0,
+    "role_addrs": [],
+    "aux_string": ""
+  },
+  "extra_outputs": null
+}

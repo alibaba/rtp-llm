@@ -1,0 +1,22 @@
+{
+    "model_type": "qwen_3_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3-30B-A3B-Instruct-2507-FP8",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nwhat is CAP Theorem ?<|im_end|>\n<|im_start|>assistant\n",
+                "generate_config": {
+                    "max_new_tokens": 8,
+                    "temperature": 0.0,
+                    "top_p": 0,
+                    "top_k": 1
+                },
+                "_prompt_source": "chat-template wrapping $prompt:s1"
+            },
+            "result": {
+                "response": "It looks like you're asking about the",
+                "finished": true
+            }
+        }
+    ]
+}

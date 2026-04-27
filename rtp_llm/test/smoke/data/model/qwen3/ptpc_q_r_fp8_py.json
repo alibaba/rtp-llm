@@ -1,0 +1,40 @@
+{
+    "model_type": "qwen_3",
+    "model_path": "/mnt/nas1/smoke/Qwen3-32B-FP8-Dynamic/",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "你是谁"
+                    }
+                ],
+                "max_tokens": 100,
+                "temperature": 0.0,
+                "top_p": 1.0
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705333930,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "<think>\n好的，用户问“你是谁”，我需要先确认用户的需求。可能他们想了解我的身份或者功能。首先，我应该介绍自己是通义千问，由通义实验室研发的超大规模语言模型。然后，列出我的主要功能，比如回答问题、创作文字、编程、表达观点等，这样用户能知道我能做什么。还要提到我支持多语言，这样用户如果有其他语言的需求也能知道。最后，保持友好，邀请用户提问"
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "total_tokens": 110,
+                    "completion_tokens": 100
+                }
+            }
+        }
+    ]
+}

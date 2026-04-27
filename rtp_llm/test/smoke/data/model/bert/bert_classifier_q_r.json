@@ -1,0 +1,43 @@
+{
+    "model_type": "bert",
+    "endpoint": "/v1/classifier",
+    "model_path": "/mnt/nas1/hf/models--unitary--toxic-bert",
+    "query_result": [
+        {
+            "query": {
+                "input": [
+                    [
+                        "what is panda?",
+                        "hi"
+                    ],
+                    [
+                        "what is panda?",
+                        "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China."
+                    ]
+                ],
+                "model": "xx"
+            },
+            "result": {
+                "object": "list",
+                "score": [
+                    [
+                        -7.16015625,
+                        -9.1328125,
+                        -8.6484375,
+                        -9.1484375,
+                        -8.6328125,
+                        -8.875
+                    ],
+                    [
+                        -5.859375,
+                        -9.2734375,
+                        -8.3984375,
+                        -9.078125,
+                        -8.3046875,
+                        -8.4921875
+                    ]
+                ]
+            }
+        }
+    ]
+}

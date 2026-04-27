@@ -1,0 +1,17 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/mtp_reg/qwen2_14b_target/",
+    "tokenizer_path": "/mnt/nas1/mtp_reg/qwen2_14b_target/",
+    "query_result": [
+        {
+            "endpoint": "/rtp_llm/cache_status",
+            "query": {
+                "latest_cache_version": -1
+            },
+            "result": {
+                "block_size": 256,
+                "version": -1
+            }
+        }
+    ]
+}

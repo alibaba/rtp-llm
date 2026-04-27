@@ -1,7 +1,7 @@
 load("@rules_python//python:defs.bzl", "py_library")
 load("@//:def.bzl", "copts", "cuda_copts")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts")
-load("@//bazel:arch_select.bzl", "requirement", "torch_deps")
+load("@arch_config//:arch_select.bzl", "requirement", "torch_deps")
 
 package(default_visibility = ["//visibility:public"])
 

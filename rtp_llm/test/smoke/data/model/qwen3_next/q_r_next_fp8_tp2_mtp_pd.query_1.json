@@ -1,0 +1,32 @@
+{
+  "response": "<think>\n\n</think>\n\n这是一份经过深度润色的版本，旨在提升学术性、逻辑连贯性以及",
+  "response_alternatives": null,
+  "hidden_states": null,
+  "logits": null,
+  "loss": null,
+  "input_ids": null,
+  "output_ids": null,
+  "aux_info": {
+    "input_len": 465,
+    "prefix_len": 0,
+    "reuse_len": 0,
+    "local_reuse_len": 0,
+    "remote_reuse_len": 0,
+    "memory_reuse_len": 0,
+    "prefill_total_reuse_len": 0,
+    "prefill_local_reuse_len": 0,
+    "prefill_remote_reuse_len": 0,
+    "prefill_memory_reuse_len": 0,
+    "decode_total_reuse_len": 0,
+    "decode_local_reuse_len": 0,
+    "decode_remote_reuse_len": 0,
+    "decode_memory_reuse_len": 0,
+    "output_len": 20,
+    "step_output_len": 19,
+    "iter_count": 7,
+    "cum_log_probs": [],
+    "beam_responses": [],
+    "pd_sep": true,
+    "softmax_probs": []
+  }
+}

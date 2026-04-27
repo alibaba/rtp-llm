@@ -1,0 +1,152 @@
+{
+    "model_type": "deepseek2",
+    "model_path": "/mnt/nas1/hf/DeepSeek-V2-Lite-Chat/",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    }
+                ],
+                "temperature": 0.0,
+                "top_p": 0.1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705333930,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": " 1. 如何有效地提高英语听力水平？\n2. 有哪些实用的英语听力技巧可以帮助学习者更好地理解英语对话？\n3. 在听力练习中，如何处理生词和难以理解的发音？\n4. 如何利用英语听力材料，如电影、播客或新闻，来提高听力技能？\n5. 有哪些在线资源或应用程序可以帮助提高英语听力？\n6. 如何通过听力练习来提高对不同口音和语速的适应能力？\n7. 在听力训练中，如何有效地记忆和复习听力材料中的关键信息？\n8. 如何通过听力练习来提高对英语语法和词汇的理解？\n9. 有哪些常见的听力误区需要避免，以提高听力理解能力？\n10. 如何结合听力练习和其他语言技能（如阅读和口语）来全面提高英语水平？"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 17,
+                    "total_tokens": 202,
+                    "completion_tokens": 185
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": [
+                    "You are a helpful assistant.\n\nUser: 你试试不上班\n\nAssistant:"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 500,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_hidden_states": true,
+                    "return_logits": true
+                }
+            },
+            "result": {
+                "response": " 作为一个虚拟助手，我没有实体存在，因此不存在不上班的情况。我的工作是24/7不间断的，只要服务器运行，我就会在这里为您提供帮助。如果您有任何问题或需要帮助，随时可以告诉我！",
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": [
+                    "You are a helpful assistant.\n\nUser: hello,你试试不上班\n\nUser: 可是怎么做实现呢\n\nAssistant:"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_input_ids": true,
+                    "return_output_ids": true
+                }
+            },
+            "result": {
+                "response": " 实现不上班的想法，首先需要考虑的是你的工作性质和环境。如果你是远程工作",
+                "input_ids": [
+                    [
+                        100000,
+                        2054,
+                        418,
+                        245,
+                        9394,
+                        20308,
+                        13,
+                        185,
+                        185,
+                        5726,
+                        25,
+                        39280,
+                        11,
+                        1372,
+                        50226,
+                        25349,
+                        6202,
+                        185,
+                        185,
+                        5726,
+                        25,
+                        207,
+                        11081,
+                        73828,
+                        7150,
+                        5053,
+                        185,
+                        185,
+                        77398,
+                        25
+                    ]
+                ],
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "\n\nDjango North is a Django app that",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 15,
+                    "reuse_len": 0,
+                    "prefix_len": 0,
+                    "iter_count": 10,
+                    "output_len": 10
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "\n\nDjango North is a Django app that",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 15,
+                    "reuse_len": 8,
+                    "prefix_len": 0,
+                    "iter_count": 10,
+                    "output_len": 10
+                }
+            }
+        }
+    ]
+}

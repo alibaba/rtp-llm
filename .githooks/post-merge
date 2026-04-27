@@ -1,3 +1,9 @@
-#!/bin/sh
-command -v git-lfs >/dev/null 2>&1 || { echo >&2 "\nnot found git-lfs, If you no longer wish to use git-lfs, remove this hook by deleting .githooks/post-merge.\n"; exit 2; }
-git lfs post-merge "$@"
+#!/bin/bash
+# post-merge hook: download large files from OSS after merge/pull.
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+PULL_SCRIPT="$REPO_ROOT/scripts/oss-lfs/oss-lfs-pull.sh"
+
+if [ -x "$PULL_SCRIPT" ]; then
+    "$PULL_SCRIPT" 2>&1 | sed 's/^/[oss-lfs] /'
+fi

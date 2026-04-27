@@ -1,0 +1,30 @@
+{
+  "id": "chat",
+  "object": "chat.completion.chunk",
+  "created": 1777092385,
+  "model": null,
+  "choices": [
+    {
+      "index": 0,
+      "delta": {
+        "role": "assistant",
+        "content": "我理解您希望获得关于",
+        "reasoning_content": null,
+        "function_call": null,
+        "tool_calls": null
+      },
+      "finish_reason": "length",
+      "logprobs": null
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 497,
+    "total_tokens": 503,
+    "completion_tokens": 6,
+    "completion_tokens_details": null,
+    "prompt_tokens_details": null
+  },
+  "debug_info": null,
+  "aux_info": null,
+  "extra_outputs": null
+}
