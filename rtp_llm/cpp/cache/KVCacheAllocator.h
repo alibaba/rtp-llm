@@ -43,15 +43,16 @@ public:
                                                             const CacheKeysType&   cache_keys,
                                                             bool                   is_connector = false) = 0;
 
-    virtual CacheLayerLayout allLayerCacheBase() const                                     = 0;
-    virtual bool             updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                           const std::vector<int>&        block_src_batch,
-                                           bool                           copy_last_block,
-                                           std::vector<BlockIdPair>&      block_update_mapping) = 0;
-    virtual int              seqSizePerBlock() const                                       = 0;
-    virtual int              singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                   int                            seq_len,
-                                                   int                            reserve_step) const                 = 0;
+    virtual CacheLayerLayout allLayerCacheBase() const = 0;
+
+    virtual bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                               const std::vector<int>&        block_src_batch,
+                               bool                           copy_last_block,
+                               std::vector<BlockIdPair>&      block_update_mapping) = 0;
+    virtual int  seqSizePerBlock() const                                       = 0;
+    virtual int  singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                       int                            seq_len,
+                                       int                            reserve_step) const                 = 0;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     virtual void blockCopy(int src_block_index, int dest_block_index);

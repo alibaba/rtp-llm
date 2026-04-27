@@ -68,7 +68,64 @@ bool DefaultLayerGroupPolicy::init() {
         RTP_LLM_LOG_ERROR("exist intersection between full and other [%s]", ss.str().c_str());
         return false;
     }
-    const auto  layer_layout       = allocator_->allLayerCacheBase();
+    const auto  layer_layout = allocator_->allLayerCacheBase();
+    const auto& l2g          = layer_layout.layer_to_group_ids;
+    if (!l2g.empty()) {
+        std::map<int, std::vector<int>> reverse_map;
+        for (size_t layer = 0; layer < l2g.size(); ++layer) {
+            // Use a set to deduplicate group_ids for this layer, TODO: remote the fix
+            std::set<int> unique_gids;
+            for (int gid : l2g[layer]) {
+                unique_gids.insert(gid);
+            }
+            for (int gid : unique_gids) {
+                reverse_map[gid].push_back(static_cast<int>(layer));
+            }
+        }
+        uint64_t group_name_bithash = 1;
+        for (int full_id : full_group_ids_) {
+            auto it = reverse_map.find(full_id);
+            if (it == reverse_map.end() || it->second.empty()) {
+                RTP_LLM_LOG_ERROR("layer_to_group_ids: no layers found for full group %d", full_id);
+                return false;
+            }
+            if (groups_.count(full_id) == 0) {
+                std::string group_name       = "F" + std::to_string(full_id);
+                groups_[full_id]             = Group{true, group_name_bithash, group_name};
+                group_to_layer_ids_[full_id] = it->second;
+                group_name_bithash <<= 1;
+            }
+        }
+        for (int other_id : other_group_ids_) {
+            auto it = reverse_map.find(other_id);
+            if (it == reverse_map.end() || it->second.empty()) {
+                RTP_LLM_LOG_ERROR("layer_to_group_ids: no layers found for other group %d", other_id);
+                return false;
+            }
+            if (groups_.count(other_id) == 0) {
+                std::string group_name        = GetOtherGroupPrefixName() + std::to_string(other_id);
+                groups_[other_id]             = Group{false, group_name_bithash, group_name};
+                group_to_layer_ids_[other_id] = it->second;
+                group_name_bithash <<= 1;
+            }
+        }
+        if (groups_.size() > 64) {
+            RTP_LLM_LOG_ERROR("not support bigger than 64 groups");
+            return false;
+        }
+        // Build group_id -> region_name mapping for DSV4 multi-pool support
+        const auto& group_region_names = layer_layout.group_region_names;
+        for (const auto& entry : groups_) {
+            int32_t gid = entry.first;
+            if (gid < static_cast<int32_t>(group_region_names.size())) {
+                group_to_region_name_[gid] = group_region_names[static_cast<size_t>(gid)];
+            } else {
+                group_to_region_name_[gid] = KVCacheRegionName::DEFAULT;
+            }
+        }
+        return true;
+    }
+
     uint64_t    group_name_bithash = 1;
     const auto& layer_to_groups    = layer_layout.layer_to_groups;
     for (int layer = 0; layer < static_cast<int>(layer_to_groups.size()); ++layer) {
@@ -126,7 +183,10 @@ bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheRe
     for (size_t key_idx = 0; key_idx < valid_keys_size; key_idx++) {
         uint64_t groups_name_bithash = 0;
         for (const auto& [group_idx, group] : groups_) {
-            const auto gpu_block_idx = group_block_ids.at(group_idx)->blocks().at(key_idx);
+            const auto&  block_ids = group_block_ids.at(group_idx)->blocks();
+            BlockIdxType gpu_block_idx =
+                GetBlockIndexByKeyName(group_idx, block_ids, key_idx, valid_keys_size, isRingBufferGroup(group_idx));
+
             if (!isNullBlockIdx(gpu_block_idx)) {
                 groups_name_bithash |= group.group_name_bithash;
             }
@@ -156,9 +216,12 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
         const auto& layer_ids = group_to_layer_ids_.at(group_ids[i]);
         auto&       iovs      = block_buffers.back().iovs;
         iovs.reserve(layer_ids.size() * 2);
+        // DSV4: use region_name-aware convertIndexToBuffer to route to correct pool
+        auto            it        = group_to_region_name_.find(group_ids[i]);
+        KVCacheRegionName region_name = (it != group_to_region_name_.end()) ? it->second : KVCacheRegionName::DEFAULT;
         for (size_t j = 0; j < layer_ids.size(); ++j) {
             // if support scale, block_infos: {kv_info, scale_info}
-            const auto& block_infos = allocator_->convertIndexToBuffer(layer_ids[j], block_ids[i]);
+            const auto& block_infos = allocator_->convertIndexToBuffer(layer_ids[j], region_name, block_ids[i]);
             if (block_infos.empty()) {
                 RTP_LLM_LOG_WARNING(
                     "convertIndexToBuffer returned empty for layer_id [%d] block_id[%d]", layer_ids[j], block_ids[i]);
@@ -188,6 +251,57 @@ std::string DefaultLayerGroupPolicy::debugString() const {
         debug_ss << '\n';
     }
     return debug_ss.str();
+}
+
+bool DefaultLayerGroupPolicy::isRingBufferGroup(int32_t group_id) const {
+    // A group uses ring-buffer indexing iff its KV region is a fixed-size state/SWA pool
+    // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV). Paged regions (CSA_KV / HCA_KV /
+    // INDEXER_KV) and DEFAULT (non-typed models) do not use ring buffers.
+    auto it = group_to_region_name_.find(group_id);
+    if (it == group_to_region_name_.end()) {
+        return false;
+    }
+    switch (it->second) {
+        case KVCacheRegionName::INDEXER_STATE:
+        case KVCacheRegionName::CSA_STATE:
+        case KVCacheRegionName::HCA_STATE:
+        case KVCacheRegionName::SWA_KV:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Static helper: Get block index from a group's blocks, handling ring buffer indexing
+BlockIdxType GroupPolicy::GetBlockIndexByKeyName(int32_t                          group_id,
+                                                 const std::vector<BlockIdxType>& blocks,
+                                                 size_t                           key_idx,
+                                                 size_t                           valid_keys_size,
+                                                 bool                             is_ring_buffer_group) {
+    if (is_ring_buffer_group) {
+        // Ring buffer mode: blocks are right-aligned to the latest keys
+        const size_t num_blocks = blocks.size();
+        if (num_blocks == 0) {
+            return NULL_BLOCK_IDX;
+        }
+        // Handle edge case: if valid_keys_size < num_blocks, clamp start_key_idx to 0
+        const size_t start_key_idx = (valid_keys_size >= num_blocks) ? (valid_keys_size - num_blocks) : 0;
+        const size_t actual_offset = valid_keys_size - start_key_idx;  // effective num_blocks used
+        if (key_idx >= start_key_idx) {
+            const size_t block_pos = key_idx - start_key_idx;
+            if (block_pos < actual_offset && block_pos < num_blocks) {
+                return blocks[block_pos];
+            }
+        }
+        // If key_idx < start_key_idx, the block has been evicted
+        return NULL_BLOCK_IDX;
+    } else {
+        // FULL groups: direct 1:1 mapping, key_idx -> block_idx
+        if (key_idx < blocks.size()) {
+            return blocks[key_idx];
+        }
+        return NULL_BLOCK_IDX;
+    }
 }
 
 bool FullLayerGroupPolicy::init() {
@@ -266,7 +380,10 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResou
     for (size_t key_idx = valid_keys_size; key_idx-- > 0;) {
         uint64_t groups_name_bithash = 0;
         for (const auto& [group_idx, group] : groups_) {
-            const auto gpu_block_idx = group_block_ids.at(group_idx)->blocks().at(key_idx);
+            const auto&  block_ids = group_block_ids.at(group_idx)->blocks();
+            BlockIdxType gpu_block_idx =
+                GetBlockIndexByKeyName(group_idx, block_ids, key_idx, valid_keys_size, isRingBufferGroup(group_idx));
+
             if (!rtp_llm::isNullBlockIdx(gpu_block_idx)) {
                 groups_name_bithash |= group.group_name_bithash;
             }

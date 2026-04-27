@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include <cstdint>
 
 namespace rtp_llm {
 
