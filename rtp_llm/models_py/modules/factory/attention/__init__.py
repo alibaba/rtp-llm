@@ -47,11 +47,22 @@ if device_type == DeviceType.ROCm:
 else:
     # currently append early means impl has higher priority
     if device_type == DeviceType.Cuda:
+        # Toggle: set RTP_LLM_DISABLE_FA3_TARGET_VERIFY=1 to fall back to the
+        # legacy FlashInfer BatchPrefill target-verify path.  Default order
+        # gives priority to PyFA3TargetVerifyImpl, mirroring what SGLang's
+        # FlashAttention backend uses on Hopper for MTP target verify and
+        # side-stepping the FlashInfer plan() / CG buffer aliasing pitfalls
+        # (see project_target_verify_cg_bug memory).
+        import os as _os
+
         from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
             HeadWisePrefillImpl,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise_fp8 import (
             HeadWiseFP8PrefillImpl,
+        )
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_fa3_target_verify import (
+            PyFA3TargetVerifyImpl,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
             PyFlashinferDecodeImpl,
@@ -72,13 +83,18 @@ else:
             get_xqa_impl,
         )
 
+        _target_verify_chain = (
+            [PyFlashinferTargetVerifyPrefillImpl, PyFA3TargetVerifyImpl]
+            if _os.environ.get("RTP_LLM_DISABLE_FA3_TARGET_VERIFY") == "1"
+            else [PyFA3TargetVerifyImpl, PyFlashinferTargetVerifyPrefillImpl]
+        )
         PREFILL_MHA_IMPS.extend(
             [
                 HeadWiseFP8PrefillImpl,
                 HeadWisePrefillImpl,
                 FlashInferTRTLLMSpecDecodeImpl,
                 FlashInferTRTLLMPrefillImpl,
-                PyFlashinferTargetVerifyPrefillImpl,
+                *_target_verify_chain,
                 TRTMHAImpl,
                 PyFlashinferPrefillImpl,
                 PyFlashinferPagedPrefillImpl,

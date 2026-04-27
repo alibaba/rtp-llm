@@ -700,9 +700,8 @@ class PyFlashinferPrefillPagedTargetVerifyAttnOp(object):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
-        backend: str = "fa2",
+        backend: str = "auto",
     ) -> None:
-        backend = "fa2"
         self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
@@ -904,7 +903,7 @@ class PyFlashinferTargetVerifyPrefillImpl(PyFlashinferPrefillImplBase):
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> Any:
         return PyFlashinferPrefillPagedTargetVerifyAttnOp(
-            attn_configs, attn_inputs, backend="fa2"
+            attn_configs, attn_inputs, backend="auto"
         )
 
     def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
@@ -927,6 +926,297 @@ class PyFlashinferTargetVerifyPrefillImpl(PyFlashinferPrefillImplBase):
         if not getattr(attn_inputs, "is_target_verify", False):
             return False
         if attn_configs.use_mla:
+            return False
+        return True
+
+
+class PyFlashinferDecodeTargetVerifyAttnOp(object):
+    """MTP target verify using BatchDecodeWithPagedKVCacheWrapper + tensor cores.
+
+    Flattens B requests x Q verify tokens into B*Q individual decode requests,
+    each with 1 query token sharing the same paged KV cache as its parent.
+    This is ~4-5x faster than the BatchPrefill approach for typical MTP verify
+    workloads (small Q, large prefix, high GQA ratio).
+    """
+
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+    ) -> None:
+        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
+        self.local_head_num = attn_configs.head_num
+        self.local_kv_head_num = attn_configs.kv_head_num
+        self.head_dim_qk = attn_configs.size_per_head
+        self.head_dim_vo = attn_configs.size_per_head
+        self.page_size = attn_configs.kernel_tokens_per_block
+        self.max_seq_len = attn_configs.max_seq_len
+        self.datatype = attn_configs.dtype
+        self.kv_cache_dtype = attn_configs.kv_cache_dtype
+        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self.enable_cuda_graph = getattr(attn_inputs, "is_cuda_graph", False)
+        self._cuda_graph_initialized = False
+        self.use_tensor_core = determine_use_tensor_core_from_configs(attn_configs)
+        self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+            self.g_workspace_buffer,
+            "HND",
+            use_tensor_cores=self.use_tensor_core,
+        )
+        # Pre-allocated expanded page table buffers for the flattened batch
+        self._flat_page_indptr: Optional[torch.Tensor] = None
+        self._flat_page_indices: Optional[torch.Tensor] = None
+        self._flat_last_page_len: Optional[torch.Tensor] = None
+
+    def __del__(self):
+        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
+
+    def _get_kv_dtype(self, attn_inputs: PyAttentionInputs) -> torch.dtype:
+        if self.kv_cache_dtype == KvCacheDataType.INT8:
+            return torch.int8
+        elif self.kv_cache_dtype == KvCacheDataType.FP8:
+            return torch.float8_e4m3fn
+        return get_scalar_type(attn_inputs.dtype)
+
+    def set_params(self, params: Any) -> None:
+        self.fmha_params = params
+
+    def _get_q_lens(
+        self, attn_inputs: PyAttentionInputs, batch_size: int
+    ) -> torch.Tensor:
+        """Get per-request query lengths for the target verify batch."""
+        if (
+            hasattr(attn_inputs, "decode_cu_seqlens_d")
+            and attn_inputs.decode_cu_seqlens_d is not None
+            and attn_inputs.decode_cu_seqlens_d.numel() > batch_size
+        ):
+            cu = attn_inputs.decode_cu_seqlens_d[: batch_size + 1]
+            return cu[1:] - cu[:-1]
+        qo_indptr = self.fmha_params.qo_indptr_d[: batch_size + 1]
+        return qo_indptr[1:] - qo_indptr[:-1]
+
+    def _expand_page_table(
+        self,
+        batch_size: int,
+        q_lens: torch.Tensor,
+        page_indptr: torch.Tensor,
+        page_indices: torch.Tensor,
+        last_page_len: torch.Tensor,
+        sequence_lengths: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Expand the B-request page table to a B*Q flattened page table
+        with per-token causal masking.
+
+        Token j within request i should only attend to KV entries
+        [0, ..., S_i - Q_i + j], i.e. S_i - Q_i + j + 1 visible entries.
+        We set per-token page count and last_page_len accordingly.
+        """
+        flat_batch = int(q_lens.sum().item())
+        device = page_indptr.device
+        dtype = page_indptr.dtype
+        page_size = self.page_size
+
+        flat_num_pages = torch.empty(flat_batch, dtype=dtype, device=device)
+        flat_lpl = torch.empty(flat_batch, dtype=dtype, device=device)
+
+        flat_idx = 0
+        for i in range(batch_size):
+            S_i = int(sequence_lengths[i].item())
+            Q_i = int(q_lens[i].item())
+            prefix_len = S_i - Q_i
+            for j in range(Q_i):
+                visible = prefix_len + j + 1
+                n_pages = (visible + page_size - 1) // page_size
+                lpl = ((visible - 1) % page_size) + 1
+                flat_num_pages[flat_idx] = n_pages
+                flat_lpl[flat_idx] = lpl
+                flat_idx += 1
+
+        flat_indptr = torch.zeros(flat_batch + 1, dtype=dtype, device=device)
+        flat_indptr[1:] = torch.cumsum(flat_num_pages, dim=0)
+
+        total_flat_pages = int(flat_indptr[-1].item())
+        flat_indices = torch.empty(total_flat_pages, dtype=dtype, device=device)
+
+        flat_idx = 0
+        offset = 0
+        for i in range(batch_size):
+            Q_i = int(q_lens[i].item())
+            src_start = int(page_indptr[i].item())
+            for j in range(Q_i):
+                n_pages = int(flat_num_pages[flat_idx].item())
+                flat_indices[offset : offset + n_pages] = page_indices[
+                    src_start : src_start + n_pages
+                ]
+                offset += n_pages
+                flat_idx += 1
+
+        return flat_indptr, flat_indices, flat_lpl
+
+    def prepare(
+        self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
+    ) -> Any:
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
+            check_attention_inputs,
+        )
+
+        check_attention_inputs(attn_inputs)
+        batch_size = attn_inputs.input_lengths.size(0)
+        self.fmha_params.fill_params(
+            attn_inputs.prefix_lengths,
+            attn_inputs.sequence_lengths,
+            attn_inputs.input_lengths,
+            attn_inputs.kv_cache_kernel_block_id_host,
+            self.page_size,
+            forbid_realloc,
+        )
+
+        q_lens = self._get_q_lens(attn_inputs, batch_size)
+        flat_batch = int(q_lens.sum().item())
+        kv_dtype = self._get_kv_dtype(attn_inputs)
+
+        page_indptr = self.fmha_params.decode_page_indptr_d
+        page_indices = self.fmha_params.page_indice_d
+        last_page_len = self.fmha_params.paged_kv_last_page_len_d
+
+        flat_indptr, flat_indices, flat_lpl = self._expand_page_table(
+            batch_size,
+            q_lens,
+            page_indptr,
+            page_indices,
+            last_page_len,
+            attn_inputs.sequence_lengths,
+        )
+
+        if self.enable_cuda_graph and not self._cuda_graph_initialized:
+            max_pages_per_seq = (
+                self.max_seq_len + self.page_size - 1
+            ) // self.page_size
+            max_total_flat_pages = max(flat_batch * max_pages_per_seq, 1)
+            device = flat_indptr.device
+            dtype = flat_indptr.dtype
+            self._flat_page_indptr = torch.zeros(
+                flat_batch + 1, dtype=dtype, device=device
+            )
+            self._flat_last_page_len = torch.zeros(
+                flat_batch, dtype=dtype, device=device
+            )
+            self._flat_page_indices = torch.zeros(
+                max_total_flat_pages, dtype=dtype, device=device
+            )
+            # qo_indptr for decode: each flat request has exactly 1 query token
+            self._flat_qo_indptr = torch.arange(
+                flat_batch + 1, dtype=dtype, device=device
+            )
+            self.decode_wrapper._use_cuda_graph = True
+            self.decode_wrapper._qo_indptr_buf = self._flat_qo_indptr
+            self.decode_wrapper._paged_kv_indptr_buf = self._flat_page_indptr
+            self.decode_wrapper._paged_kv_indices_buf = self._flat_page_indices
+            self.decode_wrapper._paged_kv_last_page_len_buf = self._flat_last_page_len
+            self.decode_wrapper._fixed_batch_size = flat_batch
+            self._cuda_graph_initialized = True
+
+        if self._cuda_graph_initialized:
+            n_indptr = min(flat_indptr.size(0), self._flat_page_indptr.size(0))
+            self._flat_page_indptr[:n_indptr].copy_(flat_indptr[:n_indptr])
+            n_idx = min(flat_indices.size(0), self._flat_page_indices.size(0))
+            self._flat_page_indices[:n_idx].copy_(flat_indices[:n_idx])
+            n_lpl = min(flat_lpl.size(0), self._flat_last_page_len.size(0))
+            self._flat_last_page_len[:n_lpl].copy_(flat_lpl[:n_lpl])
+            actual_flat = flat_indptr.size(0) - 1
+            max_flat = self._flat_page_indptr.size(0) - 1
+            if actual_flat < max_flat and actual_flat > 0:
+                last_real_indptr = int(self._flat_page_indptr[actual_flat].item())
+                num_padding = max_flat - actual_flat
+                self._flat_page_indptr[actual_flat + 1 :] = (
+                    last_real_indptr
+                    + torch.arange(
+                        1,
+                        num_padding + 1,
+                        device=self._flat_page_indptr.device,
+                        dtype=self._flat_page_indptr.dtype,
+                    )
+                )
+                safe_page = int(self._flat_page_indices[0].item())
+                end_idx = min(
+                    last_real_indptr + num_padding,
+                    self._flat_page_indices.size(0),
+                )
+                self._flat_page_indices[last_real_indptr:end_idx].fill_(safe_page)
+                self._flat_last_page_len[actual_flat:].fill_(1)
+            else:
+                torch.clamp_min_(self._flat_last_page_len, 1)
+            flat_indptr = self._flat_page_indptr
+            flat_indices = self._flat_page_indices
+            flat_lpl = self._flat_last_page_len
+
+        self.decode_wrapper.plan(
+            flat_indptr,
+            flat_indices,
+            flat_lpl,
+            self.local_head_num,
+            self.local_kv_head_num,
+            self.head_dim_qk,
+            self.page_size,
+            q_data_type=self.datatype,
+            kv_data_type=kv_dtype,
+        )
+        return self.fmha_params
+
+    @staticmethod
+    def support(attn_inputs: PyAttentionInputs) -> bool:
+        return True
+
+    def forward(
+        self, q: torch.Tensor, kv_cache: Optional[LayerKVCache]
+    ) -> torch.Tensor:
+        assert kv_cache is not None, "kv_cache is required for target verify"
+        assert q.dim() == 3, f"Expected q [total_tokens, H, D], got shape {q.shape}"
+        paged_kv_cache = kv_cache.kv_cache_base
+        if paged_kv_cache.dim() == 2:
+            paged_kv_cache = common.reshape_paged_kv_cache(
+                paged_kv_cache,
+                self.local_kv_head_num,
+                self.page_size,
+                self.head_dim_qk,
+            )
+        return self.decode_wrapper.run(q, paged_kv_cache)
+
+
+class PyFlashinferTargetVerifyDecodeImpl(PyFlashinferPrefillImplBase):
+    """BatchDecode-based MTP target verify with tensor cores.
+
+    Flattens B*Q verify tokens into individual decode requests sharing the
+    same paged KV cache.  ~4-5x faster than the BatchPrefill approach for
+    typical MTP verify workloads (small Q, large prefix, high GQA ratio).
+    """
+
+    def _create_fmha_impl(
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> Any:
+        return PyFlashinferDecodeTargetVerifyAttnOp(attn_configs, attn_inputs)
+
+    def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
+        if attn_configs.rope_config.style == RopeStyle.No:
+            return None
+        return MhaRotaryEmbeddingOp(attn_configs)
+
+    def _prepare_fmha_input(
+        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
+    ) -> torch.Tensor:
+        return query
+
+    def support_cuda_graph(self) -> bool:
+        return True
+
+    @staticmethod
+    def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
+        if not attn_inputs.is_prefill:
+            return False
+        if not getattr(attn_inputs, "is_target_verify", False):
+            return False
+        if attn_configs.use_mla:
+            return False
+        if is_sm_100():
             return False
         return True
 
