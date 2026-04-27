@@ -37,4 +37,5 @@ def iter_fake_model_stream_infer(
     out_finished.datatype = "BOOL"
     out_finished.shape.append(1)
     stream_resp.infer_response.raw_output_contents.append(b"\x01")
+    stream_resp.infer_response.parameters["incremental_output"].int64_param = 1
     yield stream_resp
