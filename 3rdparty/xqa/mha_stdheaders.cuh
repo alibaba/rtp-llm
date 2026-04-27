@@ -13,6 +13,7 @@
 #pragma once
 
 #ifndef GENERATE_CUBIN
+#include <new>
 #include <algorithm>
 #include <array>
 #include <cstddef>

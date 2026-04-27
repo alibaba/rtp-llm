@@ -1,3 +1,4 @@
+#include <new>
 #include <algorithm>
 #include "rtp_llm/cpp/kernels/cuda_graph_copy_kernel.h"
 #include <stdio.h>

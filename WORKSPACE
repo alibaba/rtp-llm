@@ -49,3 +49,4 @@ pip_gpu_rocm_torch_install_deps()
 
 load("//:def.bzl", "read_release_version")
 read_release_version(name = "release_version")
+
