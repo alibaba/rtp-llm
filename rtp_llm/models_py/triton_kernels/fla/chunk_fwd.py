@@ -215,22 +215,24 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     b_Ai22 = -b_A22
     b_Ai33 = -b_A33
 
-    for i in range(2, min(BC, T - i_tc0)):
+    # Loop to BC (compile-time constant); out-of-bounds rows are zeroed by m_tc* masks
+    # applied in Step 2, so the forward-substitution is safe for T%BT != 0.
+    for i in range(2, BC):
         b_a00 = tl.sum(tl.where((o_i == i)[:, None], -b_A00, 0.0), 0)
         b_a00 = tl.where(o_i < i, b_a00, 0.0)
         b_a00 = b_a00 + tl.sum(b_a00[:, None] * b_Ai00, 0)
         b_Ai00 = tl.where((o_i == i)[:, None], b_a00, b_Ai00)
-    for i in range(2, min(BC, T - i_tc1)):
+    for i in range(2, BC):
         b_a11 = tl.sum(tl.where((o_i == i)[:, None], -b_A11, 0.0), 0)
         b_a11 = tl.where(o_i < i, b_a11, 0.0)
         b_a11 = b_a11 + tl.sum(b_a11[:, None] * b_Ai11, 0)
         b_Ai11 = tl.where((o_i == i)[:, None], b_a11, b_Ai11)
-    for i in range(2, min(BC, T - i_tc2)):
+    for i in range(2, BC):
         b_a22 = tl.sum(tl.where((o_i == i)[:, None], -b_A22, 0.0), 0)
         b_a22 = tl.where(o_i < i, b_a22, 0.0)
         b_a22 = b_a22 + tl.sum(b_a22[:, None] * b_Ai22, 0)
         b_Ai22 = tl.where((o_i == i)[:, None], b_a22, b_Ai22)
-    for i in range(2, min(BC, T - i_tc3)):
+    for i in range(2, BC):
         b_a33 = tl.sum(tl.where((o_i == i)[:, None], -b_A33, 0.0), 0)
         b_a33 = tl.where(o_i < i, b_a33, 0.0)
         b_a33 = b_a33 + tl.sum(b_a33[:, None] * b_Ai33, 0)
@@ -306,7 +308,7 @@ def chunk_gated_delta_rule_fwd_intra(
     k: torch.Tensor,
     v: torch.Tensor,
     g: Optional[torch.Tensor] = None,
-    beta: Optional[torch.Tensor] = None,
+    beta: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
     chunk_indices: Optional[torch.LongTensor] = None,
@@ -335,6 +337,9 @@ def chunk_gated_delta_rule_fwd_intra(
         BT=BT,
         BC=BC,
         BK=64,
+        # num_warps=1 is optimal on AMD CDNA: this kernel is memory-bound with
+        # 10 small BC×BC dot products per tile; extra warps increase VGPR pressure
+        # without improving occupancy. Verified via rocprof PMC on MI355X.
         num_warps=1,
         num_stages=1,
     )

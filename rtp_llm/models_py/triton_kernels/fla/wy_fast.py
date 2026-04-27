@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
-from rtp_llm.models_py.triton_kernels.fla.op import exp, exp2
+from rtp_llm.models_py.triton_kernels.fla.op import exp2
 from rtp_llm.models_py.triton_kernels.fla.utils import is_amd
 
 

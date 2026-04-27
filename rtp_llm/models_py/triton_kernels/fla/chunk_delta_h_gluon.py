@@ -20,20 +20,32 @@ from rtp_llm.models_py.triton_kernels.fla.index import (
 
 # Maximum H and T for Gluon advantage (empirically determined)
 GLUON_MAX_H = 32
-GLUON_MAX_T = 65536
+GLUON_MAX_K = 128
+GLUON_FP32_MIN_T = 131072
 
+def _is_gluon_beneficial(H: int, T: int, K: int, state_fp32: bool = False) -> bool:
+    """Check if Gluon V2 fwd_h is faster than Triton for the given config.
 
-def _is_gluon_beneficial(H: int, T: int) -> bool:
-    """Check if Gluon fwd_h is faster than Triton for the given config."""
+    The Gluon kernel only handles K<=128 (two 64-wide tiles: b_h1, b_h2).
+    For K>128, fall back to Triton which supports up to K=256 via four tiles.
+
+    bf16 state: Gluon V2 wins at all T (convert_layout + double-buffer advantage).
+    fp32 state: Triton num_stages=2 wins for T<128K (better software pipelining),
+                Gluon V2 wins for T>=128K (double-buffer amortizes over more chunks).
+    """
     if not GLUON_AVAILABLE:
         return False
     try:
         target = triton.runtime.driver.active.get_current_target()
         if target.backend != "hip" or "gfx950" not in target.arch:
             return False
-    except Exception:
+    except AttributeError:
         return False
-    return H <= GLUON_MAX_H and T <= GLUON_MAX_T
+    if K > GLUON_MAX_K or H > GLUON_MAX_H:
+        return False
+    if state_fp32:
+        return T >= GLUON_FP32_MIN_T
+    return True
 
 
 if GLUON_AVAILABLE:
@@ -59,6 +71,7 @@ if GLUON_AVAILABLE:
         USE_INITIAL_STATE: gl.constexpr,
         STORE_FINAL_STATE: gl.constexpr,
         SAVE_NEW_VALUE: gl.constexpr,
+        H_FP32: gl.constexpr,
         IS_VARLEN: gl.constexpr,
         NUM_WARPS: gl.constexpr,
     ):
@@ -119,7 +132,11 @@ if GLUON_AVAILABLE:
                 h0_offs2 = gl.cast((64 + h0_row[:, None]) * V + (i_v * BV + h0_col[None, :]), gl.int32)
                 b_h2 = b_h2 + gl.amd.cdna4.buffer_load(ptr=h0_base, offsets=h0_offs2).to(gl.float32)
 
-        smem_a = gl.allocate_shared_memory(gl.bfloat16, [2, 64, 64], shared_layout)
+        # 4 independent smem buffers for full double-buffer pipeline
+        smem_w1 = gl.allocate_shared_memory(gl.bfloat16, [64, 64], shared_layout)
+        smem_w2 = gl.allocate_shared_memory(gl.bfloat16, [64, 64], shared_layout)
+        smem_k1 = gl.allocate_shared_memory(gl.bfloat16, [64, 64], shared_layout_t)
+        smem_k2 = gl.allocate_shared_memory(gl.bfloat16, [64, 64], shared_layout_t)
 
         m_row = gl.arange(0, 64, layout=gl.SliceLayout(1, mma))
         m_col_bv = gl.arange(0, BV, layout=gl.SliceLayout(0, mma))
@@ -152,45 +169,51 @@ if GLUON_AVAILABLE:
         if SAVE_NEW_VALUE:
             vn_base = v_new + (bos * H + i_h) * V
 
-        b_w1_pre = gl.amd.cdna4.buffer_load(ptr=w_base, offsets=w_offs_base1)
+        # Prologue: load iter 0 data → smem
+        b_w1_buf = gl.amd.cdna4.buffer_load(ptr=w_base, offsets=w_offs_base1)
         if K > 64:
-            b_w2_pre = gl.amd.cdna4.buffer_load(ptr=w_base, offsets=w_offs_base2)
+            b_w2_buf = gl.amd.cdna4.buffer_load(ptr=w_base, offsets=w_offs_base2)
         b_v_pre = gl.amd.cdna4.buffer_load(ptr=v_base, offsets=v_offs_base)
+        b_kt1_buf = gl.amd.cdna4.buffer_load(ptr=k_base, offsets=kt_offs_base1)
+        if K > 64:
+            b_kt2_buf = gl.amd.cdna4.buffer_load(ptr=k_base, offsets=kt_offs_base2)
 
-        for i_t in range(NT):
+        smem_w1.store(b_w1_buf)
+        if K > 64:
+            smem_w2.store(b_w2_buf)
+        smem_k1.store(b_kt1_buf)
+        if K > 64:
+            smem_k2.store(b_kt2_buf)
+
+        # Main loop: N-1 iterations with full pipeline
+        for i_t in range(NT - 1):
             i_t_bt = gl.cast(i_t * BT, gl.int32)
+            next_bt = i_t_bt + gl.cast(BT, gl.int32)
 
             h_off_iter = gl.cast(i_t * stride_h, gl.int32)
+            h_val1 = b_h1 if H_FP32 else b_h1.to(gl.bfloat16)
             gl.amd.cdna4.buffer_store(
-                stored_value=b_h1.to(gl.bfloat16), ptr=h_base, offsets=h_offs_base1 + h_off_iter)
+                stored_value=h_val1, ptr=h_base, offsets=h_offs_base1 + h_off_iter)
             if K > 64:
+                h_val2 = b_h2 if H_FP32 else b_h2.to(gl.bfloat16)
                 gl.amd.cdna4.buffer_store(
-                    stored_value=b_h2.to(gl.bfloat16), ptr=h_base, offsets=h_offs_base2 + h_off_iter)
+                    stored_value=h_val2, ptr=h_base, offsets=h_offs_base2 + h_off_iter)
 
-            smem_a.index(0).store(b_w1_pre)
+            b_w1_buf = gl.amd.cdna4.buffer_load(ptr=w_base, offsets=w_offs_base1 + next_bt * stride_w)
             if K > 64:
-                smem_a.index(1).store(b_w2_pre)
-            w_dot = smem_a.index(0).load(dot_op0)
+                b_w2_buf = gl.amd.cdna4.buffer_load(ptr=w_base, offsets=w_offs_base2 + next_bt * stride_w)
+
+            w_dot = smem_w1.load(dot_op0)
             h_dot = gl.convert_layout(b_h1.to(gl.bfloat16), dot_op1)
             b_wh = gl.zeros((BT, BV), dtype=gl.float32, layout=mma)
             b_wh = gl.amd.cdna4.mfma(w_dot, h_dot, b_wh)
             if K > 64:
-                w_dot2 = smem_a.index(1).load(dot_op0)
+                w_dot2 = smem_w2.load(dot_op0)
                 h_dot2 = gl.convert_layout(b_h2.to(gl.bfloat16), dot_op1)
                 b_wh = gl.amd.cdna4.mfma(w_dot2, h_dot2, b_wh)
 
-            b_kt1_pre = gl.amd.cdna4.buffer_load(ptr=k_base, offsets=kt_offs_base1 + i_t_bt * stride_k)
-            if K > 64:
-                b_kt2_pre = gl.amd.cdna4.buffer_load(ptr=k_base, offsets=kt_offs_base2 + i_t_bt * stride_k)
-
+            b_v_pre_next = gl.amd.cdna4.buffer_load(ptr=v_base, offsets=v_offs_base + next_bt * stride_v)
             b_v = gl.convert_layout(b_v_pre, mma).to(gl.float32) - b_wh
-
-            if i_t + 1 < NT:
-                next_bt = i_t_bt + gl.cast(BT, gl.int32)
-                b_w1_pre = gl.amd.cdna4.buffer_load(ptr=w_base, offsets=w_offs_base1 + next_bt * stride_w)
-                if K > 64:
-                    b_w2_pre = gl.amd.cdna4.buffer_load(ptr=w_base, offsets=w_offs_base2 + next_bt * stride_w)
-                b_v_pre = gl.amd.cdna4.buffer_load(ptr=v_base, offsets=v_offs_base + next_bt * stride_v)
 
             if SAVE_NEW_VALUE:
                 vn_offs = gl.cast((i_t * BT + m_row_bt[:, None]) * stride_v + (i_v * BV + m_col_bv[None, :]), gl.int32)
@@ -210,14 +233,73 @@ if GLUON_AVAILABLE:
                 if K > 64:
                     b_h2 = b_h2 * b_g_last_val
 
-            smem_a.index(0).store(b_kt1_pre)
+            b_kt1_buf = gl.amd.cdna4.buffer_load(ptr=k_base, offsets=kt_offs_base1 + next_bt * stride_k)
             if K > 64:
-                smem_a.index(1).store(b_kt2_pre)
+                b_kt2_buf = gl.amd.cdna4.buffer_load(ptr=k_base, offsets=kt_offs_base2 + next_bt * stride_k)
+
             v_dot = gl.convert_layout(b_v.to(gl.bfloat16), dot_op1)
-            k_dot = smem_a.index(0).load(dot_op0)
+            k_dot = smem_k1.load(dot_op0)
             b_h1 = gl.amd.cdna4.mfma(k_dot, v_dot, b_h1)
             if K > 64:
-                k_dot2 = smem_a.index(1).load(dot_op0)
+                k_dot2 = smem_k2.load(dot_op0)
+                b_h2 = gl.amd.cdna4.mfma(k_dot2, v_dot, b_h2)
+
+            smem_w1.store(b_w1_buf)
+            if K > 64:
+                smem_w2.store(b_w2_buf)
+            smem_k1.store(b_kt1_buf)
+            if K > 64:
+                smem_k2.store(b_kt2_buf)
+            b_v_pre = b_v_pre_next
+
+        # Epilogue: last iteration (no prefetch)
+        if NT > 0:
+            i_t_last = NT - 1
+            i_t_bt = gl.cast(i_t_last * BT, gl.int32)
+
+            h_off_iter = gl.cast(i_t_last * stride_h, gl.int32)
+            h_val1 = b_h1 if H_FP32 else b_h1.to(gl.bfloat16)
+            gl.amd.cdna4.buffer_store(
+                stored_value=h_val1, ptr=h_base, offsets=h_offs_base1 + h_off_iter)
+            if K > 64:
+                h_val2 = b_h2 if H_FP32 else b_h2.to(gl.bfloat16)
+                gl.amd.cdna4.buffer_store(
+                    stored_value=h_val2, ptr=h_base, offsets=h_offs_base2 + h_off_iter)
+
+            w_dot = smem_w1.load(dot_op0)
+            h_dot = gl.convert_layout(b_h1.to(gl.bfloat16), dot_op1)
+            b_wh = gl.zeros((BT, BV), dtype=gl.float32, layout=mma)
+            b_wh = gl.amd.cdna4.mfma(w_dot, h_dot, b_wh)
+            if K > 64:
+                w_dot2 = smem_w2.load(dot_op0)
+                h_dot2 = gl.convert_layout(b_h2.to(gl.bfloat16), dot_op1)
+                b_wh = gl.amd.cdna4.mfma(w_dot2, h_dot2, b_wh)
+
+            b_v = gl.convert_layout(b_v_pre, mma).to(gl.float32) - b_wh
+
+            if SAVE_NEW_VALUE:
+                vn_offs = gl.cast((i_t_last * BT + m_row_bt[:, None]) * stride_v + (i_v * BV + m_col_bv[None, :]), gl.int32)
+                gl.amd.cdna4.buffer_store(
+                    stored_value=b_v.to(gl.bfloat16), ptr=vn_base, offsets=vn_offs)
+
+            if USE_G:
+                last_idx = min((i_t_last + 1) * BT, T) - 1
+                m_t = (i_t_last * BT + m_row_bt) < T
+                b_g_last = gl.load(g_base + last_idx * H).to(gl.float32)
+                b_g = gl.amd.cdna4.buffer_load(
+                    ptr=g_base, offsets=g_offs_base + i_t_bt * H, mask=m_t, other=0.0).to(gl.float32)
+                b_scale = gl.where(m_t, gl.exp2(b_g_last - b_g), 0.0)
+                b_g_last_val = gl.exp2(b_g_last)
+                b_v = b_v * b_scale[:, None]
+                b_h1 = b_h1 * b_g_last_val
+                if K > 64:
+                    b_h2 = b_h2 * b_g_last_val
+
+            v_dot = gl.convert_layout(b_v.to(gl.bfloat16), dot_op1)
+            k_dot = smem_k1.load(dot_op0)
+            b_h1 = gl.amd.cdna4.mfma(k_dot, v_dot, b_h1)
+            if K > 64:
+                k_dot2 = smem_k2.load(dot_op0)
                 b_h2 = gl.amd.cdna4.mfma(k_dot2, v_dot, b_h2)
 
         if STORE_FINAL_STATE:
@@ -246,6 +328,7 @@ def chunk_gated_delta_rule_fwd_h_gluon(
     """
     B, T, Hg, K, V = *k.shape, u.shape[-1]
     H = u.shape[-2]
+    assert K <= 128, f"Gluon fwd_h only supports K<=128 (two 64-wide tiles), got K={K}"
     BT = chunk_size
     BV = 16
     NUM_WARPS = 4
@@ -255,9 +338,10 @@ def chunk_gated_delta_rule_fwd_h_gluon(
     else:
         N = len(cu_seqlens) - 1
         chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
-        NT = chunk_offsets[-1].item()
+        NT = int(chunk_offsets[-1])  # exact total chunk count across all sequences
 
-    h = k.new_empty(B, NT, H, K, V)
+    state_dtype = initial_state.dtype if initial_state is not None else k.dtype
+    h = k.new_empty(B, NT, H, K, V, dtype=state_dtype)
     final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
     v_new = torch.empty_like(u) if save_new_value else None
 
@@ -269,6 +353,7 @@ def chunk_gated_delta_rule_fwd_h_gluon(
         h=h, h0=initial_state, ht=final_state,
         cu_seqlens=cu_seqlens, chunk_offsets=chunk_offsets,
         T=T, H=H, Hg=Hg, K=K, V=V, BT=BT, BV=BV,
+        H_FP32=(state_dtype == torch.float32),
         NUM_WARPS=NUM_WARPS,
         num_warps=NUM_WARPS, num_stages=1,
     )

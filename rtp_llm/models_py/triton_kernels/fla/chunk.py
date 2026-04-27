@@ -42,12 +42,21 @@ def chunk_gated_delta_rule_fwd(
     output_final_state: bool,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    g = chunk_local_cumsum(
-        g,
-        chunk_size=64,
-        scale=RCP_LN2,
-        cu_seqlens=cu_seqlens,
-    )
+    if is_amd:
+        # AMD path: scale to log2 domain for exp2 (single HW instruction on CDNA)
+        g = chunk_local_cumsum(
+            g,
+            chunk_size=64,
+            scale=RCP_LN2,
+            cu_seqlens=cu_seqlens,
+        )
+    else:
+        # NVIDIA path: keep natural-log domain for safe_exp compatibility
+        g = chunk_local_cumsum(
+            g,
+            chunk_size=64,
+            cu_seqlens=cu_seqlens,
+        )
 
     if is_amd:
         # AMD-optimized: fused kkt + solve_tril + recompute_w_u

@@ -299,7 +299,9 @@ def chunk_gated_delta_rule_fwd_h(
         )
         H = u.shape[-2]
         T = k.shape[1]
-        if gk is None and _is_gluon_beneficial(H, T):
+        K = k.shape[-1]
+        state_dtype = initial_state.dtype if initial_state is not None else k.dtype
+        if gk is None and _is_gluon_beneficial(H, T, K, state_fp32=(state_dtype == torch.float32)):
             return chunk_gated_delta_rule_fwd_h_gluon(
                 k=k, w=w, u=u, g=g,
                 initial_state=initial_state,
@@ -330,7 +332,8 @@ def chunk_gated_delta_rule_fwd_h(
         )
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
-    h = k.new_empty(B, NT, H, K, V, dtype=torch.float32)
+    state_dtype = initial_state.dtype if initial_state is not None else k.dtype
+    h = k.new_empty(B, NT, H, K, V, dtype=state_dtype)
     final_state = (
         k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
     )

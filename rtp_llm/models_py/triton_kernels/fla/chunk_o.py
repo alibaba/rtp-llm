@@ -113,6 +113,10 @@ def chunk_fwd_kernel_o(
         p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
         b_o = b_o * exp2(b_g)[:, None]
+        # Safe without clamping: g is in log2 domain (scaled by RCP_LN2 in
+        # chunk_local_cumsum) and monotonically non-decreasing within each chunk
+        # (cumsum of logsigmoid ≤ 0 values). So b_g[i] - b_g[j] ≤ 0 for i ≥ j,
+        # guaranteeing exp2 ∈ (0, 1]. The m_A mask below zeros out i < j entries.
         b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
 
     o_t = i_t * BT + tl.arange(0, BT)
@@ -177,7 +181,7 @@ def chunk_fwd_o(
         BT=BT,
         BK=64 if is_amd else 128,
         BV=128 if is_amd else 64,
-        num_warps=1 if is_amd else 4,
+        num_warps=(4 if h.dtype == torch.float32 else 1) if is_amd else 4,
         num_stages=2,
     )
     return o
