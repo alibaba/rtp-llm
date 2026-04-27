@@ -4,6 +4,7 @@ Mirrors `inference/model.py:Block`. Each call applies hc_pre/F/hc_post
 twice — once for Attention and once for MoE FFN.
 """
 
+import os
 from typing import Dict, Optional
 
 import torch
@@ -13,6 +14,42 @@ import torch.nn.functional as F
 from rtp_llm.models_py.modules.dsv4.attention import Attention
 from rtp_llm.models_py.modules.dsv4.mhc import hc_split_sinkhorn
 from rtp_llm.models_py.modules.dsv4.moe import MoE
+
+# P1 (prefill_opt/final_plan.md): TileKernels fused mHC pre/post.  Drop-in
+# replaces the per-block split-K GEMM + RMSNorm + sigmoid×3 + softmax +
+# 20-iter Sinkhorn (mhc.py:hc_split_sinkhorn) with a single fused TileLang
+# kernel, plus a fused post kernel.  Falls back to the REF path when:
+#   - DSV4_USE_TILEKERNELS_MHC=0 explicitly disables it, or
+#   - tile_kernels is not importable, or
+#   - residual dtype != bf16 / mhc_mult != 4 / autograd enabled / B*S == 0
+#     (TileKernels' big_fuse requires bf16 residual + mhc_mult=4 + inference
+#     mode; empty batch trips internal asserts in pre_big_fuse_kernel).
+try:
+    from tile_kernels.modeling.mhc.functional import (
+        mhc_post as _tk_mhc_post,
+        mhc_pre as _tk_mhc_pre,
+    )
+    _TK_MHC_OK = True
+except Exception:  # pragma: no cover — keep V4 importable without tile_kernels
+    _tk_mhc_pre = None
+    _tk_mhc_post = None
+    _TK_MHC_OK = False
+
+
+def _use_tk_mhc(residual: torch.Tensor, hc_mult: int) -> bool:
+    if not _TK_MHC_OK:
+        return False
+    if os.environ.get("DSV4_USE_TILEKERNELS_MHC", "1") == "0":
+        return False
+    if torch.is_grad_enabled():
+        return False
+    if hc_mult != 4:
+        return False
+    if residual.dtype != torch.bfloat16:
+        return False
+    if residual.numel() == 0:
+        return False
+    return True
 
 
 class _RMSNorm(nn.Module):
@@ -138,7 +175,23 @@ class Block(nn.Module):
             self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
     def _hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        """x: [B,S,hc,d] -> y: [B,S,d], post: [B,S,hc], comb: [B,S,hc,hc]"""
+        """x: [B,S,hc,d] -> y: [B,S,d], post: [B,S,hc[,1]], comb: [B,S,hc,hc].
+
+        TileKernels path returns ``post`` shaped ``[B,S,hc,1]``; the REF path
+        returns ``[B,S,hc]``.  ``_hc_post`` accepts either.
+        """
+        if _use_tk_mhc(x, self.hc_mult):
+            y, (post, comb) = _tk_mhc_pre(
+                x, hc_fn, hc_scale, hc_base,
+                norm_eps=self.norm_eps,
+                mhc_mult=self.hc_mult,
+                post_mult_value=2.0,
+                pre_eps=self.hc_eps,
+                sinkhorn_eps=self.hc_eps,
+                sinkhorn_repeat=self.hc_sinkhorn_iters,
+            )
+            return y, post, comb
+
         shape, dtype = x.size(), x.dtype
         x_flat = x.flatten(2).float()
         rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
@@ -151,7 +204,22 @@ class Block(nn.Module):
         return y.to(dtype), post, comb
 
     def _hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
-        y = (post.unsqueeze(-1) * x.unsqueeze(-2)
+        # TileKernels' fused post kernel — requires bf16 x/residual + fp32
+        # post (shape [..., hc, 1]) + fp32 comb.  Falls back to the broadcast
+        # REF when the gate is off OR post is in the legacy [..., hc] shape.
+        if (
+            _use_tk_mhc(residual, self.hc_mult)
+            and x.dtype == torch.bfloat16
+            and post.dim() == residual.dim()  # post=[...,hc,1], residual=[...,hc,d]
+        ):
+            return _tk_mhc_post(x, residual, post, comb)
+
+        if post.dim() == residual.dim():
+            # Came from the TK path but TK gate now off — drop the trailing 1
+            post_b = post.squeeze(-1)
+        else:
+            post_b = post
+        y = (post_b.unsqueeze(-1) * x.unsqueeze(-2)
              + torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2))
         return y.type_as(x)
 
