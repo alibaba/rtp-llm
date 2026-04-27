@@ -481,6 +481,16 @@ class Attention(nn.Module):
             persistent=False,
         )
 
+        # Phase 4D FP8 KV cache (num_blocks=max_B, block_size=kv_cache_size, 584B/slot).
+        # Request r owns block r; write slot = r * kv_cache_size + position_in_block.
+        # Identical topk_idxs as the BF16 path (both use request-local [0, kv_cache_size)).
+        self._fp8_kv_enabled = False
+        self.register_buffer(
+            "kv_cache_fp8",
+            torch.zeros(max_batch_size, kv_cache_size, 584, dtype=torch.uint8),
+            persistent=False,
+        )
+
         # Per-layer freqs_cis: SWA-only uses base rope_theta with no yarn,
         # CSA/HCA uses compress_rope_theta with yarn (when original_seq_len > 0).
         # Store scalars so we can re-compute after `to_empty`(meta) — otherwise
@@ -629,6 +639,8 @@ class Attention(nn.Module):
 
         bsz, q_len, _ = x.size()
         assert q_len == 1, "Phase 2: q_len==1 only (MTP/spec-decode is later)"
+        if self._fp8_kv_enabled:
+            return self._forward_decode_fp8(x, attn_metadata)
         win = self.window_size
         ratio = self.compress_ratio
         rd = self.rope_head_dim
@@ -649,9 +661,12 @@ class Attention(nn.Module):
         q = self._lin(self.wq_b, qr).unflatten(
             -1, (self.n_heads, self.head_dim)
         )  # [B, 1, H, D]
-        q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.eps).to(
-            q.dtype
-        )
+        if _use_qk_rmsnorm_fast() and q.is_cuda and q.numel() > 0:
+            q = v4_rmsnorm(q, None, eps=self.eps)
+        else:
+            q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.eps).to(
+                q.dtype
+            )
         # Per-request RoPE on q_pe — each req has its own start_pos.
         freqs_cis_per_req = self.freqs_cis[start_pos.long()]  # [B, freqs_dim]
         for r in range(bsz):
@@ -754,9 +769,191 @@ class Attention(nn.Module):
 
         # Grouped output projection (same as prefill)
         o = o.reshape(bsz, q_len, self.n_groups, -1)
-        wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
-        wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
-        o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+        if self._factory_mode and _use_wo_fp8_fast() and o.is_cuda and o.numel() > 0:
+            o = self._wo_a_grouped_fp8(o)
+        else:
+            wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
+            wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
+            o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+        out = self._lin(self.wo_b, o.flatten(2))
+        if self.tp_size > 1:
+            from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+
+            all_reduce(out, Group.TP)
+        return out
+
+    # ------------------------------------------------------------------
+    # Phase 4D — FP8 KV decode path
+    # ------------------------------------------------------------------
+
+    def enable_fp8_kv_cache(self, bsz: int) -> None:
+        """Convert BF16 kv_cache → FP8 after prefill.
+
+        Call once after the prefill step when switching to the FP8 decode
+        path. All slots for requests [0, bsz) are bulk-converted; zeros
+        in unwritten slots are harmless (topk masking prevents reads).
+        """
+        from rtp_llm.models_py.modules.dsv4.decode.fp8_kv_quant_decode_op import (
+            quantize_v4_kv_decode,
+        )
+
+        block_size = self.kv_cache_fp8.shape[1]  # win + max_seq_len // ratio
+        T = bsz * block_size
+        # Flat identity mapping: BF16 kv_cache[r, p, :] → FP8 kv_cache_fp8[r, p, :]
+        # Both have the same [max_B, block_size] layout, so slot index = r * block_size + p.
+        slot_map = torch.arange(T, device=self.kv_cache.device, dtype=torch.long)
+        kv_flat = self.kv_cache[:bsz].reshape(T, self.head_dim)
+        quantize_v4_kv_decode(kv_flat, slot_map, self.kv_cache_fp8)
+        self._fp8_kv_enabled = True
+
+    def _forward_decode_fp8(
+        self,
+        x: torch.Tensor,  # [B, 1, dim] bf16
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+    ) -> torch.Tensor:
+        """Phase 4D: decode forward with FP8 KV cache + FlashMLA.
+
+        Replaces the BF16 register_buffer + SparseAttnV4DecodeOp path with:
+          * quantize_v4_kv_decode  — write new K into kv_cache_fp8
+          * SparseAttnV4DecodeFp8Op — FlashMLA is_fp8_kvcache=True sparse attn
+
+        For CSA layers the Attention's compressed-K (kv_cache_fp8[:, win:, :])
+        was populated once by enable_fp8_kv_cache() and is not re-written here
+        (the Indexer updates its own compressor's kv_cache for scoring only).
+        For HCA layers the compressor returns a fresh BF16 compressed-K each
+        step which we quantize and write to FP8.
+        """
+        from rtp_llm.models_py.modules.dsv4.decode.fp8_kv_quant_decode_op import (
+            quantize_v4_kv_decode,
+        )
+        from rtp_llm.models_py.modules.dsv4.decode.fp8_sparse_attn_decode_op import (
+            SparseAttnV4DecodeFp8Op,
+        )
+
+        bsz, q_len, _ = x.size()
+        win = self.window_size
+        ratio = self.compress_ratio
+        block_size = self.kv_cache_fp8.shape[1]  # win + max_seq_len // ratio (or win)
+        rd = self.rope_head_dim
+        device = x.device
+        start_pos = attn_metadata.start_pos  # [B] int32
+
+        # Bind compressor/indexer caches lazily (same as BF16 forward_decode).
+        if self.compress_ratio and self.compressor.kv_cache is None:
+            self.compressor.kv_cache = self.kv_cache[:, win:]
+            self.compressor.freqs_cis = self.freqs_cis
+            if self.indexer is not None:
+                self.indexer.freqs_cis = self.freqs_cis
+
+        # Q path (identical to BF16 forward_decode).
+        qr = self._rmsnorm_weighted(self._lin(self.wq_a, x), self.q_norm.weight)
+        q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
+        if _use_qk_rmsnorm_fast() and q.is_cuda and q.numel() > 0:
+            q = v4_rmsnorm(q, None, eps=self.eps)
+        else:
+            q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.eps).to(
+                q.dtype
+            )
+        freqs_cis_per_req = self.freqs_cis[start_pos.long()]
+        for r in range(bsz):
+            apply_rotary_emb(q[r : r + 1, :, :, -rd:], freqs_cis_per_req[r : r + 1])
+
+        # KV path.
+        kv = self._rmsnorm_weighted(self._lin(self.wkv, x), self.kv_norm.weight)
+        for r in range(bsz):
+            apply_rotary_emb(kv[r : r + 1, :, -rd:], freqs_cis_per_req[r : r + 1])
+
+        # Write SWA K to FP8 cache.
+        # BF16 slot_mapping_swa uses stride=win: slot = r * win + ring_pos.
+        # FP8 kv_cache_fp8 has stride=block_size, so: fp8_slot = r * block_size + ring_pos.
+        # Remap: fp8_slot = (bf16_slot // win) * block_size + (bf16_slot % win).
+        kv_flat = kv.reshape(bsz * q_len, self.head_dim)
+        swa_slot_bf16 = attn_metadata.slot_mapping_swa.to(torch.long)
+        swa_slot_fp8 = (swa_slot_bf16 // win) * block_size + (swa_slot_bf16 % win)
+        quantize_v4_kv_decode(kv_flat, swa_slot_fp8, self.kv_cache_fp8)
+
+        use_vec = bool(getattr(attn_metadata, "is_cuda_graph", False))
+        topk_idxs: torch.Tensor
+        if self.compress_ratio:
+            if self.indexer is not None:
+                # CSA: Indexer scores against its own compressor's kv_cache;
+                # the Attention's compressed-K FP8 slots were written at enable_fp8_kv_cache()
+                # and don't change during decode.
+                if use_vec:
+                    self.indexer.forward_decode_vectorized(
+                        x, qr, start_pos, attn_metadata.topk_buffer_compressed,
+                    )
+                else:
+                    self.indexer.forward_decode(
+                        x, qr, start_pos, attn_metadata.topk_buffer_compressed,
+                    )
+                topk_total = attn_metadata.topk_total_by_ratio[4]
+                idx_with_off = torch.where(
+                    attn_metadata.topk_buffer_compressed >= 0,
+                    attn_metadata.topk_buffer_compressed + win,
+                    attn_metadata.topk_buffer_compressed,
+                )
+                topk_total[:, :, win:] = idx_with_off
+                topk_idxs = topk_total
+            else:
+                # HCA: compressor produces new compressed-K each step → write to FP8.
+                if use_vec:
+                    kv_compressed = self.compressor.forward_decode_vectorized(x, start_pos)
+                else:
+                    kv_compressed = self.compressor.forward_decode(x, start_pos)
+
+                if kv_compressed is not None:
+                    # Remap: BF16 compressed slot = r * stride_bf16 + c
+                    # FP8 compressed slot = r * block_size + win + c
+                    stride_bf16 = attn_metadata.compressed_buffer_t_dim_per_ratio[ratio]
+                    cmp_slot_bf16 = attn_metadata.slot_mapping_compressed[ratio].to(torch.long)
+                    valid_mask = cmp_slot_bf16 >= 0
+                    cmp_r = cmp_slot_bf16 // stride_bf16
+                    cmp_c = cmp_slot_bf16 % stride_bf16
+                    cmp_slot_fp8 = torch.where(
+                        valid_mask,
+                        cmp_r * block_size + win + cmp_c,
+                        torch.full_like(cmp_slot_bf16, -1),
+                    )
+                    kv_c_flat = kv_compressed.reshape(bsz * q_len, self.head_dim)
+                    quantize_v4_kv_decode(kv_c_flat, cmp_slot_fp8, self.kv_cache_fp8)
+
+                topk_total = attn_metadata.topk_total_by_ratio[ratio].clone()
+                cmp_part = topk_total[:, :, win:]
+                cmp_part = torch.where(cmp_part >= 0, cmp_part + win, cmp_part)
+                topk_total[:, :, win:] = cmp_part
+                topk_idxs = topk_total
+        else:
+            topk_idxs = attn_metadata.topk_window_idxs
+
+        # FP8 sparse attention via FlashMLA (or reference fallback on non-SM100).
+        # block_table[r, 0] = r so FlashMLA reads kv_cache_fp8[r, topk_slot, :].
+        cache_seqlens = (start_pos + 1).to(torch.int32)
+        block_table = torch.arange(bsz, device=device, dtype=torch.int32).unsqueeze(1)
+        sparse_fp8 = SparseAttnV4DecodeFp8Op(
+            n_heads=self.n_heads,
+            head_dim=self.head_dim,
+            softmax_scale=self.softmax_scale,
+        )
+        o = sparse_fp8.forward(
+            q, self.kv_cache_fp8[:bsz], self.attn_sink,
+            topk_idxs, cache_seqlens, block_table,
+        )
+
+        # Inverse RoPE per request.
+        for r in range(bsz):
+            apply_rotary_emb(
+                o[r : r + 1, :, :, -rd:], freqs_cis_per_req[r : r + 1], inverse=True
+            )
+
+        # Grouped output projection (identical to BF16 path).
+        o = o.reshape(bsz, q_len, self.n_groups, -1)
+        if self._factory_mode and _use_wo_fp8_fast() and o.is_cuda and o.numel() > 0:
+            o = self._wo_a_grouped_fp8(o)
+        else:
+            wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
+            wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
+            o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
         out = self._lin(self.wo_b, o.flatten(2))
         if self.tp_size > 1:
             from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
