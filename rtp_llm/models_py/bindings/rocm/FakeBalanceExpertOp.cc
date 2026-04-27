@@ -1,6 +1,6 @@
 #include "rtp_llm/models_py/bindings/rocm/FakeBalanceExpertOp.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
-#include "rtp_llm/cpp/kernels/moe_kernels.h"
+#include "rtp_llm/models_py/bindings/common/kernels/moe_kernels.h"
 
 namespace rtp_llm {
 
