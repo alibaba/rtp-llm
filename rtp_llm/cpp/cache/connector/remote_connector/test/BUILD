@@ -56,6 +56,19 @@ cc_test(
 )
 
 cc_test(
+    name = "remote_connector_mock_dsv4_test",
+    srcs = [
+        "RemoteConnectorMockDsv4Test.cc",
+    ],
+    copts = test_copts,
+    exec_properties = {"gpu": "H20"},
+    deps = [
+        ":remote_connector_mock_base",
+        "//rtp_llm/cpp/cache:cache_core",
+    ],
+)
+
+cc_test(
     name = "remote_connector_mock_only_full_test",
     srcs = [
         "RemoteConnectorMockOnlyFullTest.cc",

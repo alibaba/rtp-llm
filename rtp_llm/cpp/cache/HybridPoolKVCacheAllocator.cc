@@ -375,8 +375,18 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
 
 CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     CacheLayerLayout layout;
-    layout.layer_to_groups        = config_.layer_to_group_id;
-    layout.layer_to_group_ids     = config_.layer_to_group_ids;
+    layout.layer_to_groups    = config_.layer_to_group_id;
+    layout.layer_to_group_ids = config_.layer_to_group_ids;
+    if (config_.dsv4_config.has_value() && !config_.global_layer_ids.empty()) {
+        layout.layer_to_group_ids.resize(config_.layer_all_num);
+        for (size_t gid = 0; gid < config_.global_layer_ids.size(); ++gid) {
+            for (int layer_id : config_.global_layer_ids[gid]) {
+                if (layer_id >= 0 && static_cast<size_t>(layer_id) < layout.layer_to_group_ids.size()) {
+                    layout.layer_to_group_ids[static_cast<size_t>(layer_id)].push_back(static_cast<int>(gid));
+                }
+            }
+        }
+    }
     layout.layer_attn_to_group_id = config_.layer_attn_to_group_id;
     layout.group_types            = config_.group_types;
     layout.group_attn_types       = config_.group_attn_types;
