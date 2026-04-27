@@ -407,7 +407,9 @@ def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
 from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 
 
-def _args_from_model_config(mc: ModelConfig) -> V4Args:
+def _args_from_model_config(
+    mc: ModelConfig, max_generate_batch_size: int = 4
+) -> V4Args:
     ac = mc.attn_config
     rc = ac.rope_config
     return V4Args(
@@ -446,10 +448,7 @@ def _args_from_model_config(mc: ModelConfig) -> V4Args:
         hc_sinkhorn_iters=int(mc.hc_sinkhorn_iters),
         hc_eps=float(mc.hc_eps),
         norm_eps=float(mc.layernorm_eps),
-        # max_batch_size is overridden in DeepSeekV4Model.__init__ from the
-        # framework-supplied max_generate_batch_size — this default is only
-        # used when V4Args is built outside the model (e.g. unit tests).
-        max_batch_size=1,
+        max_batch_size=max_generate_batch_size,  # from framework, supports concurrent requests
         max_seq_len=int(mc.max_seq_len) or 4096,
         # Mega MoE sizes its symm-mem dispatch buffer from this bound.
         # max_seq_len is the safest per-rank upper bound (one long prefill
@@ -483,12 +482,7 @@ class DeepSeekV4Model(GptModelBase):
         )
 
         # Build V4Transformer with matching args.
-        args = _args_from_model_config(model_config)
-        # Decode KV/state buffers must be sized for the real max generate
-        # batch — Phase 2 onwards. Prefill arm runs B=1 so this is purely
-        # additive (no prefill behavior change).
-        if max_generate_batch_size and max_generate_batch_size > 1:
-            args.max_batch_size = int(max_generate_batch_size)
+        args = _args_from_model_config(model_config, max_generate_batch_size)
         # MoE inter dim from V4 config: explicit (not inter_size which in RTP-LLM
         # is n_shared_experts * moe_intermediate_size for DeepSeek). Use moe_config
         # if available; else read from config's hidden_size-derived fallback.
@@ -783,12 +777,13 @@ class DeepSeekV4Model(GptModelBase):
         self._materialized = True
         self._running_pos = 0
 
-        # Wire framework KV cache if enabled
-        if (
-            os.environ.get("DSV4_USE_FRAMEWORK_KV", "0") == "1"
-            and self.kv_cache is not None
-        ):
+        # Wire framework KV cache if enabled — note: self.kv_cache may not
+        # be set yet (framework allocates it after initialize() returns).
+        # We defer wiring to the first forward() call via _framework_kv_pending.
+        self._framework_kv_pending = os.environ.get("DSV4_USE_FRAMEWORK_KV", "0") == "1"
+        if self._framework_kv_pending and self.kv_cache is not None:
             self._wire_framework_kv_cache(device_str)
+            self._framework_kv_pending = False
             logging.info(
                 "[DeepSeekV4Model] framework KV cache wired for %d layers",
                 len(self.v4.layers),
@@ -861,146 +856,432 @@ class DeepSeekV4Model(GptModelBase):
         requests (it's a framework-managed buffer, not a per-request register_buffer).
         The compressor's kv_state/score_state and kv_cache must be zeroed on each
         new prefill to avoid stale data from previous requests corrupting output.
+
+        NOTE: Do NOT set compressor.kv_cache = None here. The gather path
+        needs the buffer reference to exist so it can copy prefix-cache data
+        into it BEFORE forward() runs. The underlying storage is already
+        zeroed by attn.kv_cache.zero_() (compressor.kv_cache is a view).
         """
         for layer in self.v4.layers:
             attn = layer.attn
-            # Reset kv_cache (SWA + compressed KV)
+            # Reset kv_cache (SWA + compressed KV) — also zeros compressor.kv_cache view
             attn.kv_cache.zero_()
             # Reset compressor state
             if attn.compressor is not None:
                 attn.compressor.kv_state.zero_()
                 attn.compressor.score_state.fill_(float("-inf"))
-                attn.compressor.kv_cache = None  # force rebind
             # Reset indexer state
             if attn.indexer is not None:
                 attn.indexer.kv_cache.zero_()
                 attn.indexer.compressor.kv_state.zero_()
                 attn.indexer.compressor.score_state.fill_(float("-inf"))
-                attn.indexer.compressor.kv_cache = None
 
     def _wire_framework_kv_cache(self, device: str):
-        """Store references to framework BlockPool tensors for gather/scatter.
+        """Wire framework BlockPool for 7-pool gather/scatter.
 
-        Does NOT do flat view — keeps register_buffer as working memory.
-        In forward(), we gather from BlockPool pages into flat buffers before
-        computation, and scatter back after computation. This ensures:
-        - reuse cache works (cached data is in specific block_ids)
-        - PD separation works (cache store transfers BlockPool raw bytes)
-        - concurrent requests work (each request has independent block_ids)
+        DSV4 uses HybridPoolKVCacheAllocator with 7 independent BlockPools.
+        Each pool has its own [total_blocks, stride_bytes] uint8 tensor.
+        We use get_raw_pool_tensor(layer_id, attn_type) to get each pool's tensor.
         """
         self._framework_kv_enabled = True
-        self._fw_layer_tensors = []  # per-layer BlockPool tensor references
-        if self.kv_cache is None or not self.kv_cache.kv_cache_base_by_layer:
+        if self.kv_cache is None:
             logging.warning("[DeepSeekV4Model] no framework kv_cache, skipping wiring")
             return
 
-        for i in range(len(self.v4.layers)):
-            if i < len(self.kv_cache.kv_cache_base_by_layer):
-                self._fw_layer_tensors.append(self.kv_cache.kv_cache_base_by_layer[i])
+        # Build per-layer per-pool tensor cache from flat field
+        flat = getattr(self.kv_cache, "kv_cache_base_by_layer_attn_flat", None)
+        attn_type_count = 8
+        self._fw_pool_tensors = []
+        if flat is not None and len(flat) > 0:
+            num_layers = len(flat) // attn_type_count
+            for i in range(len(self.v4.layers)):
+                slots = [None] * attn_type_count
+                if i < num_layers:
+                    for a in range(attn_type_count):
+                        t = flat[i * attn_type_count + a]
+                        if t is not None and t.numel() > 0:
+                            slots[a] = t
+                self._fw_pool_tensors.append(slots)
+        else:
+            logging.warning(
+                "[DeepSeekV4Model] kv_cache_base_by_layer_attn_flat empty, gather/scatter disabled"
+            )
+            return
+
+        # Build per-layer pool list from compress_ratio
+        self._layer_pools = []
+        for i, layer in enumerate(self.v4.layers):
+            ratio = layer.attn.compress_ratio
+            if ratio == 4:
+                self._layer_pools.append([7, 1, 3, 4, 5])
+            elif ratio == 128:
+                self._layer_pools.append([7, 2, 6])
             else:
-                self._fw_layer_tensors.append(None)
+                self._layer_pools.append([7])
 
+        # Debug: log shapes for layer 0 and layer 2
+        for dbg in [0, 2]:
+            if dbg < len(self._fw_pool_tensors):
+                ne = {
+                    j: self._fw_pool_tensors[dbg][j].shape
+                    for j in range(attn_type_count)
+                    if self._fw_pool_tensors[dbg][j] is not None
+                }
+                logging.info("[DeepSeekV4Model] _fw_pool_tensors[%d]: %s", dbg, ne)
+
+        spb = (
+            self.kv_cache.seq_size_per_block
+            if self.kv_cache.seq_size_per_block > 0
+            else 256
+        )
         logging.info(
-            "[DeepSeekV4Model] framework BlockPool KV wired for %d layers "
-            "(gather/scatter mode, seq_size_per_block=%d)",
-            len(self._fw_layer_tensors),
-            self.kv_cache.seq_size_per_block if self.kv_cache else 0,
+            "[DeepSeekV4Model] framework 7-pool KV wired: %d layers, seq_size_per_block=%d",
+            len(self.v4.layers),
+            spb,
         )
 
-    def _gather_all_layers(self, attn_inputs):
-        """Gather cached KV from BlockPool pages into each layer's flat buffer.
+    def _gather_kv_pool(
+        self, fw_tensor, block_ids_2d, python_buf, entries_per_block, head_dim, B
+    ):
+        """Gather paged KV from BlockPool into python_buf[B, T, head_dim] (bf16).
 
-        For each layer, uses block_ids to copy data from BlockPool pages into
-        the flat [B, kv_cache_size, head_dim] register_buffer that attention reads.
+        fw_tensor is [total_blocks, stride_elems] uint8. Each page has stride_elems bytes.
+        Vectorized: one index_select + reshape instead of per-block Python loops.
         """
-        if not hasattr(self, "_fw_layer_tensors") or not self._fw_layer_tensors:
+        if fw_tensor is None or fw_tensor.numel() == 0:
             return
-        from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+        bytes_per_entry = head_dim * 2  # bf16
+        page_bytes_avail = fw_tensor.size(1)
+        capacity = min(entries_per_block, page_bytes_avail // bytes_per_entry)
+        useful_bytes = capacity * bytes_per_entry
 
-        spb = (
-            self.kv_cache.seq_size_per_block
-            if self.kv_cache.seq_size_per_block > 0
-            else 256
+        # Move block_ids to CPU once to avoid per-element GPU sync
+        bids_cpu = block_ids_2d[:B].cpu()
+        T = python_buf.size(1)
+
+        for b in range(B):
+            row = bids_cpu[b]
+            for k in range(row.size(0)):
+                bid = int(row[k].item())
+                if bid <= 0:
+                    continue
+                entry_start = k * capacity
+                entry_end = min(entry_start + capacity, T)
+                n = entry_end - entry_start
+                if n <= 0:
+                    break
+                page_bf16 = (
+                    fw_tensor[bid, : n * bytes_per_entry]
+                    .view(torch.bfloat16)
+                    .view(n, head_dim)
+                )
+                python_buf[b, entry_start:entry_end] = page_bf16
+
+    def _scatter_kv_pool(
+        self, fw_tensor, block_ids_2d, python_buf, entries_per_block, head_dim, B
+    ):
+        """Scatter python_buf[B, T, head_dim] (bf16) back to BlockPool pages."""
+        if fw_tensor is None or fw_tensor.numel() == 0:
+            return
+        bytes_per_entry = head_dim * 2
+        page_bytes_avail = fw_tensor.size(1)
+        capacity = min(entries_per_block, page_bytes_avail // bytes_per_entry)
+        T = python_buf.size(1)
+
+        bids_cpu = block_ids_2d[:B].cpu()
+        for b in range(B):
+            row = bids_cpu[b]
+            for k in range(row.size(0)):
+                bid = int(row[k].item())
+                if bid <= 0:
+                    continue
+                entry_start = k * capacity
+                entry_end = min(entry_start + capacity, T)
+                n = entry_end - entry_start
+                if n <= 0:
+                    break
+                data = (
+                    python_buf[b, entry_start:entry_end]
+                    .contiguous()
+                    .view(torch.uint8)
+                    .reshape(-1)
+                )
+                fw_tensor[bid, : n * bytes_per_entry] = data
+
+    def _gather_state_pool(
+        self,
+        fw_tensor,
+        block_ids_2d,
+        kv_state,
+        score_state,
+        entries_per_block,
+        state_dim,
+        B,
+    ):
+        """Gather fixed-allocation state from BlockPool into kv_state + score_state (fp32)."""
+        if fw_tensor is None or fw_tensor.numel() == 0:
+            return
+        half_dim = state_dim // 2
+        bids_cpu = block_ids_2d[:B].cpu()
+        max_blks = min(2, bids_cpu.size(1))
+        state_rows = kv_state.size(1)
+        for b in range(B):
+            for blk_idx in range(max_blks):
+                bid = int(bids_cpu[b, blk_idx].item())
+                if bid <= 0:
+                    continue
+                page_fp32 = (
+                    fw_tensor[bid, : entries_per_block * state_dim * 4]
+                    .view(torch.float32)
+                    .view(entries_per_block, state_dim)
+                )
+                row_start = blk_idx * entries_per_block
+                n = min(entries_per_block, state_rows - row_start)
+                if n <= 0:
+                    break
+                kv_state[b, row_start : row_start + n] = page_fp32[:n, :half_dim]
+                score_state[b, row_start : row_start + n] = page_fp32[:n, half_dim:]
+
+    def _scatter_state_pool(
+        self,
+        fw_tensor,
+        block_ids_2d,
+        kv_state,
+        score_state,
+        entries_per_block,
+        state_dim,
+        B,
+    ):
+        """Scatter kv_state + score_state (fp32) back to BlockPool pages."""
+        if fw_tensor is None or fw_tensor.numel() == 0:
+            return
+        half_dim = state_dim // 2
+        bids_cpu = block_ids_2d[:B].cpu()
+        max_blks = min(2, bids_cpu.size(1))
+        state_rows = kv_state.size(1)
+        for b in range(B):
+            for blk_idx in range(max_blks):
+                bid = int(bids_cpu[b, blk_idx].item())
+                if bid <= 0:
+                    continue
+                page_fp32 = (
+                    fw_tensor[bid, : entries_per_block * state_dim * 4]
+                    .view(torch.float32)
+                    .view(entries_per_block, state_dim)
+                )
+                row_start = blk_idx * entries_per_block
+                n = min(entries_per_block, state_rows - row_start)
+                if n <= 0:
+                    break
+                page_fp32[:n, :half_dim] = kv_state[b, row_start : row_start + n]
+                page_fp32[:n, half_dim:] = score_state[b, row_start : row_start + n]
+
+    def _get_pool_tensor(self, attn_type: int, layer_idx: int):
+        """Look up per-pool BlockPool tensor."""
+        if not hasattr(self, "_fw_pool_tensors") or not self._fw_pool_tensors:
+            return None
+        if layer_idx >= len(self._fw_pool_tensors):
+            return None
+        slots = self._fw_pool_tensors[layer_idx]
+        if attn_type >= len(slots):
+            return None
+        return slots[attn_type]
+
+    def _gather_all_layers(self, attn_inputs, B=1, batch_offset=0):
+        """Gather cached KV from BlockPool pages into each layer's buffers.
+
+        batch_offset: row offset into by_group block_ids. In prefill loop,
+        request b uses batch_offset=b so we read the correct block_ids row.
+        """
+        if not hasattr(self, "_fw_pool_tensors") or not self._fw_pool_tensors:
+            return
+
+        by_group = getattr(
+            attn_inputs, "kv_cache_kernel_block_id_device_by_group", None
         )
+        if by_group is None or len(by_group) == 0:
+            return
+
+        # attn_type → group_id (0-indexed): CSA_KV=1→0, HCA_KV=2→1, ...SWA_KV=7→6
+        attn_type_to_gid = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6}
 
         for i, layer in enumerate(self.v4.layers):
-            fw_tensor = (
-                self._fw_layer_tensors[i] if i < len(self._fw_layer_tensors) else None
-            )
-            if fw_tensor is None or fw_tensor.numel() == 0:
-                continue
-
-            gid = select_block_map_for_layer(attn_inputs, i)
-            if gid is None:
-                continue
-
-            block_ids = attn_inputs.kv_cache_kernel_block_id_device
-            if block_ids is None or block_ids.numel() == 0:
-                continue
-
             attn_mod = layer.attn
-            kv_cache = attn_mod.kv_cache  # [B, kv_cache_size, head_dim]
-            head_dim = attn_mod.head_dim
-            batch_block_ids = block_ids[0]  # B=1
+            win = attn_mod.window_size
+            hd = attn_mod.head_dim
 
-            for b_idx in range(batch_block_ids.size(0)):
-                bid = int(batch_block_ids[b_idx].item())
-                if bid < 0:
+            for attn_type in self._layer_pools[i]:
+                gid = attn_type_to_gid.get(attn_type)
+                if gid is None or gid >= len(by_group):
                     continue
-                start = b_idx * spb
-                end = min(start + spb, kv_cache.size(1))
-                n = end - start
-                if n <= 0:
+                block_ids = by_group[gid]  # [total_requests, max_blocks]
+                if block_ids is None or block_ids.numel() == 0:
                     continue
-                page = fw_tensor[bid]
-                kv_cache[0, start:end] = page[: n * head_dim].view(n, head_dim)
+                bid_slice = block_ids[batch_offset : batch_offset + B]
+                fw_t = self._get_pool_tensor(attn_type, i)
 
-    def _scatter_all_layers(self, attn_inputs):
-        """Scatter updated KV from each layer's flat buffer back to BlockPool pages.
+                if attn_type == 7:  # SWA_KV
+                    swa_buf = attn_mod.kv_cache[:B, :win]
+                    self._gather_kv_pool(fw_t, bid_slice, swa_buf, 256, hd, B)
+                elif attn_type == 1:  # CSA_KV
+                    if (
+                        attn_mod.compressor is not None
+                        and attn_mod.compressor.kv_cache is not None
+                    ):
+                        self._gather_kv_pool(
+                            fw_t, bid_slice, attn_mod.compressor.kv_cache[:B], 64, hd, B
+                        )
+                elif attn_type == 2:  # HCA_KV
+                    if (
+                        attn_mod.compressor is not None
+                        and attn_mod.compressor.kv_cache is not None
+                    ):
+                        self._gather_kv_pool(
+                            fw_t, bid_slice, attn_mod.compressor.kv_cache[:B], 2, hd, B
+                        )
+                elif attn_type == 3:  # INDEXER_KV
+                    if attn_mod.indexer is not None:
+                        idx_hd = attn_mod.indexer.head_dim
+                        self._gather_kv_pool(
+                            fw_t,
+                            bid_slice,
+                            attn_mod.indexer.kv_cache[:B],
+                            64,
+                            idx_hd,
+                            B,
+                        )
+                elif attn_type == 4:  # INDEXER_STATE
+                    if attn_mod.indexer is not None:
+                        comp = attn_mod.indexer.compressor
+                        idx_hd = attn_mod.indexer.head_dim
+                        self._gather_state_pool(
+                            fw_t,
+                            bid_slice,
+                            comp.kv_state[:B],
+                            comp.score_state[:B],
+                            4,
+                            4 * idx_hd,
+                            B,
+                        )
+                elif attn_type == 5:  # CSA_STATE
+                    if attn_mod.compressor is not None:
+                        self._gather_state_pool(
+                            fw_t,
+                            bid_slice,
+                            attn_mod.compressor.kv_state[:B],
+                            attn_mod.compressor.score_state[:B],
+                            4,
+                            4 * hd,
+                            B,
+                        )
+                elif attn_type == 6:  # HCA_STATE
+                    if attn_mod.compressor is not None:
+                        self._gather_state_pool(
+                            fw_t,
+                            bid_slice,
+                            attn_mod.compressor.kv_state[:B],
+                            attn_mod.compressor.score_state[:B],
+                            8,
+                            2 * hd,
+                            B,
+                        )
 
-        After forward computation, copies the updated KV data from flat buffers
-        back to the BlockPool pages so the framework can manage/transfer them.
+    def _scatter_all_layers(self, attn_inputs, B=1, batch_offset=0):
+        """Scatter updated KV from each layer's buffers back to BlockPool pages.
+
+        batch_offset: row offset into by_group block_ids (same as gather).
         """
-        if not hasattr(self, "_fw_layer_tensors") or not self._fw_layer_tensors:
+        if not hasattr(self, "_fw_pool_tensors") or not self._fw_pool_tensors:
             return
-        from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 
-        spb = (
-            self.kv_cache.seq_size_per_block
-            if self.kv_cache.seq_size_per_block > 0
-            else 256
+        by_group = getattr(
+            attn_inputs, "kv_cache_kernel_block_id_device_by_group", None
         )
+        if by_group is None or len(by_group) == 0:
+            return
+
+        attn_type_to_gid = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6}
 
         for i, layer in enumerate(self.v4.layers):
-            fw_tensor = (
-                self._fw_layer_tensors[i] if i < len(self._fw_layer_tensors) else None
-            )
-            if fw_tensor is None or fw_tensor.numel() == 0:
-                continue
-
-            gid = select_block_map_for_layer(attn_inputs, i)
-            if gid is None:
-                continue
-
-            block_ids = attn_inputs.kv_cache_kernel_block_id_device
-            if block_ids is None or block_ids.numel() == 0:
-                continue
-
             attn_mod = layer.attn
-            kv_cache = attn_mod.kv_cache
-            head_dim = attn_mod.head_dim
-            batch_block_ids = block_ids[0]
+            win = attn_mod.window_size
+            hd = attn_mod.head_dim
 
-            for b_idx in range(batch_block_ids.size(0)):
-                bid = int(batch_block_ids[b_idx].item())
-                if bid < 0:
+            for attn_type in self._layer_pools[i]:
+                gid = attn_type_to_gid.get(attn_type)
+                if gid is None or gid >= len(by_group):
                     continue
-                start = b_idx * spb
-                end = min(start + spb, kv_cache.size(1))
-                n = end - start
-                if n <= 0:
+                block_ids = by_group[gid]
+                if block_ids is None or block_ids.numel() == 0:
                     continue
-                fw_tensor[bid, : n * head_dim] = kv_cache[0, start:end].reshape(-1)
+                bid_slice = block_ids[batch_offset : batch_offset + B]
+                fw_t = self._get_pool_tensor(attn_type, i)
+
+                if attn_type == 7:  # SWA_KV
+                    swa_buf = attn_mod.kv_cache[:B, :win]
+                    self._scatter_kv_pool(fw_t, bid_slice, swa_buf, 256, hd, B)
+                elif attn_type == 1:  # CSA_KV
+                    if (
+                        attn_mod.compressor is not None
+                        and attn_mod.compressor.kv_cache is not None
+                    ):
+                        self._scatter_kv_pool(
+                            fw_t, bid_slice, attn_mod.compressor.kv_cache[:B], 64, hd, B
+                        )
+                elif attn_type == 2:  # HCA_KV
+                    if (
+                        attn_mod.compressor is not None
+                        and attn_mod.compressor.kv_cache is not None
+                    ):
+                        self._scatter_kv_pool(
+                            fw_t, bid_slice, attn_mod.compressor.kv_cache[:B], 2, hd, B
+                        )
+                elif attn_type == 3:  # INDEXER_KV
+                    if attn_mod.indexer is not None:
+                        idx_hd = attn_mod.indexer.head_dim
+                        self._scatter_kv_pool(
+                            fw_t,
+                            bid_slice,
+                            attn_mod.indexer.kv_cache[:B],
+                            64,
+                            idx_hd,
+                            B,
+                        )
+                elif attn_type == 4:  # INDEXER_STATE
+                    if attn_mod.indexer is not None:
+                        comp = attn_mod.indexer.compressor
+                        idx_hd = attn_mod.indexer.head_dim
+                        self._scatter_state_pool(
+                            fw_t,
+                            bid_slice,
+                            comp.kv_state[:B],
+                            comp.score_state[:B],
+                            4,
+                            4 * idx_hd,
+                            B,
+                        )
+                elif attn_type == 5:  # CSA_STATE
+                    if attn_mod.compressor is not None:
+                        self._scatter_state_pool(
+                            fw_t,
+                            bid_slice,
+                            attn_mod.compressor.kv_state[:B],
+                            attn_mod.compressor.score_state[:B],
+                            4,
+                            4 * hd,
+                            B,
+                        )
+                elif attn_type == 6:  # HCA_STATE
+                    if attn_mod.compressor is not None:
+                        self._scatter_state_pool(
+                            fw_t,
+                            bid_slice,
+                            attn_mod.compressor.kv_state[:B],
+                            attn_mod.compressor.score_state[:B],
+                            8,
+                            2 * hd,
+                            B,
+                        )
 
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
@@ -1156,69 +1437,147 @@ class DeepSeekV4Model(GptModelBase):
     def _forward_impl(
         self, inputs: PyModelInputs, fmha_impl: Any = None
     ) -> PyModelOutputs:
+        # Framework sends flat [total_tokens] input_ids with cu_seqlens packing.
+        # Use attention_inputs fields to properly handle batched requests:
+        #   Prefill: input_lengths[b], prefix_lengths[b], cu_seqlens
+        #   Decode:  sequence_lengths[b] (per-batch current position)
+        # Prefill and decode are NEVER mixed (framework guarantee).
+        input_ids: torch.Tensor = inputs.input_ids  # flat [total_tokens]
         attn = inputs.attention_inputs
-        is_prefill = (
-            bool(attn.is_prefill)
-            if attn is not None
-            else (inputs.input_ids.dim() > 0 and inputs.input_ids.size(0) > 1)
-        )
-        # Decode arm — Phase 2: batched per-request via DSv4DecodeAttnMetadata.
-        # Phase 3: when fmha_impl is a DSv4DecodeFmhaImpl, _forward_decode
-        # consumes its persistent metadata (CUDA-graph replay).
+        is_prefill = bool(attn.is_prefill) if attn is not None else True
+
+        # Decode arm — Phase 3: when fmha_impl is a DSv4DecodeFmhaImpl, route
+        # to the CUDA-graph replay path with persistent decode metadata.
         if (
             not is_prefill
+            and fmha_impl is not None
             and attn is not None
             and attn.sequence_lengths is not None
             and attn.sequence_lengths.numel() > 0
         ):
             return self._forward_decode(inputs, fmha_impl)
 
-        # Prefill arm — bit-identical to pre-Phase-2 (PD-disagg later). B=1 only.
-        input_ids: torch.Tensor = inputs.input_ids
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)  # [1, S]
+
         use_framework_kv = os.environ.get("DSV4_USE_FRAMEWORK_KV", "0") == "1"
 
-        # When framework KV cache is active, use prefix_lengths from attention_inputs
-        # to determine reuse offset. The framework reuses cached KV blocks for the
-        # prefix and only sends suffix tokens for computation. start_pos must reflect
-        # the reuse offset so attention reads cached KV correctly.
-        reuse_len = 0
-        if use_framework_kv and is_prefill and attn is not None:
-            prefix_lengths = getattr(attn, "prefix_lengths", None)
-            if prefix_lengths is not None and prefix_lengths.numel() > 0:
-                reuse_len = int(prefix_lengths[0].item())
+        # Deferred wiring: framework allocates kv_cache after initialize(),
+        # so we wire on first forward() when kv_cache becomes available.
+        if (
+            use_framework_kv
+            and getattr(self, "_framework_kv_pending", False)
+            and self.kv_cache is not None
+        ):
+            device_str = str(input_ids.device)
+            self._wire_framework_kv_cache(device_str)
+            self._framework_kv_pending = False
+            logging.info(
+                "[DeepSeekV4Model] framework KV cache wired (deferred) for %d layers",
+                len(self.v4.layers),
+            )
 
         if is_prefill:
-            start_pos = reuse_len  # 0 if no reuse, reuse_len if cache hit
-        else:
-            start_pos = self._running_pos
+            # Prefill: split by cu_seqlens, process each request separately
+            # DSV4 sparse attention doesn't support cu_seqlens batched prefill
+            input_lengths_t = attn.input_lengths if attn is not None else None
+            prefix_lengths_t = attn.prefix_lengths if attn is not None else None
+            n_prefill = input_lengths_t.size(0) if input_lengths_t is not None else 1
 
-        # --- Context Parallel (prefill) — scaffold integration ----------
-        #
-        # When CP is enabled, the framework zigzag-splits the prefill
-        # tokens across the TP group (TP is repurposed as the CP group
-        # in RTP-LLM's CP design).  Each rank sees a rank-local slice
-        # plus an ``attention_inputs.context_parallel_info`` struct with
-        # the restore metadata.
-        #
-        # For V4 we run the attention/FFN/MoE path RANK-LOCAL (so MoE
-        # EP dispatch naturally sees only 1/cp_size of the tokens per
-        # rank, avoiding the 4× duplicated-dispatch bug that an adapter-
-        # level input-gather would cause).  Only the S-pooling ops
-        # (compressor, indexer) need the full sequence; they do their
-        # own all-gather internally (see ``Compressor`` and ``Indexer``
-        # forward, S8 CP scaffold).  The hidden passed back to the
-        # engine is therefore rank-local by construction — no exit
-        # gather / scatter needed here.
-        #
-        # What this scaffold does NOT do yet:
-        #   * per-rank-Q attention sharding (attention still runs on
-        #     full sequence → no compute speedup, only memory win)
-        #   * paged KV cache CP writes (V4 keeps a mock per-module
-        #     kv_cache; each rank holds the full KV, written from the
-        #     gathered compressor output)
-        # See docs/dsv4/parallel_design.md §S8 for the staged plan.
+            all_hidden = []
+            offset = 0
+            for b in range(n_prefill):
+                # Reset compressor state before each prefill to prevent leakage
+                self._reset_compressor_state()
+                if input_lengths_t is not None:
+                    inp_len = int(input_lengths_t[b].item())
+                    prefix_len = (
+                        int(prefix_lengths_t[b].item())
+                        if prefix_lengths_t is not None and prefix_lengths_t.numel() > b
+                        else 0
+                    )
+                else:
+                    inp_len = input_ids.size(0)
+                    prefix_len = 0
+
+                batch_ids = input_ids[offset : offset + inp_len].unsqueeze(
+                    0
+                )  # [1, inp_len]
+                start_pos = prefix_len  # reuse offset
+
+                # Gather from BlockPool if reuse hit
+                if (
+                    use_framework_kv
+                    and hasattr(self, "_framework_kv_enabled")
+                    and self._framework_kv_enabled
+                    and attn is not None
+                    and prefix_len > 0
+                ):
+                    self._gather_all_layers(attn, B=1, batch_offset=b)
+
+                h = self.v4(batch_ids, start_pos=start_pos, apply_lm_head=False)
+                all_hidden.append(h)
+
+                # Scatter to BlockPool after forward
+                if (
+                    use_framework_kv
+                    and hasattr(self, "_framework_kv_enabled")
+                    and self._framework_kv_enabled
+                    and attn is not None
+                ):
+                    self._scatter_all_layers(attn, B=1, batch_offset=b)
+
+                self._running_pos = prefix_len + inp_len
+                offset += inp_len
+
+            hidden = (
+                torch.cat(all_hidden, dim=1) if len(all_hidden) > 1 else all_hidden[0]
+            )
+            reuse_len = (
+                int(prefix_lengths_t[0].item())
+                if prefix_lengths_t is not None and prefix_lengths_t.numel() > 0
+                else 0
+            )
+
+        else:
+            # Decode: B requests each 1 token
+            # Use sequence_lengths as per-batch positions (tensor [B])
+            seq_lens = attn.sequence_lengths if attn is not None else None
+
+            if use_framework_kv and seq_lens is not None and seq_lens.numel() > 0:
+                B = seq_lens.size(0)
+                start_pos = seq_lens.to(
+                    input_ids.device
+                )  # tensor [B] for batched decode
+            else:
+                B = input_ids.size(0)
+                start_pos = self._running_pos
+
+            if input_ids.dim() == 1:
+                input_ids = input_ids[:B].unsqueeze(1)  # [B, 1]
+
+            # Gather KV from BlockPool before decode
+            if (
+                use_framework_kv
+                and hasattr(self, "_framework_kv_enabled")
+                and self._framework_kv_enabled
+                and attn is not None
+            ):
+                self._gather_all_layers(attn, B=B)
+
+            hidden = self.v4(input_ids, start_pos=start_pos, apply_lm_head=False)
+
+            # Scatter KV back to BlockPool after decode
+            if (
+                use_framework_kv
+                and hasattr(self, "_framework_kv_enabled")
+                and self._framework_kv_enabled
+                and attn is not None
+            ):
+                self._scatter_all_layers(attn, B=B)
+
+            self._running_pos += 1
+            reuse_len = 0
+
+        # --- Context Parallel setup (before forward loop) ---
         pc_cfg = getattr(self, "parallelism_config", None)
         cp_enabled = (
             pc_cfg is not None
@@ -1229,201 +1588,14 @@ class DeepSeekV4Model(GptModelBase):
             and getattr(attn, "context_parallel_info", None) is not None
         )
         if cp_enabled:
-            # Bind CP metadata onto V4Transformer so nested modules
-            # (Compressor / Indexer) can pick it up without threading
-            # yet another argument through every forward signature.
             self.v4.set_cp_info(
                 cp_info=attn.context_parallel_info,
                 cp_size=int(pc_cfg.tp_size),
                 cp_rank=int(pc_cfg.tp_rank),
             )
-            if os.environ.get("DSV4_LOG_CP", "0") == "1":
-                cpi = attn.context_parallel_info
-                logging.info(
-                    "[DeepSeekV4Model] CP forward: input_ids.shape=%s "
-                    "cp_size=%d cp_rank=%d padding_mask.shape=%s "
-                    "restore_indices.shape=%s is_prefill=%s start_pos=%d",
-                    tuple(input_ids.shape),
-                    int(pc_cfg.tp_size),
-                    int(pc_cfg.tp_rank),
-                    tuple(cpi.prefill_qkv_padding_mask.shape),
-                    tuple(cpi.prefill_qkv_restore_indice.shape),
-                    is_prefill,
-                    start_pos,
-                )
         else:
             self.v4.set_cp_info(None, 1, 0)
 
-        # Warmup safety: framework warmup probes with prefill(max_seq_len)
-        # followed by decode(1), pushing start_pos out of our freqs_cis /
-        # kv_cache range.  Under DP+EP, short-circuiting the forward to
-        # a zero tensor would desync the DeepEP dispatch collective; so
-        # we instead clamp start_pos to the last valid slot. The warmup
-        # output is discarded anyway.
-        max_s = self._v4_args.max_seq_len
-        S_local = input_ids.size(1)
-        if start_pos + max(S_local, 1) > max_s:
-            start_pos = max(0, max_s - max(S_local, 1))
-
-        # Empty-batch handling (DP rank with zero local tokens):
-        # V4's attention/mHC/indexer contains many ops that crash on S=0
-        # (``.view``, ``.unflatten``, ``einsum`` on zero-element tensors,
-        # plus ``F.softplus`` returning "unknown parameter type").  We
-        # can't short-circuit the whole forward because DeepEP dispatch
-        # is a collective that ALL ranks must enter.  Instead, pad S=0
-        # → S=1 with a dummy token, run through the full layer stack
-        # (including DeepEP), then discard the dummy's output.
-        pad_empty = S_local == 0
-        if pad_empty:
-            # Create the dummy on the model's device (not input_ids.device
-            # — the framework may pass a CPU tensor for empty inputs).
-            param_dev = next(self.v4.parameters()).device
-            input_ids = torch.zeros((1, 1), dtype=torch.long, device=param_dev)
-            S_local = 1
-
-        # On-demand timeline capture for exactly one forward when trigger file exists.
-        should_capture = (
-            self._profile_path
-            and not self._profile_done
-            and os.path.exists(self._profile_trigger)
-        )
-        # Per-request KV stash (prefill arm).  We allocate a fresh stash
-        # slot per request via ``_update_slot_indices_for_batch`` (with
-        # ``is_prefill=True``); the slot allocator clears the stash entry
-        # for any reset-needed slots inside that call. We then RESET the
-        # live buffer rows (kv_cache / kv_state / score_state / etc.) for
-        # ``[0..prefill_bsz-1]`` to each buffer's initial value before
-        # prefill writes to them — gathering from the stash here would be
-        # wrong because prefill is supposed to start from a clean state and
-        # only writes a subset of positions (e.g. ``kv_state[r, :ratio]``);
-        # the unwritten tail would otherwise carry the stash's stale or
-        # default contents through into decode and break the softmax.
-        # After prefill, scatter saves the per-request state to the stash.
-        prefill_bsz = 0
-        if not pad_empty:  # warmup pad → no real request
-            prefill_bsz = self._update_slot_indices_for_batch(attn)
-        if self._stash is not None and prefill_bsz > 0:
-            self._stash.reset_batch_rows(prefill_bsz)
-        # Multi-request bundled prefill is a known correctness gap: the
-        # bridge code below does ``input_ids.unsqueeze(0)`` and V4Transformer
-        # treats the result as B=1 with seqlen=T_total — every request's KV
-        # state writes into row 0 of every per-batch-row buffer, then the
-        # stash scatter saves only row 0 back to the FIRST request's slot,
-        # leaving every other request's slot uninitialized. Their decodes
-        # then read garbage. Until V4 prefill is rewritten to honor
-        # cu_seqlens, log loudly so smoke runs surface this immediately.
-        if prefill_bsz > 1:
-            logging.warning(
-                "[DeepSeekV4Model] BUNDLED PREFILL prefill_bsz=%d — V4Transformer "
-                "treats this as a single B=1 prefill, mixing all requests' KV into "
-                "row 0; only request 0's stash slot will hold valid KV.  Set the "
-                "scheduler's ``--max_batch_tokens_size`` low enough that one prompt "
-                "fills the budget if you need correct multi-request decode.",
-                prefill_bsz,
-            )
-
-        # Framework KV gather/scatter: before forward, gather cached KV from
-        # BlockPool pages into flat buffers; after forward, scatter back.
-        fw_active = (
-            use_framework_kv
-            and hasattr(self, "_framework_kv_enabled")
-            and self._framework_kv_enabled
-            and attn is not None
-        )
-
-        if fw_active and reuse_len > 0:
-            # Gather cached KV from BlockPool for reused prefix
-            self._gather_all_layers(attn)
-
-        if should_capture:
-            try:
-                os.remove(self._profile_trigger)
-            except OSError:
-                pass
-            with torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-                record_shapes=False,
-                with_stack=False,
-            ) as prof:
-                with torch.profiler.record_function(
-                    f"V4_forward_prefill={is_prefill}_S={input_ids.size(1)}"
-                ):
-                    hidden = self.v4(
-                        input_ids, start_pos=start_pos, apply_lm_head=False
-                    )
-                    torch.cuda.synchronize()
-            prof.export_chrome_trace(self._profile_path)
-            logging.info(
-                "[DeepSeekV4Model] timeline exported: %s (%d events)",
-                self._profile_path,
-                len(prof.key_averages()),
-            )
-            self._profile_done = True
-        else:
-            hidden = self.v4(input_ids, start_pos=start_pos, apply_lm_head=False)
-
-        if self._stash is not None and prefill_bsz > 0:
-            self._stash.scatter(prefill_bsz)
-
-        # After forward: scatter updated KV back to BlockPool pages
-        if fw_active:
-            self._scatter_all_layers(attn)
-
-        # FP8 KV decode arming: after the FIRST prefill (start_pos==0) — and
-        # only when the runtime requested ``--fp8_kv_cache 1`` — bulk-convert
-        # the freshly-written BF16 KV in every Attention layer to the FP8
-        # storage layout. Subsequent decodes will route through
-        # ``Attention._forward_decode_fp8`` (FlashMLA + FP8 KV).
-        if (
-            self._fp8_kv_requested
-            and not self._fp8_kv_armed
-            and is_prefill
-            and prefill_bsz > 0
-        ):
-            for layer in self.v4.layers:
-                layer.attn.enable_fp8_kv_cache(bsz=prefill_bsz)
-            self._fp8_kv_armed = True
-            logging.info(
-                "[DeepSeekV4Model] FP8 KV cache enabled across %d layers (bsz=%d).",
-                len(self.v4.layers),
-                prefill_bsz,
-            )
-
-        # Advance running position.  Under CP the rank-local ``S`` is
-        # ``chunk_length`` (~ S_full / cp_size) — bookkeeping ``_running_pos``
-        # against it would leave decode reading the wrong kv_cache slots.
-        # Use the REAL prefill length from ``cp_info.prefill_actual_input_lengths_cpu``
-        # when CP is enabled, else fall back to ``S``.
-        if is_prefill:
-            if cp_enabled:
-                # prefill_actual_input_lengths_cpu: int32 [num_prefill_streams]
-                # V4 is B=1, single stream.
-                actual_lens = (
-                    attn.context_parallel_info.prefill_actual_input_lengths_cpu
-                )
-                self._running_pos = int(actual_lens[-1].item())
-            else:
-                # Total position = reuse_len (cached prefix) + suffix tokens sent
-                self._running_pos = reuse_len + input_ids.size(1)
-        else:
-            self._running_pos += input_ids.size(1)
-
-        # Discard the dummy token we padded in for the empty-batch case.
-        if pad_empty:
-            hidden = hidden[:, :0]
-
         # Return flat [total_tokens, hidden_dim] for engine
         flat = hidden.reshape(-1, hidden.size(-1))
-        if os.environ.get("DSV4_LOG_CP", "0") == "1":
-            logging.info(
-                "[DeepSeekV4Model] forward return: hidden.shape=%s flat.shape=%s "
-                "cp_enabled=%s is_prefill=%s",
-                tuple(hidden.shape),
-                tuple(flat.shape),
-                cp_enabled,
-                is_prefill,
-            )
         return PyModelOutputs(flat)

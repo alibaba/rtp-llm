@@ -136,9 +136,12 @@ def _block_kwargs(
         hc_sinkhorn_iters=args.hc_sinkhorn_iters,
         hc_eps=args.hc_eps,
         norm_eps=args.norm_eps,
-        weights=weights, prefix=prefix,
-        tp_size=args.tp_size, tp_rank=args.tp_rank,
-        ep_size=args.ep_size, ep_rank=args.ep_rank,
+        weights=weights,
+        prefix=prefix,
+        tp_size=args.tp_size,
+        tp_rank=args.tp_rank,
+        ep_size=args.ep_size,
+        ep_rank=args.ep_rank,
         max_tokens_per_rank=args.max_tokens_per_rank,
     )
 
@@ -264,26 +267,15 @@ class V4Transformer(nn.Module):
                     ic.set_cp_ctx(cp_ctx)
 
     def _hc_head_reduce(self, x: torch.Tensor) -> torch.Tensor:
-        """[B, S, hc, d] -> [B, S, d]
-
-        Same BF16-GEMM trick as Block._hc_pre (plan_0427.md P0): keep x in
-        BF16 for the F.linear (tensor cores) and only cast for the FP32
-        squared mean.  Eliminates the residual sgemm 128x128 SIMT call this
-        used to emit at the end of every forward.
-        """
+        """[B, S, hc, d] -> [B, S, d]"""
         shape, dtype = x.size(), x.dtype
-        x_flat = x.flatten(2)  # bf16
-        # Cache bf16 hc_head_fn once per Transformer instance.
-        bf = getattr(self, "_hc_head_fn_bf16", None)
-        if bf is None or bf.shape != self.hc_head_fn.shape or bf.device != self.hc_head_fn.device:
-            bf = self.hc_head_fn.to(torch.bfloat16) if self.hc_head_fn.dtype != torch.bfloat16 else self.hc_head_fn
-            self._hc_head_fn_bf16 = bf
-        x_flat_f32 = x_flat.float()
-        rsqrt = torch.rsqrt(x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps).to(dtype)
-        mixes = (F.linear(x_flat, bf) * rsqrt).float()
-        pre = torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
-        # Sum over hc dim — bf16 broadcast+sum is cheaper than fp32.
-        y = torch.sum(pre.to(dtype).unsqueeze(-1) * x.view(*shape), dim=2)
+        x_flat = x.flatten(2).float()
+        rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
+        mixes = F.linear(x_flat, self.hc_head_fn) * rsqrt
+        pre = (
+            torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
+        )
+        y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=2)
         return y.to(dtype)
 
     @torch.inference_mode()
@@ -314,7 +306,7 @@ class V4Transformer(nn.Module):
 
     @torch.inference_mode()
     def forward(
-        self, input_ids: torch.Tensor, start_pos: int = 0, apply_lm_head: bool = True
+        self, input_ids: torch.Tensor, start_pos=0, apply_lm_head: bool = True
     ) -> torch.Tensor:
         """Standalone forward.
 
@@ -369,8 +361,8 @@ class V4Transformer(nn.Module):
             cp_ctx = build_cp_context(_cp_info, _cp_size, _cp_rank, S, device)
         self._propagate_cp_ctx(cp_ctx)
 
-        h = self.embed(input_ids)                                  # [B, S, d]
-        h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)           # [B, S, hc, d]
+        h = self.embed(input_ids)  # [B, S, d]
+        h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, S, hc, d]
         for layer in self.layers:
             h = layer(h, start_pos, input_ids)
         h = self._hc_head_reduce(h)  # [B, S, d]

@@ -114,9 +114,9 @@ def apply_rotary_emb(
     if inverse:
         freqs_cis = freqs_cis.conj()
     if x.ndim == 3:
-        freqs_cis = freqs_cis.view(1, x.size(1), x.size(-1))
+        freqs_cis = freqs_cis.view(x.size(0), x.size(1), x.size(-1))
     else:
-        freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
+        freqs_cis = freqs_cis.view(x.size(0), x.size(1), 1, x.size(-1))
     x = torch.view_as_real(x * freqs_cis).flatten(-2)
     y.copy_(x)
     return y

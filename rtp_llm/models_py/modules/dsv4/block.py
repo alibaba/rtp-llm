@@ -4,7 +4,6 @@ Mirrors `inference/model.py:Block`. Each call applies hc_pre/F/hc_post
 twice — once for Attention and once for MoE FFN.
 """
 
-import os
 from typing import Dict, Optional
 
 import torch
@@ -191,7 +190,8 @@ class Block(nn.Module):
             vocab_size=vocab_size,
             weights=weights,
             prefix=f"{prefix}.ffn" if self._factory_mode else "",
-            ep_size=ep_size, ep_rank=ep_rank,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
         )
         self.attn_norm = _RMSNorm(dim, norm_eps)
@@ -240,39 +240,14 @@ class Block(nn.Module):
             self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
             self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
-    def _hc_fn_bf16(self, hc_fn: torch.Tensor) -> torch.Tensor:
-        """Lazy-cached bf16 view of an FP32 hc_fn parameter.
-
-        The FP32 → BF16 cast is ~30 µs on a [24, 16384] tensor; we cache by
-        ``id(hc_fn)`` so attn vs ffn fns get separate slots.  Memory: ~768 KB
-        per fn × 2 fns / layer × 43 layers ≈ 64 MB total — acceptable for
-        cutting per-call cast latency to zero.
-        """
-        cache = getattr(self, "_bf16_cache", None)
-        if cache is None:
-            cache = {}
-            self._bf16_cache = cache
-        key = id(hc_fn)
-        bf = cache.get(key)
-        if bf is None or bf.shape != hc_fn.shape or bf.device != hc_fn.device:
-            bf = hc_fn.to(torch.bfloat16)
-            cache[key] = bf
-        return bf
-
-    def _hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        """x: [B,S,hc,d] -> y: [B,S,d], post: [B,S,hc,1], comb: [B,S,hc,hc].
-
-        Always returns ``post`` in the ``[B,S,hc,1]`` shape so the post path
-        can route to TK ``mhc_post`` whenever it's importable.
-
-        Implementation (P1 of plan_0427.md):
-          - Cast hc_fn to BF16 (cached) and run F.linear in BF16 → tensor cores
-            (the previous all-FP32 path fell to SIMT sgemm 32x64, ~44 ms across
-            the model in the 64k+CP=4 trace).
-          - Compute the rsqrt scalar in FP32 from a BF16² mean + FP32 cast —
-            avoids the 1 GiB ``.float()`` of the [B,T,hc*d] activation.
-          - Sinkhorn loop stays in FP32 (numerically critical).
-        """
+    def _hc_pre(
+        self,
+        x: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+    ):
+        """x: [B,S,hc,d] -> y: [B,S,d], post: [B,S,hc], comb: [B,S,hc,hc]"""
         shape, dtype = x.size(), x.dtype
         x_flat = x.flatten(2)  # [B, T, hc*d] bf16
         # FP32 squared mean → rsqrt, single cast.  Kept in fp32 because the
@@ -296,44 +271,16 @@ class Block(nn.Module):
         # post in the [..., hc, 1] convention so _hc_post can call TK mhc_post.
         return y.to(dtype), post.unsqueeze(-1), comb
 
-    def _hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
-        """Combine the sublayer output ``x`` with the per-stream residual via post/comb.
-
-        Three implementations, fastest-first:
-          1. TileKernels ``mhc_post`` — single fused kernel, ~35× the REF.
-          2. BF16 BMM rewrite (P1 fallback) — ``comb.T @ residual`` runs as
-             a tensor-core BMM, ~1.8× the REF.
-          3. Original 5D broadcast+sum — kept as a last resort for
-             non-bf16 / odd-shape inputs.
-        """
-        # Path 1: TK fused post (preferred).  Requires post in [..., hc, 1] shape;
-        # _hc_pre always emits that now.
-        if (
-            _use_tk_mhc_post(residual, self.hc_mult)
-            and x.dtype == torch.bfloat16
-            and post.dim() == residual.dim()
-        ):
-            return _tk_mhc_post(x, residual, post, comb)
-
-        # Normalize post to the [..., hc] form for the fallback paths.
-        if post.dim() == residual.dim():
-            post_b = post.squeeze(-1)
-        else:
-            post_b = post
-
-        # Path 2: BF16 BMM rewrite.  Replaces the [B,T,hc,hc,d] intermediate
-        # (~1 GiB at S=16384) of the REF with a tensor-core BMM.
-        if x.dtype == torch.bfloat16 and residual.dtype == torch.bfloat16:
-            post_bf16 = post_b.to(x.dtype)
-            first = post_bf16.unsqueeze(-1) * x.unsqueeze(-2)  # [B,T,hc,d] bf16 broadcast
-            comb_bf16 = comb.to(x.dtype)
-            # REF reduces over the FIRST hc dim of comb (= comb.T @ residual).
-            second = torch.matmul(comb_bf16.transpose(-2, -1), residual)
-            return (first + second).to(x.dtype)
-
-        # Path 3: original REF (covers fp32 / mixed-dtype debug paths).
-        y = (post_b.unsqueeze(-1) * x.unsqueeze(-2)
-             + torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2))
+    def _hc_post(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ):
+        y = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
+            comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2
+        )
         return y.type_as(x)
 
     def forward_decode(
@@ -366,7 +313,7 @@ class Block(nn.Module):
         return x
 
     def forward(
-        self, x: torch.Tensor, start_pos: int, input_ids: Optional[torch.Tensor]
+        self, x: torch.Tensor, start_pos, input_ids: Optional[torch.Tensor]
     ) -> torch.Tensor:
         # Attention path
         residual = x
@@ -458,8 +405,10 @@ class MTPBlock(Block):
         norm_eps: float = 1e-6,
         weights: Optional[Dict[str, torch.Tensor]] = None,
         prefix: str = "",
-        tp_size: int = 1, tp_rank: int = 0,
-        ep_size: int = 1, ep_rank: int = 0,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        ep_size: int = 1,
+        ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
     ):
         super().__init__(
@@ -493,10 +442,16 @@ class MTPBlock(Block):
             swiglu_limit=swiglu_limit,
             n_hash_layers=n_hash_layers,
             vocab_size=vocab_size,
-            hc_mult=hc_mult, hc_sinkhorn_iters=hc_sinkhorn_iters, hc_eps=hc_eps,
-            norm_eps=norm_eps, weights=weights, prefix=prefix,
-            tp_size=tp_size, tp_rank=tp_rank,
-            ep_size=ep_size, ep_rank=ep_rank,
+            hc_mult=hc_mult,
+            hc_sinkhorn_iters=hc_sinkhorn_iters,
+            hc_eps=hc_eps,
+            norm_eps=norm_eps,
+            weights=weights,
+            prefix=prefix,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
         )
         from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
@@ -580,17 +535,14 @@ class MTPBlock(Block):
         # Parent Block runs attn + FFN + mHC on [B, S, hc, dim]
         x_after = super().forward(x_fused, start_pos, input_ids)  # [B, S, hc, dim]
 
-        # hc_head_reduce — same BF16-GEMM trick as Block._hc_pre / V4Transformer._hc_head_reduce.
+        # hc_head_reduce (same math as V4Transformer._hc_head_reduce)
         shape, dtype = x_after.size(), x_after.dtype
-        x_flat = x_after.flatten(2)                                     # bf16 [B, S, hc*dim]
-        bf = getattr(self, "_hc_head_fn_bf16", None)
-        if bf is None or bf.shape != self.hc_head_fn.shape or bf.device != self.hc_head_fn.device:
-            bf = self.hc_head_fn.to(torch.bfloat16) if self.hc_head_fn.dtype != torch.bfloat16 else self.hc_head_fn
-            self._hc_head_fn_bf16 = bf
-        x_flat_f32 = x_flat.float()
-        rsqrt = torch.rsqrt(x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps).to(dtype)
-        mixes = (F.linear(x_flat, bf) * rsqrt).float()                  # bf16 GEMM, fp32 epilogue
-        pre = torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
-        h = torch.sum(pre.to(dtype).unsqueeze(-1) * x_after.view(*shape), dim=2)  # bf16 sum
-        h = self.norm(h.to(dtype))                                      # [B, S, dim]
-        return F.linear(h.float(), lm_head_weight)                      # [B, S, vocab]
+        x_flat = x_after.flatten(2).float()  # [B, S, hc*dim]
+        rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
+        mixes = F.linear(x_flat, self.hc_head_fn) * rsqrt
+        pre = (
+            torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
+        )
+        h = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=2)  # [B, S, dim]
+        h = self.norm(h.to(dtype))  # [B, S, dim]
+        return F.linear(h.float(), lm_head_weight)  # [B, S, vocab]
