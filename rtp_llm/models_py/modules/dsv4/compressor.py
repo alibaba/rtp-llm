@@ -16,7 +16,9 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4.cp import (
-    CPContext, cp_all_gather_full, cp_should_gather,
+    CPContext,
+    cp_all_gather_full,
+    cp_should_gather,
 )
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
 
@@ -69,23 +71,29 @@ class Compressor(nn.Module):
 
         if self._factory_mode:
             self.ape = nn.Parameter(
-                weights[f"{prefix}.ape"].float(), requires_grad=False,
+                weights[f"{prefix}.ape"].float(),
+                requires_grad=False,
             )
             self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
             self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
             with torch.no_grad():
                 self.wkv.weight = nn.Parameter(
-                    weights[f"{prefix}.wkv.weight"].float(), requires_grad=False,
+                    weights[f"{prefix}.wkv.weight"].float(),
+                    requires_grad=False,
                 )
                 self.wgate.weight = nn.Parameter(
-                    weights[f"{prefix}.wgate.weight"].float(), requires_grad=False,
+                    weights[f"{prefix}.wgate.weight"].float(),
+                    requires_grad=False,
                 )
             self.norm = _CompressorNorm(head_dim)
             self.norm.weight = nn.Parameter(
-                weights[f"{prefix}.norm.weight"].float(), requires_grad=False,
+                weights[f"{prefix}.norm.weight"].float(),
+                requires_grad=False,
             )
         else:
-            self.ape = nn.Parameter(torch.empty(compress_ratio, coff * head_dim, dtype=torch.float32))
+            self.ape = nn.Parameter(
+                torch.empty(compress_ratio, coff * head_dim, dtype=torch.float32)
+            )
             self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
             self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
             with torch.no_grad():
@@ -97,13 +105,19 @@ class Compressor(nn.Module):
         # State buffers for incremental decode-phase compression.
         self.register_buffer(
             "kv_state",
-            torch.zeros(max_batch_size, coff * compress_ratio, coff * head_dim, dtype=torch.float32),
+            torch.zeros(
+                max_batch_size,
+                coff * compress_ratio,
+                coff * head_dim,
+                dtype=torch.float32,
+            ),
             persistent=False,
         )
         self.register_buffer(
             "score_state",
             torch.full(
-                (max_batch_size, coff * compress_ratio, coff * head_dim), float("-inf"),
+                (max_batch_size, coff * compress_ratio, coff * head_dim),
+                float("-inf"),
                 dtype=torch.float32,
             ),
             persistent=False,
@@ -139,22 +153,33 @@ class Compressor(nn.Module):
         attention run with rank-local Q × full-KV downstream."""
         self._cp_ctx = cp_ctx
 
-    def forward(self, x: torch.Tensor, start_pos: int) -> Optional[torch.Tensor]:
+    def forward(self, x: torch.Tensor, start_pos) -> Optional[torch.Tensor]:
         assert self.kv_cache is not None, "Compressor.kv_cache must be bound by caller"
-        assert self.freqs_cis is not None, "Compressor.freqs_cis must be bound by caller"
+        assert (
+            self.freqs_cis is not None
+        ), "Compressor.freqs_cis must be bound by caller"
         bsz, seqlen, _ = x.size()
-        ratio, overlap, d, rd = self.compress_ratio, self.overlap, self.head_dim, self.rope_head_dim
+        ratio, overlap, d, rd = (
+            self.compress_ratio,
+            self.overlap,
+            self.head_dim,
+            self.rope_head_dim,
+        )
         dtype = x.dtype
         x32 = x.float()
         kv = torch.nn.functional.linear(x32, self.wkv.weight)
         score = torch.nn.functional.linear(x32, self.wgate.weight)
+
+        is_batched_decode = (
+            isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
+        )
 
         # CP prefill: all-gather rank-local kv / score to full sequence
         # before the S-pool step so the pool sees all tokens in logical
         # order.  Decode (start_pos > 0) runs rank-local as usual — the
         # kv_cache was already populated with the full KV during prefill.
         cp_ctx = self._cp_ctx
-        if cp_should_gather(cp_ctx, start_pos):
+        if not is_batched_decode and cp_should_gather(cp_ctx, start_pos):
             kv = cp_all_gather_full(kv, cp_ctx)
             score = cp_all_gather_full(score, cp_ctx)
             # After gather the effective seqlen is the FULL un-padded
@@ -163,19 +188,91 @@ class Compressor(nn.Module):
             # downstream pool/pooling-mask/RoPE math operates on full.
             bsz, seqlen = kv.size(0), kv.size(1)
 
-        if start_pos == 0:
+        if is_batched_decode:
+            # ---- batched decode: each batch at different position ----
+            slot = start_pos % ratio  # [B]
+            batch_idx = torch.arange(bsz, device=x.device)
+
+            # APE: per-batch slot
+            ape_per_batch = self.ape[slot]  # [B, coff*head_dim]
+            score = score.squeeze(1) + ape_per_batch  # [B, coff*head_dim]
+            kv = kv.squeeze(1)  # [B, coff*head_dim]
+
+            if overlap:
+                write_slot = ratio + slot  # [B]
+                self.kv_state[batch_idx, write_slot] = kv
+                self.score_state[batch_idx, write_slot] = score
+            else:
+                self.kv_state[batch_idx, slot] = kv
+                self.score_state[batch_idx, slot] = score
+
+            emit_mask = (start_pos + 1) % ratio == 0  # [B] bool
+            should_compress = emit_mask.any().item()
+
+            if should_compress:
+                emit_idx = batch_idx[emit_mask]
+                if overlap:
+                    kv_s = torch.cat(
+                        [
+                            self.kv_state[emit_idx, :ratio, :d],
+                            self.kv_state[emit_idx, ratio:, d:],
+                        ],
+                        dim=1,
+                    )
+                    sc_s = torch.cat(
+                        [
+                            self.score_state[emit_idx, :ratio, :d],
+                            self.score_state[emit_idx, ratio:, d:],
+                        ],
+                        dim=1,
+                    )
+                    compressed = (kv_s * sc_s.softmax(dim=1)).sum(dim=1, keepdim=True)
+                    self.kv_state[emit_idx, :ratio] = self.kv_state[emit_idx, ratio:]
+                    self.score_state[emit_idx, :ratio] = self.score_state[
+                        emit_idx, ratio:
+                    ]
+                else:
+                    compressed = (
+                        self.kv_state[emit_idx]
+                        * self.score_state[emit_idx].softmax(dim=1)
+                    ).sum(dim=1, keepdim=True)
+
+                compressed = self._rmsnorm(compressed.to(dtype))
+                emit_pos = start_pos[emit_mask]
+                freqs = self.freqs_cis[emit_pos + 1 - ratio].unsqueeze(
+                    1
+                )  # [E, 1, rope_dim//2]
+                apply_rotary_emb(compressed[..., -rd:], freqs)
+
+                write_pos = emit_pos // ratio
+                self.kv_cache[emit_idx, write_pos] = compressed.squeeze(1)
+
+            # Decode attention reads kv_cache directly, return None
+            return None
+
+        elif seqlen > 1:
+            # Prefill (fresh or continuation)
+            sp_int = (
+                int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
+            )
             should_compress = seqlen >= ratio
             remainder = seqlen % ratio
             cutoff = seqlen - remainder
             offset = ratio if overlap else 0
 
             if overlap and cutoff >= ratio:
-                self.kv_state[:bsz, :ratio] = kv[:, cutoff - ratio:cutoff]
-                self.score_state[:bsz, :ratio] = score[:, cutoff - ratio:cutoff] + self.ape
+                self.kv_state[:bsz, :ratio] = kv[:, cutoff - ratio : cutoff]
+                self.score_state[:bsz, :ratio] = (
+                    score[:, cutoff - ratio : cutoff] + self.ape
+                )
 
             if remainder > 0:
-                kv, self.kv_state[:bsz, offset:offset + remainder] = kv.split([cutoff, remainder], dim=1)
-                self.score_state[:bsz, offset:offset + remainder] = score[:, cutoff:] + self.ape[:remainder]
+                kv, self.kv_state[:bsz, offset : offset + remainder] = kv.split(
+                    [cutoff, remainder], dim=1
+                )
+                self.score_state[:bsz, offset : offset + remainder] = (
+                    score[:, cutoff:] + self.ape[:remainder]
+                )
                 score = score[:, :cutoff]
 
             kv = kv.unflatten(1, (-1, ratio))
@@ -204,35 +301,47 @@ class Compressor(nn.Module):
                 self.score_state[:bsz, ratio + start_pos % ratio] = score.squeeze(1)
                 if should_compress:
                     kv_state = torch.cat(
-                        [self.kv_state[:bsz, :ratio, :d], self.kv_state[:bsz, ratio:, d:]], dim=1
+                        [
+                            self.kv_state[:bsz, :ratio, :d],
+                            self.kv_state[:bsz, ratio:, d:],
+                        ],
+                        dim=1,
                     )
                     score_state = torch.cat(
-                        [self.score_state[:bsz, :ratio, :d], self.score_state[:bsz, ratio:, d:]], dim=1
+                        [
+                            self.score_state[:bsz, :ratio, :d],
+                            self.score_state[:bsz, ratio:, d:],
+                        ],
+                        dim=1,
                     )
-                    kv = (kv_state * score_state.softmax(dim=1)).sum(dim=1, keepdim=True)
+                    kv = (kv_state * score_state.softmax(dim=1)).sum(
+                        dim=1, keepdim=True
+                    )
                     self.kv_state[:bsz, :ratio] = self.kv_state[:bsz, ratio:]
                     self.score_state[:bsz, :ratio] = self.score_state[:bsz, ratio:]
             else:
                 self.kv_state[:bsz, start_pos % ratio] = kv.squeeze(1)
                 self.score_state[:bsz, start_pos % ratio] = score.squeeze(1)
                 if should_compress:
-                    kv = (self.kv_state[:bsz] * self.score_state[:bsz].softmax(dim=1)).sum(
-                        dim=1, keepdim=True
-                    )
+                    kv = (
+                        self.kv_state[:bsz] * self.score_state[:bsz].softmax(dim=1)
+                    ).sum(dim=1, keepdim=True)
 
         if not should_compress:
             return None
 
         kv = self._rmsnorm(kv.to(dtype))
-        if start_pos == 0:
-            freqs_cis = self.freqs_cis[:cutoff:ratio]
+        if seqlen > 1:
+            # Prefill (fresh or continuation)
+            freqs_cis = self.freqs_cis[sp_int : sp_int + cutoff : ratio]
         else:
             freqs_cis = self.freqs_cis[start_pos + 1 - self.compress_ratio].unsqueeze(0)
         apply_rotary_emb(kv[..., -rd:], freqs_cis)
         # NOTE: skip rotate_activation/fp4/fp8 quant for M2 (BF16-only path).
 
-        if start_pos == 0:
-            self.kv_cache[:bsz, :seqlen // ratio] = kv
+        if seqlen > 1:
+            write_start = sp_int // ratio
+            self.kv_cache[:bsz, write_start : write_start + cutoff // ratio] = kv
         else:
             self.kv_cache[:bsz, start_pos // ratio] = kv.squeeze(1)
         return kv

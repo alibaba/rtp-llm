@@ -4,7 +4,6 @@ Mirrors `inference/model.py:Block`. Each call applies hc_pre/F/hc_post
 twice — once for Attention and once for MoE FFN.
 """
 
-import os
 from typing import Dict, Optional
 
 import torch
@@ -15,48 +14,10 @@ from rtp_llm.models_py.modules.dsv4.attention import Attention
 from rtp_llm.models_py.modules.dsv4.mhc import hc_split_sinkhorn
 from rtp_llm.models_py.modules.dsv4.moe import MoE
 
-# P1 (prefill_opt/plan_0427.md): TileKernels fused mHC.
-#
-# Pre/post layout:
-#   * mhc_post   — works on tilelang 0.1.9+cuda.git441c3b06.  ~35× faster than
-#     REF (0.18 ms/call vs 6.27 ms/call at B=1 S=16384 hc=4 d=4096) since it
-#     fuses the [B,T,hc,hc,d] broadcast+sum into a single TileLang kernel.
-#   * mhc_pre    — pre_big_fuse + pre_norm_fn JIT both fail under our
-#     tilelang revision with `Check failed: condition.dtype().is_bool()`
-#     in `tilelang.transform.decouple_type_cast`.  Stays disabled until
-#     tilelang gets a fix; we use a faster REF rewrite (bf16 GEMM with
-#     fp32 RMSNorm scalar) — see _hc_pre below.
-#
-# Falls back to the REF/BMM path when:
-#   * DSV4_USE_TILEKERNELS_MHC_POST=0 explicitly disables it, or
-#   * tile_kernels is not importable, or
-#   * residual dtype != bf16 / mhc_mult != 4 / autograd enabled / B*S == 0.
-try:
-    from tile_kernels.modeling.mhc.functional import mhc_post as _tk_mhc_post
-    _TK_MHC_POST_OK = True
-except Exception:  # pragma: no cover — keep V4 importable without tile_kernels
-    _tk_mhc_post = None
-    _TK_MHC_POST_OK = False
-
-
-def _use_tk_mhc_post(residual: torch.Tensor, hc_mult: int) -> bool:
-    if not _TK_MHC_POST_OK:
-        return False
-    if os.environ.get("DSV4_USE_TILEKERNELS_MHC_POST", "1") == "0":
-        return False
-    if torch.is_grad_enabled():
-        return False
-    if hc_mult != 4:
-        return False
-    if residual.dtype != torch.bfloat16:
-        return False
-    if residual.numel() == 0:
-        return False
-    return True
-
 
 class _RMSNorm(nn.Module):
     """Standalone RMSNorm with FP32 weight, matches `inference/model.py:RMSNorm`."""
+
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
@@ -124,162 +85,159 @@ class Block(nn.Module):
 
         self.attn = Attention(
             layer_id=layer_id,
-            dim=dim, n_heads=n_heads, q_lora_rank=q_lora_rank,
-            head_dim=head_dim, rope_head_dim=rope_head_dim,
-            o_lora_rank=o_lora_rank, o_groups=o_groups,
-            window_size=window_size, compress_ratio=compress_ratio,
-            compress_rope_theta=compress_rope_theta, rope_theta=rope_theta,
-            rope_factor=rope_factor, beta_fast=beta_fast, beta_slow=beta_slow,
+            dim=dim,
+            n_heads=n_heads,
+            q_lora_rank=q_lora_rank,
+            head_dim=head_dim,
+            rope_head_dim=rope_head_dim,
+            o_lora_rank=o_lora_rank,
+            o_groups=o_groups,
+            window_size=window_size,
+            compress_ratio=compress_ratio,
+            compress_rope_theta=compress_rope_theta,
+            rope_theta=rope_theta,
+            rope_factor=rope_factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
             original_seq_len=original_seq_len,
-            max_batch_size=max_batch_size, max_seq_len=max_seq_len,
-            index_n_heads=index_n_heads, index_head_dim=index_head_dim,
-            index_topk=index_topk, norm_eps=norm_eps,
+            max_batch_size=max_batch_size,
+            max_seq_len=max_seq_len,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
+            norm_eps=norm_eps,
             weights=weights,
             prefix=f"{prefix}.attn" if self._factory_mode else "",
-            tp_size=tp_size, tp_rank=tp_rank,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
         )
         self.ffn = MoE(
-            layer_id=layer_id, dim=dim, moe_inter_dim=moe_inter_dim,
-            n_routed_experts=n_routed_experts, n_activated_experts=n_activated_experts,
-            n_shared_experts=n_shared_experts, score_func=score_func,
-            route_scale=route_scale, swiglu_limit=swiglu_limit,
-            n_hash_layers=n_hash_layers, vocab_size=vocab_size,
+            layer_id=layer_id,
+            dim=dim,
+            moe_inter_dim=moe_inter_dim,
+            n_routed_experts=n_routed_experts,
+            n_activated_experts=n_activated_experts,
+            n_shared_experts=n_shared_experts,
+            score_func=score_func,
+            route_scale=route_scale,
+            swiglu_limit=swiglu_limit,
+            n_hash_layers=n_hash_layers,
+            vocab_size=vocab_size,
             weights=weights,
             prefix=f"{prefix}.ffn" if self._factory_mode else "",
-            ep_size=ep_size, ep_rank=ep_rank,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
         )
         self.attn_norm = _RMSNorm(dim, norm_eps)
         self.ffn_norm = _RMSNorm(dim, norm_eps)
         if self._factory_mode:
             self.attn_norm.weight = nn.Parameter(
-                weights[f"{prefix}.attn_norm.weight"].float(), requires_grad=False,
+                weights[f"{prefix}.attn_norm.weight"].float(),
+                requires_grad=False,
             )
             self.ffn_norm.weight = nn.Parameter(
-                weights[f"{prefix}.ffn_norm.weight"].float(), requires_grad=False,
+                weights[f"{prefix}.ffn_norm.weight"].float(),
+                requires_grad=False,
             )
 
         mix_hc = (2 + hc_mult) * hc_mult
         hc_dim = hc_mult * dim
         if self._factory_mode:
-            self.hc_attn_fn = nn.Parameter(weights[f"{prefix}.hc_attn_fn"].float(), requires_grad=False)
-            self.hc_ffn_fn = nn.Parameter(weights[f"{prefix}.hc_ffn_fn"].float(), requires_grad=False)
-            self.hc_attn_base = nn.Parameter(weights[f"{prefix}.hc_attn_base"].float(), requires_grad=False)
-            self.hc_ffn_base = nn.Parameter(weights[f"{prefix}.hc_ffn_base"].float(), requires_grad=False)
-            self.hc_attn_scale = nn.Parameter(weights[f"{prefix}.hc_attn_scale"].float(), requires_grad=False)
-            self.hc_ffn_scale = nn.Parameter(weights[f"{prefix}.hc_ffn_scale"].float(), requires_grad=False)
+            self.hc_attn_fn = nn.Parameter(
+                weights[f"{prefix}.hc_attn_fn"].float(), requires_grad=False
+            )
+            self.hc_ffn_fn = nn.Parameter(
+                weights[f"{prefix}.hc_ffn_fn"].float(), requires_grad=False
+            )
+            self.hc_attn_base = nn.Parameter(
+                weights[f"{prefix}.hc_attn_base"].float(), requires_grad=False
+            )
+            self.hc_ffn_base = nn.Parameter(
+                weights[f"{prefix}.hc_ffn_base"].float(), requires_grad=False
+            )
+            self.hc_attn_scale = nn.Parameter(
+                weights[f"{prefix}.hc_attn_scale"].float(), requires_grad=False
+            )
+            self.hc_ffn_scale = nn.Parameter(
+                weights[f"{prefix}.hc_ffn_scale"].float(), requires_grad=False
+            )
         else:
             # Match official param naming for ckpt loading.
-            self.hc_attn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim, dtype=torch.float32))
-            self.hc_ffn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim, dtype=torch.float32))
+            self.hc_attn_fn = nn.Parameter(
+                torch.empty(mix_hc, hc_dim, dtype=torch.float32)
+            )
+            self.hc_ffn_fn = nn.Parameter(
+                torch.empty(mix_hc, hc_dim, dtype=torch.float32)
+            )
             self.hc_attn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
             self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
             self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
             self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
-    def _hc_fn_bf16(self, hc_fn: torch.Tensor) -> torch.Tensor:
-        """Lazy-cached bf16 view of an FP32 hc_fn parameter.
-
-        The FP32 → BF16 cast is ~30 µs on a [24, 16384] tensor; we cache by
-        ``id(hc_fn)`` so attn vs ffn fns get separate slots.  Memory: ~768 KB
-        per fn × 2 fns / layer × 43 layers ≈ 64 MB total — acceptable for
-        cutting per-call cast latency to zero.
-        """
-        cache = getattr(self, "_bf16_cache", None)
-        if cache is None:
-            cache = {}
-            self._bf16_cache = cache
-        key = id(hc_fn)
-        bf = cache.get(key)
-        if bf is None or bf.shape != hc_fn.shape or bf.device != hc_fn.device:
-            bf = hc_fn.to(torch.bfloat16)
-            cache[key] = bf
-        return bf
-
-    def _hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        """x: [B,S,hc,d] -> y: [B,S,d], post: [B,S,hc,1], comb: [B,S,hc,hc].
-
-        Always returns ``post`` in the ``[B,S,hc,1]`` shape so the post path
-        can route to TK ``mhc_post`` whenever it's importable.
-
-        Implementation (P1 of plan_0427.md):
-          - Cast hc_fn to BF16 (cached) and run F.linear in BF16 → tensor cores
-            (the previous all-FP32 path fell to SIMT sgemm 32x64, ~44 ms across
-            the model in the 64k+CP=4 trace).
-          - Compute the rsqrt scalar in FP32 from a BF16² mean + FP32 cast —
-            avoids the 1 GiB ``.float()`` of the [B,T,hc*d] activation.
-          - Sinkhorn loop stays in FP32 (numerically critical).
-        """
+    def _hc_pre(
+        self,
+        x: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+    ):
+        """x: [B,S,hc,d] -> y: [B,S,d], post: [B,S,hc], comb: [B,S,hc,hc]"""
         shape, dtype = x.size(), x.dtype
-        x_flat = x.flatten(2)  # [B, T, hc*d] bf16
-        # FP32 squared mean → rsqrt, single cast.  Kept in fp32 because the
-        # accumulation magnitude here is what determines numeric stability of
-        # the layer norm; a bf16 reduction on hc*d=16384 would lose ~7 bits.
-        x_flat_f32 = x_flat.float()
-        rsqrt = torch.rsqrt(x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps).to(dtype)
-        mixes = (F.linear(x_flat, self._hc_fn_bf16(hc_fn)) * rsqrt).float()
+        x_flat = x.flatten(2).float()
+        rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
+        mixes = F.linear(x_flat, hc_fn) * rsqrt
         pre, post, comb = hc_split_sinkhorn(
-            mixes, hc_scale, hc_base,
-            hc_mult=self.hc_mult, sinkhorn_iters=self.hc_sinkhorn_iters, eps=self.hc_eps,
+            mixes,
+            hc_scale,
+            hc_base,
+            hc_mult=self.hc_mult,
+            sinkhorn_iters=self.hc_sinkhorn_iters,
+            eps=self.hc_eps,
         )
-        y = torch.sum(pre.to(dtype).unsqueeze(-1) * x.view(*shape), dim=2)
-        # post in the [..., hc, 1] convention so _hc_post can call TK mhc_post.
-        return y.to(dtype), post.unsqueeze(-1), comb
+        y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=2)
+        return y.to(dtype), post, comb
 
-    def _hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
-        """Combine the sublayer output ``x`` with the per-stream residual via post/comb.
-
-        Three implementations, fastest-first:
-          1. TileKernels ``mhc_post`` — single fused kernel, ~35× the REF.
-          2. BF16 BMM rewrite (P1 fallback) — ``comb.T @ residual`` runs as
-             a tensor-core BMM, ~1.8× the REF.
-          3. Original 5D broadcast+sum — kept as a last resort for
-             non-bf16 / odd-shape inputs.
-        """
-        # Path 1: TK fused post (preferred).  Requires post in [..., hc, 1] shape;
-        # _hc_pre always emits that now.
-        if (
-            _use_tk_mhc_post(residual, self.hc_mult)
-            and x.dtype == torch.bfloat16
-            and post.dim() == residual.dim()
-        ):
-            return _tk_mhc_post(x, residual, post, comb)
-
-        # Normalize post to the [..., hc] form for the fallback paths.
-        if post.dim() == residual.dim():
-            post_b = post.squeeze(-1)
-        else:
-            post_b = post
-
-        # Path 2: BF16 BMM rewrite.  Replaces the [B,T,hc,hc,d] intermediate
-        # (~1 GiB at S=16384) of the REF with a tensor-core BMM.
-        if x.dtype == torch.bfloat16 and residual.dtype == torch.bfloat16:
-            post_bf16 = post_b.to(x.dtype)
-            first = post_bf16.unsqueeze(-1) * x.unsqueeze(-2)  # [B,T,hc,d] bf16 broadcast
-            comb_bf16 = comb.to(x.dtype)
-            # REF reduces over the FIRST hc dim of comb (= comb.T @ residual).
-            second = torch.matmul(comb_bf16.transpose(-2, -1), residual)
-            return (first + second).to(x.dtype)
-
-        # Path 3: original REF (covers fp32 / mixed-dtype debug paths).
-        y = (post_b.unsqueeze(-1) * x.unsqueeze(-2)
-             + torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2))
+    def _hc_post(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ):
+        y = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
+            comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2
+        )
         return y.type_as(x)
 
-    def forward(self, x: torch.Tensor, start_pos: int, input_ids: Optional[torch.Tensor]) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, start_pos, input_ids: Optional[torch.Tensor]
+    ) -> torch.Tensor:
         # Attention path
         residual = x
-        x_pre, post, comb = self._hc_pre(x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
+        x_pre, post, comb = self._hc_pre(
+            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+        )
         x_pre = self.attn_norm(x_pre)
         attn_out = self.attn(x_pre, start_pos)
         x = self._hc_post(attn_out, residual, post, comb)
 
         # FFN path
         residual = x
-        x_pre, post, comb = self._hc_pre(x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
+        x_pre, post, comb = self._hc_pre(
+            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+        )
         x_pre = self.ffn_norm(x_pre)
-        ffn_out = self.ffn(x_pre, input_ids if input_ids is not None
-                           else torch.zeros(x.size(0), x.size(1), dtype=torch.long, device=x.device))
+        ffn_out = self.ffn(
+            x_pre,
+            (
+                input_ids
+                if input_ids is not None
+                else torch.zeros(
+                    x.size(0), x.size(1), dtype=torch.long, device=x.device
+                )
+            ),
+        )
         x = self._hc_post(ffn_out, residual, post, comb)
         return x
 
@@ -308,55 +266,109 @@ class MTPBlock(Block):
     """
 
     def __init__(
-        self, layer_id: int, dim: int, n_heads: int, q_lora_rank: int,
-        head_dim: int, rope_head_dim: int, o_lora_rank: int, o_groups: int,
-        window_size: int, compress_ratio: int, compress_rope_theta: float,
-        rope_theta: float, rope_factor: float, beta_fast: int, beta_slow: int,
-        original_seq_len: int, max_batch_size: int, max_seq_len: int,
-        index_n_heads: int, index_head_dim: int, index_topk: int,
-        moe_inter_dim: int, n_routed_experts: int, n_activated_experts: int,
-        n_shared_experts: int, score_func: str, route_scale: float,
-        swiglu_limit: float, n_hash_layers: int, vocab_size: int,
-        hc_mult: int, hc_sinkhorn_iters: int, hc_eps: float,
+        self,
+        layer_id: int,
+        dim: int,
+        n_heads: int,
+        q_lora_rank: int,
+        head_dim: int,
+        rope_head_dim: int,
+        o_lora_rank: int,
+        o_groups: int,
+        window_size: int,
+        compress_ratio: int,
+        compress_rope_theta: float,
+        rope_theta: float,
+        rope_factor: float,
+        beta_fast: int,
+        beta_slow: int,
+        original_seq_len: int,
+        max_batch_size: int,
+        max_seq_len: int,
+        index_n_heads: int,
+        index_head_dim: int,
+        index_topk: int,
+        moe_inter_dim: int,
+        n_routed_experts: int,
+        n_activated_experts: int,
+        n_shared_experts: int,
+        score_func: str,
+        route_scale: float,
+        swiglu_limit: float,
+        n_hash_layers: int,
+        vocab_size: int,
+        hc_mult: int,
+        hc_sinkhorn_iters: int,
+        hc_eps: float,
         norm_eps: float = 1e-6,
         weights: Optional[Dict[str, torch.Tensor]] = None,
         prefix: str = "",
-        tp_size: int = 1, tp_rank: int = 0,
-        ep_size: int = 1, ep_rank: int = 0,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        ep_size: int = 1,
+        ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
     ):
         super().__init__(
-            layer_id=layer_id, dim=dim, n_heads=n_heads, q_lora_rank=q_lora_rank,
-            head_dim=head_dim, rope_head_dim=rope_head_dim,
-            o_lora_rank=o_lora_rank, o_groups=o_groups,
-            window_size=window_size, compress_ratio=compress_ratio,
-            compress_rope_theta=compress_rope_theta, rope_theta=rope_theta,
-            rope_factor=rope_factor, beta_fast=beta_fast, beta_slow=beta_slow,
+            layer_id=layer_id,
+            dim=dim,
+            n_heads=n_heads,
+            q_lora_rank=q_lora_rank,
+            head_dim=head_dim,
+            rope_head_dim=rope_head_dim,
+            o_lora_rank=o_lora_rank,
+            o_groups=o_groups,
+            window_size=window_size,
+            compress_ratio=compress_ratio,
+            compress_rope_theta=compress_rope_theta,
+            rope_theta=rope_theta,
+            rope_factor=rope_factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
             original_seq_len=original_seq_len,
-            max_batch_size=max_batch_size, max_seq_len=max_seq_len,
-            index_n_heads=index_n_heads, index_head_dim=index_head_dim,
+            max_batch_size=max_batch_size,
+            max_seq_len=max_seq_len,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
             index_topk=index_topk,
-            moe_inter_dim=moe_inter_dim, n_routed_experts=n_routed_experts,
-            n_activated_experts=n_activated_experts, n_shared_experts=n_shared_experts,
-            score_func=score_func, route_scale=route_scale,
-            swiglu_limit=swiglu_limit, n_hash_layers=n_hash_layers,
+            moe_inter_dim=moe_inter_dim,
+            n_routed_experts=n_routed_experts,
+            n_activated_experts=n_activated_experts,
+            n_shared_experts=n_shared_experts,
+            score_func=score_func,
+            route_scale=route_scale,
+            swiglu_limit=swiglu_limit,
+            n_hash_layers=n_hash_layers,
             vocab_size=vocab_size,
-            hc_mult=hc_mult, hc_sinkhorn_iters=hc_sinkhorn_iters, hc_eps=hc_eps,
-            norm_eps=norm_eps, weights=weights, prefix=prefix,
-            tp_size=tp_size, tp_rank=tp_rank,
-            ep_size=ep_size, ep_rank=ep_rank,
+            hc_mult=hc_mult,
+            hc_sinkhorn_iters=hc_sinkhorn_iters,
+            hc_eps=hc_eps,
+            norm_eps=norm_eps,
+            weights=weights,
+            prefix=prefix,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
         )
         from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 
         self.dim = dim
         if self._factory_mode:
-            from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear_from_dict
+            from rtp_llm.models_py.modules.dsv4.attention import (
+                _v4_fp8_linear_from_dict,
+            )
+
             self.e_proj = _v4_fp8_linear_from_dict(
-                weights, f"{prefix}.e_proj.weight", f"{prefix}.e_proj.scale",
+                weights,
+                f"{prefix}.e_proj.weight",
+                f"{prefix}.e_proj.scale",
             )
             self.h_proj = _v4_fp8_linear_from_dict(
-                weights, f"{prefix}.h_proj.weight", f"{prefix}.h_proj.scale",
+                weights,
+                f"{prefix}.h_proj.weight",
+                f"{prefix}.h_proj.scale",
             )
             self._h_proj_is_factory = True
         else:
@@ -370,14 +382,28 @@ class MTPBlock(Block):
 
         hc_dim = hc_mult * dim
         if self._factory_mode:
-            self.enorm.weight = nn.Parameter(weights[f"{prefix}.enorm.weight"].float(), requires_grad=False)
-            self.hnorm.weight = nn.Parameter(weights[f"{prefix}.hnorm.weight"].float(), requires_grad=False)
-            self.norm.weight = nn.Parameter(weights[f"{prefix}.norm.weight"].float(), requires_grad=False)
-            self.hc_head_fn = nn.Parameter(weights[f"{prefix}.hc_head_fn"].float(), requires_grad=False)
-            self.hc_head_base = nn.Parameter(weights[f"{prefix}.hc_head_base"].float(), requires_grad=False)
-            self.hc_head_scale = nn.Parameter(weights[f"{prefix}.hc_head_scale"].float(), requires_grad=False)
+            self.enorm.weight = nn.Parameter(
+                weights[f"{prefix}.enorm.weight"].float(), requires_grad=False
+            )
+            self.hnorm.weight = nn.Parameter(
+                weights[f"{prefix}.hnorm.weight"].float(), requires_grad=False
+            )
+            self.norm.weight = nn.Parameter(
+                weights[f"{prefix}.norm.weight"].float(), requires_grad=False
+            )
+            self.hc_head_fn = nn.Parameter(
+                weights[f"{prefix}.hc_head_fn"].float(), requires_grad=False
+            )
+            self.hc_head_base = nn.Parameter(
+                weights[f"{prefix}.hc_head_base"].float(), requires_grad=False
+            )
+            self.hc_head_scale = nn.Parameter(
+                weights[f"{prefix}.hc_head_scale"].float(), requires_grad=False
+            )
         else:
-            self.hc_head_fn = nn.Parameter(torch.empty(hc_mult, hc_dim, dtype=torch.float32))
+            self.hc_head_fn = nn.Parameter(
+                torch.empty(hc_mult, hc_dim, dtype=torch.float32)
+            )
             self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
             self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
@@ -390,34 +416,31 @@ class MTPBlock(Block):
 
     def forward_draft(
         self,
-        x: torch.Tensor,                            # [B, S, hc, dim]
+        x: torch.Tensor,  # [B, S, hc, dim]
         start_pos: int,
-        input_ids: torch.Tensor,                    # [B, S] shifted one step
-        embed: nn.Module,                           # shared V4Transformer.embed
-        lm_head_weight: torch.Tensor,               # shared [vocab, dim] FP32
+        input_ids: torch.Tensor,  # [B, S] shifted one step
+        embed: nn.Module,  # shared V4Transformer.embed
+        lm_head_weight: torch.Tensor,  # shared [vocab, dim] FP32
     ) -> torch.Tensor:
         """Draft-token logits. See class docstring."""
-        e = embed(input_ids)                              # [B, S, dim]
+        e = embed(input_ids)  # [B, S, dim]
         e = self.enorm(e)
-        x_norm = self.hnorm(x)                            # [B, S, hc, dim] (norm over last dim)
-        e_proj_out = self._apply_proj(self.e_proj, e).unsqueeze(2)     # [B, S, 1, dim]
-        h_proj_out = self._apply_proj(self.h_proj, x_norm)             # [B, S, hc, dim]
-        x_fused = e_proj_out + h_proj_out                              # [B, S, hc, dim]
+        x_norm = self.hnorm(x)  # [B, S, hc, dim] (norm over last dim)
+        e_proj_out = self._apply_proj(self.e_proj, e).unsqueeze(2)  # [B, S, 1, dim]
+        h_proj_out = self._apply_proj(self.h_proj, x_norm)  # [B, S, hc, dim]
+        x_fused = e_proj_out + h_proj_out  # [B, S, hc, dim]
 
         # Parent Block runs attn + FFN + mHC on [B, S, hc, dim]
-        x_after = super().forward(x_fused, start_pos, input_ids)       # [B, S, hc, dim]
+        x_after = super().forward(x_fused, start_pos, input_ids)  # [B, S, hc, dim]
 
-        # hc_head_reduce — same BF16-GEMM trick as Block._hc_pre / V4Transformer._hc_head_reduce.
+        # hc_head_reduce (same math as V4Transformer._hc_head_reduce)
         shape, dtype = x_after.size(), x_after.dtype
-        x_flat = x_after.flatten(2)                                     # bf16 [B, S, hc*dim]
-        bf = getattr(self, "_hc_head_fn_bf16", None)
-        if bf is None or bf.shape != self.hc_head_fn.shape or bf.device != self.hc_head_fn.device:
-            bf = self.hc_head_fn.to(torch.bfloat16) if self.hc_head_fn.dtype != torch.bfloat16 else self.hc_head_fn
-            self._hc_head_fn_bf16 = bf
-        x_flat_f32 = x_flat.float()
-        rsqrt = torch.rsqrt(x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps).to(dtype)
-        mixes = (F.linear(x_flat, bf) * rsqrt).float()                  # bf16 GEMM, fp32 epilogue
-        pre = torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
-        h = torch.sum(pre.to(dtype).unsqueeze(-1) * x_after.view(*shape), dim=2)  # bf16 sum
-        h = self.norm(h.to(dtype))                                      # [B, S, dim]
-        return F.linear(h.float(), lm_head_weight)                      # [B, S, vocab]
+        x_flat = x_after.flatten(2).float()  # [B, S, hc*dim]
+        rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
+        mixes = F.linear(x_flat, self.hc_head_fn) * rsqrt
+        pre = (
+            torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
+        )
+        h = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=2)  # [B, S, dim]
+        h = self.norm(h.to(dtype))  # [B, S, dim]
+        return F.linear(h.float(), lm_head_weight)  # [B, S, vocab]

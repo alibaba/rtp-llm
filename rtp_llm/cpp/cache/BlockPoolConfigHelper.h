@@ -92,21 +92,27 @@ public:
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", group_id);
 
         BlockPoolConfig config;
-        config.block_num = (group_id < cache_config.group_block_nums.size() && cache_config.group_block_nums[group_id] > 0) ?
-                               cache_config.group_block_nums[group_id] :
-                               cache_config.block_num;
+        const bool      has_group_blocks =
+            group_id < cache_config.group_block_nums.size() && cache_config.group_block_nums[group_id] > 0;
+        config.block_num = has_group_blocks ? cache_config.group_block_nums[group_id] : cache_config.block_num;
+        RTP_LLM_LOG_INFO("createConfigForGroup: gid=%zu block_num=%d (has_group_blocks=%d, "
+                         "group_block_nums.size=%zu, global_block_num=%d)",
+                         group_id,
+                         config.block_num,
+                         has_group_blocks,
+                         cache_config.group_block_nums.size(),
+                         cache_config.block_num);
 
         const uint32_t layer_num = static_cast<uint32_t>(cache_config.global_layer_ids[group_id].size());
         RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "group %zu has no layers", group_id);
 
-        const size_t kv_stride = (group_id < cache_config.group_kv_block_stride_bytes.size()
+        const size_t kv_stride    = (group_id < cache_config.group_kv_block_stride_bytes.size()
                                   && cache_config.group_kv_block_stride_bytes[group_id] > 0) ?
-                                     cache_config.group_kv_block_stride_bytes[group_id] :
-                                     spec->block_size_bytes();
-        const size_t scale_stride =
-            (group_id < cache_config.group_kv_scale_stride_bytes.size()) ?
-                cache_config.group_kv_scale_stride_bytes[group_id] :
-                spec->scale_block_size_bytes();
+                                        cache_config.group_kv_block_stride_bytes[group_id] :
+                                        spec->block_size_bytes();
+        const size_t scale_stride = (group_id < cache_config.group_kv_scale_stride_bytes.size()) ?
+                                        cache_config.group_kv_scale_stride_bytes[group_id] :
+                                        spec->scale_block_size_bytes();
 
         CacheConfig group_cache_config = cache_config;
         group_cache_config.block_num   = config.block_num;
