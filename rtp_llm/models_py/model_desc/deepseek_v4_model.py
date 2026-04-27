@@ -162,6 +162,32 @@ class DeepSeekV4Model(GptModelBase):
                 args.ep_rank, args.ep_size, args.dp_rank, args.dp_size,
             )
 
+        # CP-aware Mega MoE buffer sizing.  When CP is on, each rank only
+        # sees ``max_seq_len / cp_size`` prefill tokens (zigzag split), so
+        # the per-rank symm-mem dispatch buffer can be cp_size× smaller.
+        # Without this, a 64k+CP=4 prefill tries to allocate a per-rank
+        # buffer sized for the full 64k which aborts in
+        # ``CUDASymmetricMemory::~CUDASymmetricMemory`` during V4Transformer
+        # construction (per-rank symm region limit + ~190 GB BF16 footprint
+        # split across 4 ranks leaves no headroom).  RTP-LLM's CP convention
+        # repurposes the TP group as the CP group (cp_size == raw tp_size,
+        # ``get_attn_tp_size()`` returns 1), so use the raw pc.tp_size here.
+        cp_size = 1
+        if pc is not None and getattr(pc, "prefill_cp_config", None) is not None:
+            try:
+                if pc.prefill_cp_config.is_enabled():
+                    cp_size = int(getattr(pc, "tp_size", 1) or 1)
+            except Exception:  # pyi-only stub or non-CP build
+                pass
+        if cp_size > 1:
+            new_bound = max(args.max_seq_len // cp_size, 4096)
+            logging.info(
+                "[DeepSeekV4Model] CP=%d: max_tokens_per_rank %d -> %d "
+                "(Mega MoE per-rank symm-mem buffer)",
+                cp_size, args.max_tokens_per_rank, new_bound,
+            )
+            args.max_tokens_per_rank = new_bound
+
         logging.info(
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d "
             "o_groups=%d n_experts=%d n_act=%d moe_inter=%d win=%d hc_mult=%d "
