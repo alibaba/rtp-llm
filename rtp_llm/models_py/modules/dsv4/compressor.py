@@ -9,6 +9,7 @@ softmax-gated weighting, applies RMSNorm + RoPE on the compressed
 result, and writes into a target `kv_cache` buffer.
 """
 
+import os
 from typing import Dict, Optional
 
 import torch
@@ -18,6 +19,23 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext, cp_all_gather_full, cp_should_gather,
 )
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
+
+# P2 (prefill_opt/final_plan.md): fused softmax+weighted-sum Triton kernel.
+# Replaces the prefill `(kv * score.softmax(dim=2)).sum(dim=2)` chain
+# (~10 launches) with one kernel.  Set DSV4_COMPRESSOR_FAST=0 to force
+# the REF path (debug only).
+try:
+    from rtp_llm.models_py.modules.dsv4._compressor_triton import v4_compressor_pool
+    _COMPRESSOR_FAST_OK = True
+except Exception:  # pragma: no cover — keep V4 importable without Triton
+    v4_compressor_pool = None
+    _COMPRESSOR_FAST_OK = False
+
+
+def _use_compressor_fast() -> bool:
+    if not _COMPRESSOR_FAST_OK:
+        return False
+    return os.environ.get("DSV4_COMPRESSOR_FAST", "1") != "0"
 
 
 class _CompressorNorm(nn.Module):
@@ -167,7 +185,16 @@ class Compressor(nn.Module):
                 kv = self._overlap_transform(kv, 0)
                 score = self._overlap_transform(score, float("-inf"))
 
-            kv = (kv * score.softmax(dim=2)).sum(dim=2)
+            # Fast path: single Triton kernel fuses per-D softmax over G
+            # + weighted sum.  REF chain materializes 3 fp32 intermediates
+            # of size [B, NB, G, D] each (softmax exp/sum, masked mul,
+            # then sum).  See _compressor_triton.py.
+            if _use_compressor_fast() and kv.is_cuda and kv.numel() > 0:
+                kv_c = kv if kv.is_contiguous() else kv.contiguous()
+                sc_c = score if score.is_contiguous() else score.contiguous()
+                kv = v4_compressor_pool(kv_c, sc_c)
+            else:
+                kv = (kv * score.softmax(dim=2)).sum(dim=2)
         else:
             should_compress = (start_pos + 1) % self.compress_ratio == 0
             score = score + self.ape[start_pos % ratio]
