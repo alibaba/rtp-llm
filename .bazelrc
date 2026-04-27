@@ -140,10 +140,29 @@ build:cuda13_arm --host_copt=-Wno-missing-field-initializers
 # can swap in CUDA-13-specific deps (cutlass_cu13, flashinfer_cpp_cu13)
 # without being tied to the ARM path's using_cuda13_arm.
 build:cuda13 --config=cuda13_base
+# Same -Wno-* set as cuda13_arm — gcc 10 (al8) on the CUDA 13 toolchain is
+# strict enough to flag warnings in third-party code (grpc tcp_posix.cc:
+# `(flag & MSG_CTRUNC) == 1` triggers -Werror=tautological-compare; etc.).
+build:cuda13 --copt=-Wno-tautological-compare
+build:cuda13 --copt=-Wno-array-bounds
+build:cuda13 --copt=-Wno-unused-result
+build:cuda13 --copt=-Wno-array-parameter
+build:cuda13 --copt=-Wno-narrowing
+# Mirror the cuda13_arm pattern (which sets using_cuda12_arm=true alongside
+# using_cuda13_arm=true): keep using_cuda12_9_x86=true so existing select()
+# branches that route x86 → cuda12_9-class deps (torch_2.8_py310_cuda,
+# pip_gpu_cuda12_9_torch_*, requirement_gpu_cuda12_9, etc.) keep matching.
+# using_cuda13_x86 then layers CUDA-13-specific overrides on top
+# (cutlass_cu13, flashinfer_cpp_cu13).  Without this, the torch_deps
+# select() falls through to //conditions:default → torch_2.1_py310_cpu
+# which has no libc10_cuda.so under @//:using_cuda → SolibSymlink failure.
 build:cuda13 --define=using_cuda13_x86=true
-build:cuda13 --define=using_cuda12_9_x86=false
-build:cuda13 --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0,10.0"
-build:cuda13 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0,10.0"
+build:cuda13 --define=using_cuda12_9_x86=true
+# nvcc 13 dropped Volta (sm_70) and Turing (sm_75); supported set on
+# CUDA 13.x is sm_80..sm_120.  With sm_70/sm_75 left in the list nvcc
+# fatals out at:  Unsupported gpu architecture 'compute_70'.
+build:cuda13 --action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9,9.0,10.0"
+build:cuda13 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9,9.0,10.0"
 build:cuda13 --copt="-DENABLE_FP4=1"
 build:cuda13 --copt=-Wno-missing-field-initializers
 build:cuda13 --copt=-Wno-error=missing-field-initializers
