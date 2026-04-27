@@ -219,13 +219,26 @@ class V4Transformer(nn.Module):
                     ic.set_cp_ctx(cp_ctx)
 
     def _hc_head_reduce(self, x: torch.Tensor) -> torch.Tensor:
-        """[B, S, hc, d] -> [B, S, d]"""
+        """[B, S, hc, d] -> [B, S, d]
+
+        Same BF16-GEMM trick as Block._hc_pre (plan_0427.md P0): keep x in
+        BF16 for the F.linear (tensor cores) and only cast for the FP32
+        squared mean.  Eliminates the residual sgemm 128x128 SIMT call this
+        used to emit at the end of every forward.
+        """
         shape, dtype = x.size(), x.dtype
-        x_flat = x.flatten(2).float()
-        rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x_flat, self.hc_head_fn) * rsqrt
+        x_flat = x.flatten(2)  # bf16
+        # Cache bf16 hc_head_fn once per Transformer instance.
+        bf = getattr(self, "_hc_head_fn_bf16", None)
+        if bf is None or bf.shape != self.hc_head_fn.shape or bf.device != self.hc_head_fn.device:
+            bf = self.hc_head_fn.to(torch.bfloat16) if self.hc_head_fn.dtype != torch.bfloat16 else self.hc_head_fn
+            self._hc_head_fn_bf16 = bf
+        x_flat_f32 = x_flat.float()
+        rsqrt = torch.rsqrt(x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps).to(dtype)
+        mixes = (F.linear(x_flat, bf) * rsqrt).float()
         pre = torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
-        y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=2)
+        # Sum over hc dim — bf16 broadcast+sum is cheaper than fp32.
+        y = torch.sum(pre.to(dtype).unsqueeze(-1) * x.view(*shape), dim=2)
         return y.to(dtype)
 
     @torch.inference_mode()
