@@ -490,7 +490,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("deep_gemm_num_sm", &HWKernelConfig::deep_gemm_num_sm)
         .def_readwrite("arm_gemm_use_kai", &HWKernelConfig::arm_gemm_use_kai)
-        .def_readwrite("enable_stable_scatter_add", &HWKernelConfig::enable_stable_scatter_add)
         .def_readwrite("enable_multi_block_mode", &HWKernelConfig::enable_multi_block_mode)
         .def_readwrite("ft_disable_custom_ar", &HWKernelConfig::ft_disable_custom_ar)
         .def_readwrite("rocm_hipblaslt_config", &HWKernelConfig::rocm_hipblaslt_config)
@@ -503,14 +502,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("decode_capture_batch_sizes", &HWKernelConfig::decode_capture_batch_sizes)
         .def_readwrite("disable_dpc_random", &HWKernelConfig::disable_dpc_random)
         .def_readwrite("rocm_disable_custom_ag", &HWKernelConfig::rocm_disable_custom_ag)
-        .def_readwrite("deterministic_gemm", &HWKernelConfig::deterministic_gemm)
-        .def_readwrite("deterministic_attn", &HWKernelConfig::deterministic_attn)
         .def("to_string", &HWKernelConfig::to_string)
         .def(py::pickle(
             [](const HWKernelConfig& self) {
                 return py::make_tuple(self.deep_gemm_num_sm,
                                       self.arm_gemm_use_kai,
-                                      self.enable_stable_scatter_add,
                                       self.enable_multi_block_mode,
                                       self.ft_disable_custom_ar,
                                       self.rocm_hipblaslt_config,
@@ -522,32 +518,27 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.prefill_capture_seq_lens,
                                       self.decode_capture_batch_sizes,
                                       self.disable_dpc_random,
-                                      self.rocm_disable_custom_ag,
-                                      self.deterministic_gemm,
-                                      self.deterministic_attn);
+                                      self.rocm_disable_custom_ag);
             },
             [](py::tuple t) {
-                if (t.size() != 17)
+                if (t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
                     c.deep_gemm_num_sm             = t[0].cast<int>();
                     c.arm_gemm_use_kai             = t[1].cast<bool>();
-                    c.enable_stable_scatter_add    = t[2].cast<bool>();
-                    c.enable_multi_block_mode      = t[3].cast<bool>();
-                    c.ft_disable_custom_ar         = t[4].cast<bool>();
-                    c.rocm_hipblaslt_config        = t[5].cast<std::string>();
-                    c.use_swizzleA                 = t[6].cast<bool>();
-                    c.enable_cuda_graph            = t[7].cast<bool>();
-                    c.enable_cuda_graph_debug_mode = t[8].cast<bool>();
-                    c.enable_native_cuda_graph     = t[9].cast<bool>();
-                    c.num_native_cuda_graph        = t[10].cast<int>();
-                    c.prefill_capture_seq_lens     = t[11].cast<std::vector<int>>();
-                    c.decode_capture_batch_sizes   = t[12].cast<std::vector<int>>();
-                    c.disable_dpc_random           = t[13].cast<bool>();
-                    c.rocm_disable_custom_ag       = t[14].cast<bool>();
-                    c.deterministic_gemm           = t[15].cast<bool>();
-                    c.deterministic_attn           = t[16].cast<bool>();
+                    c.enable_multi_block_mode      = t[2].cast<bool>();
+                    c.ft_disable_custom_ar         = t[3].cast<bool>();
+                    c.rocm_hipblaslt_config        = t[4].cast<std::string>();
+                    c.use_swizzleA                 = t[5].cast<bool>();
+                    c.enable_cuda_graph            = t[6].cast<bool>();
+                    c.enable_cuda_graph_debug_mode = t[7].cast<bool>();
+                    c.enable_native_cuda_graph     = t[8].cast<bool>();
+                    c.num_native_cuda_graph        = t[9].cast<int>();
+                    c.prefill_capture_seq_lens     = t[10].cast<std::vector<int>>();
+                    c.decode_capture_batch_sizes   = t[11].cast<std::vector<int>>();
+                    c.disable_dpc_random           = t[12].cast<bool>();
+                    c.rocm_disable_custom_ag       = t[13].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
                 }

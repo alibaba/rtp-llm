@@ -101,7 +101,6 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
             v = envs.get(k, []) if type(envs) == "dict" else []
             world_size = get_world_size_from_smoke_args(role_args)
             v = v + ['WORLD_SIZE=' + str(world_size)]
-            v = v + ['DETERMINISTIC_GEMM=1']
             gpu_count += world_size
             part_env_list.append("\"" + k + "\": " + "[" + ",".join(["\"" + x + "\"" for x in v]) +  "]")
             data.extend(extract_data(v))
@@ -110,14 +109,6 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
         envs_list = envs if type(envs) == "list" else []
         world_size = get_world_size_from_smoke_args(smoke_args)
         envs_list = envs_list + ['WORLD_SIZE=' + str(world_size)]
-        has_mi308x = False
-        for card in gpu_type:
-            if card.startswith("MI308X"):
-                has_mi308x = True
-                break
-        if has_mi308x:
-            envs_list = envs_list + ['ENABLE_STABLE_SCATTER_ADD=ON']
-        envs_list = envs_list + ['DETERMINISTIC_GEMM=1']
         gpu_count += world_size
         env_str = "[" + ",".join(["\\\"" + x + "\\\"" for x in envs_list]) +  "]"
         data.extend(extract_data(envs_list))

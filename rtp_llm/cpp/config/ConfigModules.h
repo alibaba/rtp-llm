@@ -211,7 +211,6 @@ struct ProfilingDebugLoggingConfig {
 struct HWKernelConfig {
     int         deep_gemm_num_sm             = -1;
     bool        arm_gemm_use_kai             = false;
-    bool        enable_stable_scatter_add    = false;
     bool        enable_multi_block_mode      = true;
     bool        ft_disable_custom_ar         = true;
     std::string rocm_hipblaslt_config        = "gemm_config.csv";
@@ -228,8 +227,6 @@ struct HWKernelConfig {
     std::vector<int> decode_capture_batch_sizes;
     bool             disable_dpc_random     = false;
     bool             rocm_disable_custom_ag = true;
-    bool             deterministic_gemm     = false;
-    bool             deterministic_attn     = false;
     std::string      to_string() const;
 };
 

@@ -65,15 +65,6 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     )
 
     hw_kernel_group.add_argument(
-        "--enable_stable_scatter_add",
-        env_name="ENABLE_STABLE_SCATTER_ADD",
-        bind_to=(hw_kernel_config, "enable_stable_scatter_add"),
-        type=str2bool,
-        default=False,
-        help="控制是否启用稳定的 scatter add 操作。",
-    )
-
-    hw_kernel_group.add_argument(
         "--enable_multi_block_mode",
         env_name="ENABLE_MULTI_BLOCK_MODE",
         bind_to=(hw_kernel_config, "enable_multi_block_mode"),
@@ -153,27 +144,6 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         type=str2bool,
         default=None,
         help="设置为 `True` 时，禁用ROCm平台自定义的 AllGather (AG) 实现，可能回退到标准库（如 RCCL）的 AllGather。",
-    )
-
-    hw_kernel_group.add_argument(
-        "--deterministic_gemm",
-        env_name="DETERMINISTIC_GEMM",
-        bind_to=(hw_kernel_config, "deterministic_gemm"),
-        type=str2bool,
-        default=False,
-        help="设置为 `True` 时，cuBLASLt GEMM 优先选择无 split-K 的确定性算法（splitK=1），"
-        "保证多次运行结果逐 bit 一致，适用于测试/验证场景。默认 False，使用性能最优算法。",
-    )
-
-    hw_kernel_group.add_argument(
-        "--deterministic_attn",
-        env_name="DETERMINISTIC_ATTN",
-        bind_to=(hw_kernel_config, "deterministic_attn"),
-        type=str2bool,
-        default=False,
-        help="设置为 `True` 时，注意力计算跳过 TRT_V2/PAGED_TRT_V2 FMHA 内核，"
-        "优先选择 OPEN_SOURCE/PAGED_OPEN_SOURCE Flash Attention 实现，"
-        "保证多次运行结果确定性一致。默认 False，使用性能最优算法。",
     )
 
 

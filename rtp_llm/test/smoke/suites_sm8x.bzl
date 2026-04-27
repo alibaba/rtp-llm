@@ -35,13 +35,13 @@ def sm8x_suites():
             smoke_test(
                 name="tp2",
                 task_info="data/model/qwen25/q_r_s_fp16.json",
-                smoke_args="--warm_up 0 --act_type FP16 --tp_size 2 --deterministic_attn 1",
+                smoke_args="--warm_up 0 --act_type FP16 --tp_size 2",
                 gpu_type=["L20"],
             ),
             smoke_test(
                 name="beam_search_tp2",
                 task_info="data/model/qwen25/bs_q_r.json",
-                smoke_args="--act_type FP16 --tp_size 2 --deterministic_attn 1 --warm_up 0",
+                smoke_args="--act_type FP16 --tp_size 2 --warm_up 0",
                 gpu_type=["L20"],
             ),
             smoke_test(
