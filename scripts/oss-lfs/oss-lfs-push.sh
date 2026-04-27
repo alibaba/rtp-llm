@@ -3,13 +3,39 @@
 # Usage: oss-lfs-push.sh <file1> [file2] ...
 #   or:  oss-lfs-push.sh --all   (scan for matching patterns)
 #
-# OFFLINE-ONLY MAINTENANCE SCRIPT — not invoked by CI or production.
-# Credentials are passed on the ossutil command line for simplicity, which
-# means they are visible in /proc/<pid>/cmdline and `ps` while the upload
-# runs. This is acceptable here because the script is only ever run by hand
-# on a developer machine to seed/refresh OSS objects; it must not be wired
-# into any automated pipeline. If that ever changes, switch to ossutil
-# config file (--config-file) or environment variables.
+# =============================================================================
+# OFFLINE-ONLY MAINTENANCE SCRIPT — DO NOT WIRE INTO CI OR PRODUCTION.
+# =============================================================================
+#
+# Who runs this:
+#   Only RTP-LLM team members, by hand on a personal developer machine, when
+#   seeding/refreshing OSS objects (e.g. adding a new test fixture, rotating
+#   a stale checkpoint). Never invoked by automation. The corresponding
+#   read path (oss-lfs-pull.sh) is the credentialless one used by CI and
+#   open-source contributors.
+#
+# Credentials on the command line — INTENTIONAL DESIGN, NOT A BUG:
+#   $OSS_LFS_ACCESS_KEY_ID / $OSS_LFS_ACCESS_KEY_SECRET are passed via
+#   `--access-key-id` / `--access-key-secret` to `ossutil`, so they appear
+#   in /proc/<pid>/cmdline and `ps -ef` for the lifetime of each upload.
+#   This is the simplest path that works with stock ossutil and is
+#   acceptable here precisely because:
+#     1. The script never runs in CI or on a shared box.
+#     2. The keys belong to the operator personally, not a service.
+#     3. Process listings on a personal dev box are not a meaningful threat.
+#   If this script is ever adapted to run unattended (CI, cron, shared host),
+#   STOP and switch to `ossutil --config-file <tempfile>` or an env-var-only
+#   credential profile before doing so. Do not try to "fix" the cmdline
+#   exposure piecemeal — the threat model changes the moment the operator
+#   stops being the only viewer.
+#
+# Quoting on $OSS_COMMON_ARGS:
+#   The variable is intentionally word-split (no quotes around expansion at
+#   the call site). Access keys, endpoint, and region are alphanumeric/dot
+#   strings by OSS spec — they do not contain whitespace or shell-special
+#   characters, so word-splitting is safe and avoids the awkwardness of
+#   building an array just for this one-line script.
+# =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

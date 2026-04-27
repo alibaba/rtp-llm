@@ -1,9 +1,14 @@
 
 def extract_data(envs):
     data = []
+    prefix = 'internal_source/rtp_llm/test/smoke/'
     for env in envs:
         if env.startswith('MULTI_TASK_PROMPT='):
-            data.append(env.split('=')[1][len('internal_source/rtp_llm/test/smoke/'):])
+            # Use index('=')+1 instead of split('=')[1] so a value containing
+            # '=' (e.g. a query-string or kv-style fragment) is preserved in
+            # full. Starlark has no maxsplit, so split() would silently drop
+            # everything after the first '='.
+            data.append(env[env.index('=') + 1 + len(prefix):])
     return data
 
 def extract_multi_task_prompt_data(smoke_args):
