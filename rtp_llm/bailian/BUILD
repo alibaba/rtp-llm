@@ -50,3 +50,11 @@ py_test(
     imports = [],
     exec_properties = {"gpu": "A10"},
 )
+
+py_test(
+    name = "bailian_grpc_pure_forward_service_test",
+    srcs = ["test/bailian_grpc_pure_forward_service_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)

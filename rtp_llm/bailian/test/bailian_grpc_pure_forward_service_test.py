@@ -10,6 +10,8 @@ import struct
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
 
+import grpc
+
 from rtp_llm.bailian.bailian_grpc_pure_forward_service import (
     PureForwardServicer,
     _parse_forward_addrs,
@@ -33,11 +35,12 @@ def _make_request(model_name: str = "test_model", id: str = "test_id") -> predic
 def _make_response() -> predict_v2_pb2.ModelStreamInferResponse:
     """Create a minimal ModelStreamInferResponse for testing."""
     resp = predict_v2_pb2.ModelStreamInferResponse()
-    out = resp.outputs.add()
+    infer = resp.infer_response
+    out = infer.outputs.add()
     out.name = "output"
     out.datatype = "INT32"
     out.shape.append(1)
-    resp.raw_output_contents.append(struct.pack("<i", 42))
+    infer.raw_output_contents.append(struct.pack("<i", 42))
     return resp
 
 
@@ -143,6 +146,134 @@ class IteratorBehaviorTest(TestCase):
             responses = list(self.servicer.ModelStreamInfer(request_gen(), MagicMock()))
 
         self.assertEqual(len(responses), 3)
+
+
+class BufferFirstTokenTest(TestCase):
+    """Verify first-token buffer behavior for PD-disaggregation TPOT smoothing.
+
+    The first chunk from downstream is held until the second arrives (or the
+    stream ends / errors); buffering is always on.
+    """
+
+    def setUp(self) -> None:
+        self.channel_patcher = patch("grpc.insecure_channel", return_value=MagicMock())
+        self.channel_patcher.start()
+
+        self.servicer = PureForwardServicer(["127.0.0.1:1"])
+        self.mock_stub = MagicMock()
+        self.servicer._stubs = [self.mock_stub]
+        self.servicer._log_debug = False
+
+    def tearDown(self) -> None:
+        self.servicer.close()
+        self.channel_patcher.stop()
+
+    def _make_resp(self, tag: str) -> predict_v2_pb2.ModelStreamInferResponse:
+        resp = _make_response()
+        resp.error_message = tag
+        return resp
+
+    def test_buffer_happy_path_holds_first_until_second(self) -> None:
+        """First chunk is not yielded until second arrives; final order preserved."""
+        yielded_marker: list[str] = []
+
+        def downstream_gen():
+            yielded_marker.append("yielded_a")
+            yield self._make_resp("a")
+            yielded_marker.append("yielded_b")
+            yield self._make_resp("b")
+            yielded_marker.append("yielded_c")
+            yield self._make_resp("c")
+
+        self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
+
+        def request_gen():
+            yield _make_request("req1")
+
+        out_iter = self.servicer.ModelStreamInfer(request_gen(), MagicMock())
+        out = list(out_iter)
+
+        self.assertEqual([r.error_message for r in out], ["a", "b", "c"])
+        # Before emitting "a", buffer pulled past "b"; confirms hold-then-flush.
+        self.assertEqual(
+            yielded_marker, ["yielded_a", "yielded_b", "yielded_c"]
+        )
+
+    def test_buffer_single_chunk_flushes_on_stream_end(self) -> None:
+        """Downstream ends after 1 chunk (e.g., max_new_tokens=1): buffered chunk must flush."""
+        self.mock_stub.ModelStreamInfer.return_value = iter([self._make_resp("only")])
+
+        def request_gen():
+            yield _make_request("req1")
+
+        out = list(self.servicer.ModelStreamInfer(request_gen(), MagicMock()))
+        self.assertEqual([r.error_message for r in out], ["only"])
+
+    def test_buffer_zero_chunk_returns_cleanly(self) -> None:
+        """Downstream yields nothing: proxy returns an empty stream without error."""
+        self.mock_stub.ModelStreamInfer.return_value = iter([])
+
+        def request_gen():
+            yield _make_request("req1")
+
+        out = list(self.servicer.ModelStreamInfer(request_gen(), MagicMock()))
+        self.assertEqual(out, [])
+
+    def test_buffer_error_after_first_chunk_flushes_then_raises(self) -> None:
+        """Downstream errors after yielding 1 chunk: client still gets that chunk, then error."""
+
+        class FakeRpcError(grpc.RpcError):
+            pass
+
+        def downstream_gen():
+            yield self._make_resp("a")
+            raise FakeRpcError("downstream failed")
+
+        self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
+
+        def request_gen():
+            yield _make_request("req1")
+
+        collected = []
+        with self.assertRaises(FakeRpcError):
+            for r in self.servicer.ModelStreamInfer(request_gen(), MagicMock()):
+                collected.append(r)
+        self.assertEqual([r.error_message for r in collected], ["a"])
+
+    def test_buffer_error_before_any_chunk_raises_cleanly(self) -> None:
+        """Downstream errors on the very first next(): nothing yielded, error propagates."""
+
+        class FakeRpcError(grpc.RpcError):
+            pass
+
+        def downstream_gen():
+            raise FakeRpcError("downstream failed")
+            yield  # pragma: no cover
+
+        self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
+
+        def request_gen():
+            yield _make_request("req1")
+
+        collected = []
+        with self.assertRaises(FakeRpcError):
+            for r in self.servicer.ModelStreamInfer(request_gen(), MagicMock()):
+                collected.append(r)
+        self.assertEqual(collected, [])
+
+    def test_buffer_with_log_debug_combination(self) -> None:
+        """Buffer + log_debug: both counters advance, order and count preserved."""
+        self.servicer._log_debug = True
+
+        chunks = [self._make_resp("a"), self._make_resp("b"), self._make_resp("c")]
+        self.mock_stub.ModelStreamInfer.return_value = iter(chunks)
+
+        def request_gen():
+            yield _make_request("req1")
+
+        with patch("rtp_llm.bailian.bailian_grpc_pure_forward_service.logging.info"):
+            out = list(self.servicer.ModelStreamInfer(request_gen(), MagicMock()))
+        self.assertEqual([r.error_message for r in out], ["a", "b", "c"])
 
 
 class NonlocalClosurePatternTest(TestCase):
