@@ -9,11 +9,6 @@
 namespace rtp_llm {
 namespace transfer {
 
-enum class TransferBackend {
-    kTcp,
-    kBarexRdma,
-};
-
 struct TransferBackendPair {
     IKVCacheSenderPtr   sender;
     IKVCacheReceiverPtr receiver;
