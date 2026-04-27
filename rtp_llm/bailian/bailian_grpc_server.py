@@ -16,6 +16,11 @@ from typing import Optional
 
 import grpc
 
+from rtp_llm.bailian.bailian_grpc_access_log import (
+    BAILIAN_GRPC_ACCESS_LOG_FILENAME,
+    BailianGrpcAccessLogInterceptor,
+    init_bailian_grpc_access_logger,
+)
 from rtp_llm.bailian.bailian_grpc_enqueue_loop import (
     get_bailian_grpc_enqueue_event_loop,
     set_bailian_grpc_enqueue_event_loop,
@@ -63,12 +68,20 @@ def start_bailian_grpc_server(
     *,
     ip: str = "",
     server_id: str = "",
+    log_path: str = "",
+    backup_count: int = 0,
+    rank_id: Optional[int] = None,
 ) -> grpc.Server:
     """Create and start Bailian gRPC server. backend_visitor=None -> fake (mock); else use enqueue.
 
     ``ip`` / ``server_id`` plus the bailian gRPC ``port`` feed ``generate_request_id`` inside
     the servicer so the backend ``GenerateInput.request_id`` follows the same snowflake scheme
     as the HTTP path in ``FrontendServer``.
+
+    ``log_path`` / ``backup_count`` / ``rank_id`` configure the access log file
+    (``<log_path>/bailian_grpc_access_r{rank}_s{server}.log``). If ``log_path`` is
+    empty no file handler is attached — the interceptor still runs so tests see
+    logger calls, and production without log config silently drops.
     """
     global _bailian_grpc_server, _bailian_grpc_servicer
     with _bailian_grpc_server_lock:
@@ -78,9 +91,35 @@ def start_bailian_grpc_server(
         cfg = _resolve_bailian_grpc_config(bailian_grpc_config)
         opts = bailian_grpc_server_channel_options(cfg)
         pool_size = bailian_grpc_server_max_server_workers(cfg)
+
+        server_id_int: Optional[int]
+        try:
+            server_id_int = int(server_id) if server_id not in (None, "") else None
+        except (TypeError, ValueError):
+            server_id_int = None
+        init_bailian_grpc_access_logger(
+            log_path=log_path,
+            backup_count=backup_count,
+            rank_id=rank_id,
+            server_id=server_id_int,
+        )
+        if log_path:
+            from rtp_llm.access_logger.log_utils import get_process_log_filename
+
+            logging.info(
+                "[BailianGrpc] access log enabled: path=%s/%s",
+                log_path,
+                get_process_log_filename(
+                    BAILIAN_GRPC_ACCESS_LOG_FILENAME, rank_id, server_id_int
+                ),
+            )
+        interceptor = BailianGrpcAccessLogInterceptor(
+            rank_id=rank_id, server_id=server_id_int
+        )
         server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=pool_size),
             options=opts,
+            interceptors=[interceptor],
         )
         if PureForwardServicer.has_forward_config():
             servicer = PureForwardServicer()
@@ -148,6 +187,9 @@ def start_bailian_grpc_server_in_thread(
     *,
     ip: str = "",
     server_id: str = "",
+    log_path: str = "",
+    backup_count: int = 0,
+    rank_id: Optional[int] = None,
     startup_timeout_s: float = _DEFAULT_BAILIAN_GRPC_STARTUP_TIMEOUT_S,
 ) -> None:
     """Start Bailian gRPC in a daemon thread and block until ``server.start()`` succeeds.
@@ -173,6 +215,9 @@ def start_bailian_grpc_server_in_thread(
                 bailian_grpc_config=bailian_grpc_config,
                 ip=ip,
                 server_id=server_id,
+                log_path=log_path,
+                backup_count=backup_count,
+                rank_id=rank_id,
             )
         except BaseException as e:
             start_error.append(e)
