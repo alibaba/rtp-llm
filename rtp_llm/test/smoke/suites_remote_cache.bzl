@@ -11,7 +11,7 @@ def remote_cache_suites():
                 data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
-                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --write_cache_sync 1 --enable_remote_cache true --enable_device_cache 0 --deterministic_attn 1",
+                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --write_cache_sync 1 --enable_remote_cache true --enable_device_cache 0",
                 task_info = "data/model/qwen25/q_r_l20_remote_cache.json",
             ),
             smoke_test(
@@ -20,7 +20,7 @@ def remote_cache_suites():
                 gpu_type = ["L20"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 10,
-                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0 --deterministic_attn 1",
+                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0",
                 task_info = "data/model/qwen25/q_r_l20_remote_cache.json",
             ),
             smoke_test(
@@ -49,8 +49,8 @@ def remote_cache_suites():
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 20,
                 smoke_args = {
-                    "prefill": "--warm_up 0  --reuse_cache 1 --role_type PREFILL --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0 --deterministic_attn 1 --reco_put_timeout_ms 12000 --reco_get_timeout_ms 12000 --reco_get_broadcast_timeout 15000 --reco_put_broadcast_timeout 15000",
-                    "decode": "--warm_up 0  --reuse_cache 1 --role_type DECODE --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0 --deterministic_attn 1 --reco_put_timeout_ms 12000 --reco_get_timeout_ms 12000 --reco_get_broadcast_timeout 15000 --reco_put_broadcast_timeout 15000",
+                    "prefill": "--warm_up 0  --reuse_cache 1 --role_type PREFILL --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0 --reco_put_timeout_ms 12000 --reco_get_timeout_ms 12000 --reco_get_broadcast_timeout 15000 --reco_put_broadcast_timeout 15000",
+                    "decode": "--warm_up 0  --reuse_cache 1 --role_type DECODE --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0 --reco_put_timeout_ms 12000 --reco_get_timeout_ms 12000 --reco_get_broadcast_timeout 15000 --reco_put_broadcast_timeout 15000",
                 },
                 task_info = "data/model/qwen25/q_r_l20_remote_cache_pd_sep.json",
             ),
@@ -77,7 +77,7 @@ def remote_cache_suites():
                     "TEST_START_WRITE_FAILURE=1",
                 ],
                 sleep_time_qr = 10,
-                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0 --deterministic_attn 1",
+                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0",
                 task_info = "data/model/qwen25/q_r_l20_remote_cache_start_and_finish_failure.json",
             ),
             smoke_test(
@@ -90,7 +90,7 @@ def remote_cache_suites():
                     "TEST_FINISH_WRITE_FAILURE=1",
                 ],
                 sleep_time_qr = 10,
-                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0 --deterministic_attn 1",
+                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0",
                 task_info = "data/model/qwen25/q_r_l20_remote_cache_start_and_finish_failure.json",
             ),
             smoke_test(
