@@ -60,7 +60,16 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     config.block_num            = static_cast<int>(block_num);
     if (config.dsv4_config.has_value() && config.use_independent_block_pools) {
-        config.group_block_nums.assign(config.groupNums(), block_num);
+        // DSV4ConfigCreator already set per-group block_nums; only fill
+        // groups that were left at 0 (= use global block_num).
+        if (config.group_block_nums.empty()) {
+            config.group_block_nums.assign(config.groupNums(), block_num);
+        } else {
+            for (auto& gbn : config.group_block_nums) {
+                if (gbn == 0)
+                    gbn = block_num;
+            }
+        }
     }
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {

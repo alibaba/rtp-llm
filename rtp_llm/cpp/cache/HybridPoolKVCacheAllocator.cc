@@ -39,9 +39,9 @@ bool HybridPoolKVCacheAllocator::doInit() {
         auto        spec = config_.cache_specs[static_cast<size_t>(gid)];
 
         KVCacheGroupPtr group;
-        const auto group_type = (gid < static_cast<int>(config_.group_types.size())) ?
-                                    config_.group_types[static_cast<size_t>(gid)] :
-                                    CacheGroupType::FULL;
+        const auto      group_type = (gid < static_cast<int>(config_.group_types.size())) ?
+                                         config_.group_types[static_cast<size_t>(gid)] :
+                                         CacheGroupType::FULL;
         if (group_type == CacheGroupType::LINEAR) {
             group = std::make_shared<LinearKVCacheGroup>(ids, spec, group_pool, gid, config_.linear_step);
             linear_group_ids_.push_back(gid);
@@ -93,7 +93,7 @@ int HybridPoolKVCacheAllocator::groupIdForLayerAttn(int layer_id, KVCacheAttnTyp
     RTP_LLM_FAIL("missing group mapping for layer_id=%d attn_type=%zu", layer_id, attn_id);
 }
 
-void HybridPoolKVCacheAllocator::referenceValidBlocks(int gid,
+void HybridPoolKVCacheAllocator::referenceValidBlocks(int                     gid,
                                                       const BlockIndicesType& blocks,
                                                       bool                    is_connector) const {
     BlockIndicesType valid;
@@ -193,7 +193,8 @@ MallocResult HybridPoolKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     }
 
     const int need_blocks = (reserve_blocks > 0) ? getNeedBlocks(malloc_info) : 0;
-    if (reserve_blocks > 0 && need_blocks > 0 && availableBlocksNum() < static_cast<size_t>(need_blocks) + reserve_blocks) {
+    if (reserve_blocks > 0 && need_blocks > 0
+        && availableBlocksNum() < static_cast<size_t>(need_blocks) + reserve_blocks) {
         return {false, 0};
     }
 
@@ -310,14 +311,14 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         }
         const size_t token_len = token_ids.size() - 1;
         for (int gid = 0; gid < kv_cache_resource->groupNums(); ++gid) {
-            const int    group_seq_size = kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
+            const int    group_seq_size  = kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
             const size_t full_blocks_num = token_len / static_cast<size_t>(group_seq_size);
             const size_t n               = std::min(cache_keys.size(), full_blocks_num);
             if (n == 0) {
                 continue;
             }
-            CacheKeysType put_cache_keys(cache_keys.begin(), cache_keys.begin() + n);
-            const auto&   blocks = kv_cache_resource->blocks(batch_id, gid);
+            CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + n);
+            const auto&      blocks = kv_cache_resource->blocks(batch_id, gid);
             BlockIndicesType put_blocks;
             put_blocks.reserve(n);
             for (size_t i = 0; i < n && i < blocks.size(); ++i) {
@@ -346,13 +347,20 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_all_num); ++layer_id) {
         layout.layers_to_kv_buffer_ptrs_by_attn[layer_id].resize(attn_type_count);
         layout.layers_to_scale_buffer_ptrs_by_attn[layer_id].resize(attn_type_count);
+        // Initialize all slots with empty tensors so pybind11 can serialize
+        // the vector<vector<Tensor>> without hitting undefined tensors.
+        // DSV4: 7 pools, each layer has up to 8 attn_type slots.
+        for (size_t j = 0; j < attn_type_count; ++j) {
+            layout.layers_to_kv_buffer_ptrs_by_attn[layer_id][j]    = torch::empty({0});
+            layout.layers_to_scale_buffer_ptrs_by_attn[layer_id][j] = torch::empty({0});
+        }
     }
 
     for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_all_num); ++layer_id) {
-        const int gid = defaultGroupIdForLayer(static_cast<int>(layer_id));
+        const int  gid           = defaultGroupIdForLayer(static_cast<int>(layer_id));
         const auto layer_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerCacheBase();
         const auto scale_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerScaleCacheBase();
-        auto       it           = layer_tensors.find(static_cast<int>(layer_id));
+        auto       it            = layer_tensors.find(static_cast<int>(layer_id));
         if (it != layer_tensors.end()) {
             layout.layers_to_kv_buffer_ptrs[layer_id] = it->second;
         }
@@ -365,29 +373,24 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
         const auto layer_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerCacheBase();
         const auto scale_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerScaleCacheBase();
-        const auto attn_type = static_cast<size_t>(gid < static_cast<int>(config_.group_attn_types.size()) ?
+        const auto attn_type     = static_cast<size_t>(gid < static_cast<int>(config_.group_attn_types.size()) ?
                                                        config_.group_attn_types[static_cast<size_t>(gid)] :
                                                        KVCacheAttnType::DEFAULT);
-        RTP_LLM_CHECK_WITH_INFO(attn_type < attn_type_count,
-                                "group %d has invalid attn type id %zu",
-                                gid,
-                                attn_type);
+        RTP_LLM_CHECK_WITH_INFO(attn_type < attn_type_count, "group %d has invalid attn type id %zu", gid, attn_type);
         for (const auto& [layer_id, tensor] : layer_tensors) {
-            RTP_LLM_CHECK_WITH_INFO(layer_id >= 0
-                                        && static_cast<size_t>(layer_id)
-                                               < layout.layers_to_kv_buffer_ptrs_by_attn.size(),
-                                    "layer_id %d out of typed kv layout range %zu",
-                                    layer_id,
-                                    layout.layers_to_kv_buffer_ptrs_by_attn.size());
+            RTP_LLM_CHECK_WITH_INFO(
+                layer_id >= 0 && static_cast<size_t>(layer_id) < layout.layers_to_kv_buffer_ptrs_by_attn.size(),
+                "layer_id %d out of typed kv layout range %zu",
+                layer_id,
+                layout.layers_to_kv_buffer_ptrs_by_attn.size());
             layout.layers_to_kv_buffer_ptrs_by_attn[static_cast<size_t>(layer_id)][attn_type] = tensor;
         }
         for (const auto& [layer_id, tensor] : scale_tensors) {
-            RTP_LLM_CHECK_WITH_INFO(layer_id >= 0
-                                        && static_cast<size_t>(layer_id)
-                                               < layout.layers_to_scale_buffer_ptrs_by_attn.size(),
-                                    "layer_id %d out of typed scale layout range %zu",
-                                    layer_id,
-                                    layout.layers_to_scale_buffer_ptrs_by_attn.size());
+            RTP_LLM_CHECK_WITH_INFO(
+                layer_id >= 0 && static_cast<size_t>(layer_id) < layout.layers_to_scale_buffer_ptrs_by_attn.size(),
+                "layer_id %d out of typed scale layout range %zu",
+                layer_id,
+                layout.layers_to_scale_buffer_ptrs_by_attn.size());
             layout.layers_to_scale_buffer_ptrs_by_attn[static_cast<size_t>(layer_id)][attn_type] = tensor;
         }
     }
@@ -425,11 +428,8 @@ HybridPoolKVCacheAllocator::convertIndexToBuffer(int layer_id, KVCacheAttnType a
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id);
 }
 
-std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(int             layer_id,
-                                                                        KVCacheAttnType attn_type,
-                                                                        int             block_id,
-                                                                        int             partition_count,
-                                                                        int             partition_id) const {
+std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(
+    int layer_id, KVCacheAttnType attn_type, int block_id, int partition_count, int partition_id) const {
     const int gid = groupIdForLayerAttn(layer_id, attn_type);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(
         layer_id, block_id, partition_count, partition_id);
@@ -525,12 +525,12 @@ int HybridPoolKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) con
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
         return 0;
     }
-    const int batch_size     = malloc_info.batch_kv_cache_resource->batchSize();
-    const int total_seq_len  = malloc_info.complete_token_ids->totalSeqLength();
-    const int common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
-    const int seq_len        = malloc_info.complete_token_ids->seqLength();
-    const int reserve_step   = malloc_info.complete_token_ids->getReserveStep();
-    const bool reuse_enabled = malloc_info.reuse_cache;
+    const int  batch_size       = malloc_info.batch_kv_cache_resource->batchSize();
+    const int  total_seq_len    = malloc_info.complete_token_ids->totalSeqLength();
+    const int  common_seq_len   = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
+    const int  seq_len          = malloc_info.complete_token_ids->seqLength();
+    const int  reserve_step     = malloc_info.complete_token_ids->getReserveStep();
+    const bool reuse_enabled    = malloc_info.reuse_cache;
     const int  reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
 
     int common_blocks_total = 0;
@@ -635,9 +635,10 @@ size_t HybridPoolKVCacheAllocator::availableTokensNum() const {
     }
     size_t min_tokens = std::numeric_limits<size_t>::max();
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-        const size_t seq_size = (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
-                                    config_.group_seq_size_per_block[gid] :
-                                    config_.seq_size_per_block;
+        const size_t seq_size =
+            (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
+                config_.group_seq_size_per_block[gid] :
+                config_.seq_size_per_block;
         min_tokens = std::min(min_tokens, group_block_pools_[gid]->availableBlocksNum() * seq_size);
     }
     return min_tokens;
@@ -657,9 +658,10 @@ size_t HybridPoolKVCacheAllocator::maxAvailableTokensNum() const {
     }
     size_t min_tokens = std::numeric_limits<size_t>::max();
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-        const size_t seq_size = (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
-                                    config_.group_seq_size_per_block[gid] :
-                                    config_.seq_size_per_block;
+        const size_t seq_size =
+            (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
+                config_.group_seq_size_per_block[gid] :
+                config_.seq_size_per_block;
         min_tokens = std::min(min_tokens, group_block_pools_[gid]->totalBlocksNum() * seq_size);
     }
     return min_tokens;

@@ -163,12 +163,27 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             kv_cache.kv_scale_base_by_layer.push_back(t);
         }
 
-        kv_cache.layer_attn_types                 = layout.layer_attn_types;
-        kv_cache.group_attn_types                 = layout.group_attn_types;
-        kv_cache.layer_attn_to_group_id           = layout.layer_attn_to_group_id;
-        kv_cache.kv_cache_base_by_layer_attn      = layout.layers_to_kv_buffer_ptrs_by_attn;
-        kv_cache.kv_scale_base_by_layer_attn      = layout.layers_to_scale_buffer_ptrs_by_attn;
-        init_resources.kv_cache                   = kv_cache;
+        kv_cache.layer_attn_types            = layout.layer_attn_types;
+        kv_cache.group_attn_types            = layout.group_attn_types;
+        kv_cache.layer_attn_to_group_id      = layout.layer_attn_to_group_id;
+        kv_cache.kv_cache_base_by_layer_attn = layout.layers_to_kv_buffer_ptrs_by_attn;
+        kv_cache.kv_scale_base_by_layer_attn = layout.layers_to_scale_buffer_ptrs_by_attn;
+
+        // Flatten by_attn into a 1D vector for pybind11 compatibility
+        // Layout: [layer_0_type_0, ..., layer_0_type_7, layer_1_type_0, ...]
+        {
+            const size_t attn_count = static_cast<size_t>(rtp_llm::KVCacheAttnType::TYPE_COUNT);
+            const size_t num_layers = layout.layers_to_kv_buffer_ptrs_by_attn.size();
+            kv_cache.kv_cache_base_by_layer_attn_flat.resize(num_layers * attn_count);
+            for (size_t l = 0; l < num_layers; ++l) {
+                for (size_t a = 0; a < attn_count && a < layout.layers_to_kv_buffer_ptrs_by_attn[l].size(); ++a) {
+                    auto& t = layout.layers_to_kv_buffer_ptrs_by_attn[l][a];
+                    kv_cache.kv_cache_base_by_layer_attn_flat[l * attn_count + a] = t.defined() ? t : torch::empty({0});
+                }
+            }
+        }
+
+        init_resources.kv_cache = kv_cache;
     }
 
     py::object py_init_result;

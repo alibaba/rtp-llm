@@ -59,10 +59,16 @@ struct DSV4CacheConfig {
     static constexpr uint32_t TOKENS_PER_BLOCK = 256;
     static constexpr uint32_t SLIDING_WINDOW   = 128;
 
-    // KV entry layout: 448 FP8 + 128 BF16 + 7 UE8M0 scale + 1 pad = 584 bytes
-    static constexpr uint32_t KV_ENTRY_BYTES = 584;
-    // Indexer entry: 128 FP8 + 4 FP32 scale = 132 bytes (stored as uint8)
-    static constexpr uint32_t INDEXER_ENTRY_BYTES = 132;
+    // KV entry layout — must match the model's actual storage format.
+    // Current model (BF16-only path): head_dim=512, bf16 → 512 * 2 = 1024 bytes.
+    // Future mixed-precision target: 448 FP8 NoPE + 128 BF16 RoPE + 7 UE8M0 scale + 1 pad = 584 bytes.
+    // Update this when the model switches to FP8/BF16 mixed KV storage.
+    static constexpr uint32_t KV_ENTRY_BYTES = 1024;
+    // Indexer entry — must match the model's actual storage format.
+    // Current model (BF16-only path): index_head_dim=128, bf16 → 128 * 2 = 256 bytes.
+    // Future mixed-precision target: 128 FP8 + 4 FP32 scale = 132 bytes.
+    // Update this when the model switches to FP8 indexer KV storage.
+    static constexpr uint32_t INDEXER_ENTRY_BYTES = 256;
 
     uint32_t num_csa_layers() const {
         return csa_layer_ids.size();

@@ -23,11 +23,11 @@ namespace torch_ext {
 //   MHA: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
 //   MLA: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
 struct LayerKVCache {
-    torch::Tensor kv_cache_base;
-    torch::Tensor kv_scale_base;
-    int           seq_size_per_block = 0;
-    int           layer_id           = -1;
-    rtp_llm::KVCacheAttnType attn_type = rtp_llm::KVCacheAttnType::DEFAULT;
+    torch::Tensor            kv_cache_base;
+    torch::Tensor            kv_scale_base;
+    int                      seq_size_per_block = 0;
+    int                      layer_id           = -1;
+    rtp_llm::KVCacheAttnType attn_type          = rtp_llm::KVCacheAttnType::DEFAULT;
 };
 
 // Whole-model KV cache holding tensors for all layers.
@@ -45,11 +45,16 @@ struct KVCache {
     int                        rope_head_dim             = 0;
 
     // Per-layer attention type (CacheGroupType::FULL or LINEAR).
-    std::vector<rtp_llm::CacheGroupType> layer_attn_types;
-    std::vector<rtp_llm::KVCacheAttnType> group_attn_types;
-    std::vector<std::vector<int>>         layer_attn_to_group_id;
+    std::vector<rtp_llm::CacheGroupType>    layer_attn_types;
+    std::vector<rtp_llm::KVCacheAttnType>   group_attn_types;
+    std::vector<std::vector<int>>           layer_attn_to_group_id;
     std::vector<std::vector<torch::Tensor>> kv_cache_base_by_layer_attn;
     std::vector<std::vector<torch::Tensor>> kv_scale_base_by_layer_attn;
+
+    // Flat version of kv_cache_base_by_layer_attn for pybind11 compatibility.
+    // Layout: [layer_0_type_0, layer_0_type_1, ..., layer_0_type_7, layer_1_type_0, ...]
+    // Size = layer_num * TYPE_COUNT (8). Use attn_type_count=8 to index.
+    std::vector<torch::Tensor> kv_cache_base_by_layer_attn_flat;
 
     LayerKVCache getLayerCache(int idx) {
         LayerKVCache layer_cache;
@@ -120,7 +125,7 @@ struct KVCache {
 
     LayerKVCache getLayerCache(int idx, rtp_llm::KVCacheAttnType attn_type) {
         if (attn_type == rtp_llm::KVCacheAttnType::DEFAULT || kv_cache_base_by_layer_attn.empty()) {
-            auto layer_cache = getLayerCache(idx);
+            auto layer_cache      = getLayerCache(idx);
             layer_cache.attn_type = attn_type;
             return layer_cache;
         }
@@ -147,15 +152,32 @@ struct KVCache {
         }
 
         LayerKVCache layer_cache;
-        layer_cache.layer_id            = idx;
-        layer_cache.attn_type           = attn_type;
-        layer_cache.seq_size_per_block  = seq_size_per_block;
-        layer_cache.kv_cache_base       = base;
+        layer_cache.layer_id           = idx;
+        layer_cache.attn_type          = attn_type;
+        layer_cache.seq_size_per_block = seq_size_per_block;
+        layer_cache.kv_cache_base      = base;
         if (!kv_scale_base_by_layer_attn.empty() && layer < kv_scale_base_by_layer_attn.size()
             && attn < kv_scale_base_by_layer_attn[layer].size()) {
             layer_cache.kv_scale_base = kv_scale_base_by_layer_attn[layer][attn];
         }
         return layer_cache;
+    }
+
+    // Return raw [total_blocks, stride_bytes] tensor for a specific pool,
+    // without MHA reshape. Used by DSV4 gather/scatter which needs raw uint8 access.
+    torch::Tensor getRawPoolTensor(int layer_id, rtp_llm::KVCacheAttnType attn_type) {
+        if (kv_cache_base_by_layer_attn.empty()) {
+            throw std::runtime_error("kv_cache_base_by_layer_attn is empty");
+        }
+        const auto layer = static_cast<size_t>(layer_id);
+        const auto attn  = static_cast<size_t>(attn_type);
+        if (layer_id < 0 || layer >= kv_cache_base_by_layer_attn.size()) {
+            throw std::runtime_error("Invalid layer index: " + std::to_string(layer_id));
+        }
+        if (attn >= kv_cache_base_by_layer_attn[layer].size()) {
+            throw std::runtime_error("Invalid attn type: " + std::to_string(attn));
+        }
+        return kv_cache_base_by_layer_attn[layer][attn];
     }
 };
 

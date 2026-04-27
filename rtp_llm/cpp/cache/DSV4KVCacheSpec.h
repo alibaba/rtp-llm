@@ -6,8 +6,10 @@
 namespace rtp_llm {
 
 // KVCacheSpec for DSV4 paged KV pools (Pool 0/1/2/6: CSA_KV, HCA_KV, INDEXER_KV, SWA_KV).
-// These are variable-length paged pools storing compressed KV entries as uint8.
-// Each entry contains embedded scales (FP8 NoPE + BF16 RoPE + UE8M0 scales).
+// These are variable-length paged pools storing KV entries as uint8 (byte-addressed).
+// Current model (BF16-only): each entry is head_dim * 2 bytes (bf16).
+// Future mixed-precision: FP8 NoPE + BF16 RoPE + UE8M0 scales (smaller entries).
+// Each entry contains the full KV for one compressed token (one KV head).
 struct DSV4KVSpec: public KVCacheSpec {
     DSV4CacheType cache_type;
     uint32_t      entry_elems;        // bytes per entry (584 for KV, 132 for Indexer)
