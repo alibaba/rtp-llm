@@ -98,6 +98,7 @@ def iter_real_model_stream_infer(
             mm_inputs=[],
             generate_config=generate_config,
         )
+        is_streaming = bool(getattr(generate_config, "is_streaming", True))
         logging.debug("[BailianGrpc] [%s] generate_input: %s", tag, generate_input)
         request_shape = list(request.inputs[0].shape) if request.inputs else None
         chunk_idx = 0
@@ -111,6 +112,7 @@ def iter_real_model_stream_infer(
                 request_log_tag=tag,
                 request_input_ids=input_ids_list,
                 return_input_ids=other.return_input_ids,
+                is_streaming=is_streaming,
                 _request_shape=request_shape,
             )
         if chunk_idx:
