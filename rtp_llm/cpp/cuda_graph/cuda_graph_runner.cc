@@ -208,6 +208,24 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
             py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
             py_model_inputs_.attention_inputs.sequence_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
             int last_offset = state.current_batch_size * num_tokens_per_bs_;
+            // BUG FIX: restore the ACTIVE entries [0..current_batch_size+1] of
+            // decode_cu_seqlens_d to the correct arange [0, num_tokens_per_bs,
+            // 2*num_tokens_per_bs, ...].  PyWrappedModel doesn't write
+            // decode_cu_seqlens_d for target verify (its `if context_batch_size > 0`
+            // branch in PyWrappedModel.cc:95 skips it), so optimizedCopyAsync at
+            // line 196-198 above is a no-op.  The capture-time arange is the only
+            // initial source.  But the fill_(last_offset) on the padding range
+            // below pollutes entries that would later become active when
+            // current_batch_size grows (e.g. after a smaller-batch replay's fill,
+            // entry 3 carries last_offset=8 instead of arange-12).  This corrupts
+            // captured FA3 attention's _cu_seqlens_q_ref (cumulative goes
+            // non-monotonic) and causes cross-request KV pollution → garbled
+            // output.  Restore active arange explicitly to break the cumulative
+            // pollution chain.
+            torch::Tensor active_arange = torch::arange(
+                0, (state.current_batch_size + 1) * num_tokens_per_bs_, num_tokens_per_bs_, options_cuda_int32_);
+            py_model_inputs_.attention_inputs.decode_cu_seqlens_d.slice(0, 0, state.current_batch_size + 1)
+                .copy_(active_arange);
             py_model_inputs_.attention_inputs.decode_cu_seqlens_d.slice(0, state.current_batch_size + 1, max_bs_ + 1)
                 .fill_(last_offset);
         }

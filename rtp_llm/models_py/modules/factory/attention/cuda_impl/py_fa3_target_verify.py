@@ -20,6 +20,8 @@ Compared to the FlashInfer ``BatchPrefillWithPagedKVCacheWrapper`` based op
   the same storage every replay.
 """
 
+import os
+import threading
 from typing import Any, Optional
 
 import torch
@@ -43,6 +45,122 @@ from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     rtp_llm_ops,
 )
+
+# ---------------------------------------------------------------------------
+# CG-vs-eager debug dumping infrastructure.
+#
+# Enable via env vars (all gated by FA3_TV_DUMP_DIR being set):
+#   FA3_TV_DUMP_DIR        — directory to write .pt dumps to
+#   FA3_TV_DUMP_MAX_CALLS  — cap on dumps per process (default 200)
+#   FA3_TV_DUMP_RING       — when 1, ring-buffer mode: oldest dumps deleted
+#                            once counter > max_calls so we always keep the
+#                            most recent N (good for long runs that may
+#                            accumulate enough state to trigger garbled).
+#
+# Per forward pass we dump:
+#   prepare.pt — inputs + fmha_params snapshot (data_ptrs + tensor contents)
+#                fires at every replay-prep in CG mode AND every prepare in
+#                eager mode.
+#   forward.pt — q, output, KV-cache fingerprint (eager mode only; in CG
+#                mode forward runs only at warmup/capture with zero inputs).
+#   kvwrite.pt — key/value tensors entering KVCacheWriteOp + the page slots
+#                they target + the cache state at those slots BEFORE the
+#                write (so we can detect wrong-page writes that pollute KV).
+#
+# Workflow:
+#   1) Run smoke test with FA3_TV_DUMP_DIR=/tmp/fa3_off + CG OFF
+#      (DISABLE_SP_TARGET_VERIFY_CUDA_GRAPH=1)
+#   2) Run smoke test with FA3_TV_DUMP_DIR=/tmp/fa3_on + CG ON
+#   3) Use compare_fa3_tv_dumps.py to pair calls by cache_seqlens fingerprint
+#      and report first divergent tensor.
+# ---------------------------------------------------------------------------
+_FA3_DUMP_DIR = os.environ.get("FA3_TV_DUMP_DIR")
+_FA3_DUMP_MAX_CALLS = int(os.environ.get("FA3_TV_DUMP_MAX_CALLS", "200"))
+_FA3_DUMP_RING = os.environ.get("FA3_TV_DUMP_RING", "0") == "1"
+_FA3_DUMP_LOCK = threading.Lock()
+_fa3_dump_counter = 0
+
+
+def _fa3_dump_enabled() -> bool:
+    if _FA3_DUMP_DIR is None:
+        return False
+    if not _FA3_DUMP_RING and _fa3_dump_counter >= _FA3_DUMP_MAX_CALLS:
+        return False
+    # Never dump from inside a CUDA graph capture: the .cpu().clone() copies
+    # we do are not allowed during stream capture and will throw
+    # "Offset increment outside graph capture encountered unexpectedly".
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        return False
+    return True
+
+
+def _fa3_dump(tag: str, payload: "dict[str, Any]") -> None:
+    """Atomic-ish counter-bumping save.  Counter is shared across tag types
+    so prepare/forward/kvwrite calls all share the same global ordering.
+
+    Synchronizes the device before reading tensors so the dumped values
+    reflect what the next captured-kernel replay would actually see (and
+    not pre-refresh stale state on a different stream).
+    """
+    global _fa3_dump_counter
+    if _FA3_DUMP_DIR is None:
+        return
+    with _FA3_DUMP_LOCK:
+        if not _FA3_DUMP_RING and _fa3_dump_counter >= _FA3_DUMP_MAX_CALLS:
+            return
+        idx = _fa3_dump_counter
+        _fa3_dump_counter += 1
+    # Force-sync so any async optimizedCopyAsync (from C++ prepareInputs)
+    # is visible to the .cpu() copies below.
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    rank = int(os.environ.get("WORLD_RANK", os.environ.get("RANK", "0")))
+    out_dir = _FA3_DUMP_DIR
+    os.makedirs(out_dir, exist_ok=True)
+    # Ring buffer: best-effort delete the file that drops out of the window
+    # (any tag for that idx).  Keeps the dir bounded to max_calls files.
+    if _FA3_DUMP_RING and idx >= _FA3_DUMP_MAX_CALLS:
+        old_idx = idx - _FA3_DUMP_MAX_CALLS
+        for old_tag in ("prepare", "forward", "kvwrite"):
+            old_path = os.path.join(out_dir, f"rank{rank}_{old_idx:06d}_{old_tag}.pt")
+            try:
+                os.unlink(old_path)
+            except OSError:
+                pass
+    out_path = os.path.join(out_dir, f"rank{rank}_{idx:06d}_{tag}.pt")
+    safe_payload: "dict[str, Any]" = {"call_idx": idx, "tag": tag}
+    for k, v in payload.items():
+        if isinstance(v, torch.Tensor):
+            safe_payload[k] = v.detach().cpu().clone()
+        else:
+            safe_payload[k] = v
+    torch.save(safe_payload, out_path)
+
+
+def _snapshot_fmha_params(params: Any) -> "dict[str, Any]":
+    """Snapshot the fmha_params tensors that get consumed by KVCacheWriteOp
+    and downstream attention.  Records both data_ptr (to detect captured-
+    kernel aliasing if the param tensor gets replaced between replays) and
+    tensor contents (to verify the live values are correct)."""
+    snap: "dict[str, Any]" = {}
+    if params is None:
+        return snap
+    for name in (
+        "batch_indice_d",
+        "positions_d",
+        "page_indice_d",
+        "decode_page_indptr_d",
+        "paged_kv_last_page_len_d",
+        "kvlen_d",
+    ):
+        try:
+            t = getattr(params, name)
+        except Exception:
+            continue
+        if isinstance(t, torch.Tensor):
+            snap[f"fmha_params_{name}"] = t
+            snap[f"fmha_params_{name}_data_ptr"] = int(t.data_ptr())
+    return snap
 
 
 class PyFA3PagedTargetVerifyAttnOp(object):
@@ -200,6 +318,32 @@ class PyFA3PagedTargetVerifyAttnOp(object):
                 )
             else:
                 self._max_q_per_request = 1
+
+        # Debug dump — captures the inputs that the kernel will read.  In CG
+        # mode prepare() runs at every replay-prep (via prepare_cuda_graph)
+        # so each replay produces one dump.  In eager mode prepare() runs
+        # before each forward.
+        if _fa3_dump_enabled():
+            payload: "dict[str, Any]" = {
+                "mode": "cg" if self.enable_cuda_graph else "eager",
+                "fixed_batch_size": int(self._fixed_batch_size or 0),
+                "max_q_per_request": int(self._max_q_per_request),
+                "cache_seqlens_buf": self._cache_seqlens_buf,
+                "page_table_ref": self._page_table_ref,
+                "cu_seqlens_q_ref": self._cu_seqlens_q_ref,
+                "input_prefix_lengths_d": attn_inputs.prefix_lengths_d,
+                "input_input_lengths_d": attn_inputs.input_lengths_d,
+                "input_lengths_cpu": attn_inputs.input_lengths,
+                "prefix_lengths_cpu": attn_inputs.prefix_lengths,
+                "sequence_lengths_cpu": attn_inputs.sequence_lengths,
+                "decode_cu_seqlens_d": attn_inputs.decode_cu_seqlens_d,
+                "kv_cache_kernel_block_id_host": attn_inputs.kv_cache_kernel_block_id_host,
+            }
+            # fmha_params snapshot: data_ptrs reveal whether fill_params kept
+            # buffers stable (forbid_realloc working) or replaced them
+            # (captured KV write op would then alias stale data_ptrs).
+            payload.update(_snapshot_fmha_params(self.fmha_params))
+            _fa3_dump("prepare", payload)
         return self.fmha_params
 
     @staticmethod
@@ -262,6 +406,30 @@ class PyFA3PagedTargetVerifyAttnOp(object):
         )
         if isinstance(out, tuple):
             out = out[0]
+        # Debug dump — q + output for the eager path.  In CG mode this only
+        # fires at warmup/capture (zero inputs → zero output), but we still
+        # save the data_ptr fingerprint so the comparator can verify the
+        # captured kernel was launched with the same q buffer at replay.
+        if _fa3_dump_enabled():
+            # The assert at function start guarantees kv_cache is not None.
+            paged = kv_cache.kv_cache_base
+            _fa3_dump(
+                "forward",
+                {
+                    "mode": "cg" if self.enable_cuda_graph else "eager",
+                    "q": q,
+                    "output": out,
+                    "q_data_ptr": int(q.data_ptr()),
+                    "k_cache_data_ptr": int(k_cache.data_ptr()),
+                    "v_cache_data_ptr": int(v_cache.data_ptr()),
+                    "kv_cache_base_data_ptr": int(paged.data_ptr()),
+                    "kv_cache_base_shape": list(paged.shape),
+                    "cache_seqlens_buf": self._cache_seqlens_buf,
+                    "page_table_ref": self._page_table_ref,
+                    "cu_seqlens_q_ref": self._cu_seqlens_q_ref,
+                    "max_seqlen_q": int(self._max_q_per_request),
+                },
+            )
         return out
 
 
@@ -289,6 +457,79 @@ class PyFA3TargetVerifyImpl(PyFlashinferPrefillImplBase):
 
     def support_cuda_graph(self) -> bool:
         return True
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        layer_idx: int = 0,
+    ) -> torch.Tensor:
+        """Override the base wrapper forward so we can dump KV inputs +
+        the cache state at target pages BEFORE/AFTER the KV write.
+
+        When dumping is disabled, falls through to the parent forward.
+        """
+        if not _fa3_dump_enabled() or not self.need_rope_kv_cache:
+            return super().forward(qkv, kv_cache, layer_idx=layer_idx)
+
+        # Inline the parent's forward path with KV write hooks.
+        if self.rope_impl is not None:
+            query, key, value = self.rope_impl.forward(qkv)
+        else:
+            query, key, value = self._split_qkv(qkv)
+
+        # Snapshot cache pages that the KV write op is about to touch.
+        # We use fmha_params.page_indice_d to know which pages.
+        params = self.fmha_params
+        before_pages: "dict[str, Any]" = {}
+        if (
+            kv_cache is not None
+            and isinstance(getattr(params, "page_indice_d", None), torch.Tensor)
+            and params.page_indice_d.numel() > 0
+        ):
+            page_ids = params.page_indice_d.detach().cpu()
+            unique_pages = torch.unique(page_ids).tolist()[:8]  # cap at 8 for size
+            paged = kv_cache.kv_cache_base
+            for pid in unique_pages:
+                if 0 <= pid < paged.size(0):
+                    # K page only (V is symmetric); checksum to keep dumps small.
+                    k_page = paged[int(pid), 0]
+                    before_pages[f"page{int(pid)}_k_before_norm"] = float(
+                        k_page.float().norm().item()
+                    )
+
+        # Run the KV write — captured in CG mode, eager otherwise.
+        self.kv_cache_write_op.forward(key, value, kv_cache)
+
+        # Snapshot AFTER write — confirms write actually happened.
+        after_pages: "dict[str, Any]" = {}
+        if before_pages and kv_cache is not None:
+            paged = kv_cache.kv_cache_base
+            for k_name in before_pages:
+                pid = int(k_name.split("_")[0][len("page") :])
+                if 0 <= pid < paged.size(0):
+                    after_pages[k_name.replace("_before_", "_after_")] = float(
+                        paged[pid, 0].float().norm().item()
+                    )
+
+        kv_dump: "dict[str, Any]" = {
+            "mode": "cg" if self.fmha_impl.enable_cuda_graph else "eager",
+            "layer_idx": int(layer_idx),
+            "key_norm": float(key.float().norm().item()),
+            "value_norm": float(value.float().norm().item()),
+            "key_data_ptr": int(key.data_ptr()),
+            "value_data_ptr": int(value.data_ptr()),
+        }
+        kv_dump.update(before_pages)
+        kv_dump.update(after_pages)
+        kv_dump.update(_snapshot_fmha_params(params))
+        _fa3_dump("kvwrite", kv_dump)
+
+        qkv = self._prepare_fmha_input(query, key, value)
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
+        return self.fmha_impl.forward(qkv, kv_cache)
 
     @staticmethod
     def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
