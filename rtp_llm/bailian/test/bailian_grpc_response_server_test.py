@@ -147,6 +147,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
                 "prompt_token_ids",
                 "generated_ids",
                 "finish_reason",
+                "finished",
                 "prompt_token_num",
                 "prompt_cached_token_num",
             ],

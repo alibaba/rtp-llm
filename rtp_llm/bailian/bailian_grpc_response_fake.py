@@ -32,4 +32,9 @@ def iter_fake_model_stream_infer(
     out_finish.datatype = "INT64"
     out_finish.shape.append(1)
     stream_resp.infer_response.raw_output_contents.append(struct.pack("<q", 0))
+    out_finished = stream_resp.infer_response.outputs.add()
+    out_finished.name = "finished"
+    out_finished.datatype = "BOOL"
+    out_finished.shape.append(1)
+    stream_resp.infer_response.raw_output_contents.append(b"\x01")
     yield stream_resp
