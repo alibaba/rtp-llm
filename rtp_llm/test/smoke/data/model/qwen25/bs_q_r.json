@@ -1,0 +1,161 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s2"
+                ],
+                "generate_config": {
+                    "num_beams": 5,
+                    "max_new_tokens": 45
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "并提供答案。 1. What is the main idea of the passage?\n2. What is the main idea of the passage?\n3. What is the main idea of the passage?\n4. What is the main idea",
+                        "response_alternatives": null,
+                        "hidden_states": null,
+                        "logits": null,
+                        "loss": null,
+                        "input_ids": null,
+                        "output_ids": null,
+                        "aux_info": {
+                            "input_len": 8,
+                            "prefix_len": 0,
+                            "reuse_len": 0,
+                            "local_reuse_len": 0,
+                            "remote_reuse_len": 0,
+                            "memory_reuse_len": 0,
+                            "prefill_total_reuse_len": 0,
+                            "prefill_local_reuse_len": 0,
+                            "prefill_remote_reuse_len": 0,
+                            "prefill_memory_reuse_len": 0,
+                            "decode_total_reuse_len": 0,
+                            "decode_local_reuse_len": 0,
+                            "decode_remote_reuse_len": 0,
+                            "decode_memory_reuse_len": 0,
+                            "output_len": 45,
+                            "step_output_len": 45,
+                            "iter_count": 45,
+                            "cum_log_probs": [
+                                -21.996397018432617
+                            ],
+                            "beam_responses": [
+                                "并提供答案。 1. What is the main idea of the passage?\n2. What is the main idea of the passage?\n3. What is the main idea of the passage?\n4. What is the main idea",
+                                "并提供答案。 1. What is the main idea of the passage? \n2. What is the main idea of the passage? \n3. What is the main idea of the passage? \n4. What is",
+                                "并提供答案。 1. What is the main idea of the passage? \n 2. What is the main idea of the passage? \n 3. What is the main idea of the passage? \n 4",
+                                "并提供答案。 1. What is the main idea of the passage? \n2. What is the main idea of the passage?\n3. What is the main idea of the passage?\n4. What is the main",
+                                "并提供答案。 1. What is the main idea of the passage? \n2. What is the main idea of the passage? \n3. What is the main idea of the passage?\n4. What is the"
+                            ],
+                            "pd_sep": false,
+                            "softmax_probs": []
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s3",
+                    "$prompt:s2"
+                ],
+                "generate_config": {
+                    "variable_num_beams": [
+                        2,
+                        20,
+                        5
+                    ],
+                    "max_new_tokens": 10
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "\n\nThe error message you're encountering, \"Name",
+                        "response_alternatives": null,
+                        "hidden_states": null,
+                        "logits": null,
+                        "loss": null,
+                        "input_ids": null,
+                        "output_ids": null,
+                        "aux_info": {
+                            "input_len": 12,
+                            "prefix_len": 0,
+                            "reuse_len": 0,
+                            "local_reuse_len": 0,
+                            "remote_reuse_len": 0,
+                            "memory_reuse_len": 0,
+                            "prefill_total_reuse_len": 0,
+                            "prefill_local_reuse_len": 0,
+                            "prefill_remote_reuse_len": 0,
+                            "prefill_memory_reuse_len": 0,
+                            "decode_total_reuse_len": 0,
+                            "decode_local_reuse_len": 0,
+                            "decode_remote_reuse_len": 0,
+                            "decode_memory_reuse_len": 0,
+                            "output_len": 10,
+                            "step_output_len": 10,
+                            "iter_count": 10,
+                            "cum_log_probs": [
+                                -7.125173568725586
+                            ],
+                            "beam_responses": [
+                                "\n\nThe error message you're encountering, \"Name",
+                                "\n\nThe error message you're encountering, `Name",
+                                "\n\nThe error you're encountering, `NameError",
+                                "\n\nThe error you're encountering, `TypeError:",
+                                "\n\nThe error you're encountering is due to a"
+                            ],
+                            "pd_sep": false,
+                            "softmax_probs": []
+                        }
+                    },
+                    {
+                        "response": "，并提供答案。\n1. What is your favorite",
+                        "response_alternatives": null,
+                        "hidden_states": null,
+                        "logits": null,
+                        "loss": null,
+                        "input_ids": null,
+                        "output_ids": null,
+                        "aux_info": {
+                            "input_len": 8,
+                            "prefix_len": 0,
+                            "reuse_len": 0,
+                            "local_reuse_len": 0,
+                            "remote_reuse_len": 0,
+                            "memory_reuse_len": 0,
+                            "prefill_total_reuse_len": 0,
+                            "prefill_local_reuse_len": 0,
+                            "prefill_remote_reuse_len": 0,
+                            "prefill_memory_reuse_len": 0,
+                            "decode_total_reuse_len": 0,
+                            "decode_local_reuse_len": 0,
+                            "decode_remote_reuse_len": 0,
+                            "decode_memory_reuse_len": 0,
+                            "output_len": 10,
+                            "step_output_len": 10,
+                            "iter_count": 10,
+                            "cum_log_probs": [
+                                -10.710166931152344
+                            ],
+                            "beam_responses": [
+                                "，并提供答案。\n1. What is your favorite",
+                                "，以帮助学生提高听力理解能力。 ",
+                                "，以帮助学生提高听力理解能力。\n\n1",
+                                "，并提供答案。\n1. What is the most",
+                                "，并提供答案。\n1. What is the main"
+                            ],
+                            "pd_sep": false,
+                            "softmax_probs": []
+                        }
+                    }
+                ]
+            }
+        }
+    ]
+}
