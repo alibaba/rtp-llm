@@ -1,0 +1,51 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s5",
+                    "$prompt:s5"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 100,
+                    "random_seed": 46
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": " In Django, I would use `nav`, in"
+                    },
+                    {
+                        "response": " In Django, I would use `nav`, in"
+                    }
+                ]
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "num_return_sequences": 2,
+                    "max_new_tokens": 10,
+                    "top_k": 100,
+                    "random_seed": 46
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response": [
+                    " In my project, I have two models:\n\nIn",
+                    " Provide examples of both, including their advantages and disadvantages"
+                ],
+                "iter_count": 10,
+                "finished": true
+            }
+        }
+    ]
+}

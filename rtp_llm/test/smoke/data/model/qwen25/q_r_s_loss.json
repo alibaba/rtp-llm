@@ -1,0 +1,52 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 1,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "calculate_loss": 1
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response": "1",
+                "loss": 139.95472717285156,
+                "iter_count": 1,
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s5",
+                    "$prompt:s3"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 1,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "calculate_loss": 2
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "1"
+                    },
+                    {
+                        "response": "1"
+                    }
+                ],
+                "iter_count": 1,
+                "finished": true
+            }
+        }
+    ]
+}

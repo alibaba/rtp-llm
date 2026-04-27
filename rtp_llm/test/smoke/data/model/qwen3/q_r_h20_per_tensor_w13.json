@@ -1,0 +1,235 @@
+{
+    "model_type": "qwen_3",
+    "model_path": "/mnt/nas1/hf/models--Qwen--Qwen3-1.7B/snapshots/0060bc56d46589041c1048efd1a397421b1142b5",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "$prompt:m2",
+                        "partial": false
+                    },
+                    {
+                        "role": "user",
+                        "content": "$prompt:s6",
+                        "partial": false
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "fcst_result_white_box",
+                            "description": "销量预测白盒，能够分析某货品到某仓库的销量预测白盒化信息。具体输出内容为\"reason\"（归因结果）、\"fcst_sls\"（预测销量）和 \"his_sls\"（历史销量）。",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "code": {
+                                        "description": "服务code",
+                                        "type": "string"
+                                    },
+                                    "params": {
+                                        "description": "服务入参",
+                                        "type": "object",
+                                        "properties": {
+                                            "store_code": {
+                                                "description": "仓code",
+                                                "type": "string"
+                                            },
+                                            "po_id": {
+                                                "description": "采购单ID",
+                                                "type": "string"
+                                            },
+                                            "sc_item_id": {
+                                                "description": "货品id",
+                                                "type": "string"
+                                            }
+                                        },
+                                        "required": [
+                                            "sc_item_id",
+                                            "po_id",
+                                            "store_code"
+                                        ]
+                                    }
+                                },
+                                "required": [
+                                    "code",
+                                    "params"
+                                ]
+                            }
+                        }
+                    }
+                ],
+                "max_tokens": 6,
+                "stream": false,
+                "extra_configs": {
+                    "top_k": 1,
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1777280337,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "我理解您希望获得关于",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 497,
+                    "total_tokens": 503,
+                    "completion_tokens": 6,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 125.967,
+                    "iter_count": 6,
+                    "prefix_len": 0,
+                    "input_len": 497,
+                    "output_len": 6,
+                    "step_output_len": 6,
+                    "first_token_cost_time": 33.212,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "$prompt:m2",
+                        "partial": false
+                    },
+                    {
+                        "role": "user",
+                        "content": "$prompt:s6",
+                        "partial": false
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "fcst_result_white_box",
+                            "description": "销量预测白盒，能够分析某货品到某仓库的销量预测白盒化信息。具体输出内容为\"reason\"（归因结果）、\"fcst_sls\"（预测销量）和 \"his_sls\"（历史销量）。",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "code": {
+                                        "description": "服务code",
+                                        "type": "string"
+                                    },
+                                    "params": {
+                                        "description": "服务入参",
+                                        "type": "object",
+                                        "properties": {
+                                            "store_code": {
+                                                "description": "仓code",
+                                                "type": "string"
+                                            },
+                                            "po_id": {
+                                                "description": "采购单ID",
+                                                "type": "string"
+                                            },
+                                            "sc_item_id": {
+                                                "description": "货品id",
+                                                "type": "string"
+                                            }
+                                        },
+                                        "required": [
+                                            "sc_item_id",
+                                            "po_id",
+                                            "store_code"
+                                        ]
+                                    }
+                                },
+                                "required": [
+                                    "code",
+                                    "params"
+                                ]
+                            }
+                        }
+                    }
+                ],
+                "max_tokens": 6,
+                "stream": true,
+                "extra_configs": {
+                    "top_k": 1,
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "id": "chat",
+                "object": "chat.completion.chunk",
+                "created": 1777280337,
+                "model": null,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "我理解您希望获得关于",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 497,
+                    "total_tokens": 503,
+                    "completion_tokens": 6,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": null,
+                "extra_outputs": null
+            }
+        }
+    ]
+}

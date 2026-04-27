@@ -19,15 +19,15 @@
       "result": {
         "response_batch": [
           {
-            "response": " 你好！我是Qwen3，是阿里巴巴集团最新推出的大语言模型。我基于更",
+            "response": "，并给出答案。 问题1：What is the best way to improve my English listening skills?",
             "finished": true
           },
           {
-            "response": "嗯，用户问的是“月亮圆不圆”，这个问题看起来挺简单的，但可能需要更",
+            "response": " --ar 3:4 --v 6.0 --style raw --style expressive --style",
             "finished": true
           },
           {
-            "response": "嗯，用户发来了一条消息：“hello,你试试不上班|im_end|>",
+            "response": "同时，为高校提供招生宣传、招生咨询、校园开放日策划等服务，助力高校",
             "finished": true
           }
         ]
@@ -59,7 +59,7 @@
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "<think>\nOkay, so I need to figure out how quantum algorithms solve complex problems efficiently. Hmm, I remember that quantum computing uses qubits, which can be in superpositions of states, unlike classical bits. But how does that help with solving problems faster?\n\nFirst, maybe I should recall some examples of quantum algorithms. Shor's algorithm for factoring large numbers and Grover's algorithm for searching unsorted databases come to mind. Shor's algorithm is exponentially faster than the best classical algorithm for",
+              "content": "<think>\nOkay, so the user is asking which Flask alternative is most similar to Django North in syntax. Hmm, first I need to make sure I understand what Django North is. Wait, Django North was a migration tool for Django, right? But I think it's been deprecated and replaced by Django's built-in migration system. Maybe the user is referring to Django's migration framework, or perhaps there's a confusion here. Let me check.\n\nAssuming the user meant Django's migration system, they",
               "reasoning_content": null,
               "function_call": null,
               "tool_calls": null,
@@ -71,8 +71,8 @@
           }
         ],
         "usage": {
-          "prompt_tokens": 17,
-          "total_tokens": 117,
+          "prompt_tokens": 21,
+          "total_tokens": 121,
           "completion_tokens": 100,
           "completion_tokens_details": null,
           "prompt_tokens_details": null
@@ -82,7 +82,7 @@
           "cost_time": 2989.088,
           "iter_count": 100,
           "prefix_len": 0,
-          "input_len": 17,
+          "input_len": 21,
           "output_len": 100,
           "step_output_len": 100,
           "first_token_cost_time": 52.489,
@@ -135,7 +135,7 @@
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "<think>\nOkay, so I need to figure out how quantum algorithms solve complex problems efficiently. Hmm, I remember that quantum computing uses qubits instead of classical bits, right? But how does that actually help in solving problems faster? Let me start by recalling what I know about quantum mechanics and computing.\n\nFirst, qubits can be in a superposition of states. Unlike classical bits that are either 0 or 1, a qubit can be both 0 and 1 at the same time",
+              "content": "<think>\nOkay, so the user is asking which Flask alternative is most similar to Django North in syntax. Hmm, first I need to make sure I understand what Django North is. Wait, Django North was a migration tool for Django, right? But I think it's been deprecated and replaced by Django's built-in migration system. Maybe the user is referring to Django's migration framework, or perhaps there's a confusion here. Let me check.\n\nAssuming the user meant Django's migration system, they",
               "reasoning_content": null,
               "function_call": null,
               "tool_calls": null,
@@ -147,8 +147,8 @@
           }
         ],
         "usage": {
-          "prompt_tokens": 17,
-          "total_tokens": 117,
+          "prompt_tokens": 21,
+          "total_tokens": 121,
           "completion_tokens": 100,
           "completion_tokens_details": null,
           "prompt_tokens_details": {
@@ -161,7 +161,7 @@
           "cost_time": 23835.21,
           "iter_count": 100,
           "prefix_len": 0,
-          "input_len": 17,
+          "input_len": 21,
           "output_len": 100,
           "step_output_len": 100,
           "first_token_cost_time": 20898.399,
