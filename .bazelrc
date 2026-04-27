@@ -145,9 +145,9 @@ build:rocm_gfx950 --copt="-DROCM_GFX950=1"
 build:rocm_gfx950 --define=gfx950=true
 build:rocm --copt="-DUSING_CK_INT4=1"
 build:rocm --copt="-D__HIP_PLATFORM_AMD__=1"
-
 build:rocm --copt="-DTORCH_CUDA_CPP_API=" # PyTorch 2.9 ROCm compatibility
 build:rocm --copt="-DTORCH_CUDA_CU_API=" # PyTorch 2.9 ROCm compatibility
+
 ## ROCm clang may emit compiler-rt builtins (e.g. __truncsfbf2) that are not
 ## pulled in automatically for shared objects in this toolchain setup.
 ## NOTE: The clang version number (22) must be updated when upgrading ROCm.
@@ -226,7 +226,6 @@ test --test_env TZ=Asia/Shanghai
 # compat for low driver < 535
 test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/cuda/lib64/stubs"
 
-# only use for internal source
-try-import %workspace%/stub_source/.internal_bazelrc
-# always use for aone ci
+# internal source overrides (only loaded when internal_source symlink exists)
+try-import %workspace%/internal_source/.internal_bazelrc
 try-import %workspace%/internal_source/.cicd_bazelrc

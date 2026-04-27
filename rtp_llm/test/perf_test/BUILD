@@ -1,3 +1,12 @@
+package(default_visibility = ["//visibility:public"])
+
+# Exported so the perf_test() macro (defined in defs.bzl, instantiated by
+# internal_source/rtp_llm/test/perf_test/BUILD) can reference test_entry.py
+# across packages.
+exports_files([
+    "test_entry.py",
+])
+
 py_library(
     name = "perf_test_lib",
     srcs = [
