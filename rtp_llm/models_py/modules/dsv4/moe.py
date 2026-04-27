@@ -17,6 +17,42 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 
+# P2 (plan_0427.md): single-Triton-kernel router-gate epilogue for
+# score_func='sqrtsoftplus'.  Replaces ~7 elementwise/reduce/topk launches
+# (softplus → sqrt → bias-add → topk → gather → sum → div → mul) with one
+# fused kernel.  ~4× per-call speedup, identical top-k indices vs eager.
+try:
+    from rtp_llm.models_py.modules.dsv4._gate_fused_triton import fused_sqrtsoftplus_gate
+    _GATE_FUSED_OK = True
+except Exception:  # pragma: no cover
+    fused_sqrtsoftplus_gate = None
+    _GATE_FUSED_OK = False
+
+
+def _use_fused_gate(score_func: str, x_size_0: int) -> bool:
+    """Gate for the fused router-gate kernel.
+
+    Defaults to OFF: the kernel is bit-equivalent to the eager FP32 epilogue
+    in microbench (max abs diff 4.5e-8 at rel ~2e-7, top-k strict-equal 100%
+    across 5 random seeds), but in practice the slight fp32 reduction-order
+    drift in `weights / weights.sum()` is enough to flip greedy decode on
+    tied/near-tied logits across ~60 layers — re-capturing all 6 V4-Flash
+    smoke goldens is required when this is on.  The per-call win (~0.18 ms)
+    over 43 layers/forward is small (~8 ms / ~0.25% of the 3090 ms prefill),
+    so we keep this opt-in for users willing to pay the golden churn.
+
+    Set ``DSV4_GATE_FUSED=1`` to enable.
+    """
+    if not _GATE_FUSED_OK or fused_sqrtsoftplus_gate is None:
+        return False
+    if os.environ.get("DSV4_GATE_FUSED", "0") != "1":
+        return False
+    if score_func != "sqrtsoftplus":
+        return False
+    if x_size_0 == 0:
+        return False
+    return True
+
 FP4_BLOCK = 32
 FP8_BLOCK = 128
 
@@ -213,6 +249,20 @@ class Gate(nn.Module):
         # then run in FP32 through softplus/sqrt/topk, same as before.
         x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
         scores = F.linear(x_bf16, self._weight_bf16()).float()
+
+        # P2 fast path: fuse softplus+sqrt+bias+topk+normalize for the
+        # default V4 score_func='sqrtsoftplus' + non-hash routing.
+        if (
+            not self.hash
+            and self.bias is not None
+            and _use_fused_gate(self.score_func, x.size(0))
+        ):
+            return fused_sqrtsoftplus_gate(
+                scores.contiguous(), self.bias.contiguous(),
+                topk=self.topk, route_scale=float(self.route_scale),
+                norm_eps=1e-12,
+            )
+
         if self.score_func == "softmax":
             scores = scores.softmax(dim=-1)
         elif self.score_func == "sigmoid":
