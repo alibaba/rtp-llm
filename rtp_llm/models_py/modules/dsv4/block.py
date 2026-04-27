@@ -407,12 +407,17 @@ class MTPBlock(Block):
         # Parent Block runs attn + FFN + mHC on [B, S, hc, dim]
         x_after = super().forward(x_fused, start_pos, input_ids)       # [B, S, hc, dim]
 
-        # hc_head_reduce (same math as V4Transformer._hc_head_reduce)
+        # hc_head_reduce — same BF16-GEMM trick as Block._hc_pre / V4Transformer._hc_head_reduce.
         shape, dtype = x_after.size(), x_after.dtype
-        x_flat = x_after.flatten(2).float()                             # [B, S, hc*dim]
-        rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x_flat, self.hc_head_fn) * rsqrt
+        x_flat = x_after.flatten(2)                                     # bf16 [B, S, hc*dim]
+        bf = getattr(self, "_hc_head_fn_bf16", None)
+        if bf is None or bf.shape != self.hc_head_fn.shape or bf.device != self.hc_head_fn.device:
+            bf = self.hc_head_fn.to(torch.bfloat16) if self.hc_head_fn.dtype != torch.bfloat16 else self.hc_head_fn
+            self._hc_head_fn_bf16 = bf
+        x_flat_f32 = x_flat.float()
+        rsqrt = torch.rsqrt(x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps).to(dtype)
+        mixes = (F.linear(x_flat, bf) * rsqrt).float()                  # bf16 GEMM, fp32 epilogue
         pre = torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
-        h = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=2)    # [B, S, dim]
+        h = torch.sum(pre.to(dtype).unsqueeze(-1) * x_after.view(*shape), dim=2)  # bf16 sum
         h = self.norm(h.to(dtype))                                      # [B, S, dim]
         return F.linear(h.float(), lm_head_weight)                      # [B, S, vocab]
