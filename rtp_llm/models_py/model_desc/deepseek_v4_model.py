@@ -854,33 +854,153 @@ class DeepSeekV4Model(GptModelBase):
             )
         return len(slots)
 
-    def _wire_framework_kv_cache(self, device: str):
-        """Replace each Attention layer's register_buffer kv_cache with framework tensors.
+    def _reset_compressor_state(self):
+        """Reset compressor/indexer state for a new prefill request.
 
-        The framework's KVCache (self.kv_cache) provides per-layer tensors via
-        kv_cache_base_by_layer. For DSV4, each layer's attention uses a single
-        contiguous [B, kv_cache_size, head_dim] buffer. We allocate matching
-        tensors and rebind them, so the attention forward reads/writes the
-        framework-managed memory instead of the internal register_buffer.
-
-        The compressor/indexer kv_cache references are set to None to force
-        rebinding on the next forward call (they bind to kv_cache[:, win:]).
+        When using framework KV cache, the kv_cache tensor persists across
+        requests (it's a framework-managed buffer, not a per-request register_buffer).
+        The compressor's kv_state/score_state and kv_cache must be zeroed on each
+        new prefill to avoid stale data from previous requests corrupting output.
         """
-        for i, layer in enumerate(self.v4.layers):
+        for layer in self.v4.layers:
             attn = layer.attn
-            # Create framework-managed tensor with same shape as internal buffer
-            ext_cache = torch.zeros_like(attn.kv_cache)
-            attn.kv_cache = ext_cache
-
-            # Force compressor to rebind to new kv_cache slice on next forward
+            # Reset kv_cache (SWA + compressed KV)
+            attn.kv_cache.zero_()
+            # Reset compressor state
             if attn.compressor is not None:
-                attn.compressor.kv_cache = None
-
-            # Force indexer's compressor to rebind too
+                attn.compressor.kv_state.zero_()
+                attn.compressor.score_state.fill_(float("-inf"))
+                attn.compressor.kv_cache = None  # force rebind
+            # Reset indexer state
             if attn.indexer is not None:
-                idx_ext = torch.zeros_like(attn.indexer.kv_cache)
-                attn.indexer.kv_cache = idx_ext
+                attn.indexer.kv_cache.zero_()
+                attn.indexer.compressor.kv_state.zero_()
+                attn.indexer.compressor.score_state.fill_(float("-inf"))
                 attn.indexer.compressor.kv_cache = None
+
+    def _wire_framework_kv_cache(self, device: str):
+        """Store references to framework BlockPool tensors for gather/scatter.
+
+        Does NOT do flat view — keeps register_buffer as working memory.
+        In forward(), we gather from BlockPool pages into flat buffers before
+        computation, and scatter back after computation. This ensures:
+        - reuse cache works (cached data is in specific block_ids)
+        - PD separation works (cache store transfers BlockPool raw bytes)
+        - concurrent requests work (each request has independent block_ids)
+        """
+        self._framework_kv_enabled = True
+        self._fw_layer_tensors = []  # per-layer BlockPool tensor references
+        if self.kv_cache is None or not self.kv_cache.kv_cache_base_by_layer:
+            logging.warning("[DeepSeekV4Model] no framework kv_cache, skipping wiring")
+            return
+
+        for i in range(len(self.v4.layers)):
+            if i < len(self.kv_cache.kv_cache_base_by_layer):
+                self._fw_layer_tensors.append(self.kv_cache.kv_cache_base_by_layer[i])
+            else:
+                self._fw_layer_tensors.append(None)
+
+        logging.info(
+            "[DeepSeekV4Model] framework BlockPool KV wired for %d layers "
+            "(gather/scatter mode, seq_size_per_block=%d)",
+            len(self._fw_layer_tensors),
+            self.kv_cache.seq_size_per_block if self.kv_cache else 0,
+        )
+
+    def _gather_all_layers(self, attn_inputs):
+        """Gather cached KV from BlockPool pages into each layer's flat buffer.
+
+        For each layer, uses block_ids to copy data from BlockPool pages into
+        the flat [B, kv_cache_size, head_dim] register_buffer that attention reads.
+        """
+        if not hasattr(self, "_fw_layer_tensors") or not self._fw_layer_tensors:
+            return
+        from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+
+        spb = (
+            self.kv_cache.seq_size_per_block
+            if self.kv_cache.seq_size_per_block > 0
+            else 256
+        )
+
+        for i, layer in enumerate(self.v4.layers):
+            fw_tensor = (
+                self._fw_layer_tensors[i] if i < len(self._fw_layer_tensors) else None
+            )
+            if fw_tensor is None or fw_tensor.numel() == 0:
+                continue
+
+            gid = select_block_map_for_layer(attn_inputs, i)
+            if gid is None:
+                continue
+
+            block_ids = attn_inputs.kv_cache_kernel_block_id_device
+            if block_ids is None or block_ids.numel() == 0:
+                continue
+
+            attn_mod = layer.attn
+            kv_cache = attn_mod.kv_cache  # [B, kv_cache_size, head_dim]
+            head_dim = attn_mod.head_dim
+            batch_block_ids = block_ids[0]  # B=1
+
+            for b_idx in range(batch_block_ids.size(0)):
+                bid = int(batch_block_ids[b_idx].item())
+                if bid < 0:
+                    continue
+                start = b_idx * spb
+                end = min(start + spb, kv_cache.size(1))
+                n = end - start
+                if n <= 0:
+                    continue
+                page = fw_tensor[bid]
+                kv_cache[0, start:end] = page[: n * head_dim].view(n, head_dim)
+
+    def _scatter_all_layers(self, attn_inputs):
+        """Scatter updated KV from each layer's flat buffer back to BlockPool pages.
+
+        After forward computation, copies the updated KV data from flat buffers
+        back to the BlockPool pages so the framework can manage/transfer them.
+        """
+        if not hasattr(self, "_fw_layer_tensors") or not self._fw_layer_tensors:
+            return
+        from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+
+        spb = (
+            self.kv_cache.seq_size_per_block
+            if self.kv_cache.seq_size_per_block > 0
+            else 256
+        )
+
+        for i, layer in enumerate(self.v4.layers):
+            fw_tensor = (
+                self._fw_layer_tensors[i] if i < len(self._fw_layer_tensors) else None
+            )
+            if fw_tensor is None or fw_tensor.numel() == 0:
+                continue
+
+            gid = select_block_map_for_layer(attn_inputs, i)
+            if gid is None:
+                continue
+
+            block_ids = attn_inputs.kv_cache_kernel_block_id_device
+            if block_ids is None or block_ids.numel() == 0:
+                continue
+
+            attn_mod = layer.attn
+            kv_cache = attn_mod.kv_cache
+            head_dim = attn_mod.head_dim
+            batch_block_ids = block_ids[0]
+
+            for b_idx in range(batch_block_ids.size(0)):
+                bid = int(batch_block_ids[b_idx].item())
+                if bid < 0:
+                    continue
+                start = b_idx * spb
+                end = min(start + spb, kv_cache.size(1))
+                n = end - start
+                if n <= 0:
+                    continue
+                fw_tensor[bid, : n * head_dim] = kv_cache[0, start:end].reshape(-1)
 
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
@@ -1057,7 +1177,22 @@ class DeepSeekV4Model(GptModelBase):
         input_ids: torch.Tensor = inputs.input_ids
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)  # [1, S]
-        start_pos = 0 if is_prefill else self._running_pos
+        use_framework_kv = os.environ.get("DSV4_USE_FRAMEWORK_KV", "0") == "1"
+
+        # When framework KV cache is active, use prefix_lengths from attention_inputs
+        # to determine reuse offset. The framework reuses cached KV blocks for the
+        # prefix and only sends suffix tokens for computation. start_pos must reflect
+        # the reuse offset so attention reads cached KV correctly.
+        reuse_len = 0
+        if use_framework_kv and is_prefill and attn is not None:
+            prefix_lengths = getattr(attn, "prefix_lengths", None)
+            if prefix_lengths is not None and prefix_lengths.numel() > 0:
+                reuse_len = int(prefix_lengths[0].item())
+
+        if is_prefill:
+            start_pos = reuse_len  # 0 if no reuse, reuse_len if cache hit
+        else:
+            start_pos = self._running_pos
 
         # --- Context Parallel (prefill) — scaffold integration ----------
         #
@@ -1187,6 +1322,19 @@ class DeepSeekV4Model(GptModelBase):
                 prefill_bsz,
             )
 
+        # Framework KV gather/scatter: before forward, gather cached KV from
+        # BlockPool pages into flat buffers; after forward, scatter back.
+        fw_active = (
+            use_framework_kv
+            and hasattr(self, "_framework_kv_enabled")
+            and self._framework_kv_enabled
+            and attn is not None
+        )
+
+        if fw_active and reuse_len > 0:
+            # Gather cached KV from BlockPool for reused prefix
+            self._gather_all_layers(attn)
+
         if should_capture:
             try:
                 os.remove(self._profile_trigger)
@@ -1219,6 +1367,10 @@ class DeepSeekV4Model(GptModelBase):
 
         if self._stash is not None and prefill_bsz > 0:
             self._stash.scatter(prefill_bsz)
+
+        # After forward: scatter updated KV back to BlockPool pages
+        if fw_active:
+            self._scatter_all_layers(attn)
 
         # FP8 KV decode arming: after the FIRST prefill (start_pos==0) — and
         # only when the runtime requested ``--fp8_kv_cache 1`` — bulk-convert
@@ -1254,7 +1406,8 @@ class DeepSeekV4Model(GptModelBase):
                 )
                 self._running_pos = int(actual_lens[-1].item())
             else:
-                self._running_pos = input_ids.size(1)
+                # Total position = reuse_len (cached prefix) + suffix tokens sent
+                self._running_pos = reuse_len + input_ids.size(1)
         else:
             self._running_pos += input_ids.size(1)
 
