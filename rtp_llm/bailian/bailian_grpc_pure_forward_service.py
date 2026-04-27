@@ -96,26 +96,31 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         if self._log_debug:
             req_count = 0
             resp_count = 0
-            for req in request_iterator:
-                req_count += 1
-                logging.info(
-                    "[BailianGrpc] Forward req #%d to %s: model=%s id=%s inputs=%d",
-                    req_count,
-                    addr,
-                    req.model_name,
-                    req.id,
-                    len(req.inputs),
-                )
-                for resp in stub.ModelStreamInfer([req]):
-                    resp_count += 1
+            # Wrap iterator to log each request
+            def logged_iterator():
+                nonlocal req_count
+                for req in request_iterator:
+                    req_count += 1
                     logging.info(
-                        "[BailianGrpc] Forward resp #%d from %s: error=%s outputs=%d",
-                        resp_count,
+                        "[BailianGrpc] Forward req #%d to %s: model=%s id=%s inputs=%d",
+                        req_count,
                         addr,
-                        resp.error_message or "none",
-                        len(resp.outputs),
+                        req.model_name,
+                        req.id,
+                        len(req.inputs),
                     )
-                    yield resp
+                    yield req
+            # Forward with wrapped iterator
+            for resp in stub.ModelStreamInfer(logged_iterator()):
+                resp_count += 1
+                logging.info(
+                    "[BailianGrpc] Forward resp #%d from %s: error=%s outputs=%d",
+                    resp_count,
+                    addr,
+                    resp.error_message or "none",
+                    len(resp.outputs),
+                )
+                yield resp
         else:
             for resp in stub.ModelStreamInfer(request_iterator):
                 yield resp
