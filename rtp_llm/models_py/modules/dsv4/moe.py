@@ -180,6 +180,23 @@ class Gate(nn.Module):
             else:
                 self.bias = nn.Parameter(torch.empty(n_routed_experts, dtype=torch.float32))
 
+    def _weight_bf16(self) -> torch.Tensor:
+        """Lazy-cached BF16 view of ``self.weight``.
+
+        V4 checkpoint ships gate weights in BF16 or FP32 (loader.py:88); when
+        FP32, the previous forward upcast both x and weight to FP32, hitting
+        the SIMT sgemm 128x128 path (~80 TFLOPS, no tensor cores).  Caching
+        a BF16 view + matmul-ing in BF16 gets us tensor-core throughput.
+        See plan_0427.md P1.
+        """
+        if self.weight.dtype == torch.bfloat16:
+            return self.weight
+        cached = getattr(self, "_w_bf16", None)
+        if cached is None or cached.shape != self.weight.shape or cached.device != self.weight.device:
+            cached = self.weight.to(torch.bfloat16)
+            self._w_bf16 = cached
+        return cached
+
     def forward(self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         # x: [N, dim] flat.  Empty-batch safe — some paths (DP rank with
         # zero local tokens; F.softplus on certain degenerate shapes)
@@ -190,7 +207,12 @@ class Gate(nn.Module):
                 torch.zeros((0, self.topk), dtype=torch.float32, device=x.device),
                 torch.zeros((0, self.topk), dtype=torch.long, device=x.device),
             )
-        scores = F.linear(x.float(), self.weight.float())
+        # P1 (plan_0427.md): BF16 GEMM with FP32 epilogue replaces the
+        # FP32-everywhere path that previously emitted SIMT sgemm 128x128
+        # (127× × 1.15 ms = 145 ms in the 64k+CP=4 trace).  Score numerics
+        # then run in FP32 through softplus/sqrt/topk, same as before.
+        x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
+        scores = F.linear(x_bf16, self._weight_bf16()).float()
         if self.score_func == "softmax":
             scores = scores.softmax(dim=-1)
         elif self.score_func == "sigmoid":
