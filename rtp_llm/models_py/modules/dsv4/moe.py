@@ -20,6 +20,39 @@ from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 FP4_BLOCK = 32
 FP8_BLOCK = 128
 
+# Module-level cache for the Mega MoE symm-mem dispatch buffer.
+# Each MoE layer's symm buffer holds only single-layer staging
+# (per-token x/sf, topk, l1_acts/sf, l2_acts/sf) — the previous layer's
+# data is no longer needed once the next layer's MoE starts, so a single
+# buffer can be reused across all layers.  Without sharing, V4-Flash's
+# 64+ MoE-layer instances each allocate ~3.4 GiB at CP=4 → ~218 GiB symm
+# memory per rank, OOMing the GB200's 188 GiB after dozens of allocs.
+# Keyed by the shape parameters so different model configs in the same
+# process don't collide; in practice there's only ever one entry.
+_MEGA_BUF_CACHE = {}
+
+
+def _get_or_create_mega_buf(group, num_experts, num_max_tokens_per_rank,
+                            num_topk, hidden, intermediate_hidden,
+                            use_fp8_dispatch, activation):
+    import deep_gemm
+    key = (id(group), num_experts, num_max_tokens_per_rank, num_topk,
+           hidden, intermediate_hidden, bool(use_fp8_dispatch), activation)
+    buf = _MEGA_BUF_CACHE.get(key)
+    if buf is None:
+        buf = deep_gemm.get_symm_buffer_for_mega_moe(
+            group=group,
+            num_experts=num_experts,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            num_topk=num_topk,
+            hidden=hidden,
+            intermediate_hidden=intermediate_hidden,
+            use_fp8_dispatch=use_fp8_dispatch,
+            activation=activation,
+        )
+        _MEGA_BUF_CACHE[key] = buf
+    return buf
+
 # ACCL-EP's intranode dispatch kernel has a compile-time switch over
 # ``num_topk`` that only covers {2, 4, 8, 16} (asserts false on others —
 # intranode.cu:2237 "Unsupported num_topk").  V4-Flash uses
@@ -466,7 +499,9 @@ class MoE(nn.Module):
             "_mega_moe_available() should have gated this earlier"
         )
         group = dist.group.WORLD
-        self._mega_buf = deep_gemm.get_symm_buffer_for_mega_moe(
+        # Symm buffer is single-layer staging — share one across all
+        # MoE layers via the module-level cache (see _get_or_create_mega_buf).
+        self._mega_buf = _get_or_create_mega_buf(
             group=group,
             num_experts=self.n_routed_experts,
             num_max_tokens_per_rank=max(self.max_tokens_per_rank, 1),
