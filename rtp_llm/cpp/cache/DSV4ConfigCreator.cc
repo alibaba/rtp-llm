@@ -47,8 +47,12 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
     // All groups use TOKENS_PER_BLOCK = 256
     // Pool 0/1/2: variable num_blocks (large), entries_per_block = 256/ratio
     // Pool 3/4/5/6: fixed 2 blocks per request
+    //
+    // KV pools use TYPE_UINT8 as store_dtype because entry_elems (KV_ENTRY_BYTES /
+    // INDEXER_ENTRY_BYTES) is already in bytes. getTypeSize(TYPE_UINT8) = 1, so
+    // block_size_bytes = entries_per_block * entry_bytes * 1 = correct byte count.
 
-    // Pool 0: CSA KV (ratio=4, 64 entries per block)
+    // Pool 0: CSA KV (ratio=4, 64 entries per block, bf16 head_dim=512 → 1024 bytes/entry)
     dsv4_config.pool_specs[0] = {
         DSV4CacheType::CSA_KV,
         num_csa,
@@ -58,7 +62,7 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
         true,
         0,
     };
-    // Pool 1: HCA KV (ratio=128, 2 entries per block)
+    // Pool 1: HCA KV (ratio=128, 2 entries per block, bf16 head_dim=512 → 1024 bytes/entry)
     dsv4_config.pool_specs[1] = {
         DSV4CacheType::HCA_KV,
         num_hca,
@@ -68,7 +72,7 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
         true,
         0,
     };
-    // Pool 2: Indexer KV (ratio=4, 64 entries per block)
+    // Pool 2: Indexer KV (ratio=4, 64 entries per block, bf16 index_head_dim=128 → 256 bytes/entry)
     dsv4_config.pool_specs[2] = {
         DSV4CacheType::INDEXER_KV,
         num_csa,
@@ -182,15 +186,47 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
         max_block_stride = std::max(max_block_stride, spec->block_size_bytes());
     }
 
+    // Map each group to its KVCacheAttnType so kv_cache_base_by_layer_attn
+    // is populated per-pool (CSA_KV=1, HCA_KV=2, ..., SWA_KV=7).
+    static const KVCacheAttnType pool_attn_types[DSV4_NUM_POOLS] = {
+        KVCacheAttnType::CSA_KV,
+        KVCacheAttnType::HCA_KV,
+        KVCacheAttnType::INDEXER_KV,
+        KVCacheAttnType::INDEXER_STATE,
+        KVCacheAttnType::CSA_STATE,
+        KVCacheAttnType::HCA_STATE,
+        KVCacheAttnType::SWA_KV,
+    };
+    for (int i = 0; i < DSV4_NUM_POOLS; i++) {
+        config.group_attn_types.push_back(pool_attn_types[i]);
+    }
+
     // group_layer_num must be the max layer count across all groups,
     // because BlockPool creates group_layer_num layer tensors shared by all groups.
     uint32_t max_group_layers = 0;
     for (int i = 0; i < DSV4_NUM_POOLS; i++) {
         max_group_layers = std::max(max_group_layers, dsv4_config.pool_specs[i].layer_num);
     }
-    config.group_layer_num  = static_cast<int>(max_group_layers);
-    config.full_group_num   = DSV4_NUM_POOLS;
-    config.linear_group_num = 0;
+    config.group_layer_num             = static_cast<int>(max_group_layers);
+    config.full_group_num              = DSV4_NUM_POOLS;
+    config.linear_group_num            = 0;
+    config.use_independent_block_pools = true;  // DSV4: each group gets its own BlockPool
+
+    // Per-group block counts: fixed pools (3/4/5/6) only need
+    // fixed_blocks_per_req * max_batch blocks.
+    // Paged pools (0/1/2) use the global block_num (0 = fallback).
+    // Use a conservative max_batch estimate; the actual concurrency limit
+    // is set later by the scheduler, but we need an upper bound for allocation.
+    const uint32_t max_batch = 128;  // DSV4 fixed pools  // conservative upper bound
+    config.group_block_nums.resize(DSV4_NUM_POOLS, 0);
+    for (int i = 0; i < DSV4_NUM_POOLS; i++) {
+        const auto& pool = dsv4_config.pool_specs[i];
+        if (pool.is_paged) {
+            config.group_block_nums[i] = 0;  // 0 = use global block_num
+        } else {
+            config.group_block_nums[i] = pool.fixed_blocks_per_req * max_batch;
+        }
+    }
 
     // Physical sizes: use max stride so all groups fit in uniform blocks
     config.kv_block_stride_bytes = max_block_stride;
@@ -203,6 +239,22 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
     config.layer_to_group_id.assign(num_layers, 6);  // default to SWA group
     config.layer_attn_types.assign(num_layers, CacheGroupType::FULL);
     config.layer_to_block_stride_bytes.assign(num_layers, static_cast<int>(max_block_stride));
+
+    // Per-layer attn-type-to-group mapping for multi-pool access
+    const size_t attn_type_count = static_cast<size_t>(KVCacheAttnType::TYPE_COUNT);
+    config.layer_attn_to_group_id.resize(num_layers);
+    config.layer_to_group_ids.resize(num_layers);
+    for (size_t i = 0; i < num_layers; i++) {
+        config.layer_attn_to_group_id[i].assign(attn_type_count, -1);
+    }
+    // Fill from group_layers: for each group, mark its layers
+    for (int gid = 0; gid < DSV4_NUM_POOLS; gid++) {
+        auto attn_type = static_cast<size_t>(pool_attn_types[gid]);
+        for (int layer_id : *group_layers[gid]) {
+            config.layer_attn_to_group_id[static_cast<size_t>(layer_id)][attn_type] = gid;
+            config.layer_to_group_ids[static_cast<size_t>(layer_id)].push_back(gid);
+        }
+    }
 }
 
 DSV4CacheConfig DSV4ConfigCreator::buildDSV4Config(const ModelConfig& model_config) {

@@ -13,7 +13,6 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
 import math
-import os
 from typing import Dict, Optional
 
 import torch
@@ -111,7 +110,21 @@ def _get_window_topk_idxs(
 ) -> torch.Tensor:
     """Returns int64 [bsz, seqlen, window_size] giving the (cyclic) absolute slot indices
     in the sliding-window KV ring buffer that each query position should read."""
-    if start_pos >= window_size - 1:
+    if start_pos > 0 and seqlen > 1:
+        # Continuation prefill: per-position ring buffer indices
+        # Each query at global position g = start_pos + i reads from ring buffer
+        global_pos = torch.arange(
+            start_pos, start_pos + seqlen, device=device
+        )  # [seqlen]
+        sp = global_pos % window_size  # [seqlen]
+        offsets = torch.arange(window_size, device=device)  # [win]
+        idxs = (
+            sp.unsqueeze(1) + 1 + offsets.unsqueeze(0)
+        ) % window_size  # [seqlen, win]
+        valid_count = torch.clamp(global_pos + 1, max=window_size)  # [seqlen]
+        invalid = offsets.unsqueeze(0) < (window_size - valid_count.unsqueeze(1))
+        matrix = torch.where(invalid, -1, idxs)
+    elif start_pos >= window_size - 1:
         sp = start_pos % window_size
         matrix = torch.cat(
             [
@@ -571,8 +584,6 @@ class Attention(nn.Module):
                 self.indexer.compressor.freqs_cis = None
 
     def _rmsnorm_weighted(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        if _use_qk_rmsnorm_fast() and x.is_cuda and x.numel() > 0:
-            return v4_rmsnorm(x, weight, eps=self.eps)
         dtype = x.dtype
         x32 = x.float()
         x32 = x32 * torch.rsqrt(x32.square().mean(-1, keepdim=True) + self.eps)
@@ -1007,7 +1018,10 @@ class Attention(nn.Module):
             all_reduce(out, Group.TP)
         return out
 
-    def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, start_pos, sequence_lengths=None
+    ) -> torch.Tensor:
+        """Forward pass. start_pos can be int (B=1) or tensor [B] for batched decode."""
         bsz, seqlen, _ = x.size()
         win = self.window_size
         ratio = self.compress_ratio
@@ -1015,15 +1029,29 @@ class Attention(nn.Module):
         device = x.device
 
         cp_ctx = self._cp_ctx
-        cp_on = cp_ctx is not None and cp_ctx.cp_size > 1 and start_pos == 0
+        is_batched_decode = (
+            isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
+        )
+        is_prefill_attn = (not is_batched_decode) and seqlen > 1
+        cp_on = cp_ctx is not None and cp_ctx.cp_size > 1 and is_prefill_attn
 
         # Per-token RoPE angles.  Non-CP uses the contiguous window
         # freqs_cis[start_pos:start_pos+seqlen]; CP selects at each
         # rank-local token's GLOBAL position.
+        is_batched_decode = (
+            isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
+        )
         if cp_on:
             freqs_cis = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
+        elif is_batched_decode:
+            # Batched decode: each batch element at different position, seqlen=1
+            # Gather freqs for each batch element's position
+            positions = start_pos.long()
+            freqs_cis = self.freqs_cis[positions]  # [B, rope_dim//2]
+            freqs_cis = freqs_cis.unsqueeze(1)  # [B, 1, rope_dim//2]
         else:
-            freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+            sp = int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
+            freqs_cis = self.freqs_cis[sp : sp + seqlen]
 
         # bind compressor cache + freqs on first call
         if self.compress_ratio and self.compressor.kv_cache is None:
@@ -1074,18 +1102,32 @@ class Attention(nn.Module):
                 seqlen_full,
                 cp_ctx.global_positions,
             )
+        elif is_batched_decode:
+            # Batched decode: vectorized topk_idxs — each batch at different ring position
+            sp = start_pos % win  # [B]
+            offsets = torch.arange(win, device=device)  # [win]
+            idxs = (sp.unsqueeze(1) + 1 + offsets.unsqueeze(0)) % win  # [B, win]
+            valid_count = torch.clamp(start_pos + 1, max=win)  # [B]
+            invalid = offsets.unsqueeze(0) < (win - valid_count.unsqueeze(1))
+            idxs = torch.where(invalid, -1, idxs)
+            topk_idxs = idxs.unsqueeze(1)  # [B, 1, win]
         else:
-            topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, start_pos, device)
+            sp = int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
+            topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, sp, device)
         if self.compress_ratio:
             # The concatenated prefill KV is [sliding (seqlen_full), compressed tail].
             # Compressed block start-index is seqlen_full in prefill,
             # win in decode (ring-buffer layout).
-            if start_pos == 0:
+            if is_prefill_attn:
                 offset = seqlen_full
             else:
                 offset = win
             if self.indexer is not None:
-                compress_idxs = self.indexer(x, qr, start_pos, offset)
+                if is_batched_decode:
+                    # Indexer now supports tensor start_pos directly
+                    compress_idxs = self.indexer(x, qr, start_pos, offset)
+                else:
+                    compress_idxs = self.indexer(x, qr, start_pos, offset)
             elif cp_on:
                 compress_idxs = _get_compress_topk_idxs_cp(
                     ratio,
@@ -1094,33 +1136,79 @@ class Attention(nn.Module):
                     offset,
                     cp_ctx.global_positions,
                 )
+            elif is_batched_decode:
+                # Vectorized compress_idxs for HCA batched decode (no indexer)
+                n_entries = (start_pos + 1) // ratio  # [B]
+                max_entries = int(n_entries.max().item())
+                if max_entries > 0:
+                    entry_range = torch.arange(max_entries, device=device)
+                    valid = entry_range.unsqueeze(0) < n_entries.unsqueeze(
+                        1
+                    )  # [B, max_entries]
+                    c_idxs = torch.where(valid, entry_range.unsqueeze(0) + offset, -1)
+                    compress_idxs = c_idxs.unsqueeze(1)  # [B, 1, max_entries]
+                else:
+                    compress_idxs = torch.full(
+                        (bsz, 1, 0), -1, device=device, dtype=torch.long
+                    )
             else:
+                sp_int = (
+                    int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
+                )
                 compress_idxs = _get_compress_topk_idxs(
-                    ratio, bsz, seqlen, start_pos, offset, device
+                    ratio, bsz, seqlen, sp_int, offset, device
                 )
             topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
         topk_idxs = topk_idxs.long()
 
         # Write KV cache + sparse attn
-        if start_pos == 0:
-            if seqlen_full <= win:
-                self.kv_cache[:bsz, :seqlen_full] = kv_full
-            else:
-                cutoff = seqlen_full % win
-                # Place the last `win` tokens into the ring buffer in correct order.
-                self.kv_cache[:bsz, cutoff:win], self.kv_cache[:bsz, :cutoff] = kv_full[
-                    :, -win:
-                ].split([win - cutoff, cutoff], dim=1)
-            if self.compress_ratio:
-                # Compressor reads x rank-local, all-gathers internally,
-                # writes full compressed KV into self.kv_cache[:, win:].
-                kv_compress = self.compressor(x, start_pos)
-                if kv_compress is not None:
-                    kv_cat = torch.cat([kv_full, kv_compress], dim=1)
+        sp_int = (
+            int(start_pos)
+            if isinstance(start_pos, torch.Tensor) and start_pos.numel() == 1
+            else (start_pos if isinstance(start_pos, int) else 0)
+        )
+
+        if is_prefill_attn:
+            if sp_int == 0:
+                # Fresh prefill: write all tokens into ring buffer
+                if seqlen_full <= win:
+                    self.kv_cache[:bsz, :seqlen_full] = kv_full
                 else:
-                    kv_cat = kv_full
+                    cutoff = seqlen_full % win
+                    self.kv_cache[:bsz, cutoff:win], self.kv_cache[:bsz, :cutoff] = (
+                        kv_full[:, -win:].split([win - cutoff, cutoff], dim=1)
+                    )
             else:
-                kv_cat = kv_full
+                # Continuation prefill: prefix KV already in kv_cache (gathered from BlockPool).
+                # Write new tokens into ring buffer starting at start_pos.
+                total_len = sp_int + seqlen
+                if total_len <= win:
+                    self.kv_cache[:bsz, sp_int:total_len] = kv_full
+                else:
+                    # Ring buffer wrap: place last `win` tokens of [prefix..prefix+seqlen]
+                    # But we only have the new tokens (kv_full). Prefix is already in cache.
+                    # Write new tokens at their ring positions.
+                    for t in range(seqlen):
+                        pos = (sp_int + t) % win
+                        self.kv_cache[:bsz, pos] = kv_full[:, t]
+            if self.compress_ratio:
+                kv_compress = self.compressor(x, sp_int)
+                if kv_compress is not None:
+                    if sp_int == 0:
+                        kv_cat = torch.cat([kv_full, kv_compress], dim=1)
+                    else:
+                        # Continuation: use ring buffer for attention (has prefix + new KV)
+                        kv_cat = self.kv_cache[:bsz]
+                else:
+                    if sp_int == 0:
+                        kv_cat = kv_full
+                    else:
+                        kv_cat = self.kv_cache[:bsz]
+            else:
+                if sp_int == 0:
+                    kv_cat = kv_full
+                else:
+                    kv_cat = self.kv_cache[:bsz]
             if _tl_kernels.tilelang_available():
                 o = _tl_kernels.sparse_attn(
                     q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
@@ -1130,9 +1218,20 @@ class Attention(nn.Module):
                     q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
                 )
         else:
-            self.kv_cache[:bsz, start_pos % win] = kv.squeeze(1)
-            if self.compress_ratio:
-                self.compressor(x, start_pos)
+            # Decode: write each batch element to its own ring position
+            if is_batched_decode:
+                batch_idx = torch.arange(bsz, device=device)
+                pos = start_pos % win  # [B]
+                self.kv_cache[batch_idx, pos] = kv.squeeze(1)  # vectorized write
+                if self.compress_ratio:
+                    self.compressor(x, start_pos)  # compressor handles tensor start_pos
+            else:
+                sp = (
+                    int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
+                )
+                self.kv_cache[:bsz, sp % win] = kv.squeeze(1)
+                if self.compress_ratio:
+                    self.compressor(x, sp)
             if _tl_kernels.tilelang_available():
                 o = _tl_kernels.sparse_attn(
                     q,
@@ -1155,14 +1254,10 @@ class Attention(nn.Module):
 
         # Grouped output projection: split heads into n_groups groups
         o = o.reshape(bsz, seqlen, self.n_groups, -1)
-        if self._factory_mode and _use_wo_fp8_fast() and o.is_cuda and o.numel() > 0:
-            # Native FP8 per-group GEMM via DeepGEMM (no [G*R, K] dequant).
-            o = self._wo_a_grouped_fp8(o)
-        else:
-            # REF: materialize BF16 weight then bf16 einsum.
-            wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
-            wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
-            o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+        # wo_a storage is native FP8; dequant on-the-fly and view into group-wise form.
+        wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
+        wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
+        o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
         out = self._lin(self.wo_b, o.flatten(2))
         if self.tp_size > 1:
             # wo_b is row-split along K — each rank produces a partial
