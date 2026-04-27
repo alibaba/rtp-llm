@@ -144,3 +144,49 @@ py_test(
     ],
     tags = ["manual"],
 )
+
+# V4-Flash CP=4 + EP=4 + Mega MoE prefill profile.  Same topology as
+# the baseline above but with DSV4_USE_MEGA_MOE=1 + DG_JIT_CPP_STANDARD=20.
+# Smaller input (8k vs baseline 64k) because Mega MoE's symm-mem buffer
+# allocation is sized from max_tokens_per_rank=max_seq_len; at 64k the
+# symm allocation aborts in CUDASymmetricMemory destructor during warmup.
+# 8k still exercises the Mega MoE fused dispatch + L1/L2 GEMM + combine
+# path on every MoE layer — enough kernel data to compare against the
+# baseline's per-layer DeepEP dispatch+combine breakdown.
+py_test(
+    name = "v4_flash_cp4_ep4_prefill_8k_mega_perf",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--batch_size", "1",
+        "--input_len", "8192",
+        "--partial", "2",
+        "--decode_test_length", "2",
+        "--seq_size_per_block", "64",
+        "--tp_size", "4",
+        "--dp_size", "1",
+        "--ep_size", "4",
+        "--world_size", "4",
+        "--max_seq_len", "8200",
+        "--cp_rotate_method", "ALL_GATHER",
+        "--use_deepep_moe", "1",
+        "--use_deepep_low_latency", "0",
+        "--act_type", "BF16",
+        "--load_method", "scratch",
+        "--concurrency_limit", "1",
+        "--enable_cuda_graph", "0",
+        "--reserver_runtime_mem_mb", "32768",
+        "--max_context_batch_size", "1",
+    ],
+    tags = ["manual"],
+)
