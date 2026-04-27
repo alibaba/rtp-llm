@@ -51,6 +51,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_cache_base_by_layer_attn",
                        &KVCache::kv_cache_base_by_layer_attn,
                        "Per-layer and per-attention-type KV cache tensors")
+        .def_readwrite("kv_cache_base_by_layer_attn_flat",
+                       &KVCache::kv_cache_base_by_layer_attn_flat,
+                       "Flat version of by_layer_attn: [layer*8+attn_type] = tensor")
         .def_readwrite("kv_scale_base_by_layer_attn",
                        &KVCache::kv_scale_base_by_layer_attn,
                        "Per-layer and per-attention-type KV scale tensors")
@@ -59,7 +62,10 @@ void registerPyOpDefs(pybind11::module& m) {
              "Return the legacy/default per-layer LayerKVCache for the given global layer id")
         .def("get_layer_cache",
              pybind11::overload_cast<int, rtp_llm::KVCacheAttnType>(&KVCache::getLayerCache),
-             "Return a raw per-layer LayerKVCache for the given global layer id and KV cache attention type");
+             "Return a raw per-layer LayerKVCache for the given global layer id and KV cache attention type")
+        .def("get_raw_pool_tensor",
+             &KVCache::getRawPoolTensor,
+             "Return raw [total_blocks, stride_bytes] tensor for a specific layer and attn type, no reshape (DSV4)");
 
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
