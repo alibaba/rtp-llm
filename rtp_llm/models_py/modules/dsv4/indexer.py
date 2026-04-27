@@ -7,6 +7,7 @@ Has its own dedicated Compressor (rotate=True in official code; we keep
 the parameter for ckpt-loader symmetry but don't apply Hadamard).
 """
 
+import os
 from typing import Dict, Optional
 
 import torch
@@ -16,6 +17,22 @@ from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_freqs_cis_local
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
+
+# P0 (prefill_opt/final_plan.md): fused indexer score Triton kernel.
+# Replaces einsum + relu + weighted-sum chunked path.  Set
+# DSV4_INDEXER_FAST=0 to force the chunked REF (debug only).
+try:
+    from rtp_llm.models_py.modules.dsv4._indexer_score_triton import v4_indexer_score
+    _INDEXER_FAST_OK = True
+except Exception:  # pragma: no cover — keep V4 importable without Triton
+    v4_indexer_score = None
+    _INDEXER_FAST_OK = False
+
+
+def _use_indexer_fast() -> bool:
+    if not _INDEXER_FAST_OK:
+        return False
+    return os.environ.get("DSV4_INDEXER_FAST", "1") != "0"
 
 
 class Indexer(nn.Module):
@@ -139,51 +156,70 @@ class Indexer(nn.Module):
         # Per-token index score: for each Q token we score every key in
         # ``kv_cache[:, :end_pos//ratio]``, ReLU, weight-sum over heads.
         # The naive einsum materializes ``[B, S, n_heads, T]`` fp32 which
-        # is ``O(S*T*H)`` — 64 GB at S=64K, T=16K, H=64.  Chunk in S to
-        # keep peak memory bounded (under a few GB) at any seqlen.
-        # Without this, warmup prefill at max_seq_len ≥ 32K OOMs.
-        # TODO(K9 in kernel_audit): port V4-official ``index_score_kernel``
-        # TileLang kernel — eliminates the materialized intermediate
-        # entirely (online ReLU+reduce in shared memory).
+        # is ``O(S*T*H)`` — 64 GB at S=64K, T=16K, H=64.  Two paths:
+        #
+        # * fast path (DSV4_INDEXER_FAST=1, default): single Triton
+        #   kernel `v4_indexer_score` streams the H dim and never
+        #   materializes the [B,S,H,T] intermediate; causal mask folded
+        #   in at write-time.  See _indexer_score_triton.py.
+        # * REF path (DSV4_INDEXER_FAST=0): chunked einsum + relu + sum.
         kv = self.kv_cache[:bsz, :end_pos // ratio]
-        q_f = q.float()
-        w_f = weights.float()
-        S = q_f.size(1)
-        # Chunk size picked so peak = chunk_size * n_heads * T * 4 bytes
-        # stays under ~2 GB for typical T up to 32K.
-        max_chunk_bytes = 2 * (1 << 30)
         T = kv.size(1)
-        denom = max(self.n_heads * max(T, 1) * 4, 1)
-        chunk_size = max(1, min(S, max_chunk_bytes // denom))
-        if chunk_size >= S:
-            index_score = torch.einsum("bshd,btd->bsht", q_f, kv.float())
-            index_score = (index_score.relu_() * w_f.unsqueeze(-1)).sum(dim=2)
-        else:
-            parts = []
-            kv_f = kv.float()
-            for i in range(0, S, chunk_size):
-                end = min(i + chunk_size, S)
-                score = torch.einsum(
-                    "bshd,btd->bsht", q_f[:, i:end], kv_f,
-                )
-                score = (score.relu_() * w_f[:, i:end].unsqueeze(-1)).sum(dim=2)
-                parts.append(score)
-            index_score = torch.cat(parts, dim=1)
-            del parts, kv_f
 
-        # Causal mask: each Q token at GLOBAL position g can only read
-        # compressed KV blocks [0, (g+1)//ratio).  Single-rank uses the
-        # row-index (0..S-1) as the global position.  Under CP the rank-
-        # local row i's global position is cp_ctx.global_positions[i].
+        # Build q_pos for the causal mask (only on the prefill chunk).
         if start_pos == 0:
-            T_comp = index_score.size(-1)
             if cp_on:
-                q_pos_1b = (cp_ctx.global_positions + 1).unsqueeze(1)  # [chunk_length, 1]
+                q_pos = cp_ctx.global_positions.unsqueeze(0).expand(bsz, -1).contiguous()
             else:
-                q_pos_1b = torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1)  # [S, 1]
-            kv_cols = torch.arange(T_comp, device=x.device)                           # [T_comp]
-            mask = kv_cols >= (q_pos_1b // ratio)                                     # [S_local, T_comp]
-            index_score = index_score + torch.where(mask, float("-inf"), 0.0)
+                q_pos = (
+                    torch.arange(seqlen, dtype=torch.int32, device=x.device)
+                    .unsqueeze(0)
+                    .expand(bsz, -1)
+                    .contiguous()
+                )
+        else:
+            q_pos = None
+
+        if _use_indexer_fast() and T > 0 and seqlen > 0:
+            # contiguous required by the Triton kernel
+            kv_c = kv.contiguous() if not kv.is_contiguous() else kv
+            q_c = q if q.is_contiguous() else q.contiguous()
+            index_score = v4_indexer_score(
+                q_c, kv_c, weights,
+                q_pos=q_pos,
+                compress_ratio=ratio,
+            )
+        else:
+            q_f = q.float()
+            w_f = weights.float()
+            S = q_f.size(1)
+            # REF chunked path — peak chunk_size * n_heads * T * 4 bytes ≤ 2 GB.
+            max_chunk_bytes = 2 * (1 << 30)
+            denom = max(self.n_heads * max(T, 1) * 4, 1)
+            chunk_size = max(1, min(S, max_chunk_bytes // denom))
+            if chunk_size >= S:
+                index_score = torch.einsum("bshd,btd->bsht", q_f, kv.float())
+                index_score = (index_score.relu_() * w_f.unsqueeze(-1)).sum(dim=2)
+            else:
+                parts = []
+                kv_f = kv.float()
+                for i in range(0, S, chunk_size):
+                    end = min(i + chunk_size, S)
+                    score = torch.einsum(
+                        "bshd,btd->bsht", q_f[:, i:end], kv_f,
+                    )
+                    score = (score.relu_() * w_f[:, i:end].unsqueeze(-1)).sum(dim=2)
+                    parts.append(score)
+                index_score = torch.cat(parts, dim=1)
+                del parts, kv_f
+
+            # REF path applies the causal mask separately; the fast path
+            # folds it into the kernel write.
+            if q_pos is not None and T > 0:
+                kv_cols = torch.arange(T, device=x.device)
+                thr = (q_pos.long() + 1) // ratio  # [B, S]
+                mask = kv_cols.unsqueeze(0).unsqueeze(0) >= thr.unsqueeze(-1)
+                index_score = index_score + torch.where(mask, float("-inf"), 0.0)
 
         topk_idxs = index_score.topk(min(self.index_topk, end_pos // ratio), dim=-1)[1]
         if start_pos == 0:
@@ -191,10 +227,8 @@ class Indexer(nn.Module):
             # past this Q token's allowed window become -1 (masked).  The
             # remaining ones shift by ``offset`` — the base index in the
             # attention-side concatenated tensor (offset = S_sliding).
-            if cp_on:
-                q_pos_1b = (cp_ctx.global_positions + 1).unsqueeze(1)
-            else:
-                q_pos_1b = torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1)
+            # ``q_pos`` was built above for the score causal mask; reuse it.
+            q_pos_1b = (q_pos.long() + 1).unsqueeze(-1)  # [B, S_local, 1]
             mask = topk_idxs >= (q_pos_1b // ratio)
             topk_idxs = torch.where(mask, -1, topk_idxs + offset)
         else:
