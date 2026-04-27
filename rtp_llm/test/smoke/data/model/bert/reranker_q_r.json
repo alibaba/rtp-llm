@@ -1,0 +1,175 @@
+{
+    "model_type": "roberta",
+    "endpoint": "/v1/reranker",
+    "model_path": "/mnt/nas1/hf/bge-reranker-large",
+    "query_result": [
+        {
+            "query": {
+                "query": "what is panda?",
+                "documents": [
+                    "hi",
+                    "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China.",
+                    "gg"
+                ]
+            },
+            "result": {
+                "results": [
+                    {
+                        "index": 1,
+                        "document": "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China.",
+                        "relevance_score": 5.76953125
+                    },
+                    {
+                        "index": 0,
+                        "document": "hi",
+                        "relevance_score": -5.609375
+                    },
+                    {
+                        "index": 2,
+                        "document": "gg",
+                        "relevance_score": -7.64453125
+                    }
+                ],
+                "total_tokens": 64
+            }
+        },
+        {
+            "query": {
+                "query": "what is panda?",
+                "documents": [
+                    "hi",
+                    "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China.",
+                    "gg"
+                ],
+                "sorted": false
+            },
+            "result": {
+                "results": [
+                    {
+                        "index": 0,
+                        "document": "hi",
+                        "relevance_score": -5.609375
+                    },
+                    {
+                        "index": 1,
+                        "document": "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China.",
+                        "relevance_score": 5.76953125
+                    },
+                    {
+                        "index": 2,
+                        "document": "gg",
+                        "relevance_score": -7.64453125
+                    }
+                ],
+                "total_tokens": 64
+            }
+        },
+        {
+            "query": {
+                "query": "what is panda?",
+                "documents": [
+                    "hi",
+                    "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China.",
+                    "gg"
+                ],
+                "top_k": 2
+            },
+            "result": {
+                "results": [
+                    {
+                        "index": 1,
+                        "document": "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China.",
+                        "relevance_score": 5.76953125
+                    },
+                    {
+                        "index": 0,
+                        "document": "hi",
+                        "relevance_score": -5.609375
+                    }
+                ],
+                "total_tokens": 64
+            }
+        },
+        {
+            "query": {
+                "query": "what is panda?",
+                "documents": [
+                    "hi",
+                    "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China.",
+                    "gg"
+                ],
+                "top_k": 2,
+                "return_documents": false
+            },
+            "result": {
+                "results": [
+                    {
+                        "index": 1,
+                        "relevance_score": 5.76953125
+                    },
+                    {
+                        "index": 0,
+                        "relevance_score": -5.609375
+                    }
+                ],
+                "total_tokens": 64
+            }
+        },
+        {
+            "query": {
+                "query": "what is panda?",
+                "documents": [
+                    "hi",
+                    "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China.",
+                    "gg"
+                ],
+                "top_k": 2,
+                "return_documents": false,
+                "normalize": true
+            },
+            "result": {
+                "results": [
+                    {
+                        "index": 1,
+                        "relevance_score": 0.9968884914601416
+                    },
+                    {
+                        "index": 0,
+                        "relevance_score": 0.0036499870312098385
+                    }
+                ],
+                "total_tokens": 64
+            }
+        },
+        {
+            "query": {
+                "query": "what is panda? hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello ",
+                "documents": [
+                    "hi",
+                    "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China.",
+                    "gg"
+                ]
+            },
+            "result": {
+                "results": [
+                    {
+                        "index": 1,
+                        "document": "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China.",
+                        "relevance_score": 4.38671875
+                    },
+                    {
+                        "index": 0,
+                        "document": "hi",
+                        "relevance_score": -6.796875
+                    },
+                    {
+                        "index": 2,
+                        "document": "gg",
+                        "relevance_score": -6.859375
+                    }
+                ],
+                "total_tokens": 1536
+            }
+        }
+    ]
+}

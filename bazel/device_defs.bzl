@@ -1,4 +1,4 @@
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 
 def device_test_envs():

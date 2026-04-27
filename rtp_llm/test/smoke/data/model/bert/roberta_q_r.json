@@ -1,0 +1,50 @@
+{
+    "model_type": "roberta",
+    "endpoint": "/v1/embeddings",
+    "model_path": "/mnt/nas1/hf/bge-m3",
+    "query_result": [
+        {
+            "query": {
+                "input": "hello, what is your name?",
+                "model": "xx"
+            },
+            "result": {
+                "object": "list",
+                "data": [
+                    {
+                        "object": "embedding",
+                        "embedding": "data/model/bert/roberta_expect.pt",
+                        "index": 0
+                    }
+                ],
+                "model": "xx",
+                "usage": {
+                    "prompt_tokens": 10,
+                    "total_tokens": 10
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/embeddings/similarity",
+            "query": {
+                "left": [
+                    "hello, what is your name?"
+                ],
+                "right": [
+                    "hello",
+                    "what is your name"
+                ],
+                "model": "xx"
+            },
+            "result": {
+                "model": "",
+                "similarity": [
+                    [
+                        0.811180591583252,
+                        0.8662606477737427
+                    ]
+                ]
+            }
+        }
+    ]
+}

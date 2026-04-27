@@ -1,0 +1,82 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2___5-14B-Instruct/",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2___5-14B-Instruct/",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s3"
+                    }
+                ],
+                "max_tokens": 20,
+                "temperature": 0.0,
+                "top_k": 1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705334081,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "The error message \"NameError: name 'screen_manager' is not defined\" typically occurs in Python",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 41,
+                    "total_tokens": 61,
+                    "completion_tokens": 20
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s3"
+                    }
+                ],
+                "max_tokens": 20,
+                "temperature": 0.0,
+                "top_k": 1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705334081,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "The error message \"NameError: name 'screen_manager' is not defined\" typically occurs in Python",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 41,
+                    "total_tokens": 61,
+                    "completion_tokens": 20,
+                    "prompt_tokens_details": {
+                        "cached_tokens": 32
+                    }
+                }
+            }
+        }
+    ]
+}

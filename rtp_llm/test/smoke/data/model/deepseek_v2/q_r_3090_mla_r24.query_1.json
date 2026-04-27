@@ -1,0 +1,32 @@
+{
+    "response": " 作为一个虚拟助手，我没有实体存在，因此不存在不上班的情况。我的工作是24/7不间断的，只要服务器运行，我就会在这里帮助用户解答问题和提供信息。如果你有任何问题或需要帮助，随时可以告诉我！",
+    "response_alternatives": null,
+    "hidden_states": null,
+    "logits": null,
+    "loss": null,
+    "input_ids": null,
+    "output_ids": null,
+    "aux_info": {
+        "input_len": 20,
+        "prefix_len": 0,
+        "reuse_len": 0,
+        "local_reuse_len": 0,
+        "remote_reuse_len": 0,
+        "memory_reuse_len": 0,
+        "prefill_total_reuse_len": 0,
+        "prefill_local_reuse_len": 0,
+        "prefill_remote_reuse_len": 0,
+        "prefill_memory_reuse_len": 0,
+        "decode_total_reuse_len": 0,
+        "decode_local_reuse_len": 0,
+        "decode_remote_reuse_len": 0,
+        "decode_memory_reuse_len": 0,
+        "output_len": 54,
+        "step_output_len": 54,
+        "iter_count": 54,
+        "cum_log_probs": [],
+        "beam_responses": [],
+        "pd_sep": false,
+        "softmax_probs": []
+    }
+}

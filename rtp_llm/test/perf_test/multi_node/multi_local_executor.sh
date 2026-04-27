@@ -48,10 +48,7 @@ checkout_code() {
     echo "开始下载大文件..."
     (sh .githooks/post-checkout) || exit 1;
     echo "成功下载大文件..."
-    echo "开始创建软链接..."
-    (unlink ./stub_source) || exit 1;
-    (ln -sf ../internal_source ./stub_source) || exit 1;
-    echo "软链接创建完成！"
+    echo "子模块更新完成"
   else
     if [ -d "RTP-LLM" ] && [ -d "RTP-LLM/internal_source" ]; then
       rm -rf RTP-LLM;

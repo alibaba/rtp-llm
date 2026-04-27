@@ -1,0 +1,36 @@
+{
+    "model_type": "qwen_3_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3-30B-A3B-Instruct-2507-FP8",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 55,
+                    "temperature": 0.0,
+                    "top_p": 0,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response": " explain in simple terms\n\nSure! Let's break down the **CAP Theorem** in simple terms.\n\n---\n\n### 🌐 What is the CAP Theorem?\n\nThe **CAP Theorem** (also called **Brewer’s Theorem**) says that in a **",
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s2",
+                "generate_config": {
+                    "max_new_tokens": 200,
+                    "temperature": 0.0,
+                    "top_p": 0,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response": "，要求问题具有开放性，能引发思考和讨论\n\n当然可以。以下是几个以“英语听力方法”为主题、具有开放性、能够引发深入思考和讨论的问题：\n\n1. **在没有字幕的情况下，我们如何平衡“理解内容”与“锻炼听力”的关系？当听不懂时，是否应该立即查词或看字幕？这种依赖会如何影响长期听力能力的发展？**\n\n2. **不同的人在听力学习中表现出不同的偏好：有人喜欢听新闻，有人偏爱播客，有人更愿意看影视剧。这些不同的输入材料是否适合所有人？我们该如何根据个人兴趣、语言水平和学习目标选择最适合自己的听力材料？**\n\n3. **听力不仅仅是“听清每个词”，更涉及语境理解、语调判断和文化背景的把握。在实际交流中，我们常常遇到“听懂了字面意思，却误解了对方的意图”。那么，如何培养“听懂言",
+                "finished": true
+            }
+        }
+    ]
+}

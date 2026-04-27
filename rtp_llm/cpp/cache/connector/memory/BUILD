@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
+load("@arch_config//:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
 cc_library(
     name = "memory_connector",

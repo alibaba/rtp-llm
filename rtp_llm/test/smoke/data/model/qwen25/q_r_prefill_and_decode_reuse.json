@@ -1,0 +1,108 @@
+{
+  "model_type": "qwen_2",
+  "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+  "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+  "query_result": [
+    {
+      "query": {
+        "prompt": "Write a detailed analogy between mathematics and a lighthouse.",
+        "generate_config": {
+          "max_new_tokens": 10,
+          "top_k": 1,
+          "top_p": 0
+        }
+      },
+      "result": {
+        "response": " Mathematics is like a lighthouse, a beacon of",
+        "finished": true,
+        "aux_info": {
+          "input_len": 11,
+          "reuse_len": 0,
+          "memory_reuse_len": 0,
+          "local_reuse_len": 0,
+          "remote_reuse_len": 0,
+          "prefill_total_reuse_len": 0,
+          "prefill_memory_reuse_len": 0,
+          "prefill_local_reuse_len": 0,
+          "prefill_remote_reuse_len": 0,
+          "decode_total_reuse_len": 0,
+          "decode_memory_reuse_len": 0,
+          "decode_local_reuse_len": 0,
+          "decode_remote_reuse_len": 0,
+          "prefix_len": 0,
+          "iter_count": 10,
+          "output_len": 10
+        }
+      }
+    },
+    {
+      "query": {
+        "prompt": "Write a detailed analogy between mathematics and a lighthouse.\n\nAnswer: ",
+        "generate_config": {
+          "max_new_tokens": 10,
+          "top_k": 1,
+          "top_p": 0,
+          "enable_device_cache": true,
+          "enable_memory_cache": false
+        }
+      },
+      "result": {
+        "response": "1. Mathematics is like a lighthouse in the",
+        "finished": true,
+        "aux_info": {
+          "input_len": 14,
+          "reuse_len": 8,
+          "memory_reuse_len": 0,
+          "local_reuse_len": 8,
+          "remote_reuse_len": 0,
+          "prefill_total_reuse_len": 8,
+          "prefill_memory_reuse_len": 0,
+          "prefill_local_reuse_len": 8,
+          "prefill_remote_reuse_len": 0,
+          "decode_total_reuse_len": 8,
+          "decode_memory_reuse_len": 0,
+          "decode_local_reuse_len": 8,
+          "decode_remote_reuse_len": 0,
+          "prefix_len": 0,
+          "iter_count": 10,
+          "output_len": 10
+        }
+      }
+    },
+    {
+      "query": {
+        "prompt": "Write a detailed analogy between mathematics and a lighthouse.\n\nAnswer: ",
+        "generate_config": {
+          "max_new_tokens": 10,
+          "top_k": 1,
+          "top_p": 0,
+          "enable_device_cache": false,
+          "enable_memory_cache": true
+        }
+      },
+      "result": {
+        "response": "1. Mathematics is like a lighthouse in the",
+        "finished": true,
+        "aux_info": {
+          "input_len": 14,
+          "reuse_len": 8,
+          "memory_reuse_len": 8,
+          "local_reuse_len": 8,
+          "remote_reuse_len": 0,
+          "prefill_total_reuse_len": 8,
+          "prefill_local_reuse_len": 8,
+          "prefill_remote_reuse_len": 0,
+          "prefill_memory_reuse_len": 8,
+          "decode_total_reuse_len": 8,
+          "decode_local_reuse_len": 8,
+          "decode_remote_reuse_len": 0,
+          "decode_memory_reuse_len": 8,
+          "prefix_len": 0,
+          "iter_count": 10,
+          "output_len": 10,
+          "step_output_len": 9
+        }
+      }
+    }
+  ]
+}

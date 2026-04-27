@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "trt_fused_multihead_attention_impl",

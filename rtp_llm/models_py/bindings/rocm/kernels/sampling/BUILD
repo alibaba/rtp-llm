@@ -1,5 +1,5 @@
 load("//:def.bzl", "rocm_copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "sampling",

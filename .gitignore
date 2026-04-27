@@ -52,7 +52,7 @@ deep_gemm_runtime/
 
 package/requirements*.txt
 package/rtp_llm*.whl
-package/maga_start.sh
+package/maga-ci.Dockerfile
 rtp_llm/test-data/*
 
 # Protobuf / gRPC generated Python (grpc_tools.protoc / setup.py build_ext)

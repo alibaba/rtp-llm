@@ -1,0 +1,32 @@
+{
+  "response": "新高考三年规划与升学指导服务旨在帮助高中生在高中阶段制定明确的学习目标，合理规划学业与职业生涯，为未来升学和就业打下坚实基础。以下是一些建议，涵盖强基计划择校、综合评价",
+  "response_alternatives": null,
+  "hidden_states": null,
+  "logits": null,
+  "loss": null,
+  "input_ids": null,
+  "output_ids": null,
+  "aux_info": {
+    "input_len": 58,
+    "prefix_len": 0,
+    "reuse_len": 0,
+    "local_reuse_len": 0,
+    "remote_reuse_len": 0,
+    "memory_reuse_len": 0,
+    "prefill_total_reuse_len": 0,
+    "prefill_local_reuse_len": 0,
+    "prefill_remote_reuse_len": 0,
+    "prefill_memory_reuse_len": 0,
+    "decode_total_reuse_len": 0,
+    "decode_local_reuse_len": 0,
+    "decode_remote_reuse_len": 0,
+    "decode_memory_reuse_len": 0,
+    "output_len": 50,
+    "step_output_len": 50,
+    "iter_count": 44,
+    "cum_log_probs": [],
+    "beam_responses": [],
+    "pd_sep": false,
+    "softmax_probs": []
+  }
+}

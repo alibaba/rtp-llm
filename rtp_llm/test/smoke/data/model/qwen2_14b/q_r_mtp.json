@@ -1,0 +1,38 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/mtp_reg/qwen2_14b_target",
+    "query_result": [
+        {
+            "query": {
+                "top_p": 0,
+                "yield_generator": false,
+                "generate_config": {
+                    "top_p": 0,
+                    "max_new_tokens": 100,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "stop_words_str": [
+                        "<|im_end|>",
+                        "<|im_start|>",
+                        "Observation:",
+                        "<|endoftext|>",
+                        "end",
+                        "</end>",
+                        "</search_target",
+                        "</search_comfort",
+                        "</search_knowledge",
+                        "</answer"
+                    ],
+                    "print_stop_words": true
+                },
+                "top_k": 1,
+                "temperature": 0,
+                "prompt": "$prompt:m2"
+            },
+            "result": {
+                "response": " and will give us the courage to move forward. Can you please improve the dialogue by adding these three points?\nCertainly! Here's an improved version of the dialogue incorporating your three points:\n\n---\n\n**Speaker 1:** When someone passes away, it's like their spirit takes flight, just like a butterfly soaring into the sky. We don't know where it goes, but it's beautiful to imagine.\n\n**Speaker 2:** Yes, exactly. That spirit is free to explore the vastness of the",
+                "finished": true
+            }
+        }
+    ]
+}

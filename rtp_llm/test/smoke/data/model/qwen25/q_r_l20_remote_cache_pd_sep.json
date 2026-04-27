@@ -1,0 +1,178 @@
+{
+  "model_type": "qwen_tool",
+  "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+  "query_result": [
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "请推荐一部好看的电影。"
+          }
+        ],
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "max_tokens": 100
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 1776595446,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "推荐一部好看的电影，首先需要考虑电影的类型和主题。如果您喜欢科幻、动作、冒险等类型，那么《星际穿越》可能是一个不错的选择。这部电影由克里斯托弗·诺兰执导，讲述了人类在宇宙中寻找新的居住地的故事。如果您喜欢爱情、友情、家庭等类型，那么《泰坦尼克号》可能是一个不错的选择。这部电影由詹姆斯·卡梅隆执导，讲述了1912年泰坦尼克号沉船事件的",
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
+            },
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 35,
+          "total_tokens": 135,
+          "completion_tokens": 100,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": null
+        },
+        "debug_info": null,
+        "aux_info": {
+          "cost_time": 1006.958,
+          "iter_count": 100,
+          "prefix_len": 0,
+          "input_len": 35,
+          "output_len": 100,
+          "step_output_len": 99,
+          "first_token_cost_time": 328.19,
+          "wait_time": 0.017,
+          "pd_sep": true,
+          "cum_log_probs": [],
+          "beam_responses": [],
+          "softmax_probs": [],
+          "reuse_len": 0,
+          "local_reuse_len": 0,
+          "remote_reuse_len": 0,
+          "memory_reuse_len": 0,
+          "prefill_total_reuse_len": 0,
+          "prefill_local_reuse_len": 0,
+          "prefill_remote_reuse_len": 0,
+          "prefill_memory_reuse_len": 0,
+          "decode_total_reuse_len": 0,
+          "decode_local_reuse_len": 0,
+          "decode_remote_reuse_len": 0,
+          "decode_memory_reuse_len": 0,
+          "role_addrs": [
+            {
+              "role": "DECODE",
+              "ip": "127.0.0.1",
+              "http_port": 10613,
+              "grpc_port": 10614
+            }
+          ],
+          "aux_string": ""
+        },
+        "extra_outputs": null
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "请推荐一部好看的电影。"
+          },
+          {
+            "role": "assistant",
+            "content": "推荐一部好看的电影，首先需要考虑电影的类型和主题。如果您喜欢科幻、动作、冒险等类型，那么《星际穿越》可能是一个不错的选择。这部电影由克里斯托弗·诺兰执导，讲述了人类在宇宙中寻找新的居住地的故事。影片融合了科幻元素和悬疑元素，展现了人类在面对未知和挑战时的勇气和决心。\n\n如果您更喜欢剧情片或者爱情片，那么《泰坦尼克号》可能是一个不错的选择。这部电影",
+            "partial": false
+          },
+          {
+            "role": "user",
+            "content": "我喜欢喜剧类型的。"
+          }
+        ],
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "max_tokens": 100
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 1776595467,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "推荐一部喜剧类型的电影，比如《疯狂原始人》。这部电影由克里斯托弗·诺兰执导，讲述了一个关于原始人的故事，其中充满了幽默和滑稽的元素。影片通过幽默的方式展现了人类对未知和挑战的勇气和决心，同时也展现了原始人的独特文化和性格。这部电影在喜剧和科幻的结合上非常成功，受到了观众的喜爱。",
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
+            },
+            "finish_reason": "stop",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 149,
+          "total_tokens": 227,
+          "completion_tokens": 78,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 88
+          }
+        },
+        "debug_info": null,
+        "aux_info": {
+          "cost_time": 443.603,
+          "iter_count": 78,
+          "prefix_len": 0,
+          "input_len": 149,
+          "output_len": 78,
+          "step_output_len": 77,
+          "first_token_cost_time": 60.417,
+          "wait_time": 0.019,
+          "pd_sep": true,
+          "cum_log_probs": [],
+          "beam_responses": [],
+          "softmax_probs": [],
+          "reuse_len": 88,
+          "local_reuse_len": 0,
+          "remote_reuse_len": 88,
+          "memory_reuse_len": 0,
+          "prefill_total_reuse_len": 88,
+          "prefill_local_reuse_len": 0,
+          "prefill_remote_reuse_len": 88,
+          "prefill_memory_reuse_len": 0,
+          "decode_total_reuse_len": 88,
+          "decode_local_reuse_len": 0,
+          "decode_remote_reuse_len": 88,
+          "decode_memory_reuse_len": 0,
+          "role_addrs": [
+            {
+              "role": "DECODE",
+              "ip": "127.0.0.1",
+              "http_port": 10613,
+              "grpc_port": 10614
+            }
+          ],
+          "aux_string": ""
+        },
+        "extra_outputs": null
+      }
+    }
+  ]
+}

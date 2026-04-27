@@ -1,5 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
