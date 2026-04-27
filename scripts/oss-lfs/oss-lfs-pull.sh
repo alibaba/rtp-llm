@@ -47,11 +47,23 @@ download() {
     fi
 
     echo "[oss-lfs] downloading $target"
-    if ! curl -sS -f "$OSS_BASE/lfs/$expected" -o "$target.tmp"; then
-        echo "[oss-lfs] FAIL download $target (sha=$expected)" >&2
-        rm -f "$target.tmp"
-        return 1
-    fi
+    # Retry transient network failures — CI runners and developer machines
+    # behind flaky networks routinely see one-shot curl failures resolve on
+    # the next attempt. Keep this short (3 tries, 1s/2s backoff) so a truly
+    # dead OSS object still fails fast rather than hanging the whole pull.
+    local attempt
+    for attempt in 1 2 3; do
+        if curl -sS -f "$OSS_BASE/lfs/$expected" -o "$target.tmp"; then
+            break
+        fi
+        if [ "$attempt" = 3 ]; then
+            echo "[oss-lfs] FAIL download $target (sha=$expected) after 3 attempts" >&2
+            rm -f "$target.tmp"
+            return 1
+        fi
+        echo "[oss-lfs] retry $attempt/3 for $target" >&2
+        sleep "$attempt"
+    done
     local actual; actual=$(sha256_of "$target.tmp")
     if [ "$actual" != "$expected" ]; then
         echo "[oss-lfs] FAIL sha256 $target expected=$expected got=$actual" >&2
