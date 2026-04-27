@@ -511,6 +511,14 @@ class MoE(nn.Module):
             use_fp8_dispatch=True,
             activation="swiglu",
         )
+        # Pre-allocate static output buffer — avoids torch.empty((T, D)) inside the
+        # forward, which reallocates on every step and blocks CUDA graph capture.
+        # Sized to max_tokens_per_rank; forward slices [:T] for the live batch.
+        self._mega_y = torch.empty(
+            (max(self.max_tokens_per_rank, 1), D),
+            dtype=torch.bfloat16,
+            device=device,
+        )
 
     def _routed_experts_mega_moe(
         self,
@@ -552,7 +560,7 @@ class MoE(nn.Module):
         buf.topk_idx[:T].copy_(indices.to(torch.int64).contiguous())
         buf.topk_weights[:T].copy_(weights.to(torch.float32).contiguous())
 
-        y = torch.empty((T, self.dim), dtype=torch.bfloat16, device=x.device)
+        y = self._mega_y[:T]
         deep_gemm.fp8_fp4_mega_moe(
             y,
             (self._mega_l1_w, self._mega_l1_sf),
