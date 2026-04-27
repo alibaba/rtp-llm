@@ -15,31 +15,34 @@ from rtp_llm.models_py.modules.dsv4.attention import Attention
 from rtp_llm.models_py.modules.dsv4.mhc import hc_split_sinkhorn
 from rtp_llm.models_py.modules.dsv4.moe import MoE
 
-# P1 (prefill_opt/final_plan.md): TileKernels fused mHC pre/post.  Drop-in
-# replaces the per-block split-K GEMM + RMSNorm + sigmoid×3 + softmax +
-# 20-iter Sinkhorn (mhc.py:hc_split_sinkhorn) with a single fused TileLang
-# kernel, plus a fused post kernel.  Falls back to the REF path when:
-#   - DSV4_USE_TILEKERNELS_MHC=0 explicitly disables it, or
-#   - tile_kernels is not importable, or
-#   - residual dtype != bf16 / mhc_mult != 4 / autograd enabled / B*S == 0
-#     (TileKernels' big_fuse requires bf16 residual + mhc_mult=4 + inference
-#     mode; empty batch trips internal asserts in pre_big_fuse_kernel).
+# P1 (prefill_opt/plan_0427.md): TileKernels fused mHC.
+#
+# Pre/post layout:
+#   * mhc_post   — works on tilelang 0.1.9+cuda.git441c3b06.  ~35× faster than
+#     REF (0.18 ms/call vs 6.27 ms/call at B=1 S=16384 hc=4 d=4096) since it
+#     fuses the [B,T,hc,hc,d] broadcast+sum into a single TileLang kernel.
+#   * mhc_pre    — pre_big_fuse + pre_norm_fn JIT both fail under our
+#     tilelang revision with `Check failed: condition.dtype().is_bool()`
+#     in `tilelang.transform.decouple_type_cast`.  Stays disabled until
+#     tilelang gets a fix; we use a faster REF rewrite (bf16 GEMM with
+#     fp32 RMSNorm scalar) — see _hc_pre below.
+#
+# Falls back to the REF/BMM path when:
+#   * DSV4_USE_TILEKERNELS_MHC_POST=0 explicitly disables it, or
+#   * tile_kernels is not importable, or
+#   * residual dtype != bf16 / mhc_mult != 4 / autograd enabled / B*S == 0.
 try:
-    from tile_kernels.modeling.mhc.functional import (
-        mhc_post as _tk_mhc_post,
-        mhc_pre as _tk_mhc_pre,
-    )
-    _TK_MHC_OK = True
+    from tile_kernels.modeling.mhc.functional import mhc_post as _tk_mhc_post
+    _TK_MHC_POST_OK = True
 except Exception:  # pragma: no cover — keep V4 importable without tile_kernels
-    _tk_mhc_pre = None
     _tk_mhc_post = None
-    _TK_MHC_OK = False
+    _TK_MHC_POST_OK = False
 
 
-def _use_tk_mhc(residual: torch.Tensor, hc_mult: int) -> bool:
-    if not _TK_MHC_OK:
+def _use_tk_mhc_post(residual: torch.Tensor, hc_mult: int) -> bool:
+    if not _TK_MHC_POST_OK:
         return False
-    if os.environ.get("DSV4_USE_TILEKERNELS_MHC", "1") == "0":
+    if os.environ.get("DSV4_USE_TILEKERNELS_MHC_POST", "1") == "0":
         return False
     if torch.is_grad_enabled():
         return False
@@ -174,51 +177,91 @@ class Block(nn.Module):
             self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
             self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
-    def _hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        """x: [B,S,hc,d] -> y: [B,S,d], post: [B,S,hc[,1]], comb: [B,S,hc,hc].
+    def _hc_fn_bf16(self, hc_fn: torch.Tensor) -> torch.Tensor:
+        """Lazy-cached bf16 view of an FP32 hc_fn parameter.
 
-        TileKernels path returns ``post`` shaped ``[B,S,hc,1]``; the REF path
-        returns ``[B,S,hc]``.  ``_hc_post`` accepts either.
+        The FP32 → BF16 cast is ~30 µs on a [24, 16384] tensor; we cache by
+        ``id(hc_fn)`` so attn vs ffn fns get separate slots.  Memory: ~768 KB
+        per fn × 2 fns / layer × 43 layers ≈ 64 MB total — acceptable for
+        cutting per-call cast latency to zero.
         """
-        if _use_tk_mhc(x, self.hc_mult):
-            y, (post, comb) = _tk_mhc_pre(
-                x, hc_fn, hc_scale, hc_base,
-                norm_eps=self.norm_eps,
-                mhc_mult=self.hc_mult,
-                post_mult_value=2.0,
-                pre_eps=self.hc_eps,
-                sinkhorn_eps=self.hc_eps,
-                sinkhorn_repeat=self.hc_sinkhorn_iters,
-            )
-            return y, post, comb
+        cache = getattr(self, "_bf16_cache", None)
+        if cache is None:
+            cache = {}
+            self._bf16_cache = cache
+        key = id(hc_fn)
+        bf = cache.get(key)
+        if bf is None or bf.shape != hc_fn.shape or bf.device != hc_fn.device:
+            bf = hc_fn.to(torch.bfloat16)
+            cache[key] = bf
+        return bf
 
+    def _hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
+        """x: [B,S,hc,d] -> y: [B,S,d], post: [B,S,hc,1], comb: [B,S,hc,hc].
+
+        Always returns ``post`` in the ``[B,S,hc,1]`` shape so the post path
+        can route to TK ``mhc_post`` whenever it's importable.
+
+        Implementation (P1 of plan_0427.md):
+          - Cast hc_fn to BF16 (cached) and run F.linear in BF16 → tensor cores
+            (the previous all-FP32 path fell to SIMT sgemm 32x64, ~44 ms across
+            the model in the 64k+CP=4 trace).
+          - Compute the rsqrt scalar in FP32 from a BF16² mean + FP32 cast —
+            avoids the 1 GiB ``.float()`` of the [B,T,hc*d] activation.
+          - Sinkhorn loop stays in FP32 (numerically critical).
+        """
         shape, dtype = x.size(), x.dtype
-        x_flat = x.flatten(2).float()
-        rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x_flat, hc_fn) * rsqrt
+        x_flat = x.flatten(2)  # [B, T, hc*d] bf16
+        # FP32 squared mean → rsqrt, single cast.  Kept in fp32 because the
+        # accumulation magnitude here is what determines numeric stability of
+        # the layer norm; a bf16 reduction on hc*d=16384 would lose ~7 bits.
+        x_flat_f32 = x_flat.float()
+        rsqrt = torch.rsqrt(x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps).to(dtype)
+        mixes = (F.linear(x_flat, self._hc_fn_bf16(hc_fn)) * rsqrt).float()
         pre, post, comb = hc_split_sinkhorn(
             mixes, hc_scale, hc_base,
             hc_mult=self.hc_mult, sinkhorn_iters=self.hc_sinkhorn_iters, eps=self.hc_eps,
         )
-        y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=2)
-        return y.to(dtype), post, comb
+        y = torch.sum(pre.to(dtype).unsqueeze(-1) * x.view(*shape), dim=2)
+        # post in the [..., hc, 1] convention so _hc_post can call TK mhc_post.
+        return y.to(dtype), post.unsqueeze(-1), comb
 
     def _hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
-        # TileKernels' fused post kernel — requires bf16 x/residual + fp32
-        # post (shape [..., hc, 1]) + fp32 comb.  Falls back to the broadcast
-        # REF when the gate is off OR post is in the legacy [..., hc] shape.
+        """Combine the sublayer output ``x`` with the per-stream residual via post/comb.
+
+        Three implementations, fastest-first:
+          1. TileKernels ``mhc_post`` — single fused kernel, ~35× the REF.
+          2. BF16 BMM rewrite (P1 fallback) — ``comb.T @ residual`` runs as
+             a tensor-core BMM, ~1.8× the REF.
+          3. Original 5D broadcast+sum — kept as a last resort for
+             non-bf16 / odd-shape inputs.
+        """
+        # Path 1: TK fused post (preferred).  Requires post in [..., hc, 1] shape;
+        # _hc_pre always emits that now.
         if (
-            _use_tk_mhc(residual, self.hc_mult)
+            _use_tk_mhc_post(residual, self.hc_mult)
             and x.dtype == torch.bfloat16
-            and post.dim() == residual.dim()  # post=[...,hc,1], residual=[...,hc,d]
+            and post.dim() == residual.dim()
         ):
             return _tk_mhc_post(x, residual, post, comb)
 
+        # Normalize post to the [..., hc] form for the fallback paths.
         if post.dim() == residual.dim():
-            # Came from the TK path but TK gate now off — drop the trailing 1
             post_b = post.squeeze(-1)
         else:
             post_b = post
+
+        # Path 2: BF16 BMM rewrite.  Replaces the [B,T,hc,hc,d] intermediate
+        # (~1 GiB at S=16384) of the REF with a tensor-core BMM.
+        if x.dtype == torch.bfloat16 and residual.dtype == torch.bfloat16:
+            post_bf16 = post_b.to(x.dtype)
+            first = post_bf16.unsqueeze(-1) * x.unsqueeze(-2)  # [B,T,hc,d] bf16 broadcast
+            comb_bf16 = comb.to(x.dtype)
+            # REF reduces over the FIRST hc dim of comb (= comb.T @ residual).
+            second = torch.matmul(comb_bf16.transpose(-2, -1), residual)
+            return (first + second).to(x.dtype)
+
+        # Path 3: original REF (covers fp32 / mixed-dtype debug paths).
         y = (post_b.unsqueeze(-1) * x.unsqueeze(-2)
              + torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2))
         return y.type_as(x)
