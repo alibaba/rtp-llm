@@ -48,6 +48,14 @@ if device_type == DeviceType.ROCm:
 else:
     # currently append early means impl has higher priority
     if device_type == DeviceType.Cuda:
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.torch_naive_pq import (
+            TorchNaivePQDecodeImpl,
+            TorchNaivePQPrefillImpl,
+        )
+
+        PREFILL_MHA_IMPS.extend([TorchNaivePQPrefillImpl])
+        DECODE_MHA_IMPS.extend([TorchNaivePQDecodeImpl])
+
         from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
             HeadWisePrefillImpl,
         )
@@ -69,8 +77,8 @@ else:
             FlashInferTRTLLMSpecDecodeImpl,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import (
-            get_xqa_impl,
             XQASpecImpl,
+            get_xqa_impl,
         )
 
         PREFILL_MHA_IMPS.extend(
