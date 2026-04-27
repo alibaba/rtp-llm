@@ -42,6 +42,28 @@ public:
             }
         }
     }
+
+    // Constructor for DSV4-style multi-pool with group_attn_types
+    FakeKVCacheAllocator(const CacheConfig&                  config,
+                         const std::vector<int32_t>&         full_group_ids,
+                         const std::vector<int32_t>&         other_group_ids,
+                         size_t                              per_group_layer_num,
+                         const std::vector<KVCacheAttnType>& group_attn_types,
+                         const std::vector<CacheGroupType>&  group_types):
+        KVCacheAllocator(config) {
+        fake_layout_.group_attn_types = group_attn_types;
+        fake_layout_.group_types      = group_types;
+        for (int32_t full_group_id : full_group_ids) {
+            for (size_t i = 0; i < per_group_layer_num; i++) {
+                fake_layout_.layer_to_groups.push_back(full_group_id);
+            }
+        }
+        for (int32_t other_group_id : other_group_ids) {
+            for (size_t i = 0; i < per_group_layer_num; i++) {
+                fake_layout_.layer_to_groups.push_back(other_group_id);
+            }
+        }
+    }
     void free(const FreeInfo& free_info) override {
         return;
     }
@@ -235,6 +257,55 @@ public:
             } while (std::prev_permutation(bitmask.begin(), bitmask.end()));
         }
         RTP_LLM_LOG_INFO("initGroupPolicy debug info\n [%s]", group_policy_->debugString().c_str());
+    }
+
+    // Initialize group policy with DSV4-style group_attn_types for ring buffer testing
+    void initGroupPolicyWithDsv4Groups(size_t                              tp_size,
+                                       const std::vector<int32_t>&         full_group_ids,
+                                       const std::vector<int32_t>&         other_group_ids,
+                                       size_t                              per_group_layer_num,
+                                       const std::vector<KVCacheAttnType>& group_attn_types,
+                                       const std::vector<CacheGroupType>&  group_types,
+                                       uint32_t                            linear_attention_write_interval = 0) {
+        allocator_ = std::make_shared<FakeKVCacheAllocator>(
+            config_, full_group_ids, other_group_ids, per_group_layer_num, group_attn_types, group_types);
+
+        group_policy_ = std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(
+            allocator_, full_group_ids, other_group_ids, linear_attention_write_interval);
+
+        ASSERT_TRUE(group_policy_->init());
+        size_t group_size = group_policy_->groups().size();
+        ASSERT_GT(group_size, 0);
+        std::vector<std::string> all_group_names;
+        std::vector<uint64_t>    all_group_name_bithashs;
+        all_group_names.reserve(group_size);
+        for (const auto& entry : group_policy_->groups()) {
+            const auto& group = entry.second;
+            all_group_names.push_back(group.group_name);
+            all_group_name_bithashs.push_back(group.group_name_bithash);
+            group_policy_->addLocationSpecGroup(group.group_name_bithash, group.group_name);
+            for (int r = 0; r < tp_size; ++r) {
+                std::string location_spec_name = genLocationSpecName(r, group.group_name);
+                ASSERT_TRUE(group_policy_->addSpecInfo(location_spec_name, entry.first, r));
+            }
+        }
+        for (int sub_group = 2; sub_group <= group_size; ++sub_group) {
+            std::string bitmask(sub_group, 1);
+            bitmask.resize(group_size, 0);
+            do {
+                std::stringstream ss_group_name;
+                uint64_t          groups_name_bithash = 0;
+                for (size_t i = 0; i < group_size; ++i) {
+                    if (static_cast<bool>(bitmask[i])) {
+                        ss_group_name << all_group_names[i];
+                        groups_name_bithash |= all_group_name_bithashs[i];
+                    }
+                }
+                std::string groups_name = ss_group_name.str();
+                group_policy_->addLocationSpecGroup(groups_name_bithash, groups_name);
+            } while (std::prev_permutation(bitmask.begin(), bitmask.end()));
+        }
+        RTP_LLM_LOG_INFO("initGroupPolicyWithDsv4Groups debug info\n [%s]", group_policy_->debugString().c_str());
     }
 
 private:
@@ -1076,6 +1147,9 @@ TEST_F(GroupPolicyTest, test_DefaultLayerGroupPolicy_filterNeedWriteGroups_succe
         ASSERT_EQ(expected, real);
     }
 }
+
+// Note: Ring buffer tests are covered in RemoteConnectorMockDsv4Test.cc
+// which has proper DSV4 allocator setup.
 
 }  // namespace test
 }  // namespace remote_connector

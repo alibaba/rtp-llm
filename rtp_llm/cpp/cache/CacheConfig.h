@@ -179,6 +179,8 @@ struct CacheConfig {
             }
         }
         os << "]\n";
+        OUTPUT_FIELD_EXPR("layer_to_group_id.size()", layer_to_group_id.size());
+        os << indent1 << "layer_to_group_id=" << rtp_llm::vectorToString(layer_to_group_id) << "\n";
         OUTPUT_FIELD_EXPR("layer_to_group_ids.size()", layer_to_group_ids.size());
         os << indent1 << "layer_to_group_ids=" << rtp_llm::vectorsToString(layer_to_group_ids) << "\n";
         OUTPUT_FIELD_EXPR("layer_group_types.size()", layer_group_types.size());

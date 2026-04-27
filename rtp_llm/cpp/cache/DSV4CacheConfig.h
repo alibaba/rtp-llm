@@ -19,6 +19,10 @@ enum class DSV4CacheType : int {
 
 constexpr int DSV4_NUM_POOLS = 7;
 
+// RemoteConnector (Full+Linear style): pools 0..2 = paged KV (F*), pools 3..6 = state + SWA (L*).
+// Matches DSV4CacheType order: CSA_KV, HCA_KV, INDEXER_KV | INDEXER_STATE, CSA_STATE, HCA_STATE, SWA_KV.
+constexpr int DSV4_REMOTE_FULL_POOL_NUM = 3;
+
 struct DSV4PoolSpec {
     DSV4CacheType type;
     uint32_t      layer_num;             // number of layers this pool covers

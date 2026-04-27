@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/DSV4CacheConfig.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -181,7 +182,17 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                             register_buffer_size};
     init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
     std::vector<int32_t> full_group_ids, linear_group_ids;
-    if (cache_config.linear_group_num == 0) {
+    if (cache_config.dsv4_config.has_value()) {
+        // DSV4: paged KV pools (0..2) = F*; state + SWA pools (3..6) = L* for FullLinearLayerGroupPolicy.
+        for (int32_t g = 0; g < DSV4_REMOTE_FULL_POOL_NUM; ++g) {
+            full_group_ids.push_back(g);
+        }
+        for (int32_t g = DSV4_REMOTE_FULL_POOL_NUM; g < DSV4_NUM_POOLS; ++g) {
+            linear_group_ids.push_back(g);
+        }
+        group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
+            allocator, full_group_ids, linear_group_ids, std::max(1, cache_config.linear_step));
+    } else if (cache_config.linear_group_num == 0) {
         full_group_ids.push_back(0);
         group_policy_ =
             std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_ids, linear_group_ids);
@@ -214,11 +225,21 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
     size_t group_size               = group_policy_->groups().size();
     assert(group_size > 0);
     auto location_spec_info_map_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecInfoMap>();
-    // TODO : support different byte_size_per_block (transfer client not support now)
-    size_t                   byte_size_per_block = init_params_->cache_config.block_size_bytes;
+    // DSV4: each group (pool) has its own block_size_bytes; non-DSV4 uses global block_size_bytes
+    const auto&         cache_cfg = init_params_->cache_config;
+    const bool          is_dsv4   = cache_cfg.dsv4_config.has_value();
+    std::vector<size_t> group_byte_sizes;
+    group_byte_sizes.reserve(group_size);
+    for (const auto& entry : group_policy_->groups()) {
+        int32_t group_id = entry.first;
+        size_t  byte_size_per_block =
+            is_dsv4 ? cache_cfg.group_block_size_bytes.at(static_cast<size_t>(group_id)) : cache_cfg.block_size_bytes;
+        group_byte_sizes.push_back(byte_size_per_block);
+    }
     std::vector<std::string> all_group_names;
     std::vector<uint64_t>    all_group_name_bithashs;
     all_group_names.reserve(group_size);
+    size_t group_idx = 0;
     for (const auto& entry : group_policy_->groups()) {
         const auto& group = entry.second;
         all_group_names.push_back(group.group_name);
@@ -228,10 +249,11 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
         group_policy_->addLocationSpecGroup(group.group_name_bithash, group.group_name);
         for (int r = 0; r < tp_size; ++r) {
             std::string location_spec_name = genLocationSpecName(r, group.group_name);
-            location_spec_info_map_ptr->emplace(location_spec_name, byte_size_per_block);
+            location_spec_info_map_ptr->emplace(location_spec_name, group_byte_sizes[group_idx]);
             iter->second.push_back(location_spec_name);
             group_policy_->addSpecInfo(location_spec_name, entry.first, r);
         }
+        ++group_idx;
     }
     for (int sub_group = 2; sub_group <= group_size; ++sub_group) {
         std::string bitmask(sub_group, 1);
@@ -642,6 +664,7 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
 
     std::vector<FunctionRequestPB> requests;
     size_t                         new_reuse_block_num = 0;
+    RTP_LLM_LOG_ERROR("yemu_debug RemoteConnector::asyncReadTask genReadRequest begin");
     CHECK_AND_LOG(genReadRequest(broadcaster_->workerNum(),
                                  *locations_ptr,
                                  start_block_index,
@@ -652,6 +675,7 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
                                  new_reuse_block_num),
                   RCS_ERROR,
                   "remote_connector_get genRequest failed");
+    RTP_LLM_LOG_ERROR("yemu_debug RemoteConnector::asyncReadTask genReadRequest end, %zu", new_reuse_block_num);
     RETURN_IF(new_reuse_block_num == 0, read);
     async_context->setState(RemoteConnectorState::State::RCS_READ_BROADCAST);
     auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
@@ -735,7 +759,6 @@ void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&    
                              finish_write_task,
                              "remote_connector_put genRequest failed");
     helper.collector.remote_write_cache_block_num = requests[0].remote_request().block_ids_size();
-
     async_context->setState(RemoteConnectorState::State::RCS_WRITE_BROADCAST);
     auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& context,
@@ -812,15 +835,31 @@ bool RemoteConnector::genReadRequest(size_t                                   tp
             auto        remote_request = requests[spec_info.tp_rank].mutable_remote_request();
             remote_request->add_group_ids(spec_info.group_id);
             const auto& block_indices = resource->groupBlocks().at(spec_info.group_id)->blocks();
-            if (block_indices.size() <= block_idx) {
-                RTP_LLM_LOG_ERROR("trace_id [%s], group_id [%d] bad block_indices size[%lu], block_idx [%zu]",
-                                  trace_id.c_str(),
-                                  spec_info.group_id,
-                                  block_indices.size(),
-                                  block_idx);
+
+            // Use helper function to handle ring buffer indexing
+            const size_t valid_keys_size = resource->cacheKeys().size();
+            BlockIdxType block_id        = remote_connector::GroupPolicy::GetBlockIndexByKeyName(
+                spec_info.group_id,
+                block_indices,
+                block_idx,
+                valid_keys_size,
+                group_policy_->isRingBufferGroup(spec_info.group_id));
+
+            if (rtp_llm::isNullBlockIdx(block_id)) {
+                if (!group_policy_->isRingBufferGroup(spec_info.group_id)) {
+                    RTP_LLM_LOG_ERROR("trace_id [%s], group_id [%d] bad block_indices size[%lu], block_idx [%zu]",
+                                      trace_id.c_str(),
+                                      spec_info.group_id,
+                                      block_indices.size(),
+                                      block_idx);
+                } else {
+                    RTP_LLM_LOG_WARNING("trace_id [%s], group_id [%d] block_id is NULL (evicted), block_idx [%zu]",
+                                        trace_id.c_str(),
+                                        spec_info.group_id,
+                                        block_idx);
+                }
                 return false;
             }
-            auto block_id = block_indices.at(block_idx);
             remote_request->add_block_ids(block_id);
             remote_request->add_uris(location_spec.uri.data());
         }
@@ -881,14 +920,31 @@ bool RemoteConnector::genWriteRequest(size_t                                  tp
             auto        remote_request = requests[spec_info.tp_rank].mutable_remote_request();
             remote_request->add_group_ids(spec_info.group_id);
             const auto& block_indices = resource->groupBlocks().at(spec_info.group_id)->blocks();
-            if (block_indices.size() <= cache_key_idx) {
-                RTP_LLM_LOG_ERROR("trace_id [%s], group_id [%d] bad block_indices size[%lu]",
-                                  trace_id.c_str(),
-                                  spec_info.group_id,
-                                  block_indices.size());
+
+            // Use helper function to handle ring buffer indexing
+            const size_t valid_keys_size = resource->cacheKeys().size();
+            BlockIdxType block_id        = remote_connector::GroupPolicy::GetBlockIndexByKeyName(
+                spec_info.group_id,
+                block_indices,
+                static_cast<size_t>(cache_key_idx),
+                valid_keys_size,
+                group_policy_->isRingBufferGroup(spec_info.group_id));
+
+            if (rtp_llm::isNullBlockIdx(block_id)) {
+                if (!group_policy_->isRingBufferGroup(spec_info.group_id)) {
+                    RTP_LLM_LOG_ERROR("trace_id [%s], group_id [%d] bad block_indices size[%lu], cache_key_idx [%ld]",
+                                      trace_id.c_str(),
+                                      spec_info.group_id,
+                                      block_indices.size(),
+                                      cache_key_idx);
+                } else {
+                    RTP_LLM_LOG_WARNING("trace_id [%s], group_id [%d] block_id is NULL (evicted), cache_key_idx [%ld]",
+                                        trace_id.c_str(),
+                                        spec_info.group_id,
+                                        cache_key_idx);
+                }
                 return false;
             }
-            auto block_id = block_indices.at(cache_key_idx);
             remote_request->add_block_ids(block_id);
             remote_request->add_uris(location_spec.uri);
             actual_uri_gather[spec_info.tp_rank].push_back(

@@ -45,17 +45,18 @@ public:
                          int partition_id) const;
     virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                             const CacheKeysType&   cache_keys,
-                                                            bool                   is_connector = false)            = 0;
+                                                            bool                   is_connector = false) = 0;
 
-    virtual CacheLayerLayout allLayerCacheBase() const                                     = 0;
-    virtual bool             updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                           const std::vector<int>&        block_src_batch,
-                                           bool                           copy_last_block,
-                                           std::vector<BlockIdPair>&      block_update_mapping) = 0;
-    virtual int              seqSizePerBlock() const                                       = 0;
-    virtual int              singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                   int                            seq_len,
-                                                   int                            reserve_step) const                 = 0;
+    virtual CacheLayerLayout allLayerCacheBase() const = 0;
+
+    virtual bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                               const std::vector<int>&        block_src_batch,
+                               bool                           copy_last_block,
+                               std::vector<BlockIdPair>&      block_update_mapping) = 0;
+    virtual int  seqSizePerBlock() const                                       = 0;
+    virtual int  singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                       int                            seq_len,
+                                       int                            reserve_step) const                 = 0;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     virtual void blockCopy(int src_block_index, int dest_block_index);
@@ -76,8 +77,8 @@ public:
         return reserve_block_num_;
     }
 
-    virtual void            regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
-    virtual int64_t         getMrCostTimeMs() const;
+    virtual void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    virtual int64_t                 getMrCostTimeMs() const;
     virtual size_t                  freeBlocksNum() const;
     virtual size_t                  availableBlocksNum() const;
     virtual BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
