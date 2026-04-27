@@ -35,3 +35,18 @@ cc_test(
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),
 )
+
+cc_test(
+    name = "transfer_backend_config_test",
+    srcs = [
+        "TransferBackendConfigTest.cc",
+        "main.cc",
+    ],
+    copts = test_copts,
+    exec_properties = {'gpu':'A10'},
+    deps = [
+        "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_factory_interface",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_config",
+        "@com_google_googletest//:gtest",
+    ],
+)

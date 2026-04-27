@@ -153,6 +153,31 @@ protected:
     std::vector<std::string>                    tp_broadcast_addrs_;
 };
 
+TEST(P2PConnectorConfigTest, WorkerConfigCarriesMooncakeTransportSettings) {
+    RuntimeConfig runtime_config;
+    CacheStoreConfig cache_store_config;
+    cache_store_config.cache_store_mooncake_mode = true;
+    cache_store_config.cache_store_mooncake_transport = "rdma";
+    cache_store_config.cache_store_mooncake_location = "tp0";
+    cache_store_config.cache_store_mooncake_control_plane_port = 23456;
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 2;
+    parallelism_config.tp_rank = 1;
+
+    PDSepConfig pd_sep_config;
+    pd_sep_config.cache_store_listen_port = 12345;
+
+    auto config = P2PConnectorConfig::create(
+        runtime_config, cache_store_config, parallelism_config, pd_sep_config, /*layer_all_num=*/8);
+
+    EXPECT_TRUE(config.worker_config.transfer_backend_config.cache_store_mooncake_mode);
+    EXPECT_EQ(config.worker_config.transfer_backend_config.mooncake.classic.transport, "rdma");
+    EXPECT_EQ(config.worker_config.transfer_backend_config.mooncake.location, "tp0");
+    EXPECT_EQ(config.worker_config.transfer_backend_config.mooncake.control_plane_port, 23456);
+    EXPECT_EQ(config.worker_config.transfer_backend_config.cache_store_listen_port, 12345);
+}
+
 // ==================== handleRead 测试 ====================
 
 // 测试: stream_store_ 为 nullptr，返回 INTERNAL 错误

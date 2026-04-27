@@ -62,7 +62,14 @@ def get_cuda_info():
 
 
 def get_ip():
-    return socket.gethostbyname(socket.gethostname())
+    for env_name in ("HOST_IP", "POD_IP"):
+        env_value = os.environ.get(env_name)
+        if env_value:
+            return env_value
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except socket.gaierror:
+        return "127.0.0.1"
 
 
 def get_gpu_ids():
