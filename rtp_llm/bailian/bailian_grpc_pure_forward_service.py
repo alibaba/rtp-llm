@@ -96,8 +96,8 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         if self._log_debug:
             req_count = 0
             resp_count = 0
-            # Wrap iterator to log each request
-            def logged_iterator():
+
+            def logged_request_iterator():
                 nonlocal req_count
                 for req in request_iterator:
                     req_count += 1
@@ -110,17 +110,63 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         len(req.inputs),
                     )
                     yield req
-            # Forward with wrapped iterator
-            for resp in stub.ModelStreamInfer(logged_iterator()):
-                resp_count += 1
-                logging.info(
-                    "[BailianGrpc] Forward resp #%d from %s: error=%s outputs=%d",
-                    resp_count,
-                    addr,
-                    resp.error_message or "none",
-                    len(resp.outputs),
-                )
-                yield resp
+
+            upstream_iter = stub.ModelStreamInfer(logged_request_iterator())
+
+            def logged_response_iter():
+                nonlocal resp_count
+                for resp in upstream_iter:
+                    resp_count += 1
+                    logging.info(
+                        "[BailianGrpc] Forward resp #%d from %s: error=%s outputs=%d",
+                        resp_count,
+                        addr,
+                        resp.error_message or "none",
+                        len(resp.infer_response.outputs),
+                    )
+                    yield resp
+
+            downstream_iter = logged_response_iter()
         else:
-            for resp in stub.ModelStreamInfer(request_iterator):
-                yield resp
+            downstream_iter = stub.ModelStreamInfer(request_iterator)
+
+        yield from self._buffered_iter(downstream_iter)
+
+    @staticmethod
+    def _buffered_iter(downstream_iter):
+        """Hold the first chunk until the second arrives, then yield both back-to-back.
+
+        Smooths PD-disaggregation TPOT perception: in PD mode the gap between
+        token 1 (emitted by prefill) and token 2 (emitted by decode, after KV cache
+        handoff) is much larger than steady-state TPOT. Buffering delays token 1
+        until token 2 is ready, so clients see a uniform inter-token cadence.
+
+        Exception handling contract:
+        - downstream ends after 1 chunk -> flush buffered, return cleanly;
+        - downstream errors at any point -> flush buffered (best-effort), then re-raise;
+        - downstream yields 0 chunks -> return cleanly.
+        """
+        it = iter(downstream_iter)
+        buffered = None
+        try:
+            try:
+                buffered = next(it)
+            except StopIteration:
+                return
+            try:
+                second = next(it)
+            except StopIteration:
+                yield buffered
+                buffered = None
+                return
+            yield buffered
+            buffered = None
+            yield second
+            yield from it
+        except BaseException:
+            if buffered is not None:
+                try:
+                    yield buffered
+                except BaseException:
+                    pass
+            raise
