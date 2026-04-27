@@ -86,6 +86,9 @@ def _v4_indexer_score_fwd(
     t_mask = t_off < T
 
     # K tile [BLOCK_T, D] — shared across all S rows in this program.
+    # Kept in BF16 so the inner tl.dot uses BF16 tensor cores with an
+    # fp32 accumulator (out_dtype below).  Casting to fp32 here would
+    # force the dot through FP32 SIMT / TF32 and lose ~30× throughput.
     d_idx = tl.arange(0, D)
     k_ptrs = (
         kv_ptr
@@ -93,7 +96,12 @@ def _v4_indexer_score_fwd(
         + t_off[:, None] * kv_t
         + d_idx[None, :]
     )
-    k_tile = tl.load(k_ptrs, mask=t_mask[:, None], other=0.0).to(tl.float32)  # [BLOCK_T, D]
+    k_tile = tl.load(k_ptrs, mask=t_mask[:, None], other=0.0)  # [BLOCK_T, D] bf16
+    # Pre-transpose K once.  Inside the H loop, we'd otherwise tl.trans
+    # the same tile 64 times — the compiler can sometimes hoist that
+    # CSE, but doing it explicitly keeps the dot's RHS as a loop-
+    # invariant register tile and saves issue slots.
+    k_t = tl.trans(k_tile)  # [D, BLOCK_T] bf16
 
     # Causal mask (apply once per program; per-tile).  q_pos[s] is the global
     # position of S row s; the row may attend to compressed-KV columns
@@ -112,7 +120,7 @@ def _v4_indexer_score_fwd(
     acc = tl.zeros((BLOCK_S, BLOCK_T), dtype=tl.float32)
 
     for h in tl.static_range(H):
-        # q[s, h, d] tile [BLOCK_S, D]
+        # q[s, h, d] tile [BLOCK_S, D] — keep bf16 for tensor-core mma.
         q_ptrs = (
             q_ptr
             + pid_b * q_b
@@ -120,10 +128,12 @@ def _v4_indexer_score_fwd(
             + h * q_h
             + d_idx[None, :]
         )
-        q_tile = tl.load(q_ptrs, mask=s_mask[:, None], other=0.0).to(tl.float32)  # [BLOCK_S, D]
+        q_tile = tl.load(q_ptrs, mask=s_mask[:, None], other=0.0)  # [BLOCK_S, D] bf16
 
-        # dot: [BLOCK_S, D] x [BLOCK_T, D]^T = [BLOCK_S, BLOCK_T]
-        score = tl.dot(q_tile, tl.trans(k_tile))
+        # dot: [BLOCK_S, D] x [D, BLOCK_T] = [BLOCK_S, BLOCK_T]
+        # bf16 inputs + out_dtype=fp32 accumulator = BF16 tensor core path.
+        # k_t was pre-transposed above the H loop.
+        score = tl.dot(q_tile, k_t, out_dtype=tl.float32)
 
         # ReLU (V4 indexer math), then per-head weighted accumulate
         score = tl.where(score > 0.0, score, 0.0)
@@ -186,8 +196,15 @@ def v4_indexer_score(
     if S == 0 or T == 0:
         return out
 
-    BLOCK_S = 32 if S >= 32 else triton.next_power_of_2(S)
-    BLOCK_T = 64 if T >= 64 else triton.next_power_of_2(T)
+    # Tile sizes tuned on SM100 (GB200) for V4-Flash 64k+CP=4 (S=T=16384,
+    # H=64, D=128).  Best config across the 4-of-4 shape sweep was
+    # BLOCK_S=16 / BLOCK_T=256 / num_warps=4 / num_stages=2, with the
+    # BF16 tensor-core mma path enabled in the kernel above.  Smaller
+    # BLOCK_S beats the previous BLOCK_S=32 default because each program
+    # streams Q across 64 heads — fewer rows × wider T columns gives
+    # better Q reuse and more T-axis parallelism per SM.
+    BLOCK_S = 16 if S >= 16 else triton.next_power_of_2(S)
+    BLOCK_T = 256 if T >= 256 else triton.next_power_of_2(T)
 
     grid = (B, triton.cdiv(S, BLOCK_S), triton.cdiv(T, BLOCK_T))
 
