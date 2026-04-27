@@ -4,6 +4,6 @@ py_library(
     name = "test_util",
     srcs = glob(["*.py"]),
     deps = [
-        "//rtp_llm:testlib"
-    ]
+        "//rtp_llm:testlib",
+    ],
 )

@@ -4,6 +4,10 @@ import logging
 import tempfile
 import unittest
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 from PIL import Image
 
 from rtp_llm.utils.multimodal_util import get_bytes_io_from_url
@@ -38,4 +42,5 @@ class TestMultiModalUtil(unittest.TestCase):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+if __name__ == "__main__":
     unittest.main()

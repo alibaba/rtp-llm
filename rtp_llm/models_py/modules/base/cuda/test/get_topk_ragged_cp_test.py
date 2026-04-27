@@ -8,7 +8,10 @@ for index_select on local q_fp8.
 
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (

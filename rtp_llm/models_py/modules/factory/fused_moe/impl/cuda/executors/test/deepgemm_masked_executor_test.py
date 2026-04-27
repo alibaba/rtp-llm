@@ -2,7 +2,10 @@ import random
 import unittest
 from typing import Dict, Tuple
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (

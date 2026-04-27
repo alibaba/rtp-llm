@@ -57,5 +57,10 @@ pip_cuda12_arm_torch_install_deps()
 load("@pip_gpu_rocm_torch//:requirements.bzl", pip_gpu_rocm_torch_install_deps = "install_deps")
 pip_gpu_rocm_torch_install_deps()
 
-load("//:def.bzl", "read_release_version")
+load("//:def.bzl", "read_release_version", "torch_local_repository")
 read_release_version(name = "release_version")
+
+torch_local_repository(
+    name = "torch",
+    build_file = "//:BUILD.pytorch",
+)

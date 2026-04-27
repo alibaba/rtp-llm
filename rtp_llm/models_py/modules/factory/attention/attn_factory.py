@@ -6,13 +6,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
     MlaImplBase,
 )
-from rtp_llm.ops import (
-    AttentionConfigs,
-    FMHAConfig,
-    FMHAType,
-    KvCacheDataType,
-    ParallelismConfig,
-)
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -41,20 +35,10 @@ def get_mla_impl(
             continue
 
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
-        # TODO: support fast path for cp prefill
         use_fast_path = (
             attn_inputs.is_prefill
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
-            and not (
-                parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
-            )
         )
-
-        if not use_fast_path and not impl.support_parallelism_config(
-            parallelism_config
-        ):
-            continue
-
         # Skip sparse MLA if fast path is enabled
         if use_fast_path and impl.is_sparse():
             logging.debug(
@@ -75,60 +59,86 @@ def get_mla_impl(
             quant_config=quant_config,
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
-            parallelism_config=parallelism_config,
         )
         if not is_cuda_graph or instance.support_cuda_graph():
             return instance
     raise Exception(f"can not find mla type")
 
 
-def _is_fmha_impl_disabled(
-    impl_class_name: str, fmha_config: Optional[FMHAConfig]
-) -> bool:
-    """Check if a FMHA implementation is disabled in fmha_config.
+def _get_effective_backends(fmha_config: FMHAConfig, is_prefill: bool) -> List[str]:
+    """Resolve the effective attn_backend list for the given stage.
 
-    Args:
-        impl_class_name: The implementation class name
-        fmha_config: The FMHA config, if None, assume not disabled
+    Priority: prefill/decode override > global attn_backend.
+    Returns a list of backend NAMEs (possibly ["auto"] or ["none"]).
 
-    Returns:
-        True if the FMHA implementation is disabled, False otherwise
+    Supports comma-separated ordered lists, e.g. "xqa,flashinfer" means
+    try xqa first, then flashinfer. Each candidate's support() is still checked.
     """
-    if fmha_config is None:
-        return False
+    raw = ""
+    if is_prefill and fmha_config.prefill_attn_backend:
+        raw = fmha_config.prefill_attn_backend
+    elif not is_prefill and fmha_config.decode_attn_backend:
+        raw = fmha_config.decode_attn_backend
+    else:
+        raw = fmha_config.attn_backend
+    return [s.strip() for s in raw.split(",") if s.strip()]
 
-    # XQA implementations
+
+def _get_blocked_backends(fmha_config: FMHAConfig) -> set:
+    if not fmha_config.disable_attn_backends:
+        return set()
+    return {
+        s.strip() for s in fmha_config.disable_attn_backends.split(",") if s.strip()
+    }
+
+
+def _is_fmha_impl_disabled_legacy(impl_class: type, fmha_config: FMHAConfig) -> bool:
+    """Legacy boolean flag check. Only called when effective_backend == "auto"."""
+    impl_class_name = impl_class.__name__
     if "XQA" in impl_class_name:
         return not fmha_config.enable_xqa
-    # TRT implementations
     elif impl_class_name == "TRTMHAImpl":
         return not fmha_config.enable_trt_fmha
     elif impl_class_name == "TRTPagedMHAImpl":
         return not fmha_config.enable_paged_trt_fmha
-    # FlashInfer TRTLLM implementations
-    elif "FlashInferTRTLLM" in impl_class_name:
-        return fmha_config.disable_flash_infer
-    # FlashInfer implementations
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
         return fmha_config.disable_flash_infer
-    # Aiter ASM / Paged prefill
     elif (
         "AiterPrefillImplAsm" in impl_class_name
         or "AiterDecodeImplAsm" in impl_class_name
         or "AiterPrefillImplPaged" in impl_class_name
     ):
         return not fmha_config.use_asm_pa
-    # Aiter Non-ASM implementations
     elif (
         "AiterPrefillImplNonAsm" in impl_class_name
         or "AiterDecodeImplNonAsm" in impl_class_name
     ):
         return not fmha_config.use_aiter_pa
-    # Aiter Triton implementations
     elif "AiterDecodeImplTriton" in impl_class_name:
         return not fmha_config.use_triton_pa
-    # Default: not disabled
     return False
+
+
+def _try_instantiate(
+    impl: type,
+    attn_configs: AttentionConfigs,
+    attn_inputs: PyAttentionInputs,
+    parallelism_config: Optional[ParallelismConfig],
+    is_cuda_graph: bool,
+) -> Optional[FMHAImplBase]:
+    """Try to create an impl instance, checking support/parallelism/cuda_graph."""
+    if not impl.support(attn_configs, attn_inputs):
+        return None
+    if not impl.support_parallelism_config(parallelism_config):
+        return None
+    try:
+        instance = impl(attn_configs, attn_inputs, parallelism_config)
+        if is_cuda_graph and not instance.support_cuda_graph():
+            return None
+        return instance
+    except Exception as e:
+        logging.warning(f"Failed to instantiate {impl.__name__}: {e}")
+        return None
 
 
 def get_fmha_impl(
@@ -141,36 +151,52 @@ def get_fmha_impl(
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
 ) -> FMHAImplBase:
-    # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
-
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
 
-    for impl in mha_impls:
-        # Check if this FMHA implementation is disabled before creating instance
-        impl_class_name = impl.__name__
+    if fmha_config is None:
+        backends = ["auto"]
+        blocked = set()
+    else:
+        backends = _get_effective_backends(fmha_config, attn_inputs.is_prefill)
+        blocked = _get_blocked_backends(fmha_config)
 
-        # Skip if this FMHA implementation is disabled in config
-        if _is_fmha_impl_disabled(impl_class_name, fmha_config):
-            continue
+    if backends == ["none"]:
+        raise Exception("Attention is disabled (attn_backend=none)")
 
-        # Check support before creating instance
-        if not impl.support(attn_configs, attn_inputs):
-            continue
-
-        # Check if implementation supports parallelism config
-        if not impl.support_parallelism_config(parallelism_config):
-            continue
-        try:
-            instance = impl(attn_configs, attn_inputs, parallelism_config)
-            if not is_cuda_graph or instance.support_cuda_graph():
+    if backends == ["auto"]:
+        # Auto mode: iterate impls in registration order, check legacy flags + blocklist
+        for impl in mha_impls:
+            name = getattr(impl, "NAME", None)
+            if name and name in blocked:
+                continue
+            if fmha_config and _is_fmha_impl_disabled_legacy(impl, fmha_config):
+                continue
+            instance = _try_instantiate(
+                impl, attn_configs, attn_inputs, parallelism_config, is_cuda_graph
+            )
+            if instance is not None:
                 return instance
+    else:
+        # Explicit backend list: iterate in user-specified order.
+        # For each backend name, find all matching impls and try them.
+        name_to_impls = {}
+        for impl in mha_impls:
+            name = getattr(impl, "NAME", None)
+            if name:
+                name_to_impls.setdefault(name, []).append(impl)
 
-        except Exception as e:
-            # If instantiation fails, continue to next impl
-            logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
-            continue
-    raise Exception(f"can not find mha type")
+        for backend_name in backends:
+            if backend_name in blocked:
+                continue
+            for impl in name_to_impls.get(backend_name, []):
+                instance = _try_instantiate(
+                    impl, attn_configs, attn_inputs, parallelism_config, is_cuda_graph
+                )
+                if instance is not None:
+                    return instance
+
+    raise Exception(f"can not find mha type for backends={backends}")
 
 
 class AttnImplFactory(object):
@@ -202,7 +228,6 @@ class AttnImplFactory(object):
         attn_configs = model_config.getAttentionConfigs(
             parallelism_config.get_attn_tp_size()
         )
-        attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
         instance = fmha_impl_method(
