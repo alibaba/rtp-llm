@@ -169,6 +169,7 @@ struct PyCacheStoreInputs {
     torch::Tensor            request_id;
     torch::Tensor            request_pd_separation;
     torch::Tensor            kv_cache_layer_to_group;
+    torch::Tensor            kv_cache_layer_attn_to_group;
     torch::Tensor            kv_cache_group_types;
     std::vector<std::string> cache_keys;  // [context_batch_size]
     size_t                   tokens_per_block;

@@ -77,7 +77,11 @@ void registerPyOpDefs(pybind11::module& m) {
         [](caffe2::TypeMeta dtype) { return dtype.toScalarType(); },
         "Convert TypeMeta to scalar type");
 
-    pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs").def(pybind11::init<>());
+    pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs")
+        .def(pybind11::init<>())
+        .def_readwrite("kv_cache_layer_to_group", &PyCacheStoreInputs::kv_cache_layer_to_group)
+        .def_readwrite("kv_cache_layer_attn_to_group", &PyCacheStoreInputs::kv_cache_layer_attn_to_group)
+        .def_readwrite("kv_cache_group_types", &PyCacheStoreInputs::kv_cache_group_types);
 
     pybind11::class_<rtp_llm::ParamsBase, std::shared_ptr<rtp_llm::ParamsBase>>(m, "ParamsBase")
         .def(pybind11::init<>())

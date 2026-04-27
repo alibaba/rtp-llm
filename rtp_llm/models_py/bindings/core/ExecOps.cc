@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <mutex>
 #include <atomic>
+#include <algorithm>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
@@ -156,23 +157,36 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const int32_t* offset_addr          = nullptr;
     size_t         max_blocks_per_batch = 0;
 
-    bool is_hybrid = false;
-    if (param.kv_cache_group_types_host.defined() && param.kv_cache_group_types_host.size(0) > 1) {
-        is_hybrid =
-            !torch::all(param.kv_cache_group_types_host.index({param.kv_cache_layer_to_group_host}) == 1).item<bool>();
-    }
-
-    const size_t group_num = is_hybrid ? param.kv_cache_group_types_host.size(0) : 1;
+    const size_t group_num = param.kv_cache_group_types_host.defined() ? param.kv_cache_group_types_host.size(0) : 1;
+    const bool   is_hybrid = group_num > 1;
 
     int gid = 0;
-    if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
-        && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
-        gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
-    }
-
-    RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
+    auto mapped_group_id = [&param, group_num]() -> int {
+        if (param.kv_cache_layer_attn_to_group_host.defined() && param.kv_cache_layer_attn_to_group_host.dim() == 2
+            && param.layer_id >= 0
+            && static_cast<int64_t>(param.layer_id) < param.kv_cache_layer_attn_to_group_host.size(0)) {
+            const auto attn = static_cast<int64_t>(param.attn_type);
+            if (attn >= 0 && attn < param.kv_cache_layer_attn_to_group_host.size(1)) {
+                const int candidate =
+                    param.kv_cache_layer_attn_to_group_host.data_ptr<int32_t>()[param.layer_id
+                                                                                * param.kv_cache_layer_attn_to_group_host.size(1)
+                                                                                + attn];
+                if (candidate >= 0) {
+                    return candidate;
+                }
+            }
+        }
+        if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
+            && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
+            return param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
+        }
+        return group_num > 0 ? 0 : -1;
+    };
 
     if (param.host_kv_cache_offset.dim() == 3) {
+        gid = mapped_group_id();
+        RTP_LLM_CHECK_WITH_INFO(
+            gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
         const auto group_offset_view = param.host_kv_cache_offset[static_cast<int64_t>(gid)];
         max_blocks_per_batch         = group_offset_view.size(1);
         offset_addr                  = group_offset_view.data_ptr<int32_t>();
@@ -211,14 +225,16 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             "write cache store, request id is %ld, blocks num is %ld", request_id, block_num + reuse_block_num);
 
         CacheGroupType group_type = CacheGroupType::FULL;
-        group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
+        if (param.kv_cache_group_types_host.defined()) {
+            group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
+        }
 
         const int total_blocks = block_num + reuse_block_num;
         if (total_blocks <= 0) {
             continue;
         }
 
-        auto addBlock = [&](int index, CacheGroupType group_type) {
+        auto addBlock = [&](int index) {
             RTP_LLM_CHECK_WITH_INFO(index >= 0 && index < static_cast<int>(max_blocks_per_batch),
                                     "invalid block index=%d (max_blocks_per_batch=%zu)",
                                     index,
@@ -226,7 +242,10 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
             std::string cache_key;
             cache_key =
-                makeCacheKey(param.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
+                makeCacheKey(param.model_id,
+                             param.cache_keys[batch_id * max_blocks_per_batch + index],
+                             param.layer_id,
+                             param.attn_type);
 
             void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
             std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
@@ -262,10 +281,13 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         };
 
         if (group_type == CacheGroupType::LINEAR) {
-            addBlock(total_blocks - 1, group_type);
+            const int start = std::max(0, total_blocks - 2);
+            for (int index = start; index < total_blocks; ++index) {
+                addBlock(index);
+            }
         } else {
             for (int index = 0; index < total_blocks; ++index) {
-                addBlock(index, group_type);
+                addBlock(index);
             }
         }
 

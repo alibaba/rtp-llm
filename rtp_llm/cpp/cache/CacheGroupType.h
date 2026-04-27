@@ -5,7 +5,7 @@
 namespace rtp_llm {
 
 // Cache group type for hybrid KV-cache:
-// - LINEAR: linear attention group (only last block is needed for cache-store transfer)
+// - LINEAR: linear attention group (PD cache-store transfer keeps the last two blocks)
 // - FULL: full attention group (all blocks are needed for cache-store transfer)
 enum class CacheGroupType : int8_t {
     LINEAR = 0,
