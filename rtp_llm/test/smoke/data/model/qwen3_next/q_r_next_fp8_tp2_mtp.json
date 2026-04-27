@@ -1,102 +1,205 @@
 {
-    "model_type": "qwen35_moe",
-    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
-    "query_result": [
-        {
-            "endpoint": "/v1/chat/completions",
-            "query": {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "$prompt:s2"
-                    }
-                ],
-                "max_tokens": 100,
-                "temperature": 0.0,
-                "top_p": 0,
-                "top_k": 1,
-                "random_seed": 42
+  "model_type": "qwen35_moe",
+  "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+  "query_result": [
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "$prompt:s2"
+          }
+        ],
+        "max_tokens": 100,
+        "temperature": 0.0,
+        "top_p": 0,
+        "top_k": 1,
+        "random_seed": 42
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 1777289051,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate for clarity).\n    *   **Goal:** The questions should be thought-prov",
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
             },
-            "result": {
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate).\n    *   **Goal:** The questions should be thought-provoking,"
-                        },
-                        "finish_reason": "length"
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 18,
-                    "total_tokens": 118,
-                    "completion_tokens": 100
-                }
-            }
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 18,
+          "total_tokens": 118,
+          "completion_tokens": 100,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": null
         },
-        {
-            "endpoint": "/v1/chat/completions",
-            "query": {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "$prompt:l2"
-                    }
-                ],
-                "max_tokens": 20,
-                "temperature": 0.0,
-                "top_p": 0,
-                "top_k": 1,
-                "random_seed": 42
-            },
-            "result": {
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": "Here's a thinking process that leads to the suggested revisions:\n\n1.  **Analyze the"
-                        },
-                        "finish_reason": "length"
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 467,
-                    "total_tokens": 487,
-                    "completion_tokens": 20
-                }
-            }
+        "debug_info": null,
+        "aux_info": {
+          "cost_time": 3143.197,
+          "iter_count": 26,
+          "prefix_len": 0,
+          "input_len": 18,
+          "output_len": 100,
+          "step_output_len": 100,
+          "first_token_cost_time": 264.576,
+          "wait_time": 0.0,
+          "pd_sep": false,
+          "cum_log_probs": [],
+          "beam_responses": [],
+          "softmax_probs": [],
+          "reuse_len": 0,
+          "local_reuse_len": 0,
+          "remote_reuse_len": 0,
+          "memory_reuse_len": 0,
+          "prefill_total_reuse_len": 0,
+          "prefill_local_reuse_len": 0,
+          "prefill_remote_reuse_len": 0,
+          "prefill_memory_reuse_len": 0,
+          "decode_total_reuse_len": 0,
+          "decode_local_reuse_len": 0,
+          "decode_remote_reuse_len": 0,
+          "decode_memory_reuse_len": 0,
+          "role_addrs": [],
+          "aux_string": ""
         },
-        {
-            "query": {
-                "top_p": 0,
-                "yield_generator": false,
-                "generate_config": {
-                    "top_p": 0,
-                    "max_new_tokens": 20,
-                    "top_k": 1,
-                    "temperature": 0,
-                    "random_seed": 42
-                },
-                "top_k": 1,
-                "temperature": 0,
-                "prompt": "<|im_start|>user\n润色一下，使其更通顺，更有逻辑，更有专业性：In addition, the Doushantuo phosphorites are characterized by their rich microfossils and a certain amount of organic matter, which suggest that microbial degradation of organic matter could have been a crucial factor in facilitating the precipitation of phosphate in Zhangcunping phosphorites. However, it is important to note that the δ13Ccarb values of lower phosphorites (ca. -2.47‰) are lighter than those of upper phosphorites (ca. -0.71‰). This difference may be attributed the potential variation in the organic matter degradation process.\nOrganic matter degradation in marine sediments is mediated by a series of microbial redox reactions that decrease in energy yield, ranging from oxic respiration, denitrification, Mn reduction, Fe reduction, sulfate reduction, and methanogenesis (Jarvis et al., 1994; Pufahl and Groat, 2017). The lower phosphorites were formed in an anoxic water column where oxygen in overlying water was limited. In this scenario, bacteria-driven breakdown of organic matter is very efficient especially in the presence of microbial sulfate reduction (Arning et al., 2009; Hiatt et al., 2015). The presence of pyrite framboids in lower phosphorites is indicative of an authigenic microbial origin and suggests the presence of sulfate, which fuels sulfate reduction (Hiatt et al., 2015; Hiatt et al., 2020). The increased supply of sulfate from oxidative weathering into the Ediacaran ocean (Laakso et al., 2020) likely fueled the microbial sulfate reduction and, thus organic matter degradation (Chen et al., 2022). Pyrite precipitates in the zone of sulfate reduction when ferrous Fe from Fe(oxyhydr)oxides dissolution combines with bacterially reduced sulfide (Pufahl, 2010). In addition, the observation of sulfur bacteria in Zhangcunping lower phosphorites supports our view (Bailey et al., 2013).<|im_end|>\n<|im_start|>assistant\n",
-                "_prompt_source": "chat-template wrapping $prompt:l2"
+        "extra_outputs": null
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "$prompt:l2"
+          }
+        ],
+        "max_tokens": 20,
+        "temperature": 0.0,
+        "top_p": 0,
+        "top_k": 1,
+        "random_seed": 42
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 1777289052,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Here's a thinking process that leads to the suggested revisions:\n\n1.  **Analyze the",
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
             },
-            "result": {
-                "response": "<think>\nHere's a thinking process that leads to the suggested revisions:\n\n1.  **An",
-                "finished": true,
-                "aux_info": {
-                    "input_len": 465,
-                    "output_len": 20,
-                    "reuse_len": 0,
-                    "local_reuse_len": 0,
-                    "memory_reuse_len": 0,
-                    "remote_reuse_len": 0,
-                    "iter_count": 6
-                }
-            }
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 467,
+          "total_tokens": 487,
+          "completion_tokens": 20,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": null
+        },
+        "debug_info": null,
+        "aux_info": {
+          "cost_time": 684.577,
+          "iter_count": 5,
+          "prefix_len": 0,
+          "input_len": 467,
+          "output_len": 20,
+          "step_output_len": 20,
+          "first_token_cost_time": 243.41,
+          "wait_time": 0.0,
+          "pd_sep": false,
+          "cum_log_probs": [],
+          "beam_responses": [],
+          "softmax_probs": [],
+          "reuse_len": 0,
+          "local_reuse_len": 0,
+          "remote_reuse_len": 0,
+          "memory_reuse_len": 0,
+          "prefill_total_reuse_len": 0,
+          "prefill_local_reuse_len": 0,
+          "prefill_remote_reuse_len": 0,
+          "prefill_memory_reuse_len": 0,
+          "decode_total_reuse_len": 0,
+          "decode_local_reuse_len": 0,
+          "decode_remote_reuse_len": 0,
+          "decode_memory_reuse_len": 0,
+          "role_addrs": [],
+          "aux_string": ""
+        },
+        "extra_outputs": null
+      }
+    },
+    {
+      "query": {
+        "top_p": 0,
+        "yield_generator": false,
+        "generate_config": {
+          "top_p": 0,
+          "max_new_tokens": 20,
+          "top_k": 1,
+          "temperature": 0,
+          "random_seed": 42
+        },
+        "top_k": 1,
+        "temperature": 0,
+        "prompt": "<|im_start|>user\n润色一下，使其更通顺，更有逻辑，更有专业性：In addition, the Doushantuo phosphorites are characterized by their rich microfossils and a certain amount of organic matter, which suggest that microbial degradation of organic matter could have been a crucial factor in facilitating the precipitation of phosphate in Zhangcunping phosphorites. However, it is important to note that the δ13Ccarb values of lower phosphorites (ca. -2.47‰) are lighter than those of upper phosphorites (ca. -0.71‰). This difference may be attributed the potential variation in the organic matter degradation process.\nOrganic matter degradation in marine sediments is mediated by a series of microbial redox reactions that decrease in energy yield, ranging from oxic respiration, denitrification, Mn reduction, Fe reduction, sulfate reduction, and methanogenesis (Jarvis et al., 1994; Pufahl and Groat, 2017). The lower phosphorites were formed in an anoxic water column where oxygen in overlying water was limited. In this scenario, bacteria-driven breakdown of organic matter is very efficient especially in the presence of microbial sulfate reduction (Arning et al., 2009; Hiatt et al., 2015). The presence of pyrite framboids in lower phosphorites is indicative of an authigenic microbial origin and suggests the presence of sulfate, which fuels sulfate reduction (Hiatt et al., 2015; Hiatt et al., 2020). The increased supply of sulfate from oxidative weathering into the Ediacaran ocean (Laakso et al., 2020) likely fueled the microbial sulfate reduction and, thus organic matter degradation (Chen et al., 2022). Pyrite precipitates in the zone of sulfate reduction when ferrous Fe from Fe(oxyhydr)oxides dissolution combines with bacterially reduced sulfide (Pufahl, 2010). In addition, the observation of sulfur bacteria in Zhangcunping lower phosphorites supports our view (Bailey et al., 2013).<|im_end|>\n<|im_start|>assistant\n",
+        "_prompt_source": "chat-template wrapping $prompt:l2"
+      },
+      "result": {
+        "response": "<think>\nHere's a thinking process that leads to the suggested revisions:\n\n1.  **An",
+        "response_alternatives": null,
+        "hidden_states": null,
+        "logits": null,
+        "loss": null,
+        "input_ids": null,
+        "output_ids": null,
+        "aux_info": {
+          "input_len": 465,
+          "prefix_len": 0,
+          "reuse_len": 0,
+          "local_reuse_len": 0,
+          "remote_reuse_len": 0,
+          "memory_reuse_len": 0,
+          "prefill_total_reuse_len": 0,
+          "prefill_local_reuse_len": 0,
+          "prefill_remote_reuse_len": 0,
+          "prefill_memory_reuse_len": 0,
+          "decode_total_reuse_len": 0,
+          "decode_local_reuse_len": 0,
+          "decode_remote_reuse_len": 0,
+          "decode_memory_reuse_len": 0,
+          "output_len": 20,
+          "step_output_len": 20,
+          "iter_count": 6,
+          "cum_log_probs": [],
+          "beam_responses": [],
+          "pd_sep": false,
+          "softmax_probs": []
         }
-    ]
+      }
+    }
+  ]
 }

@@ -14,8 +14,36 @@
         "_prompt_source": "chat-template wrapping $prompt:s1"
       },
       "result": {
-        "response": "I'm Qwen, a large-scale language model developed by Alibaba Cloud. I can assist you with answering questions, writing, logical reasoning, programming, and more. How can I help you today?",
-        "finished": true
+        "response": "The CAP Theorem, also known as Brewer's Theorem, is a fundamental concept in distributed systems that states that it is impossible for a distributed data store to simultaneously provide more than two out of the following three guarantees:\n\n1. **Consistency (C)**: Every read receives the most recent write or an error.",
+        "response_alternatives": null,
+        "hidden_states": null,
+        "logits": null,
+        "loss": null,
+        "input_ids": null,
+        "output_ids": null,
+        "aux_info": {
+          "input_len": 30,
+          "prefix_len": 0,
+          "reuse_len": 0,
+          "local_reuse_len": 0,
+          "remote_reuse_len": 0,
+          "memory_reuse_len": 0,
+          "prefill_total_reuse_len": 0,
+          "prefill_local_reuse_len": 0,
+          "prefill_remote_reuse_len": 0,
+          "prefill_memory_reuse_len": 0,
+          "decode_total_reuse_len": 0,
+          "decode_local_reuse_len": 0,
+          "decode_remote_reuse_len": 0,
+          "decode_memory_reuse_len": 0,
+          "output_len": 64,
+          "step_output_len": 64,
+          "iter_count": 64,
+          "cum_log_probs": [],
+          "beam_responses": [],
+          "pd_sep": false,
+          "softmax_probs": []
+        }
       }
     },
     {
@@ -34,10 +62,68 @@
       "result": {
         "response_batch": [
           {
-            "response": "I'm Qwen, a large-scale language model developed by Alibaba Cloud. I can assist you with answering questions, writing, logical reasoning, programming, and more. How can I help you today?"
+            "response": "The CAP Theorem, also known as Brewer's Theorem, is a fundamental concept in distributed systems that states that it is impossible for a distributed data store to simultaneously provide more than two out of the following three guarantees:\n\n1. **Consistency (C)**: Every read receives the most recent write or an error.",
+            "response_alternatives": null,
+            "hidden_states": null,
+            "logits": null,
+            "loss": null,
+            "input_ids": null,
+            "output_ids": null,
+            "aux_info": {
+              "input_len": 30,
+              "prefix_len": 0,
+              "reuse_len": 0,
+              "local_reuse_len": 0,
+              "remote_reuse_len": 0,
+              "memory_reuse_len": 0,
+              "prefill_total_reuse_len": 0,
+              "prefill_local_reuse_len": 0,
+              "prefill_remote_reuse_len": 0,
+              "prefill_memory_reuse_len": 0,
+              "decode_total_reuse_len": 0,
+              "decode_local_reuse_len": 0,
+              "decode_remote_reuse_len": 0,
+              "decode_memory_reuse_len": 0,
+              "output_len": 64,
+              "step_output_len": 64,
+              "iter_count": 64,
+              "cum_log_probs": [],
+              "beam_responses": [],
+              "pd_sep": false,
+              "softmax_probs": []
+            }
           },
           {
-            "response": "I don't have an age, as I'm a large language model created by Alibaba Cloud. I don't have a physical form or a birth date. I exist to assist you with your inquiries. How can I help you today?"
+            "response": "The error `NameError: name 'screen_manager' is not defined` means that you're trying to use a variable called `screen_manager` in your code, but Python doesn't recognize it because it hasn't been defined yet.\n\nThis commonly happens in Kivy applications when you try to access a `ScreenManager`",
+            "response_alternatives": null,
+            "hidden_states": null,
+            "logits": null,
+            "loss": null,
+            "input_ids": null,
+            "output_ids": null,
+            "aux_info": {
+              "input_len": 36,
+              "prefix_len": 0,
+              "reuse_len": 0,
+              "local_reuse_len": 0,
+              "remote_reuse_len": 0,
+              "memory_reuse_len": 0,
+              "prefill_total_reuse_len": 0,
+              "prefill_local_reuse_len": 0,
+              "prefill_remote_reuse_len": 0,
+              "prefill_memory_reuse_len": 0,
+              "decode_total_reuse_len": 0,
+              "decode_local_reuse_len": 0,
+              "decode_remote_reuse_len": 0,
+              "decode_memory_reuse_len": 0,
+              "output_len": 64,
+              "step_output_len": 64,
+              "iter_count": 64,
+              "cum_log_probs": [],
+              "beam_responses": [],
+              "pd_sep": false,
+              "softmax_probs": []
+            }
           }
         ]
       }

@@ -1,0 +1,165 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_softmax_probs": true
+                },
+                "yield_generator": false
+            },
+            "result": {
+                "response": " Flask is a lightweight web framework for Python, and",
+                "response_alternatives": null,
+                "hidden_states": null,
+                "logits": null,
+                "loss": null,
+                "input_ids": null,
+                "output_ids": null,
+                "aux_info": {
+                    "input_len": 13,
+                    "prefix_len": 0,
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "output_len": 10,
+                    "step_output_len": 10,
+                    "iter_count": 10,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "pd_sep": false,
+                    "softmax_probs": [
+                        0.19312472641468048,
+                        0.2185598760843277,
+                        0.7176850438117981,
+                        0.28491923213005066,
+                        0.38049623370170593,
+                        0.9759673476219177,
+                        0.4265383780002594,
+                        0.8182097673416138,
+                        0.34402593970298767,
+                        0.18101073801517487
+                    ]
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s5",
+                    "$prompt:s3"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 9,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_softmax_probs": true
+                },
+                "yield_generator": false
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": " Flask is a lightweight web framework for Python,",
+                        "response_alternatives": null,
+                        "hidden_states": null,
+                        "logits": null,
+                        "loss": null,
+                        "input_ids": null,
+                        "output_ids": null,
+                        "aux_info": {
+                            "input_len": 13,
+                            "prefix_len": 0,
+                            "reuse_len": 0,
+                            "local_reuse_len": 0,
+                            "remote_reuse_len": 0,
+                            "memory_reuse_len": 0,
+                            "prefill_total_reuse_len": 0,
+                            "prefill_local_reuse_len": 0,
+                            "prefill_remote_reuse_len": 0,
+                            "prefill_memory_reuse_len": 0,
+                            "decode_total_reuse_len": 0,
+                            "decode_local_reuse_len": 0,
+                            "decode_remote_reuse_len": 0,
+                            "decode_memory_reuse_len": 0,
+                            "output_len": 9,
+                            "step_output_len": 9,
+                            "iter_count": 9,
+                            "cum_log_probs": [],
+                            "beam_responses": [],
+                            "pd_sep": false,
+                            "softmax_probs": [
+                                0.19466036558151245,
+                                0.21835559606552124,
+                                0.7167497873306274,
+                                0.28535041213035583,
+                                0.37723371386528015,
+                                0.9759908318519592,
+                                0.42285969853401184,
+                                0.8191636800765991,
+                                0.3441835343837738
+                            ]
+                        }
+                    },
+                    {
+                        "response": "\n\nI am trying to use the screen\\_",
+                        "response_alternatives": null,
+                        "hidden_states": null,
+                        "logits": null,
+                        "loss": null,
+                        "input_ids": null,
+                        "output_ids": null,
+                        "aux_info": {
+                            "input_len": 12,
+                            "prefix_len": 0,
+                            "reuse_len": 0,
+                            "local_reuse_len": 0,
+                            "remote_reuse_len": 0,
+                            "memory_reuse_len": 0,
+                            "prefill_total_reuse_len": 0,
+                            "prefill_local_reuse_len": 0,
+                            "prefill_remote_reuse_len": 0,
+                            "prefill_memory_reuse_len": 0,
+                            "decode_total_reuse_len": 0,
+                            "decode_local_reuse_len": 0,
+                            "decode_remote_reuse_len": 0,
+                            "decode_memory_reuse_len": 0,
+                            "output_len": 9,
+                            "step_output_len": 9,
+                            "iter_count": 9,
+                            "cum_log_probs": [],
+                            "beam_responses": [],
+                            "pd_sep": false,
+                            "softmax_probs": [
+                                0.4730912446975708,
+                                0.245347797870636,
+                                0.32783398032188416,
+                                0.4153047204017639,
+                                0.9849086999893188,
+                                0.18394814431667328,
+                                0.2795454263687134,
+                                0.2366538643836975,
+                                0.4118333160877228
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+    ]
+}
