@@ -75,6 +75,18 @@ def _append_finish_reason_output(
     infer.raw_output_contents.append(struct.pack("<q", 0 if finished else 2))
 
 
+def _append_finished_output(
+    infer: predict_v2_pb2.ModelInferResponse,
+    finished: bool,
+) -> None:
+    """``finished``：BOOL 标量，shape ``[1]``；1 byte（``\\x01`` / ``\\x00``）。"""
+    out = infer.outputs.add()
+    out.name = "finished"
+    out.datatype = "BOOL"
+    out.shape.append(1)
+    infer.raw_output_contents.append(b"\x01" if finished else b"\x00")
+
+
 def _append_int32_scalar_output(
     infer: predict_v2_pb2.ModelInferResponse,
     tensor_name: str,
@@ -138,6 +150,7 @@ def build_stream_response_from_generate_outputs(
 
     _append_generated_ids_output(infer, generated_ids)
     _append_finish_reason_output(infer, finished)
+    _append_finished_output(infer, finished)
     _append_aux_info_metrics_outputs(infer, out_py)
 
     logging.debug(
