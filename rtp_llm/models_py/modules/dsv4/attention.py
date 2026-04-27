@@ -13,6 +13,7 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
 import math
+import os
 from typing import Dict, Optional
 
 import torch
@@ -29,6 +30,32 @@ from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
 from rtp_llm.models_py.modules.dsv4.weight_loader import _repack_v4_fp8_scale_to_int32
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
+
+# P4 (prefill_opt/final_plan.md, minimal C): fused RMSNorm Triton kernel.
+# Replaces the 6-launch ``.float().square().mean(-1).rsqrt().mul().to()``
+# chain at all 3 attention RMSNorm sites.  Set DSV4_QK_RMSNORM_FAST=0
+# to force REF (debug only).
+try:
+    from rtp_llm.models_py.modules.dsv4._qk_rmsnorm_triton import v4_rmsnorm
+    _QK_RMSNORM_FAST_OK = True
+except Exception:  # pragma: no cover
+    v4_rmsnorm = None
+    _QK_RMSNORM_FAST_OK = False
+
+
+def _use_qk_rmsnorm_fast() -> bool:
+    if not _QK_RMSNORM_FAST_OK:
+        return False
+    return os.environ.get("DSV4_QK_RMSNORM_FAST", "1") != "0"
+
+
+# P3 (prefill_opt/final_plan.md): wo_a native FP8 fast path.  Replaces
+# ``dequant_weight()`` + bf16 ``einsum("bsgd,grd->bsgr")`` with per-group
+# DeepGEMM ``fp8_gemm_nt`` calls (no BF16 weight materialization).  wo_b
+# is already on the FP8 native path via ``_v4_fp8_linear_from_dict``.
+# Set DSV4_WO_FP8_FAST=0 to force the dequant REF (debug only).
+def _use_wo_fp8_fast() -> bool:
+    return os.environ.get("DSV4_WO_FP8_FAST", "1") != "0"
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
@@ -457,6 +484,8 @@ class Attention(nn.Module):
                 self.indexer.compressor.freqs_cis = None
 
     def _rmsnorm_weighted(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        if _use_qk_rmsnorm_fast() and x.is_cuda and x.numel() > 0:
+            return v4_rmsnorm(x, weight, eps=self.eps)
         dtype = x.dtype
         x32 = x.float()
         x32 = x32 * torch.rsqrt(x32.square().mean(-1, keepdim=True) + self.eps)
@@ -470,6 +499,48 @@ class Attention(nn.Module):
             y = layer(x.reshape(-1, shape[-1]))
             return y.view(*shape[:-1], y.shape[-1])
         return layer(x)
+
+    def _wo_a_grouped_fp8(self, o: torch.Tensor) -> torch.Tensor:
+        """Per-group native FP8 GEMM, replaces dequant + bf16 einsum.
+
+        ``o`` is ``[B, S, G, K]`` BF16 from sparse-attn output (after
+        inv-RoPE).  ``self.wo_a.weight`` is the full ``[G*R, K]`` FP8
+        tensor with UE8M0 block-128 scale.  We slice per-group, build
+        ``CudaFp8DeepGEMMLinear`` lazily on first call (so the repack
+        runs on-device), then loop over groups calling DeepGEMM's
+        ``fp8_gemm_nt`` — no [G*R, K] BF16 dequant, no full transpose.
+
+        Returns ``[B, S, G, R]`` BF16, identical math (within block-FP8
+        quant noise) to the dequant + einsum REF path.
+        """
+        B, S, G, K = o.shape
+        R = self.o_lora_rank
+        if getattr(self, "_wo_a_groups_lazy", None) is None:
+            from rtp_llm.models_py.modules.dsv4.weight_loader import (
+                _repack_v4_fp8_scale_to_int32,
+            )
+            groups = []
+            for g in range(G):
+                w_g = self.wo_a.weight[g * R:(g + 1) * R].contiguous()
+                s_g_raw = self.wo_a.scale[g * R // 128:(g + 1) * R // 128].contiguous()
+                if s_g_raw.dtype == torch.float8_e8m0fnu:
+                    s_g = _repack_v4_fp8_scale_to_int32(s_g_raw)
+                else:
+                    s_g = s_g_raw
+                local = {f"_g.weight": w_g, f"_g.scale": s_g}
+                lin = LinearFactory.create_linear_from_weights(
+                    local, f"_g.weight", f"_g.scale",
+                    quant_config=_V4_FP8_BLOCK_CFG,
+                )
+                groups.append(lin)
+            self._wo_a_groups_lazy = groups
+
+        out_full = torch.empty(B, S, G, R, dtype=o.dtype, device=o.device)
+        for g in range(G):
+            x_g = o[:, :, g, :].contiguous().view(B * S, K)
+            out_g = self._wo_a_groups_lazy[g](x_g)
+            out_full[:, :, g, :].copy_(out_g.view(B, S, R))
+        return out_full
 
     def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
         bsz, seqlen, _ = x.size()
@@ -500,7 +571,10 @@ class Attention(nn.Module):
         qr = self._rmsnorm_weighted(self._lin(self.wq_a, x), self.q_norm.weight)  # [B, S, q_lora_rank]
         q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
         # QK RMSNorm (no learnable scale here, per official code)
-        q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.eps).to(q.dtype)
+        if _use_qk_rmsnorm_fast() and q.is_cuda and q.numel() > 0:
+            q = v4_rmsnorm(q, None, eps=self.eps)
+        else:
+            q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.eps).to(q.dtype)
         apply_rotary_emb(q[..., -rd:], freqs_cis)
 
         # KV path (single KV head) — rank-local under CP.
@@ -584,10 +658,14 @@ class Attention(nn.Module):
 
         # Grouped output projection: split heads into n_groups groups
         o = o.reshape(bsz, seqlen, self.n_groups, -1)
-        # wo_a storage is native FP8; dequant on-the-fly and view into group-wise form.
-        wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
-        wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
-        o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+        if self._factory_mode and _use_wo_fp8_fast() and o.is_cuda and o.numel() > 0:
+            # Native FP8 per-group GEMM via DeepGEMM (no [G*R, K] dequant).
+            o = self._wo_a_grouped_fp8(o)
+        else:
+            # REF: materialize BF16 weight then bf16 einsum.
+            wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
+            wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
+            o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
         out = self._lin(self.wo_b, o.flatten(2))
         if self.tp_size > 1:
             # wo_b is row-split along K — each rank produces a partial
