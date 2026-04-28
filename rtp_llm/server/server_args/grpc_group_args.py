@@ -3,7 +3,7 @@ import json
 import logging
 
 DEFAULT_GRPC_MAX_SERVER_POLLERS = 4
-DEFAULT_BAILIAN_GRPC_MAX_SERVER_WORKERS = 4
+DEFAULT_DASH_SC_GRPC_MAX_SERVER_WORKERS = 4
 
 # Model RPC: receive / metadata limits (C++ GenerateStreamCall path).
 _MODEL_RPC_GRPC_RECV_AND_METADATA_BYTES = 1024 * 1024 * 1024
@@ -36,10 +36,10 @@ def default_model_grpc_config_json() -> str:
     return json.dumps(obj, separators=(",", ":"))
 
 
-def default_bailian_grpc_config_json() -> str:
-    """Same as ``default_model_grpc_config_json``, plus Bailian ``max_server_workers``."""
+def default_dash_sc_grpc_config_json() -> str:
+    """Same as ``default_model_grpc_config_json``, plus DashSc ``max_server_workers``."""
     obj = json.loads(default_model_grpc_config_json())
-    obj["max_server_workers"] = DEFAULT_BAILIAN_GRPC_MAX_SERVER_WORKERS
+    obj["max_server_workers"] = DEFAULT_DASH_SC_GRPC_MAX_SERVER_WORKERS
     return json.dumps(obj, separators=(",", ":"))
 
 
@@ -84,22 +84,22 @@ def init_model_grpc_group_args(parser, grpc_config):
     )
 
 
-def init_bailian_grpc_group_args(parser, bailian_grpc_config):
-    """Bailian gRPC（predict_v2.proto ModelStreamInfer）Python client / server。"""
-    bailian_group = parser.add_argument_group("Bailian gRPC configuration")
+def init_dash_sc_grpc_group_args(parser, dash_sc_grpc_config):
+    """DashSc gRPC（predict_v2.proto ModelStreamInfer）Python client / server。"""
+    dash_sc_group = parser.add_argument_group("DashSc gRPC configuration")
 
-    default_json = default_bailian_grpc_config_json()
+    default_json = default_dash_sc_grpc_config_json()
 
-    bailian_grpc_config.from_json(default_json)
+    dash_sc_grpc_config.from_json(default_json)
 
-    bailian_group.add_argument(
-        "--bailian_grpc_config_json",
-        env_name="BAILIAN_GRPC_CONFIG_JSON",
+    dash_sc_group.add_argument(
+        "--dash_sc_grpc_config_json",
+        env_name="DASH_SC_GRPC_CONFIG_JSON",
         bind_to=None,
-        type=_grpc_config_from_json(bailian_grpc_config),
+        type=_grpc_config_from_json(dash_sc_grpc_config),
         default=default_json,
         help=(
-            "Bailian gRPC JSON: "
+            "DashSc gRPC JSON: "
             '{"client_config": {...}, "server_config": {...}, "max_server_workers": <int>}. '
             "max_server_workers is ThreadPoolExecutor size for grpc.server."
         ),

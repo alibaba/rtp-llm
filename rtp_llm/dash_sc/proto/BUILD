@@ -1,4 +1,4 @@
-# BUILD for bailian inference proto (predict_v2 + model_config).
+# BUILD for dash_sc inference proto (predict_v2 + model_config).
 # predict_v2.proto imports model_config.proto; use include="." so protoc finds it.
 # Python pb: same pattern as rtp_llm/cpp/model_rpc/proto (py_binary + genrule + py_library).
 load("//bazel:tf_proto.bzl", "cc_proto_library")

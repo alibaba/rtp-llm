@@ -1,8 +1,8 @@
-"""Unit tests for ``rtp_llm.bailian.bailian_grpc_access_log``.
+"""Unit tests for ``rtp_llm.dash_sc.dash_sc_grpc_access_log``.
 
 Covers the four stream-type code paths, content capture, status handling, and
 JSON line shape. Does not spin up a real gRPC server — builds ``RpcMethodHandler``
-fakes and drives ``BailianGrpcAccessLogInterceptor.intercept_service`` directly.
+fakes and drives ``DashScGrpcAccessLogInterceptor.intercept_service`` directly.
 """
 
 from __future__ import annotations
@@ -16,12 +16,12 @@ from unittest.mock import MagicMock, patch
 
 import grpc
 
-from rtp_llm.bailian.bailian_grpc_access_log import (
-    BAILIAN_GRPC_ACCESS_LOGGER_NAME,
-    BailianGrpcAccessLogInterceptor,
-    init_bailian_grpc_access_logger,
+from rtp_llm.dash_sc.dash_sc_grpc_access_log import (
+    DASH_SC_GRPC_ACCESS_LOGGER_NAME,
+    DashScGrpcAccessLogInterceptor,
+    init_dash_sc_grpc_access_logger,
 )
-from rtp_llm.bailian.proto import predict_v2_pb2
+from rtp_llm.dash_sc.proto import predict_v2_pb2
 
 
 def _make_infer_request(
@@ -117,10 +117,18 @@ def _make_handler(*, request_streaming: bool, response_streaming: bool, inner):
     handler.response_streaming = response_streaming
     handler.request_deserializer = None
     handler.response_serializer = None
-    handler.unary_unary = inner if (not request_streaming and not response_streaming) else None
-    handler.unary_stream = inner if (not request_streaming and response_streaming) else None
-    handler.stream_unary = inner if (request_streaming and not response_streaming) else None
-    handler.stream_stream = inner if (request_streaming and response_streaming) else None
+    handler.unary_unary = (
+        inner if (not request_streaming and not response_streaming) else None
+    )
+    handler.unary_stream = (
+        inner if (not request_streaming and response_streaming) else None
+    )
+    handler.stream_unary = (
+        inner if (request_streaming and not response_streaming) else None
+    )
+    handler.stream_stream = (
+        inner if (request_streaming and response_streaming) else None
+    )
     return handler
 
 
@@ -149,30 +157,35 @@ def _wrapped_behavior(interceptor, handler):
         captured["behavior"] = behavior
         return ("uu", behavior)
 
-    with patch.object(grpc, "stream_stream_rpc_method_handler", side_effect=capture_ss), \
-         patch.object(grpc, "stream_unary_rpc_method_handler", side_effect=capture_su), \
-         patch.object(grpc, "unary_stream_rpc_method_handler", side_effect=capture_us), \
-         patch.object(grpc, "unary_unary_rpc_method_handler", side_effect=capture_uu):
+    with patch.object(
+        grpc, "stream_stream_rpc_method_handler", side_effect=capture_ss
+    ), patch.object(
+        grpc, "stream_unary_rpc_method_handler", side_effect=capture_su
+    ), patch.object(
+        grpc, "unary_stream_rpc_method_handler", side_effect=capture_us
+    ), patch.object(
+        grpc, "unary_unary_rpc_method_handler", side_effect=capture_uu
+    ):
         interceptor.intercept_service(continuation, details)
     return captured["behavior"]
 
 
 class InitLoggerTest(TestCase):
     def test_init_logger_empty_log_path_is_noop(self) -> None:
-        init_bailian_grpc_access_logger(log_path="", backup_count=0)
-        logger = logging.getLogger(BAILIAN_GRPC_ACCESS_LOGGER_NAME)
+        init_dash_sc_grpc_access_logger(log_path="", backup_count=0)
+        logger = logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME)
         # No handlers attached when log_path="" (get_handler returns None)
         self.assertEqual(len(logger.handlers), 0)
 
     def test_init_logger_sets_log_level(self) -> None:
-        init_bailian_grpc_access_logger(log_path="", backup_count=0)
-        logger = logging.getLogger(BAILIAN_GRPC_ACCESS_LOGGER_NAME)
+        init_dash_sc_grpc_access_logger(log_path="", backup_count=0)
+        logger = logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME)
         self.assertEqual(logger.level, logging.INFO)
 
 
 class InterceptorTestBase(TestCase):
     def setUp(self) -> None:
-        self.interceptor = BailianGrpcAccessLogInterceptor(rank_id=0, server_id=1)
+        self.interceptor = DashScGrpcAccessLogInterceptor(rank_id=0, server_id=1)
         self.records: list[dict[str, Any]] = []
 
         def capture(msg, *args, **_kw):
@@ -324,7 +337,7 @@ class BidiStreamTest(InterceptorTestBase):
     def test_bidi_empty_generated_ids_chunk_not_polluting(self) -> None:
         """Empty generated_ids chunk (shape=[1,0] with 4-byte filler) must not pollute the accumulator.
 
-        ``bailian_grpc_response_real._append_generated_ids_output`` writes
+        ``dash_sc_grpc_response_real._append_generated_ids_output`` writes
         ``struct.pack("<i", 0)`` when the delta is empty (e.g., a finish-only
         chunk). Without shape-aware decoding this would become a bogus ``[0]``.
         """

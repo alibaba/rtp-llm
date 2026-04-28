@@ -482,18 +482,18 @@ void GrpcConfig::from_json(const std::string& json_str) {
     max_server_pollers = parse_optional_root_int_json(json_str, "max_server_pollers", 0);
 }
 
-BailianGrpcConfig::BailianGrpcConfig(const std::string& json_str) {
+DashScGrpcConfig::DashScGrpcConfig(const std::string& json_str) {
     from_json(json_str);
 }
 
-std::string BailianGrpcConfig::to_string() const {
+std::string DashScGrpcConfig::to_string() const {
     std::ostringstream oss;
     append_grpc_maps_to_stream(oss, *this);
     oss << "max_server_workers: " << max_server_workers << "\n";
     return oss.str();
 }
 
-void BailianGrpcConfig::from_json(const std::string& json_str) {
+void DashScGrpcConfig::from_json(const std::string& json_str) {
     if (json_str.empty()) {
         return;
     }

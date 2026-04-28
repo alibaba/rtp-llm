@@ -9,9 +9,9 @@ from rtp_llm.config.model_args import ModelArgs
 st = time.time()
 from rtp_llm.ops import (
     ArpcConfig,
-    BailianGrpcConfig,
     CacheStoreConfig,
     ConcurrencyConfig,
+    DashScGrpcConfig,
     DeviceResourceConfig,
     EPLBConfig,
     FfnDisAggregateConfig,
@@ -86,8 +86,8 @@ class ServerConfig:
         return self._server_base() + 7
 
     @property
-    def bailian_grpc_server_port(self) -> int:
-        """Bailian gRPC listen port (ModelStreamInfer, wire: predict_v2.proto); base + 8."""
+    def dash_sc_grpc_server_port(self) -> int:
+        """DashSc gRPC listen port (ModelStreamInfer, wire: predict_v2.proto); base + 8."""
         return self._server_base() + 8
 
     def set_local_rank(self, local_rank: int):
@@ -113,7 +113,7 @@ class ServerConfig:
             f"cache_store_rdma_listen_port: {self.cache_store_rdma_listen_port}\n"
             f"http_port: {self.http_port}\n"
             f"embedding_rpc_server_port: {self.embedding_rpc_server_port}\n"
-            f"bailian_grpc_server_port: {self.bailian_grpc_server_port}"
+            f"dash_sc_grpc_server_port: {self.dash_sc_grpc_server_port}"
         )
 
 
@@ -452,7 +452,7 @@ class PyEnvConfigs:
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()
         self.grpc_config = GrpcConfig()
-        self.bailian_grpc_config = BailianGrpcConfig()
+        self.dash_sc_grpc_config = DashScGrpcConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
 
@@ -504,6 +504,6 @@ class PyEnvConfigs:
             + self.runtime_config.fifo_scheduler_config.to_string()
             + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
-            "[bailian_grpc_config]\n" + self.bailian_grpc_config.to_string() + "\n\n"
+            "[dash_sc_grpc_config]\n" + self.dash_sc_grpc_config.to_string() + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )

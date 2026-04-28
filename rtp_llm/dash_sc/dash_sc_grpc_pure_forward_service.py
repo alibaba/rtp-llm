@@ -13,10 +13,10 @@ from typing import List, Optional
 
 import grpc
 
-from rtp_llm.bailian.proto import predict_v2_pb2_grpc
+from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 
-_FORWARD_ENV_KEY = "BAILIAN_GRPC_FORWARD_ADDR"
-_LOG_DEBUG_ENV_KEY = "BAILIAN_GRPC_FORWARD_LOG_DEBUG"
+_FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
+_LOG_DEBUG_ENV_KEY = "DASH_SC_GRPC_FORWARD_LOG_DEBUG"
 
 
 def _parse_forward_addrs(env_value: str) -> List[str]:
@@ -63,7 +63,11 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._forward_addrs = forward_addrs
         self._channels: List[grpc.Channel] = []
         self._stubs: List[predict_v2_pb2_grpc.GRPCInferenceServiceStub] = []
-        self._log_debug = os.environ.get(_LOG_DEBUG_ENV_KEY, "").lower() in ("true", "1", "on")
+        self._log_debug = os.environ.get(_LOG_DEBUG_ENV_KEY, "").lower() in (
+            "true",
+            "1",
+            "on",
+        )
 
         for addr in forward_addrs:
             channel = grpc.insecure_channel(addr)
@@ -72,7 +76,7 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             self._stubs.append(stub)
 
         logging.info(
-            "[BailianGrpc] PureForwardServicer initialized with %d addresses: %s, log_debug=%s",
+            "[DashScGrpc] PureForwardServicer initialized with %d addresses: %s, log_debug=%s",
             len(forward_addrs),
             forward_addrs,
             self._log_debug,
@@ -102,7 +106,7 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 for req in request_iterator:
                     req_count += 1
                     logging.info(
-                        "[BailianGrpc] Forward req #%d to %s: model=%s id=%s inputs=%d",
+                        "[DashScGrpc] Forward req #%d to %s: model=%s id=%s inputs=%d",
                         req_count,
                         addr,
                         req.model_name,
@@ -118,7 +122,7 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 for resp in upstream_iter:
                     resp_count += 1
                     logging.info(
-                        "[BailianGrpc] Forward resp #%d from %s: error=%s outputs=%d",
+                        "[DashScGrpc] Forward resp #%d from %s: error=%s outputs=%d",
                         resp_count,
                         addr,
                         resp.error_message or "none",
