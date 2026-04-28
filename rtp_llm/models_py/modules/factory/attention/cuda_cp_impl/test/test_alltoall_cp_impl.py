@@ -10,6 +10,10 @@ import contextlib
 import math
 import time
 import unittest
+
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 from typing import List
 from unittest.mock import patch
 

@@ -10,7 +10,7 @@ from aiter_meta.csrc.cpp_itfs.pa_gluon_aot.pa_decode_gluon_aot import (
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOpAsm,
     FusedRopeKVCacheDecodeOpNonAsm,
@@ -147,7 +147,7 @@ class AiterPrefillAttnOp:
         self.head_num = attn_configs.head_num
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
-        self.tokens_per_block = attn_configs.kernel_tokens_per_block
+        self.tokens_per_block = attn_configs.tokens_per_block
         self.is_causal = attn_configs.is_causal
         self.v1_kv_layout = v1_kv_layout
 
@@ -611,7 +611,7 @@ class AiterDecodeAttnOpBase:
         self.head_num = attn_configs.head_num
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
-        self.tokens_per_block = attn_configs.kernel_tokens_per_block
+        self.tokens_per_block = attn_configs.tokens_per_block
         self.max_seq_len = attn_configs.max_seq_len
         # Updated per-request in prepare(); keep default false to avoid stale state
         # before first input is prepared.
@@ -865,6 +865,8 @@ class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
 class AiterPrefillImplAsm(FMHAImplBase):
     """Aiter prefill attention implementation using ASM."""
 
+    NAME = "aiter_asm"
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -982,7 +984,7 @@ class AiterPrefillImplPaged(FMHAImplBase):
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.head_num_kv = attn_configs.kv_head_num
         self.head_dim = attn_configs.size_per_head
-        self.tokens_per_block = attn_configs.kernel_tokens_per_block
+        self.tokens_per_block = attn_configs.tokens_per_block
 
         self.batch_prefill_impl = AiterPrefillAttnOpPaged(attn_configs)
         self.triton_prefill_impl = AiterPrefillAttnOpTriton(attn_configs)

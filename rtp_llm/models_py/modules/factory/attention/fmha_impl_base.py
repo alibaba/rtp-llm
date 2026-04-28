@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, ParamsBase, PyAttentionInputs
 
 

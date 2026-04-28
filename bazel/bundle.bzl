@@ -131,12 +131,6 @@ def _get_transitive_headers(deps):
         transitive = [dep[CcInfo].compilation_context.headers for dep in deps],
     )
 
-def _get_transitive_py_sources(deps):
-    return depset(
-        [],
-        transitive = [dep[PyInfo].transitive_sources for dep in deps],
-    )
-
 def mapping_files(srcs, deps, prefix, strip_prefix):
     dest_src_map = {}
     for s in deps:
@@ -226,9 +220,6 @@ def _bundle_transitive_files(ctx, transitive_func):
 def _bundle_cc_hdrs_impl(ctx):
     return _bundle_transitive_files(ctx, _get_transitive_headers)
 
-def _bundle_py_libs_impl(ctx):
-    return _bundle_transitive_files(ctx, _get_transitive_py_sources)
-
 _bundle_rules_base_attrs =  {
     "srcs": attr.label_list(
         doc = """Files/Labels to include in the outputs of these rules""",
@@ -278,12 +269,6 @@ bundle_files_impl = rule(
 
 bundle_cc_hdrs_impl = rule(
     implementation = _bundle_cc_hdrs_impl,
-    attrs = _bundle_transitive_attrs,
-    provides = [BundleFilesInfo],
-)
-
-bundle_py_libs_impl = rule(
-    implementation = _bundle_py_libs_impl,
     attrs = _bundle_transitive_attrs,
     provides = [BundleFilesInfo],
 )
@@ -539,13 +524,6 @@ def bundle_files(name, **kwargs):
 def bundle_cc_hdrs(name, **kwargs):
     _add_default_args(kwargs)
     bundle_cc_hdrs_impl(
-        name = name,
-        **kwargs,
-    )
-
-def bundle_py_libs(name, **kwargs):
-    _add_default_args(kwargs)
-    bundle_py_libs_impl(
         name = name,
         **kwargs,
     )

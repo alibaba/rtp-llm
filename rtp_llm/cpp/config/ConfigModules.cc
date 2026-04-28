@@ -83,12 +83,14 @@ std::string ConcurrencyConfig::to_string() const {
 // FMHAConfig
 std::string FMHAConfig::to_string() const {
     std::ostringstream oss;
-    oss << "enable_fmha: " << enable_fmha << "\n"
+    oss << "attn_backend: " << attn_backend << "\n"
+        << "prefill_attn_backend: " << prefill_attn_backend << "\n"
+        << "decode_attn_backend: " << decode_attn_backend << "\n"
+        << "disable_attn_backends: " << disable_attn_backends << "\n"
+        << "enable_fmha: " << enable_fmha << "\n"
         << "enable_trt_fmha: " << enable_trt_fmha << "\n"
         << "enable_paged_trt_fmha: " << enable_paged_trt_fmha << "\n"
         << "enable_open_source_fmha: " << enable_open_source_fmha << "\n"
-        << "enable_paged_open_source_fmha: " << enable_paged_open_source_fmha << "\n"
-        << "enable_trtv1_fmha: " << enable_trtv1_fmha << "\n"
         << "disable_flash_infer: " << disable_flash_infer << "\n"
         << "enable_xqa: " << enable_xqa << "\n"
         << "use_aiter_pa: " << use_aiter_pa << "\n"
