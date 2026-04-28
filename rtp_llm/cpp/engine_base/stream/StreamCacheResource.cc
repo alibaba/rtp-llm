@@ -148,9 +148,6 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                         .loss              = {},
                         .src_batch_indices = {},
                         .all_hidden_states = {}});
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
-                          payload->first_token_id,
-                          stream->streamId());
     }
 
     // 2. Reuse lengths
@@ -159,11 +156,6 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                                       payload->local_reuse_len,
                                       payload->remote_reuse_len,
                                       payload->memory_reuse_len);
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: prefill reuse total=%d, local=%d, remote=%d, memory=%d",
-                          payload->total_reuse_len,
-                          payload->local_reuse_len,
-                          payload->remote_reuse_len,
-                          payload->memory_reuse_len);
     }
     // 3. Speculative proposal info
     if (!payload->propose_tokens.empty()) {
@@ -180,14 +172,12 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                payload->propose_tokens.size() * sizeof(int));
 
         stream->setSPOutputBuffer(sp_output_buffer);
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: propose_tokens count=%zu", payload->propose_tokens.size());
     }
 
     // 4. Position IDs
     if (!payload->position_ids.empty()) {
         auto position_ids = torch::tensor(payload->position_ids, torch::dtype(torch::kInt32).device(torch::kCPU));
         stream->setContextPositionIds(std::move(position_ids));
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: position_ids count=%zu", payload->position_ids.size());
     }
 
     return true;

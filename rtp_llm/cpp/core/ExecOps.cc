@@ -175,7 +175,6 @@ private:
 static void writeCacheToConnector(const rtp_llm::CacheStoreInputs&                         param,
                                    rtp_llm::IKVCacheConnectorCoordinator* connector_coordinator) {
     if (param.warmup) {
-        RTP_LLM_LOG_DEBUG("is warmup, so ignore writeCacheToConnector");
         return;
     }
 
@@ -278,18 +277,6 @@ static void writeCacheToConnector(const rtp_llm::CacheStoreInputs&              
 
         std::vector<int> layer_to_group_id(global_layer_id + 1, 0);
         layer_to_group_id[global_layer_id] = gid;
-        if (global_layer_id == 0) {
-            RTP_LLM_LOG_INFO("writeCacheToConnector [P2P]: request_id=%ld, batch_id=%zu, group_num=%d, gid=%d, "
-                             "total_blocks=%zu, block_num=%d, reuse=%d, max_blocks_per_batch=%zu",
-                             request_id,
-                             batch_id,
-                             group_num,
-                             gid,
-                             total_block_num,
-                             block_num,
-                             reuse_block_num,
-                             max_blocks_per_batch);
-        }
         kv_cache_resource->initGroups(group_num, global_layer_id + 1, layer_to_group_id);
 
         auto& block_ids_obj = kv_cache_resource->mutableBlockIds(gid);
@@ -299,8 +286,9 @@ static void writeCacheToConnector(const rtp_llm::CacheStoreInputs&              
             block_ids_obj.setAt(index, block_id);
         }
 
+        auto attention_event = param.pre_created_event ? param.pre_created_event : rtp_llm::runtimeCreateEvent();
         auto layer_context =
-            std::make_shared<WriteCacheLayerContext>(kv_cache_resource, request_id, rtp_llm::runtimeCreateEvent());
+            std::make_shared<WriteCacheLayerContext>(kv_cache_resource, request_id, attention_event);
         connector_coordinator->asyncWriteByLayer(global_layer_id, layer_context);
     }
 }
