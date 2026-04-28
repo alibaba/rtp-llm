@@ -263,7 +263,7 @@ class AiterPrefillAttnOp:
         return query.contiguous(), key.contiguous(), value.contiguous()
 
     def _forward_varlen(self, qkv, fmha_params):
-        """Fallback path using flash_attn_varlen_func for models without KV cache.
+        """Fallhk path using flash_attn_varlen_func for models without KV cache.
 
         Handles raw QKV tensor (from qkv_proj) by splitting and reshaping, then
         dispatches to aiter.flash_attn_varlen_func.
@@ -787,6 +787,71 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
 class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
     """Aiter decode attention operation using non-ASM paged attention."""
 
+    def _forward_fp8_mha_batch_prefill(
+        self, query: torch.Tensor, kv_cache, fmha_params
+    ) -> torch.Tensor:
+        """FP8 KV cache decode via mha_batch_prefill_func.
+
+        paged_attention_rocm/atrex do not support the vectorized FP8 KV layout,
+        so we use mha_batch_prefill_func which handles it correctly.
+        """
+        num_seqs = query.shape[0]
+        gpu_device = query.device
+
+        # Reshape KV cache to vectorized 5D layout expected by mha_batch_prefill_func.
+        key_cache = kv_cache.kv_cache_base.select(1, 0)
+        value_cache = kv_cache.kv_cache_base.select(1, 1)
+        block_num = key_cache.shape[0]
+        hk = self.head_num_kv
+        ps = key_cache.shape[2]
+        hd = self.head_dim
+        vs = 16 // key_cache.element_size()
+        key_cache = key_cache.view(block_num, hk, hd // vs, ps, vs)
+        value_cache = value_cache.view(block_num, hk, ps // vs, hd, vs)
+
+        # Build cu_seqlens_q: each decode request has exactly 1 query token.
+        cu_seqlens_q = torch.arange(
+            0, num_seqs + 1, dtype=torch.int32, device=gpu_device
+        )
+
+        seq_lens = fmha_params.seq_lens
+        seqlen_k = seq_lens.to(torch.int32)
+        max_seqlen_k = fmha_params.max_seq_len
+
+        block_table = fmha_params.kv_cache_block_id_device
+        if block_table.dtype != torch.int32 or block_table.device != gpu_device:
+            block_table = block_table.to(dtype=torch.int32, device=gpu_device)
+
+        if not hasattr(self, '_kv_indptr_fp8') or self._kv_indptr_fp8.shape[0] != num_seqs + 1:
+            self._kv_indptr_fp8 = torch.zeros(num_seqs + 1, dtype=torch.int32, device=gpu_device)
+            self._kv_page_indices_fp8 = torch.empty(0, dtype=torch.int32, device=gpu_device)
+        if not hasattr(self, '_fp8_descale'):
+            self._fp8_descale = torch.ones(1, dtype=torch.float32, device=gpu_device)
+
+        q_tensor = query.view(num_seqs, self.head_num, self.head_dim)
+        # Convert BF16 query to FP8 if needed (mha_batch_prefill requires Q/K same dtype).
+        if q_tensor.dtype not in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
+            q_tensor = q_tensor.to(torch.float8_e4m3fnuz)
+        softmax_scale = 1.0 / (self.head_dim ** 0.5)
+
+        res = aiter.mha_batch_prefill_func(
+            q_tensor,
+            key_cache,
+            value_cache,
+            cu_seqlens_q,
+            self._kv_indptr_fp8,
+            self._kv_page_indices_fp8,
+            1,  # max_seqlen_q = 1 for decode
+            max_seqlen_k,
+            causal=True,
+            block_table=block_table,
+            seqlen_k=seqlen_k,
+            q_descale=self._fp8_descale,
+            k_descale=self._fp8_descale,
+            v_descale=self._fp8_descale,
+        )
+        return res.reshape(num_seqs, self.head_num * self.head_dim)
+
     def forward(
         self, query: torch.Tensor, kv_cache: Optional[LayerKVCache], fmha_params
     ) -> torch.Tensor:
@@ -805,6 +870,11 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
             V_QScale = kv_cache.kv_scale_base.select(1, 1)
             using_fp8_kvcache = True
 
+        # FP8 KV cache: use mha_batch_prefill_func which correctly handles
+        # the vectorized FP8 layout. paged_attention_rocm/atrex do not support it.
+        if using_fp8_kvcache:
+            return self._forward_fp8_mha_batch_prefill(query, kv_cache, fmha_params)
+
         block_tables_id_device = fmha_params.kv_cache_block_id_device
 
         max_seq_len = fmha_params.max_seq_len
@@ -814,7 +884,8 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         num_seqs, num_heads, head_size = query.shape
         block_size = value_cache.shape[2]
         output = self._get_output(query).view((num_seqs, num_heads, head_size))
-        if max_seq_len <= 16384 and (not using_fp8_kvcache):
+
+        if max_seq_len <= 16384:
             _PARTITION_SIZE_ROCM = 512
             max_num_partitions = (
                 max_seq_len + _PARTITION_SIZE_ROCM - 1

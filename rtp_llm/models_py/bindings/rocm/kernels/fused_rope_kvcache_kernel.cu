@@ -278,8 +278,11 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
                     (pre_len + seq_idx) * size_per_head * head_num + head_idx * size_per_head + tidx * vec_size;
             }
             *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
+            // Paged FP8: write quantized Q into QuantizedQKV (the FP8 Q buffer).
+            // Non-paged FP8: write quantized Q into q_buf (in-place over BF16 data).
+            // Must match ASM kernel convention.
             QuantizedVecType* quantized_q_ptr =
-                USE_PAGED_FMHA ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx) :
+                USE_PAGED_FMHA ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, dest_q_idx) :
                                  reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
             convert_to_fp8(quantized_q_ptr, q);
         }
@@ -293,6 +296,16 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
             dest_q_idx = (pre_len + seq_idx) * size_per_head * head_num + head_idx * size_per_head + tidx * vec_size;
         }
         *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
+        // FP8 Q output: when QuantizedQKV is provided, write FP8 Q into
+        // QuantizedQKV (paged) or q_buf (non-paged), matching ASM kernel convention.
+        if (QuantizedQKV != nullptr) {
+            using QuantizedEltType = __hip_fp8_e4m3_fnuz;
+            using QuantizedVecType = __hip_fp8x2_e4m3_fnuz;
+            QuantizedVecType* quantized_q_ptr =
+                USE_PAGED_FMHA ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, dest_q_idx) :
+                                 reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx);
+            convert_to_fp8(quantized_q_ptr, q);
+        }
     }
 
     if (store_kv) {
@@ -1014,11 +1027,13 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
     if (store_q) {
         size_t dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
                             + seq_idx * size_per_head + tidx * vec_size;
+        // Always write BF16 Q into q_buf.
+        *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
+        // When FP8 Q buffer is provided, also write FP8 Q into QuantizedQKV.
         if (QuantizedQKV != nullptr) {
-            QuantizedVecType* quantized_q_ptr = reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx);
+            QuantizedVecType* quantized_q_ptr =
+                reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, dest_q_idx);
             convert_to_fp8(quantized_q_ptr, q);
-        } else {
-            *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
         }
     }
     if (store_cache) {

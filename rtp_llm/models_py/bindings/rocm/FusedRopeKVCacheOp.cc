@@ -367,9 +367,7 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
             qkv.data_ptr(),
             nullptr,
             /*params.common.position_ids*/ nullptr,
-            /*qkv_bias*/ nullptr,  //                params.configs.fuse_qkv_add_bias &&
-                                   //                params.weights.qkv_weight->bias?
-                                   //                params.weights.qkv_weight->bias->data(): nullptr,???
+            /*qkv_bias*/ nullptr,
             params->padding_offset.data_ptr<int>(),
             params->cu_seqlens.data_ptr<int>(),
             params->sequence_lengths.data_ptr<int>(),
@@ -402,9 +400,7 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
             qkv.data_ptr(),
             nullptr,
             /*params.common.position_ids*/ nullptr,
-            /*qkv_bias*/ nullptr,  //                params.configs.fuse_qkv_add_bias &&
-                                   //                params.weights.qkv_weight->bias?
-                                   //                params.weights.qkv_weight->bias->data(): nullptr,???
+            /*qkv_bias*/ nullptr,
             params->padding_offset.data_ptr<int>(),
             params->cu_seqlens.data_ptr<int>(),
             params->sequence_lengths.data_ptr<int>(),
