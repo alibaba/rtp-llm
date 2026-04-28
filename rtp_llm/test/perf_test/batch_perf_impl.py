@@ -25,17 +25,18 @@ def _curl_server_single_worker(
     generate_config: Optional[Dict[str, Any]] = None,
     profile_trace_name: str = "",
 ) -> ResponseInfo:
-    req = {
+    gen_config: Dict[str, Any] = {
+        "max_new_tokens": decode_test_length if is_decode else 1,
+        "min_new_tokens": decode_test_length if is_decode else 1,
+        "force_sp_accept": True,
+    }
+    req: Dict[str, Any] = {
         "prompt": input_query,
-        "generate_config": {
-            "max_new_tokens": decode_test_length if is_decode else 1,
-            "min_new_tokens": decode_test_length if is_decode else 1,
-            "force_sp_accept": True,
-        },
+        "generate_config": gen_config,
     }
 
     if generate_config is not None:
-        req["generate_config"].update(generate_config)
+        gen_config.update(generate_config)
         if "top_k" in generate_config:
             req["top_k"] = generate_config["top_k"]
         if "top_p" in generate_config:
@@ -135,11 +136,29 @@ class BatchPerfImpl(object):
         self.generate_config = generate_config or {}
         self.profile_trace_name = profile_trace_name
 
-    # 3 runs: warmup (JIT compile), measure timing, profile (optional, torch profiler affects accuracy)
-    def run(self):
+    # warmup → N× measure (trim min/max, average) → profile
+    def run(self, num_measures: int = 3):
         self._set_concurrency()
-        _ = self._curl_server()
-        results = self._curl_server()
+        _ = self._curl_server()  # warmup
+
+        measurements = [self._curl_server() for _ in range(num_measures)]
+        key = "avg_decode_time" if self.is_decode else "avg_prefill_time"
+        measurements.sort(key=lambda m: getattr(m, key))
+        values = [f"{getattr(m, key):.2f}" for m in measurements]
+
+        if num_measures >= 3:
+            # Trim min and max, average the rest
+            trimmed = measurements[1:-1]
+            avg_val = sum(getattr(m, key) for m in trimmed) / len(trimmed)
+            logging.debug(
+                f"{num_measures} runs {key}: {values}, "
+                f"trimmed [{values[0]}, {values[-1]}], avg={avg_val:.2f}"
+            )
+            results = trimmed[len(trimmed) // 2]  # use median of trimmed as base
+            setattr(results, key, avg_val)  # override with trimmed average
+        else:
+            results = measurements[0]
+
         if self.profile:
             _ = self._curl_server(True)
         return results

@@ -17,9 +17,13 @@ py_library(
         "distribution_runner.py",
         "grid_runner.py",
         "hub_download.py",
+        "perf_config.py",
+        "perf_utils.py",
+        "tps_runner.py",
         "sampling.py",
         "server.py",
         "test_util.py",
+        "visualization.py",
     ],
     deps = [
         "//rtp_llm:testlib",
@@ -29,6 +33,15 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+py_test(
+    name = "test_perf_config_and_runners",
+    srcs = ["test_perf_config_and_runners.py"],
+    deps = [
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+)
+
+# Distribution mode: sampling from dataset using model's parameters.
 py_test(
         name = "distribution_perf_test",
         main = "batch_decode_test.py",
@@ -54,8 +67,7 @@ py_test(
         tags = ["manual"],
     )
 
-# Grid mode:固定 batch_size × input_len 扫面，不传 dataset / test_json。
-# 需显式 --model_type；远端 checkpoint 由 batch_decode_test 在启动引擎前解析为本地路径。
+# Grid mode: perf test with fixed batch_size × input_len.
 py_test(
     name = "grid_perf_test",
     main = "batch_decode_test.py",

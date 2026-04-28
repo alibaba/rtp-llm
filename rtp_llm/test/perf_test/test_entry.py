@@ -171,6 +171,93 @@ def _format_comparison_table(
     return "\n".join(lines)
 
 
+def _collect_tps_results(result_dir: str) -> Dict[str, float]:
+    """Extract key -> tps mapping from TPS result JSONs.
+
+    Grid mode:         key = "seq{input_len}"
+    Distribution mode: key = "distribution"
+
+    Entries with best_bs==0 are kept as tps=0 so regressions are still detected.
+    """
+    tps_map: Dict[str, float] = {}
+    if not os.path.isdir(result_dir):
+        return tps_map
+    for fname in sorted(os.listdir(result_dir)):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(result_dir, fname)) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            continue
+        if data.get("mode") != "tps":
+            continue
+        for r in data.get("results", []):
+            key = f"seq{r['input_len']}" if r.get("input_len", 0) > 0 else "distribution"
+            tps_map[key] = r.get("tps", 0.0)
+    return tps_map
+
+
+def _format_tps_comparison_table(
+    baseline_tps: Dict[str, float],
+    current_tps: Dict[str, float],
+) -> str:
+    """TPS comparison table. Higher TPS is better, so regression = current < baseline * (1 - threshold)."""
+    header = f"{'key':>20} {'baseline(tps)':>14} {'current(tps)':>14} {'delta':>10} {'status':>8}"
+    sep = "-" * len(header)
+    lines = [sep, header, sep]
+    for key in sorted(baseline_tps, key=_sort_key):
+        baseline_val = baseline_tps[key]
+        if key not in current_tps:
+            lines.append(f"{key:>20} {baseline_val:>14.2f} {'N/A':>14} {'N/A':>10} {'SKIP':>8}")
+            continue
+        current_val = current_tps[key]
+        if baseline_val > 0:
+            delta_pct = (current_val / baseline_val - 1) * 100
+        else:
+            delta_pct = 0.0
+        threshold = baseline_val * (1 - REGRESSION_THRESHOLD)
+        status = "FAIL" if current_val < threshold else "OK"
+        lines.append(
+            f"{key:>20} {baseline_val:>14.2f} {current_val:>14.2f} {delta_pct:>+9.1f}% {status:>8}"
+        )
+    lines.append(sep)
+    return "\n".join(lines)
+
+
+def validate_tps_against_baseline(result_dir: str, baseline: Dict[str, Any]) -> bool:
+    """Validate TPS results against baseline. current_tps < baseline_tps * (1 - threshold) -> FAIL."""
+    baseline_tps = baseline.get("tps", {})
+    if not baseline_tps:
+        logging.info("Baseline has no tps data, skip TPS validation")
+        return True
+
+    current_tps = _collect_tps_results(result_dir)
+    if not current_tps:
+        logging.error("No TPS results found but baseline expects TPS data — FAIL")
+        return False
+
+    table = _format_tps_comparison_table(baseline_tps, current_tps)
+    print(f"\n=== TPS Baseline Comparison (threshold: {REGRESSION_THRESHOLD * 100:.0f}%) ===")
+    print(table)
+
+    passed = True
+    for key, baseline_val in baseline_tps.items():
+        if key not in current_tps:
+            continue
+        current_val = current_tps[key]
+        threshold = baseline_val * (1 - REGRESSION_THRESHOLD)
+        if current_val < threshold:
+            passed = False
+
+    if passed:
+        print("Result: ALL PASSED")
+    else:
+        print("Result: TPS REGRESSION DETECTED")
+    print()
+    return passed
+
+
 def validate_against_baseline(result_dir: str, baseline_path: Optional[str]) -> bool:
     if not baseline_path:
         return True
@@ -178,6 +265,10 @@ def validate_against_baseline(result_dir: str, baseline_path: Optional[str]) -> 
     baseline = _load_baseline(baseline_path)
     if not baseline:
         return True
+
+    # Route to TPS validator if baseline contains a "tps" section.
+    if baseline.get("tps"):
+        return validate_tps_against_baseline(result_dir, baseline)
 
     baseline_times = baseline.get("decode_times", {})
     if not baseline_times:
@@ -221,24 +312,24 @@ OSS_PREFIX = "perf_test"
 
 def _oss_env() -> Dict[str, str]:
     return {
-        "id": os.environ.get("OSS_ACCESS_KEY_ID", ""),
-        "key": os.environ.get("OSS_ACCESS_KEY_SECRET", ""),
-        "host": os.environ["OSS_ENDPOINT"],
+        "id": os.environ.get("MAGA_OSS_KEY_ID", ""),
+        "key": os.environ.get("MAGA_OSS_KEY_SECRET", ""),
+        "host": os.environ.get("OSS_ENDPOINT", "oss-cn-zhangjiakou.aliyuncs.com"),
     }
 
 
-def _ossutil_cmd(local: str, remote: str) -> List[str]:
+def _osscmd(local: str, remote: str) -> List[str]:
     cred = _oss_env()
     if not cred["id"] or not cred["key"]:
         raise EnvironmentError(
-            "OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET not set, cannot upload to OSS"
+            "MAGA_OSS_KEY_ID / MAGA_OSS_KEY_SECRET not set, cannot upload to OSS"
         )
     return [
-        "ossutil", "cp", local, remote,
+        "osscmd", "put", local, remote,
+        "-H", cred["host"],
         "-i", cred["id"],
         "-k", cred["key"],
-        "-e", cred["host"],
-        "-f",
+        "--replace=true",
     ]
 
 
@@ -263,11 +354,15 @@ def upload_results_to_oss(result_dir: str) -> str:
     logging.info(f"Packed results to {tar_local} ({os.path.getsize(tar_local)} bytes)")
 
     oss_path = f"{OSS_BUCKET}/{OSS_PREFIX}/{date_str}/{test_name}/{tar_name}"
-    cmd = _ossutil_cmd(tar_local, oss_path)
+    cmd = _osscmd(tar_local, oss_path)
     logging.info(f"Uploading to {oss_path}")
-    ret = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    try:
+        ret = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except FileNotFoundError:
+        logging.warning("osscmd binary not found in PATH, skip OSS upload")
+        return ""
     if ret.returncode != 0:
-        logging.error(f"ossutil upload failed: {ret.stderr}")
+        logging.error(f"osscmd upload failed: {ret.stderr}")
         return ""
     logging.info(f"OSS upload success: {oss_path}")
 
@@ -286,13 +381,17 @@ ODPS_TABLE = "batch_decode_test_result"
 
 
 def _get_odps_client():
-    ak_id = os.environ.get("ODPS_ACCESS_ID", "")
-    ak_secret = os.environ.get("ODPS_ACCESS_KEY", "")
-    project = os.environ.get("ODPS_PROJECT", "")
-    endpoint = os.environ.get("ODPS_ENDPOINT", "")
-    if not ak_id or not ak_secret or not project or not endpoint:
+    ak_id = os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID", "")
+    ak_secret = os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET", "")
+    project = os.environ.get("ODPS_PROJECT", "rank_service_dev")
+    endpoint = os.environ.get("ODPS_ENDPOINT", "http://service-corp.odps.aliyun-inc.com/api")
+    if not ak_id or not ak_secret:
         return None
-    from odps import ODPS
+    try:
+        from odps import ODPS
+    except ImportError:
+        logging.warning("pyodps not installed, skip ODPS write")
+        return None
     return ODPS(ak_id, ak_secret, project, endpoint=endpoint)
 
 
