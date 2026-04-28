@@ -47,7 +47,26 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # Check quantization method - handle all other FP8 methods
         quant_method = quant_config.get_method()
-        return quant_method == "FP8_PER_BLOCK"
+        if quant_method != "FP8_PER_BLOCK":
+            return False
+        # Defer to flashinfer's swapAB-aware SM90 kernel when enabled.
+        try:
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear import (
+                CudaFp8FlashinferLinear,
+            )
+
+            if CudaFp8FlashinferLinear.can_handle(
+                quant_config,
+                weight,
+                weight_scales,
+                hw_kernel_config,
+                weight_scale_2,
+                input_scale,
+            ):
+                return False
+        except Exception:
+            pass
+        return True
 
     @torch.inference_mode()
     def __init__(
