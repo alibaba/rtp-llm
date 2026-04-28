@@ -181,8 +181,9 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
         config.cache_specs.push_back(spec);
         config.global_layer_ids.push_back(*group_layers[i]);
         config.layer_ids.push_back(*group_layers[i]);
-        // All 7 groups participate in reuse cache
-        config.group_types.push_back(CacheGroupType::FULL);
+        // Paged pools (0/1/2): FULL — left-to-right prefix cache matching
+        // Fixed pools (3/4/5/6): LINEAR — right-to-left matching of last block
+        config.group_types.push_back(pool.is_paged ? CacheGroupType::FULL : CacheGroupType::LINEAR);
         max_block_stride = std::max(max_block_stride, spec->block_size_bytes());
     }
 
@@ -208,8 +209,9 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
         max_group_layers = std::max(max_group_layers, dsv4_config.pool_specs[i].layer_num);
     }
     config.group_layer_num             = static_cast<int>(max_group_layers);
-    config.full_group_num              = DSV4_NUM_POOLS;
-    config.linear_group_num            = 0;
+    config.full_group_num              = 3;     // Pool 0/1/2 (CSA_KV, HCA_KV, INDEXER_KV)
+    config.linear_group_num            = 4;     // Pool 3/4/5/6 (INDEXER_STATE, CSA_STATE, HCA_STATE, SWA_KV)
+    config.linear_fixed_cap            = 2;     // Each LINEAR group is a ring buffer of 2 blocks per request
     config.use_independent_block_pools = true;  // DSV4: each group gets its own BlockPool
 
     // Per-group block counts: fixed pools (3/4/5/6) only need
