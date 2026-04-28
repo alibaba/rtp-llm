@@ -111,7 +111,7 @@ try:
     from libth_transformer_config import (
         ArpcConfig,
         AttentionConfigs,
-        BailianGrpcConfig,
+        DashScGrpcConfig,
         GrpcConfig,
         BatchDecodeSchedulerConfig,
         CacheStoreConfig,

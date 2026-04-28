@@ -1,4 +1,4 @@
-"""Tests for Bailian gRPC response build, real infer stream, and servicer."""
+"""Tests for DashSc gRPC response build, real infer stream, and servicer."""
 
 from __future__ import annotations
 
@@ -8,17 +8,17 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from rtp_llm.bailian import bailian_grpc_server as bgs
-from rtp_llm.bailian import bailian_grpc_service as bg_svc
-from rtp_llm.bailian.bailian_grpc_real_infer import (
+from rtp_llm.dash_sc import dash_sc_grpc_server as bgs
+from rtp_llm.dash_sc import dash_sc_grpc_service as bg_svc
+from rtp_llm.dash_sc.dash_sc_grpc_real_infer import (
     iter_real_model_stream_infer,
     stream_log_tag,
 )
-from rtp_llm.bailian.bailian_grpc_request import OtherParams, SamplingParams
-from rtp_llm.bailian.bailian_grpc_response_real import (
+from rtp_llm.dash_sc.dash_sc_grpc_request import OtherParams, SamplingParams
+from rtp_llm.dash_sc.dash_sc_grpc_response_real import (
     build_stream_response_from_generate_outputs,
 )
-from rtp_llm.bailian.proto import predict_v2_pb2
+from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
 
@@ -49,7 +49,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         go = GenerateOutputs(generate_outputs=[])
         with self.assertRaises(ValueError) as ctx:
             build_stream_response_from_generate_outputs(
-                bailian_request_id="r1",
+                dash_sc_request_id="r1",
                 model_name="m",
                 go=go,
                 request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r1"),
@@ -64,7 +64,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         )
         go = GenerateOutputs(generate_outputs=[out])
         resp = build_stream_response_from_generate_outputs(
-            bailian_request_id="req-a",
+            dash_sc_request_id="req-a",
             model_name="mdl",
             go=go,
             request_log_tag=stream_log_tag(request_id_numeric=99, trace_id="req-a"),
@@ -92,7 +92,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         )
         go = GenerateOutputs(generate_outputs=[out])
         resp = build_stream_response_from_generate_outputs(
-            bailian_request_id="r",
+            dash_sc_request_id="r",
             model_name="m",
             go=go,
             request_log_tag=stream_log_tag(request_id_numeric=0, trace_id="r"),
@@ -113,7 +113,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         )
         go = GenerateOutputs(generate_outputs=[out])
         resp = build_stream_response_from_generate_outputs(
-            bailian_request_id="r",
+            dash_sc_request_id="r",
             model_name="m",
             go=go,
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
@@ -132,7 +132,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         )
         go = GenerateOutputs(generate_outputs=[out])
         resp = build_stream_response_from_generate_outputs(
-            bailian_request_id="r",
+            dash_sc_request_id="r",
             model_name="m",
             go=go,
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
@@ -163,7 +163,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         out = GenerateOutput(output_ids=None, finished=False, aux_info=AuxInfo())
         go = GenerateOutputs(generate_outputs=[out])
         resp = build_stream_response_from_generate_outputs(
-            bailian_request_id="r",
+            dash_sc_request_id="r",
             model_name="m",
             go=go,
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
@@ -268,7 +268,7 @@ class IterRealModelStreamInferTest(TestCase):
         self.assertIn("backend down", chunks[0].error_message)
 
 
-class BailianGrpcInferenceServicerTest(TestCase):
+class DashScGrpcInferenceServicerTest(TestCase):
     def _valid_infer_request(self) -> predict_v2_pb2.ModelInferRequest:
         req = predict_v2_pb2.ModelInferRequest()
         req.id = "srv-1"
@@ -277,7 +277,7 @@ class BailianGrpcInferenceServicerTest(TestCase):
         return req
 
     def test_fake_mode_returns_incremented_ids(self) -> None:
-        servicer = bgs.BailianGrpcInferenceServicer(backend_visitor=None)
+        servicer = bgs.DashScGrpcInferenceServicer(backend_visitor=None)
         req = self._valid_infer_request()
         responses = list(servicer.ModelStreamInfer(iter([req]), MagicMock()))
         self.assertEqual(len(responses), 1)
@@ -289,7 +289,7 @@ class BailianGrpcInferenceServicerTest(TestCase):
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [142])
 
     def test_missing_input_ids_error(self) -> None:
-        servicer = bgs.BailianGrpcInferenceServicer(backend_visitor=None)
+        servicer = bgs.DashScGrpcInferenceServicer(backend_visitor=None)
         bad = predict_v2_pb2.ModelInferRequest()
         bad.id = "x"
         bad.model_name = "m"
@@ -308,7 +308,7 @@ class BailianGrpcInferenceServicerTest(TestCase):
             [GenerateOutputs(generate_outputs=[out])]
         )
 
-        servicer = bgs.BailianGrpcInferenceServicer(backend_visitor=MagicMock())
+        servicer = bgs.DashScGrpcInferenceServicer(backend_visitor=MagicMock())
         req = self._valid_infer_request()
         responses = list(servicer.ModelStreamInfer(iter([req]), MagicMock()))
         self.assertEqual(len(responses), 1)
@@ -330,7 +330,7 @@ class BailianGrpcInferenceServicerTest(TestCase):
             captured.append(gi.request_id)
             return []
 
-        servicer = bg_svc.BailianGrpcInferenceServicer(
+        servicer = bg_svc.DashScGrpcInferenceServicer(
             backend_visitor=MagicMock(),
             ip="10.0.0.1",
             port=12345,

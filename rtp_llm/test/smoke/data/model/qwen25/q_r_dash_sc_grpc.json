@@ -4,7 +4,7 @@
     "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
     "query_result": [
         {
-            "endpoint": "/__bailian_grpc__",
+            "endpoint": "/__dash_sc_grpc__",
             "query": {
                 "prompt": "Write a detailed analogy between mathematics and a lighthouse.\n\nAnswer: ",
                 "generate_config": {

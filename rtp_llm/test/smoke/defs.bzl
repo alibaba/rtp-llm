@@ -152,7 +152,7 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
         imports = [".."] if has_entry else ["../../../../rtp_llm/test", ".."],
         deps = [
             "//rtp_llm/test/utils:maga_server_manager",
-            "//rtp_llm/bailian:bailian_grpc_server",
+            "//rtp_llm/dash_sc:dash_sc_grpc_server",
             "//rtp_llm:uvicorn",
             "//rtp_llm:fastapi",
             "//rtp_llm:psutil",

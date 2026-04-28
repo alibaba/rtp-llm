@@ -1,4 +1,4 @@
-"""Smoke comparer: Bailian gRPC ModelStreamInfer (wire: predict_v2.proto; frontend starts server by default)."""
+"""Smoke comparer: DashSc gRPC ModelStreamInfer (wire: predict_v2.proto; frontend starts server by default)."""
 
 from __future__ import annotations
 
@@ -14,19 +14,19 @@ from smoke.common_def import QueryStatus, SmokeException
 from smoke.normal_comparer import NormalComparer, QueryInfo
 from smoke.utils import no_compare, save_response
 
-from rtp_llm.bailian.bailian_grpc_client import (
+from rtp_llm.dash_sc.dash_sc_grpc_client import (
     _decode_finish_reason,
-    bailian_grpc_client_channel_options,
+    dash_sc_grpc_client_channel_options,
     build_model_infer_request,
 )
-from rtp_llm.bailian.bailian_grpc_request import OtherParams, SamplingParams
-from rtp_llm.bailian.proto import predict_v2_pb2_grpc
+from rtp_llm.dash_sc.dash_sc_grpc_request import OtherParams, SamplingParams
+from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import ServerConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 
 # Per-query endpoint in task JSON; must match case_runner._get_comparer_cls
-BAILIAN_GRPC_ENDPOINT = "/__bailian_grpc__"
+DASH_SC_GRPC_ENDPOINT = "/__dash_sc_grpc__"
 
 
 def _scalar_int(v: Any) -> int:
@@ -64,13 +64,13 @@ def _generate_config_to_sampling(gc: GenerateConfig) -> SamplingParams:
     )
 
 
-def _resolve_bailian_grpc_port(server_manager) -> int:
-    """Match ``FrontendApp`` / ``ServerConfig.bailian_grpc_server_port`` (smoke: rank_id=0, default ``worker_info_port_num``)."""
+def _resolve_dash_sc_grpc_port(server_manager) -> int:
+    """Match ``FrontendApp`` / ``ServerConfig.dash_sc_grpc_server_port`` (smoke: rank_id=0, default ``worker_info_port_num``)."""
     sc = ServerConfig()
     # ``START_PORT`` / ``MagaServerManager.port`` is ``server_config.start_port``; HTTP bind is ``server_port`` for rank 0.
     sc.start_port = int(server_manager.port)
     sc.rank_id = 0
-    return sc.bailian_grpc_server_port
+    return sc.dash_sc_grpc_server_port
 
 
 def _parse_infer_chunk(
@@ -102,8 +102,8 @@ def _parse_infer_chunk(
     return generated, finish, ptn, ptcn
 
 
-class BailianGrpcComparer(NormalComparer):
-    """Same golden format as NormalComparer; drives inference via Bailian gRPC (predict_v2.proto)."""
+class DashScGrpcComparer(NormalComparer):
+    """Same golden format as NormalComparer; drives inference via DashSc gRPC (predict_v2.proto)."""
 
     def run(self):
         query_info: BaseModel = self.format_query(self.qr_info["query"])
@@ -117,23 +117,23 @@ class BailianGrpcComparer(NormalComparer):
         if not ckpt or not model_type:
             raise SmokeException(
                 QueryStatus.VALID_FAILED,
-                "bailian_grpc: missing _smoke_task_model_path / _smoke_task_model_type",
+                "dash_sc_grpc: missing _smoke_task_model_path / _smoke_task_model_type",
             )
 
-        grpc_port = _resolve_bailian_grpc_port(self.server_manager)
+        grpc_port = _resolve_dash_sc_grpc_port(self.server_manager)
         grpc_addr = f"127.0.0.1:{grpc_port}"
-        logging.info("BailianGrpcComparer grpc_addr=%s", grpc_addr)
+        logging.info("DashScGrpcComparer grpc_addr=%s", grpc_addr)
 
         prompt = query_info.prompt
         if isinstance(prompt, list):
             raise SmokeException(
                 QueryStatus.VALID_FAILED,
-                "bailian_grpc: chat-style messages prompt not supported in smoke",
+                "dash_sc_grpc: chat-style messages prompt not supported in smoke",
             )
         if query_info.prompt_batch is not None:
             raise SmokeException(
                 QueryStatus.VALID_FAILED,
-                "bailian_grpc: prompt_batch not supported in smoke",
+                "dash_sc_grpc: prompt_batch not supported in smoke",
             )
 
         tokenizer = TokenizerFactory.create(ckpt, tok_path or ckpt, model_type)
@@ -147,7 +147,7 @@ class BailianGrpcComparer(NormalComparer):
         other = OtherParams(return_input_ids=bool(gc.return_input_ids))
 
         request = build_model_infer_request(
-            request_id="smoke_bailian_grpc_%s" % self.qr_info.get("_query_idx", 0),
+            request_id="smoke_dash_sc_grpc_%s" % self.qr_info.get("_query_idx", 0),
             model_name="default",
             input_ids=input_ids,
             sampling=sampling,
@@ -160,7 +160,7 @@ class BailianGrpcComparer(NormalComparer):
         error_message: Optional[str] = None
 
         channel = grpc.insecure_channel(
-            grpc_addr, options=bailian_grpc_client_channel_options()
+            grpc_addr, options=dash_sc_grpc_client_channel_options()
         )
         try:
             stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
@@ -188,7 +188,7 @@ class BailianGrpcComparer(NormalComparer):
         if error_message:
             raise SmokeException(
                 QueryStatus.VISIT_FAILED,
-                f"bailian_grpc error: {error_message}",
+                f"dash_sc_grpc error: {error_message}",
             )
 
         decoded = tokenizer.decode(accumulated) if accumulated else ""

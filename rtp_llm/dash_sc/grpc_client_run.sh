@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Bailian gRPC 客户端压测 / 单次调用（wire: predict_v2.proto）
+# DashSc gRPC 客户端压测 / 单次调用（wire: predict_v2.proto）
 #
-# 路径：rtp_llm/bailian/grpc_client_run.sh（与 BUILD 中 grpc_client_scripts 一致）
+# 路径：rtp_llm/dash_sc/grpc_client_run.sh（与 BUILD 中 grpc_client_scripts 一致）
 #
 # 必须用 bash 运行（不要用 sh：数组 / [[ ]] 会报错）。
 # 脚本会自动把仓库根加入 PYTHONPATH（含 rtp_llm 包）。
@@ -35,14 +35,14 @@ fi
 
 set -euo pipefail
 
-# 定位仓库根（含 rtp_llm/）：本文件在 rtp_llm/bailian/ 下
+# 定位仓库根（含 rtp_llm/）：本文件在 rtp_llm/dash_sc/ 下
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 if [[ -d "$_SCRIPT_DIR/rtp_llm" ]]; then
   _REPO_ROOT="$_SCRIPT_DIR"
 elif [[ -d "$(cd "$_SCRIPT_DIR/../.." && pwd)/rtp_llm" ]]; then
   _REPO_ROOT="$(cd "$_SCRIPT_DIR/../.." && pwd)"
 else
-  echo "error: 找不到 rtp_llm 包。请在仓库根或 rtp_llm/bailian 下运行本脚本。" >&2
+  echo "error: 找不到 rtp_llm 包。请在仓库根或 rtp_llm/dash_sc 下运行本脚本。" >&2
   exit 1
 fi
 export PYTHONPATH="$_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
@@ -73,12 +73,12 @@ run_once() {
   local idx="$1"
   # 单数组 + 条件 +=，避免 set -u 下空数组 "${seed_args[@]}" 报 unbound
   local -a cmd=(
-    "$PYTHON" -m rtp_llm.bailian.bailian_grpc_client
+    "$PYTHON" -m rtp_llm.dash_sc.dash_sc_grpc_client
     --grpc_addr "$GRPC_ADDR"
     --ckpt_path "$CKPT_PATH"
     --model_type "$MODEL_TYPE"
     --prompt "$PROMPT"
-    --request_id "bailian_grpc_client_${idx}_$$"
+    --request_id "dash_sc_grpc_client_${idx}_$$"
     --max_new_tokens "$MAX_NEW_TOKENS"
     --num_return_sequences "$NUM_RETURN_SEQUENCES"
     --top_p "$TOP_P"

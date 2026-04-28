@@ -3,8 +3,8 @@
 # rtp_llm/cpp/model_rpc/proto/create_grpc_proto.py: run once to produce pb files; no runtime generation.
 #
 # Usage (from repo root):
-#   python rtp_llm/bailian/proto/create_grpc_proto.py [output_dir]
-# Default output_dir = this directory (rtp_llm/bailian/proto); generate_proto_py passes that path.
+#   python rtp_llm/dash_sc/proto/create_grpc_proto.py [output_dir]
+# Default output_dir = this directory (rtp_llm/dash_sc/proto); generate_proto_py passes that path.
 import os
 import subprocess
 import sys
@@ -30,7 +30,7 @@ def main():
         proto_file = os.path.join(proto_dir, name)
         subprocess.run(cmd_base + [proto_file], check=True)
 
-    # Fix package-relative imports so "from rtp_llm.bailian.proto import ..." works.
+    # Fix package-relative imports so "from rtp_llm.dash_sc.proto import ..." works.
     # protoc generates "import model_config_pb2" but we need "from . import model_config_pb2".
     for fname in ("predict_v2_pb2.py", "predict_v2_pb2_grpc.py"):
         path = os.path.join(output_dir, fname)
