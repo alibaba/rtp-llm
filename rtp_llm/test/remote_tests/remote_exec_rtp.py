@@ -97,14 +97,18 @@ def _load_pyproject(rootdir: Path) -> dict:
         except Exception as exc:
             log.warning("Failed to load %s: %s", base_path, exc)
 
-    internal_path = rootdir / "internal_source" / "pyproject.toml"
-    if internal_path.exists():
-        try:
-            with open(internal_path, "rb") as f:
-                internal = tomllib.load(f)
-            _deep_merge(base, internal)
-        except Exception as exc:
-            log.warning("Failed to load %s: %s", internal_path, exc)
+    # internal_source overlay: prefer pyproject_internal.toml (current naming),
+    # fall back to pyproject.toml for backwards compatibility with older trees.
+    for fname in ("pyproject_internal.toml", "pyproject.toml"):
+        internal_path = rootdir / "internal_source" / fname
+        if internal_path.exists():
+            try:
+                with open(internal_path, "rb") as f:
+                    internal = tomllib.load(f)
+                _deep_merge(base, internal)
+            except Exception as exc:
+                log.warning("Failed to load %s: %s", internal_path, exc)
+            break
 
     return base
 
