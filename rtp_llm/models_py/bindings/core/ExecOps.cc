@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
@@ -160,17 +161,16 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const size_t group_num = param.kv_cache_group_types_host.defined() ? param.kv_cache_group_types_host.size(0) : 1;
     const bool   is_hybrid = group_num > 1;
 
-    int gid = 0;
+    int  gid             = 0;
     auto mapped_group_id = [&param, group_num]() -> int {
-        if (param.kv_cache_layer_attn_to_group_host.defined() && param.kv_cache_layer_attn_to_group_host.dim() == 2
+        if (param.kv_cache_layer_region_to_group_host.defined() && param.kv_cache_layer_region_to_group_host.dim() == 2
             && param.layer_id >= 0
-            && static_cast<int64_t>(param.layer_id) < param.kv_cache_layer_attn_to_group_host.size(0)) {
-            const auto attn = static_cast<int64_t>(param.attn_type);
-            if (attn >= 0 && attn < param.kv_cache_layer_attn_to_group_host.size(1)) {
+            && static_cast<int64_t>(param.layer_id) < param.kv_cache_layer_region_to_group_host.size(0)) {
+            const auto attn = static_cast<int64_t>(param.region_name);
+            if (attn >= 0 && attn < param.kv_cache_layer_region_to_group_host.size(1)) {
                 const int candidate =
-                    param.kv_cache_layer_attn_to_group_host.data_ptr<int32_t>()[param.layer_id
-                                                                                * param.kv_cache_layer_attn_to_group_host.size(1)
-                                                                                + attn];
+                    param.kv_cache_layer_region_to_group_host
+                        .data_ptr<int32_t>()[param.layer_id * param.kv_cache_layer_region_to_group_host.size(1) + attn];
                 if (candidate >= 0) {
                     return candidate;
                 }
@@ -240,12 +240,19 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                                     index,
                                     max_blocks_per_batch);
             auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
+            if (isNullBlockIdx(block_id)) {
+                RTP_LLM_LOG_DEBUG("skip null kv cache block, request id [%ld], layer id [%d], region [%d], index [%d]",
+                                  request_id,
+                                  param.layer_id,
+                                  static_cast<int>(param.region_name),
+                                  index);
+                return;
+            }
             std::string cache_key;
-            cache_key =
-                makeCacheKey(param.model_id,
-                             param.cache_keys[batch_id * max_blocks_per_batch + index],
-                             param.layer_id,
-                             param.attn_type);
+            cache_key = makeCacheKey(param.model_id,
+                                     param.cache_keys[batch_id * max_blocks_per_batch + index],
+                                     param.layer_id,
+                                     param.region_name);
 
             void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
             std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
@@ -301,7 +308,13 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                     ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str());
             }
         };
-        cache_store->store(request_blocks, storeCallback);
+        if (request_blocks->getBlocksCount() > 0) {
+            cache_store->store(request_blocks, storeCallback);
+        } else {
+            RTP_LLM_LOG_DEBUG("skip cache store because all selected blocks are null, request id [%ld], layer id [%d]",
+                              request_id,
+                              param.layer_id);
+        }
     }
 }
 

@@ -15,11 +15,11 @@ inline std::string makeCacheKey(size_t model_id, const std::string& token_id_str
 }
 
 inline std::string
-makeCacheKey(size_t model_id, const std::string& token_id_str, size_t layer_id, KVCacheAttnType attn_type) {
-    if (attn_type == KVCacheAttnType::DEFAULT) {
+makeCacheKey(size_t model_id, const std::string& token_id_str, size_t layer_id, KVCacheRegionName region_name) {
+    if (region_name == KVCacheRegionName::DEFAULT) {
         return makeCacheKey(model_id, token_id_str, layer_id);
     }
-    return makeCacheKey(model_id, token_id_str, layer_id) + "_attn_type_" + std::to_string(static_cast<int>(attn_type));
+    return makeCacheKey(model_id, token_id_str, layer_id) + "_region_" + std::to_string(static_cast<int>(region_name));
 }
 
 }  // namespace rtp_llm

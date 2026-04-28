@@ -1,7 +1,10 @@
 #include "gtest/gtest.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
+#include "rtp_llm/cpp/utils/KVCacheUtils.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "autil/NetUtil.h"
 #include "autil/EnvUtil.h"
 #include <cuda_runtime.h>
@@ -73,6 +76,72 @@ void NormalCacheStoreTest::verifyBlock(
 
     device_util_->freeCPU(buf);
 }
+
+namespace {
+
+CacheStoreInputs makePdHybridInputs(
+    int64_t request_id, int layer_id, KVCacheRegionName region_name, size_t max_blocks, size_t kv_stride_bytes) {
+    CacheStoreInputs inputs;
+    inputs.input_lengths_host   = torch::tensor({static_cast<int>(max_blocks)}, torch::kInt32);
+    inputs.prefix_lengths_host  = torch::tensor({0}, torch::kInt32);
+    inputs.host_kv_cache_offset = torch::empty({2, 1, static_cast<int64_t>(max_blocks)}, torch::kInt32);
+    auto* offset_data           = inputs.host_kv_cache_offset.data_ptr<int32_t>();
+    offset_data[0]              = 0;
+    offset_data[1]              = 1;
+    offset_data[2]              = 2;
+    offset_data[3]              = 3;
+    offset_data[4]              = 4;
+    offset_data[5]              = 5;
+    offset_data[6]              = NULL_BLOCK_IDX;
+    offset_data[7]              = 7;
+
+    inputs.kv_cache_layer_to_group_host = torch::zeros({layer_id + 1}, torch::kInt32);
+    inputs.kv_cache_layer_region_to_group_host =
+        torch::full({layer_id + 1, static_cast<int64_t>(KVCacheRegionName::REGION_COUNT)}, -1, torch::kInt32);
+    inputs.kv_cache_layer_region_to_group_host.index_put_({layer_id, static_cast<int64_t>(KVCacheRegionName::CSA_KV)},
+                                                          0);
+    inputs.kv_cache_layer_region_to_group_host.index_put_({layer_id, static_cast<int64_t>(KVCacheRegionName::SWA_KV)},
+                                                          1);
+    inputs.kv_cache_group_types_host = torch::tensor(
+        {static_cast<int32_t>(CacheGroupType::FULL), static_cast<int32_t>(CacheGroupType::LINEAR)}, torch::kInt32);
+
+    inputs.context_batch_size    = 1;
+    inputs.decoder_batch_size    = 0;
+    inputs.request_id            = torch::tensor({request_id}, torch::kInt64);
+    inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
+    inputs.cache_keys            = {"0", "1", "2", "3"};
+    inputs.tokens_per_block      = 1;
+    inputs.kv_block_stride_bytes = kv_stride_bytes;
+    inputs.kv_scale_stride_bytes = 0;
+    inputs.pd_separation         = true;
+    inputs.model_id              = 99;
+    inputs.decode_entrance       = false;
+    inputs.warmup                = false;
+    inputs.layer_id              = layer_id;
+    inputs.region_name           = region_name;
+    return inputs;
+}
+
+std::string kvKey(size_t model_id, const std::string& token, int layer_id, KVCacheRegionName region_name) {
+    return "kv_" + makeCacheKey(model_id, token, layer_id, region_name);
+}
+
+std::shared_ptr<RequestBlockBuffer> makeDecodeLoadCache(const std::string&                               request_id,
+                                                        int                                              layer_id,
+                                                        KVCacheRegionName                                region_name,
+                                                        const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
+    auto request_key = request_id + "-" + std::to_string(layer_id);
+    if (region_name != KVCacheRegionName::DEFAULT) {
+        request_key += "-" + std::to_string(static_cast<int>(region_name));
+    }
+    auto load_cache = std::make_shared<RequestBlockBuffer>(request_id, request_key);
+    for (const auto& block : blocks) {
+        load_cache->addBlock(block);
+    }
+    return load_cache;
+}
+
+}  // namespace
 
 TEST_F(NormalCacheStoreTest, testStore_Success) {
     ASSERT_TRUE(initCacheStores());
@@ -655,6 +724,71 @@ TEST_F(NormalCacheStoreTest, testLoadContext_Success) {
     verifyBlock(load_cache2->getBlock("abc"), "abc", block_size, true, '2');
 
     set_block_thread.join();
+}
+
+TEST_F(NormalCacheStoreTest, testPdTcpWriteCacheStoreToDecodeLoad_MultiRegion) {
+    ASSERT_TRUE(initCacheStores());
+
+    constexpr int64_t request_id      = 777;
+    constexpr int     layer_id        = 3;
+    constexpr size_t  max_blocks      = 4;
+    constexpr size_t  kv_stride_bytes = 16;
+    const auto        request_id_str  = std::to_string(request_id);
+
+    KvCacheInfo kv_cache;
+    kv_cache.kv_cache_buffer = torch::empty({static_cast<int64_t>(8 * kv_stride_bytes)},
+                                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+
+    auto* kv_base = static_cast<int8_t*>(kv_cache.kv_cache_buffer.data_ptr());
+    for (int block_id = 0; block_id < 8; ++block_id) {
+        ASSERT_EQ(cudaSuccess, cudaMemset(kv_base + block_id * kv_stride_bytes, 'A' + block_id, kv_stride_bytes));
+    }
+    runtimeSyncAndCheck();
+
+    auto full_inputs = makePdHybridInputs(request_id, layer_id, KVCacheRegionName::CSA_KV, max_blocks, kv_stride_bytes);
+    full_inputs.pre_created_event = runtimeCreateEvent();
+    auto linear_inputs =
+        makePdHybridInputs(request_id, layer_id, KVCacheRegionName::SWA_KV, max_blocks, kv_stride_bytes);
+    linear_inputs.pre_created_event = runtimeCreateEvent();
+
+    runtimeWriteCacheStore(full_inputs, kv_cache, /*mla_kvcache=*/false, cache_store1_);
+    runtimeWriteCacheStore(linear_inputs, kv_cache, /*mla_kvcache=*/false, cache_store1_);
+
+    const auto full_key0       = kvKey(full_inputs.model_id, "0", layer_id, KVCacheRegionName::CSA_KV);
+    const auto full_key1       = kvKey(full_inputs.model_id, "1", layer_id, KVCacheRegionName::CSA_KV);
+    const auto full_key2       = kvKey(full_inputs.model_id, "2", layer_id, KVCacheRegionName::CSA_KV);
+    const auto full_key3       = kvKey(full_inputs.model_id, "3", layer_id, KVCacheRegionName::CSA_KV);
+    const auto linear_skip_key = kvKey(linear_inputs.model_id, "2", layer_id, KVCacheRegionName::SWA_KV);
+    const auto linear_key3     = kvKey(linear_inputs.model_id, "3", layer_id, KVCacheRegionName::SWA_KV);
+
+    auto full_load_cache =
+        makeDecodeLoadCache(request_id_str,
+                            layer_id,
+                            KVCacheRegionName::CSA_KV,
+                            {block_buffer_util_->makeBlockBuffer(full_key0, kv_stride_bytes, '?', true),
+                             block_buffer_util_->makeBlockBuffer(full_key1, kv_stride_bytes, '?', true),
+                             block_buffer_util_->makeBlockBuffer(full_key2, kv_stride_bytes, '?', true),
+                             block_buffer_util_->makeBlockBuffer(full_key3, kv_stride_bytes, '?', true)});
+    auto linear_load_cache =
+        makeDecodeLoadCache(request_id_str,
+                            layer_id,
+                            KVCacheRegionName::SWA_KV,
+                            {block_buffer_util_->makeBlockBuffer(linear_key3, kv_stride_bytes, '?', true)});
+
+    std::vector<std::shared_ptr<RequestBlockBuffer>> load_caches{full_load_cache, linear_load_cache};
+    auto                                             load_context = cache_store2_->loadBuffers(
+        load_caches, autil::NetUtil::getBindIp(), port1_, 0, 5000, []() { return false; }, 1, 0);
+    ASSERT_TRUE(load_context != nullptr);
+    load_context->waitDone();
+    ASSERT_TRUE(load_context->success()) << load_context->getErrorInfoString();
+
+    verifyBlock(full_load_cache->getBlock(full_key0), full_key0, kv_stride_bytes, true, 'A' + 0);
+    verifyBlock(full_load_cache->getBlock(full_key1), full_key1, kv_stride_bytes, true, 'A' + 1);
+    verifyBlock(full_load_cache->getBlock(full_key2), full_key2, kv_stride_bytes, true, 'A' + 2);
+    verifyBlock(full_load_cache->getBlock(full_key3), full_key3, kv_stride_bytes, true, 'A' + 3);
+    verifyBlock(linear_load_cache->getBlock(linear_key3), linear_key3, kv_stride_bytes, true, 'A' + 7);
+
+    EXPECT_EQ(cache_store1_->getRequestBlockBufferStore()->getBlockBuffer(request_id_str, linear_skip_key), nullptr);
 }
 
 TEST_F(NormalCacheStoreTest, testLoadContext_loadTimeout) {

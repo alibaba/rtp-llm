@@ -8,15 +8,15 @@ void registerPyOpDefs(pybind11::module& m) {
         .value("FULL", rtp_llm::CacheGroupType::FULL)
         .export_values();
 
-    pybind11::enum_<rtp_llm::KVCacheAttnType>(m, "KVCacheAttnType")
-        .value("DEFAULT", rtp_llm::KVCacheAttnType::DEFAULT)
-        .value("CSA_KV", rtp_llm::KVCacheAttnType::CSA_KV)
-        .value("HCA_KV", rtp_llm::KVCacheAttnType::HCA_KV)
-        .value("INDEXER_KV", rtp_llm::KVCacheAttnType::INDEXER_KV)
-        .value("INDEXER_STATE", rtp_llm::KVCacheAttnType::INDEXER_STATE)
-        .value("CSA_STATE", rtp_llm::KVCacheAttnType::CSA_STATE)
-        .value("HCA_STATE", rtp_llm::KVCacheAttnType::HCA_STATE)
-        .value("SWA_KV", rtp_llm::KVCacheAttnType::SWA_KV)
+    pybind11::enum_<rtp_llm::KVCacheRegionName>(m, "KVCacheRegionName")
+        .value("DEFAULT", rtp_llm::KVCacheRegionName::DEFAULT)
+        .value("CSA_KV", rtp_llm::KVCacheRegionName::CSA_KV)
+        .value("HCA_KV", rtp_llm::KVCacheRegionName::HCA_KV)
+        .value("INDEXER_KV", rtp_llm::KVCacheRegionName::INDEXER_KV)
+        .value("INDEXER_STATE", rtp_llm::KVCacheRegionName::INDEXER_STATE)
+        .value("CSA_STATE", rtp_llm::KVCacheRegionName::CSA_STATE)
+        .value("HCA_STATE", rtp_llm::KVCacheRegionName::HCA_STATE)
+        .value("SWA_KV", rtp_llm::KVCacheRegionName::SWA_KV)
         .export_values();
 
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
@@ -25,7 +25,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
-        .def_readonly("attn_type", &LayerKVCache::attn_type, "KV cache attention type");
+        .def_readonly("region_name", &LayerKVCache::region_name, "KV cache attention type");
 
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
@@ -40,14 +40,14 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("use_mla", &KVCache::use_mla, "Whether MLA cache layout is used")
         .def_readwrite("kv_lora_rank", &KVCache::kv_lora_rank, "MLA KV LoRA rank")
         .def_readwrite("rope_head_dim", &KVCache::rope_head_dim, "MLA RoPE head dimension")
-        .def_readwrite("layer_attn_types",
-                       &KVCache::layer_attn_types,
+        .def_readwrite("layer_group_types",
+                       &KVCache::layer_group_types,
                        "Per-layer attention type (CacheGroupType::FULL or LINEAR). "
                        "Empty = all layers treated as FULL (backward compatibility).")
-        .def_readwrite("group_attn_types", &KVCache::group_attn_types, "Per-group KV cache attention types")
-        .def_readwrite("layer_attn_to_group_id",
-                       &KVCache::layer_attn_to_group_id,
-                       "Dense mapping from layer id and KVCacheAttnType to group id")
+        .def_readwrite("group_region_names", &KVCache::group_region_names, "Per-group KV cache attention types")
+        .def_readwrite("layer_region_to_group_id",
+                       &KVCache::layer_region_to_group_id,
+                       "Dense mapping from layer id and KVCacheRegionName to group id")
         .def_readwrite("kv_cache_base_by_layer_attn",
                        &KVCache::kv_cache_base_by_layer_attn,
                        "Per-layer and per-attention-type KV cache tensors")
@@ -58,7 +58,7 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::overload_cast<int>(&KVCache::getLayerCache),
              "Return the legacy/default per-layer LayerKVCache for the given global layer id")
         .def("get_layer_cache",
-             pybind11::overload_cast<int, rtp_llm::KVCacheAttnType>(&KVCache::getLayerCache),
+             pybind11::overload_cast<int, rtp_llm::KVCacheRegionName>(&KVCache::getLayerCache),
              "Return a raw per-layer LayerKVCache for the given global layer id and KV cache attention type");
 
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
@@ -80,7 +80,7 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs")
         .def(pybind11::init<>())
         .def_readwrite("kv_cache_layer_to_group", &PyCacheStoreInputs::kv_cache_layer_to_group)
-        .def_readwrite("kv_cache_layer_attn_to_group", &PyCacheStoreInputs::kv_cache_layer_attn_to_group)
+        .def_readwrite("kv_cache_layer_region_to_group", &PyCacheStoreInputs::kv_cache_layer_region_to_group)
         .def_readwrite("kv_cache_group_types", &PyCacheStoreInputs::kv_cache_group_types);
 
     pybind11::class_<rtp_llm::ParamsBase, std::shared_ptr<rtp_llm::ParamsBase>>(m, "ParamsBase")

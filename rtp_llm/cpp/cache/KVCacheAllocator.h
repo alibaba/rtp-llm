@@ -33,19 +33,14 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
-    virtual BlockAddrInfo
-    convertIndexToAddr(int layer_id, KVCacheAttnType attn_type, int block_id) const;
+    virtual BlockAddrInfo convertIndexToAddr(int layer_id, KVCacheRegionName region_name, int block_id) const;
     virtual std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, KVCacheAttnType attn_type, int block_id) const;
-    virtual std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id,
-                         KVCacheAttnType attn_type,
-                         int block_id,
-                         int partition_count,
-                         int partition_id) const;
+    convertIndexToBuffer(int layer_id, KVCacheRegionName region_name, int block_id) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, KVCacheRegionName region_name, int block_id, int partition_count, int partition_id) const;
     virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                             const CacheKeysType&   cache_keys,
-                                                            bool                   is_connector = false)            = 0;
+                                                            bool                   is_connector = false) = 0;
 
     virtual CacheLayerLayout allLayerCacheBase() const                                     = 0;
     virtual bool             updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -76,8 +71,8 @@ public:
         return reserve_block_num_;
     }
 
-    virtual void            regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
-    virtual int64_t         getMrCostTimeMs() const;
+    virtual void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    virtual int64_t                 getMrCostTimeMs() const;
     virtual size_t                  freeBlocksNum() const;
     virtual size_t                  availableBlocksNum() const;
     virtual BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);

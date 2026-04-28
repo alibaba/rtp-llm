@@ -1,6 +1,9 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 
+#include <algorithm>
+#include <limits>
 #include <numeric>
+#include <sstream>
 
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
@@ -9,6 +12,113 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
+
+namespace {
+
+std::vector<double> parsePoolRatio(const std::string& ratio_str) {
+    std::vector<double> weights;
+    std::istringstream  ss(ratio_str);
+    std::string         token;
+    while (std::getline(ss, token, ':')) {
+        double w = std::stod(token);
+        RTP_LLM_CHECK_WITH_INFO(w > 0, "pool_ratio weight must be positive, got '%s'", token.c_str());
+        weights.push_back(w);
+    }
+    return weights;
+}
+
+void computeGroupBlockNumsByRatio(CacheConfig& config, size_t kv_cache_mem_size, const std::vector<double>& weights) {
+    const size_t group_nums = static_cast<size_t>(config.groupNums());
+    RTP_LLM_CHECK_WITH_INFO(weights.size() == group_nums,
+                            "pool_ratio has %zu parts but model requires %zu groups",
+                            weights.size(),
+                            group_nums);
+
+    double total_weight = 0;
+    for (double w : weights)
+        total_weight += w;
+
+    config.group_block_nums.resize(group_nums);
+    for (size_t gid = 0; gid < group_nums; ++gid) {
+        const size_t layer_num = config.global_layer_ids[gid].size();
+        RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "group %zu has no layers", gid);
+
+        const size_t kv_stride =
+            (gid < config.group_kv_block_stride_bytes.size() && config.group_kv_block_stride_bytes[gid] > 0) ?
+                config.group_kv_block_stride_bytes[gid] :
+                config.cache_specs[gid]->block_size_bytes();
+        const size_t scale_stride    = (gid < config.group_kv_scale_stride_bytes.size()) ?
+                                           config.group_kv_scale_stride_bytes[gid] :
+                                           config.cache_specs[gid]->scale_block_size_bytes();
+        const size_t bytes_per_block = layer_num * (kv_stride + scale_stride);
+        RTP_LLM_CHECK_WITH_INFO(bytes_per_block > 0, "group %zu bytes_per_block is 0", gid);
+
+        const double mem_for_group   = static_cast<double>(kv_cache_mem_size) * weights[gid] / total_weight;
+        config.group_block_nums[gid] = static_cast<uint32_t>(mem_for_group / static_cast<double>(bytes_per_block));
+        RTP_LLM_CHECK_WITH_INFO(config.group_block_nums[gid] > 0,
+                                "pool_ratio results in 0 blocks for group %zu (budget %.0f bytes, bytes_per_block %zu)",
+                                gid,
+                                mem_for_group,
+                                bytes_per_block);
+        RTP_LLM_LOG_INFO("pool_ratio: group %zu gets %u blocks (%.1f%% of %zu bytes, %zu bytes/block)",
+                         gid,
+                         config.group_block_nums[gid],
+                         weights[gid] / total_weight * 100.0,
+                         kv_cache_mem_size,
+                         bytes_per_block);
+    }
+
+    uint32_t max_block_num = *std::max_element(config.group_block_nums.begin(), config.group_block_nums.end());
+    config.block_num       = static_cast<int>(max_block_num);
+}
+
+size_t groupSeqSizePerBlock(const CacheConfig& config, size_t gid) {
+    if (gid < config.group_seq_size_per_block.size() && config.group_seq_size_per_block[gid] > 0) {
+        return config.group_seq_size_per_block[gid];
+    }
+    return config.seq_size_per_block;
+}
+
+uint32_t groupBlockNum(const CacheConfig& config, size_t gid) {
+    if (gid < config.group_block_nums.size()) {
+        return config.group_block_nums[gid];
+    }
+    return static_cast<uint32_t>(config.block_num);
+}
+
+size_t effectiveKvCacheSeqLen(const CacheConfig& config) {
+    if (!config.use_independent_block_pools || config.group_block_nums.empty()) {
+        return static_cast<size_t>(config.block_num) * config.seq_size_per_block;
+    }
+
+    size_t min_tokens = std::numeric_limits<size_t>::max();
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        const auto   blocks   = groupBlockNum(config, gid);
+        const size_t seq_size = groupSeqSizePerBlock(config, gid);
+        min_tokens            = std::min(min_tokens, static_cast<size_t>(blocks) * seq_size);
+    }
+    return min_tokens == std::numeric_limits<size_t>::max() ? 0 : min_tokens;
+}
+
+std::string groupCapacityDebugString(const CacheConfig& config) {
+    if (!config.use_independent_block_pools || config.group_block_nums.empty()) {
+        return "";
+    }
+
+    std::ostringstream oss;
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        if (gid > 0) {
+            oss << ", ";
+        }
+        const auto blocks   = groupBlockNum(config, gid);
+        const auto seq_size = groupSeqSizePerBlock(config, gid);
+        oss << "group " << gid << ": blocks=" << blocks << ", tokens=" << static_cast<size_t>(blocks) * seq_size
+            << ", seq_size_per_block=" << seq_size;
+    }
+    return oss.str();
+}
+
+}  // namespace
 
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
@@ -29,7 +139,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     CacheConfig config    = CacheConfigCreator::createBasicConfig(model_config, parallelism_config);
     uint32_t    block_num = 0;
 
-    config.linear_step = kv_cache_config.linear_step;
+    config.use_independent_block_pools = kv_cache_config.enable_independent_pool;
+    config.linear_step                 = kv_cache_config.linear_step;
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block % kv_cache_config.kernel_seq_size_per_block == 0,
                                 "seq_size_per_block(%d) must be divisible by kernel_seq_size_per_block(%d)",
@@ -41,11 +152,13 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         config.kernel_seq_size_per_block = config.seq_size_per_block;
     }
 
+    size_t kv_cache_mem_size = 0;
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
-        block_num = kv_cache_config.test_block_num;
+        block_num         = kv_cache_config.test_block_num;
+        kv_cache_mem_size = static_cast<size_t>(block_num) * config.block_size_bytes;
     } else {
-        const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
+        kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
             runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
         block_num = kv_cache_mem_size / config.block_size_bytes;
     }
@@ -54,18 +167,38 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                             block_num,
                             static_cast<long>(config.block_size_bytes / 1024 / 1024));
 
-    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
-    config.block_num            = static_cast<int>(block_num);
-    if (config.dsv4_config.has_value() && config.use_independent_block_pools) {
-        config.group_block_nums.assign(config.groupNums(), block_num);
+    config.block_num = static_cast<int>(block_num);
+    if (config.use_independent_block_pools) {
+        std::vector<double> weights;
+        if (!kv_cache_config.pool_ratio.empty()) {
+            weights = parsePoolRatio(kv_cache_config.pool_ratio);
+        } else {
+            weights.assign(static_cast<size_t>(config.groupNums()), 1.0);
+        }
+        computeGroupBlockNumsByRatio(config, kv_cache_mem_size, weights);
     }
-    RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
+    const auto kv_cache_seq_len = effectiveKvCacheSeqLen(config);
+    if (config.use_independent_block_pools) {
+        RTP_LLM_LOG_INFO("kv cache independent pool capacity: effective tokens %ld, %s",
+                         kv_cache_seq_len,
+                         groupCapacityDebugString(config).c_str());
+    } else {
+        RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
+    }
     if (kv_cache_seq_len < model_config.max_seq_len) {
-        RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
-                            "this is dangerous, consider decrease max_seq_len",
-                            block_num,
-                            kv_cache_seq_len,
-                            model_config.max_seq_len);
+        if (config.use_independent_block_pools) {
+            RTP_LLM_LOG_WARNING("kv cache independent pools can only store %ld tokens at the bottleneck group, "
+                                "less than max_seq_len %ld, this is dangerous, consider decrease max_seq_len; %s",
+                                kv_cache_seq_len,
+                                model_config.max_seq_len,
+                                groupCapacityDebugString(config).c_str());
+        } else {
+            RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
+                                "this is dangerous, consider decrease max_seq_len",
+                                block_num,
+                                kv_cache_seq_len,
+                                model_config.max_seq_len);
+        }
     }
     return config;
 }
@@ -157,7 +290,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.mtp_sub_configs.clear();
     config.mtp_sub_configs.reserve(num_mtp_modules);
     config.layer_to_group_id.resize(total_layer_num, 0);
-    config.layer_attn_types.resize(total_layer_num, CacheGroupType::FULL);
+    config.layer_group_types.resize(total_layer_num, CacheGroupType::FULL);
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(total_layer_num), 0);
 
     // Main(score) model per-layer stride (kv + scale).
@@ -169,8 +302,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                             score_layers);
     for (size_t l = 0; l < score_layers; ++l) {
         config.layer_to_block_stride_bytes[l] = score_config.layer_to_block_stride_bytes[l];
-        if (l < score_config.layer_attn_types.size()) {
-            config.layer_attn_types[l] = score_config.layer_attn_types[l];
+        if (l < score_config.layer_group_types.size()) {
+            config.layer_group_types[l] = score_config.layer_group_types[l];
         }
     }
 
@@ -194,8 +327,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
             const int stride_bytes = sub_cfg->layer_to_block_stride_bytes[static_cast<size_t>(l)];
             config.layer_to_block_stride_bytes[static_cast<size_t>(global_layer_id)] = stride_bytes;
-            if (l < sub_cfg->layer_attn_types.size()) {
-                config.layer_attn_types[static_cast<size_t>(global_layer_id)] = sub_cfg->layer_attn_types[l];
+            if (l < sub_cfg->layer_group_types.size()) {
+                config.layer_group_types[static_cast<size_t>(global_layer_id)] = sub_cfg->layer_group_types[l];
             }
         }
 

@@ -61,6 +61,7 @@ cc_library(
         "//rtp_llm/cpp/utils:device_perf_wrapper",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
     ] + torch_deps() + select_py_bindings() + select({
         "@//:using_cuda12": ["//rtp_llm/models_py/bindings/cuda/ops:gpu_base"],
         "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],

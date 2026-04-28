@@ -21,19 +21,19 @@ public:
         batch_resource.resize(batch_size);
     }
 
-    void initGroups(int                                group_nums,
-                    int                                layer_num,
-                    const std::vector<int>&            layer_to_group_id          = {},
-                    size_t                             kernel_blocks_per_kv_block = 1,
-                    const std::vector<CacheGroupType>& group_types                = {},
-                    const std::vector<std::vector<int>>& layer_attn_to_group_id    = {}) {
+    void initGroups(int                                  group_nums,
+                    int                                  layer_num,
+                    const std::vector<int>&              layer_to_group_id          = {},
+                    size_t                               kernel_blocks_per_kv_block = 1,
+                    const std::vector<CacheGroupType>&   group_types                = {},
+                    const std::vector<std::vector<int>>& layer_region_to_group_id   = {}) {
         for (auto& batch : batch_resource) {
             batch.initGroups(group_nums,
                              layer_num,
                              layer_to_group_id,
                              kernel_blocks_per_kv_block,
                              group_types,
-                             layer_attn_to_group_id);
+                             layer_region_to_group_id);
         }
     }
 
@@ -134,20 +134,20 @@ public:
         batch_resource[batch_id].cacheKeys().push_back(key);
     }
 
-    void initBatchGroups(int                                batch_id,
-                         int                                group_nums,
-                         int                                layer_num,
-                         const std::vector<int>&            layer_to_group_id          = {},
-                         size_t                             kernel_blocks_per_kv_block = 1,
-                         const std::vector<CacheGroupType>& group_types                = {},
-                         const std::vector<std::vector<int>>& layer_attn_to_group_id    = {}) {
+    void initBatchGroups(int                                  batch_id,
+                         int                                  group_nums,
+                         int                                  layer_num,
+                         const std::vector<int>&              layer_to_group_id          = {},
+                         size_t                               kernel_blocks_per_kv_block = 1,
+                         const std::vector<CacheGroupType>&   group_types                = {},
+                         const std::vector<std::vector<int>>& layer_region_to_group_id   = {}) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         batch_resource[batch_id].initGroups(group_nums,
                                             layer_num,
                                             layer_to_group_id,
                                             kernel_blocks_per_kv_block,
                                             group_types,
-                                            layer_attn_to_group_id);
+                                            layer_region_to_group_id);
     }
 
     void setBatchBlocks(int batch_id, int group_id, const BlockIndicesType& blocks) {

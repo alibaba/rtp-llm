@@ -56,11 +56,11 @@ public:
     std::vector<CacheKeyType> cacheKeys() const;
 
 private:
-    struct LayerAttnSlot {
-        int             layer_id{-1};
-        KVCacheAttnType attn_type{KVCacheAttnType::DEFAULT};
-        int             group_id{-1};
-        size_t          stride_bytes{0};
+    struct LayerRegionSlot {
+        int               layer_id{-1};
+        KVCacheRegionName region_name{KVCacheRegionName::DEFAULT};
+        int               group_id{-1};
+        size_t            stride_bytes{0};
     };
     struct CopyInfoPerKey {
         CacheKeyType              cache_key{0};
@@ -77,17 +77,17 @@ private:
         CopyDirection               direction;
     };
 
-    std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType& cache_keys,
-                                                   const LayerAttnBlockIds& layer_attn_block_ids,
-                                                   const std::vector<LayerAttnSlot>& slots,
-                                                   int start_index,
-                                                   int read_num);
-    std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType& cache_keys,
-                                                    const LayerAttnBlockIds& layer_attn_block_ids,
-                                                    const std::vector<LayerAttnSlot>& slots,
-                                                    int start_index,
-                                                    int write_num,
-                                                    bool& no_need_write);
+    std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType&                cache_keys,
+                                                   const LayerRegionBlockIds&          layer_region_block_ids,
+                                                   const std::vector<LayerRegionSlot>& slots,
+                                                   int                                 start_index,
+                                                   int                                 read_num);
+    std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType&                cache_keys,
+                                                    const LayerRegionBlockIds&          layer_region_block_ids,
+                                                    const std::vector<LayerRegionSlot>& slots,
+                                                    int                                 start_index,
+                                                    int                                 write_num,
+                                                    bool&                               no_need_write);
     std::shared_ptr<CopyPlan> createCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos,
                                              const CopyDirection&               direction);
     bool startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context, const std::shared_ptr<CopyPlan>& copy_plan);
@@ -107,17 +107,17 @@ private:
                                   std::vector<torch::Tensor>& dst,
                                   std::vector<torch::Tensor>& src);
 
-    void checkLayerBlockStrideBytes() const;
-    std::vector<LayerAttnSlot> layerAttnSlots() const;
-    bool                      hasTypedLayerAttnSlots(const std::vector<LayerAttnSlot>& slots) const;
-    bool checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
-    bool checkLayerAttnBlocks(const LayerAttnBlockIds& layer_attn_block_ids,
-                              const std::vector<LayerAttnSlot>& slots,
-                              size_t required_len) const;
-    bool gpuBlocksAllValid(const LayerBlockIds& layer_block_ids, size_t key_index) const;
-    bool gpuBlocksAllValid(const LayerAttnBlockIds& layer_attn_block_ids,
-                           const std::vector<LayerAttnSlot>& slots,
-                           size_t key_index) const;
+    void                         checkLayerBlockStrideBytes() const;
+    std::vector<LayerRegionSlot> layerRegionSlots() const;
+    bool                         hasTypedLayerRegionSlots(const std::vector<LayerRegionSlot>& slots) const;
+    bool                         checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
+    bool                         checkLayerRegionBlocks(const LayerRegionBlockIds&          layer_region_block_ids,
+                                                        const std::vector<LayerRegionSlot>& slots,
+                                                        size_t                              required_len) const;
+    bool                         gpuBlocksAllValid(const LayerBlockIds& layer_block_ids, size_t key_index) const;
+    bool                         gpuBlocksAllValid(const LayerRegionBlockIds&          layer_region_block_ids,
+                                                   const std::vector<LayerRegionSlot>& slots,
+                                                   size_t                              key_index) const;
 
     bool mallocBlocks(size_t need_blocks, std::vector<BlockIdxType>& malloced_blocks);
     bool freeBlocks(const std::vector<BlockIdxType>& blocks, bool cache_free = true);
@@ -141,7 +141,7 @@ private:
     std::shared_ptr<KVCacheAllocator> allocator_;
     const std::vector<std::string>    tp_addrs_;
 
-    std::shared_ptr<BlockPool> block_pool_;
+    std::shared_ptr<BlockPool>                 block_pool_;
     mutable std::mutex                         malloc_mutex_;
     std::shared_ptr<MemoryBlockCache>          block_cache_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;

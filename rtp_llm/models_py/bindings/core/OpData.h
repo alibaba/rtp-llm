@@ -173,7 +173,7 @@ struct CacheStoreInputs {
     torch::Tensor host_kv_cache_offset;
 
     torch::Tensor kv_cache_layer_to_group_host;
-    torch::Tensor kv_cache_layer_attn_to_group_host;
+    torch::Tensor kv_cache_layer_region_to_group_host;
     torch::Tensor kv_cache_group_types_host;  // 0 -> LINEAR, 1 -> FULL.
 
     size_t context_batch_size = 0;
@@ -190,8 +190,8 @@ struct CacheStoreInputs {
     bool                     decode_entrance       = false;
     bool                     warmup;
 
-    int layer_id = 0;
-    KVCacheAttnType attn_type = KVCacheAttnType::DEFAULT;
+    int               layer_id    = 0;
+    KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
 
     // Pre-created event from the main thread to avoid cudaEventRecord
     // contention on background threads. nullptr means writeCacheStore will

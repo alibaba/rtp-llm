@@ -641,52 +641,51 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_ReturnTrue_AndRegistersPool) {
 }
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndAttnSlots) {
-    auto cfg = cache_config_;
+    auto cfg          = cache_config_;
     cfg.layer_num     = 1;
     cfg.layer_all_num = 1;
     cfg.layer_to_group_id.assign(1, 0);
     cfg.layer_to_group_ids.assign(1, std::vector<int>{0, 1});
-    cfg.layer_attn_to_group_id.assign(1,
-                                      std::vector<int>(static_cast<size_t>(KVCacheAttnType::TYPE_COUNT), -1));
-    cfg.layer_attn_to_group_id[0][static_cast<size_t>(KVCacheAttnType::CSA_KV)] = 0;
-    cfg.layer_attn_to_group_id[0][static_cast<size_t>(KVCacheAttnType::SWA_KV)] = 1;
-    cfg.group_types = {CacheGroupType::FULL, CacheGroupType::FULL};
-    cfg.group_kv_block_stride_bytes    = {16, 32};
-    cfg.group_kv_scale_stride_bytes    = {0, 0};
-    cfg.layer_to_block_stride_bytes    = {999};
+    cfg.layer_region_to_group_id.assign(1, std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
+    cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)] = 1;
+    cfg.group_types                 = {CacheGroupType::FULL, CacheGroupType::FULL};
+    cfg.group_kv_block_stride_bytes = {16, 32};
+    cfg.group_kv_scale_stride_bytes = {0, 0};
+    cfg.layer_to_block_stride_bytes = {999};
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn          = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
     conn->block_cache_ = std::make_shared<MemoryBlockCache>();
     ASSERT_NO_THROW(conn->initBlockPool());
 
-    auto slots = conn->layerAttnSlots();
+    auto slots = conn->layerRegionSlots();
     ASSERT_EQ(slots.size(), 2u);
     EXPECT_EQ(slots[0].layer_id, 0);
-    EXPECT_EQ(slots[0].attn_type, KVCacheAttnType::CSA_KV);
+    EXPECT_EQ(slots[0].region_name, KVCacheRegionName::CSA_KV);
     EXPECT_EQ(slots[0].group_id, 0);
     EXPECT_EQ(slots[0].stride_bytes, 16u);
     EXPECT_EQ(slots[1].layer_id, 0);
-    EXPECT_EQ(slots[1].attn_type, KVCacheAttnType::SWA_KV);
+    EXPECT_EQ(slots[1].region_name, KVCacheRegionName::SWA_KV);
     EXPECT_EQ(slots[1].group_id, 1);
     EXPECT_EQ(slots[1].stride_bytes, 32u);
 
-    auto resource = std::make_shared<KVCacheResource>();
+    auto resource         = std::make_shared<KVCacheResource>();
     resource->cacheKeys() = {101, 102, 103};
     resource->initGroups(/*group_num=*/2,
                          /*layer_num=*/1,
                          cfg.layer_to_group_id,
                          /*kernel_blocks_per_kv_block=*/1,
                          cfg.group_types,
-                         cfg.layer_attn_to_group_id);
+                         cfg.layer_region_to_group_id);
     resource->mutableBlockIds(/*group_id=*/0).assign({11, 12, 13});
     resource->mutableBlockIds(/*group_id=*/1).assign({21, NULL_BLOCK_IDX, 23});
 
     bool no_need_write = true;
-    auto plan = conn->buildCopyPlanForWrite(
-        resource->cacheKeys(), resource->layerAttnBlocks(), slots, /*start_index=*/0, /*write_num=*/3, no_need_write);
+    auto plan          = conn->buildCopyPlanForWrite(
+        resource->cacheKeys(), resource->layerRegionBlocks(), slots, /*start_index=*/0, /*write_num=*/3, no_need_write);
 
     ASSERT_NE(plan, nullptr);
     EXPECT_FALSE(no_need_write);

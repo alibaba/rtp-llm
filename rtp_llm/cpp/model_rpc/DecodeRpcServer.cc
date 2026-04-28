@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -39,26 +40,26 @@ namespace rtp_llm {
 
 namespace {
 
-struct LayerAttnSlot {
-    size_t          layer_id{0};
-    KVCacheAttnType attn_type{KVCacheAttnType::DEFAULT};
-    size_t          group_id{0};
+struct LayerRegionSlot {
+    size_t            layer_id{0};
+    KVCacheRegionName region_name{KVCacheRegionName::DEFAULT};
+    size_t            group_id{0};
 };
 
-std::vector<LayerAttnSlot> layerAttnSlotsForRpc(const CacheConfig& cache_config, size_t layer_num) {
-    std::vector<LayerAttnSlot> slots;
-    const auto attn_type_count = static_cast<size_t>(KVCacheAttnType::TYPE_COUNT);
+std::vector<LayerRegionSlot> layerRegionSlotsForRpc(const CacheConfig& cache_config, size_t layer_num) {
+    std::vector<LayerRegionSlot> slots;
+    const auto                   region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
     for (size_t layer_id = 0; layer_id < layer_num; ++layer_id) {
         bool has_typed_slot = false;
-        if (layer_id < cache_config.layer_attn_to_group_id.size()) {
-            const auto& dense = cache_config.layer_attn_to_group_id[layer_id];
-            const auto  count = std::min(attn_type_count, dense.size());
+        if (layer_id < cache_config.layer_region_to_group_id.size()) {
+            const auto& dense = cache_config.layer_region_to_group_id[layer_id];
+            const auto  count = std::min(region_name_count, dense.size());
             for (size_t attn = 0; attn < count; ++attn) {
                 const int gid = dense[attn];
                 if (gid < 0) {
                     continue;
                 }
-                slots.push_back({layer_id, static_cast<KVCacheAttnType>(attn), static_cast<size_t>(gid)});
+                slots.push_back({layer_id, static_cast<KVCacheRegionName>(attn), static_cast<size_t>(gid)});
                 has_typed_slot = true;
             }
         }
@@ -67,7 +68,7 @@ std::vector<LayerAttnSlot> layerAttnSlotsForRpc(const CacheConfig& cache_config,
             if (layer_id < cache_config.layer_to_group_id.size() && cache_config.layer_to_group_id[layer_id] >= 0) {
                 gid = static_cast<size_t>(cache_config.layer_to_group_id[layer_id]);
             }
-            slots.push_back({layer_id, KVCacheAttnType::DEFAULT, gid});
+            slots.push_back({layer_id, KVCacheRegionName::DEFAULT, gid});
         }
     }
     return slots;
@@ -80,11 +81,15 @@ CacheGroupType cacheGroupType(const CacheConfig& cache_config, size_t group_id) 
     return CacheGroupType::FULL;
 }
 
-std::vector<size_t> blockPositionsForRpc(size_t block_num,
-                                         size_t reuse_block_size,
-                                         bool use_hybrid,
+bool useFullBlockRemoteLoad(const CacheConfig& cache_config) {
+    return cache_config.use_mla || cache_config.is_sparse || cache_config.groupNums() > 1;
+}
+
+std::vector<size_t> blockPositionsForRpc(size_t         block_num,
+                                         size_t         reuse_block_size,
+                                         bool           use_hybrid,
                                          CacheGroupType group_type,
-                                         bool hybrid_full_from_begin) {
+                                         bool           hybrid_full_from_begin) {
     std::vector<size_t> block_pos_list;
     block_pos_list.reserve(block_num);
     if (use_hybrid && block_num > 0 && group_type == CacheGroupType::LINEAR) {
@@ -101,10 +106,10 @@ std::vector<size_t> blockPositionsForRpc(size_t block_num,
     return block_pos_list;
 }
 
-std::string layerAttnRequestKey(size_t request_id, size_t layer_id, KVCacheAttnType attn_type) {
+std::string layerRegionRequestKey(size_t request_id, size_t layer_id, KVCacheRegionName region_name) {
     auto key = std::to_string(request_id) + "-" + std::to_string(layer_id);
-    if (attn_type != KVCacheAttnType::DEFAULT) {
-        key += "-" + std::to_string(static_cast<int>(attn_type));
+    if (region_name != KVCacheRegionName::DEFAULT) {
+        key += "-" + std::to_string(static_cast<int>(region_name));
     }
     return key;
 }
@@ -467,7 +472,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         rpc_context.stub  = connect_status.value().stub;
         BroadcastLoadRequestPB load_request;
 
-        if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
+        if (useFullBlockRemoteLoad(engine_->resourceContext().cache_manager->cacheConfig())) {
             load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
         } else {
             load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
@@ -591,7 +596,7 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
             ClientContext          client_context;
             BroadcastLoadRequestPB load_request;
 
-            if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
+            if (useFullBlockRemoteLoad(engine_->resourceContext().cache_manager->cacheConfig())) {
                 load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
             } else {
                 load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
@@ -651,7 +656,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
-    const bool   use_mla       = cache_config.use_mla;
+    const bool   use_mla       = cache_config.use_mla || cache_config.is_sparse;
     const bool   use_hybrid    = cache_config.groupNums() > 1;
     const auto&  spec          = cache_config.cache_specs[0];
     const size_t k_total_bytes = spec->k_block_size_bytes();
@@ -676,10 +681,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
         RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
 
-        for (const auto& slot : layerAttnSlotsForRpc(cache_config, layer_num)) {
+        for (const auto& slot : layerRegionSlotsForRpc(cache_config, layer_num)) {
             const auto layer_id    = slot.layer_id;
-            auto request_key = layerAttnRequestKey(load_context.request_id, layer_id, slot.attn_type);
-            auto load_layer_cache =
+            auto       request_key = layerRegionRequestKey(load_context.request_id, layer_id, slot.region_name);
+            auto       load_layer_cache =
                 std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
             size_t gid = slot.group_id;
             RTP_LLM_CHECK_WITH_INFO(gid < load_context.block_ids_by_group.size(),
@@ -698,14 +703,24 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
             for (size_t block_pos : block_pos_list) {
                 auto cache_key = makeCacheKey(
-                    model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id, slot.attn_type);
+                    model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id, slot.region_name);
                 // FT_LOG_DEBUG("large model load cache_key %s", cache_key.c_str());
                 auto block_id = block_ids[block_pos];
+                if (isNullBlockIdx(block_id)) {
+                    RTP_LLM_LOG_DEBUG("skip null rpc kv cache block, request [%s], layer [%zu], region [%d], "
+                                      "group [%zu], block_pos [%zu]",
+                                      request_key.c_str(),
+                                      layer_id,
+                                      static_cast<int>(slot.region_name),
+                                      gid,
+                                      block_pos);
+                    continue;
+                }
 
-                const int local_part_cnt = peer_cnt;
-                const int local_part_id  = i;
-                auto parts = cache_manager->convertIndexToBuffer(
-                    block_id, layer_id, slot.attn_type, local_part_cnt, local_part_id);
+                const bool load_full_block = use_mla || use_hybrid;
+                auto       parts           = load_full_block ?
+                                                 cache_manager->convertIndexToBuffer(block_id, layer_id, slot.region_name) :
+                                                 cache_manager->convertIndexToBuffer(block_id, layer_id, slot.region_name, peer_cnt, i);
 
                 auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                     RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
@@ -735,7 +750,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     }
                 }
             }
-            layer_caches.push_back(load_layer_cache);
+            if (load_layer_cache->getBlocksCount() > 0) {
+                layer_caches.push_back(load_layer_cache);
+            }
         }
 
         if (engine_->isMTPEagle()) {
@@ -762,9 +779,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         !mtp_cache_cfg.global_layer_ids.empty(),
                         "mtp_cache_cfg.global_layer_ids is empty (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
 
-                    for (const auto& slot : layerAttnSlotsForRpc(mtp_cache_cfg, layer_num)) {
+                    for (const auto& slot : layerRegionSlotsForRpc(mtp_cache_cfg, layer_num)) {
                         const auto layer_id = slot.layer_id;
-                        auto request_key = layerAttnRequestKey(load_context.request_id, layer_id, slot.attn_type);
+                        auto request_key = layerRegionRequestKey(load_context.request_id, layer_id, slot.region_name);
                         auto load_layer_cache =
                             std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
                         const bool mtp_use_hybrid = mtp_cache_cfg.groupNums() > 1;
@@ -782,24 +799,38 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         // Use per-module global_layer_ids for address lookup.
                         const int global_layer_id = mtp_cache_cfg.global_layer_ids[0][layer_id];
 
-                        // Hybrid cache: Linear group transfers the last two blocks; keep existing MTP Full reuse behavior.
-                        const auto group_type = cacheGroupType(mtp_cache_cfg, gid);
-                        auto       block_pos_list =
-                            blockPositionsForRpc(block_num,
-                                                 load_context.reuse_block_size,
-                                                 mtp_use_hybrid,
-                                                 group_type,
-                                                 /*hybrid_full_from_begin=*/false);
+                        // Hybrid cache: Linear group transfers the last two blocks; keep existing MTP Full reuse
+                        // behavior.
+                        const auto group_type     = cacheGroupType(mtp_cache_cfg, gid);
+                        auto       block_pos_list = blockPositionsForRpc(block_num,
+                                                                   load_context.reuse_block_size,
+                                                                   mtp_use_hybrid,
+                                                                   group_type,
+                                                                   /*hybrid_full_from_begin=*/false);
 
                         for (size_t block_pos : block_pos_list) {
-                            auto cache_key = makeCacheKey(
-                                model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id, slot.attn_type);
-                            auto       block_id       = block_ids[block_pos];
-                            const bool mtp_use_mla    = mtp_cache_cfg.use_mla;
-                            const int  local_part_cnt = peer_cnt;
-                            const int  local_part_id  = i;
-                            auto       parts          = cache_manager->convertIndexToBuffer(
-                                block_id, global_layer_id, slot.attn_type, local_part_cnt, local_part_id);
+                            auto cache_key = makeCacheKey(model_id,
+                                                          std::to_string(load_context.cache_keys[block_pos]),
+                                                          layer_id,
+                                                          slot.region_name);
+                            auto block_id  = block_ids[block_pos];
+                            if (isNullBlockIdx(block_id)) {
+                                RTP_LLM_LOG_DEBUG("skip null mtp rpc kv cache block, request [%s], layer [%zu], "
+                                                  "region [%d], group [%zu], block_pos [%zu]",
+                                                  request_key.c_str(),
+                                                  layer_id,
+                                                  static_cast<int>(slot.region_name),
+                                                  gid,
+                                                  block_pos);
+                                continue;
+                            }
+                            const bool mtp_use_mla       = mtp_cache_cfg.use_mla || mtp_cache_cfg.is_sparse;
+                            const bool mtp_load_full_blk = mtp_use_mla || mtp_use_hybrid;
+                            auto       parts =
+                                mtp_load_full_blk ?
+                                          cache_manager->convertIndexToBuffer(block_id, global_layer_id, slot.region_name) :
+                                          cache_manager->convertIndexToBuffer(
+                                        block_id, global_layer_id, slot.region_name, peer_cnt, i);
 
                             auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                                 RTP_LLM_CHECK_WITH_INFO(
@@ -831,10 +862,18 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 }
                             }
                         }
-                        layer_caches.push_back(load_layer_cache);
+                        if (load_layer_cache->getBlocksCount() > 0) {
+                            layer_caches.push_back(load_layer_cache);
+                        }
                     }
                 }
             }
+        }
+
+        if (layer_caches.empty()) {
+            RTP_LLM_LOG_DEBUG(
+                "request [%s] has no kv cache blocks to load from peer [%s]", request_key.c_str(), peer_addr.c_str());
+            continue;
         }
 
         auto ip_parts = autil::StringUtil::split(peer_addr, ":");

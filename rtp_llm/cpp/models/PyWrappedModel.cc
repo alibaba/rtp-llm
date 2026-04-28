@@ -27,24 +27,26 @@ namespace rtp_llm {
 
 namespace {
 
-torch::Tensor layerAttnToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
-    if (!layout_opt.has_value() || layout_opt->layer_attn_to_group_id.empty()) {
+torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
+    if (!layout_opt.has_value() || layout_opt->layer_region_to_group_id.empty()) {
         return torch::Tensor();
     }
-    const auto& mapping = layout_opt->layer_attn_to_group_id;
+    const auto&   mapping   = layout_opt->layer_region_to_group_id;
     const int64_t layer_num = static_cast<int64_t>(mapping.size());
-    int64_t attn_num = 0;
+    int64_t       attn_num  = 0;
     for (const auto& row : mapping) {
         attn_num = std::max<int64_t>(attn_num, static_cast<int64_t>(row.size()));
     }
     if (layer_num <= 0 || attn_num <= 0) {
         return torch::Tensor();
     }
-    auto tensor = torch::full({layer_num, attn_num}, -1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
+    auto tensor =
+        torch::full({layer_num, attn_num}, -1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
     auto* data = tensor.data_ptr<int32_t>();
     for (int64_t layer = 0; layer < layer_num; ++layer) {
         for (int64_t attn = 0; attn < static_cast<int64_t>(mapping[static_cast<size_t>(layer)].size()); ++attn) {
-            data[layer * attn_num + attn] = static_cast<int32_t>(mapping[static_cast<size_t>(layer)][static_cast<size_t>(attn)]);
+            data[layer * attn_num + attn] =
+                static_cast<int32_t>(mapping[static_cast<size_t>(layer)][static_cast<size_t>(attn)]);
         }
     }
     return tensor;
@@ -296,7 +298,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         }
         torch::Tensor kv_cache_layer_to_group =
             inputs.kv_cache_layer_to_group.defined() ? inputs.kv_cache_layer_to_group : torch::Tensor();
-        torch::Tensor kv_cache_layer_attn_to_group = layerAttnToGroupTensor(kv_cache_layer_layout_);
+        torch::Tensor kv_cache_layer_region_to_group = layerRegionToGroupTensor(kv_cache_layer_layout_);
         torch::Tensor kv_cache_group_types =
             inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types : torch::Tensor();
         PyCacheStoreInputs cache_store_inputs{context_batch_size,
@@ -304,7 +306,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                               inputs.request_id,
                                               inputs.request_pd_separation,
                                               kv_cache_layer_to_group,
-                                              kv_cache_layer_attn_to_group,
+                                              kv_cache_layer_region_to_group,
                                               kv_cache_group_types,
                                               transVectorToString(cache_keys_vec),
                                               inputs.seq_size_per_block,
@@ -514,7 +516,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        if (device_props_.enable_prefill_cp) {
+        const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        if (device_props_.enable_prefill_cp && has_context_request) {
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }

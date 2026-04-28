@@ -246,22 +246,18 @@ KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int partitio
     return allocator_->convertIndexToBuffer(layer_id, block_index, partition_count, partition_id);
 }
 
-BlockAddrInfo
-KVCacheManager::convertIndexToAddr(int block_index, int layer_id, KVCacheAttnType attn_type) const {
-    return allocator_->convertIndexToAddr(layer_id, attn_type, block_index);
+BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id, KVCacheRegionName region_name) const {
+    return allocator_->convertIndexToAddr(layer_id, region_name, block_index);
 }
 
 std::vector<BlockInfo>
-KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, KVCacheAttnType attn_type) const {
-    return allocator_->convertIndexToBuffer(layer_id, attn_type, block_index);
+KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, KVCacheRegionName region_name) const {
+    return allocator_->convertIndexToBuffer(layer_id, region_name, block_index);
 }
 
-std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int             block_index,
-                                                            int             layer_id,
-                                                            KVCacheAttnType attn_type,
-                                                            int             partition_count,
-                                                            int             partition_id) const {
-    return allocator_->convertIndexToBuffer(layer_id, attn_type, block_index, partition_count, partition_id);
+std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
+    int block_index, int layer_id, KVCacheRegionName region_name, int partition_count, int partition_id) const {
+    return allocator_->convertIndexToBuffer(layer_id, region_name, block_index, partition_count, partition_id);
 }
 
 CacheLayerLayout KVCacheManager::allLayerCacheBase() const {
@@ -281,12 +277,12 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
         layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
     }
 
-    layout.layer_to_groups      = config_.layer_to_group_id;
-    layout.layer_to_group_ids   = config_.layer_to_group_ids;
-    layout.layer_attn_to_group_id = config_.layer_attn_to_group_id;
-    layout.group_types          = config_.group_types;
-    layout.group_attn_types     = config_.group_attn_types;
-    layout.layer_attn_types.resize(config_.layer_num, CacheGroupType::FULL);
+    layout.layer_to_groups          = config_.layer_to_group_id;
+    layout.layer_to_group_ids       = config_.layer_to_group_ids;
+    layout.layer_region_to_group_id = config_.layer_region_to_group_id;
+    layout.group_types              = config_.group_types;
+    layout.group_region_names       = config_.group_region_names;
+    layout.layer_group_types.resize(config_.layer_num, CacheGroupType::FULL);
     layout.layers_to_kv_buffer_ptrs_by_attn    = all_layout.layers_to_kv_buffer_ptrs_by_attn;
     layout.layers_to_scale_buffer_ptrs_by_attn = all_layout.layers_to_scale_buffer_ptrs_by_attn;
 
@@ -310,8 +306,8 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
                 RTP_LLM_CHECK(false);
             }
         }
-        if (static_cast<size_t>(layer_id) < config_.layer_attn_types.size()) {
-            layout.layer_attn_types[layer_id] = config_.layer_attn_types[static_cast<size_t>(layer_id)];
+        if (static_cast<size_t>(layer_id) < config_.layer_group_types.size()) {
+            layout.layer_group_types[layer_id] = config_.layer_group_types[static_cast<size_t>(layer_id)];
         }
     }
 
@@ -346,7 +342,7 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     if (!all_scale_tensors.empty()) {
         layout.layers_to_scale_buffer_ptrs.resize(mtp_layer_num);
     }
-    layout.layer_attn_types.resize(mtp_layer_num, CacheGroupType::FULL);
+    layout.layer_group_types.resize(mtp_layer_num, CacheGroupType::FULL);
 
     for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
         if (local_layer_id < mtp_global_layer_ids.size()) {
@@ -366,8 +362,8 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
                     RTP_LLM_CHECK(false);
                 }
             }
-            if (local_layer_id < mtp_sub_config->layer_attn_types.size()) {
-                layout.layer_attn_types[local_layer_id] = mtp_sub_config->layer_attn_types[local_layer_id];
+            if (local_layer_id < mtp_sub_config->layer_group_types.size()) {
+                layout.layer_group_types[local_layer_id] = mtp_sub_config->layer_group_types[local_layer_id];
             }
         } else {
             RTP_LLM_CHECK(false);
