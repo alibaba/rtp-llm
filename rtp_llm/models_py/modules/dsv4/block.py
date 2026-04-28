@@ -15,6 +15,32 @@ from rtp_llm.models_py.modules.dsv4.attention import Attention
 from rtp_llm.models_py.modules.dsv4.mhc import hc_split_sinkhorn
 from rtp_llm.models_py.modules.dsv4.moe import MoE
 
+# P-sinkhorn (plan_0427.md): single-Triton-kernel replacement for
+# mhc.py:hc_split_sinkhorn (~135 launches → 1).  32× per-call speedup
+# (1.340 ms → 0.041 ms at B=1 T=16384 HC=4 iters=20), max abs diff
+# < 5e-7 vs eager (essentially fp32 round-off).  Default ON; gate via
+# ``DSV4_SINKHORN_FUSED=0`` to disable.
+try:
+    from rtp_llm.models_py.modules.dsv4._sinkhorn_triton import fused_hc_split_sinkhorn
+    _SINKHORN_FUSED_OK = True
+except Exception:  # pragma: no cover
+    fused_hc_split_sinkhorn = None
+    _SINKHORN_FUSED_OK = False
+
+
+def _use_fused_sinkhorn(mixes: torch.Tensor, hc_mult: int) -> bool:
+    if not _SINKHORN_FUSED_OK or fused_hc_split_sinkhorn is None:
+        return False
+    if os.environ.get("DSV4_SINKHORN_FUSED", "1") == "0":
+        return False
+    if hc_mult != 4:
+        return False
+    if mixes.dtype != torch.float32:
+        return False
+    if mixes.numel() == 0:
+        return False
+    return True
+
 # P1 (prefill_opt/plan_0427.md): TileKernels fused mHC.
 #
 # Pre/post layout:
@@ -218,10 +244,17 @@ class Block(nn.Module):
         x_flat_f32 = x_flat.float()
         rsqrt = torch.rsqrt(x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps).to(dtype)
         mixes = (F.linear(x_flat, self._hc_fn_bf16(hc_fn)) * rsqrt).float()
-        pre, post, comb = hc_split_sinkhorn(
-            mixes, hc_scale, hc_base,
-            hc_mult=self.hc_mult, sinkhorn_iters=self.hc_sinkhorn_iters, eps=self.hc_eps,
-        )
+        mixes = mixes.contiguous()
+        if _use_fused_sinkhorn(mixes, self.hc_mult):
+            pre, post, comb = fused_hc_split_sinkhorn(
+                mixes, hc_scale.contiguous(), hc_base.contiguous(),
+                hc_mult=self.hc_mult, sinkhorn_iters=self.hc_sinkhorn_iters, eps=self.hc_eps,
+            )
+        else:
+            pre, post, comb = hc_split_sinkhorn(
+                mixes, hc_scale, hc_base,
+                hc_mult=self.hc_mult, sinkhorn_iters=self.hc_sinkhorn_iters, eps=self.hc_eps,
+            )
         y = torch.sum(pre.to(dtype).unsqueeze(-1) * x.view(*shape), dim=2)
         # post in the [..., hc, 1] convention so _hc_post can call TK mhc_post.
         return y.to(dtype), post.unsqueeze(-1), comb
