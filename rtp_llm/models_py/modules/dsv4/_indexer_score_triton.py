@@ -203,8 +203,11 @@ def v4_indexer_score(
     # BLOCK_S beats the previous BLOCK_S=32 default because each program
     # streams Q across 64 heads — fewer rows × wider T columns gives
     # better Q reuse and more T-axis parallelism per SM.
-    BLOCK_S = 16 if S >= 16 else triton.next_power_of_2(S)
-    BLOCK_T = 256 if T >= 256 else triton.next_power_of_2(T)
+    # Triton 3.4 rejects tl.dot tiles with M or N below 16.  Short prompts
+    # can produce S/T < 16, so keep the MMA tile at the legal minimum and
+    # rely on the masks above to discard padded rows/columns.
+    BLOCK_S = 16
+    BLOCK_T = 256 if T >= 256 else max(16, triton.next_power_of_2(T))
 
     grid = (B, triton.cdiv(S, BLOCK_S), triton.cdiv(T, BLOCK_T))
 
