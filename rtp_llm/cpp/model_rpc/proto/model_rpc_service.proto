@@ -580,10 +580,24 @@ message FunctionResponsePB {
     }
 }
 
+message BatchGenerateInputPB {
+    repeated GenerateInputPB inputs = 1;
+}
+
+message BatchGenerateResultPB {
+    GenerateOutputsPB final_output = 1;
+    RpcErrorPB error_info = 2;
+}
+
+message BatchGenerateOutputsPB {
+    repeated BatchGenerateResultPB results = 1;
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
+    rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
     rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
     rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);

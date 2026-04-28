@@ -51,7 +51,12 @@ public:
     }
 
     std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override {
-        return {};  // Not implemented for BatchDecodeScheduler
+        {
+            std::lock_guard<std::mutex> lock(lock_);
+            waiting_streams_.insert(waiting_streams_.end(), streams.begin(), streams.end());
+        }
+        cond_.notify_all();
+        return streams;
     }
 
     void updateSchedulerInfo(const std::string& scheduler_info) override {

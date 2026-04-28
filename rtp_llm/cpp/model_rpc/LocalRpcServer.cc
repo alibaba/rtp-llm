@@ -122,6 +122,39 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
     return grpc::Status::OK;
 }
 
+ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
+    output = QueryConverter::transQuery(&input_pb);
+    if (mm_processor_ != nullptr && output->multimodal_inputs) {
+        RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
+        auto mm_res = mm_processor_->updateMultimodalFeatures(output);
+        if (!mm_res.ok()) {
+            return mm_res;
+        }
+    }
+    return ErrorInfo::OkStatus();
+}
+
+ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*                  context,
+                                              std::shared_ptr<GenerateStream>&      stream,
+                                              const std::shared_ptr<GenerateInput>& input,
+                                              GenerateOutputs&                      last_outputs) {
+    while (!stream->isFinished() || stream->hasOutput()) {
+        if (context->IsCancelled()) {
+            stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
+            return ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client");
+        }
+        const auto output_result = stream->nextOutput();
+        if (!output_result.ok()) {
+            if (output_result.status().code() != ErrorCode::FINISHED) {
+                return output_result.status();
+            }
+            break;
+        }
+        last_outputs = output_result.value();
+    }
+    return ErrorInfo::OkStatus();
+}
+
 grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*                   context,
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
@@ -131,18 +164,9 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
-    auto input = QueryConverter::transQuery(request);
-    if (applyTimelineGate(generate_context.request_key,
-                          input->generate_config->gen_timeline,
-                          input->generate_config->profile_step,
-                          input->generate_config->profile_trace_name)) {
-        input->generate_config->gen_timeline = true;
-    }
-
-    // need to check client has buffer at first
-    if (mm_processor_ != nullptr && input->multimodal_inputs) {
-        RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
-        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
+    std::shared_ptr<GenerateInput> input;
+    {
+        auto mm_res = prepareInput(*request, input);
         if (!mm_res.ok()) {
             generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
         }
@@ -163,20 +187,64 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     return generate_context.error_status;
 }
 
-bool LocalRpcServer::applyTimelineGate(const std::string& request_key,
-                                       bool               request_timeline,
-                                       int                profile_step,
-                                       const std::string& profile_trace_name) {
-    const bool force_timeline = engine_->isTimelineProfilingEnabled();
-    RTP_LLM_LOG_DEBUG("request [%s] timeline gate, force_timeline=%d, request_timeline=%d, trace_name=%s",
-                      request_key.c_str(),
-                      int(force_timeline),
-                      int(request_timeline),
-                      profile_trace_name.c_str());
-    if (!force_timeline && request_timeline) {
-        engine_->startTimelineProfiling(profile_trace_name, 0, profile_step);
+grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        context,
+                                               const BatchGenerateInputPB* request,
+                                               BatchGenerateOutputsPB*     response) {
+    RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
+    AtomicGuard request_guard(onflight_requests_);
+    const int   batch_size = request->inputs_size();
+    RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d", batch_size);
+
+    if (batch_size == 0) {
+        return grpc::Status::OK;
     }
-    return force_timeline;
+
+    std::vector<std::shared_ptr<GenerateInput>> inputs;
+    inputs.reserve(batch_size);
+    for (int i = 0; i < batch_size; i++) {
+        std::shared_ptr<GenerateInput> input;
+        auto                           err = prepareInput(request->inputs(i), input);
+        if (!err.ok()) {
+            // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping
+            for (int j = 0; j < batch_size; j++) {
+                auto* result = response->add_results();
+                auto* err_pb = result->mutable_error_info();
+                err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
+                if (j == i) {
+                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
+                } else {
+                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
+                }
+            }
+            return grpc::Status::OK;
+        }
+        inputs.push_back(input);
+    }
+
+    auto streams = engine_->batchEnqueue(inputs);
+
+    for (int i = 0; i < (int)streams.size(); i++) {
+        auto* result = response->add_results();
+
+        GenerateOutputs last_outputs;
+        auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
+        if (!err.ok()) {
+            auto* err_pb = result->mutable_error_info();
+            err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
+                                                                        ErrorCodePB::UNKNOWN_ERROR);
+            err_pb->set_error_message(err.ToString());
+        } else {
+            auto* output_pb = result->mutable_final_output();
+            QueryConverter::transResponse(output_pb,
+                                          &last_outputs,
+                                          inputs[i]->generate_config->aux_info,
+                                          maga_init_params_.misc_config.aux_string,
+                                          streams[i]->specialTokens().eos_token_id);
+        }
+    }
+
+    RTP_LLM_LOG_INFO("batch generate done, batch_size=%d", batch_size);
+    return grpc::Status::OK;
 }
 
 grpc::Status

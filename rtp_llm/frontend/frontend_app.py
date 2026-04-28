@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import json
 import logging
 import socket
 import threading
@@ -26,7 +27,10 @@ from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.frontend_worker import get_dp_addrs_from_world_info
-from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.openai.api_datatype import (
+    BatchChatCompletionRequest,
+    ChatCompletionRequest,
+)
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
 from rtp_llm.utils.util import AtomicCounter, async_request_server
 from rtp_llm.utils.version_info import VersionInfo
@@ -272,6 +276,9 @@ class FrontendApp(object):
                 response["frontend_available_concurrency"] = (
                     self.frontend_server._global_controller.get_available_concurrency()
                 )
+                response["frontend_concurrency_limit"] = (
+                    self.frontend_server._global_controller.max_concurrency
+                )
             else:
                 return ORJSONResponse(
                     status_code=500,
@@ -325,6 +332,30 @@ class FrontendApp(object):
             active_requests.increment()
             try:
                 return await self.frontend_server.chat_completion(request, raw_request)
+            finally:
+                active_requests.decrement()
+
+        @app.post("/v1/batch/chat/completions")
+        async def batch_chat_completion(
+            request: BatchChatCompletionRequest, raw_request: RawRequest
+        ):
+            global active_requests
+            active_requests.increment()
+            try:
+                return await self.frontend_server.batch_chat_completion(
+                    request, raw_request
+                )
+            finally:
+                active_requests.decrement()
+
+        @app.post("/batch_infer")
+        async def batch_infer(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
+            global active_requests
+            active_requests.increment()
+            try:
+                if isinstance(req, str):
+                    req = json.loads(req)
+                return await self.frontend_server.batch_infer(req, raw_request)
             finally:
                 active_requests.decrement()
 

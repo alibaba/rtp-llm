@@ -508,6 +508,76 @@ class OpenaiEndpoint(object):
             choice_generator, debug_info, self.tokenizer
         )
 
+    def _prepare_chat_input(self, request_id: int, chat_request):
+        import torch
+
+        from rtp_llm.utils.base_model_datatypes import GenerateInput
+
+        rendered_input = self.render_chat(chat_request)
+        generate_config = self._extract_generation_config(chat_request)
+
+        if generate_config.sp_advice_prompt != "":
+            generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
+                generate_config.sp_advice_prompt
+            )
+
+        input_id_tensor = torch.Tensor(rendered_input.input_ids).int().unsqueeze(0)
+        gen_input = GenerateInput(
+            request_id=request_id,
+            token_ids=input_id_tensor,
+            mm_inputs=rendered_input.multimodal_inputs,
+            generate_config=generate_config,
+            tokenizer=self.tokenizer,
+        )
+        return gen_input, generate_config
+
+    async def _render_single_output(self, outputs, chat_request, generate_config):
+        """Render a single GenerateOutputs into a ChatCompletionResponse.
+        Only non-streaming mode is supported for batch inference."""
+        renderer = (
+            self.template_renderer if chat_request.user_template else self.chat_renderer
+        )
+
+        async def _single_output_gen(out):
+            yield out
+
+        merged_gen = await renderer._merge_non_streaming_outputs(
+            _single_output_gen(outputs)
+        )
+        choice_generator = renderer.render_response_stream(
+            merged_gen, chat_request, generate_config
+        )
+        return await self._collect_complete_response(
+            choice_generator, None, self.tokenizer
+        )
+
+    async def batch_chat_completion(self, base_request_id: int, batch_request) -> list:
+        inputs = []
+        all_configs = []
+        for i, chat_request in enumerate(batch_request.requests):
+            if chat_request.stream:
+                raise ValueError(
+                    f"batch chat completion does not support streaming (request index {i})"
+                )
+            chat_request.stream = False
+            gen_input, generate_config = self._prepare_chat_input(
+                base_request_id + i, chat_request
+            )
+            generate_config.is_streaming = False
+            inputs.append(gen_input)
+            all_configs.append(generate_config)
+
+        batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
+
+        responses = []
+        for i, outputs in enumerate(batch_outputs):
+            complete_response = await self._render_single_output(
+                outputs, batch_request.requests[i], all_configs[i]
+            )
+            responses.append(complete_response)
+
+        return responses
+
     def chat_render(self, chat_request: ChatCompletionRequest) -> DebugInfo:
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer

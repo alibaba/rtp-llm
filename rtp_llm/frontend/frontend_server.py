@@ -301,6 +301,52 @@ class FrontendServer(object):
 
         return rep
 
+    async def batch_chat_completion(self, request, raw_request: Request):
+        from rtp_llm.openai.api_datatype import BatchChatCompletionResponse
+
+        sequence = self._global_controller.increment() % 4096
+        request_id = generate_request_id(
+            self.py_env_configs.server_config.ip,
+            self.py_env_configs.server_config.server_port,
+            self.server_id,
+            sequence,
+        )
+        try:
+            assert self._openai_endpoint is not None
+            responses = await self._openai_endpoint.batch_chat_completion(
+                request_id, request
+            )
+            return ORJSONResponse(
+                content=BatchChatCompletionResponse(
+                    responses=[r.model_dump(exclude_none=True) for r in responses]
+                ).model_dump()
+            )
+        finally:
+            self._global_controller.decrement()
+
+    async def batch_infer(self, req: dict, raw_request: Request):
+        from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
+
+        sequence = self._global_controller.increment() % 4096
+        request_id = generate_request_id(
+            self.py_env_configs.server_config.ip,
+            self.py_env_configs.server_config.server_port,
+            self.server_id,
+            sequence,
+        )
+        try:
+            assert self._frontend_worker is not None
+            prompts = req.get("prompt_batch", [])
+            generate_config = req.get("generate_config", {})
+            result = await self._frontend_worker.batch_infer(
+                prompts=prompts,
+                request_id=request_id,
+                generate_config=generate_config,
+            )
+            return ORJSONResponse(content=result.model_dump(exclude_none=True))
+        finally:
+            self._global_controller.decrement()
+
     async def chat_render(self, request: ChatCompletionRequest, raw_request: Request):
         try:
             assert self._openai_endpoint != None

@@ -87,9 +87,6 @@ public:
         return false;
     }
     virtual void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {}
-    virtual bool isTimelineProfilingEnabled() const {
-        return false;
-    }
 
     std::shared_ptr<KVCacheManager> getCacheManager() const;
 

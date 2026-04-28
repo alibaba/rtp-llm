@@ -6,7 +6,6 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
-#include "rtp_llm/cpp/engine_base/schedulers/GatherBatchScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -141,15 +140,6 @@ void NormalEngine::initScheduler() {
         scheduler_.reset(new BatchDecodeScheduler(
             runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
-    } else if (runtime_config.use_gather_batch_scheduler) {
-        scheduler_.reset(new GatherBatchScheduler(runtime_config,
-                                                  model_config_,
-                                                  pd_sep_config,
-                                                  parallelism_config,
-                                                  model_specific_config,
-                                                  resource_context_.cache_manager,
-                                                  metrics_reporter_));
-        RTP_LLM_LOG_INFO("create gather batch scheduler done");
     } else {
         scheduler_.reset(new FIFOScheduler(runtime_config,
                                            model_config_,
@@ -466,14 +456,30 @@ absl::Status NormalEngine::step() {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
+
+    // If any stream in this batch requested gen_timeline AND no profiling session is
+    // already active, configure + tick BEFORE process() so the profiler is up before
+    // the actual work runs. This guarantees the trace captures THIS step's work, not
+    // the next step's. If a session is already active (e.g. external StartProfile RPC),
+    // skip — first-come-first-served.
+    if (!step_profiler_.enabled()) {
+        for (const auto& stream : streams) {
+            if (stream && stream->genTimeline()) {
+                const auto& cfg = stream->generateConfig();
+                step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step);
+                step_profiler_.tick();  // start profiler now (start_step=0)
+                break;
+            }
+        }
+    }
+
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams);
     }
 
-    // tick profiler after process() so that all TP ranks (which synchronize
-    // inside process() via NCCL) start/stop the profiler at the same point,
-    // giving aligned time windows across ranks.
+    // tick profiler after process() to count this step (and stop when num_steps reached).
+    // All TP ranks synchronize inside process() via NCCL, so stop happens at aligned points.
     step_profiler_.tick();
 
     // report step metrics
@@ -495,10 +501,6 @@ bool NormalEngine::updateEplbConfig(const EPLBConfig& config) {
 
 void NormalEngine::startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {
     step_profiler_.configure(true, trace_name, start_step, num_steps);
-}
-
-bool NormalEngine::isTimelineProfilingEnabled() const {
-    return step_profiler_.enabled();
 }
 
 bool NormalEngine::isMTPEagle() {

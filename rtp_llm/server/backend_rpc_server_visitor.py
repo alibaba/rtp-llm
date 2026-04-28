@@ -288,18 +288,12 @@ class BackendRPCServerVisitor:
                 "speculative decoding does not support return_all_probs",
             )
 
-    @torch.inference_mode()
-    async def enqueue(
-        self, input: GenerateInput
-    ) -> AsyncGenerator[GenerateOutputs, None]:
+    def _validate_input(self, input: GenerateInput) -> None:
         if input.prompt_length <= 0:
             raise FtRuntimeException(
                 ExceptionType.LONG_PROMPT_ERROR,
                 f"model tokens can not be empty, request length is {input.prompt_length}",
             )
-
-        self.check_sp_supported(input)
-
         max_new_tokens = min(
             self.max_seq_len - input.prompt_length,
             input.generate_config.max_new_tokens,
@@ -311,10 +305,29 @@ class BackendRPCServerVisitor:
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
 
+    @torch.inference_mode()
+    async def enqueue(
+        self, input: GenerateInput
+    ) -> AsyncGenerator[GenerateOutputs, None]:
+        self._validate_input(input)
+        self.check_sp_supported(input)
+
         if self.host_service.service_available:
             await self.route_ips(input)
 
         return self.model_rpc_client.enqueue(input)
+
+    @torch.inference_mode()
+    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        for input in inputs:
+            self._validate_input(input)
+            self.check_sp_supported(input)
+
+        if self.host_service.service_available:
+            for input in inputs:
+                await self.route_ips(input)
+
+        return await self.model_rpc_client.batch_enqueue(inputs)
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(

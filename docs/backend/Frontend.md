@@ -489,6 +489,41 @@ class ChatCompletionRequest(BaseModel):
 # output
 # inference response
 ```
+
+#### Batch Inference APIs
+
+Batch inference APIs allow sending multiple requests in a single call. All requests in a batch are enqueued together into the engine, which ensures they are processed in the same batch for deterministic results. **Only non-streaming mode is supported.**
+
+``` python
+@app.post("/v1/batch/chat/completions")
+
+# input
+class BatchChatCompletionRequest(BaseModel):
+  requests: List[ChatCompletionRequest]  # each request follows the same format as /v1/chat/completions
+
+# output
+class BatchChatCompletionResponse(BaseModel):
+  responses: List[ChatCompletionResponse]  # one response per request, in the same order
+```
+
+``` python
+@app.post("/batch_infer")
+
+# input (raw JSON)
+# {
+#   "prompt_batch": ["prompt1", "prompt2", ...],
+#   "generate_config": { "max_new_tokens": 10, ... }
+# }
+
+# output
+# {
+#   "response_batch": [
+#     { "response": "...", "finished": true },
+#     { "response": "...", "finished": true },
+#     ...
+#   ]
+# }
+```
 #### Prompt Processing APIs
 ``` python
 @app.post("/chat/render")

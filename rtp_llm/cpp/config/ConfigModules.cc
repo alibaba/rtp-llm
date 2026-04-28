@@ -363,7 +363,6 @@ std::string RuntimeConfig::to_string() const {
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
-        << "use_gather_batch_scheduler: " << use_gather_batch_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"
         << batch_decode_scheduler_config.to_string() << "\n}\n"
         << "fifo_scheduler_config: {\n"

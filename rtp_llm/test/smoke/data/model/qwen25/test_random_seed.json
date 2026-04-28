@@ -13,8 +13,7 @@
                     "max_new_tokens": 10,
                     "top_k": 100,
                     "random_seed": 46
-                },
-                "yield_generator": true
+                }
             },
             "result": {
                 "response_batch": [

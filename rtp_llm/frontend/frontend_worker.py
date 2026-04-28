@@ -167,6 +167,57 @@ class FrontendWorker:
         tokens = [self.pipeline.decode(id) for id in token_ids]
         return token_ids, tokens
 
+    async def batch_infer(
+        self, prompts: List[str], request_id: int, generate_config: dict
+    ) -> BatchPipelineResponse:
+        responses = await self.pipeline.batch_infer(
+            prompts=prompts,
+            base_request_id=request_id,
+            generate_config_json=generate_config,
+            generate_env_config=self.generate_env_config,
+        )
+        # Reconstruct GenerateConfig to check flags (aux_info, calculate_loss, etc.)
+        gc = self.pipeline.create_generate_config(
+            generate_config,
+            len(self.pipeline.tokenizer),
+            self.pipeline._special_tokens,
+            self.pipeline.tokenizer,
+            generate_env_config=self.generate_env_config,
+        )
+        pipeline_responses = []
+        for gen_response in responses:
+            out = gen_response.generate_outputs.generate_outputs[0]
+            generate_texts = gen_response.generate_texts
+            aux_info_dict: Dict[str, Any] = {}
+            if gc.aux_info:
+                aux = out.aux_info
+                if gc.has_num_beams():
+                    aux.beam_responses = generate_texts
+                aux_info_dict = asdict(aux)
+            pipeline_responses.append(
+                PipelineResponse(
+                    response=generate_texts[0],
+                    finished=out.finished,
+                    aux_info=aux_info_dict,
+                    hidden_states=(
+                        out.hidden_states.tolist()
+                        if gc.return_hidden_states and out.hidden_states is not None
+                        else None
+                    ),
+                    loss=(
+                        out.loss.tolist()
+                        if gc.calculate_loss and out.loss is not None
+                        else None
+                    ),
+                    logits=(
+                        out.logits.tolist()
+                        if gc.return_logits and out.logits is not None
+                        else None
+                    ),
+                )
+            )
+        return BatchPipelineResponse(response_batch=pipeline_responses)
+
     def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
         default_generate_config = GenerateConfig()
         request_extractor = RequestExtractor(default_generate_config)

@@ -14,8 +14,15 @@ py_library(
         "port_util.py",
         "stream_util.py",
         "diff_util.py",
+        "coredump_util.py",
     ],
     deps = [],
+)
+
+py_library(
+    name = "coredump_util",
+    srcs = ["coredump_util.py"],
+    visibility = ["//visibility:public"],
 )
 
 py_binary(

@@ -30,8 +30,8 @@ build --define=xft_use_icx=true
 build --define=frontend=false
 build --linkopt -ldl # exception backtrace
 build --define=NVSHMEM_DIR=/
-build --action_env PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260321"
-build --host_action_env PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260321"
+build --action_env PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260423"
+build --host_action_env PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260423"
 
 build:cuda --copt="-DENABLE_BF16=1"
 build:cuda --copt="-DBUILD_CUTLASS_MIXED_GEMM=ON"
@@ -170,8 +170,8 @@ build:rocm --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
 #build:rocm --copt="-DENABLE_PROF=1"
 build:rocm --action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/conda310/lib/:/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/"
 build:rocm --host_action_env LD_LIBRARY_PATH="/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/"
-build:rocm --action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260321"
-build:rocm --host_action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260321"
+build:rocm --action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260423"
+build:rocm --host_action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260423"
 build:rocm --copt="-DUSE_ROCM=1"
 build:rocm --copt="-DFORCE_NVSHMEM_API=1"
 build:rocm --copt="-DFLASHINFER_CUB_SUBTRACTLEFT_DEFINED"  # ROCm 7.2 hipcub uses SubtractLeft instead of FlagHeads

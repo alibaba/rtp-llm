@@ -1,9 +1,7 @@
 import concurrent.futures
-import glob
 import json
 import logging
 import os
-import subprocess
 import traceback
 import time
 
@@ -46,6 +44,7 @@ from smoke.remote_kvcm_server import RemoteKVCMServer
 from rtp_llm.utils.util import (
     str_to_bool,
 )
+from rtp_llm.test.utils.coredump_util import summarize_and_cleanup_coredumps
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 
@@ -61,60 +60,6 @@ def _iterate_modidfy_qr(origin: Dict[str, Any], new: Dict[str, Any]):
             _iterate_modidfy_qr(origin[key], new[key])
         else:
             origin[key] = new[key]
-
-
-def _summarize_and_cleanup_coredumps(output_dir: str) -> None:
-    """Scan output_dir for core dump files, write a summary log, then delete them."""
-    if not output_dir or not os.path.isdir(output_dir):
-        return
-    core_files = glob.glob(os.path.join(output_dir, "core-*")) + \
-                 glob.glob(os.path.join(output_dir, "core.*"))
-    if not core_files:
-        return
-
-    summary_path = os.path.join(output_dir, "coredump_summary.log")
-    total_size = 0
-    lines = [f"[COREDUMP_SUMMARY] Found {len(core_files)} core dump(s)\n"]
-    for path in sorted(core_files):
-        name = os.path.basename(path)
-        try:
-            size = os.path.getsize(path)
-        except OSError:
-            size = -1
-        total_size += max(size, 0)
-        size_mb = size / (1024 * 1024) if size >= 0 else -1
-
-        # Use `file` command to extract process name / signal info
-        file_info = ""
-        try:
-            result = subprocess.run(
-                ["file", path], capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode == 0:
-                file_info = result.stdout.strip()
-        except Exception:
-            file_info = "(file command failed)"
-
-        line = f"  {name}  size={size_mb:.1f}MB  info={file_info}"
-        lines.append(line)
-        logging.info(f"[COREDUMP_SUMMARY] {line}")
-
-    lines.append(f"\n[COREDUMP_SUMMARY] Total core dump size: {total_size / (1024*1024):.1f}MB")
-    lines.append("[COREDUMP_SUMMARY] Core dump files deleted to reduce artifact size.\n")
-
-    try:
-        with open(summary_path, "w") as f:
-            f.write("\n".join(lines))
-        logging.info(f"[COREDUMP_SUMMARY] Summary written to {summary_path}")
-    except OSError as e:
-        logging.warning(f"[COREDUMP_SUMMARY] Failed to write summary: {e}")
-
-    for path in core_files:
-        try:
-            os.remove(path)
-            logging.info(f"[COREDUMP_SUMMARY] Deleted {os.path.basename(path)}")
-        except OSError as e:
-            logging.warning(f"[COREDUMP_SUMMARY] Failed to delete {path}: {e}")
 
 
 class CaseRunner(object):
@@ -188,7 +133,7 @@ class CaseRunner(object):
                 self.remote_kvcm_server.copy_logs()
             return task_states
         finally:
-            _summarize_and_cleanup_coredumps(
+            summarize_and_cleanup_coredumps(
                 os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "")
             )
 
@@ -228,6 +173,33 @@ class CaseRunner(object):
         else:
             task_states = self._curl_server_impl(server_manager, self.task_info)
         return task_states
+
+    @staticmethod
+    def _resolve_endpoint(q_r: Dict[str, Any], task_endpoint: Optional[str]) -> str:
+        """Per-query endpoint resolution.
+
+        Queries that carry `prompt_batch` must hit `/batch_infer` so the engine
+        atomically enqueues the whole batch via BatchGenerateCall. Hitting the
+        default `/` endpoint splits them into independent FIFOScheduler streams,
+        which is non-deterministic for beam-search numerics.
+
+        `/batch_infer` is non-streaming only — `prompt_batch` queries with
+        `yield_generator: true` are rejected here so test data stays consistent
+        with what the endpoint can actually serve.
+        """
+        explicit = q_r.get("endpoint")
+        if explicit:
+            return explicit
+        query = q_r.get("query", {})
+        if "prompt_batch" in query:
+            if query.get("yield_generator"):
+                raise SmokeException(
+                    QueryStatus.VALID_FAILED,
+                    "prompt_batch queries must be non-streaming "
+                    "(set yield_generator=false); /batch_infer does not stream",
+                )
+            return "/batch_infer"
+        return task_endpoint or "/"
 
     @staticmethod
     def _get_comparer_cls(q_r: Dict[str, Any], request_endpoint: str) -> Type:
@@ -283,7 +255,7 @@ class CaseRunner(object):
 
         for iter_idx in range(repeat_count):
             for q_idx, q_r in enumerate(qr_array):
-                request_endpoint = q_r.get("endpoint", task_endpoint)
+                request_endpoint = self._resolve_endpoint(q_r, task_endpoint)
                 comparer_cls = self._get_comparer_cls(q_r, request_endpoint)
                 try:
                     comparer_cls(server_manager, request_endpoint, q_r, Tracer(), self.batch_infer).run()
@@ -343,7 +315,7 @@ class CaseRunner(object):
             q_r["_taskinfo_rel_path"] = task_info.taskinfo_rel_path
             q_r["_query_idx"] = q_idx
             tracer = Tracer()
-            request_endpoint = q_r.get("endpoint", task_endpoint)
+            request_endpoint = self._resolve_endpoint(q_r, task_endpoint)
             try:
                 comparer_cls = self._get_comparer_cls(q_r, request_endpoint)
                 comparer_cls(server_manager, request_endpoint, q_r, tracer, self.batch_infer).run()

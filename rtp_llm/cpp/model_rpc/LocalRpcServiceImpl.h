@@ -35,6 +35,12 @@ public:
         return local_server_->GenerateStreamCall(context, request, writer);
     }
 
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response) override {
+        return local_server_->BatchGenerateCall(context, request, response);
+    }
+
     ::grpc::Status
     GetWorkerStatus(::grpc::ServerContext* context, const StatusVersionPB* request, WorkerStatusPB* response) override {
         return local_server_->GetWorkerStatus(context, request, response);
