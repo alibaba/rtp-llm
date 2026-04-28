@@ -46,6 +46,27 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_cache_layer_region_utils",
+    srcs = [
+        "KVCacheLayerRegionUtils.cc",
+    ],
+    hdrs = [
+        "KVCacheLayerRegionUtils.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_types",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/engine_base/stream:generate_types",
+        "//rtp_llm/cpp/models:position_ids_generator",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_types",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)
+
+cc_library(
     name = "block_pool",
     srcs = [
         "BlockCache.cc",

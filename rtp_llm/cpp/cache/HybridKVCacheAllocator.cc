@@ -79,10 +79,45 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     const int seq_len        = malloc_info.complete_token_ids->seqLength();
     const int common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
 
-    const auto&  cache_keys         = kv_resource->cacheKeys(0);
-    int64_t      match_cost_time_us = 0;
-    const size_t reserve_blocks     = reserveBlockNum();
-    int          reuse_blocks       = 0;
+    const auto&                   cache_keys         = kv_resource->cacheKeys(0);
+    int64_t                       match_cost_time_us = 0;
+    const size_t                  reserve_blocks     = reserveBlockNum();
+    int                           reuse_blocks       = 0;
+    std::vector<BlockIndicesType> referenced_blocks(static_cast<size_t>(kv_resource->groupNums()));
+
+    auto valid_blocks_after = [](const BlockIndicesType& blocks, size_t begin) {
+        BlockIndicesType valid;
+        if (begin >= blocks.size()) {
+            return valid;
+        }
+        valid.reserve(blocks.size() - begin);
+        for (size_t i = begin; i < blocks.size(); ++i) {
+            if (!isNullBlockIdx(blocks[i])) {
+                valid.push_back(blocks[i]);
+            }
+        }
+        return valid;
+    };
+
+    auto rollback = [&](const std::vector<size_t>& original_sizes) {
+        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
+            auto& block_ids = kv_resource->mutableBlockIds(0, gid);
+            if (!original_sizes.empty() && static_cast<size_t>(gid) < original_sizes.size()
+                && block_ids.blocksNum() > original_sizes[static_cast<size_t>(gid)]) {
+                auto allocated = valid_blocks_after(block_ids.blocks(), original_sizes[static_cast<size_t>(gid)]);
+                block_ids.resize(original_sizes[static_cast<size_t>(gid)]);
+                if (!allocated.empty()) {
+                    freeBlocksInGroup(gid, allocated);
+                }
+            }
+            if (!referenced_blocks[static_cast<size_t>(gid)].empty()) {
+                freeBlocksInGroup(gid, referenced_blocks[static_cast<size_t>(gid)]);
+                referenced_blocks[static_cast<size_t>(gid)].clear();
+            }
+            block_ids.resize(0);
+        }
+        kv_resource->cacheResource(0).setDeviceReuseBlockNum(0);
+    };
 
     if (malloc_info.enable_device_cache) {
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
@@ -101,6 +136,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
             }
             if (!valid.empty()) {
                 referenceBlocksInGroup(gid, valid);
+                referenced_blocks[static_cast<size_t>(gid)] = std::move(valid);
             }
         }
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
@@ -118,14 +154,20 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                                  available_blocks,
                                  reserve_blocks);
             }
+            rollback({});
             return {false, 0};
         }
     }
 
+    std::vector<size_t> original_sizes(static_cast<size_t>(kv_resource->groupNums()));
+    for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
+        original_sizes[static_cast<size_t>(gid)] = kv_resource->blocksNum(0, gid);
+    }
     for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
         auto& block_ids_0 = kv_resource->mutableBlockIds(0, gid);
         if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
                 block_ids_0, common_seq_len, malloc_info.reuse_cache, 0)) {
+            rollback(original_sizes);
             return {false, 0};
         }
     }

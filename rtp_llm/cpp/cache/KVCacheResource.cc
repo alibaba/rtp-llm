@@ -121,6 +121,13 @@ void KVCacheResource::initGroups(int                                  group_num,
     layer_block_ids.clear();
     layer_region_block_ids.clear();
 
+    RTP_LLM_CHECK_WITH_INFO(group_types.empty() || group_types.size() >= static_cast<size_t>(group_num),
+                            "KVCacheResource::initGroups: group_types size %zu < group_num %d",
+                            group_types.size(),
+                            group_num);
+    RTP_LLM_CHECK_WITH_INFO(!group_types.empty() || layer_region_to_group_id.empty(),
+                            "KVCacheResource::initGroups: group_types must be explicit for typed layer-region mapping");
+
     group_block_ids.reserve(static_cast<size_t>(group_num));
     for (int i = 0; i < group_num; i++) {
         const bool   is_full = group_types.empty() || group_types[static_cast<size_t>(i)] == CacheGroupType::FULL;
@@ -158,6 +165,7 @@ void KVCacheResource::initGroups(int                                  group_num,
                                         layer_num);
                 const auto&  dense_groups = layer_region_to_group_id[static_cast<size_t>(layer)];
                 const size_t n            = std::min(region_name_count, dense_groups.size());
+                bool         has_region   = false;
                 for (size_t attn = 0; attn < n; ++attn) {
                     const int gid = dense_groups[attn];
                     if (gid < 0) {
@@ -171,7 +179,10 @@ void KVCacheResource::initGroups(int                                  group_num,
                         attn,
                         group_num);
                     attn_blocks[attn] = group_block_ids[static_cast<size_t>(gid)];
+                    has_region        = true;
                 }
+                RTP_LLM_CHECK_WITH_INFO(
+                    has_region, "KVCacheResource::initGroups: missing layer-region mapping for layer %d", layer);
             } else {
                 attn_blocks[static_cast<size_t>(KVCacheRegionName::DEFAULT)] =
                     layer_block_ids[static_cast<size_t>(layer)];

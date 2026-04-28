@@ -11,6 +11,7 @@
 #include "autil/LockFreeThreadPool.h"
 #include <torch/torch.h>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheLayerRegionUtils.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -56,12 +57,6 @@ public:
     std::vector<CacheKeyType> cacheKeys() const;
 
 private:
-    struct LayerRegionSlot {
-        int               layer_id{-1};
-        KVCacheRegionName region_name{KVCacheRegionName::DEFAULT};
-        int               group_id{-1};
-        size_t            stride_bytes{0};
-    };
     struct CopyInfoPerKey {
         CacheKeyType              cache_key{0};
         BlockIdxType              mem_block{NULL_BLOCK_IDX};
@@ -110,11 +105,9 @@ private:
     void                         checkLayerBlockStrideBytes() const;
     std::vector<LayerRegionSlot> layerRegionSlots() const;
     bool                         hasTypedLayerRegionSlots(const std::vector<LayerRegionSlot>& slots) const;
-    bool                         checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
     bool                         checkLayerRegionBlocks(const LayerRegionBlockIds&          layer_region_block_ids,
                                                         const std::vector<LayerRegionSlot>& slots,
                                                         size_t                              required_len) const;
-    bool                         gpuBlocksAllValid(const LayerBlockIds& layer_block_ids, size_t key_index) const;
     bool                         gpuBlocksAllValid(const LayerRegionBlockIds&          layer_region_block_ids,
                                                    const std::vector<LayerRegionSlot>& slots,
                                                    size_t                              key_index) const;

@@ -25,9 +25,7 @@ using namespace std;
 
 namespace rtp_llm {
 
-namespace {
-
-torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
+static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
     if (!layout_opt.has_value() || layout_opt->layer_region_to_group_id.empty()) {
         return torch::Tensor();
     }
@@ -51,8 +49,6 @@ torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& la
     }
     return tensor;
 }
-
-}  // namespace
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
@@ -516,8 +512,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
-        if (device_props_.enable_prefill_cp && has_context_request) {
+        if (device_props_.enable_prefill_cp) {
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }

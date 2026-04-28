@@ -7,6 +7,7 @@
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/BlockCache.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -57,6 +58,7 @@ static CacheConfig makeTinyHybridConfig() {
     config.cache_specs      = {linear_spec, full_spec};
     config.linear_group_num = 1;
     config.full_group_num   = 1;
+    config.group_types      = {CacheGroupType::LINEAR, CacheGroupType::FULL};
 
     // Physical block strides: take max between full and linear.
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
@@ -595,6 +597,73 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
 
     // Cleanup.
     block_pool->requestFree(keep);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, InitMallocRollbackReleasesReferencedReuseBlocksOnReserveReject) {
+    auto config      = makeTinyHybridConfig();
+    config.block_num = 8;
+    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool  = allocator->getBlockPool();
+    auto block_cache = block_pool->blockCache();
+    ASSERT_NE(block_pool, nullptr);
+    ASSERT_NE(block_cache, nullptr);
+
+    const int gid_linear = 0;
+    const int gid_full   = 1;
+    auto      full_blocks =
+        allocateAndCache(block_pool, block_cache, gid_full, CacheKeysType{100, 101}, /*is_resident=*/true);
+    auto linear_blocks =
+        allocateAndCache(block_pool, block_cache, gid_linear, CacheKeysType{101}, /*is_resident=*/true);
+    ASSERT_EQ(full_blocks.size(), 2u);
+    ASSERT_EQ(linear_blocks.size(), 1u);
+
+    const auto request_refs_before = allocator->requestRefBlocksNum();
+    const auto free_before         = allocator->freeBlocksNum();
+    allocator->setReserveBlockNum(allocator->availableBlocksNum());
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_to_group_id=*/config.layer_to_group_id,
+                                       CacheKeysType{100, 101, 102});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+
+    MallocInfo info{batch_res, token_ids};
+    info.enable_device_cache = true;
+    info.reuse_cache         = true;
+    auto result              = allocator->malloc(info);
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.reuse_len, 0);
+
+    EXPECT_EQ(batch_res->blocksNum(0, gid_linear), 0);
+    EXPECT_EQ(batch_res->blocksNum(0, gid_full), 0);
+    EXPECT_EQ(batch_res->cacheResource(0).reuseBlockNum(), 0u);
+    EXPECT_EQ(allocator->requestRefBlocksNum(), request_refs_before);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, HybridPoolAllocatorRejectsMissingGroupTypes) {
+    auto config = makeTinyHybridConfig();
+    config.group_types.clear();
+
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    EXPECT_ANY_THROW((void)allocator->init());
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, HybridPoolAllLayerCacheBaseRejectsTypedMappingWithoutRegionNames) {
+    auto config = makeTinyHybridConfig();
+    config.layer_region_to_group_id.assign(config.layer_all_num,
+                                           std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    for (size_t layer = 0; layer < config.layer_all_num; ++layer) {
+        config.layer_region_to_group_id[layer][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
+    }
+    config.group_region_names.clear();
+
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+    EXPECT_ANY_THROW((void)allocator->allLayerCacheBase());
 }
 
 }  // namespace test

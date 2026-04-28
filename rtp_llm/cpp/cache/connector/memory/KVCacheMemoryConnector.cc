@@ -1,7 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 
-#include <algorithm>
-
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
@@ -110,66 +108,12 @@ void KVCacheMemoryConnector::initBlockPool() {
     RTP_LLM_CHECK_WITH_INFO(block_pool_ != nullptr, "init block pool failed, create block pool failed");
 }
 
-std::vector<KVCacheMemoryConnector::LayerRegionSlot> KVCacheMemoryConnector::layerRegionSlots() const {
-    std::vector<LayerRegionSlot> slots;
-    const size_t                 layer_num         = cache_config_.layer_all_num;
-    const size_t                 region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
-
-    auto group_stride = [this](int gid, int layer_id) -> size_t {
-        if (gid >= 0 && static_cast<size_t>(gid) < cache_config_.group_kv_block_stride_bytes.size()) {
-            const size_t kv_stride    = cache_config_.group_kv_block_stride_bytes[static_cast<size_t>(gid)];
-            const size_t scale_stride = static_cast<size_t>(gid) < cache_config_.group_kv_scale_stride_bytes.size() ?
-                                            cache_config_.group_kv_scale_stride_bytes[static_cast<size_t>(gid)] :
-                                            0;
-            if (kv_stride + scale_stride > 0) {
-                return kv_stride + scale_stride;
-            }
-        }
-        if (layer_id >= 0 && static_cast<size_t>(layer_id) < cache_config_.layer_to_block_stride_bytes.size()) {
-            return static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)]);
-        }
-        return cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
-    };
-
-    for (size_t layer = 0; layer < layer_num; ++layer) {
-        bool has_typed_slot = false;
-        if (layer < cache_config_.layer_region_to_group_id.size()) {
-            const auto&  dense = cache_config_.layer_region_to_group_id[layer];
-            const size_t n     = std::min(region_name_count, dense.size());
-            for (size_t attn = 0; attn < n; ++attn) {
-                const int gid = dense[attn];
-                if (gid < 0) {
-                    continue;
-                }
-                slots.push_back(LayerRegionSlot{static_cast<int>(layer),
-                                                static_cast<KVCacheRegionName>(attn),
-                                                gid,
-                                                group_stride(gid, static_cast<int>(layer))});
-                has_typed_slot = true;
-            }
-        }
-        if (!has_typed_slot) {
-            int gid = 0;
-            if (layer < cache_config_.layer_to_group_id.size() && cache_config_.layer_to_group_id[layer] >= 0) {
-                gid = cache_config_.layer_to_group_id[layer];
-            }
-            slots.push_back(LayerRegionSlot{
-                static_cast<int>(layer), KVCacheRegionName::DEFAULT, gid, group_stride(gid, static_cast<int>(layer))});
-        }
-    }
-    return slots;
+std::vector<LayerRegionSlot> KVCacheMemoryConnector::layerRegionSlots() const {
+    return buildLayerRegionSlots(cache_config_, cache_config_.layer_all_num);
 }
 
 bool KVCacheMemoryConnector::hasTypedLayerRegionSlots(const std::vector<LayerRegionSlot>& slots) const {
-    if (slots.size() != cache_config_.layer_all_num) {
-        return true;
-    }
-    for (size_t i = 0; i < slots.size(); ++i) {
-        if (slots[i].layer_id != static_cast<int>(i) || slots[i].region_name != KVCacheRegionName::DEFAULT) {
-            return true;
-        }
-    }
-    return false;
+    return rtp_llm::hasTypedLayerRegionSlots(slots, cache_config_.layer_all_num);
 }
 
 std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResource>& resource,
@@ -240,16 +184,6 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
                      cache_keys_size);
     reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
     return std::make_shared<MemoryAsyncMatchContext>(matched_num);
-}
-
-bool KVCacheMemoryConnector::gpuBlocksAllValid(const LayerBlockIds& layer_block_ids, size_t key_index) const {
-    for (size_t layer = 0; layer < cache_config_.layer_all_num; ++layer) {
-        const auto& blocks = layer_block_ids.at(layer)->blocks();
-        if (isNullBlockIdx(blocks.at(key_index))) {
-            return false;
-        }
-    }
-    return true;
 }
 
 bool KVCacheMemoryConnector::gpuBlocksAllValid(const LayerRegionBlockIds&          layer_region_block_ids,
@@ -754,35 +688,6 @@ bool KVCacheMemoryConnector::appendCopyBytesToBuffers(const BlockInfo&          
     } else {
         src.push_back(gpu_tensor);
         dst.push_back(mem_tensor);
-    }
-    return true;
-}
-
-bool KVCacheMemoryConnector::checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const {
-    if (layer_block_ids.empty()) {
-        RTP_LLM_LOG_WARNING(
-            "check layer blocks failed, layer_block_ids is empty (required_len=%zu, layer_block_ids.size=%zu)",
-            required_len,
-            layer_block_ids.size());
-        return false;
-    }
-
-    const auto layer_num = cache_config_.layer_all_num;
-    if (layer_block_ids.size() != layer_num) {
-        RTP_LLM_LOG_WARNING(
-            "check layer blocks failed, layer block ids size is not equal to layer num, layer block ids size: %zu, layer num: %zu",
-            layer_block_ids.size(),
-            layer_num);
-        return false;
-    }
-    for (const auto& blocks : layer_block_ids) {
-        if (blocks->blocksNum() < required_len) {
-            RTP_LLM_LOG_WARNING(
-                "check layer blocks failed, layer blocksNum is less than required_len, blocksNum: %zu, required_len: %zu",
-                blocks->blocksNum(),
-                required_len);
-            return false;
-        }
     }
     return true;
 }

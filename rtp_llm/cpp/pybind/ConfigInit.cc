@@ -380,7 +380,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.pool_ratio);
             },
             [](py::tuple t) {
-                if (t.size() < 45)
+                if (t.size() != 46)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -429,8 +429,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_client_config                   = t[42].cast<std::string>();
                     c.ssm_state_dtype                      = t[43].cast<std::string>();
                     c.enable_independent_pool              = t[44].cast<bool>();
-                    if (t.size() > 45)
-                        c.pool_ratio = t[45].cast<std::string>();
+                    c.pool_ratio                           = t[45].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }

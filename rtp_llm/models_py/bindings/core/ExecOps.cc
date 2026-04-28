@@ -191,6 +191,9 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         max_blocks_per_batch         = group_offset_view.size(1);
         offset_addr                  = group_offset_view.data_ptr<int32_t>();
     } else {
+        gid = mapped_group_id();
+        RTP_LLM_CHECK_WITH_INFO(
+            gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
         max_blocks_per_batch = param.host_kv_cache_offset.size(1);
         offset_addr          = param.host_kv_cache_offset.data_ptr<int32_t>();
     }

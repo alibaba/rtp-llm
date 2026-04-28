@@ -177,7 +177,9 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:kv_cache_layer_region_utils",
+    ],
     env = {},
     exec_properties = {'gpu':'H20'},
 )

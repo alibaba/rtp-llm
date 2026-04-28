@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheLayerRegionUtils.h"
 
 namespace rtp_llm {
 namespace test {
@@ -80,6 +81,100 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
 
     ASSERT_EQ(resource.blocks(1), (BlockIndicesType{1}));
     ASSERT_EQ(resource.kernelBlocks(1), (BlockIndicesType{1}));
+}
+
+TEST(KVCacheResourceTest, InitGroups_RejectsTypedMappingWithoutExplicitGroupTypes) {
+    KVCacheResource               resource;
+    std::vector<std::vector<int>> layer_region_to_group_id(
+        1, std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
+
+    EXPECT_ANY_THROW(resource.initGroups(/*group_num=*/1,
+                                         /*layer_num=*/1,
+                                         /*layer_to_group_id=*/{0},
+                                         /*kernel_blocks_per_kv_block=*/1,
+                                         /*group_types=*/{},
+                                         layer_region_to_group_id));
+}
+
+TEST(KVCacheResourceTest, InitGroups_RejectsMissingTypedRegionForLayer) {
+    KVCacheResource               resource;
+    std::vector<std::vector<int>> layer_region_to_group_id(
+        2, std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
+
+    EXPECT_ANY_THROW(resource.initGroups(/*group_num=*/1,
+                                         /*layer_num=*/2,
+                                         /*layer_to_group_id=*/{0, 0},
+                                         /*kernel_blocks_per_kv_block=*/1,
+                                         /*group_types=*/{CacheGroupType::FULL},
+                                         layer_region_to_group_id));
+}
+
+TEST(KVCacheLayerRegionUtilsTest, BuildsDefaultLayerSlotsAndSingleGroupDefaultType) {
+    CacheConfig config;
+    config.layer_all_num = 2;
+    config.cache_specs.resize(1);
+    config.layer_to_group_id           = {0, 0};
+    config.layer_to_block_stride_bytes = {64, 96};
+
+    auto slots = buildLayerRegionSlots(config, config.layer_all_num);
+    ASSERT_EQ(slots.size(), 2u);
+    EXPECT_EQ(slots[0].layer_id, 0);
+    EXPECT_EQ(slots[0].region_name, KVCacheRegionName::DEFAULT);
+    EXPECT_EQ(slots[0].group_id, 0);
+    EXPECT_EQ(slots[0].stride_bytes, 64u);
+    EXPECT_EQ(slots[1].layer_id, 1);
+    EXPECT_EQ(slots[1].stride_bytes, 96u);
+    EXPECT_FALSE(hasTypedLayerRegionSlots(slots, config.layer_all_num));
+    EXPECT_EQ(cacheGroupTypeForGroup(config, 0), CacheGroupType::FULL);
+}
+
+TEST(KVCacheLayerRegionUtilsTest, BuildsTypedLayerRegionSlotsWithGroupStride) {
+    CacheConfig config;
+    config.layer_all_num = 2;
+    config.cache_specs.resize(2);
+    config.group_types                 = {CacheGroupType::FULL, CacheGroupType::LINEAR};
+    config.group_region_names          = {KVCacheRegionName::CSA_KV, KVCacheRegionName::SWA_KV};
+    config.group_kv_block_stride_bytes = {16, 32};
+    config.group_kv_scale_stride_bytes = {1, 2};
+    config.layer_region_to_group_id.assign(config.layer_all_num,
+                                           std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    for (size_t layer = 0; layer < config.layer_all_num; ++layer) {
+        config.layer_region_to_group_id[layer][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
+        config.layer_region_to_group_id[layer][static_cast<size_t>(KVCacheRegionName::SWA_KV)] = 1;
+    }
+
+    auto slots = buildLayerRegionSlots(config, config.layer_all_num);
+    ASSERT_EQ(slots.size(), 4u);
+    EXPECT_EQ(slots[0].layer_id, 0);
+    EXPECT_EQ(slots[0].region_name, KVCacheRegionName::CSA_KV);
+    EXPECT_EQ(slots[0].group_id, 0);
+    EXPECT_EQ(slots[0].stride_bytes, 17u);
+    EXPECT_EQ(slots[1].region_name, KVCacheRegionName::SWA_KV);
+    EXPECT_EQ(slots[1].group_id, 1);
+    EXPECT_EQ(slots[1].stride_bytes, 34u);
+    EXPECT_TRUE(hasTypedLayerRegionSlots(slots, config.layer_all_num));
+    EXPECT_EQ(cacheGroupTypeForGroup(config, 1), CacheGroupType::LINEAR);
+}
+
+TEST(KVCacheLayerRegionUtilsTest, RejectsIncompleteTypedConfigAndMissingStride) {
+    CacheConfig config;
+    config.layer_all_num = 2;
+    config.cache_specs.resize(2);
+    config.group_region_names = {KVCacheRegionName::CSA_KV, KVCacheRegionName::SWA_KV};
+    config.layer_region_to_group_id.assign(config.layer_all_num,
+                                           std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    config.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
+
+    EXPECT_ANY_THROW(buildLayerRegionSlots(config, config.layer_all_num));
+
+    config.layer_region_to_group_id[1][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
+    EXPECT_ANY_THROW(buildLayerRegionSlots(config, config.layer_all_num));
+
+    config.group_kv_block_stride_bytes = {16};
+    config.group_kv_scale_stride_bytes = {0};
+    EXPECT_ANY_THROW(cacheGroupTypeForGroup(config, 1));
 }
 
 TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {

@@ -119,10 +119,14 @@ struct KVCache {
     }
 
     LayerKVCache getLayerCache(int idx, rtp_llm::KVCacheRegionName region_name) {
-        if (region_name == rtp_llm::KVCacheRegionName::DEFAULT || kv_cache_base_by_layer_attn.empty()) {
+        if (region_name == rtp_llm::KVCacheRegionName::DEFAULT) {
             auto layer_cache        = getLayerCache(idx);
             layer_cache.region_name = region_name;
             return layer_cache;
+        }
+        if (kv_cache_base_by_layer_attn.empty()) {
+            throw std::runtime_error("Typed KV cache layout is empty for region "
+                                     + std::to_string(static_cast<int>(region_name)));
         }
 
         const auto layer = static_cast<size_t>(idx);

@@ -36,9 +36,10 @@ bool HybridPoolKVCacheAllocator::doInit() {
         auto        spec = config_.cache_specs[static_cast<size_t>(gid)];
 
         KVCacheGroupPtr group;
-        const auto      group_type = (gid < static_cast<int>(config_.group_types.size())) ?
-                                         config_.group_types[static_cast<size_t>(gid)] :
-                                         CacheGroupType::FULL;
+        RTP_LLM_CHECK_WITH_INFO(gid < static_cast<int>(config_.group_types.size()),
+                                "missing group type for group %d in HybridPoolKVCacheAllocator",
+                                gid);
+        const auto group_type = config_.group_types[static_cast<size_t>(gid)];
         if (group_type == CacheGroupType::LINEAR) {
             group = std::make_shared<LinearKVCacheGroup>(ids, spec, group_pool, gid, config_.linear_step);
             linear_group_ids_.push_back(gid);
@@ -115,6 +116,14 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     layout.group_types              = config_.group_types;
     layout.group_region_names       = config_.group_region_names;
     layout.layer_group_types        = config_.layer_group_types;
+
+    const bool has_typed_mapping = !config_.layer_region_to_group_id.empty();
+    if (has_typed_mapping) {
+        RTP_LLM_CHECK_WITH_INFO(config_.group_region_names.size() == kv_cache_groups_.size(),
+                                "group_region_names size %zu != group num %zu for typed layer-region mapping",
+                                config_.group_region_names.size(),
+                                kv_cache_groups_.size());
+    }
 
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
