@@ -65,7 +65,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     torch::Tensor do_sample =
         torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
-    int           stream_idx = 0;
+    int stream_idx = 0;
     for (const GenerateStreamPtr& stream : streams) {
         do_sample[stream_idx] = !stream->generateConfig()->top1();
         stream_idx++;
@@ -179,6 +179,10 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     output_token_ids_d.index_put_({output_token_ids_d == -1}, 0);
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
+
+    sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
+    sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
+    sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
 
 void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample_output,

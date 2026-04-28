@@ -108,6 +108,11 @@ protected:
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t);
 
+    bool useMtpDeviceInput() const;
+    bool checkMtpDeviceInput() const;
+    void ensureMtpModelInputsOnCuda(GptModelInputs& model_input, const char* tag);
+    void checkMtpModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
+
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,
                         std::list<GenerateStreamPtr>&       decode_streams);

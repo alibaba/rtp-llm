@@ -10,9 +10,25 @@
 using namespace torch_ext;
 
 namespace rtp_llm {
-static const int                                      MIN_CACHE_PAGE_NUM        = 1024 * 1024;
-static const int                                      MIN_CACHE_BATCH_SIZE      = 256;
-static const int                                      MIN_CACHE_INPUT_TOKEN_NUM = 512;
+static const int MIN_CACHE_PAGE_NUM        = 1024 * 1024;
+static const int MIN_CACHE_BATCH_SIZE      = 256;
+static const int MIN_CACHE_INPUT_TOKEN_NUM = 512;
+
+namespace {
+
+torch::Tensor toHostContiguousI32(const torch::Tensor& tensor) {
+    if (!tensor.defined()) {
+        return tensor;
+    }
+    auto host_tensor = tensor.is_cuda() ? tensor.cpu() : tensor;
+    if (host_tensor.scalar_type() != torch::kInt32) {
+        host_tensor = host_tensor.to(torch::kInt32);
+    }
+    return host_tensor.is_contiguous() ? host_tensor : host_tensor.contiguous();
+}
+
+}  // namespace
+
 std::tuple<torch::Tensor, std::vector<torch::Tensor>> FlashInferMlaAttnParams::allocateManyBuffer(
     const std::vector<std::vector<int64_t>>& shapes, bool is_device, torch::ScalarType dtype) {
     std::vector<torch::Tensor> tensors;
@@ -406,14 +422,19 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
                                          torch::Tensor t_kv_cache_block_id_host,
                                          int           seq_size_per_block,
                                          bool          forbid_realloc) {
-    const int batch_size = t_input_lengths.size(0);
+    auto t_prefix_lengths_host   = toHostContiguousI32(t_prefix_lengths);
+    auto t_sequence_lengths_host = toHostContiguousI32(t_sequence_lengths);
+    auto t_input_lengths_host    = toHostContiguousI32(t_input_lengths);
+
+    const int batch_size = t_input_lengths_host.size(0);
 
     // First pass: calculate required sizes accurately
-    auto input_lengths_ptr = t_input_lengths.data_ptr<int32_t>();
-    auto prefix_lengths_ptr =
-        t_prefix_lengths.defined() && t_prefix_lengths.size(0) > 0 ? t_prefix_lengths.data_ptr<int32_t>() : nullptr;
-    auto sequence_lengths_ptr = t_sequence_lengths.defined() && t_sequence_lengths.size(0) > 0 ?
-                                    t_sequence_lengths.data_ptr<int32_t>() :
+    auto input_lengths_ptr    = t_input_lengths_host.data_ptr<int32_t>();
+    auto prefix_lengths_ptr   = t_prefix_lengths_host.defined() && t_prefix_lengths_host.size(0) > 0 ?
+                                    t_prefix_lengths_host.data_ptr<int32_t>() :
+                                    nullptr;
+    auto sequence_lengths_ptr = t_sequence_lengths_host.defined() && t_sequence_lengths_host.size(0) > 0 ?
+                                    t_sequence_lengths_host.data_ptr<int32_t>() :
                                     nullptr;
 
     int input_token_num       = 0;
@@ -440,9 +461,9 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     ensureTensorSize(batch_size, input_token_num, page_num, reuse_page_num, batch_reuse_info_size, forbid_realloc);
 
     // Fill params directly into HOST tensors
-    fillParamsInternal(t_prefix_lengths,
-                       t_sequence_lengths,
-                       t_input_lengths,
+    fillParamsInternal(t_prefix_lengths_host,
+                       t_sequence_lengths_host,
+                       t_input_lengths_host,
                        t_kv_cache_block_id_host,
                        batch_size,
                        seq_size_per_block,

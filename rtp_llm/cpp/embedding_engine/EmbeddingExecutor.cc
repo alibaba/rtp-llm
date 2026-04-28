@@ -88,6 +88,22 @@ void EmbeddingExecutor::init_position_ids(int max_seq_len) {
     max_position_ids_tensor_ = torch::arange(max_seq_len, torch::kInt32);
 }
 
+namespace {
+torch::Tensor toCudaInt32ModelInput(const torch::Tensor& tensor) {
+    if (!tensor.defined()) {
+        return tensor;
+    }
+    auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    if (tensor.is_cuda() && tensor.scalar_type() == torch::kInt32) {
+        return tensor;
+    }
+    if (tensor.numel() == 0) {
+        return torch::empty(tensor.sizes(), options);
+    }
+    return tensor.to(options);
+}
+}  // namespace
+
 absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const {
     int64_t token_num  = 0;
     int64_t batch_size = 0;
@@ -190,6 +206,12 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         model_input.need_moe_gating = true;
     }
     reportMetrics(batch_size, token_num, max_seq_len);
+    // TODO(async): embedding streams are still gathered through CPU pointers,
+    // but the model-facing GptModelInputs metadata should be CUDA resident.
+    model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
+    model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
+    model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
+    model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
     return model_input;
 }
 

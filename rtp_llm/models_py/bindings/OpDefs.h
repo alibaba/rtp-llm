@@ -195,11 +195,8 @@ struct PyAttentionInputs {
 
     std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;
     bool                                       is_s_padded = false;
-    // Device-side mirrors of host tensors, managed by C++ for fused D2D copy in CUDA graph.
-    torch::Tensor prefix_lengths_d;
-    torch::Tensor sequence_lengths_plus_1_d;
-    torch::Tensor input_lengths_d;
-    torch::Tensor decode_cu_seqlens_d;
+    torch::Tensor                              sequence_lengths_plus_1_d;
+    torch::Tensor                              decode_cu_seqlens_d;
 
     // CUDA Graph mode flags
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
