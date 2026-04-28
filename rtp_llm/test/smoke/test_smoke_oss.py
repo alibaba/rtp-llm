@@ -24,6 +24,11 @@ smoke_dir = str(Path(os.path.dirname(os.path.realpath(__file__))).parent)
 if smoke_dir not in sys.path:
     sys.path.insert(0, smoke_dir)
 
+# Tell common_def to resolve REL_PATH against the OSS data tree
+# (rtp_llm/test/smoke/data/) even when internal_source/ is also present.
+# Must be set BEFORE the first `from smoke.common_def import ...`.
+os.environ.setdefault("SMOKE_REL_PATH_PREFER", "oss")
+
 import pytest  # noqa: E402
 from smoke.case_runner import CaseRunner  # noqa: E402
 from smoke.common_def import REL_PATH  # noqa: E402

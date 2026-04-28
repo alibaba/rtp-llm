@@ -6,10 +6,17 @@ from pydantic import BaseModel
 
 WORLD_SIZE = "WORLD_SIZE"
 
-_CANDIDATES = [
-    "internal_source/rtp_llm/test/smoke",
-    "rtp_llm/test/smoke",
-]
+# OSS and internal smoke share comparer code but have separate data trees.
+# When BOTH internal_source/rtp_llm/test/smoke/ and rtp_llm/test/smoke/ exist,
+# the previous "first hit wins" rule misrouted OSS task_info paths to the
+# internal data dir. Entry scripts (test_smoke_oss.py / test_smoke_internal.py)
+# set SMOKE_REL_PATH_PREFER before importing this module to bias the choice.
+_PREFER = os.environ.get("SMOKE_REL_PATH_PREFER", "")
+_CANDIDATES = (
+    ["rtp_llm/test/smoke", "internal_source/rtp_llm/test/smoke"]
+    if _PREFER == "oss"
+    else ["internal_source/rtp_llm/test/smoke", "rtp_llm/test/smoke"]
+)
 REL_PATH = next((p for p in _CANDIDATES if os.path.isdir(p)),
                 os.path.dirname(os.path.realpath(__file__)))
 

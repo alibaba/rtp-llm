@@ -280,9 +280,13 @@ def _collect_repo_runtime_files(rootdir: Path) -> List[str]:
 
 
 def _collect_smoke_files(rootdir: Path) -> List[str]:
-    """Smoke test golden data."""
+    """Smoke test golden data — OSS tree + internal tree, both shipped."""
     files: List[str] = []
     for pattern in (
+        "rtp_llm/test/smoke/data/**/*.json",
+        "rtp_llm/test/smoke/data/**/*.pt",
+        "rtp_llm/test/smoke/data/**/*.jpg",
+        "rtp_llm/test/smoke/data/**/*.mp4",
         "internal_source/rtp_llm/test/smoke/data/**/*.json",
         "internal_source/rtp_llm/test/smoke/data/**/*.pt",
         "internal_source/rtp_llm/test/smoke/data/**/*.jpg",
