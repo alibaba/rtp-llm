@@ -76,7 +76,13 @@ public:
     explicit StepWindowProfiler(const std::string& default_output_dir = "", int world_rank = 0);
     ~StepWindowProfiler();
 
-    // Called from gRPC/API thread to configure a profiling session.
+    // Configure a profiling session. Safe to call from any thread (sets atomic state).
+    // The actual profiler start happens inside tick() (on the engine loop thread),
+    // satisfying Kineto thread-affinity. If a session is already active, this is a no-op
+    // (first-come-first-served).
+    //
+    // For in-step capture: the engine loop can call configure(start_step=0) and then
+    // tick() BEFORE process() to start the profiler before the work runs.
     void configure(bool enable, const std::string& trace_name, int start_step, int num_steps);
 
     // Called once per engine step() on the engine loop thread.

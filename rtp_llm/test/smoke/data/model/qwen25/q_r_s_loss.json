@@ -32,8 +32,7 @@
                     "top_k": 1,
                     "top_p": 0,
                     "calculate_loss": 2
-                },
-                "yield_generator": true
+                }
             },
             "result": {
                 "response_batch": [

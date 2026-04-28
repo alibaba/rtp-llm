@@ -29,8 +29,7 @@
                     "max_new_tokens": 10,
                     "top_k": 1,
                     "top_p": 0
-                },
-                "yield_generator": true
+                }
             },
             "result": {
                 "response_batch": [

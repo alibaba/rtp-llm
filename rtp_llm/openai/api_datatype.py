@@ -180,6 +180,14 @@ class ChatCompletionRequest(BaseModel):
             return False
 
 
+class BatchChatCompletionRequest(BaseModel):
+    requests: List[ChatCompletionRequest]
+
+
+class BatchChatCompletionResponse(BaseModel):
+    responses: List[Any] = []
+
+
 class CompletionTokensDetails(BaseModel):
     audio_tokens: Optional[int] = None
     reasoning_tokens: Optional[int] = None

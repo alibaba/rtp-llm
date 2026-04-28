@@ -552,3 +552,76 @@ class Pipeline(object):
                         sum(output_lens) / len(output_lens),
                     )
                 break
+
+    @torch.inference_mode()
+    async def batch_infer(
+        self,
+        prompts: List[str],
+        base_request_id: int,
+        generate_config_json: dict,
+        generate_env_config=None,
+        **kwargs: Any
+    ) -> List[GenerateResponse]:
+        generate_config = self.create_generate_config(
+            generate_config_json,
+            len(self.tokenizer),
+            self._special_tokens,
+            self.tokenizer,
+            generate_env_config=generate_env_config,
+            **kwargs
+        )
+        generate_config.is_streaming = False
+
+        inputs = []
+        for i, prompt in enumerate(prompts):
+            if len(prompt) == 0:
+                raise FtRuntimeException(
+                    ExceptionType.EMPTY_PROMPT_ERROR,
+                    "prompt should have at least one token!",
+                )
+            token_ids = self.tokenizer.encode(prompt)
+
+            if generate_config.sp_advice_prompt != "":
+                generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
+                    generate_config.sp_advice_prompt
+                )
+
+            input_tensor = torch.tensor(token_ids, dtype=torch.int)
+            gen_input = GenerateInput(
+                request_id=base_request_id + i,
+                token_ids=input_tensor,
+                mm_inputs=[],
+                generate_config=generate_config,
+                tokenizer=self.tokenizer,
+            )
+            inputs.append(gen_input)
+
+        batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
+
+        stop_word_strs = generate_config.stop_words_str
+        stop_word_str_slices = get_stop_word_slices(stop_word_strs)
+        stop_word_ids = generate_config.stop_words_list
+        stop_word_id_slices = get_stop_word_slices(stop_word_ids)
+
+        responses = []
+        for i, outputs in enumerate(batch_outputs):
+            (
+                generate_texts,
+                output_lens,
+                _,
+            ) = self.decode_non_incremental_tokens(
+                generate_config,
+                outputs,
+                stop_word_strs,
+                stop_word_str_slices,
+                stop_word_ids,
+                stop_word_id_slices,
+                [],
+            )
+            responses.append(
+                GenerateResponse(
+                    generate_outputs=outputs,
+                    generate_texts=generate_texts,
+                )
+            )
+        return responses

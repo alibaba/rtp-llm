@@ -78,57 +78,81 @@ class GrpcClientWrapper:
             }
 
     async def get_cache_status(self, query_params: Dict[str, Any]) -> Dict[str, Any]:
-        """Get cache status from gRPC server"""
-        try:
-            start_time = time.time() * 1000
-            await self._ensure_connection()
-            request = pb2.CacheVersionPB(
-                latest_cache_version=query_params.get("latest_cache_version", -1),
-                need_cache_keys=query_params.get("need_cache_keys", True),
-            )
-            response = await self.stub.GetCacheStatus(request, timeout=1)
-            # Convert response to dict format expected by frontend
-            result = MessageToDict(
-                response,
-                preserving_proto_field_name=True,
-                including_default_value_fields=True,
-            )
-            kmonitor.report(AccMetrics.CACHE_STATUS_QPS_METRIC, 1)
-            kmonitor.report(
-                GaugeMetrics.CACHE_STATUS_QPS_LATENCY_METRIC,
-                time.time() * 1000 - start_time,
-            )
-            return result
+        """Get cache status from all DP backends.
 
-        except Exception as e:
-            logging.error(f"Get cache status failed: {e}")
-            return {"error": f"Failed to get cache status: {str(e)}"}
+        Returns a list of per-DP results under the ``"results"`` key.
+        If no backend is reachable, returns ``{"error": ...}``.
+        """
+        start_time = time.time() * 1000
+        request = pb2.CacheVersionPB(
+            latest_cache_version=query_params.get("latest_cache_version", -1),
+            need_cache_keys=query_params.get("need_cache_keys", True),
+        )
+        results = []
+        for addr in self.dp_addresses:
+            try:
+                await self._ensure_dp_connection(addr)
+                response = await self._dp_stubs[addr].GetCacheStatus(request, timeout=1)
+                result = MessageToDict(
+                    response,
+                    preserving_proto_field_name=True,
+                    including_default_value_fields=True,
+                )
+                result["address"] = addr
+                results.append(result)
+            except Exception as e:
+                logging.warning(f"Get cache status from {addr} failed: {e}")
+        kmonitor.report(AccMetrics.CACHE_STATUS_QPS_METRIC, 1)
+        kmonitor.report(
+            GaugeMetrics.CACHE_STATUS_QPS_LATENCY_METRIC,
+            time.time() * 1000 - start_time,
+        )
+        if not results:
+            return {"error": "No backend available for cache_status"}
+        # For backward compatibility, merge first result's fields at top level
+        merged = dict(results[0])
+        merged["results"] = results
+        merged["dp_size"] = len(results)
+        return merged
 
     async def get_worker_status(self, query_params: Dict[str, Any]) -> Dict[str, Any]:
-        """Get worker status from gRPC server"""
-        try:
-            start_time = time.time() * 1000
-            await self._ensure_connection()
-            request = pb2.StatusVersionPB(
-                latest_cache_version=query_params.get("latest_cache_version", -1),
-                latest_finished_version=query_params.get("latest_finished_version", -1),
-            )
-            response = await self.stub.GetWorkerStatus(request, timeout=1)
-            # Convert response to dict format expected by frontend
-            result = MessageToDict(
-                response,
-                preserving_proto_field_name=True,
-                including_default_value_fields=True,
-            )
-            kmonitor.report(AccMetrics.WORKER_STATUS_QPS_METRIC, 1)
-            kmonitor.report(
-                GaugeMetrics.WORKER_STATUS_QPS_LANTENCY_METRIC,
-                time.time() * 1000 - start_time,
-            )
-            return result
-        except Exception as e:
-            logging.error(f"Get worker status failed: {e}")
-            return {"error": f"Failed to get worker status: {str(e)}"}
+        """Get worker status from all DP backends.
+
+        Returns a list of per-DP results under the ``"results"`` key.
+        If no backend is reachable, returns ``{"error": ...}``.
+        """
+        start_time = time.time() * 1000
+        request = pb2.StatusVersionPB(
+            latest_cache_version=query_params.get("latest_cache_version", -1),
+            latest_finished_version=query_params.get("latest_finished_version", -1),
+        )
+        results = []
+        for addr in self.dp_addresses:
+            try:
+                await self._ensure_dp_connection(addr)
+                response = await self._dp_stubs[addr].GetWorkerStatus(
+                    request, timeout=1
+                )
+                result = MessageToDict(
+                    response,
+                    preserving_proto_field_name=True,
+                    including_default_value_fields=True,
+                )
+                result["address"] = addr
+                results.append(result)
+            except Exception as e:
+                logging.warning(f"Get worker status from {addr} failed: {e}")
+        kmonitor.report(AccMetrics.WORKER_STATUS_QPS_METRIC, 1)
+        kmonitor.report(
+            GaugeMetrics.WORKER_STATUS_QPS_LANTENCY_METRIC,
+            time.time() * 1000 - start_time,
+        )
+        if not results:
+            return {"error": "No backend available for worker_status"}
+        merged = dict(results[0])
+        merged["results"] = results
+        merged["dp_size"] = len(results)
+        return merged
 
     async def set_log_level(self, req: Any) -> Dict[str, Any]:
         """Set log level - this would need to be implemented based on your requirements"""

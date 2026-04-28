@@ -114,8 +114,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     // PyTorch broadcast error. Failing here gives an actionable message and also catches any
     // future scheduler regression that lets a mixed batch reach the python model path. Schedulers
     // that talk to py_model are expected to drain decode before adding context (see
-    // FIFOScheduler::evaluateRunningMemory and GatherBatchScheduler::schedule's
-    // python_model_busy guard).
+    // FIFOScheduler::evaluateRunningMemory).
     RTP_LLM_CHECK_WITH_INFO(context_batch_size == 0 || decode_batch_size == 0,
                             "PyWrappedModel received a mixed prefill+decode batch which is not supported: "
                             "context_batch_size[%ld] decode_batch_size[%ld]. The scheduler must keep prefill and "

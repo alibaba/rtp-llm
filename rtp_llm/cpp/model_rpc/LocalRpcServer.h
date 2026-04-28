@@ -43,6 +43,10 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer);
 
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response);
+
     grpc::Status CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response);
 
     grpc::Status UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response);
@@ -99,14 +103,17 @@ public:
 
 protected:
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
-    bool         applyTimelineGate(const std::string& request_key,
-                                   bool               request_timeline,
-                                   int                profile_step,
-                                   const std::string& profile_trace_name = "");
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,
                                   std::shared_ptr<GenerateStream>& stream);
+
+    // Shared helpers for single and batch paths
+    ErrorInfo prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);
+    ErrorInfo collectStreamOutput(grpc::ServerContext*                  context,
+                                  std::shared_ptr<GenerateStream>&      stream,
+                                  const std::shared_ptr<GenerateInput>& input,
+                                  GenerateOutputs&                      last_outputs);
 
 protected:
     std::shared_ptr<EngineBase>           engine_;
