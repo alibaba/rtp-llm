@@ -155,10 +155,10 @@ class MLATest(TestCase):
         weights = {}
         weights[W.mla_fusedqkrope_no_lora_w] = torch.randn(
             [
-                self.config.hidden_size,
                 self.config.attn_config.size_per_head * self.config.attn_config.head_num
                 + self.config.attn_config.kv_lora_rank
                 + self.config.attn_config.rope_head_dim,
+                self.config.hidden_size,
             ],
             dtype=torch.bfloat16,
             device=device,
@@ -190,12 +190,12 @@ class MLATest(TestCase):
 
         weights[W.mla_kv_b_w] = torch.randn(
             [
-                self.config.attn_config.kv_lora_rank,
                 self.config.attn_config.head_num
                 * (
                     self.config.attn_config.nope_head_dim
                     + self.config.attn_config.v_head_dim
                 ),
+                self.config.attn_config.kv_lora_rank,
             ],
             dtype=torch.bfloat16,
             device=device,
@@ -203,8 +203,8 @@ class MLATest(TestCase):
 
         weights[W.attn_o_w] = torch.randn(
             [
-                self.config.attn_config.head_num * self.config.attn_config.v_head_dim,
                 self.config.hidden_size,
+                self.config.attn_config.head_num * self.config.attn_config.v_head_dim,
             ],
             dtype=torch.bfloat16,
             device=device,

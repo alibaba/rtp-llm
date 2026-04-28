@@ -27,13 +27,12 @@ from rtp_llm.utils.model_weight import (
     W,
     identity,
     merge_qkv_hf,
+    pad,
     sp_0,
     sp_id,
     sp_neg1,
     stack_,
     stack_moe_w1,
-    transpose,
-    transpose_pad,
 )
 
 
@@ -161,16 +160,16 @@ def merge_qkvz_transpose_reorder(
     """
     qkv = ts[0]
     z = ts[1]
-    return torch.cat([qkv, z], dim=0).T
+    return torch.cat([qkv, z], dim=0)
 
 
 def merge_ba_transpose_reorder(
     ts: List[torch.Tensor], linear_attention_config: LinearAttentionConfig
 ):
-    """Merge and reorder b and a tensors, then transpose."""
+    """Merge and reorder b and a tensors, then identity."""
     b = ts[0]
     a = ts[1]
-    return torch.cat([b, a], dim=0).T
+    return torch.cat([b, a], dim=0)
 
 
 def transpose_gate_up(ts: List[torch.Tensor]):
@@ -190,7 +189,7 @@ def transpose_gate_up(ts: List[torch.Tensor]):
 
 
 # List[gate_up, hidden] -> [Expert, up_gate, hidden]
-def transpose_stack_moe_w1(ts: List[torch.Tensor]) -> torch.Tensor:
+def stack_reorder_moe_w1(ts: List[torch.Tensor]) -> torch.Tensor:
     stacked_tensor = torch.stack(ts, dim=0)
     gate_up_dim = stacked_tensor.shape[1] // 2
     return torch.cat(
@@ -289,7 +288,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                         identity,
                     )
                 ],
-                process_fun=transpose,
+                process_fun=identity,
                 config=self.attn_config,
             ),
             AttnAtomicWeight(
@@ -305,7 +304,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                         ),
                     )
                 ],
-                process_fun=transpose,
+                process_fun=identity,
                 config=self.attn_config,
             ),
             AtomicWeight(
@@ -354,7 +353,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
         moe_gate = MoeAtomicWeight(
             W.moe_gate,
             [CkptWeightInfo(self.prefix + "layers.{i}.mlp.gate.weight", identity)],
-            process_fun=transpose,
+            process_fun=identity,
             config=moe_config,
         )
         ffn_sub_weights = [
@@ -366,7 +365,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                         identity,
                     )
                 ],
-                process_fun=transpose,
+                process_fun=identity,
                 config=ffn_config,
             ),
             FfnAtomicWeight(
@@ -377,7 +376,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                         identity,
                     )
                 ],
-                process_fun=transpose,
+                process_fun=identity,
                 config=ffn_config,
             ),
             FfnAtomicWeight(
@@ -388,7 +387,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                         identity,
                     )
                 ],
-                process_fun=transpose,
+                process_fun=identity,
                 config=ffn_config,
             ),
         ]
@@ -400,7 +399,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                     identity,
                 )
             ],
-            process_fun=transpose,
+            process_fun=identity,
         )
         return moe_gate, shared_expert_gate, ffn_sub_weights
 
@@ -509,7 +508,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                         self.prefix + "layers.{i}.linear_attn.out_proj.weight", identity
                     )
                 ],
-                transpose,
+                identity,
                 LinearAttnConfig(self.model_config.linear_attention_config),
             ),
         ]
@@ -535,7 +534,7 @@ class Qwen3NextWeight(Qwen3NextBaseWeight):
                     ),
                 )
             ],
-            transpose,
+            identity,
             LinearAttnConfig(self.model_config.linear_attention_config),
         )
 
@@ -552,7 +551,7 @@ class Qwen3NextWeight(Qwen3NextBaseWeight):
                     ),
                 )
             ],
-            transpose,
+            identity,
             LinearAttnConfig(self.model_config.linear_attention_config),
         )
 
@@ -602,7 +601,7 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
             MoeAtomicWeight(
                 W.moe_w1,
                 [CkptWeightInfo(self.prefix + "layers.{i}.mlp.experts.gate_up_proj")],
-                process_fun=transpose_stack_moe_w1,
+                process_fun=stack_reorder_moe_w1,
                 config=moe_config,
                 stacked_ckpt_keys=True,
             ),
@@ -671,14 +670,14 @@ class Qwen35DenseWeight(Qwen35MoeWeight):
                                 identity,
                             )
                         ],
-                        functools.partial(transpose_pad, align_size=align_size, dim=0),
+                        functools.partial(pad, align_size=align_size, dim=0),
                         config=ffn_config,
-                        lora_a_process_func=transpose,
+                        lora_a_process_func=identity,
                         lora_b_process_func=functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
+                            pad, align_size=align_size, dim=0
                         ),
                         lora_a_split_func=sp_id,
-                        lora_b_split_func=sp_neg1,
+                        lora_b_split_func=sp_0,
                     ),
                     FfnAtomicWeight(
                         W.ffn_w3,
@@ -687,14 +686,14 @@ class Qwen35DenseWeight(Qwen35MoeWeight):
                                 self.prefix + "layers.{i}.mlp.up_proj.weight", identity
                             )
                         ],
-                        functools.partial(transpose_pad, align_size=align_size, dim=0),
+                        functools.partial(pad, align_size=align_size, dim=0),
                         config=ffn_config,
-                        lora_a_process_func=transpose,
+                        lora_a_process_func=identity,
                         lora_b_process_func=functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
+                            pad, align_size=align_size, dim=0
                         ),
                         lora_a_split_func=sp_id,
-                        lora_b_split_func=sp_neg1,
+                        lora_b_split_func=sp_0,
                     ),
                     FfnAtomicWeight(
                         W.ffn_w2,
@@ -704,13 +703,13 @@ class Qwen35DenseWeight(Qwen35MoeWeight):
                                 identity,
                             )
                         ],
-                        functools.partial(transpose_pad, align_size=align_size, dim=1),
+                        functools.partial(pad, align_size=align_size, dim=1),
                         config=ffn_config,
                         lora_a_process_func=functools.partial(
-                            transpose_pad, align_size=align_size, dim=1
+                            pad, align_size=align_size, dim=1
                         ),
-                        lora_b_process_func=transpose,
-                        lora_a_split_func=sp_0,
+                        lora_b_process_func=identity,
+                        lora_a_split_func=sp_neg1,
                         lora_b_split_func=sp_id,
                     ),
                 ],

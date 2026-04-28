@@ -2,8 +2,7 @@ from typing import Any, Dict, List
 
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
@@ -13,13 +12,7 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.utils.model_weight import (
-    CkptWeightInfo,
-    W,
-    WeightStyle,
-    identity,
-    transpose,
-)
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, WeightStyle, identity
 from rtp_llm.utils.util import get_config_from_path
 
 
@@ -110,7 +103,7 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
             AttnAtomicWeight(
                 W.attn_qkv_w,
                 [CkptWeightInfo("transformer.h.{i}.attn.c_attn.weight", identity)],
-                transpose,
+                identity,
                 config=attn_config,
             ),
             AttnAtomicWeight(
@@ -122,7 +115,7 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
             AttnAtomicWeight(
                 W.attn_o_w,
                 [CkptWeightInfo("transformer.h.{i}.attn.c_proj.weight", identity)],
-                transpose,
+                identity,
                 config=attn_config,
             ),
             AttnAtomicWeight(
@@ -136,7 +129,7 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
                     FfnAtomicWeight(
                         W.ffn_w3,
                         [CkptWeightInfo("transformer.h.{i}.mlp.c_fc.weight", identity)],
-                        transpose,
+                        identity,
                         config=ffn_config,
                     ),
                     FfnAtomicWeight(
@@ -152,7 +145,7 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
                                 "transformer.h.{i}.mlp.c_proj.weight", identity
                             )
                         ],
-                        transpose,
+                        identity,
                         config=ffn_w2_config,
                     ),
                     FfnAtomicWeight(

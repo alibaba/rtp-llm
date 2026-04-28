@@ -31,13 +31,12 @@ from rtp_llm.utils.model_weight import (
     merge_qkv_hf,
     merge_qkv_lora_A,
     merge_qkv_lora_B,
+    pad,
     sp_0,
     sp_head_lora,
     sp_id,
     stack_,
     stack_moe_w1,
-    transpose,
-    transpose_pad,
 )
 
 
@@ -123,11 +122,11 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                         identity,
                     )
                 ],
-                transpose,
+                identity,
                 config=attn_config,
-                lora_a_process_func=transpose,
-                lora_b_process_func=transpose,
-                lora_a_split_func=sp_0,
+                lora_a_process_func=identity,
+                lora_b_process_func=identity,
+                lora_a_split_func=sp_neg1,
                 lora_b_split_func=sp_id,
             ),
             AtomicWeight(
@@ -220,7 +219,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=0,
                             ),
@@ -235,7 +234,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=1,
                             ),
@@ -250,7 +249,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=0,
                             ),
@@ -268,7 +267,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                                     "model.layers.{i}.mlp.gate.weight", identity
                                 )
                             ],
-                            transpose,
+                            identity,
                             config=moe_config,
                         ),
                         MoeAtomicWeight(
@@ -331,7 +330,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=0,
                             ),
@@ -345,7 +344,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=1,
                             ),
@@ -359,7 +358,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=0,
                             ),

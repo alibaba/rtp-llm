@@ -331,10 +331,11 @@ class AtomicWeight(WeightModule):
         return self.__class__(*args, **kwargs)
 
     @property
-    def need_transpose(self) -> bool:
-        if isinstance(
-            self.process_fun, functools.partial
-        ) and self.process_fun.func.__name__ in ["transpose_pad", "transpose"]:
+    def need_pad(self) -> bool:
+        if (
+            isinstance(self.process_fun, functools.partial)
+            and self.process_fun.func.__name__ == "pad"
+        ):
             return True
         else:
             return False
@@ -580,8 +581,8 @@ class AtomicWeight(WeightModule):
             )
             merge_tensor = (
                 (
-                    lora_a_tensor.type(torch.float32)
-                    @ lora_b_tensor.type(torch.float32)
+                    lora_b_tensor.type(torch.float32)
+                    @ lora_a_tensor.type(torch.float32)
                     * scale
                 )
                 .type(raw_tensor.dtype)
@@ -591,8 +592,8 @@ class AtomicWeight(WeightModule):
         elif lora_b_tensor.dim() == 3 and lora_a_tensor.dim() == 3:
             merge_tensor = (
                 torch.bmm(
-                    lora_a_tensor.type(torch.float32),
-                    lora_b_tensor.type(torch.float32) * scale,
+                    lora_b_tensor.type(torch.float32),
+                    lora_a_tensor.type(torch.float32) * scale,
                 )
                 .type(raw_tensor.dtype)
                 .to(raw_tensor.device)
@@ -600,8 +601,8 @@ class AtomicWeight(WeightModule):
         else:
             merge_tensor = (
                 (
-                    lora_a_tensor.type(torch.float32)
-                    @ lora_b_tensor.type(torch.float32)
+                    lora_b_tensor.type(torch.float32)
+                    @ lora_a_tensor.type(torch.float32)
                     * scale
                 )
                 .type(raw_tensor.dtype)

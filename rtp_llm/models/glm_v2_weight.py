@@ -14,7 +14,6 @@ from rtp_llm.utils.model_weight import (
     W,
     concat_1,
     identity,
-    transpose,
     w_half1_t,
     w_half2_t,
     zeros,
@@ -89,7 +88,7 @@ class GlmV2WeightInfo(ModelDeployWeightInfo):
                         identity,
                     )
                 ],
-                transpose,
+                identity,
                 config=attn_config,
             ),
             AttnAtomicWeight(
@@ -111,7 +110,7 @@ class GlmV2WeightInfo(ModelDeployWeightInfo):
                         identity,
                     )
                 ],
-                transpose,
+                identity,
                 config=attn_config,
             ),
             FfnWeight(
@@ -146,7 +145,7 @@ class GlmV2WeightInfo(ModelDeployWeightInfo):
                                 identity,
                             )
                         ],
-                        transpose,
+                        identity,
                         config=ffn_config,
                     ),
                 ],

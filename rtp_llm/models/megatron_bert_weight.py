@@ -10,12 +10,12 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity, transpose
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity
 
 
 def merge_qkv_hf(ts: List[torch.Tensor]):
     q, k, v = ts
-    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    qkv_weight = torch.concat([q, k, v], dim=0).contiguous()
     return qkv_weight
 
 
@@ -116,16 +116,16 @@ class MegatronBertWeightInfo(ModelDeployWeightInfo):
                 ],
                 concat_0,
             ),
-            AttnAtomicWeight(W.attn_o_w, [CkptWeightInfo(self._names.O_W)], transpose),
+            AttnAtomicWeight(W.attn_o_w, [CkptWeightInfo(self._names.O_W)], identity),
             AttnAtomicWeight(W.attn_o_b, [CkptWeightInfo(self._names.O_B)]),
             AtomicWeight(W.post_ln_beta, [CkptWeightInfo(self._names.POST_LN_B)]),
             AtomicWeight(W.post_ln_gamma, [CkptWeightInfo(self._names.POST_LN_W)]),
             FfnAtomicWeight(
-                W.ffn_w3, [CkptWeightInfo(self._names.FFN_INTER_DENSE_W)], transpose
+                W.ffn_w3, [CkptWeightInfo(self._names.FFN_INTER_DENSE_W)], identity
             ),
             FfnAtomicWeight(W.ffn_b3, [CkptWeightInfo(self._names.FFN_INTER_DENSE_B)]),
             FfnAtomicWeight(
-                W.ffn_w2, [CkptWeightInfo(self._names.FFN_OUTPUT_DENSE_W)], transpose
+                W.ffn_w2, [CkptWeightInfo(self._names.FFN_OUTPUT_DENSE_W)], identity
             ),
             FfnAtomicWeight(W.ffn_b2, [CkptWeightInfo(self._names.FFN_OUTPUT_DENSE_B)]),
         ]

@@ -933,11 +933,13 @@ class RocmImpl(GpuImpl):
         ]:
             if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
                 if weight.dtype != torch.float8_e4m3fn:
-                    weight = swizzle_tensor(weight.t(), False).t()
+                    weight = swizzle_tensor(weight, False).t()
                 else:
                     weight = swizzle_tensor(weight, weight.dtype != torch.float8_e4m3fn)
             elif weight.dtype == torch.float8_e4m3fn:
                 weight = self.shuffle_gemm_weight(weight)
+            else:
+                weight = weight.t().contiguous()
 
         return weight
 

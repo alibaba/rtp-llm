@@ -1,2 +1,6 @@
 internal_source/rdma
 open_source
+bazel-github-opensource
+bazel-bin
+bazel-out
+bazel-testlogs

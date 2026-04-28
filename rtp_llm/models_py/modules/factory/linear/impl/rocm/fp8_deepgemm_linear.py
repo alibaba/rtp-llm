@@ -51,12 +51,10 @@ class RocmFp8DeepGEMMLinear(LinearBase):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
-        self.hidden_size = weight.shape[0]  # k
-        self.output_size = weight.shape[1]  # n
-        self.weight = weight.reshape([weight.shape[1], weight.shape[0]])
-        self.weight_scales = weight_scales.reshape(
-            [weight_scales.shape[1], weight_scales.shape[0]]
-        )
+        self.output_size = weight.shape[0]  # n
+        self.hidden_size = weight.shape[1]  # k
+        self.weight = weight
+        self.weight_scales = weight_scales
         self.bias = bias
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:

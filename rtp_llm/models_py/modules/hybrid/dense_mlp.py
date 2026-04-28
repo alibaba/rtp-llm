@@ -45,39 +45,37 @@ class DenseMLP(nn.Module):
         self.is_gated = activation_type in _GATED_ACTIVATION_TYPE_LIST
 
         if self.is_gated:
-            if W.ffn_w13 not in weights:
-                self.up_proj = LinearFactory.create_merged_linear(
-                    weights,
-                    weight_keys=[W.ffn_w1, W.ffn_w3],
-                    scale_keys=[W.ffn_s1, W.ffn_s3],
-                    bias_keys=[W.ffn_b1, W.ffn_b3],
-                    quant_config=quant_config,
-                    dim=-1,
-                    hw_kernel_config=hw_kernel_config,
-                    scale2_keys=[W.ffn_w1_s2, W.ffn_w3_s2],
-                    input_scale_keys=[W.ffn_w1_i_s, W.ffn_w3_i_s],
-                )
-            else:
-                self.up_proj = LinearFactory.create_linear_from_weights(
-                    weights, W.ffn_w13, W.ffn_s13, W.ffn_b13,
-                    quant_config=quant_config, hw_kernel_config=hw_kernel_config,
-                    weight_scale_2_key=W.ffn_w13_s2,
-                    input_scale_key=W.ffn_w13_i_s,
-                )
-
+            self.up_proj = LinearFactory.create_linear_from_weights(
+                weights,
+                W.ffn_w13,
+                W.ffn_s13,
+                W.ffn_b13,
+                quant_config=quant_config,
+                hw_kernel_config=hw_kernel_config,
+                weight_scale_2_key=W.ffn_w13_s2,
+                input_scale_key=W.ffn_w13_i_s,
+            )
         else:
             self.up_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w3, W.ffn_s3, W.ffn_b3,
-                quant_config=quant_config, hw_kernel_config=hw_kernel_config,
+                weights,
+                W.ffn_w3,
+                W.ffn_s3,
+                W.ffn_b3,
+                quant_config=quant_config,
+                hw_kernel_config=hw_kernel_config,
                 weight_scale_2_key=W.ffn_w3_s2,
                 input_scale_key=W.ffn_w3_i_s,
             )
 
         self.down_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2,
-            quant_config=quant_config, hw_kernel_config=hw_kernel_config,
+            weights,
+            W.ffn_w2,
+            W.ffn_s2,
+            W.ffn_b2,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
             weight_scale_2_key=W.ffn_w2_s2,
-            input_scale_key=W.ffn_w2_i_s
+            input_scale_key=W.ffn_w2_i_s,
         )
 
     def forward(self, x: torch.Tensor):

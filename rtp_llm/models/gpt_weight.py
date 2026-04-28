@@ -13,7 +13,6 @@ from rtp_llm.utils.model_weight import (
     identity,
     trans_qkv,
     trans_qkv_b,
-    transpose,
 )
 
 from ..model_loader.weight_module import AtomicWeight
@@ -109,7 +108,7 @@ class GptWeightInfo(ModelDeployWeightInfo):
                             "model.layers.{i}.self_attention.dense.weight", identity
                         )
                     ],
-                    transpose,
+                    identity,
                     config=attn_config,
                 ),
                 AttnAtomicWeight(
@@ -132,7 +131,7 @@ class GptWeightInfo(ModelDeployWeightInfo):
                                     identity,
                                 )
                             ],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
@@ -153,7 +152,7 @@ class GptWeightInfo(ModelDeployWeightInfo):
                                     identity,
                                 )
                             ],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(

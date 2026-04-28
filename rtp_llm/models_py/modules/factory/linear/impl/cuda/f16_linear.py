@@ -8,6 +8,7 @@ from torch.nn import functional as F
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.ops import HWKernelConfig
 
+
 class CudaF16Linear(LinearBase):
     """CUDA F16 (non-quantized) Linear"""
 
@@ -17,7 +18,7 @@ class CudaF16Linear(LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
@@ -31,11 +32,12 @@ class CudaF16Linear(LinearBase):
         input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
-        weight_scale_2: Optional[torch.Tensor] = None
+        weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(weight, weight_scales, input_scales,
-                         bias, quant_config, weight_scale_2)
-        self.weight = weight.T
+        super().__init__(
+            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+        )
+        self.weight = weight
         self.bias = bias
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:

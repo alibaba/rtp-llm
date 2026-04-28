@@ -28,7 +28,6 @@ from rtp_llm.utils.model_weight import (
     sp_head_lora,
     sp_id,
     sp_neg1,
-    transpose,
     zeros,
 )
 
@@ -46,13 +45,13 @@ def merge_qkv(ts, hidden_size, head_num_kv, head_num):
     q, k, v = ts
     q = permute(q, head_num, hidden_size, hidden_size)
     k = permute(k, head_num_kv, head_num_kv * hidden_size // head_num, hidden_size)
-    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    qkv_weight = torch.concat([q, k, v], dim=0).contiguous()
     return qkv_weight
 
 
 def merge_qkv_hf(ts: List[torch.Tensor], hidden_size, head_num_kv, head_num):
     q, k, v = ts
-    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    qkv_weight = torch.concat([q, k, v], dim=0).contiguous()
     return qkv_weight
 
 
@@ -60,15 +59,15 @@ def qkv_rerange(ts, hidden_size, head_num_kv, head_num):
     num_key_value_groups = int(head_num // head_num_kv)
     size_per_head = int(hidden_size / head_num)
     w = rearrange(
-        ts[0].T, "q (h gs d) -> q h gs d", gs=2 + num_key_value_groups, d=size_per_head
+        ts[0], "(h gs d) q -> h gs d q", gs=2 + num_key_value_groups, d=size_per_head
     )
-    wq = w[..., :num_key_value_groups, :].reshape(w.shape[0], -1)
-    wk = w[..., -2, :].reshape(w.shape[0], -1)
-    wv = w[..., -1, :].reshape(w.shape[0], -1)
-    return torch.concat([wq, wk, wv], dim=1)
+    wq = w[:, :num_key_value_groups, :, :].reshape(-1, w.shape[-1])
+    wk = w[:, -2, :, :].reshape(-1, w.shape[-1])
+    wv = w[:, -1, :, :].reshape(-1, w.shape[-1])
+    return torch.concat([wq, wk, wv], dim=0)
 
 
-def qkv_transpose(ts, hidden_size):
+def qkv_reshape(ts, hidden_size):
     return ts[0].reshape(hidden_size, -1)
 
 
@@ -301,7 +300,7 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                                 identity,
                             )
                         ],
-                        transpose,
+                        identity,
                         config=attn_config,
                     ),
                     FfnWeight(
@@ -315,7 +314,7 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                                         identity,
                                     )
                                 ],
-                                transpose,
+                                identity,
                                 config=ffn_config,
                             ),
                             FfnAtomicWeight(
@@ -327,7 +326,7 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                                         identity,
                                     )
                                 ],
-                                transpose,
+                                identity,
                                 config=ffn_config,
                             ),
                             FfnAtomicWeight(
@@ -339,7 +338,7 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                                         identity,
                                     )
                                 ],
-                                transpose,
+                                identity,
                                 config=ffn_config,
                             ),
                         ],
@@ -352,11 +351,11 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                                 self._prefix
                                 + self._names.W_QKV.removesuffix(".int8.col"),
                                 functools.partial(
-                                    qkv_transpose, hidden_size=self._hidden_size
+                                    qkv_reshape, hidden_size=self._hidden_size
                                 ),
                             )
                         ],
-                        transpose,
+                        identity,
                         config=attn_config,
                     ),
                 ]
@@ -367,11 +366,11 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                     AttnAtomicWeight(
                         W.attn_o_w,
                         [CkptWeightInfo(self._prefix + self._names.WO, concat_1)],
-                        transpose,
+                        identity,
                         config=attn_config,
-                        lora_a_process_func=transpose,
-                        lora_b_process_func=transpose,
-                        lora_a_split_func=sp_0,
+                        lora_a_process_func=identity,
+                        lora_b_process_func=identity,
+                        lora_a_split_func=sp_neg1,
                         lora_b_split_func=sp_id,
                     ),
                     FfnWeight(
@@ -383,12 +382,12 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                                         self._prefix + self._names.FFW1, concat_0
                                     )
                                 ],
-                                transpose,
+                                identity,
                                 config=ffn_config,
-                                lora_a_process_func=transpose,
-                                lora_b_process_func=transpose,
+                                lora_a_process_func=identity,
+                                lora_b_process_func=identity,
                                 lora_a_split_func=sp_id,
-                                lora_b_split_func=sp_neg1,
+                                lora_b_split_func=sp_0,
                             ),
                             FfnAtomicWeight(
                                 W.ffn_w3,
@@ -397,12 +396,12 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                                         self._prefix + self._names.FFW3, concat_0
                                     )
                                 ],
-                                transpose,
+                                identity,
                                 config=ffn_config,
-                                lora_a_process_func=transpose,
-                                lora_b_process_func=transpose,
+                                lora_a_process_func=identity,
+                                lora_b_process_func=identity,
                                 lora_a_split_func=sp_id,
-                                lora_b_split_func=sp_neg1,
+                                lora_b_split_func=sp_0,
                             ),
                             FfnAtomicWeight(
                                 W.ffn_w2,
@@ -411,11 +410,11 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                                         self._prefix + self._names.FFW2, concat_1
                                     )
                                 ],
-                                transpose,
+                                identity,
                                 config=ffn_config,
-                                lora_a_process_func=transpose,
-                                lora_b_process_func=transpose,
-                                lora_a_split_func=sp_0,
+                                lora_a_process_func=identity,
+                                lora_b_process_func=identity,
+                                lora_a_split_func=sp_neg1,
                                 lora_b_split_func=sp_id,
                             ),
                         ],
@@ -515,10 +514,10 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                     AttnAtomicWeight(
                         W.attn_qkv_w,
                         [CkptWeightInfo(self._prefix + self._names.W_QKV, identity)],
-                        transpose,
+                        identity,
                         config=attn_config,
-                        lora_a_process_func=transpose,
-                        lora_b_process_func=transpose,
+                        lora_a_process_func=identity,
+                        lora_b_process_func=identity,
                         lora_a_split_func=sp_id,
                         lora_b_split_func=sp_head_lora,
                     )

@@ -13,7 +13,6 @@ from rtp_llm.utils.model_weight import (
     identity,
     trans_qkv,
     trans_qkv_b,
-    transpose,
     zeros,
 )
 
@@ -73,7 +72,7 @@ class GPTNeoxWeight(ModelDeployWeightInfo):
                             "gpt_neox.layers.{i}.attention.dense.weight", identity
                         )
                     ],
-                    transpose,
+                    identity,
                     config=attn_config,
                 ),
                 AttnAtomicWeight(
@@ -96,7 +95,7 @@ class GPTNeoxWeight(ModelDeployWeightInfo):
                                     identity,
                                 )
                             ],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
@@ -118,7 +117,7 @@ class GPTNeoxWeight(ModelDeployWeightInfo):
                                     identity,
                                 )
                             ],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
@@ -324,7 +323,7 @@ class GPTNeox13BWeight(ModelDeployWeightInfo):
                             "gpt_neox.layers.{i}.attention.dense.weight", identity
                         )
                     ],
-                    transpose,
+                    identity,
                     config=attn_config,
                 ),
                 AttnAtomicWeight(
@@ -347,7 +346,7 @@ class GPTNeox13BWeight(ModelDeployWeightInfo):
                                     identity,
                                 )
                             ],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
@@ -369,7 +368,7 @@ class GPTNeox13BWeight(ModelDeployWeightInfo):
                                     identity,
                                 )
                             ],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(

@@ -33,16 +33,17 @@ class MLPTest(TestCase):
         parallelism_config.tp_rank = 0
 
         weights = {}
-        weights[W.ffn_w1] = torch.randn(hidden_size, 4 * hidden_size, dtype=dtype)
-        torch.nn.init.xavier_uniform_(weights[W.ffn_w1])
-        weights[W.ffn_w3] = torch.randn(hidden_size, 4 * hidden_size, dtype=dtype)
-        torch.nn.init.xavier_uniform_(weights[W.ffn_w3])
-        weights[W.ffn_w2] = torch.randn(4 * hidden_size, hidden_size, dtype=dtype)
+        w1 = torch.randn(4 * hidden_size, hidden_size, dtype=dtype)
+        torch.nn.init.xavier_uniform_(w1)
+        w3 = torch.randn(4 * hidden_size, hidden_size, dtype=dtype)
+        torch.nn.init.xavier_uniform_(w3)
+        weights[W.ffn_w13] = torch.cat([w1, w3], dim=0)
+        weights[W.ffn_w2] = torch.randn(hidden_size, 4 * hidden_size, dtype=dtype)
         torch.nn.init.xavier_uniform_(weights[W.ffn_w2])
 
         qwen3_mlp = DenseMLPRef(
-            weights[W.ffn_w1],
-            weights[W.ffn_w3],
+            w1,
+            w3,
             weights[W.ffn_w2],
             ActivationType.Swiglu,
         )

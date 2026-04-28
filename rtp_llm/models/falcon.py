@@ -12,13 +12,7 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.utils.model_weight import (
-    CkptWeightInfo,
-    W,
-    identity,
-    qkv_gather,
-    transpose,
-)
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, qkv_gather
 
 
 class FalconWeightInfo(ModelDeployWeightInfo):
@@ -60,7 +54,7 @@ class FalconWeightInfo(ModelDeployWeightInfo):
                         "transformer.h.{i}.self_attention.dense.weight", identity
                     )
                 ],
-                transpose,
+                identity,
                 config=attn_config,
             ),
             FfnWeight(
@@ -72,7 +66,7 @@ class FalconWeightInfo(ModelDeployWeightInfo):
                                 "transformer.h.{i}.mlp.dense_h_to_4h.weight", identity
                             )
                         ],
-                        transpose,
+                        identity,
                         config=ffn_config,
                     ),
                     FfnAtomicWeight(
@@ -82,7 +76,7 @@ class FalconWeightInfo(ModelDeployWeightInfo):
                                 "transformer.h.{i}.mlp.dense_4h_to_h.weight", identity
                             )
                         ],
-                        transpose,
+                        identity,
                         config=ffn_config,
                     ),
                 ],
@@ -143,7 +137,7 @@ class FalconWeightInfo(ModelDeployWeightInfo):
                                 identity,
                             )
                         ],
-                        transpose,
+                        identity,
                         config=attn_config,
                     ),
                     AtomicWeight(
@@ -189,7 +183,9 @@ class Falcon(BaseModel):
         )
         config.attn_config.size_per_head = config_json["hidden_size"] // head_num
         config.inter_size = config_json["hidden_size"] * 4
-        config.num_layers = config_json.get("n_layer", config_json.get("num_hidden_layers"))
+        config.num_layers = config_json.get(
+            "n_layer", config_json.get("num_hidden_layers")
+        )
         config.max_seq_len = 2048
         config.vocab_size = config_json["vocab_size"]
         config.activation_type = "gelu-none-approximate"

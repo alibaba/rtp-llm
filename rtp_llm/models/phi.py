@@ -8,7 +8,7 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 from rtp_llm.utils.util import get_config_from_path
 
 
@@ -57,7 +57,7 @@ class PhiWeightInfo(ModelDeployWeightInfo):
                 AttnAtomicWeight(
                     W.attn_qkv_w,
                     [CkptWeightInfo("layers.{i_1}.mixer.Wqkv.weight", identity)],
-                    transpose,
+                    identity,
                     config=attn_config,
                 ),
                 AttnAtomicWeight(
@@ -69,7 +69,7 @@ class PhiWeightInfo(ModelDeployWeightInfo):
                 AttnAtomicWeight(
                     W.attn_o_w,
                     [CkptWeightInfo("layers.{i_1}.mixer.out_proj.weight", identity)],
-                    transpose,
+                    identity,
                     config=attn_config,
                 ),
                 AttnAtomicWeight(
@@ -83,7 +83,7 @@ class PhiWeightInfo(ModelDeployWeightInfo):
                         FfnAtomicWeight(
                             W.ffn_w3,
                             [CkptWeightInfo("layers.{i_1}.mlp.fc1.weight", identity)],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
@@ -95,7 +95,7 @@ class PhiWeightInfo(ModelDeployWeightInfo):
                         FfnAtomicWeight(
                             W.ffn_w2,
                             [CkptWeightInfo("layers.{i_1}.mlp.fc2.weight", identity)],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
@@ -134,7 +134,9 @@ class Phi(BaseModel):
         config.num_layers = config_dict.get("n_layer", 24)
         config.max_seq_len = config_dict.get("n_positions", 2048)
         config.vocab_size = config_dict.get("vocab_size", 32)
-        config.attn_config.rope_config.dim = config_dict.get("rotary_dim", size_per_head)
+        config.attn_config.rope_config.dim = config_dict.get(
+            "rotary_dim", size_per_head
+        )
         config.attn_config.rope_config.style = 1
         config.attn_config.kv_head_num = config_dict.get("n_head", 32)
         config.norm_type = "layernorm"

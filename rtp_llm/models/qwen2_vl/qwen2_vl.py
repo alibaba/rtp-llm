@@ -28,12 +28,11 @@ from rtp_llm.utils.model_weight import (
     merge_qkv_hf,
     merge_qkv_lora_A,
     merge_qkv_lora_B,
+    pad,
     sp_0,
     sp_head_lora,
     sp_id,
     sp_neg1,
-    transpose,
-    transpose_pad,
     zeros,
 )
 
@@ -138,15 +137,15 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                 ],
                 functools.partial(merge_qkv_b),
                 config=attn_config,
-                lora_a_process_func=transpose,
-                lora_b_process_func=transpose,
-                lora_a_split_func=sp_0,
+                lora_a_process_func=identity,
+                lora_b_process_func=identity,
+                lora_a_split_func=sp_neg1,
                 lora_b_split_func=sp_id,
             ),
             AttnAtomicWeight(
                 W.attn_o_w,
                 [CkptWeightInfo("model.layers.{i}.self_attn.o_proj.weight", identity)],
-                transpose,
+                identity,
                 config=attn_config,
             ),
             FfnWeight(
@@ -158,14 +157,14 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                                 "model.layers.{i}.mlp.gate_proj.weight", identity
                             )
                         ],
-                        functools.partial(transpose_pad, align_size=align_size, dim=0),
+                        functools.partial(pad, align_size=align_size, dim=0),
                         config=ffn_config,
-                        lora_a_process_func=transpose,
+                        lora_a_process_func=identity,
                         lora_b_process_func=functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
+                            pad, align_size=align_size, dim=0
                         ),
                         lora_a_split_func=sp_id,
-                        lora_b_split_func=sp_neg1,
+                        lora_b_split_func=sp_0,
                     ),
                     FfnAtomicWeight(
                         W.ffn_w3,
@@ -174,14 +173,14 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                                 "model.layers.{i}.mlp.up_proj.weight", identity
                             )
                         ],
-                        functools.partial(transpose_pad, align_size=align_size, dim=0),
+                        functools.partial(pad, align_size=align_size, dim=0),
                         config=ffn_config,
-                        lora_a_process_func=transpose,
+                        lora_a_process_func=identity,
                         lora_b_process_func=functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
+                            pad, align_size=align_size, dim=0
                         ),
                         lora_a_split_func=sp_id,
-                        lora_b_split_func=sp_neg1,
+                        lora_b_split_func=sp_0,
                     ),
                     FfnAtomicWeight(
                         W.ffn_w2,
@@ -190,13 +189,13 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                                 "model.layers.{i}.mlp.down_proj.weight", identity
                             )
                         ],
-                        functools.partial(transpose_pad, align_size=align_size, dim=1),
+                        functools.partial(pad, align_size=align_size, dim=1),
                         config=ffn_config,
                         lora_a_process_func=functools.partial(
-                            transpose_pad, align_size=align_size, dim=1
+                            pad, align_size=align_size, dim=1
                         ),
-                        lora_b_process_func=transpose,
-                        lora_a_split_func=sp_0,
+                        lora_b_process_func=identity,
+                        lora_a_split_func=sp_neg1,
                         lora_b_split_func=sp_id,
                     ),
                 ],

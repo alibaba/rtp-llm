@@ -5,7 +5,7 @@ from rtp_llm.ops import ActivationType
 
 
 def linear(input: torch.Tensor, weight: torch.Tensor):
-    return torch.nn.functional.linear(input, weight.T)
+    return torch.nn.functional.linear(input, weight)
 
 
 class DenseMLP(nn.Module):

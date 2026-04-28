@@ -37,11 +37,11 @@ from rtp_llm.utils.model_weight import (
     sp_head_gemm_a8,
     sp_head_s_gemm_a8_channel,
     sp_id,
+    sp_moe_neg1,
+    sp_moe_w1,
     sp_neg1,
     stack_,
     stack_moe_w1,
-    sp_moe_w1,
-    sp_moe_neg1
 )
 from rtp_llm.utils.util import check_with_info
 
@@ -67,15 +67,15 @@ def _ckpt_base_matches_quant_exclude(
 ) -> bool:
     """
     Check if the checkpoint module path template matches any entry in the quantization exclude list.
-    
+
     Args:
-        base_name_template: A template string representing the module path, where '{i}' 
+        base_name_template: A template string representing the module path, where '{i}'
                             acts as a placeholder for the layer index (e.g., 'model.layers.{i}.mlp.gate_proj').
-        exclude_modules: A set of concrete module paths that are excluded from quantization 
+        exclude_modules: A set of concrete module paths that are excluded from quantization
                          (e.g., {'model.layers.0.mlp.gate_proj', 'model.layers.1.mlp.gate_proj'}).
-    
+
     Returns:
-        True if the template (with '{i}' replaced by a wildcard for digits) matches any 
+        True if the template (with '{i}' replaced by a wildcard for digits) matches any
         concrete path in 'exclude_modules'.
     """
     if not exclude_modules:
@@ -133,28 +133,27 @@ def cast_to_fp8(x: torch.Tensor):
     """Convert tensor to FP8 format."""
     return x.to(torch.float8_e4m3fn)
 
+
 def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Per-channel FP8 quantization.
     Args:
-        x: Input tensor to be quantized
+        x: Input tensor to be quantized, shape (N, K) for 2D or (E, N, K) for 3D
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Quantized tensor and channel-wise scales
     """
-    assert x.dim() in [2, 3], f"weight dim=2 or dim=3 supported, but got shape {x.shape}"
-    if x.dim() == 3:
-        channel_max = x.abs().amax(dim=-1, keepdim=True).clamp(1e-4)
-        scales = (channel_max / FP8_E4M3_MAX).to(torch.float32)
-        quantized = (x / scales).to(torch.float8_e4m3fn)
-        return quantized.contiguous(), scales.contiguous()
-    x = x.T
-    # Calculate per-channel maximum absolute values
+    assert x.dim() in [
+        2,
+        3,
+    ], f"weight dim=2 or dim=3 supported, but got shape {x.shape}"
+    # For 2D (N, K) and 3D (E, N, K): reduce along K (dim=-1) to produce
+    # per-output-channel scale of shape (N, 1) / (E, N, 1). TP split funcs
+    # (sp_0, sp_head_s_gemm_a8_channel, ...) expect output-channel-major layout.
     channel_max = x.abs().amax(dim=-1, keepdim=True).clamp(1e-4)
-    # Compute scaling factors
     scales = (channel_max / FP8_E4M3_MAX).to(torch.float32)
-    # Quantize the tensor
     quantized = (x / scales).to(torch.float8_e4m3fn)
-    return (quantized.T).contiguous(), (scales.T).contiguous()
+    return quantized.contiguous(), scales.contiguous()
+
 
 def gemm_channel_fp8_gpt_style_tp_strategy():
     gemm_channel_fp8_weight_tp_strategy: Dict[str, Any] = {
@@ -245,7 +244,8 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
         if not quant_config.is_quanted() or not isinstance(
-            quant_config, (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig)
+            quant_config,
+            (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig),
         ):
             return False
         name = src_weight_info.name
@@ -615,22 +615,10 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         device: str,
         load_config: LoadConfig,
     ):
-        # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
-        kernel_weight = (
-            kernel_weight.reshape(kernel_weight.shape[-1], -1)
-            if kernel_weight.dim() == 2
-            else kernel_weight
-        )
-        processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
-            scale_weight = (
-                scale_weight.reshape(scale_weight.shape[-1], -1)
-                if scale_weight.dim() == 2
-                else scale_weight
-            )
             kernel_weight, scale_weight = (
                 load_config.exported_device.convert_fp8_weight_params(
                     kernel_weight, scale_weight
@@ -640,6 +628,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             processed_res[self.kernel.name] = kernel_weight
 
         return processed_res
+
 
 class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
     """
@@ -726,15 +715,8 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
             # Simple cast to FP8 without scaling
             quant_kernel = cast_to_fp8(kernel.get(self.kernel.name))
 
-        # Prepare result dictionary
-        if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
-            pass
-        elif quant_kernel.dim() == 2:
-            quant_kernel = quant_kernel.T
-
         res = {self.kernel.name: quant_kernel.contiguous().to(device)}
         if self.scale:
-            scale = scale.T if scale.dim() == 2 else scale
             res.update({self.scale.name: scale.contiguous().to(device)})
 
         return res

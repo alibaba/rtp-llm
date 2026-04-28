@@ -10,7 +10,7 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, transpose
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity
 
 
 def get_tensor_reciprocal(ts: List[torch.Tensor]) -> torch.Tensor:
@@ -23,13 +23,13 @@ def get_tensor_from_scalar(ts: List[torch.Tensor]) -> torch.Tensor:
 
 def merge_qkv_hf(ts: List[torch.Tensor]):
     q, k, v = ts
-    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    qkv_weight = torch.concat([q, k, v], dim=0).contiguous()
     return qkv_weight
 
 
-def merge_qkv_transpose_concat0(ts: List[torch.Tensor]):
+def merge_qkv_concat0(ts: List[torch.Tensor]):
     q, k, v = ts
-    qkv_weight = torch.concat([q.T, k.T, v.T], dim=0).contiguous()
+    qkv_weight = torch.concat([q, k, v], dim=0).contiguous()
     return qkv_weight
 
 
@@ -163,7 +163,7 @@ class BertWeightInfo(ModelDeployWeightInfo):
                 AttnAtomicWeight(
                     W.attn_o_w,
                     [CkptWeightInfo(self._names.O_W)],
-                    transpose,
+                    identity,
                     config=attn_config,
                 ),
                 AttnAtomicWeight(
@@ -176,7 +176,7 @@ class BertWeightInfo(ModelDeployWeightInfo):
                         FfnAtomicWeight(
                             W.ffn_w3,
                             [CkptWeightInfo(self._names.FFN_INTER_DENSE_W)],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
@@ -187,7 +187,7 @@ class BertWeightInfo(ModelDeployWeightInfo):
                         FfnAtomicWeight(
                             W.ffn_w2,
                             [CkptWeightInfo(self._names.FFN_OUTPUT_DENSE_W)],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(

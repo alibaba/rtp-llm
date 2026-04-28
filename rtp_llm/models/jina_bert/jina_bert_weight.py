@@ -11,26 +11,24 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, slopes, transpose
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity, slopes
 
 
 def merge_qkv_hf(ts: List[torch.Tensor]):
     q, k, v = ts
-    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    qkv_weight = torch.concat([q, k, v], dim=0).contiguous()
     return qkv_weight
 
 
-def merge_qkv_transpose_concat0(ts: List[torch.Tensor]):
+def merge_qkv_concat0(ts: List[torch.Tensor]):
     q, k, v = ts
-    qkv_weight = torch.concat([q.T, k.T, v.T], dim=0).contiguous()
+    qkv_weight = torch.concat([q, k, v], dim=0).contiguous()
     return qkv_weight
 
 
 def slice_index_transepose(ts: List[torch.Tensor], index: int, inter_size: int):
     t = ts[0]
-    return (
-        t[index * inter_size : (index + 1) * inter_size, :].transpose(0, 1).contiguous()
-    )
+    return t[index * inter_size : (index + 1) * inter_size, :].contiguous()
 
 
 # from [torch.Size(1), torch.Size(1), torch.Size(1)] to torch.Size(3 * hidden_size)
@@ -163,7 +161,7 @@ class JinaBertWeightInfo(ModelDeployWeightInfo):
             AtomicWeight(W.q_ln_beta, [CkptWeightInfo(self._names.Q_LN_B)]),
             AtomicWeight(W.k_ln_gamma, [CkptWeightInfo(self._names.K_LN_W)]),
             AtomicWeight(W.k_ln_beta, [CkptWeightInfo(self._names.K_LN_B)]),
-            AttnAtomicWeight(W.attn_o_w, [CkptWeightInfo(self._names.O_W)], transpose),
+            AttnAtomicWeight(W.attn_o_w, [CkptWeightInfo(self._names.O_W)], identity),
             AttnAtomicWeight(W.attn_o_b, [CkptWeightInfo(self._names.O_B)]),
             AtomicWeight(W.post_ln_beta, [CkptWeightInfo(self._names.POST_LN_B)]),
             AtomicWeight(W.post_ln_gamma, [CkptWeightInfo(self._names.POST_LN_W)]),
@@ -187,7 +185,7 @@ class JinaBertWeightInfo(ModelDeployWeightInfo):
             ),
             # down
             FfnAtomicWeight(
-                W.ffn_w2, [CkptWeightInfo(self._names.FFN_DOWN_W)], transpose
+                W.ffn_w2, [CkptWeightInfo(self._names.FFN_DOWN_W)], identity
             ),
             FfnAtomicWeight(W.ffn_b2, [CkptWeightInfo(self._names.FFN_DOWN_B)]),
             AtomicWeight(

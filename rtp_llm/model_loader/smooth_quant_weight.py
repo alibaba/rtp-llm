@@ -22,14 +22,13 @@ from rtp_llm.utils.model_weight import (
     W,
     WeightStyle,
     concat_w13,
+    concat_w13_2,
     identity,
+    merge_qkv_concat0,
     merge_qkv_hf,
-    merge_qkv_transpose_concat0,
     merge_te_qkv,
     stack_,
     stack_moe_w1,
-    transpose,
-    transpose_w13_2,
 )
 
 QW_SUFFIX = ".qweight"
@@ -41,7 +40,7 @@ INT8QW_COL_SUFFIX = ".weight.int8.col"
 INT8QS_COL_SUFFIX = ".scale_w_quant_orig.col"
 
 
-def qkv_transpose(ts, hidden_size):
+def qkv_reshape(ts, hidden_size):
     return ts[0].reshape(hidden_size, -1)
 
 
@@ -153,7 +152,7 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
                         CkptWeightInfo(k_name + self.qw_suffix, identity),
                         CkptWeightInfo(v_name + self.qw_suffix, identity),
                     ],
-                    merge_qkv_transpose_concat0,
+                    merge_qkv_concat0,
                     data_type=torch.int8,
                     config=src_weight_info.config,
                 ),
@@ -183,12 +182,12 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
                         CkptWeightInfo(
                             qkv_name + self.qw_suffix,
                             functools.partial(
-                                qkv_transpose,
+                                qkv_reshape,
                                 hidden_size=src_weight_info.config.hidden_size,
                             ),
                         )
                     ],
-                    transpose,
+                    identity,
                     data_type=torch.int8,
                     config=src_weight_info.config,
                 ),
@@ -211,7 +210,7 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
             src_weight_info,
             W.attn_o_w,
             [CkptWeightInfo(w_name + self.qw_suffix, identity)],
-            transpose,
+            identity,
             data_type=torch.int8,
             config=src_weight_info.config,
         )
@@ -261,7 +260,7 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
                     src_weight,
                     w,
                     [
-                        CkptWeightInfo(name + self.qw_suffix, transpose)
+                        CkptWeightInfo(name + self.qw_suffix, identity)
                         for name in w_name
                     ],
                     stack,
@@ -290,7 +289,7 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
                     src_weight,
                     w,
                     [CkptWeightInfo(w_name + self.qw_suffix, identity)],
-                    transpose,
+                    identity,
                     data_type=torch.int8,
                     config=src_weight.config,
                 ),
@@ -323,7 +322,7 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w1_name + self.qw_suffix, identity),
                         CkptWeightInfo(w3_name + self.qw_suffix, identity),
                     ],
-                    transpose_w13_2,
+                    concat_w13_2,
                     data_type=torch.int8,
                     config=src_weight.config,
                 ),
@@ -354,7 +353,7 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
                     src_weight,
                     w,
                     [CkptWeightInfo(w_name + self.qw_suffix, identity)],
-                    transpose,
+                    identity,
                     data_type=torch.int8,
                     config=src_weight.config,
                 ),
@@ -375,12 +374,7 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
         device: str,
         load_config: LoadConfig,
     ):
-        # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
-        kernel_weight = processed_res[self.kernel.name]
-        kernel_weight = kernel_weight.reshape(kernel_weight.shape[-1], -1)
-        processed_res[self.kernel.name] = kernel_weight
-
         return processed_res
 
 
@@ -599,7 +593,7 @@ class TrtEngineSmoothQuantWeightInfo(SmoothQuantWeightInfo):
                         CkptWeightInfo(w1_name + self.qw_suffix, identity),
                         CkptWeightInfo(w3_name + self.qw_suffix, identity),
                     ],
-                    transpose_w13_2,
+                    concat_w13_2,
                     data_type=torch.int8,
                     config=src_weight.config,
                 ),
@@ -630,7 +624,7 @@ class TrtEngineSmoothQuantWeightInfo(SmoothQuantWeightInfo):
                     src_weight,
                     w,
                     [CkptWeightInfo(w_name + self.qw_suffix, identity)],
-                    transpose,
+                    identity,
                     data_type=torch.int8,
                     config=src_weight.config,
                 ),

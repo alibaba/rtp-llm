@@ -18,11 +18,11 @@ from rtp_llm.utils.model_weight import (
     W,
     identity,
     merge_qkv_hf,
+    merge_qkv_hf_col,
     pad,
     pad_w13,
     stack_,
     stack_moe_w1,
-    transpose,
 )
 from rtp_llm.utils.util import check_with_info
 
@@ -54,33 +54,33 @@ def get_qkv_quant_weight_info(
             src_weight.create_from(
                 W.attn_qkv_w,
                 [
-                    CkptWeightInfo(q_name + QW_SUFFIX, transpose),
-                    CkptWeightInfo(k_name + QW_SUFFIX, transpose),
-                    CkptWeightInfo(v_name + QW_SUFFIX, transpose),
+                    CkptWeightInfo(q_name + QW_SUFFIX, identity),
+                    CkptWeightInfo(k_name + QW_SUFFIX, identity),
+                    CkptWeightInfo(v_name + QW_SUFFIX, identity),
                 ],
-                functools.partial(merge_qkv_hf),
+                functools.partial(merge_qkv_hf_col),
                 data_type=torch.int32,
                 config=src_weight.config,
             ),
             src_weight.create_from(
                 W.attn_qkv_z,
                 [
-                    CkptWeightInfo(q_name + QZ_SUFFIX, transpose),
-                    CkptWeightInfo(k_name + QZ_SUFFIX, transpose),
-                    CkptWeightInfo(v_name + QZ_SUFFIX, transpose),
+                    CkptWeightInfo(q_name + QZ_SUFFIX, identity),
+                    CkptWeightInfo(k_name + QZ_SUFFIX, identity),
+                    CkptWeightInfo(v_name + QZ_SUFFIX, identity),
                 ],
-                functools.partial(merge_qkv_hf),
+                functools.partial(merge_qkv_hf_col),
                 data_type=torch.int32,
                 config=src_weight.config,
             ),
             src_weight.create_from(
                 W.attn_qkv_s,
                 [
-                    CkptWeightInfo(q_name + QS_SUFFIX, transpose),
-                    CkptWeightInfo(k_name + QS_SUFFIX, transpose),
-                    CkptWeightInfo(v_name + QS_SUFFIX, transpose),
+                    CkptWeightInfo(q_name + QS_SUFFIX, identity),
+                    CkptWeightInfo(k_name + QS_SUFFIX, identity),
+                    CkptWeightInfo(v_name + QS_SUFFIX, identity),
                 ],
-                functools.partial(merge_qkv_hf),
+                functools.partial(merge_qkv_hf_col),
                 config=src_weight.config,
             ),
         ]
@@ -149,9 +149,7 @@ def get_ffn_quant_weight_info(
                 [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    align_size=(
-                        align_size // pad_div if is_gptq else align_size
-                    ),
+                    align_size=(align_size // pad_div if is_gptq else align_size),
                     dim=0,
                 ),
                 data_type=torch.int32,
@@ -160,18 +158,14 @@ def get_ffn_quant_weight_info(
             FfnAtomicWeight(
                 W.ffn_z2,
                 [CkptWeightInfo(w_name + QZ_SUFFIX, identity)],
-                functools.partial(
-                    pad, align_size=align_size // group_size, dim=0
-                ),
+                functools.partial(pad, align_size=align_size // group_size, dim=0),
                 data_type=torch.int32,
                 config=src_weight.config,
             ),
             FfnAtomicWeight(
                 W.ffn_s2,
                 [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
-                functools.partial(
-                    pad, align_size=align_size // group_size, dim=0
-                ),
+                functools.partial(pad, align_size=align_size // group_size, dim=0),
                 config=src_weight.config,
             ),
             act_w,
@@ -188,21 +182,21 @@ def get_ffn_quant_weight_info(
         return [
             MoeAtomicWeight(
                 w,
-                [CkptWeightInfo(name + QW_SUFFIX, transpose) for name in w_name],
+                [CkptWeightInfo(name + QW_SUFFIX, identity) for name in w_name],
                 stack,
                 data_type=torch.int32,
                 config=src_weight.config,
             ),
             MoeAtomicWeight(
                 z,
-                [CkptWeightInfo(name + QZ_SUFFIX, transpose) for name in w_name],
+                [CkptWeightInfo(name + QZ_SUFFIX, identity) for name in w_name],
                 stack,
                 data_type=torch.int32,
                 config=src_weight.config,
             ),
             MoeAtomicWeight(
                 s,
-                [CkptWeightInfo(name + QS_SUFFIX, transpose) for name in w_name],
+                [CkptWeightInfo(name + QS_SUFFIX, identity) for name in w_name],
                 stack,
                 config=src_weight.config,
             ),
@@ -221,9 +215,7 @@ def get_ffn_quant_weight_info(
                 ],
                 functools.partial(
                     pad_w13,
-                    align_size=(
-                        align_size // pad_div if is_awq else align_size
-                    ),
+                    align_size=(align_size // pad_div if is_awq else align_size),
                     dim=1,
                 ),
                 data_type=torch.int32,
@@ -270,9 +262,7 @@ def get_ffn_quant_weight_info(
                 [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    align_size=(
-                        align_size // pad_div if is_awq else align_size
-                    ),
+                    align_size=(align_size // pad_div if is_awq else align_size),
                     dim=1,
                 ),
                 data_type=torch.int32,
@@ -292,9 +282,7 @@ def get_ffn_quant_weight_info(
             FfnAtomicWeight(
                 s,
                 [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
-                functools.partial(
-                    pad, align_size=align_size, dim=1
-                ),
+                functools.partial(pad, align_size=align_size, dim=1),
                 config=src_weight.config,
             ),
             act_w,

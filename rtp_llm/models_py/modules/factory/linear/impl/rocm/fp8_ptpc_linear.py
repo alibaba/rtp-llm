@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
 from rtp_llm.ops import HWKernelConfig
 
+
 class RocmFp8PTPCLinear(LinearBase):
     """ROCm FP8 PTPC (Per-Token Per-Channel) quantized Linear"""
 
@@ -23,7 +24,7 @@ class RocmFp8PTPCLinear(LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
@@ -48,15 +49,13 @@ class RocmFp8PTPCLinear(LinearBase):
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(weight, weight_scales, input_scales,
-                         bias, quant_config, weight_scale_2)
-        self.hidden_size = weight.shape[0]  # k
-        self.output_size = weight.shape[1]  # n
-        # Reshape weight from [k, n] to [n, k] as done in C++ code
-        self.weight = weight.reshape([weight.shape[1], weight.shape[0]])
-        self.weight_scales = weight_scales.reshape(
-            [weight_scales.shape[1], weight_scales.shape[0]]
+        super().__init__(
+            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
+        self.output_size = weight.shape[0]  # n
+        self.hidden_size = weight.shape[1]  # k
+        self.weight = weight
+        self.weight_scales = weight_scales
         self.bias = bias
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:

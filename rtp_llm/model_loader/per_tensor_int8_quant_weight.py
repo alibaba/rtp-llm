@@ -21,13 +21,12 @@ from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
     WeightStyle,
+    concat_0,
     expand_scale,
     get_tensor_from_scalar,
     get_tensor_reciprocal,
     identity,
-    merge_qkv_transpose_concat0,
-    transpose,
-    transpose_w13,
+    merge_qkv_concat0,
 )
 
 W_SUFFIX = ".weight"
@@ -104,7 +103,9 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
         scale: Optional[AtomicWeight] = None
         act_scale: Optional[AtomicWeight] = None
         act_scale_inv: Optional[AtomicWeight] = None
-        logging.debug("PerTensorInt8QuantWeight : %s, %s", self.qs_suffix, self.qw_suffix)
+        logging.debug(
+            "PerTensorInt8QuantWeight : %s, %s", self.qs_suffix, self.qw_suffix
+        )
 
         if src_weight_info.name == W.attn_qkv_w:
             (kernel, scale, act_scale, act_scale_inv) = self._get_qkv_quant_weight_info(
@@ -205,7 +206,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
             src_weight_info,
             W.attn_qkv_w,
             qkv_w_list,
-            merge_qkv_transpose_concat0,
+            merge_qkv_concat0,
             data_type=torch.int8,
             config=src_weight_info.config,
         )
@@ -260,7 +261,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
                 src_weight_info,
                 W.attn_o_w,
                 [CkptWeightInfo(w_name + self.qw_suffix, identity)],
-                transpose,
+                identity,
                 data_type=torch.int8,
                 config=src_weight_info.config,
             ),
@@ -320,7 +321,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w1_name + self.qw_suffix, identity),
                         CkptWeightInfo(w3_name + self.qw_suffix, identity),
                     ],
-                    transpose_w13,
+                    concat_0,
                     data_type=torch.int8,
                     config=src_weight.config,
                 ),
@@ -331,7 +332,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w1_name + self.qs_suffix, identity),
                         CkptWeightInfo(w3_name + self.qs_suffix, identity),
                     ],
-                    transpose_w13,
+                    concat_0,
                     data_type=torch.float32,
                     config=src_weight.config,
                 ),
@@ -361,7 +362,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
                     src_weight,
                     w,
                     [CkptWeightInfo(w_name + self.qw_suffix, identity)],
-                    transpose,
+                    identity,
                     data_type=torch.int8,
                     config=src_weight.config,
                 ),
@@ -369,7 +370,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
                     src_weight,
                     s,
                     [CkptWeightInfo(w_name + self.qs_suffix, identity)],
-                    transpose,
+                    identity,
                     data_type=torch.float32,
                     config=src_weight.config,
                 ),
@@ -419,10 +420,5 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
         device: str,
         load_config: LoadConfig,
     ):
-        # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
-        kernel_weight = processed_res[self.kernel.name]
-        kernel_weight = kernel_weight.reshape(kernel_weight.shape[-1], -1)
-        processed_res[self.kernel.name] = kernel_weight
-
         return processed_res

@@ -53,7 +53,7 @@ class QWenV3MoeWeight(QWenV2MoeWeight):
                     MoeAtomicWeight(
                         W.moe_gate,
                         [CkptWeightInfo("model.layers.{i}.mlp.gate.weight", identity)],
-                        transpose,
+                        identity,
                         config=moe_config,
                     ),
                     MoeAtomicWeight(
