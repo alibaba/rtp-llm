@@ -24,8 +24,7 @@
 #include <cub/cub.cuh>
 #else
 #include "3rdparty/cub/cub.cuh"
-#endif
-#include "3rdparty/cub_compat.h"
+#endif 
 
 #define HDI inline __host__ __device__
 

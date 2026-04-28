@@ -26,23 +26,9 @@ flash_mla_headers = glob([
 cc_library(
     name = "flashmla_hdrs",
     hdrs = flash_mla_headers,
-    deps = select({
-        # CUDA 13: use the cutlass_cu13 build (CUTLASS v3.8 v2) which gates
-        # cuTensorMapEncode on __CUDACC_VER_MAJOR__ > 12 so CUDA 13 gets the
-        # versioned PFN_*_v12000 typedefs.  CUDA 12 keeps the existing @cutlass.
-        "@//:using_cuda13_arm": [
-            "@cutlass_cu13//:cutlass",
-            "@cutlass_cu13//:cutlass_utils",
-        ],
-        "@//:using_cuda13_x86": [
-            "@cutlass_cu13//:cutlass",
-            "@cutlass_cu13//:cutlass_utils",
-        ],
-        "//conditions:default": [
-            "@cutlass//:cutlass",
-            "@cutlass//:cutlass_utils",
-        ],
-    }) + [
+    deps = [
+        "@cutlass//:cutlass",
+        "@cutlass//:cutlass_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
