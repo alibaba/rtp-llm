@@ -185,7 +185,7 @@ def create_proxy_app(
         只有当所有 VIT worker 进程都准备就绪时才返回健康状态
         """
         if not worker_addresses:
-            return "ok"
+            return {"status": "ok"}
 
         request = StatusVersionPB()
         healthy_count = 0
@@ -223,7 +223,7 @@ def create_proxy_app(
             logging.debug(
                 f"[VIT_PROXY_HEALTH] All {len(worker_addresses)} workers are healthy"
             )
-            return "ok"
+            return {"status": "ok"}
         else:
             logging.warning(
                 f"[VIT_PROXY_HEALTH] Only {healthy_count}/{len(worker_addresses)} workers are healthy"

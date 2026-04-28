@@ -140,7 +140,7 @@ class VitEndpointApp:
         @app.post("/health")
         @app.post("/health_check")
         async def health():
-            return "ok"
+            return {"status": "ok"}
 
         @app.get("/worker_status")
         @app.post("/worker_status")
