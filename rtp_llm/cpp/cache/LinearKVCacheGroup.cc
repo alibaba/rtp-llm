@@ -99,16 +99,21 @@ MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
         return result;
     }
 
-    // Ring-buffer match (fixed_cap_ > 0): scan the last `fixed_cap_` key
-    // positions right-to-left; the rightmost hit at position `i` determines
-    // reuse_blocks = i + 1.  Result.block_indices is length
-    // min(i+1, fixed_cap_) RIGHT-ALIGNED so Python's `bids[0]` = older
-    // ring slot, `bids[last]` = newer ring slot.
-    //
+    // Ring-buffer groups (DSV4 SWA / State): fixed blocks hold state at the
+    // LATEST sequence position, not at an arbitrary prefix length.  A cache
+    // hit on a prefix shorter than the cached sequence would restore state at
+    // the wrong position, corrupting the compressor/indexer rollover.  Veto
+    // the entire reuse by returning 0 here; combined with HybridPool's
+    // `min_reuse_blocks = min(... across all pools)`, this forces full
+    // recomputation whenever LINEAR ring pools are in the mix.
+    if (fixed_cap_ > 0) {
+        return result;
+    }
+
     // Legacy (fixed_cap_ == 0): keep stash-era behavior that scans only the
     // last two positions and returns a prefix-length block_indices with
     // NULL placeholders at non-hit slots.
-    const int scan_window = fixed_cap_ > 0 ? fixed_cap_ : 2;
+    const int scan_window = 2;
     const int start       = m - 1;
     const int end         = std::max(0, m - scan_window);
 
@@ -118,31 +123,12 @@ MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
             continue;
         }
         result.reuse_blocks = static_cast<size_t>(i + 1);
-
-        if (fixed_cap_ > 0) {
-            // Ring slots cover logical positions [ring_start, i].
-            const int ring_size  = std::min(i + 1, fixed_cap_);
-            const int ring_start = i + 1 - ring_size;
-            result.block_indices.assign(static_cast<size_t>(ring_size), NULL_BLOCK_IDX);
-            // The rightmost hit goes into the newest ring slot.
-            result.block_indices.back() = single.block_indices[0];
-            // Try to fill older ring slots from block_cache (best-effort;
-            // NULL_BLOCK_IDX if that logical position did not cache its block).
-            for (int slot = ring_size - 2; slot >= 0; --slot) {
-                const int logical_pos = ring_start + slot;
-                auto      prev        = matchSingleKey(cache_keys[static_cast<size_t>(logical_pos)]);
-                if (!prev.block_indices.empty()) {
-                    result.block_indices[static_cast<size_t>(slot)] = prev.block_indices[0];
-                }
-            }
-        } else {
-            result.block_indices.assign(static_cast<size_t>(i + 1), NULL_BLOCK_IDX);
-            result.block_indices[static_cast<size_t>(i)] = single.block_indices[0];
-            if (i - 1 >= 0) {
-                auto prev = matchSingleKey(cache_keys[static_cast<size_t>(i - 1)]);
-                if (!prev.block_indices.empty()) {
-                    result.block_indices[static_cast<size_t>(i - 1)] = prev.block_indices[0];
-                }
+        result.block_indices.assign(static_cast<size_t>(i + 1), NULL_BLOCK_IDX);
+        result.block_indices[static_cast<size_t>(i)] = single.block_indices[0];
+        if (i - 1 >= 0) {
+            auto prev = matchSingleKey(cache_keys[static_cast<size_t>(i - 1)]);
+            if (!prev.block_indices.empty()) {
+                result.block_indices[static_cast<size_t>(i - 1)] = prev.block_indices[0];
             }
         }
         result.reuse_length = result.reuse_blocks * static_cast<size_t>(seq_size_per_block_);
