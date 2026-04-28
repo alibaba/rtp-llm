@@ -1,0 +1,50 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data/model/qwen_vl/1.jpeg"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": "Describe this image."
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 100,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "The user wants a description of the provided image.\n\n1.  **Identify the main subjects:** A woman and a dog.\n2.  **Identify the setting:** A sandy beach with the ocean in the background. The lighting suggests sunset or sunrise (golden hour).\n3.  **Describe the action:** The dog is sitting and giving its paw to the woman. The woman is holding the paw. They are looking at each other.\n4.  **Describe the subjects",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 971,
+                    "total_tokens": 1071,
+                    "completion_tokens": 100
+                }
+            }
+        }
+    ]
+}
