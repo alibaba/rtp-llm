@@ -35,6 +35,10 @@ def load_initial_state_from_block_map_kernel(
     block_idx = tl.where(
         is_zero, 0, tl.load(block_map + i_b * max_block_size + block_offset)
     ).to(tl.int64)
+    tl.device_assert(
+        block_idx >= 0,
+        "load_initial_state_from_block_map: block_map slot is < 0 (corrupted)",
+    )
 
     p_out = tl.make_block_ptr(
         initial_states + i_b * SSM_PER_BATCH + i_h * SSM_PER_HEAD,
@@ -148,6 +152,14 @@ def store_ssm_state_to_block_map_kernel(
     block_idx = tl.load(block_map + batch * max_block_size + dest_block_pos).to(
         tl.int64
     )
+    # H1 intercept: block 0 is BlockPool's reserved sentinel; the existing
+    # `<= 0` skip already prevents the write, but log so we know if the
+    # fill_(0) artifact ever lines up with a real store request.
+    if block_idx == 0:
+        tl.device_print(
+            "H1_intercept store_ssm_state block0 dest_block_pos=",
+            dest_block_pos,
+        )
 
     if block_idx <= 0:
         return

@@ -181,6 +181,9 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {
+        // removeSkippedBlocks discards mid-prefix blocks the linear cache no
+        // longer needs — these were never inserted into BlockCache, so it is
+        // always safe (and required) to zero before requestFree.
         zeroLinearWriteRegion(blocks_to_free);
         block_pool_->requestFree(blocks_to_free);
         block_ids.remove(pos_to_remove);  // null-out by position, updates kernel slots incrementally
@@ -196,6 +199,16 @@ void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     if (valid.empty()) {
         return;
     }
+    // Note on LINEAR cache reuse semantics: tryReleaseKVBlock inserts blocks
+    // into BlockCache BEFORE calling free(). Zeroing here therefore wipes the
+    // cached recurrent SSM state — future reuse hits load zeros instead of the
+    // request's actual end-of-block state. That degrades reuse to "no-prefix"
+    // semantically but cannot manufacture Inf/NaN, so it is the safer choice
+    // until the BlockCache eviction paths (KVCacheGroup::ensureFreeBlocks,
+    // KVCacheAllocator::blockCacheFree) learn to zero LINEAR blocks themselves.
+    // Skipping the zero here would leave fp32 SSM bytes alive in cache; once
+    // those blocks are evicted into the pool free list a FULL ATTN malloc
+    // re-reads the bytes as bf16 and the softmax NaN comes back.
     zeroLinearWriteRegion(valid);
     block_pool_->requestFree(valid);
 }

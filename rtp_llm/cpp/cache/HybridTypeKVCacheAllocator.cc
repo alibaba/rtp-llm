@@ -76,6 +76,32 @@ void HybridTypeKVCacheAllocator::referenceValidBlocks(const BlockIndicesType& bl
     }
 }
 
+void HybridTypeKVCacheAllocator::zeroLinearGroupBytes(const BlockIndicesType& blocks) const {
+    if (blocks.empty() || linear_group_ids_.empty()) {
+        return;
+    }
+    BlockIndicesType valid;
+    valid.reserve(blocks.size());
+    for (auto b : blocks) {
+        if (!isNullBlockIdx(b) && b > 0) {
+            valid.push_back(b);
+        }
+    }
+    if (valid.empty()) {
+        return;
+    }
+    // Each LINEAR group's zeroLinearWriteRegion only touches the layer rows it
+    // owns, so iterating all linear groups is correct (and idempotent across
+    // groups because each owns disjoint global layer ids).
+    for (int gid : linear_group_ids_) {
+        auto* linear_group =
+            dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
+        if (linear_group) {
+            linear_group->zeroLinearWriteRegion(valid);
+        }
+    }
+}
+
 int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource) {
     // 1) Prefix match on all full-attn groups, take the shortest prefix.
     int                           min_full_reuse_blocks = static_cast<int>(cache_keys.size());
@@ -211,7 +237,12 @@ MallocResult HybridTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
         }
     }
     if (!blocks_to_free.empty()) {
-        // All groups share the same block pool; free directly.
+        // All groups share the same block pool; free directly. Defensive zero:
+        // these blocks were just malloc'd this call (forward hasn't run yet),
+        // so they cannot carry NEW LINEAR fp32 bytes. But they may still carry
+        // STALE fp32 bytes from a previous owner if some other free path missed
+        // its zero pass. Wiping again on rollback closes that gap cheaply.
+        zeroLinearGroupBytes(blocks_to_free);
         block_pool_->requestFree(blocks_to_free);
     }
     RTP_LLM_LOG_WARNING("Hybrid incrMalloc failed at batch=%d group=%d", failed_batch, failed_group);
@@ -475,6 +506,12 @@ void HybridTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
             }
         }
     }
+    // Wipe LINEAR write region before releasing the connector / request ref. If
+    // this drop is the last ref the block goes straight to the pool free list,
+    // bypassing LinearKVCacheGroup::free's zero pass. The PD-sep / async-write
+    // flows hold connector refs that can outlive the original stream's free, so
+    // ref-drop ordering is not guaranteed to land on a pre-zeroed block.
+    zeroLinearGroupBytes(blocks_to_free);
     if (is_connector) {
         block_pool_->connectorFree(blocks_to_free);
     } else {
