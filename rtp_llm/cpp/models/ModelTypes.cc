@@ -69,6 +69,28 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    {
+        // encode root-side tensor device for fields that may live on
+        // GPU on the PDFUSION fast path, so non-root ranks can allocate matching
+        // GPU buffers below and tpSync's pack/unpack stays in lockstep.
+        uint32_t device_bits = 0;
+        if (inputs.combo_tokens.defined() && inputs.combo_tokens.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitComboTokens;
+        }
+        if (inputs.input_lengths.defined() && inputs.input_lengths.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitInputLengths;
+        }
+        if (inputs.sequence_lengths.defined() && inputs.sequence_lengths.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitSequenceLengths;
+        }
+        if (inputs.prefix_lengths.defined() && inputs.prefix_lengths.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitPrefixLengths;
+        }
+        if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
+        }
+        shape_hints_ptr[GptModelInputIndex::tensorDeviceMap] = static_cast<int32_t>(device_bits);
+    }
 
     // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
     // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
@@ -128,13 +150,27 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (is_non_root) {
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
 
-        inputs.combo_tokens =
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]});
-        inputs.input_lengths =
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]});
-        inputs.sequence_lengths =
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]});
-        inputs.prefix_lengths = allocBuf(rtp_llm::DataType::TYPE_INT32, {context_batch_size});
+        // respect the root-side device bitmap so GPU-resident fields
+        // are allocated on CUDA on non-root ranks too. Without this, the
+        // pack/unpack loop classifies tensors differently per rank and breaks
+        // NCCL broadcast ordering.
+        const uint32_t device_bits = static_cast<uint32_t>(shape_hints_ptr[GptModelInputIndex::tensorDeviceMap]);
+        auto           pickAlloc   = [&](GptModelInputDeviceBit bit) {
+            return (device_bits & bit) ? rtp_llm::AllocationType::DEVICE : rtp_llm::AllocationType::HOST;
+        };
+
+        inputs.combo_tokens     = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                           {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]},
+                                       pickAlloc(GptModelInputDeviceBit::kDeviceBitComboTokens));
+        inputs.input_lengths    = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                           {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]},
+                                        pickAlloc(GptModelInputDeviceBit::kDeviceBitInputLengths));
+        inputs.sequence_lengths = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                           {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]},
+                                           pickAlloc(GptModelInputDeviceBit::kDeviceBitSequenceLengths));
+        inputs.prefix_lengths   = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                           {context_batch_size},
+                                         pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
         if (max_kernel_blocks != 0) {
             inputs.kv_cache_kernel_block_id = allocBuf(
                 rtp_llm::DataType::TYPE_INT32,
@@ -158,8 +194,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         inputs.request_id            = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
         inputs.request_pd_separation = allocBuf(rtp_llm::DataType::TYPE_BOOL, {request_length});
-        inputs.lm_output_indexes =
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]});
+        inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
+                                            pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
         inputs.lm_output_lengths =
             allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputLengthes]});
         if (combo_position_ids_size) {

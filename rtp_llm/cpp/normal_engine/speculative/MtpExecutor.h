@@ -112,6 +112,21 @@ protected:
                         std::list<GenerateStreamPtr>&       prefill_streams,
                         std::list<GenerateStreamPtr>&       decode_streams);
 
+    // Env-gated stream-async switch. Default off unless
+    // RTP_LLM_MTP_STREAM_ASYNC=1 is exported at server start.
+    bool useStreamAsync() const;
+
+    // Stream-async dispatch. The caller records rejection_event after rejection
+    // sampling and draft_event after draft_model_sample. This method attaches
+    // device-resident next-step state to each stream, then forks a worker that
+    // waits on those events and performs D2H/specUpdate/KV release off the
+    // main thread.
+    absl::Status dispatchDecodeAsync(const StreamGroups&                          stream_groups,
+                                     const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                     MergedOutput                                 draft_prefill_output,
+                                     std::shared_ptr<torch::Event>                rejection_event,
+                                     std::shared_ptr<torch::Event>                draft_event);
+
 private:
     std::unique_ptr<ModelBase>               model_;
     std::unique_ptr<Sampler>                 sampler_;
@@ -151,5 +166,9 @@ private:
 
     AsyncRunner target_verify_prepare_runner_;
     AsyncRunner draft_prefill_prepare_runner_;
+
+    // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
+    // stream + thread and runs D2H/specUpdate/KV release off the main thread.
+    AsyncRunner spec_bookkeeping_runner_;
 };
 };  // namespace rtp_llm

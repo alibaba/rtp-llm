@@ -78,7 +78,22 @@ enum GptModelInputIndex : size_t {
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
+    // Per-tensor device hint bitmap. Each bit (see GptModelInputDeviceBit
+    // below) is set when the corresponding root-side tensor lives on CUDA, so non-root
+    // ranks can allocate matching GPU buffers and tpSync's GPU-broadcast lane stays
+    // consistent across ranks.
+    tensorDeviceMap,
     gptModelInputLength,
+};
+
+// Bit positions for `tensorDeviceMap`. Only fields that participate in the
+// MTP/Eagle decode-prepare GPU path need a bit; other fields stay CPU.
+enum GptModelInputDeviceBit : uint32_t {
+    kDeviceBitComboTokens     = 1u << 0,
+    kDeviceBitInputLengths    = 1u << 1,
+    kDeviceBitSequenceLengths = 1u << 2,
+    kDeviceBitPrefixLengths   = 1u << 3,
+    kDeviceBitLmOutputIndexes = 1u << 4,
 };
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
