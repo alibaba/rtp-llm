@@ -322,7 +322,13 @@ class AiterPrefillAttnOp:
         seqlen_k = (prefix_lengths_device + input_lengths).to(torch.int32)
 
         softmax_scale = 1.0 / math.sqrt(self.head_dim)
-        kv_indptr = cu_seqlens_q
+        # kv_indptr must be all-zeros when kv_page_indices is empty (block_table
+        # is used instead).  Previously cu_seqlens_q was passed here, causing
+        # aiter to index into the empty kv_page_indices and trigger an
+        # out-of-bounds assert on GPU.
+        if not hasattr(self, '_kv_indptr') or self._kv_indptr.shape[0] != batch_size + 1:
+            self._kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=cu_seqlens_q.device)
+        kv_indptr = self._kv_indptr
         # Reuse cached empty tensor to avoid per-layer allocation
         if not hasattr(self, '_empty_kv_page_indices'):
             self._empty_kv_page_indices = torch.empty(0, dtype=torch.int32, device=cu_seqlens_q.device)

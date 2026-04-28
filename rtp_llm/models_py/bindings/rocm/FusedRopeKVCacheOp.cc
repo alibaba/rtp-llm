@@ -220,8 +220,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
                                          invokeAddFusedQKVBiasTransposePrefillV1,
                                          q_output.data_ptr(),
-                                         k_output.data_ptr(),
-                                         v_output.data_ptr(),
+                                         k_output.defined() ? k_output.data_ptr() : nullptr,
+                                         v_output.defined() ? v_output.data_ptr() : nullptr,
                                          &prefix_prompt_param,
                                          qkv.data_ptr(),
                                          paged_fp8 ? q_fp8_buf.data_ptr() :
