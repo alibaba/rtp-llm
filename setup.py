@@ -1038,9 +1038,10 @@ def get_base_dependencies() -> list:
             print(f"Warning: Could not read base dependencies: {e}")
 
     # Internal overlay can contribute additional base deps
+    # (skipped under RTP_LLM_OSS_BUILD=1 — see get_platform_dependencies)
     repo_root = project_root.parent
     internal_overlay = repo_root / "internal_source" / "pyproject_internal.toml"
-    if internal_overlay.exists():
+    if not os.environ.get("RTP_LLM_OSS_BUILD") and internal_overlay.exists():
         try:
             with open(internal_overlay, "rb") as f:
                 data = tomllib.load(f)
@@ -1112,9 +1113,17 @@ def get_platform_dependencies() -> list:
     # Layer 1 — root extras (open-source defaults)
     root_extras = _load_extras_from_toml(project_root / "pyproject.toml")
 
+    # OSS-only mode (set by build-open_source_* CI jobs to bypass internal
+    # overlays even when /aoneci/runner/work/source/internal_source/ still
+    # exists at repo_root). Without this, setup.py would silently use
+    # internal-mirror torch URLs that may not match the OSS test container.
+    oss_only = bool(os.environ.get("RTP_LLM_OSS_BUILD"))
+    if oss_only:
+        print("[overlay] RTP_LLM_OSS_BUILD=1 — skipping internal/PPU overlays")
+
     # Layer 2 — internal overlay (override target_extras)
     internal_overlay = repo_root / "internal_source" / "pyproject_internal.toml"
-    if internal_overlay.exists():
+    if not oss_only and internal_overlay.exists():
         meta = _load_overlay_meta(internal_overlay)
         internal_extras = _load_extras_from_toml(internal_overlay)
         mode = meta.get("mode", "extend")
@@ -1138,7 +1147,7 @@ def get_platform_dependencies() -> list:
             root_extras.setdefault(key, []).extend(deps)
 
     # Layer 3 — PPU overlay (extend, only when ppu build)
-    if build_config == "ppu":
+    if not oss_only and build_config == "ppu":
         ppu_overlay = (
             repo_root / "internal_source" / "RTP_LLM-PPU" / "pyproject_ppu.toml"
         )
