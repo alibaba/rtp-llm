@@ -319,6 +319,21 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
         QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
     }
 
+    auto& pq_cids = stream->getPerLayerCids();
+    if (pq_cids.has_value()) {
+        for (const auto& t : pq_cids.value()) {
+            auto cpu_t = t.is_cuda() ? t.cpu() : t;
+            QueryConverter::transTensorPB(generate_request.add_pq_cids(), cpu_t);
+        }
+    }
+    auto& pq_cents = stream->getPerLayerCents();
+    if (pq_cents.has_value()) {
+        for (const auto& t : pq_cents.value()) {
+            auto cpu_t = t.is_cuda() ? t.cpu() : t;
+            QueryConverter::transTensorPB(generate_request.add_pq_cents(), cpu_t);
+        }
+    }
+
     generate_request.set_stage(RemoteStage::GENERATE);
 
     CLIENT_GRPC_RET_IF_ERROR(

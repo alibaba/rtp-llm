@@ -175,6 +175,15 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    if (model_output.per_layer_cids.has_value()) {
+        for (const auto& stream : stream_groups.contextStreams()) {
+            stream->setPerLayerCids(model_output.per_layer_cids.value());
+            if (model_output.per_layer_cents.has_value()) {
+                stream->setPerLayerCents(model_output.per_layer_cents.value());
+            }
+        }
+    }
+
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
         cudaSyncAndCheck();
         model_->releaseBuffers();

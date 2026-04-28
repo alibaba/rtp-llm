@@ -106,6 +106,9 @@ struct GptModelOutputs {
     torch::Tensor softmax_result;
 
     std::vector<torch::Tensor> moe_gating;
+
+    std::optional<std::vector<torch::Tensor>> per_layer_cids;
+    std::optional<std::vector<torch::Tensor>> per_layer_cents;
 };
 
 struct CopyParams {

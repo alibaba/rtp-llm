@@ -51,7 +51,7 @@ def _heuristic_euclid_config(
         device = torch.device("cuda")
     gpu_name = torch.cuda.get_device_properties(device).name.upper()
 
-    if "H200" in gpu_name:
+    if "H200" in gpu_name or "H20" in gpu_name:
         block_n = 128
         block_k = 64
         num_warps = 4
@@ -281,6 +281,12 @@ _euclid_assign_kernel_autotuned = triton.autotune(_TUNE_CONFIGS, key=["N", "K"])
 )
 
 
+def _next_power_of_2_min16(d: int) -> int:
+    """Round up to next power-of-2 with a minimum of 16 (tl.dot constraint on sm_90)."""
+    d = max(d, 16)
+    return 1 << (d - 1).bit_length()
+
+
 def euclid_assign_triton(
     x: torch.Tensor,
     centroids: torch.Tensor,
@@ -308,6 +314,12 @@ def euclid_assign_triton(
     K = centroids.shape[1]
     assert centroids.shape == (B, K, D), "centroids shape mismatch"
     assert x_sq.shape == (B, N), "x_sq shape mismatch"
+
+    D_padded = _next_power_of_2_min16(D)
+    if D_padded != D:
+        x = torch.nn.functional.pad(x, (0, D_padded - D))
+        centroids = torch.nn.functional.pad(centroids, (0, D_padded - D))
+        D = D_padded
 
     if out is None:
         out = torch.empty((B, N), device=x.device, dtype=torch.int32)
@@ -491,8 +503,14 @@ def triton_centroid_update_sorted_euclid(
 ):
     """Fast Euclidean centroid update; sorts cluster IDs internally."""
     assert x.is_cuda and cluster_ids.is_cuda
-    B, N, D = x.shape
+    B, N, D_orig = x.shape
     K = old_centroids.shape[1]
+
+    D_padded = _next_power_of_2_min16(D_orig)
+    if D_padded != D_orig:
+        x = torch.nn.functional.pad(x, (0, D_padded - D_orig))
+        old_centroids = torch.nn.functional.pad(old_centroids, (0, D_padded - D_orig))
+    D = D_padded
 
     sorted_cluster_ids, sorted_idx = torch.sort(cluster_ids, dim=-1)
     sorted_idx_int = sorted_idx.to(torch.int32)
@@ -538,7 +556,10 @@ def triton_centroid_update_sorted_euclid(
         centroids = centroid_sums / counts_f
         empty_mask = (centroid_cnts == 0).unsqueeze(-1)
         centroids = torch.where(empty_mask, old_centroids.to(torch.float32), centroids)
-        return centroids.to(x.dtype)
+        result = centroids.to(x.dtype)
+        if D_padded != D_orig:
+            result = result[:, :, :D_orig]
+        return result
     else:
         return None
 

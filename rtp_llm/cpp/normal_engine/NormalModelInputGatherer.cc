@@ -263,8 +263,50 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
             ctx.batch_idx += 1;
         }
         addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping());
+
         stream->step();
     }
+
+    // Merge PQ data from all decode streams into model_input.
+    // Each stream holds per_layer_cids[layer] = [H, S, prefill_len_i].
+    // Stack them along a new batch dim → [batch, H, S, max_prefill_len].
+    {
+        std::vector<const std::vector<torch::Tensor>*> all_cids, all_cents;
+        for (const auto& stream : stream_groups.decodeStreams()) {
+            if (stream->getPerLayerCids().has_value()) {
+                all_cids.push_back(&stream->getPerLayerCids().value());
+                all_cents.push_back(&stream->getPerLayerCents().value());
+            }
+        }
+        if (!all_cids.empty()) {
+            size_t num_layers = all_cids[0]->size();
+            size_t num_streams = all_cids.size();
+            std::vector<torch::Tensor> merged_cids(num_layers);
+            std::vector<torch::Tensor> merged_cents(num_layers);
+
+            for (size_t l = 0; l < num_layers; ++l) {
+                int64_t max_plen = 0;
+                for (size_t b = 0; b < num_streams; ++b) {
+                    max_plen = std::max(max_plen, (*all_cids[b])[l].size(-1));
+                }
+                std::vector<torch::Tensor> cids_vec, cents_vec;
+                for (size_t b = 0; b < num_streams; ++b) {
+                    auto t = (*all_cids[b])[l];
+                    int64_t pad = max_plen - t.size(-1);
+                    if (pad > 0) {
+                        t = torch::constant_pad_nd(t, {0, pad}, 0);
+                    }
+                    cids_vec.push_back(t);
+                    cents_vec.push_back((*all_cents[b])[l]);
+                }
+                merged_cids[l] = torch::stack(cids_vec, 0);
+                merged_cents[l] = torch::stack(cents_vec, 0);
+            }
+            model_input.per_layer_cids = std::move(merged_cids);
+            model_input.per_layer_cents = std::move(merged_cents);
+        }
+    }
+
     return absl::OkStatus();
 }
 
