@@ -1,192 +1,192 @@
 {
-  "model_type": "qwen_3",
-  "model_path": "/mnt/nas1/hf/Qwen3-32B/",
-  "query_result": [
-    {
-      "query": {
-        "prompt_batch": [
-          "$prompt:s2",
-          "$prompt:s4",
-          "$prompt:s6"
-        ],
-        "generate_config": {
-          "max_new_tokens": 20,
-          "temperature": 0.0,
-          "top_p": 0.1,
-          "top_k": 1
-        }
-      },
-      "result": {
-        "response_batch": [
-          {
-            "response": "，并给出答案。 问题1：What is the best way to improve my English listening skills?",
-            "finished": true
-          },
-          {
-            "response": " --ar 3:4 --v 6.0 --style raw --style expressive --style",
-            "finished": true
-          },
-          {
-            "response": "同时，为高校提供招生宣传、招生咨询、校园开放日策划等服务，助力高校",
-            "finished": true
-          }
-        ]
-      }
-    },
-    {
-      "endpoint": "/v1/chat/completions",
-      "query": {
-        "messages": [
-          {
-            "role": "user",
-            "content": "$prompt:s5"
-          }
-        ],
-        "extra_configs": {
-          "max_new_tokens": 100,
-          "temperature": 0.0,
-          "top_p": 0.1,
-          "top_k": 1
-        }
-      },
-      "result": {
-        "id": "chat-",
-        "object": "chat.completion",
-        "created": 1776610196,
-        "model": "",
-        "choices": [
-          {
-            "index": 0,
-            "message": {
-              "role": "assistant",
-              "content": "<think>\nOkay, so the user is asking which Flask alternative is most similar to Django North in syntax. Hmm, first I need to make sure I understand what Django North is. Wait, Django North was a migration tool for Django, right? But I think it's been deprecated and replaced by Django's built-in migration system. Maybe the user is referring to Django's migration framework, or perhaps there's a confusion here. Let me check.\n\nAssuming the user meant Django's migration system, they",
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+    "model_type": "qwen_3",
+    "model_path": "/mnt/nas1/hf/Qwen3-32B/",
+    "query_result": [
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s2",
+                    "$prompt:s4",
+                    "$prompt:s6"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "temperature": 0.0,
+                    "top_p": 0.1,
+                    "top_k": 1
+                }
             },
-            "finish_reason": "length",
-            "logprobs": null
-          }
-        ],
-        "usage": {
-          "prompt_tokens": 21,
-          "total_tokens": 121,
-          "completion_tokens": 100,
-          "completion_tokens_details": null,
-          "prompt_tokens_details": null
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "，并给出答案。 问题1：What is the best way to improve my English listening skills?",
+                        "finished": true
+                    },
+                    {
+                        "response": " --ar 3:4 --v 6.0 --style raw --style expressive --style",
+                        "finished": true
+                    },
+                    {
+                        "response": "同时，为高校提供招生宣传、招生咨询、校园开放日策划等服务，助力高校",
+                        "finished": true
+                    }
+                ]
+            }
         },
-        "debug_info": null,
-        "aux_info": {
-          "cost_time": 2989.088,
-          "iter_count": 100,
-          "prefix_len": 0,
-          "input_len": 21,
-          "output_len": 100,
-          "step_output_len": 100,
-          "first_token_cost_time": 52.489,
-          "wait_time": 0.22,
-          "pd_sep": false,
-          "cum_log_probs": [],
-          "beam_responses": [],
-          "softmax_probs": [],
-          "reuse_len": 0,
-          "local_reuse_len": 0,
-          "remote_reuse_len": 0,
-          "memory_reuse_len": 0,
-          "prefill_total_reuse_len": 0,
-          "prefill_local_reuse_len": 0,
-          "prefill_remote_reuse_len": 0,
-          "prefill_memory_reuse_len": 0,
-          "decode_total_reuse_len": 0,
-          "decode_local_reuse_len": 0,
-          "decode_remote_reuse_len": 0,
-          "decode_memory_reuse_len": 0,
-          "role_addrs": [],
-          "aux_string": ""
-        },
-        "extra_outputs": null
-      }
-    },
-    {
-      "endpoint": "/v1/chat/completions",
-      "query": {
-        "messages": [
-          {
-            "role": "user",
-            "content": "$prompt:s5"
-          }
-        ],
-        "extra_configs": {
-          "max_new_tokens": 100,
-          "temperature": 0.0,
-          "top_p": 0.1,
-          "top_k": 1
-        }
-      },
-      "result": {
-        "id": "chat-",
-        "object": "chat.completion",
-        "created": 1776610220,
-        "model": "",
-        "choices": [
-          {
-            "index": 0,
-            "message": {
-              "role": "assistant",
-              "content": "<think>\nOkay, so the user is asking which Flask alternative is most similar to Django North in syntax. Hmm, first I need to make sure I understand what Django North is. Wait, Django North was a migration tool for Django, right? But I think it's been deprecated and replaced by Django's built-in migration system. Maybe the user is referring to Django's migration framework, or perhaps there's a confusion here. Let me check.\n\nAssuming the user meant Django's migration system, they",
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s5"
+                    }
+                ],
+                "extra_configs": {
+                    "max_new_tokens": 100,
+                    "temperature": 0.0,
+                    "top_p": 0.1,
+                    "top_k": 1
+                }
             },
-            "finish_reason": "length",
-            "logprobs": null
-          }
-        ],
-        "usage": {
-          "prompt_tokens": 21,
-          "total_tokens": 121,
-          "completion_tokens": 100,
-          "completion_tokens_details": null,
-          "prompt_tokens_details": {
-            "audio_tokens": null,
-            "cached_tokens": 16
-          }
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1776610196,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "<think>\nOkay, so the user is asking which Flask alternative is most similar to Django North in syntax. Hmm, first I need to make sure I understand what Django North is. Wait, Django North was a migration tool for Django, right? But I think it's been deprecated and replaced by Django's built-in migration system. Maybe the user is referring to Django's migration framework, or perhaps there's a confusion here. Let me check.\n\nAssuming the user meant Django's migration system, they",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 21,
+                    "total_tokens": 121,
+                    "completion_tokens": 100,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 2989.088,
+                    "iter_count": 100,
+                    "prefix_len": 0,
+                    "input_len": 21,
+                    "output_len": 100,
+                    "step_output_len": 100,
+                    "first_token_cost_time": 52.489,
+                    "wait_time": 0.22,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
         },
-        "debug_info": null,
-        "aux_info": {
-          "cost_time": 23835.21,
-          "iter_count": 100,
-          "prefix_len": 0,
-          "input_len": 21,
-          "output_len": 100,
-          "step_output_len": 100,
-          "first_token_cost_time": 20898.399,
-          "wait_time": 0.151,
-          "pd_sep": false,
-          "cum_log_probs": [],
-          "beam_responses": [],
-          "softmax_probs": [],
-          "reuse_len": 16,
-          "local_reuse_len": 16,
-          "remote_reuse_len": 0,
-          "memory_reuse_len": 0,
-          "prefill_total_reuse_len": 0,
-          "prefill_local_reuse_len": 0,
-          "prefill_remote_reuse_len": 0,
-          "prefill_memory_reuse_len": 0,
-          "decode_total_reuse_len": 0,
-          "decode_local_reuse_len": 0,
-          "decode_remote_reuse_len": 0,
-          "decode_memory_reuse_len": 0,
-          "role_addrs": [],
-          "aux_string": ""
-        },
-        "extra_outputs": null
-      }
-    }
-  ]
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s5"
+                    }
+                ],
+                "extra_configs": {
+                    "max_new_tokens": 100,
+                    "temperature": 0.0,
+                    "top_p": 0.1,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1776610220,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "<think>\nOkay, so the user is asking which Flask alternative is most similar to Django North in syntax. Hmm, first I need to make sure I understand what Django North is. Wait, Django North was a migration tool for Django, right? But I think it's been deprecated and replaced by Django's built-in migration system. Maybe the user is referring to Django's migration framework, or perhaps there's a confusion here. Let me check.\n\nAssuming the user meant Django's migration system, they",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 21,
+                    "total_tokens": 121,
+                    "completion_tokens": 100,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": {
+                        "audio_tokens": null,
+                        "cached_tokens": 16
+                    }
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 23835.21,
+                    "iter_count": 100,
+                    "prefix_len": 0,
+                    "input_len": 21,
+                    "output_len": 100,
+                    "step_output_len": 100,
+                    "first_token_cost_time": 20898.399,
+                    "wait_time": 0.151,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 16,
+                    "local_reuse_len": 16,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
+        }
+    ]
 }
