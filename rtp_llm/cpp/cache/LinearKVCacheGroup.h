@@ -34,8 +34,6 @@ public:
                                  int  reuse_blocks_len,
                                  bool reuse_enabled = false) const override;
 
-private:
-    void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
     // Zero only the bytes this LINEAR group actually wrote (ssm_state +
     // conv_state, ~2 MB per layer per block) before returning blocks to the
     // pool. This breaks the chain "LINEAR fp32 SSM -> recycled by FULL ATTN
@@ -45,7 +43,12 @@ private:
     // LINEAR free path (not every malloc). FULL group's K/V residue is bf16
     // already so reusing it does not produce NaN, just bf16-magnitude noise
     // on padding positions, so we don't need a symmetric clean for FULL frees.
+    // Public so HybridTypeKVCacheAllocator can route LINEAR blocks through
+    // it on bypass free paths (rollback, connector decrRef, cache eviction).
     void zeroLinearWriteRegion(const BlockIndicesType& block_ids) const;
+
+private:
+    void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
 
 private:
     // NOTE: linear attention cache can be sparsified; current implementation is conservative:

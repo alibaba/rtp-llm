@@ -356,8 +356,17 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 + idx_seq * max_block_size
                 + dest_idx // SEQ_SIZE_PER_BLOCK
             ).to(tl.int64)
+            # H1 intercept: block 0 is BlockPool's reserved sentinel (never
+            # malloc'd, always zero). Writing here corrupts the safe-zero
+            # block for every later reader.
+            if write_page_idx == 0:
+                tl.device_print(
+                    "H1_intercept causal_conv1d_fwd_write block0 dest_idx=",
+                    dest_idx,
+                )
 
-        if write_to_block and write_page_idx >= 0:
+        # changed from `>= 0` to `> 0` to reject block 0 in addition to -1
+        if write_to_block and write_page_idx > 0:
             # tl.device_print("idx_seq:", idx_seq)
             # tl.device_print("max_block_size:", max_block_size)
             # tl.device_print("dest_idx:", dest_idx)
@@ -706,6 +715,14 @@ def _causal_conv1d_update_kernel(
     read_block_id = tl.load(
         block_map_ptr + idx_seq * stride_block_map + read_block_offset
     ).to(tl.int64)
+    # The decode path reads conv state for the LAST allocated block of the
+    # sequence; a -1 slot here would point conv_states_base below at memory
+    # before the cache buffer (UB). LinearKVCacheGroup always allocates the
+    # seq_tail block, so this should never be NULL.
+    tl.device_assert(
+        read_block_id >= 0,
+        "causal_conv1d_update read: block_map slot is -1 (NULL) — sparse-NULL slot read at decode",
+    )
     # STEP 1: READ init_state data
     conv_states_base = (
         conv_state_ptr
@@ -770,8 +787,16 @@ def _causal_conv1d_update_kernel(
         write_block_id = tl.load(
             block_map_ptr + idx_seq * stride_block_map + write_block_offset
         ).to(tl.int64)
+        # H1 intercept: block 0 is BlockPool's reserved sentinel; writes here
+        # corrupt the safe-zero block for every later reader.
+        if write_block_id == 0:
+            tl.device_print(
+                "H1_intercept causal_conv1d_update_write block0 offset=",
+                write_block_offset,
+            )
 
-        if write_block_id != -1:
+        # changed from `!= -1` to `> 0` to also reject block 0
+        if write_block_id > 0:
             conv_state_base = (
                 conv_state_ptr
                 + (write_block_id * stride_conv_state_seq)

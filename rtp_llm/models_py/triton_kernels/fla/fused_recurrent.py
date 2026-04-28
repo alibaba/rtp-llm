@@ -153,6 +153,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         # keep the states for multi-query tokens
+        write_active = True
         if INPLACE_FINAL_STATE and IS_CONTINUOUS_BATCHING:
             write_block_offset = (
                 cal_block_idx(sequence_length, SEQ_SIZE_PER_BLOCK) + i_t
@@ -160,11 +161,27 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             write_block_id = tl.load(
                 block_map + i_n * max_block_size + write_block_offset
             ).to(tl.int64)
-            p_ht = ht + write_block_id * stride_final_state_token
+            # H1 intercept: block 0 is BlockPool's reserved "safe zero" block;
+            # writing fp32 SSM state here corrupts it for every later FULL ATTN
+            # reader. -1 is a legitimate sparse-NULL slot. Reject both, log 0.
+            if write_block_id == 0:
+                tl.device_print(
+                    "H1_intercept fused_recurrent_write block0 offset=",
+                    write_block_offset,
+                )
+            write_active = write_block_id > 0
+            # Use 0 as a safe pointer base when not writing — the store mask
+            # below suppresses the actual store, so block 0 stays untouched.
+            safe_block_id = tl.where(
+                write_active, write_block_id, tl.cast(0, tl.int64)
+            )
+            p_ht = ht + safe_block_id * stride_final_state_token
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
         p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+        tl.store(
+            p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h & write_active
+        )
 
         p_q += stride_qs
         p_k += stride_ks

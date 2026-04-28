@@ -51,6 +51,14 @@ private:
     int  reuseCache(const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource);
     void referenceValidBlocks(const BlockIndicesType& blocks) const;
 
+    // Run LinearKVCacheGroup::zeroLinearWriteRegion across every linear group on
+    // bypass paths that drop blocks straight into the pool (incrMalloc rollback,
+    // decrKVCacheRef). LinearKVCacheGroup::free is the canonical zero point, but
+    // these direct requestFree paths skip it; without the wipe a LINEAR-dirty
+    // fp32 block can be picked up next by a FULL ATTN malloc and decoded as
+    // bf16 -> Inf -> softmax NaN.
+    void zeroLinearGroupBytes(const BlockIndicesType& blocks) const;
+
 private:
     std::vector<KVCacheGroupPtr> kv_cache_groups_;
 
