@@ -1,0 +1,16 @@
+{
+    "model_type": "qwen_3_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3-30B-A3B-Instruct-2507-FP8",
+    "query_result": [
+        {
+            "query": {
+                "tau2_bench": true
+            },
+            "result": {},
+            "tau2_bench": true,
+            "tau2_model": "Qwen3-30B",
+            "tau2_task_ids_file": "passing_tasks.json",
+            "tau2_threshold": 0.75
+        }
+    ]
+}

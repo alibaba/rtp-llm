@@ -89,3 +89,22 @@ def sm100_suites():
         ]
     )
 
+
+    # SM100 Eval (end-to-end benchmark-based smokes, standalone CI job due to long runtime)
+    # Not aggregated into maga_model_smoke; triggered directly by its own .aoneci job.
+    native.test_suite(
+        name = "smoke_sm100_eval",
+        tests = [
+            smoke_test(
+                name="qwen3_moe_tau2_bench_sm100",
+                task_info="data/model/qwen3_moe/q_r_30b_tau2_bench_tp2_sm100.json",
+                smoke_args="--warm_up 0 --act_type BF16 --max_seq_len 16384 --reserver_runtime_mem_mb 8192 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 64 --quantization FP8_PER_BLOCK --blockwise_use_fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --tp_size 2 --world_size 2",
+                gpu_type=["SM100_ARM"],
+                data=[
+                    "data/model/qwen3_moe/passing_tasks.json",
+                    "data/model/qwen3_moe/run_tau2_bench.py",
+                ],
+            ),
+        ],
+    )
+

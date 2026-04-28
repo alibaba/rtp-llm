@@ -1,0 +1,30 @@
+{
+  "airline": [
+    "4",
+    "5",
+    "40"
+  ],
+  "retail": [
+    "13",
+    "17",
+    "38",
+    "40",
+    "50",
+    "53",
+    "61",
+    "65",
+    "68",
+    "69",
+    "73",
+    "75",
+    "77",
+    "86",
+    "87",
+    "89",
+    "113"
+  ],
+  "telecom": [
+    "[service_issue]airplane_mode_on|break_apn_settings|contract_end_suspension|unseat_sim_card[PERSONA:Easy]",
+    "[service_issue]break_apn_settings|contract_end_suspension|lock_sim_card_pin|unseat_sim_card[PERSONA:Hard]"
+  ]
+}
