@@ -24,6 +24,12 @@ generate_grpc_proto(
     create_grpc_proto = ":create_grpc_proto"
 )
 
+cc_library(
+    name = "grpc_buffer_list_link_fix",
+    srcs = ["@grpc//:src/core/lib/iomgr/buffer_list.cc"],
+    alwayslink = True,
+    deps = ["@grpc//:grpc_base_c"],
+)
 
 cc_library(
     name = "model_rpc_service_cc_proto",
@@ -31,7 +37,10 @@ cc_library(
             "model_rpc_service.grpc.pb.h"],
     srcs = ["model_rpc_service.pb.cc",
             "model_rpc_service.grpc.pb.cc"],
-    deps = [":model_rpc_service_cc_impl"],
+    deps = [
+        ":grpc_buffer_list_link_fix",
+        ":model_rpc_service_cc_impl",
+    ],
     visibility = ["//visibility:public"],
 )
 
