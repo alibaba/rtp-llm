@@ -676,12 +676,26 @@ def build_bazel_extensions(build_config: str) -> None:
     copy_extensions(project_root, build_config)
 
 
-def _safe_copy_so(src: Path, dst: Path):
-    """Copy .so file, handling read-only bazel outputs."""
-    if dst.exists():
+def _safe_copy_so(src: Path, dst: Path) -> bool:
+    """Copy .so file, handling read-only bazel outputs.
+
+    Returns True on success, False if src is a broken symlink / missing
+    (which can happen when copy_extensions runs against a stale bazel-bin
+    where some _solib_local symlinks point to garbage-collected paths —
+    common when RTP_SKIP_BAZEL_BUILD=1 is used to seed test venvs).
+    """
+    try:
+        if not src.exists():
+            print(f"  Warning: source missing or broken symlink: {src}")
+            return False
+        if dst.exists():
+            dst.chmod(0o755)
+        shutil.copy2(src, dst)
         dst.chmod(0o755)
-    shutil.copy2(src, dst)
-    dst.chmod(0o755)
+        return True
+    except (OSError, FileNotFoundError) as e:
+        print(f"  Warning: copy failed {src} -> {dst}: {e}")
+        return False
 
 
 def copy_core_so_files(bazel_bin: Path, target_dir: Path) -> None:
