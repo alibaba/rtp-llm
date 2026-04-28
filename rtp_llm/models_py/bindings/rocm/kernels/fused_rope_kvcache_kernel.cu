@@ -345,8 +345,8 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
                         dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                     k_cache[inKBlockIdx] = reinterpret_cast<T*>(&k)[vec_i];
 
-                    const int inVBlockIdx = kv_block_array.getVLocalIdx<KvCacheDataType::BASE>(
-                        dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
+                    const int inVBlockIdx =
+                        kv_block_array.getVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                     v_cache[inVBlockIdx] = reinterpret_cast<T*>(&v)[vec_i];
                 }
             }

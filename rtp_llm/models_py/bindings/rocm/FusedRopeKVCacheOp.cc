@@ -216,11 +216,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
             nullptr,
             pad_query,
             stream_);
-
-        // V1 kernel: same FP8 logic as ASM — use QuantizedQKV for FP8 output.
-        // FP8 paged: write FP8 Q into q_fp8_buf via QuantizedQKV ptr.
-        // FP8 non-paged: write full FP8 QKV into qkv_buf_fp8 via QuantizedQKV ptr.
-        // Non-FP8: USE_PAGED_FMHA=true for packed-token Q layout.
+    } else {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
                                          invokeAddFusedQKVBiasTransposePrefillV1,
                                          q_output.data_ptr(),
