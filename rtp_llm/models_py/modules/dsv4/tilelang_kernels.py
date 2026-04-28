@@ -14,12 +14,11 @@ so unlike ``flash_mla.flash_mla_sparse_fwd`` there is no "misleading
 name" concern.
 """
 
+import logging as _logging
 from typing import Optional
 
 import torch
 
-
-import logging as _logging
 _log = _logging.getLogger(__name__)
 
 _TILELANG_AVAILABLE: bool = False
@@ -175,6 +174,11 @@ try:  # noqa: broad except — ImportError / OSError (CDLL symbol miss) / Runtim
 
                 T.clear(acc_o)
                 T.clear(sum_exp)
+                # Identity element of max — standard online-softmax init.
+                # NaN would arise only if block 0 is entirely masked
+                # (exp(−∞ − (−∞)) = exp(NaN)), which requires topk = 0.
+                # V4's Indexer always returns index_topk ≥ 1 valid keys,
+                # so block 0 always has ≥ 1 valid entry and this is safe.
                 T.fill(scores_max, -T.infinity(FP32))
                 T.copy(q[by, bx, :, :], q_shared)
 
@@ -182,18 +186,28 @@ try:  # noqa: broad except — ImportError / OSError (CDLL symbol miss) / Runtim
                     for i in T.Parallel(block):
                         idxs[i] = T.if_then_else(
                             t * block + i < topk,
-                            topk_idxs[by, bx, t * block + i], -1,
+                            topk_idxs[by, bx, t * block + i],
+                            -1,
                         )
                     for i, j in T.Parallel(block, d):
                         kv_shared[i, j] = T.if_then_else(
-                            idxs[i] != -1, kv[by, idxs[i], j], 0,
+                            idxs[i] != -1,
+                            kv[by, idxs[i], j],
+                            0,
                         )
                     for i, j in T.Parallel(h, block):
                         acc_s[i, j] = T.if_then_else(
-                            idxs[j] != -1, 0, -T.infinity(FP32),
+                            idxs[j] != -1,
+                            0,
+                            -T.infinity(FP32),
                         )
-                    T.gemm(q_shared, kv_shared, acc_s,
-                           transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                    T.gemm(
+                        q_shared,
+                        kv_shared,
+                        acc_s,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow,
+                    )
                     for i, j in T.Parallel(h, block):
                         acc_s[i, j] *= scale
                     T.copy(scores_max, scores_max_prev)
@@ -208,8 +222,9 @@ try:  # noqa: broad except — ImportError / OSError (CDLL symbol miss) / Runtim
                     T.copy(acc_s, acc_s_cast)
                     for i, j in T.Parallel(h, d):
                         acc_o[i, j] *= scores_scale[i]
-                    T.gemm(acc_s_cast, kv_shared, acc_o,
-                           policy=T.GemmWarpPolicy.FullRow)
+                    T.gemm(
+                        acc_s_cast, kv_shared, acc_o, policy=T.GemmWarpPolicy.FullRow
+                    )
 
                 for i in T.Parallel(h):
                     sum_exp[i] += T.exp(attn_sink[i] - scores_max[i])
@@ -223,7 +238,9 @@ try:  # noqa: broad except — ImportError / OSError (CDLL symbol miss) / Runtim
 except (ImportError, OSError, RuntimeError) as _e:  # pragma: no cover
     _log.warning(
         "[dsv4] tilelang unavailable (%s: %s); sparse attention falls "
-        "back to the Python reference", type(_e).__name__, _e,
+        "back to the Python reference",
+        type(_e).__name__,
+        _e,
     )
     _TILELANG_AVAILABLE = False
 
@@ -234,11 +251,38 @@ def tilelang_available() -> bool:
     return _TILELANG_AVAILABLE
 
 
+def prewarm(
+    n_heads: int, head_dim: int, softmax_scale: float, device: str = "cuda"
+) -> None:
+    """Pre-warm (JIT-compile and cache) the TileLang sparse_attn kernel.
+
+    Must be called before CUDA graph capture.  The first call triggers JIT
+    compilation; subsequent calls with the same (h_padded, d, scale) hit the
+    module-level _SPARSE_ATTN_KERNEL_CACHE and skip compilation.
+    """
+    if not _TILELANG_AVAILABLE:
+        return
+    h_padded = max(n_heads, 16)
+    _log.info(
+        "[dsv4] pre-warming TileLang sparse_attn h=%d d=%d scale=%.6f on %s",
+        h_padded,
+        head_dim,
+        softmax_scale,
+        device,
+    )
+    q = torch.zeros((1, 1, h_padded, head_dim), dtype=torch.bfloat16, device=device)
+    kv = torch.zeros((1, 1, head_dim), dtype=torch.bfloat16, device=device)
+    attn_sink = torch.zeros(h_padded, dtype=torch.float32, device=device)
+    topk_idxs = torch.zeros((1, 1, 1), dtype=torch.int32, device=device)
+    sparse_attn(q, kv, attn_sink, topk_idxs, softmax_scale)
+    _log.info("[dsv4] TileLang sparse_attn prewarm done")
+
+
 def sparse_attn(
-    q: torch.Tensor,            # [B, S, H, D] bf16
-    kv: torch.Tensor,           # [B, T, D] bf16  (single KV head, shared across H)
-    attn_sink: torch.Tensor,    # [H] fp32
-    topk_idxs: torch.Tensor,    # [B, S, K] int — any integer dtype; cast to int32
+    q: torch.Tensor,  # [B, S, H, D] bf16
+    kv: torch.Tensor,  # [B, T, D] bf16  (single KV head, shared across H)
+    attn_sink: torch.Tensor,  # [H] fp32
+    topk_idxs: torch.Tensor,  # [B, S, K] int — any integer dtype; cast to int32
     softmax_scale: float,
 ) -> torch.Tensor:
     """V4's native top-k sparse MQA attention with per-head learned sink.
@@ -265,7 +309,9 @@ def sparse_attn(
     key = (h_padded, d, float(softmax_scale))
     kernel = _SPARSE_ATTN_KERNEL_CACHE.get(key)
     if kernel is None:
-        _log.warning("[dsv4] JIT-compiling V4 TileLang sparse_attn h=%d d=%d", h_padded, d)
+        _log.warning(
+            "[dsv4] JIT-compiling V4 TileLang sparse_attn h=%d d=%d", h_padded, d
+        )
         kernel = _sparse_attn_kernel(h_padded, d, softmax_scale)
         _SPARSE_ATTN_KERNEL_CACHE[key] = kernel
 

@@ -16,7 +16,7 @@ flow (V4-Flash has 67k+ tensors in ~250 packed FP4/FP8 shards) and directly call
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -28,6 +28,334 @@ from rtp_llm.models_py.modules.dsv4.weight_loader import (
     load_v4_safetensors,
     load_v4_weights_dict,
 )
+
+
+class _RequestSlotAllocator:
+    """Maps framework request identifiers (first-block-id) to stable rows
+    in DSv4's per-layer KV cache pool.
+
+    DSv4 keeps its own [N_concurrent, T, D] per-layer KV cache pool (this
+    class chooses N_concurrent at the model level). For each framework
+    request the first block_id is a stable per-request key. We assign a
+    fresh pool row to every new block_id and remember it — every later
+    decode step for the same request resolves to the same row. Block_ids
+    not seen in the current batch keep their row reserved (LRU eviction
+    only when the pool is full).
+
+    Block_id reuse: the framework recycles block_ids after a request
+    finishes. To distinguish "new request happens to get a recycled
+    block_id" from "decode step of the same request", the caller MUST
+    pass ``is_prefill``. On prefill we always treat every block_id as
+    a fresh request — drop any stale mapping and assign a new slot, then
+    return the slot in ``slots_needing_reset`` so the stash pool entry
+    can be cleared before the prefill writes to it.
+    """
+
+    def __init__(self, num_slots: int):
+        self.num_slots = int(num_slots)
+        self._block_to_slot: Dict[int, int] = {}
+        self._lru: List[int] = []  # block_ids, MRU at the end
+
+    def _free_slot(self, bid: int) -> None:
+        """Drop the mapping for ``bid`` so its slot is available for reuse.
+        Caller is responsible for re-allocating + bookkeeping."""
+        if bid in self._block_to_slot:
+            self._block_to_slot.pop(bid)
+            try:
+                self._lru.remove(bid)
+            except ValueError:
+                pass
+
+    def _allocate_new_slot(self, bid: int, active: set) -> int:
+        if len(self._block_to_slot) < self.num_slots:
+            slot = len(self._block_to_slot)
+        else:
+            # Evict LRU row that's NOT in the current batch.
+            evict_bid: Optional[int] = None
+            for cand in self._lru:
+                if cand not in active:
+                    evict_bid = cand
+                    break
+            if evict_bid is None:
+                raise RuntimeError(
+                    f"_RequestSlotAllocator: no LRU candidate to evict "
+                    f"(num_slots={self.num_slots}, batch={len(active)})"
+                )
+            self._lru.remove(evict_bid)
+            slot = self._block_to_slot.pop(evict_bid)
+        self._block_to_slot[bid] = slot
+        self._lru.append(bid)
+        return slot
+
+    def get_slots(
+        self, block_ids: List[int], is_prefill: bool
+    ) -> Tuple[List[int], List[int]]:
+        """Return ``(slots, slots_needing_reset)``.
+
+        On ``is_prefill=True``: every block_id is treated as a brand-new
+        request. Any prior mapping for the same block_id is dropped,
+        a fresh slot is allocated, and the slot is added to
+        ``slots_needing_reset`` (the caller must clear the stash entry
+        for that slot before prefill writes to the live buffer row).
+
+        On ``is_prefill=False`` (decode): every block_id MUST already
+        have a mapping established by the prefill step; a missing mapping
+        indicates the decode arrived without a preceding prefill (a real
+        bug we want to surface early), so we fall back to allocating a
+        slot but warn loudly via the empty-reset list (the caller can
+        skip-or-zero based on policy).
+        """
+        out: List[int] = []
+        needs_reset: List[int] = []
+        active = set(block_ids)
+        for bid in block_ids:
+            if is_prefill:
+                # Drop any stale mapping for this block_id (e.g., the
+                # framework recycled the block from a finished request).
+                # Free the slot first so _allocate_new_slot can reuse it
+                # if no eviction is needed.
+                self._free_slot(bid)
+                slot = self._allocate_new_slot(bid, active)
+                needs_reset.append(slot)
+            else:
+                if bid in self._block_to_slot:
+                    slot = self._block_to_slot[bid]
+                    try:
+                        self._lru.remove(bid)
+                    except ValueError:
+                        pass
+                    self._lru.append(bid)
+                else:
+                    # Defensive: decode without a prior prefill mapping —
+                    # treat as a fresh request. This shouldn't normally
+                    # happen but is safer than a KeyError that crashes
+                    # the engine; surface in the log.
+                    slot = self._allocate_new_slot(bid, active)
+                    needs_reset.append(slot)
+            out.append(slot)
+        return out, needs_reset
+
+
+class _RequestStateStash:
+    """Per-request stash for every ``[max_batch_size, ...]`` buffer in V4Transformer.
+
+    DSv4's KV state is spread across multiple per-layer buffers all sized
+    ``[max_batch_size, ...]`` and indexed by the current batch slot:
+    ``Attention.kv_cache``, ``Attention.kv_cache_fp8``, ``Compressor.kv_state``,
+    ``Compressor.score_state``, ``Indexer.kv_cache``, the indexer's nested
+    ``Compressor.kv_state``/``score_state``, etc. Without framework
+    PagedAttention wired up (M4 work), the slot index has no per-request
+    affinity: prefill (B=1) always writes to slot 0, then concurrent decode
+    at BS>1 reads slots ``[0..bsz-1]`` expecting per-request data — but only
+    slot 0 was populated by the most recent prefill.
+
+    This stash maintains per-request shadow rows in a parallel pool of size
+    ``num_slots`` (chosen >= concurrency_limit). For each forward call we
+    gather the shadow rows for the active requests into batch positions
+    ``[0..bsz-1]`` of every per-batch-row buffer, run the forward, then
+    scatter the updated batch rows back to the shadow rows. The scatter +
+    gather are CUDA tensor ops driven by a ``slot_indices`` tensor at a
+    fixed address — both eager-mode safe and CUDA-graph-safe (the captured
+    graph reads from the same tensor address every replay; only the tensor
+    contents change between replays via ``prepare_cuda_graph``).
+
+    The stash is enabled only when ``num_slots > max_batch_size`` (i.e.,
+    pool is bigger than max batch). For the ``num_slots == max_batch_size``
+    case (single-request use cases that never overlap), we skip the
+    gather/scatter entirely.
+    """
+
+    def __init__(
+        self,
+        transformer: torch.nn.Module,
+        max_batch_size: int,
+        num_slots: int,
+        device: torch.device,
+    ):
+        self.max_batch_size = int(max_batch_size)
+        self.num_slots = int(num_slots)
+        self.device = device
+        # Stash pool layout: ``num_slots`` real per-request rows + ``max_batch_size``
+        # scratch rows for graph-capture padding. The captured graph at fixed BS=k
+        # always gathers/scatters ALL k rows; for replays where the actual batch
+        # is smaller (bsz < k), padding entries in ``slot_indices`` MUST point at
+        # distinct rows — otherwise ``index_copy_(stash, slot_indices, kv_cache[:k])``
+        # makes the graph write multiple rows of kv_cache into the same stash
+        # slot, clobbering whichever active request happens to share that index.
+        # The scratch tail gives every padding position its own throwaway slot.
+        self._pool_size = int(num_slots) + int(max_batch_size)
+        # Discover [max_batch_size, ...] buffers across the model. ``named_buffers``
+        # walks every nn.Module, including Compressor / Indexer's nested
+        # Compressor — so we capture every per-batch-row buffer in one pass.
+        # We dedupe by storage data_ptr so views (compressor.kv_cache → a slice
+        # of attention.kv_cache) don't get a redundant stash.
+        # Per-buffer ``init_val`` is the fill we use to "reset" both the
+        # stash slot (when it's freshly allocated) and the live buffer row
+        # (right before prefill, see ``reset_batch_rows``). For zero-init
+        # buffers it's 0.0; for ``Compressor.score_state`` it's -inf —
+        # those are the only two patterns DSv4 uses today.
+        self._buffers: List[Tuple[str, torch.Tensor, torch.Tensor, float]] = []
+        seen_storage: Dict[int, str] = {}
+        for name, buf in transformer.named_buffers():
+            if buf is None or buf.dim() < 1 or buf.shape[0] != max_batch_size:
+                continue
+            ptr = buf.data_ptr()
+            if ptr in seen_storage:
+                continue
+            seen_storage[ptr] = name
+            stash_shape = (self._pool_size,) + tuple(buf.shape[1:])
+            stash = torch.zeros(
+                stash_shape,
+                dtype=buf.dtype,
+                device=buf.device,
+            )
+            # If the buffer was initialized to a non-zero sentinel (e.g.,
+            # Compressor.score_state is full of -inf), match it so newly
+            # allocated stash rows look identical to a fresh batch slot.
+            init_val = 0.0
+            if buf.numel() > 0:
+                init_val = float(buf.flatten()[0].item())
+                if init_val != 0.0:
+                    stash.fill_(init_val)
+            self._buffers.append((name, buf, stash, init_val))
+        # slot_indices buffer at a fixed address; updated in place each step.
+        # Initialized so the [bsz:max_batch_size] suffix points to the scratch
+        # tail (each entry distinct) — captured graph at any BS replays
+        # correctly even when actual bsz < captured bsz.
+        self.slot_indices = torch.arange(
+            num_slots,
+            num_slots + max_batch_size,
+            dtype=torch.int64,
+            device=device,
+        )
+        # Pre-built host scratch padding for fast slot_indices updates;
+        # the active prefix is overwritten per call.
+        self._padding_host = torch.arange(
+            num_slots,
+            num_slots + max_batch_size,
+            dtype=torch.int64,
+        )
+
+    def update_slot_indices(self, slots: List[int]) -> None:
+        """Copy the per-batch slot list into the persistent slot_indices
+        tensor (in place — keeps the data_ptr stable for graph capture).
+
+        Pads the suffix ``[bsz:max_batch_size]`` with distinct scratch slots
+        so the captured graph's gather/scatter touches a throwaway region
+        instead of clobbering active stash slots."""
+        if len(slots) == 0:
+            return
+        bs = len(slots)
+        if bs > self.max_batch_size:
+            raise RuntimeError(
+                f"slot_indices update bsz={bs} exceeds max_batch_size={self.max_batch_size}"
+            )
+        # Build full [max_batch_size] vector on CPU: real slots + scratch tail.
+        host = self._padding_host.clone()
+        host[:bs] = torch.tensor(slots, dtype=torch.int64)
+        self.slot_indices.copy_(host, non_blocking=True)
+
+    def gather(self, bsz: int) -> None:
+        """Restore per-request rows from the stash into batch positions
+        ``[0..bsz-1]`` of every tracked buffer.
+
+        ``index_select(out=...)`` writes into a pre-existing storage so
+        no allocation happens on the capture stream; safe inside a
+        captured CUDA graph."""
+        if bsz <= 0:
+            return
+        idx = self.slot_indices.narrow(0, 0, bsz)
+        for _name, buf, stash, _init in self._buffers:
+            torch.index_select(stash, 0, idx, out=buf.narrow(0, 0, bsz))
+
+    def scatter(self, bsz: int) -> None:
+        """Save batch positions ``[0..bsz-1]`` back into the stash slots.
+
+        ``index_copy_`` is in-place on the stash tensor — no allocation,
+        safe inside a captured CUDA graph."""
+        if bsz <= 0:
+            return
+        idx = self.slot_indices.narrow(0, 0, bsz)
+        for _name, buf, stash, _init in self._buffers:
+            stash.index_copy_(0, idx, buf.narrow(0, 0, bsz))
+
+    def reset_batch_rows(self, bsz: int) -> None:
+        """Reset live buffer rows ``[0..bsz-1]`` to each buffer's initial
+        value (zeros for KV / FP8 KV / KV state / index KV; -inf for
+        ``Compressor.score_state``).
+
+        Used in place of ``gather`` at PREFILL time — prefill is supposed
+        to start from a clean state. If we gathered instead, a stash slot
+        carrying stale data from a prior request that REUSED the same
+        block_id (warmup → real, finished → recycled) would seed batch
+        row 0 with garbage at any positions prefill does not overwrite
+        (e.g., ``Compressor.kv_state[r, ratio:]`` and
+        ``Compressor.score_state[r, ratio:]`` only get touched on the
+        boundary path; the rest of the row would carry stale finite
+        score_state values, breaking the softmax weighting in decode).
+
+        Eager-only — prefill never runs under CUDA graph capture for V4."""
+        if bsz <= 0:
+            return
+        for _name, buf, _stash, init_val in self._buffers:
+            row_view = buf.narrow(0, 0, bsz)
+            if init_val == 0.0:
+                row_view.zero_()
+            else:
+                row_view.fill_(init_val)
+
+    def reset_stash_slots(self, slots: List[int]) -> None:
+        """Reset the given stash slots to each buffer's initial value.
+
+        Called by the slot allocator when assigning a slot to a brand-new
+        block_id (or when reusing a slot for a recycled block_id) to
+        guarantee the stash pool entry looks identical to a fresh
+        allocation. Without this, the next decode step's gather would
+        pull contaminated data into the live buffer row.
+
+        Eager-only — slot allocation only happens at prefill time."""
+        if not slots:
+            return
+        idx = torch.tensor(slots, dtype=torch.int64, device=self.device)
+        for _name, _buf, stash, init_val in self._buffers:
+            sel = stash.index_select(0, idx)
+            if init_val == 0.0:
+                sel.zero_()
+            else:
+                sel.fill_(init_val)
+            stash.index_copy_(0, idx, sel)
+
+
+def _extract_first_block_ids(attn_inputs) -> List[int]:
+    """Read the first block-id of every active request from attn_inputs.
+
+    The framework provides ``kv_cache_block_id_host`` whose shape varies by
+    code path: ``[batch_size, max_blocks_per_seq]`` from PyWrappedModel,
+    occasionally ``[layers, batch_size, max_blocks_per_seq]`` from layered
+    KV cache plumbing, and an empty / undefined tensor during warmup probes.
+    The first block-id of every active request is a stable per-request
+    identifier (a block stays allocated to a request for its lifetime).
+
+    Returns ``[]`` if the tensor isn't usable (warmup probe, no real
+    request) — callers must treat this as "stash management not applicable".
+    """
+    t = getattr(attn_inputs, "kv_cache_block_id_host", None)
+    if t is None or t.numel() == 0:
+        return []
+    if t.dim() == 3:
+        # [layers, batch_size, max_blocks_per_seq] — collapse the layer
+        # dim by taking layer 0 (per-request first-block-id is shared
+        # across layers for the same request).
+        t = t[0]
+    if t.dim() < 2 or t.shape[1] == 0:
+        return []
+    first_col = t[:, 0].contiguous()
+    if first_col.device.type != "cpu":
+        first_col = first_col.cpu()
+    # ``.tolist()`` on a 1-D int tensor gives a flat ``[int, int, ...]``;
+    # be defensive in case the shape was actually higher-dim by flattening.
+    flat = first_col.flatten().tolist()
+    return [int(v) for v in flat]
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -209,7 +537,9 @@ class DeepSeekV4Model(GptModelBase):
             logging.info(
                 "[DeepSeekV4Model] CP=%d: max_tokens_per_rank %d -> %d "
                 "(Mega MoE per-rank symm-mem buffer)",
-                cp_size, args.max_tokens_per_rank, new_bound,
+                cp_size,
+                args.max_tokens_per_rank,
+                new_bound,
             )
             args.max_tokens_per_rank = new_bound
 
@@ -247,6 +577,41 @@ class DeepSeekV4Model(GptModelBase):
         # until framework KV cache lands.
         self._running_pos: int = 0
 
+        # Per-request KV stash for concurrent decode.  DSv4 maintains its own
+        # ``[max_batch_size, ...]`` per-layer KV buffers indexed by current
+        # batch slot; without per-request slot affinity, concurrent BS>1
+        # decode reads stale data and produces garbage. The stash is sized at
+        # the framework's concurrency limit so each active request gets a
+        # stable shadow row that's gather/scattered around every forward.
+        # When the framework provides max_concurrent_requests <= 1 (or no
+        # batching at all), the stash is a no-op.
+        self._stash_num_slots = max(
+            int(max_generate_batch_size or 1),
+            int(getattr(model_config, "concurrency_limit", 0) or 0),
+            1,
+        )
+        self._stash: Optional[_RequestStateStash] = None
+        self._slot_alloc: Optional[_RequestSlotAllocator] = None
+
+        # FP8 KV cache toggle: read from attn_config.kv_cache_dtype, which the
+        # framework sets to KvCacheDataType.FP8 when ``--fp8_kv_cache 1`` is
+        # supplied (see ``ModelConfig._set_dtype_and_check`` in
+        # rtp_llm/config/model_config.py).  When set, the first prefill triggers
+        # ``Attention.enable_fp8_kv_cache`` on every layer, switching subsequent
+        # decodes to the FlashMLA ``is_fp8_kvcache=True`` sparse path.
+        # Override via ``DSV4_FP8_KV=0`` to force-disable for debugging.
+        self._fp8_kv_requested = False
+        try:
+            from rtp_llm.config.model_config import KvCacheDataType  # local import
+
+            kv_dtype = getattr(model_config.attn_config, "kv_cache_dtype", None)
+            self._fp8_kv_requested = kv_dtype == KvCacheDataType.FP8
+        except Exception:
+            pass
+        if os.environ.get("DSV4_FP8_KV", "1") == "0":
+            self._fp8_kv_requested = False
+        self._fp8_kv_armed = False  # set True after the first prefill enables FP8
+
         # Optional on-demand timeline capture. Set DSV4_PROFILE_TRACE=/path/trace.json
         # and touch /tmp/dsv4_profile_trigger to capture the NEXT forward only.
         self._profile_path = os.environ.get("DSV4_PROFILE_TRACE")
@@ -261,6 +626,20 @@ class DeepSeekV4Model(GptModelBase):
             )
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
+        try:
+            return self._initialize_impl(init_resource)
+        except BaseException as e:
+            import traceback
+
+            logging.error(
+                "[DeepSeekV4Model] initialize() raised %s: %s\nTraceback:\n%s",
+                type(e).__name__,
+                e,
+                traceback.format_exc(),
+            )
+            raise
+
+    def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
         super().initialize(init_resource)
         if self._materialized:
@@ -320,40 +699,134 @@ class DeepSeekV4Model(GptModelBase):
             mem = torch.cuda.memory_allocated(torch.device(device_str)) / 1024**3
             logging.info("[DeepSeekV4Model] GPU mem after load: %.1f GB", mem)
 
+        # Pre-warm the TileLang sparse_attn kernel before the C++ engine
+        # creates CudaGraphRunner.  The first call triggers JIT compilation;
+        # doing it here (outside graph capture) caches the compiled kernel so
+        # subsequent calls inside CUDA graph capture hit the cache and skip
+        # JIT — which would otherwise abort via __unexpected (noexcept violation).
+        if device_str.startswith("cuda"):
+            from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
+
+            first_attn = self.v4.layers[0].attn
+            _tl_kernels.prewarm(
+                first_attn.n_heads,
+                first_attn.head_dim,
+                first_attn.softmax_scale,
+                device_str,
+            )
+
+        # Initialize the per-request KV stash after V4Transformer's per-layer
+        # buffers exist on the real device.  We size the pool at the larger
+        # of (a) max_generate_batch_size and (b) concurrency_limit — each
+        # active request needs its own shadow row.
+        if device_str.startswith("cuda"):
+            self._stash = _RequestStateStash(
+                self.v4,
+                max_batch_size=int(self._v4_args.max_batch_size),
+                num_slots=int(self._stash_num_slots),
+                device=torch.device(device_str),
+            )
+            self._slot_alloc = _RequestSlotAllocator(
+                num_slots=int(self._stash_num_slots),
+            )
+            logging.info(
+                "[DeepSeekV4Model] KV stash: tracking %d per-batch-row buffers, "
+                "pool size = %d slots (max_batch=%d, concurrency_limit_hint=%d)",
+                len(self._stash._buffers),
+                self._stash_num_slots,
+                int(self._v4_args.max_batch_size),
+                self._stash_num_slots,
+            )
+            if os.environ.get("DSV4_LOG_STASH", "0") == "1":
+                for nm, b, s in self._stash._buffers[:10]:
+                    logging.info(
+                        "[DSv4 stash buffer] %s shape=%s dtype=%s",
+                        nm,
+                        tuple(b.shape),
+                        b.dtype,
+                    )
+                logging.info(
+                    "[DSv4 stash buffer] ... and %d more",
+                    max(0, len(self._stash._buffers) - 10),
+                )
+        if self._fp8_kv_requested:
+            logging.info(
+                "[DeepSeekV4Model] --fp8_kv_cache=1 — first prefill will arm "
+                "Attention.enable_fp8_kv_cache() on every layer, switching "
+                "subsequent decodes to the FlashMLA FP8 sparse path."
+            )
+
         self._materialized = True
         self._running_pos = 0
         return True
 
+    def _update_slot_indices_for_batch(self, attn_inputs) -> int:
+        """Compute per-request stash slots for the current batch and copy them
+        into the persistent ``slot_indices`` tensor (in place — keeps the
+        data_ptr stable for CUDA graph capture/replay).
+
+        Returns the active batch size ``bsz``.  Called from the eager forward
+        path AND from ``DSv4DecodeFmhaImpl.prepare`` (which the graph runner
+        invokes between each replay) so the captured graph reads fresh slot
+        values from a stable address every step.
+
+        On prefill: any newly-allocated stash slots are cleared to each
+        buffer's initial value so the prefill starts from a guaranteed-clean
+        per-request state — this fixes block_id-recycling contamination
+        where a finished request's stash row would otherwise leak into the
+        new request that inherits the same block_id.
+
+        Returns 0 if stash management is not applicable (e.g., warmup probes
+        with no block_ids); the caller should skip gather/scatter in that case.
+        """
+        if self._stash is None or self._slot_alloc is None:
+            return 0
+        block_ids = _extract_first_block_ids(attn_inputs)
+        if not block_ids:
+            return 0
+        is_prefill = bool(getattr(attn_inputs, "is_prefill", False))
+        slots, slots_needing_reset = self._slot_alloc.get_slots(
+            block_ids,
+            is_prefill=is_prefill,
+        )
+        if slots_needing_reset:
+            self._stash.reset_stash_slots(slots_needing_reset)
+        self._stash.update_slot_indices(slots)
+        if os.environ.get("DSV4_LOG_STASH", "0") == "1":
+            logging.info(
+                "[DSv4 stash] is_prefill=%s bsz=%d block_ids=%s slots=%s reset=%s",
+                is_prefill,
+                len(block_ids),
+                block_ids,
+                slots,
+                slots_needing_reset,
+            )
+        return len(slots)
+
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
-        """V4 uses its own sparse/compressed attention internally — no standard FMHA
-        backend fits (64 Q heads × 1 KV head × head_dim=512 with CSA/HCA/SWA per-layer
-        variants). Return None when CUDA graph is OFF (Phase 2 eager path
-        builds metadata inline). Return a ``DSv4DecodeFmhaImpl`` when CUDA
-        graph is ON — that impl owns persistent metadata buffers updated
-        in place by ``prepare_cuda_graph`` between replays."""
+        """Return a ``DSv4DecodeFmhaImpl`` for decode CUDA-graph capture; None otherwise.
+
+        Prefill runs eagerly (no graph). Decode uses its own sparse/compressed
+        attention; the impl owns persistent metadata buffers updated in place
+        by ``prepare_cuda_graph`` between replays."""
         if not is_cuda_graph:
             return None
 
-        # Phase 3 stage 3A: build the impl with geometry derived from
-        # V4Args + the framework-provided BS (== inputs.attention_inputs
-        # batch dimension at capture time; each captured graph is per-BS
-        # so this is fixed for the impl's lifetime).
+        attn = inputs.attention_inputs
+        # V4 only captures CUDA graphs for decode — prefill runs eagerly.
+        # Mirrors attn_factory.py: PREFILL_MLA_IMPS if is_prefill else DECODE_MLA_IMPS.
+        if attn is None or bool(attn.is_prefill):
+            return None
+
         from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImpl,
             DSv4DecodeFmhaImplConfig,
         )
 
-        attn = inputs.attention_inputs
-        # input_lengths is sized [batch_size] at this entry point (the C++
-        # capture path slices it down to the captured BS before invoking).
         bs = int(attn.input_lengths.size(0)) if attn.input_lengths.numel() > 0 else 1
-        device = (
-            attn.sequence_lengths.device
-            if attn.sequence_lengths.numel() > 0
-            else next(self.v4.parameters()).device
-        )
+        device = next(self.v4.parameters()).device
         cfg = DSv4DecodeFmhaImplConfig(
             max_batch_size=bs,
             q_len=1,
@@ -365,7 +838,12 @@ class DeepSeekV4Model(GptModelBase):
             ],
             index_topk=int(self._v4_args.index_topk),
         )
-        return DSv4DecodeFmhaImpl(cfg, device=device)
+        return DSv4DecodeFmhaImpl(
+            cfg,
+            device=device,
+            attn_inputs=attn,
+            slot_update_cb=self._update_slot_indices_for_batch,
+        )
 
     def _forward_decode(
         self, inputs: PyModelInputs, fmha_impl: Any = None
@@ -377,47 +855,54 @@ class DeepSeekV4Model(GptModelBase):
         from rtp_llm.models_py.modules.dsv4.decode.decode_attn_metadata import (
             build_decode_metadata,
         )
+        from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
+            DSv4DecodeFmhaImpl,
+        )
 
         attn = inputs.attention_inputs
-        # sequence_lengths[r] = stream->seqLength() - 1 = absolute pos of NEW token's predecessor
-        # (per NormalModelInputGatherer.cc:255). That IS our start_pos.
-        seq_lens_d = attn.sequence_lengths
-        if seq_lens_d.device.type == "cpu":
-            seq_lens_d = seq_lens_d.to(next(self.v4.parameters()).device)
-        start_pos = seq_lens_d.to(torch.int32)
-        B = start_pos.shape[0]
+        param_dev = next(self.v4.parameters()).device
 
         # input_ids: framework packs as flat [T_total] for B requests, q_len=1.
         input_ids = inputs.input_ids
         if input_ids.dim() == 0:
             input_ids = input_ids.unsqueeze(0)
-        param_dev = next(self.v4.parameters()).device
         if input_ids.device != param_dev:
             input_ids = input_ids.to(param_dev)
-        # Pad-empty safety: if B==0, skip everything (no requests).
-        if B == 0:
-            return PyModelOutputs(
-                torch.zeros(
-                    (0, self._v4_args.dim), dtype=torch.bfloat16, device=param_dev
-                ),
-            )
-
-        # Clamp out-of-range start_pos for warmup safety (prefill probes at
-        # max_seq_len then decode shifts start_pos past freqs_cis range).
-        max_s = self._v4_args.max_seq_len
-        start_pos = torch.clamp(start_pos, min=0, max=max(0, max_s - 1))
-
-        # Phase 3 stage 3A: when a CUDA-graph impl is supplied, read its
-        # in-place-updated metadata (the C++ runner has already called
-        # ``prepare_cuda_graph(attn_inputs)`` on it before replay).
-        # Otherwise build a fresh metadata inline (Phase 2 eager path).
-        from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
-            DSv4DecodeFmhaImpl,
-        )
 
         if isinstance(fmha_impl, DSv4DecodeFmhaImpl):
+            # CUDA-graph path: metadata was populated either in __init__
+            # (initial dtype-check forward) or by C++ ``prepare_cuda_graph``
+            # before each replay. Reading attn.sequence_lengths here would
+            # trigger a CPU→CUDA copy that's illegal during stream capture.
             meta = fmha_impl.metadata
+            # Slot indices were ALREADY copied into ``self._stash.slot_indices``
+            # by ``prepare`` (called by ``__init__`` and ``prepare_cuda_graph``).
+            # We only need bsz here so the gather/scatter narrow to the right
+            # prefix of every per-batch-row buffer. Use the captured
+            # ``meta.batch_size`` (Python int set inside update_decode_metadata
+            # _in_place) — that's frozen into the graph at capture time and
+            # selects the same constant on every replay.
+            graph_bsz = int(meta.batch_size)
         else:
+            # Eager path: build metadata inline from sequence_lengths.
+            # sequence_lengths[r] = absolute pos of NEW token's predecessor
+            # (per NormalModelInputGatherer.cc:255).
+            seq_lens_d = attn.sequence_lengths
+            if seq_lens_d.device.type == "cpu":
+                seq_lens_d = seq_lens_d.to(param_dev)
+            start_pos = seq_lens_d.to(torch.int32)
+            B = start_pos.shape[0]
+            if B == 0:
+                return PyModelOutputs(
+                    torch.zeros(
+                        (0, self._v4_args.dim),
+                        dtype=torch.bfloat16,
+                        device=param_dev,
+                    ),
+                )
+            # Clamp for warmup safety (probe at max_seq_len then decode).
+            max_s = self._v4_args.max_seq_len
+            start_pos = torch.clamp(start_pos, min=0, max=max(0, max_s - 1))
             meta = build_decode_metadata(
                 start_pos=start_pos,
                 q_len=1,
@@ -430,11 +915,48 @@ class DeepSeekV4Model(GptModelBase):
                 index_topk=self._v4_args.index_topk,
                 device=param_dev,
             )
+            # Eager path: pull slot_indices from the per-batch block_ids and
+            # update the persistent slot_indices tensor before gather/scatter.
+            graph_bsz = self._update_slot_indices_for_batch(attn)
+
+        # Per-request KV stash gather: copy each request's shadow rows from
+        # the stash into batch positions [0..bsz-1] of every per-batch-row
+        # buffer (Attention.kv_cache, Compressor.kv_state/score_state, etc.).
+        # Both the eager path and the captured graph land here; the graph
+        # captures the gather/scatter ops (they read slot_indices from a
+        # stable address — contents updated each replay by prepare_cuda_graph).
+        if self._stash is not None and graph_bsz > 0:
+            self._stash.gather(graph_bsz)
 
         hidden = self.v4.forward_decode(input_ids, meta)  # [B, dim] packed
+
+        # Scatter the updated batch rows back to the stash so the next forward
+        # (possibly a different batch composition) sees fresh per-request data.
+        if self._stash is not None and graph_bsz > 0:
+            self._stash.scatter(graph_bsz)
         return PyModelOutputs(hidden)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        # pybind11's object_api operator() is noexcept — a Python exception
+        # would trigger __unexpected → abort, hiding the real error. Log the
+        # traceback explicitly before re-raising so the cause survives the
+        # noexcept boundary.
+        try:
+            return self._forward_impl(inputs, fmha_impl)
+        except BaseException as e:
+            import traceback
+
+            logging.error(
+                "[DeepSeekV4Model] forward() raised %s: %s\nTraceback:\n%s",
+                type(e).__name__,
+                e,
+                traceback.format_exc(),
+            )
+            raise
+
+    def _forward_impl(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
         attn = inputs.attention_inputs
         is_prefill = (
             bool(attn.is_prefill)
@@ -507,10 +1029,13 @@ class DeepSeekV4Model(GptModelBase):
                     "[DeepSeekV4Model] CP forward: input_ids.shape=%s "
                     "cp_size=%d cp_rank=%d padding_mask.shape=%s "
                     "restore_indices.shape=%s is_prefill=%s start_pos=%d",
-                    tuple(input_ids.shape), int(pc_cfg.tp_size), int(pc_cfg.tp_rank),
+                    tuple(input_ids.shape),
+                    int(pc_cfg.tp_size),
+                    int(pc_cfg.tp_rank),
                     tuple(cpi.prefill_qkv_padding_mask.shape),
                     tuple(cpi.prefill_qkv_restore_indice.shape),
-                    is_prefill, start_pos,
+                    is_prefill,
+                    start_pos,
                 )
         else:
             self.v4.set_cp_info(None, 1, 0)
@@ -548,6 +1073,24 @@ class DeepSeekV4Model(GptModelBase):
             and not self._profile_done
             and os.path.exists(self._profile_trigger)
         )
+        # Per-request KV stash (prefill arm).  We allocate a fresh stash
+        # slot per request via ``_update_slot_indices_for_batch`` (with
+        # ``is_prefill=True``); the slot allocator clears the stash entry
+        # for any reset-needed slots inside that call. We then RESET the
+        # live buffer rows (kv_cache / kv_state / score_state / etc.) for
+        # ``[0..prefill_bsz-1]`` to each buffer's initial value before
+        # prefill writes to them — gathering from the stash here would be
+        # wrong because prefill is supposed to start from a clean state and
+        # only writes a subset of positions (e.g. ``kv_state[r, :ratio]``);
+        # the unwritten tail would otherwise carry the stash's stale or
+        # default contents through into decode and break the softmax.
+        # After prefill, scatter saves the per-request state to the stash.
+        prefill_bsz = 0
+        if not pad_empty:  # warmup pad → no real request
+            prefill_bsz = self._update_slot_indices_for_batch(attn)
+        if self._stash is not None and prefill_bsz > 0:
+            self._stash.reset_batch_rows(prefill_bsz)
+
         if should_capture:
             try:
                 os.remove(self._profile_trigger)
@@ -578,6 +1121,29 @@ class DeepSeekV4Model(GptModelBase):
         else:
             hidden = self.v4(input_ids, start_pos=start_pos, apply_lm_head=False)
 
+        if self._stash is not None and prefill_bsz > 0:
+            self._stash.scatter(prefill_bsz)
+
+        # FP8 KV decode arming: after the FIRST prefill (start_pos==0) — and
+        # only when the runtime requested ``--fp8_kv_cache 1`` — bulk-convert
+        # the freshly-written BF16 KV in every Attention layer to the FP8
+        # storage layout. Subsequent decodes will route through
+        # ``Attention._forward_decode_fp8`` (FlashMLA + FP8 KV).
+        if (
+            self._fp8_kv_requested
+            and not self._fp8_kv_armed
+            and is_prefill
+            and prefill_bsz > 0
+        ):
+            for layer in self.v4.layers:
+                layer.attn.enable_fp8_kv_cache(bsz=prefill_bsz)
+            self._fp8_kv_armed = True
+            logging.info(
+                "[DeepSeekV4Model] FP8 KV cache enabled across %d layers (bsz=%d).",
+                len(self.v4.layers),
+                prefill_bsz,
+            )
+
         # Advance running position.  Under CP the rank-local ``S`` is
         # ``chunk_length`` (~ S_full / cp_size) — bookkeeping ``_running_pos``
         # against it would leave decode reading the wrong kv_cache slots.
@@ -587,7 +1153,9 @@ class DeepSeekV4Model(GptModelBase):
             if cp_enabled:
                 # prefill_actual_input_lengths_cpu: int32 [num_prefill_streams]
                 # V4 is B=1, single stream.
-                actual_lens = attn.context_parallel_info.prefill_actual_input_lengths_cpu
+                actual_lens = (
+                    attn.context_parallel_info.prefill_actual_input_lengths_cpu
+                )
                 self._running_pos = int(actual_lens[-1].item())
             else:
                 self._running_pos = input_ids.size(1)
@@ -604,6 +1172,9 @@ class DeepSeekV4Model(GptModelBase):
             logging.info(
                 "[DeepSeekV4Model] forward return: hidden.shape=%s flat.shape=%s "
                 "cp_enabled=%s is_prefill=%s",
-                tuple(hidden.shape), tuple(flat.shape), cp_enabled, is_prefill,
+                tuple(hidden.shape),
+                tuple(flat.shape),
+                cp_enabled,
+                is_prefill,
             )
         return PyModelOutputs(flat)

@@ -38,6 +38,7 @@ try:
             from flash_mla import (
                 flash_mla_with_kvcache,  # type: ignore[import-not-found]
             )
+            from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
 
             _FLASH_MLA_AVAILABLE = True
 except (ImportError, AttributeError, ValueError) as e:
@@ -142,21 +143,23 @@ class SparseAttnV4DecodeFp8Op:
         cache_seqlens: Optional[torch.Tensor],
         block_table: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        from flash_mla import flash_mla_with_kvcache  # type: ignore[import-not-found]
+        from flash_mla import (  # type: ignore[import-not-found]
+            flash_mla_with_kvcache,
+            get_mla_metadata,
+        )
 
         B, q_len, H, D = q.shape
-        # Flatten (B, q_len) → batch dim for FlashMLA (it expects [T, H, D])
-        q_batched = q.reshape(B * q_len, H, D)
+        # Flatten (B, q_len) → [T, H, D] for FlashMLA (per-request layout).
+        T = B * q_len
+        q_batched = q.reshape(T, H, D)
 
-        # Default block_table: single contiguous block of size cache.shape[1]
+        # block_table[r, 0] = r: each request r uses FP8 block r (one block per request).
         if block_table is None:
-            block_table = torch.zeros(
-                (B, 1),
-                dtype=torch.int32,
-                device=q.device,
+            block_table = torch.arange(B, dtype=torch.int32, device=q.device).unsqueeze(
+                1
             )
+
         if cache_seqlens is None:
-            # If caller doesn't supply, assume max cache length
             cache_seqlens = torch.full(
                 (B,),
                 kv_cache.shape[1],
@@ -164,35 +167,44 @@ class SparseAttnV4DecodeFp8Op:
                 device=q.device,
             )
 
-        # FlashMLA expects topk_idxs as [T, H_kv, topk] global cache idxs.
-        # V4 has H_kv=1 (MQA), so squeeze if needed.
-        if topk_idxs.dim() == 3:
-            topk_flat = topk_idxs.reshape(B * q_len, 1, -1)
+        # FlashMLA FP8 kernel requires 4D k_cache: [num_blocks, block_size, num_heads_k=1, kv_dim].
+        kv_4d = kv_cache.unsqueeze(-2)  # [B, block_size, 1, 584]
+
+        # topk_idxs: [B, q_len, topk] or [B, q_len, 1, topk] → reshape to [T, 1, topk].
+        if topk_idxs.dim() == 4:
+            topk_flat = topk_idxs.reshape(T, 1, -1)
         else:
-            topk_flat = topk_idxs
+            topk_flat = topk_idxs.reshape(T, 1, -1)
+
+        # get_mla_metadata is a no-op stub that returns empty scheduler structures;
+        # calling it inline is graph-safe (no stream sync, no alloc).
+        topk = topk_flat.shape[-1]
+        tile_scheduler_metadata, num_splits = get_mla_metadata(
+            cache_seqlens=None,
+            num_q_tokens_per_head_k=T * H,
+            topk=topk,
+            num_heads_q=H,
+            num_heads_k=1,
+            is_fp8_kvcache=True,
+        )
 
         attn_out, _ = flash_mla_with_kvcache(
             q=q_batched,
-            k_cache=kv_cache,
+            k_cache=kv_4d,
             block_table=block_table,
             head_dim_v=self.head_dim,
             cache_seqlens=cache_seqlens,
+            tile_scheduler_metadata=tile_scheduler_metadata,
+            num_splits=num_splits,
             is_fp8_kvcache=True,
             indices=topk_flat,
             softmax_scale=self.softmax_scale,
         )
-        # FlashMLA sparse path doesn't natively support per-head learned
-        # ``attn_sink`` — apply it as a softmax-normalization correction
-        # post-hoc (matches V4-official ``_sparse_attn`` math). For the
-        # zero-sink case (V4-Flash default), this is a no-op.
+        # V4-Flash attn_sink is zero; non-zero case is unsupported by FlashMLA native path.
         if attn_sink is not None and attn_sink.abs().max().item() > 0:
             logging.warning(
-                "[dsv4-fp8] non-zero attn_sink with FlashMLA path: applying "
-                "post-hoc sink correction (untested for V4)"
+                "[dsv4-fp8] non-zero attn_sink with FlashMLA path: sink correction deferred"
             )
-            # Simplified: assume attn_sink_logit = sink, scale output by
-            # softmax(stack([logits, sink]))[..., :seq] / softmax(logits).
-            # Defer to Phase 4-bis if needed.
 
         return attn_out.view(B, q_len, H, self.head_dim).contiguous()
 
