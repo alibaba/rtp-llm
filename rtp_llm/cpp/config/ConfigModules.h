@@ -523,12 +523,12 @@ struct GrpcConfig: GrpcMapsConfig {
     void        from_json(const std::string& json_str);
 };
 
-/// Bailian gRPC (predict_v2.proto) Python client/server channel options + executor workers.
-struct BailianGrpcConfig: GrpcMapsConfig {
+/// DashSc gRPC (predict_v2.proto) Python client/server channel options + executor workers.
+struct DashScGrpcConfig: GrpcMapsConfig {
     /// ``ThreadPoolExecutor(max_workers=...)`` for ``grpc.server``; must be >= 1 when used.
     int max_server_workers = 4;
-    BailianGrpcConfig() {};
-    BailianGrpcConfig(const std::string& json_str);
+    DashScGrpcConfig() {};
+    DashScGrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
 };

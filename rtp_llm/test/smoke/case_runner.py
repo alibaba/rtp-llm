@@ -25,7 +25,7 @@ class _TensorEncoder(json.JSONEncoder):
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
-from smoke.bailian_grpc_comparer import BAILIAN_GRPC_ENDPOINT, BailianGrpcComparer
+from smoke.dash_sc_grpc_comparer import DASH_SC_GRPC_ENDPOINT, DashScGrpcComparer
 from smoke.cache_status_comparer import CacheStatusComparer
 from smoke.classifier_comparer import ClassifierComparer
 from smoke.common_def import QueryStatus, SmokeException, Tracer
@@ -268,8 +268,8 @@ class CaseRunner(object):
             return ClassifierComparer
         elif request_endpoint == "/v1/reranker":
             return RerankerComparer
-        elif request_endpoint == BAILIAN_GRPC_ENDPOINT:
-            return BailianGrpcComparer
+        elif request_endpoint == DASH_SC_GRPC_ENDPOINT:
+            return DashScGrpcComparer
         elif q_r.get("mainse_module", None) == True:
             if q_r.get("use_decode_arpc", None) == True:
                 from smoke.mainse.mainse_decode_arpc_comparer import (

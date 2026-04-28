@@ -4,24 +4,24 @@ from __future__ import annotations
 
 import logging
 
-from rtp_llm.bailian.bailian_grpc_real_infer import (
+from rtp_llm.dash_sc.dash_sc_grpc_real_infer import (
     _iter_enqueue_sync,
     iter_real_model_stream_infer,
 )
-from rtp_llm.bailian.bailian_grpc_request import parse_bailian_grpc_request
-from rtp_llm.bailian.bailian_grpc_response_fake import iter_fake_model_stream_infer
-from rtp_llm.bailian.proto import predict_v2_pb2, predict_v2_pb2_grpc
+from rtp_llm.dash_sc.dash_sc_grpc_request import parse_dash_sc_grpc_request
+from rtp_llm.dash_sc.dash_sc_grpc_response_fake import iter_fake_model_stream_infer
+from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.utils.util import AtomicCounter
 
 
-class BailianGrpcInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
+class DashScGrpcInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
     """ModelStreamInfer: fake mode (mock) or real mode (backend_visitor.enqueue).
 
     ``ip`` / ``port`` / ``server_id`` are used to derive the snowflake-style
     ``GenerateInput.request_id`` via ``generate_request_id`` — same scheme as the HTTP path
     in ``FrontendServer`` so the backend sees a single request_id generation policy.
-    ``port`` should be the bailian gRPC listening port. The per-servicer sequence counter
+    ``port`` should be the dash_sc gRPC listening port. The per-servicer sequence counter
     is intentionally independent of ``FrontendServer._global_controller``.
     """
 
@@ -49,11 +49,11 @@ class BailianGrpcInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServi
     def ModelStreamInfer(self, request_iterator, context):
         for request in request_iterator:
             logging.debug(
-                "[BailianGrpc] ModelInferRequest: id=%s model_name=%s",
+                "[DashScGrpc] ModelInferRequest: id=%s model_name=%s",
                 request.id,
                 request.model_name,
             )
-            input_ids_list, sampling, other = parse_bailian_grpc_request(request)
+            input_ids_list, sampling, other = parse_dash_sc_grpc_request(request)
             if input_ids_list is None:
                 yield predict_v2_pb2.ModelStreamInferResponse(
                     error_message="input_ids not found or raw_input_contents mismatch"

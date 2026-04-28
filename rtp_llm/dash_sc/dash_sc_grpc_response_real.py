@@ -6,7 +6,7 @@ import logging
 import struct
 from typing import Any
 
-from rtp_llm.bailian.proto import predict_v2_pb2
+from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 
@@ -119,7 +119,7 @@ def _set_incremental_output_param(
 
 
 def build_stream_response_from_generate_outputs(
-    bailian_request_id: str,
+    dash_sc_request_id: str,
     model_name: str,
     go: GenerateOutputs,
     request_log_tag: str,
@@ -135,8 +135,8 @@ def build_stream_response_from_generate_outputs(
     ``prompt_token_num`` (``AuxInfo.input_len``) and ``prompt_cached_token_num`` (``AuxInfo.reuse_len``).
     Output order is stable across chunks.
 
-    ``bailian_request_id``: wire id for ``ModelInferResponse.id`` / trace string.
-    ``request_log_tag``: same format as ``stream_log_tag`` in ``bailian_grpc_real_infer`` (debug logs).
+    ``dash_sc_request_id``: wire id for ``ModelInferResponse.id`` / trace string.
+    ``request_log_tag``: same format as ``stream_log_tag`` in ``dash_sc_grpc_real_infer`` (debug logs).
 
     ``_request_shape`` reserved for future shape alignment.
     """
@@ -147,7 +147,7 @@ def build_stream_response_from_generate_outputs(
         )
     stream_resp = predict_v2_pb2.ModelStreamInferResponse()
     infer = stream_resp.infer_response
-    _set_infer_response_identity(infer, bailian_request_id, model_name)
+    _set_infer_response_identity(infer, dash_sc_request_id, model_name)
 
     out_py = go.generate_outputs[0]
     finished = out_py.finished
@@ -163,10 +163,10 @@ def build_stream_response_from_generate_outputs(
     _set_incremental_output_param(infer, is_streaming)
 
     logging.debug(
-        "[BailianGrpc] [%s] generated_ids: %s", request_log_tag, generated_ids
+        "[DashScGrpc] [%s] generated_ids: %s", request_log_tag, generated_ids
     )
     logging.debug(
-        "[BailianGrpc] [%s] return_input_ids=%s prompt_len=%s is_streaming=%s",
+        "[DashScGrpc] [%s] return_input_ids=%s prompt_len=%s is_streaming=%s",
         request_log_tag,
         return_input_ids,
         len(request_input_ids or []),

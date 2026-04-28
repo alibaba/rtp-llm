@@ -5,7 +5,7 @@ servicers get uniform coverage. Schema is a flat JSON line; fields always presen
 (null when N/A). Content (input_ids / generated_ids / generate_config) is always
 recorded in full — no env switches.
 
-File: ``<log_path>/bailian_grpc_access_r{rank}_s{server}.log`` (per-process via
+File: ``<log_path>/dash_sc_grpc_access_r{rank}_s{server}.log`` (per-process via
 ``get_process_log_filename``).
 
 Performance notes (what stays on the RPC worker thread):
@@ -32,13 +32,13 @@ import grpc
 import orjson
 
 from rtp_llm.access_logger.log_utils import get_handler
-from rtp_llm.bailian.bailian_grpc_request import (
+from rtp_llm.dash_sc.dash_sc_grpc_request import (
     parse_input_ids_from_request,
     parse_sampling_params,
 )
 
-BAILIAN_GRPC_ACCESS_LOGGER_NAME = "bailian_grpc_access_logger"
-BAILIAN_GRPC_ACCESS_LOG_FILENAME = "bailian_grpc_access.log"
+DASH_SC_GRPC_ACCESS_LOGGER_NAME = "dash_sc_grpc_access_logger"
+DASH_SC_GRPC_ACCESS_LOG_FILENAME = "dash_sc_grpc_access.log"
 
 _STREAM_TYPE = {
     (False, False): "unary",
@@ -48,7 +48,7 @@ _STREAM_TYPE = {
 }
 
 
-def init_bailian_grpc_access_logger(
+def init_dash_sc_grpc_access_logger(
     log_path: str,
     backup_count: int,
     rank_id: Optional[int] = None,
@@ -56,9 +56,9 @@ def init_bailian_grpc_access_logger(
     async_mode: bool = True,
 ) -> None:
     """Configure the dedicated gRPC access logger. Safe to call multiple times."""
-    logger = logging.getLogger(BAILIAN_GRPC_ACCESS_LOGGER_NAME)
+    logger = logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME)
     handler = get_handler(
-        BAILIAN_GRPC_ACCESS_LOG_FILENAME,
+        DASH_SC_GRPC_ACCESS_LOG_FILENAME,
         log_path,
         backup_count,
         rank_id,
@@ -109,7 +109,7 @@ def _scan_response_outputs(
     Respects the declared tensor ``shape`` — some producers append a 4-byte filler
     for empty ``generated_ids`` (shape=[1, 0]); without this check the accumulator
     would pick up spurious ``0`` tokens. See ``_append_generated_ids_output`` in
-    ``bailian_grpc_response_real.py``.
+    ``dash_sc_grpc_response_real.py``.
     """
     gen_ids: Optional[list[int]] = None
     finish_reason: Optional[int] = None
@@ -260,7 +260,7 @@ class _RpcAggregate:
         }
 
 
-class BailianGrpcAccessLogInterceptor(grpc.ServerInterceptor):
+class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
     """Wrap every RPC with latency + content capture, emit one JSON line at completion."""
 
     def __init__(
@@ -268,7 +268,7 @@ class BailianGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         rank_id: Optional[int] = None,
         server_id: Optional[int] = None,
     ) -> None:
-        self._logger = logging.getLogger(BAILIAN_GRPC_ACCESS_LOGGER_NAME)
+        self._logger = logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME)
         self._rank_id = rank_id
         self._server_id = server_id
 
@@ -341,7 +341,7 @@ class BailianGrpcAccessLogInterceptor(grpc.ServerInterceptor):
             # and it emits bytes — decode once for the logging framework.
             self._logger.info(orjson.dumps(record).decode("utf-8"))
         except Exception as e:
-            logging.warning("[BailianGrpc] access log emit failed: %s", e)
+            logging.warning("[DashScGrpc] access log emit failed: %s", e)
 
     def _wrap_unary_unary(self, inner, method, stream_type):
         def behavior(request, context):

@@ -1,4 +1,4 @@
-"""Async event loop used by Bailian gRPC ``enqueue`` (Uvicorn main loop or dedicated fallback)."""
+"""Async event loop used by DashSc gRPC ``enqueue`` (Uvicorn main loop or dedicated fallback)."""
 
 from __future__ import annotations
 
@@ -16,13 +16,13 @@ _async_loop_thread: threading.Thread | None = None
 _async_loop_lock = threading.Lock()
 
 
-def set_bailian_grpc_enqueue_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+def set_dash_sc_grpc_enqueue_event_loop(loop: asyncio.AbstractEventLoop) -> None:
     global _enqueue_loop
     _enqueue_loop = loop
-    logging.info("[BailianGrpc] enqueue_event_loop set (uvicorn main loop)")
+    logging.info("[DashScGrpc] enqueue_event_loop set (uvicorn main loop)")
 
 
-def get_bailian_grpc_enqueue_event_loop() -> asyncio.AbstractEventLoop | None:
+def get_dash_sc_grpc_enqueue_event_loop() -> asyncio.AbstractEventLoop | None:
     return _enqueue_loop
 
 

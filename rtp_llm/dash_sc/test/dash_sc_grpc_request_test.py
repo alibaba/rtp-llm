@@ -1,19 +1,19 @@
-"""Unit tests for ``rtp_llm.bailian.bailian_grpc_request``."""
+"""Unit tests for ``rtp_llm.dash_sc.dash_sc_grpc_request``."""
 
 from __future__ import annotations
 
 import struct
 from unittest import TestCase, main
 
-from rtp_llm.bailian.bailian_grpc_request import (
+from rtp_llm.dash_sc.dash_sc_grpc_request import (
     OtherParams,
     SamplingParams,
-    parse_bailian_grpc_request,
+    parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
     parse_other_params,
     parse_sampling_params,
 )
-from rtp_llm.bailian.proto import predict_v2_pb2
+from rtp_llm.dash_sc.proto import predict_v2_pb2
 
 
 def _add_tensor(
@@ -30,7 +30,7 @@ def _add_tensor(
     req.raw_input_contents.append(raw)
 
 
-class BailianGrpcRequestTest(TestCase):
+class DashScGrpcRequestTest(TestCase):
     def test_parse_input_ids_int32(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         raw = struct.pack("<3i", 10, 20, 30)
@@ -137,12 +137,12 @@ class BailianGrpcRequestTest(TestCase):
         op = parse_other_params(req)
         self.assertFalse(op.return_input_ids)
 
-    def test_parse_bailian_grpc_request_ok(self) -> None:
+    def test_parse_dash_sc_grpc_request_ok(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "input_ids", "INT32", [2], struct.pack("<2i", 1, 2))
         _add_tensor(req, "top_k", "INT32", [1], struct.pack("<i", 10))
         _add_tensor(req, "return_input_ids", "BOOL", [1], b"\x01")
-        ids, sp, op = parse_bailian_grpc_request(req)
+        ids, sp, op = parse_dash_sc_grpc_request(req)
         self.assertEqual(ids, [1, 2])
         self.assertIsNotNone(sp)
         self.assertIsNotNone(op)
@@ -150,9 +150,9 @@ class BailianGrpcRequestTest(TestCase):
         self.assertEqual(sp.top_k, 10)
         self.assertTrue(op.return_input_ids)
 
-    def test_parse_bailian_grpc_request_no_input_ids(self) -> None:
+    def test_parse_dash_sc_grpc_request_no_input_ids(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
-        ids, sp, op = parse_bailian_grpc_request(req)
+        ids, sp, op = parse_dash_sc_grpc_request(req)
         self.assertIsNone(ids)
         self.assertIsNone(sp)
         self.assertIsNone(op)
