@@ -23,7 +23,9 @@ import torch.nn.functional as F
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.cp import (
-    CPContext, cp_all_gather_full, cp_freqs_cis_local,
+    CPContext,
+    cp_all_gather_full,
+    cp_freqs_cis_local,
 )
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
@@ -37,6 +39,7 @@ from rtp_llm.models_py.modules.factory.linear import LinearFactory
 # to force REF (debug only).
 try:
     from rtp_llm.models_py.modules.dsv4._qk_rmsnorm_triton import v4_rmsnorm
+
     _QK_RMSNORM_FAST_OK = True
 except Exception:  # pragma: no cover
     v4_rmsnorm = None
@@ -56,6 +59,7 @@ def _use_qk_rmsnorm_fast() -> bool:
 # Set DSV4_WO_FP8_FAST=0 to force the dequant REF (debug only).
 def _use_wo_fp8_fast() -> bool:
     return os.environ.get("DSV4_WO_FP8_FAST", "1") != "0"
+
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
@@ -134,7 +138,10 @@ def _get_window_topk_idxs(
 
 
 def _get_window_topk_idxs_cp(
-    window_size: int, bsz: int, seq_len_full: int, global_positions: torch.Tensor,
+    window_size: int,
+    bsz: int,
+    seq_len_full: int,
+    global_positions: torch.Tensor,
 ) -> torch.Tensor:
     """CP-prefill variant: each rank-local Q token at local index i sits
     at GLOBAL position g = global_positions[i].  Its sliding window
@@ -152,10 +159,10 @@ def _get_window_topk_idxs_cp(
     S_local = int(global_positions.shape[0])
     W = min(window_size, max(seq_len_full, 1))
     # base: [S_local, 1] the global KV "right edge" (= g for row i).
-    base = global_positions.unsqueeze(1)                            # [S_local, 1]
-    offs = torch.arange(W, device=device)                           # [W]
+    base = global_positions.unsqueeze(1)  # [S_local, 1]
+    offs = torch.arange(W, device=device)  # [W]
     # kv_pos[i, j] = (g_i - W + 1) + j
-    kv_pos = (base - W + 1) + offs                                  # [S_local, W]
+    kv_pos = (base - W + 1) + offs  # [S_local, W]
     # Mask-out:
     #   - kv_pos < 0   (Q too early, window begins before seq start)
     #   - kv_pos > g   (impossible given our window-length design, but
@@ -167,12 +174,16 @@ def _get_window_topk_idxs_cp(
         # Pad trailing columns with -1 so concat with compressed topk is
         # a fixed width across calls (sparse_attn_kernel takes symbolic
         # topk but we keep layout consistent with the non-CP path).
-        pad = torch.full((S_local, window_size - W), -1, dtype=kv_pos.dtype, device=device)
+        pad = torch.full(
+            (S_local, window_size - W), -1, dtype=kv_pos.dtype, device=device
+        )
         kv_pos = torch.cat([kv_pos, pad], dim=1)
     return kv_pos.unsqueeze(0).expand(bsz, -1, -1).contiguous()
 
 
-def _get_compress_topk_idxs(ratio: int, bsz: int, seqlen: int, start_pos: int, offset: int, device) -> torch.Tensor:
+def _get_compress_topk_idxs(
+    ratio: int, bsz: int, seqlen: int, start_pos: int, offset: int, device
+) -> torch.Tensor:
     if start_pos > 0:
         n = (start_pos + 1) // ratio
         matrix = (
@@ -188,7 +199,10 @@ def _get_compress_topk_idxs(ratio: int, bsz: int, seqlen: int, start_pos: int, o
 
 
 def _get_compress_topk_idxs_cp(
-    ratio: int, bsz: int, seq_len_full: int, offset: int,
+    ratio: int,
+    bsz: int,
+    seq_len_full: int,
+    offset: int,
     global_positions: torch.Tensor,
 ) -> torch.Tensor:
     """CP-prefill variant of the dense HCA compressed-KV index list
@@ -202,11 +216,12 @@ def _get_compress_topk_idxs_cp(
     T_comp = max(seq_len_full // ratio, 0)
     if T_comp == 0:
         return torch.full((bsz, S_local, 0), -1, dtype=torch.long, device=device)
-    cols = torch.arange(T_comp, device=device)                              # [T_comp]
-    max_allowed = (global_positions + 1) // ratio                            # [S_local]
-    mask = cols.unsqueeze(0) >= max_allowed.unsqueeze(1)                     # [S_local, T_comp]
+    cols = torch.arange(T_comp, device=device)  # [T_comp]
+    max_allowed = (global_positions + 1) // ratio  # [S_local]
+    mask = cols.unsqueeze(0) >= max_allowed.unsqueeze(1)  # [S_local, T_comp]
     matrix = torch.where(
-        mask, torch.full_like(cols, -1).expand(S_local, -1),
+        mask,
+        torch.full_like(cols, -1).expand(S_local, -1),
         cols.expand(S_local, -1) + offset,
     )
     return matrix.unsqueeze(0).expand(bsz, -1, -1).contiguous()
@@ -591,17 +606,22 @@ class Attention(nn.Module):
             from rtp_llm.models_py.modules.dsv4.weight_loader import (
                 _repack_v4_fp8_scale_to_int32,
             )
+
             groups = []
             for g in range(G):
-                w_g = self.wo_a.weight[g * R:(g + 1) * R].contiguous()
-                s_g_raw = self.wo_a.scale[g * R // 128:(g + 1) * R // 128].contiguous()
+                w_g = self.wo_a.weight[g * R : (g + 1) * R].contiguous()
+                s_g_raw = self.wo_a.scale[
+                    g * R // 128 : (g + 1) * R // 128
+                ].contiguous()
                 if s_g_raw.dtype == torch.float8_e8m0fnu:
                     s_g = _repack_v4_fp8_scale_to_int32(s_g_raw)
                 else:
                     s_g = s_g_raw
                 local = {f"_g.weight": w_g, f"_g.scale": s_g}
                 lin = LinearFactory.create_linear_from_weights(
-                    local, f"_g.weight", f"_g.scale",
+                    local,
+                    f"_g.weight",
+                    f"_g.scale",
                     quant_config=_V4_FP8_BLOCK_CFG,
                 )
                 groups.append(lin)
@@ -645,14 +665,27 @@ class Attention(nn.Module):
         ratio = self.compress_ratio
         rd = self.rope_head_dim
         device = x.device
-        start_pos = attn_metadata.start_pos  # [B] int32
+        # Slice metadata to actual bsz — the CUDA-graph impl allocates
+        # buffers at max_bs, but the captured graph at BS=k must read only
+        # the [:k] prefix. Padding entries [k:max_bs] are stale across
+        # replays; mixing them with k-sized index arrays in fancy
+        # indexing (e.g. self.kv_state[b_idx[k], slot[max_bs]] = ...)
+        # broadcasts the same row to multiple slots and corrupts state.
+        start_pos = attn_metadata.start_pos[:bsz]  # [bsz] int32
 
-        # bind compressor cache + freqs lazily (mirrors prefill arm)
+        # bind compressor cache + freqs lazily (mirrors prefill arm).
+        # Indexer owns its OWN nested compressor (indexer.compressor) with
+        # its OWN kv_cache; the indexer prefill path binds it inside
+        # indexer.forward(), but the decode_vectorized path doesn't —
+        # bind it here so the captured graph sees the buffer.
         if self.compress_ratio and self.compressor.kv_cache is None:
             self.compressor.kv_cache = self.kv_cache[:, win:]
             self.compressor.freqs_cis = self.freqs_cis
             if self.indexer is not None:
                 self.indexer.freqs_cis = self.freqs_cis
+                if self.indexer.compressor.kv_cache is None:
+                    self.indexer.compressor.kv_cache = self.indexer.kv_cache
+                    self.indexer.compressor.freqs_cis = self.freqs_cis
 
         # Q path
         qr = self._rmsnorm_weighted(
@@ -664,9 +697,9 @@ class Attention(nn.Module):
         if _use_qk_rmsnorm_fast() and q.is_cuda and q.numel() > 0:
             q = v4_rmsnorm(q, None, eps=self.eps)
         else:
-            q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.eps).to(
-                q.dtype
-            )
+            q = q * torch.rsqrt(
+                q.float().square().mean(-1, keepdim=True) + self.eps
+            ).to(q.dtype)
         # Per-request RoPE on q_pe — each req has its own start_pos.
         freqs_cis_per_req = self.freqs_cis[start_pos.long()]  # [B, freqs_dim]
         for r in range(bsz):
@@ -680,10 +713,14 @@ class Attention(nn.Module):
             apply_rotary_emb(kv[r : r + 1, :, -rd:], freqs_cis_per_req[r : r + 1])
 
         # Write SWA K — flat slot mapping over [B*q_len].
+        # Slice metadata to actual bsz (allocated for max_bs by graph impl;
+        # captured graph at BS=k must read only [:k] slots, else PyTorch
+        # broadcast-assigns the bsz-sized k_state across all max_bs slot
+        # positions, corrupting the KV cache).
         kv_flat = kv.reshape(bsz * q_len, self.head_dim)  # [T, head_dim]
-        # SWA buffer view: per-layer kv_cache[:max_B, :win, :] is the SWA region.
-        swa_buffer = self.kv_cache[:, :win]  # [B, win, head_dim]
-        write_swa_k_decode(kv_flat, attn_metadata.slot_mapping_swa, swa_buffer)
+        swa_buffer = self.kv_cache[:, :win]  # [max_B, win, head_dim]
+        slot_mapping_swa = attn_metadata.slot_mapping_swa[: bsz * q_len]
+        write_swa_k_decode(kv_flat, slot_mapping_swa, swa_buffer)
 
         # CSA / HCA: build / fill compressed topk; write compressed-K.
         # Stage 3B: when the metadata is from CUDA-graph capture, dispatch
@@ -693,31 +730,34 @@ class Attention(nn.Module):
         use_vec = bool(getattr(attn_metadata, "is_cuda_graph", False))
         topk_idxs: torch.Tensor
         if self.compress_ratio:
+            # Slice topk_buffer_compressed to actual bsz so indexer writes
+            # only the [:bsz] prefix (graph impl allocates [max_bs, ...]).
+            topk_buf_cmp = attn_metadata.topk_buffer_compressed[:bsz]
             if self.indexer is not None:
                 # CSA layer (ratio=4): indexer fills its own buffer slot in
-                # attn_metadata.topk_buffer_compressed; we then stitch into
-                # topk_total_by_ratio[4][..., win:].
+                # topk_buf_cmp; we then stitch into topk_total_by_ratio[4][..., win:].
                 if use_vec:
                     self.indexer.forward_decode_vectorized(
                         x,
                         qr,
                         start_pos,
-                        attn_metadata.topk_buffer_compressed,
+                        topk_buf_cmp,
                     )
                 else:
                     self.indexer.forward_decode(
                         x,
                         qr,
                         start_pos,
-                        attn_metadata.topk_buffer_compressed,
+                        topk_buf_cmp,
                     )
                 # Stitch indexer output into topk_total compressed half (with +win offset).
-                topk_total = attn_metadata.topk_total_by_ratio[4]  # [B, 1, win+K]
-                # Add win offset only where indexer-output >= 0 (preserve -1 sentinel).
+                topk_total = attn_metadata.topk_total_by_ratio[4][
+                    :bsz
+                ]  # [bsz, 1, win+K]
                 idx_with_off = torch.where(
-                    attn_metadata.topk_buffer_compressed >= 0,
-                    attn_metadata.topk_buffer_compressed + win,
-                    attn_metadata.topk_buffer_compressed,
+                    topk_buf_cmp >= 0,
+                    topk_buf_cmp + win,
+                    topk_buf_cmp,
                 )
                 topk_total[:, :, win:] = idx_with_off
                 topk_idxs = topk_total
@@ -725,28 +765,20 @@ class Attention(nn.Module):
                 # HCA layer (ratio=128): use the dense-filled topk from builder.
                 # The builder already fills [win+K_dense) with [0..lens) but
                 # WITHOUT the +win offset — apply it here.
-                topk_total = attn_metadata.topk_total_by_ratio[ratio].clone()
+                topk_total = attn_metadata.topk_total_by_ratio[ratio][:bsz].clone()
                 cmp_part = topk_total[:, :, win:]
-                cmp_part = torch.where(
-                    cmp_part >= 0,
-                    cmp_part + win,
-                    cmp_part,
-                )
+                cmp_part = torch.where(cmp_part >= 0, cmp_part + win, cmp_part)
                 topk_total[:, :, win:] = cmp_part
                 topk_idxs = topk_total
-                # HCA also needs to write the compressor's compressed-K output
-                # into self.kv_cache[r, win + (sp+1)//ratio - 1] on boundary.
-                # Compressor.forward_decode already writes self.compressor.kv_cache,
-                # which is a VIEW of self.kv_cache[:, win:] — so writing through
-                # forward_decode automatically lands in the right slot. We just
-                # invoke it here for HCA (CSA invocation lives inside Indexer).
+                # HCA also writes the compressor's compressed-K output via
+                # the compressor.kv_cache view bound earlier.
                 if use_vec:
                     self.compressor.forward_decode_vectorized(x, start_pos)
                 else:
                     self.compressor.forward_decode(x, start_pos)
         else:
             # SWA-only layer: just window topk. Already request-local ring slots.
-            topk_idxs = attn_metadata.topk_window_idxs
+            topk_idxs = attn_metadata.topk_window_idxs[:bsz]
 
         # Sparse attn over per-request KV view.
         # NOTE: kv_cache layout is [max_B, win + max_seq_len/ratio, head_dim].
@@ -851,9 +883,9 @@ class Attention(nn.Module):
         if _use_qk_rmsnorm_fast() and q.is_cuda and q.numel() > 0:
             q = v4_rmsnorm(q, None, eps=self.eps)
         else:
-            q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.eps).to(
-                q.dtype
-            )
+            q = q * torch.rsqrt(
+                q.float().square().mean(-1, keepdim=True) + self.eps
+            ).to(q.dtype)
         freqs_cis_per_req = self.freqs_cis[start_pos.long()]
         for r in range(bsz):
             apply_rotary_emb(q[r : r + 1, :, :, -rd:], freqs_cis_per_req[r : r + 1])
@@ -881,11 +913,17 @@ class Attention(nn.Module):
                 # and don't change during decode.
                 if use_vec:
                     self.indexer.forward_decode_vectorized(
-                        x, qr, start_pos, attn_metadata.topk_buffer_compressed,
+                        x,
+                        qr,
+                        start_pos,
+                        attn_metadata.topk_buffer_compressed,
                     )
                 else:
                     self.indexer.forward_decode(
-                        x, qr, start_pos, attn_metadata.topk_buffer_compressed,
+                        x,
+                        qr,
+                        start_pos,
+                        attn_metadata.topk_buffer_compressed,
                     )
                 topk_total = attn_metadata.topk_total_by_ratio[4]
                 idx_with_off = torch.where(
@@ -898,7 +936,9 @@ class Attention(nn.Module):
             else:
                 # HCA: compressor produces new compressed-K each step → write to FP8.
                 if use_vec:
-                    kv_compressed = self.compressor.forward_decode_vectorized(x, start_pos)
+                    kv_compressed = self.compressor.forward_decode_vectorized(
+                        x, start_pos
+                    )
                 else:
                     kv_compressed = self.compressor.forward_decode(x, start_pos)
 
@@ -906,7 +946,9 @@ class Attention(nn.Module):
                     # Remap: BF16 compressed slot = r * stride_bf16 + c
                     # FP8 compressed slot = r * block_size + win + c
                     stride_bf16 = attn_metadata.compressed_buffer_t_dim_per_ratio[ratio]
-                    cmp_slot_bf16 = attn_metadata.slot_mapping_compressed[ratio].to(torch.long)
+                    cmp_slot_bf16 = attn_metadata.slot_mapping_compressed[ratio].to(
+                        torch.long
+                    )
                     valid_mask = cmp_slot_bf16 >= 0
                     cmp_r = cmp_slot_bf16 // stride_bf16
                     cmp_c = cmp_slot_bf16 % stride_bf16
@@ -936,8 +978,12 @@ class Attention(nn.Module):
             softmax_scale=self.softmax_scale,
         )
         o = sparse_fp8.forward(
-            q, self.kv_cache_fp8[:bsz], self.attn_sink,
-            topk_idxs, cache_seqlens, block_table,
+            q,
+            self.kv_cache_fp8[:bsz],
+            self.attn_sink,
+            topk_idxs,
+            cache_seqlens,
+            block_table,
         )
 
         # Inverse RoPE per request.
@@ -977,7 +1023,7 @@ class Attention(nn.Module):
         if cp_on:
             freqs_cis = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
         else:
-            freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
+            freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
 
         # bind compressor cache + freqs on first call
         if self.compress_ratio and self.compressor.kv_cache is None:
@@ -995,11 +1041,15 @@ class Attention(nn.Module):
         if _use_qk_rmsnorm_fast() and q.is_cuda and q.numel() > 0:
             q = v4_rmsnorm(q, None, eps=self.eps)
         else:
-            q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.eps).to(q.dtype)
+            q = q * torch.rsqrt(
+                q.float().square().mean(-1, keepdim=True) + self.eps
+            ).to(q.dtype)
         apply_rotary_emb(q[..., -rd:], freqs_cis)
 
         # KV path (single KV head) — rank-local under CP.
-        kv = self._rmsnorm_weighted(self._lin(self.wkv, x), self.kv_norm.weight)  # [B, S_local, head_dim]
+        kv = self._rmsnorm_weighted(
+            self._lin(self.wkv, x), self.kv_norm.weight
+        )  # [B, S_local, head_dim]
         apply_rotary_emb(kv[..., -rd:], freqs_cis)
 
         # Under CP prefill, all-gather KV across the CP (== TP) group
@@ -1007,7 +1057,7 @@ class Attention(nn.Module):
         # sliding KV in logical order; attention then runs with rank-
         # local Q × full-KV.
         if cp_on:
-            kv_full = cp_all_gather_full(kv, cp_ctx)                # [1, seq_len_full, head_dim]
+            kv_full = cp_all_gather_full(kv, cp_ctx)  # [1, seq_len_full, head_dim]
             seqlen_full = cp_ctx.seq_len_full
         else:
             kv_full = kv
@@ -1019,7 +1069,10 @@ class Attention(nn.Module):
         # ``chunk_length``).
         if cp_on:
             topk_idxs = _get_window_topk_idxs_cp(
-                win, bsz, seqlen_full, cp_ctx.global_positions,
+                win,
+                bsz,
+                seqlen_full,
+                cp_ctx.global_positions,
             )
         else:
             topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, start_pos, device)
@@ -1035,7 +1088,11 @@ class Attention(nn.Module):
                 compress_idxs = self.indexer(x, qr, start_pos, offset)
             elif cp_on:
                 compress_idxs = _get_compress_topk_idxs_cp(
-                    ratio, bsz, seqlen_full, offset, cp_ctx.global_positions,
+                    ratio,
+                    bsz,
+                    seqlen_full,
+                    offset,
+                    cp_ctx.global_positions,
                 )
             else:
                 compress_idxs = _get_compress_topk_idxs(
@@ -1051,8 +1108,9 @@ class Attention(nn.Module):
             else:
                 cutoff = seqlen_full % win
                 # Place the last `win` tokens into the ring buffer in correct order.
-                self.kv_cache[:bsz, cutoff:win], self.kv_cache[:bsz, :cutoff] = \
-                    kv_full[:, -win:].split([win - cutoff, cutoff], dim=1)
+                self.kv_cache[:bsz, cutoff:win], self.kv_cache[:bsz, :cutoff] = kv_full[
+                    :, -win:
+                ].split([win - cutoff, cutoff], dim=1)
             if self.compress_ratio:
                 # Compressor reads x rank-local, all-gathers internally,
                 # writes full compressed KV into self.kv_cache[:, win:].
@@ -1064,9 +1122,13 @@ class Attention(nn.Module):
             else:
                 kv_cat = kv_full
             if _tl_kernels.tilelang_available():
-                o = _tl_kernels.sparse_attn(q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale)
+                o = _tl_kernels.sparse_attn(
+                    q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
+                )
             else:
-                o = _sparse_attn(q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale)
+                o = _sparse_attn(
+                    q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
+                )
         else:
             self.kv_cache[:bsz, start_pos % win] = kv.squeeze(1)
             if self.compress_ratio:
