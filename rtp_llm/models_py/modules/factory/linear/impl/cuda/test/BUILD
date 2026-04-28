@@ -48,3 +48,12 @@ py_test(
     exec_properties = {'gpu':'SM100_ARM'},
 )
 
+py_test(
+    name = "fp8_flashinfer_linear_test",
+    srcs = ["fp8_flashinfer_linear_test.py"],
+    deps = py_test_deps,
+    env = test_envs,
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'},
+)
+

@@ -201,3 +201,25 @@ py_test(
     },
 )
 
+# Reproduces PyFA3PagedTargetVerifyAttnOp's heterogeneous-batch CUDA-graph bug
+# (target verify path produces garbled output when cache_seqlens vary across
+# requests in the same batch).  Expected to FAIL on test_heterogeneous_batch_*
+# until the bug is fixed; the homogeneous + eager-only variants pass as sanity
+# baselines.
+py_test(
+    name = "test_fa3_target_verify_heterogeneous",
+    srcs = [
+        "test_fa3_target_verify_heterogeneous.py",
+        "base_attention_test.py",
+    ],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+

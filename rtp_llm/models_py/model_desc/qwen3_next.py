@@ -445,10 +445,64 @@ class Qwen3NextAttention(CausalAttention):
         super().__init__(
             attn_config, parallelism_config, weights, layernorm_eps, quant_config
         )
-        # maybe fuse gate in qkv_proj later
-        self.gate = LinearFactory.create_linear_from_weights(
-            weights, W.attn_gate_w, W.attn_gate_s, None, quant_config
+        # Fuse the gate GEMM into the qkv GEMM (one linear with output
+        # [qkv | gate] that we slice in forward). Mirrors sglang's
+        # `attn_output_gate` packing in qwen3_5.
+        self._qkv_size = self.q_size + 2 * (attn_config.kv_head_num * self.head_dim)
+        self._gate_size = self.q_size
+        fused_weight, fused_scales = self._build_fused_qkv_gate_weights(weights)
+        self.qkv_proj = LinearFactory.create_linear(
+            weight=fused_weight,
+            bias=None,
+            weight_scales=fused_scales,
+            quant_config=quant_config,
         )
+
+    @staticmethod
+    def _build_fused_qkv_gate_weights(
+        weights: Dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        qkv_w = weights[W.attn_qkv_w]
+        gate_w = weights[W.attn_gate_w]
+        fused_weight = Qwen3NextAttention._concat_along_n_axis(qkv_w, gate_w)
+        fused_scales: Optional[torch.Tensor] = None
+        qkv_s = weights.get(W.attn_qkv_s)
+        gate_s = weights.get(W.attn_gate_s)
+        if qkv_s is not None and gate_s is not None:
+            fused_scales = Qwen3NextAttention._concat_along_n_axis(qkv_s, gate_s)
+        return fused_weight, fused_scales
+
+    @staticmethod
+    def _concat_along_n_axis(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """Concat two attention projection tensors along the output (N) axis.
+
+        BF16 weights from `merge_qkv_hf` are stored as (K, N) row-major in
+        memory, so plain `torch.cat(dim=1)` is a real column-wise concat.
+
+        FP8 per-block weights/scales come from `merge_te_qkv` /
+        `merge_block_scale` which concat along dim=0, giving real (N, K)
+        row-major memory; the per-block FP8 postprocess then reshapes the
+        SHAPE to (K, N) without touching the data. To fuse correctly we have
+        to view in the actual (N, K) memory layout, concat along the N axis
+        (dim=0), then reshape the SHAPE back to (K, N_total) so downstream
+        code keeps working.
+        """
+        K, N_a = a.shape
+        K_b, N_b = b.shape
+        assert K == K_b, f"K dim mismatch: {K} vs {K_b}"
+        # FP8 weight (e4m3) and FP8 per-block scale (float32 with the same
+        # postprocess reshape) live in (N, K) memory; everything else lives
+        # in (K, N) memory.
+        if a.dtype in (
+            torch.float8_e4m3fn,
+            torch.float8_e4m3fnuz,
+            torch.float32,
+        ):
+            a_real = a.reshape(N_a, K)
+            b_real = b.reshape(N_b, K)
+            fused_real = torch.cat([a_real, b_real], dim=0).contiguous()
+            return fused_real.reshape(K, N_a + N_b)
+        return torch.cat([a, b], dim=1).contiguous()
 
     def forward(
         self,
@@ -458,9 +512,23 @@ class Qwen3NextAttention(CausalAttention):
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
-        gate = self.gate(hidden_states)
-        attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
-        return attn_out
+        input_shape = hidden_states.shape[:-1]
+        fused = self.qkv_proj(hidden_states)
+        # Split into qkv (used by attention) and gate (sigmoid mask on
+        # attention output). Slices along the last dim are non-contiguous
+        # views; we materialize them since downstream kernels expect
+        # contiguous tensors.
+        qkv = fused[..., : self._qkv_size].contiguous()
+        gate = fused[..., self._qkv_size :].contiguous()
+        if self.qk_fuse_norm is not None:
+            qkv = self.qk_fuse_norm(qkv)
+        attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = attn_output.mul_(gate.sigmoid_())
+        output = self.o_proj(attn_output)
+        if self.tp_size > 1:
+            output = all_reduce(output, group=Group.TP)
+        return output
 
 
 class Qwen3NextGatedDeltaNet(nn.Module):
