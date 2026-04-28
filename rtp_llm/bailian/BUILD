@@ -1,5 +1,5 @@
 # BUILD for rtp_llm/bailian: Python frontend gRPC (same pattern as model_rpc).
-load("//bazel:arch_select.bzl", "requirement")
+load("@arch_config//:arch_select.bzl", "requirement")
 
 requirement(["grpcio"])
 
