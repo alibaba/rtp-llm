@@ -173,7 +173,10 @@ def run_smoke_test(test_name: str, test_config: dict):
 _test_params = build_smoke_params(pytest)
 
 
-@pytest.mark.timeout(600)
+# 7200s matches the --remote --timeout=7200 ceiling; a tighter local mark
+# kills cases that the remote worker is still actively executing (mistakenly
+# reporting them as FAILED while remote later returns PASS).
+@pytest.mark.timeout(7200)
 @pytest.mark.parametrize("test_name,test_config", _test_params)
 def test_smoke_oss(test_name: str, test_config: dict):
     run_smoke_test(test_name, test_config)
