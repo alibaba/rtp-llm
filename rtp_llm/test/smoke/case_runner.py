@@ -38,6 +38,7 @@ from smoke.openai_comparer import OpenaiComparer
 from smoke.reranker_comparer import RerankerComparer
 from smoke.similarity_comparer import SimilarityComparer
 from smoke.task_info import TaskInfo, TaskStates
+from smoke.tau2_bench_comparer import Tau2BenchComparer
 from smoke.worker_status_comparer import WorkerStatusComparer
 from smoke.remote_kvcm_server import RemoteKVCMServer
 
@@ -203,6 +204,8 @@ class CaseRunner(object):
 
     @staticmethod
     def _get_comparer_cls(q_r: Dict[str, Any], request_endpoint: str) -> Type:
+        if q_r.get("tau2_bench", False):
+            return Tau2BenchComparer
         if "messages" in q_r["query"]:
             return OpenaiComparer
         elif request_endpoint in [
@@ -455,7 +458,7 @@ class CaseRunner(object):
                 failure_context=f"server startup failed: {failure_desc}",
                 log_path=os.path.join(output_dir, "gpu_state_server_failed.log"),
                 server_pid=server_manager.server_pid,
-                server_proc_status=server_manager.server_proc_status,
+                server_proc_status=getattr(server_manager, "server_proc_status", None),
                 dmesg_baseline=getattr(self, "_dmesg_baseline", 0),
             )
             return None
