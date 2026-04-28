@@ -189,7 +189,7 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     py_attn_inputs.kv_cache_kernel_block_id_device_by_group.reserve(group);
 
     for (size_t g = 0; g < group; ++g) {
-        // group view: [batch, kernel_blocks] on HOST
+        // Group view: [batch, kernel_blocks] on HOST
         auto group_view = inputs.kv_cache_kernel_block_id[g];
         py_attn_inputs.kv_cache_kernel_block_id_host_by_group.push_back(group_view);
         py_attn_inputs.kv_cache_kernel_block_id_device_by_group.push_back(tensorHoldHostAndToCuda(group_view));
