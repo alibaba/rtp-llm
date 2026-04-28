@@ -64,6 +64,11 @@ struct CacheConfig {
     size_t kv_block_stride_bytes = 0;
     size_t kv_scale_stride_bytes = 0;
 
+    // Bytes pre-reserved for fixed-allocation pools (e.g. DSV4 state / SWA pools).
+    // CacheConfigCreator deducts this from kv_cache_mem_size before computing the
+    // paged block_num, so paged pools don't overcommit HBM. 0 means no reservation.
+    size_t fixed_pool_reserve_bytes = 0;
+
     // Attention-specific configuration
     int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
     int linear_fixed_cap =
