@@ -26,6 +26,30 @@ _TILELANG_AVAILABLE: bool = False
 _SPARSE_ATTN_KERNEL_CACHE: dict = {}
 
 
+def _ensure_tvm_tmpdir_writable() -> None:
+    """Route TVM debug tempdirs away from a root-owned /tmp parent."""
+    import os
+    import tempfile
+
+    default_parent = os.path.join(tempfile.gettempdir(), "tvm-debug-mode-tempdirs")
+    if os.path.exists(default_parent) and os.access(default_parent, os.W_OK):
+        return
+    if not os.path.exists(default_parent):
+        try:
+            os.makedirs(default_parent, exist_ok=True)
+            return
+        except OSError:
+            pass
+
+    fallback = os.path.join("/tmp", f"rtp_tvm_tmp_{os.getuid()}")
+    try:
+        os.makedirs(fallback, exist_ok=True)
+    except OSError:
+        return
+    os.environ["TMPDIR"] = fallback
+    tempfile.tempdir = None
+
+
 def _ensure_libz3_loadable() -> None:
     """z3-solver ships ``libz3.so`` inside its site-packages lib dir and
     tilelang's internal Rewriter dlopens it by bare name (`libz3.so`),
@@ -36,25 +60,59 @@ def _ensure_libz3_loadable() -> None:
     it via ctypes before tilelang imports; if the host has a system
     libz3 this is a no-op."""
     import ctypes
+    import os
+    import sys
+
     try:
         ctypes.CDLL("libz3.so", mode=ctypes.RTLD_GLOBAL)
         return
     except OSError:
         pass
+
     try:
         import z3
-        import os
         lib_dir = os.path.join(os.path.dirname(z3.__file__), "lib")
-        for name in ("libz3.so", "libz3.so.4.13", "libz3.so.4"):
-            path = os.path.join(lib_dir, name)
-            if os.path.exists(path):
+    except Exception:
+        return
+
+    # In Bazel runfiles, tilelang and z3-solver live in separate pip_parse
+    # repositories. tilelang/lib/libtvm.so has RUNPATH
+    # $ORIGIN/../../z3/lib, so make that path exist next to tilelang.
+    # Loading z3 by absolute path is not enough because the z3 wheel's SONAME
+    # is versioned (for example libz3.so.4.15) while libtvm needs libz3.so.
+    for site_dir in list(sys.path):
+        tilelang_lib_dir = os.path.join(site_dir, "tilelang", "lib")
+        if not os.path.isdir(tilelang_lib_dir):
+            continue
+        dst_dir = os.path.join(site_dir, "z3", "lib")
+        try:
+            os.makedirs(dst_dir, exist_ok=True)
+            for name in os.listdir(lib_dir):
+                if not name.startswith("libz3.so"):
+                    continue
+                src = os.path.join(lib_dir, name)
+                dst = os.path.join(dst_dir, name)
+                if os.path.exists(dst):
+                    continue
+                os.symlink(src, dst)
+        except OSError:
+            # Some runfiles layouts may be read-only. Fall through to the
+            # absolute-path preload attempt; regular site-packages installs do
+            # not need the symlink path.
+            pass
+
+    for name in ("libz3.so", "libz3.so.4.15", "libz3.so.4.13", "libz3.so.4"):
+        path = os.path.join(lib_dir, name)
+        if os.path.exists(path):
+            try:
                 ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
                 return
-    except Exception:
-        pass
+            except OSError:
+                pass
 
 
 _ensure_libz3_loadable()
+_ensure_tvm_tmpdir_writable()
 
 try:  # noqa: broad except — ImportError / OSError (CDLL symbol miss) / RuntimeError
     import tilelang
