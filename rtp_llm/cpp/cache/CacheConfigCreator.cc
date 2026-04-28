@@ -50,7 +50,21 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     } else {
         const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
             runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-        block_num = kv_cache_mem_size / config.block_size_bytes;
+        // Deduct fixed-pool reservation (DSV4 state / SWA pools) from the budget
+        // so paged pools don't overcommit HBM.
+        size_t paged_budget = kv_cache_mem_size;
+        if (config.fixed_pool_reserve_bytes > 0) {
+            RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > config.fixed_pool_reserve_bytes,
+                                    "kv cache budget %zu MiB is smaller than fixed-pool reservation %zu MiB",
+                                    kv_cache_mem_size / 1024 / 1024,
+                                    config.fixed_pool_reserve_bytes / 1024 / 1024);
+            paged_budget = kv_cache_mem_size - config.fixed_pool_reserve_bytes;
+            RTP_LLM_LOG_INFO("kv cache: total budget %zu MiB, fixed-pool reserve %zu MiB, paged budget %zu MiB",
+                             kv_cache_mem_size / 1024 / 1024,
+                             config.fixed_pool_reserve_bytes / 1024 / 1024,
+                             paged_budget / 1024 / 1024);
+        }
+        block_num = paged_budget / config.block_size_bytes;
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
