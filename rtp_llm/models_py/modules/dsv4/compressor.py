@@ -28,6 +28,7 @@ from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
 # the REF path (debug only).
 try:
     from rtp_llm.models_py.modules.dsv4._compressor_triton import v4_compressor_pool
+
     _COMPRESSOR_FAST_OK = True
 except Exception:  # pragma: no cover — keep V4 importable without Triton
     v4_compressor_pool = None
@@ -281,6 +282,15 @@ class Compressor(nn.Module):
             if overlap:
                 kv = self._overlap_transform(kv, 0)
                 score = self._overlap_transform(score, float("-inf"))
+                # Continuation prefill: inject saved overlap from prefix tail.
+                # kv_state[:, :ratio] holds the wkv projections of the last
+                # `ratio` tokens before the prefix boundary (saved at scatter).
+                # score_state[:, :ratio] holds the corresponding score+ape.
+                # Without this, window 0's overlap slots are zero/-inf, causing
+                # the first compressed entry to differ from full prefill.
+                if sp_int > 0:
+                    kv[:bsz, 0, :ratio] = self.kv_state[:bsz, :ratio, :d]
+                    score[:bsz, 0, :ratio] = self.score_state[:bsz, :ratio, :d]
 
             # Fast path: single Triton kernel fuses per-D softmax over G
             # + weighted sum.  REF chain materializes 3 fp32 intermediates

@@ -43,7 +43,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
                                          config_.group_types[static_cast<size_t>(gid)] :
                                          CacheGroupType::FULL;
         if (group_type == CacheGroupType::LINEAR) {
-            group = std::make_shared<LinearKVCacheGroup>(ids, spec, group_pool, gid, config_.linear_step);
+            group = std::make_shared<LinearKVCacheGroup>(
+                ids, spec, group_pool, gid, config_.linear_step, config_.linear_fixed_cap);
             linear_group_ids_.push_back(gid);
         } else {
             group = std::make_shared<FullKVCacheGroup>(ids, spec, group_pool, gid);
@@ -114,57 +115,76 @@ void HybridPoolKVCacheAllocator::referenceValidBlocks(int                     gi
 }
 
 int HybridPoolKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource) {
-    int                           min_full_reuse_blocks = static_cast<int>(cache_keys.size());
-    std::vector<BlockIndicesType> full_matched_blocks(kv_cache_groups_.size());
+    const int num_groups = static_cast<int>(kv_cache_groups_.size());
+    if (num_groups == 0 || cache_keys.empty()) {
+        return 0;
+    }
+
+    // All 7 groups participate in matching — reuse_blocks_len is the min across groups.
+    // FULL groups: left-to-right continuous match (existing semantics).
+    // LINEAR groups: right-to-left match on last 2 positions; 0 on total miss.
+    // If any group returns 0, global reuse falls to 0 → full recomputation.
+    std::vector<BlockIndicesType> matched_blocks(static_cast<size_t>(num_groups));
+    int                           min_reuse_blocks = static_cast<int>(cache_keys.size());
 
     for (int gid : full_group_ids_) {
-        auto match_result     = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys);
-        min_full_reuse_blocks = std::min(min_full_reuse_blocks, static_cast<int>(match_result.reuse_blocks));
-        full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
+        auto mr                                  = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys);
+        min_reuse_blocks                         = std::min(min_reuse_blocks, static_cast<int>(mr.reuse_blocks));
+        matched_blocks[static_cast<size_t>(gid)] = std::move(mr.block_indices);
+    }
+    for (int gid : linear_group_ids_) {
+        auto mr                                  = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys);
+        min_reuse_blocks                         = std::min(min_reuse_blocks, static_cast<int>(mr.reuse_blocks));
+        matched_blocks[static_cast<size_t>(gid)] = std::move(mr.block_indices);
     }
 
-    int                       pos = min_full_reuse_blocks - 1;
-    std::vector<BlockIdxType> linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
-    for (; pos >= 0; --pos) {
-        bool all_linear_matched = true;
-        for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
-            const int gid      = linear_group_ids_[i];
-            auto* linear_group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
-            RTP_LLM_CHECK_WITH_INFO(linear_group != nullptr, "group %d is not LinearKVCacheGroup", gid);
-            auto result = linear_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
-            if (result.block_indices.empty()) {
-                all_linear_matched = false;
-                break;
-            }
-            linear_tail_blocks[i] = result.block_indices[0];
-        }
-        if (all_linear_matched) {
-            break;
-        }
-    }
-
-    const int reuse_blocks_len = std::max(pos + 1, 0);
+    int reuse_blocks_len = min_reuse_blocks;
     if (reuse_blocks_len <= 0) {
         return 0;
     }
 
-    for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        kv_resource.mutableBlockIds(0, gid).assign(
-            BlockIndicesType(static_cast<size_t>(reuse_blocks_len), NULL_BLOCK_IDX));
-    }
-
+    // FULL groups: write the first reuse_blocks_len matched blocks into block_ids.
     for (int gid : full_group_ids_) {
-        BlockIndicesType full_blocks = full_matched_blocks[static_cast<size_t>(gid)];
-        if (static_cast<int>(full_blocks.size()) > reuse_blocks_len) {
-            full_blocks.resize(static_cast<size_t>(reuse_blocks_len));
+        BlockIndicesType blocks = matched_blocks[static_cast<size_t>(gid)];
+        if (static_cast<int>(blocks.size()) > reuse_blocks_len) {
+            blocks.resize(static_cast<size_t>(reuse_blocks_len));
         }
-        kv_resource.mutableBlockIds(0, gid).assign(std::move(full_blocks));
+        // Pad to reuse_blocks_len so downstream malloc sees correct current_blocks_len.
+        while (static_cast<int>(blocks.size()) < reuse_blocks_len) {
+            blocks.push_back(NULL_BLOCK_IDX);
+        }
+        kv_resource.mutableBlockIds(0, gid).assign(std::move(blocks));
     }
 
-    for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
-        const int gid = linear_group_ids_[i];
-        kv_resource.mutableBlockIds(0, gid).setAt(static_cast<size_t>(reuse_blocks_len - 1), linear_tail_blocks[i]);
+    // LINEAR groups: in ring-buffer mode (linear_fixed_cap > 0) the matched
+    // blocks are already right-aligned at ring-size (≤ fixed_cap); assign
+    // directly without padding.  For legacy (fixed_cap == 0) groups, keep the
+    // pad-to-reuse_blocks_len behavior used by the old sparse layout.
+    for (int gid : linear_group_ids_) {
+        BlockIndicesType blocks = matched_blocks[static_cast<size_t>(gid)];
+        auto* linear_group      = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
+        RTP_LLM_CHECK_WITH_INFO(linear_group != nullptr, "group %d is not LinearKVCacheGroup", gid);
+        const int fixed_cap = linear_group->fixedCap();
+
+        if (fixed_cap > 0) {
+            // Ring mode: `blocks` is already ring-sized right-aligned.
+            auto& block_ids_ref = kv_resource.mutableBlockIds(0, gid);
+            block_ids_ref.assign(std::move(blocks));
+            // Seed prev_seq_slots so subsequent malloc knows how many logical
+            // blocks the reuse brought us to — without this, the first malloc
+            // call after reuse would miscompute rotations.
+            linear_group->recordReuse(block_ids_ref, reuse_blocks_len);
+        } else {
+            if (static_cast<int>(blocks.size()) > reuse_blocks_len) {
+                blocks.resize(static_cast<size_t>(reuse_blocks_len));
+            }
+            while (static_cast<int>(blocks.size()) < reuse_blocks_len) {
+                blocks.push_back(NULL_BLOCK_IDX);
+            }
+            kv_resource.mutableBlockIds(0, gid).assign(std::move(blocks));
+        }
     }
+
     return reuse_blocks_len;
 }
 
@@ -317,13 +337,36 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
             if (n == 0) {
                 continue;
             }
-            CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + n);
-            const auto&      blocks = kv_cache_resource->blocks(batch_id, gid);
+            const auto& blocks     = kv_cache_resource->blocks(batch_id, gid);
+            const auto  group_type = (gid < static_cast<int>(config_.group_types.size())) ?
+                                         config_.group_types[static_cast<size_t>(gid)] :
+                                         CacheGroupType::FULL;
+
+            CacheKeysType    put_cache_keys;
             BlockIndicesType put_blocks;
-            put_blocks.reserve(n);
-            for (size_t i = 0; i < n && i < blocks.size(); ++i) {
-                put_blocks.push_back(blocks[i]);
+
+            if (group_type == CacheGroupType::LINEAR) {
+                // LINEAR groups (SWA/State): fixed blocks represent state at the
+                // latest position. Map blocks to the LAST full-block keys so that
+                // right-to-left matchSingleKey can find them.
+                const size_t num_blocks  = blocks.size();
+                const size_t keys_to_use = std::min(n, num_blocks);
+                put_cache_keys.reserve(keys_to_use);
+                put_blocks.reserve(keys_to_use);
+                for (size_t i = 0; i < keys_to_use; ++i) {
+                    size_t key_idx = n - keys_to_use + i;
+                    put_cache_keys.push_back(cache_keys[key_idx]);
+                    put_blocks.push_back(blocks[i]);
+                }
+            } else {
+                // FULL groups: left-to-right, key[i] → block[i]
+                put_cache_keys.assign(cache_keys.begin(), cache_keys.begin() + n);
+                put_blocks.reserve(n);
+                for (size_t i = 0; i < n && i < blocks.size(); ++i) {
+                    put_blocks.push_back(blocks[i]);
+                }
             }
+
             kv_cache_groups_[static_cast<size_t>(gid)]->insertIntoCache(
                 put_cache_keys, put_blocks, insert_info.is_resident);
         }
