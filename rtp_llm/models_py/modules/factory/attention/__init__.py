@@ -61,6 +61,9 @@ else:
         from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise_fp8 import (
             HeadWiseFP8PrefillImpl,
         )
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_fa3_draft_prefill import (
+            PyFA3DraftPrefillImpl,
+        )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_fa3_target_verify import (
             PyFA3TargetVerifyImpl,
         )
@@ -88,6 +91,17 @@ else:
             if _os.environ.get("RTP_LLM_DISABLE_FA3_TARGET_VERIFY") == "1"
             else [PyFA3TargetVerifyImpl, PyFlashinferTargetVerifyPrefillImpl]
         )
+        # Toggle: set RTP_LLM_DISABLE_FA3_DRAFT_PREFILL=1 to fall back to the
+        # legacy FlashInfer BatchPrefillWithPagedKVCacheWrapper path for the
+        # draft-model prefill step in MTP.  Default order prefers
+        # PyFA3DraftPrefillImpl, which sidesteps the FlashInfer plan() / CG
+        # buffer aliasing that produces residual non-determinism in CG mode
+        # (see project_draft_prefill_cg_root_cause memory).
+        _draft_prefill_chain = (
+            []
+            if _os.environ.get("RTP_LLM_DISABLE_FA3_DRAFT_PREFILL") == "1"
+            else [PyFA3DraftPrefillImpl]
+        )
         PREFILL_MHA_IMPS.extend(
             [
                 HeadWiseFP8PrefillImpl,
@@ -95,6 +109,7 @@ else:
                 FlashInferTRTLLMSpecDecodeImpl,
                 FlashInferTRTLLMPrefillImpl,
                 *_target_verify_chain,
+                *_draft_prefill_chain,
                 TRTMHAImpl,
                 PyFlashinferPrefillImpl,
                 PyFlashinferPagedPrefillImpl,
