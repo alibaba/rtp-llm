@@ -1,4 +1,4 @@
-"""Parse Bailian gRPC ModelInferRequest (wire format from predict_v2.proto): input_ids and sampling."""
+"""Parse DashSc gRPC ModelInferRequest (wire format from predict_v2.proto): input_ids and sampling."""
 
 from __future__ import annotations
 
@@ -263,7 +263,7 @@ def parse_other_params(request) -> OtherParams:
     return OtherParams(return_input_ids=return_input_ids)
 
 
-def parse_bailian_grpc_request(
+def parse_dash_sc_grpc_request(
     request,
 ) -> tuple[list[int] | None, SamplingParams | None, OtherParams | None]:
     """Parse one ``ModelInferRequest``: ``input_ids``, sampling tensors, ``other`` params.

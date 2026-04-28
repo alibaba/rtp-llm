@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import AsyncGenerator, List, Optional
+from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
 
 import torch
 
@@ -16,6 +16,9 @@ from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
 from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 from rtp_llm.utils.time_util import Timer
+
+if TYPE_CHECKING:
+    from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 route_logger = logging.getLogger("route_logger")
 
@@ -340,3 +343,47 @@ class BackendRPCServerVisitor:
                 logging.warning(f"role {role} not in available roles {roles}")
                 return False
         return True
+
+
+def create_backend_rpc_server_visitor(
+    py_env_configs: "PyEnvConfigs",
+    model_config,
+) -> "BackendRPCServerVisitor":
+    """Build a `BackendRPCServerVisitor` from `PyEnvConfigs` + a lightweight `ModelConfig`.
+
+    Used by both `FrontendWorker` (historically inline) and `DashScApp` (independent
+    process) so they open equivalent channels to the backend without dragging in the
+    tokenizer/pipeline machinery. `model_config` only needs `max_seq_len` and
+    `attn_config.tokens_per_block`; produce it via `ModelFactory.create_model_config`.
+    """
+    from rtp_llm.config.engine_config import EngineConfig
+    from rtp_llm.distribute.distributed_server import (
+        get_dp_addrs_from_world_info,
+        get_world_info,
+    )
+
+    engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
+    world_info = get_world_info(
+        server_config=py_env_configs.server_config,
+        distribute_config=py_env_configs.distribute_config,
+        parallelism_config=py_env_configs.parallelism_config,
+    )
+    addresses = get_dp_addrs_from_world_info(
+        world_info=world_info,
+        parallelism_config=engine_config.parallelism_config,
+    )
+    vit_separation = None
+    if py_env_configs.vit_config:
+        vit_separation = py_env_configs.vit_config.vit_separation
+
+    return BackendRPCServerVisitor(
+        max_seq_len=model_config.max_seq_len,
+        seq_size_per_block=model_config.attn_config.tokens_per_block,
+        pd_sep_config=engine_config.pd_sep_config,
+        addresses=addresses,
+        sp_config=py_env_configs.sp_config,
+        grpc_config=py_env_configs.grpc_config,
+        vit_separation=vit_separation,
+        server_config=py_env_configs.server_config,
+        master_config=py_env_configs.master_config,
+    )

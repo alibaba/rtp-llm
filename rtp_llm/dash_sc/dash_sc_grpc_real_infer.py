@@ -10,12 +10,12 @@ from typing import Any
 
 import torch
 
-from rtp_llm.bailian.bailian_grpc_enqueue_loop import resolve_loop_for_enqueue
-from rtp_llm.bailian.bailian_grpc_request import OtherParams, SamplingParams
-from rtp_llm.bailian.bailian_grpc_response_real import (
+from rtp_llm.dash_sc.dash_sc_grpc_enqueue_loop import resolve_loop_for_enqueue
+from rtp_llm.dash_sc.dash_sc_grpc_request import OtherParams, SamplingParams
+from rtp_llm.dash_sc.dash_sc_grpc_response_real import (
     build_stream_response_from_generate_outputs,
 )
-from rtp_llm.bailian.proto import predict_v2_pb2
+from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 
 
@@ -82,7 +82,7 @@ def iter_real_model_stream_infer(
     trace_str = str(request.id)
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
     logging.debug(
-        "[BailianGrpc] [%s] real infer start: model_name=%s input_len=%s sampling=%s",
+        "[DashScGrpc] [%s] real infer start: model_name=%s input_len=%s sampling=%s",
         tag,
         request.model_name,
         len(input_ids_list),
@@ -99,14 +99,14 @@ def iter_real_model_stream_infer(
             generate_config=generate_config,
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
-        logging.debug("[BailianGrpc] [%s] generate_input: %s", tag, generate_input)
+        logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
         request_shape = list(request.inputs[0].shape) if request.inputs else None
         chunk_idx = 0
         for go in run_enqueue_sync(backend_visitor, generate_input):
             chunk_idx += 1
-            logging.debug("[BailianGrpc] [%s] real infer chunk %s", tag, chunk_idx)
+            logging.debug("[DashScGrpc] [%s] real infer chunk %s", tag, chunk_idx)
             yield build_stream_response_from_generate_outputs(
-                bailian_request_id=request.id,
+                dash_sc_request_id=request.id,
                 model_name=request.model_name,
                 go=go,
                 request_log_tag=tag,
@@ -117,18 +117,18 @@ def iter_real_model_stream_infer(
             )
         if chunk_idx:
             logging.debug(
-                "[BailianGrpc] [%s] real infer done: output_chunks=%s",
+                "[DashScGrpc] [%s] real infer done: output_chunks=%s",
                 tag,
                 chunk_idx,
             )
         if chunk_idx == 0:
             logging.warning(
-                "[BailianGrpc] [%s] empty outputs_list",
+                "[DashScGrpc] [%s] empty outputs_list",
                 tag,
             )
             yield predict_v2_pb2.ModelStreamInferResponse(
                 error_message="empty outputs_list from backend",
             )
     except Exception as e:
-        logging.exception("[BailianGrpc] [%s] enqueue failed: %s", tag, e)
+        logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
         yield predict_v2_pb2.ModelStreamInferResponse(error_message=str(e))

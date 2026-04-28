@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Bailian gRPC client (ModelStreamInfer, wire: predict_v2.proto). Same tokenizer as FrontendApp
+DashSc gRPC client (ModelStreamInfer, wire: predict_v2.proto). Same tokenizer as FrontendApp
 (FrontendWorker) to encode a prompt to input_ids, then sends ModelInferRequest and
 prints the response (generated_ids, finish_reason).
 
 Usage (tokenizer same as frontend: ckpt_path, tokenizer_path, model_type):
-  python -m rtp_llm.bailian.bailian_grpc_client \\
+  python -m rtp_llm.dash_sc.dash_sc_grpc_client \\
     --grpc_addr 127.0.0.1:8096 \\
     --ckpt_path /path/to/checkpoint \\
     --tokenizer_path /path/to/tokenizer \\
@@ -21,23 +21,23 @@ from typing import Any
 
 import grpc
 
-from rtp_llm.bailian.bailian_grpc_request import SamplingParams
-from rtp_llm.bailian.proto import predict_v2_pb2, predict_v2_pb2_grpc
+from rtp_llm.dash_sc.dash_sc_grpc_request import SamplingParams
+from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
-from rtp_llm.server.server_args.grpc_group_args import default_bailian_grpc_config_json
+from rtp_llm.server.server_args.grpc_group_args import default_dash_sc_grpc_config_json
 
 
-def bailian_grpc_client_channel_options(
-    bailian_grpc_config=None,
+def dash_sc_grpc_client_channel_options(
+    dash_sc_grpc_config=None,
 ) -> list[tuple[str, int]]:
-    """``grpc.insecure_channel(..., options=...)`` from ``BailianGrpcConfig.get_client_config()``."""
-    if bailian_grpc_config is None:
-        from rtp_llm.ops import BailianGrpcConfig
+    """``grpc.insecure_channel(..., options=...)`` from ``DashScGrpcConfig.get_client_config()``."""
+    if dash_sc_grpc_config is None:
+        from rtp_llm.ops import DashScGrpcConfig
 
-        bailian_grpc_config = BailianGrpcConfig()
-        bailian_grpc_config.from_json(default_bailian_grpc_config_json())
+        dash_sc_grpc_config = DashScGrpcConfig()
+        dash_sc_grpc_config.from_json(default_dash_sc_grpc_config_json())
     return sorted(
-        (str(k), int(v)) for k, v in bailian_grpc_config.get_client_config().items()
+        (str(k), int(v)) for k, v in dash_sc_grpc_config.get_client_config().items()
     )
 
 
@@ -279,10 +279,10 @@ def _parse_stop_token_ids_csv(s: str | None) -> tuple[tuple[int, ...], ...]:
     return (tuple(ids),) if ids else tuple()
 
 
-def build_bailian_grpc_client_argparser() -> argparse.ArgumentParser:
+def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
     """CLI for ``main()``; callers may ``parse_args(argv)`` for tests or subprocesses."""
     parser = argparse.ArgumentParser(
-        description="Bailian gRPC client: encode prompt with same tokenizer as frontend, call ModelStreamInfer."
+        description="DashSc gRPC client: encode prompt with same tokenizer as frontend, call ModelStreamInfer."
     )
     parser.add_argument(
         "--grpc_addr",
@@ -290,7 +290,7 @@ def build_bailian_grpc_client_argparser() -> argparse.ArgumentParser:
         default="127.0.0.1:8096",
         help=(
             "gRPC server address (host:port); default matches rank0 "
-            "ServerConfig.bailian_grpc_server_port (8088 + 8)"
+            "ServerConfig.dash_sc_grpc_server_port (8088 + 8)"
         ),
     )
     parser.add_argument(
@@ -320,7 +320,7 @@ def build_bailian_grpc_client_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--request_id",
         type=str,
-        default="bailian_grpc_client_1",
+        default="dash_sc_grpc_client_1",
         help="Request id for the inference request",
     )
     parser.add_argument(
@@ -329,7 +329,7 @@ def build_bailian_grpc_client_argparser() -> argparse.ArgumentParser:
         default="default",
         help="Model name in the request",
     )
-    # Sampling / generation (tensor names match ``bailian_grpc_request.parse_sampling_params``)
+    # Sampling / generation (tensor names match ``dash_sc_grpc_request.parse_sampling_params``)
     parser.add_argument(
         "--max_new_tokens",
         type=int,
@@ -402,16 +402,16 @@ def build_bailian_grpc_client_argparser() -> argparse.ArgumentParser:
         help="Send return_input_ids INT32 tensor (1) so server echoes prompt in prompt_token_ids",
     )
     parser.add_argument(
-        "--bailian_grpc_config_json",
+        "--dash_sc_grpc_config_json",
         type=str,
         default="",
-        help="Optional BailianGrpcConfig JSON (client_config / server_config / max_server_workers).",
+        help="Optional DashScGrpcConfig JSON (client_config / server_config / max_server_workers).",
     )
     return parser
 
 
 def main():
-    args = build_bailian_grpc_client_argparser().parse_args()
+    args = build_dash_sc_grpc_client_argparser().parse_args()
 
     tokenizer_path = args.tokenizer_path or args.ckpt_path
 
@@ -449,14 +449,14 @@ def main():
         return_input_ids=args.return_input_ids,
     )
 
-    bailian_cfg = None
-    if args.bailian_grpc_config_json.strip():
-        from rtp_llm.ops import BailianGrpcConfig
+    dash_sc_cfg = None
+    if args.dash_sc_grpc_config_json.strip():
+        from rtp_llm.ops import DashScGrpcConfig
 
-        bailian_cfg = BailianGrpcConfig()
-        bailian_cfg.from_json(args.bailian_grpc_config_json.strip())
+        dash_sc_cfg = DashScGrpcConfig()
+        dash_sc_cfg.from_json(args.dash_sc_grpc_config_json.strip())
     channel = grpc.insecure_channel(
-        args.grpc_addr, options=bailian_grpc_client_channel_options(bailian_cfg)
+        args.grpc_addr, options=dash_sc_grpc_client_channel_options(dash_sc_cfg)
     )
     stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
 

@@ -117,6 +117,118 @@ def start_backend_server_impl(
     return backend_process
 
 
+def _iter_serving_ranks(py_env_configs: PyEnvConfigs):
+    """Yield (rank, local_world_size) for each rank that should host frontend/dash_sc.
+
+    Matches the historical frontend filter: rank 0 on every node (for heartbeat) plus
+    any tp_rank==0 rank.
+    """
+    pc = py_env_configs.parallelism_config
+    local_world_size = pc.world_size
+    if "LOCAL_WORLD_SIZE" in os.environ:
+        logging.info(
+            f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
+        )
+        local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+    else:
+        logging.info(
+            f"multi rank starts with default local world size: {local_world_size}, world size = {pc.world_size}"
+        )
+    for rank in range(local_world_size):
+        if rank == 0 or (pc.world_rank + rank) % pc.tp_size == 0:
+            yield rank
+        else:
+            logging.info(f"rank {pc.world_rank + rank} skipping frontend/dash_sc startup")
+
+
+@timer_wrapper(description="start dash_sc server")
+def start_dash_sc_server_impl(
+    global_controller,
+    py_env_configs: PyEnvConfigs,
+    process_manager=None,
+):
+    from rtp_llm.start_dash_sc_server import start_dash_sc_server
+
+    dash_sc_processes = []
+    dash_sc_pipe_readers = []
+
+    pc = py_env_configs.parallelism_config
+    frontend_server_count = py_env_configs.server_config.frontend_server_count
+
+    for rank in _iter_serving_ranks(py_env_configs):
+        for i in range(frontend_server_count):
+            pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
+            logging.info(
+                f"[PROCESS_SPAWN]Start dash_sc server process rank_{rank}_server_{i} outer"
+            )
+            process = multiprocessing.Process(
+                target=start_dash_sc_server,
+                args=(
+                    rank,
+                    i,
+                    global_controller,
+                    py_env_configs,
+                    pipe_writer,
+                ),
+                name=f"dash_sc_server_{rank}_{i}",
+            )
+            process.start()
+            pipe_writer.close()
+            dash_sc_processes.append(process)
+            dash_sc_pipe_readers.append(pipe_reader)
+
+    if not dash_sc_processes:
+        return dash_sc_processes
+
+    startup_status = {"remaining": set(range(len(dash_sc_pipe_readers)))}
+
+    def check_dash_sc_ready():
+        if not startup_status["remaining"]:
+            return True
+        # Poll each outstanding reader non-blocking; raise on any failure.
+        done_now = []
+        for idx in list(startup_status["remaining"]):
+            reader = dash_sc_pipe_readers[idx]
+            try:
+                if not reader.poll(timeout=0):
+                    continue
+                msg = reader.recv()
+            except EOFError:
+                raise Exception(
+                    f"DashSc server rank_idx={idx} pipe closed unexpectedly"
+                )
+            if msg.get("status") == "success":
+                logging.info(
+                    f"DashSc server rank_idx={idx} ready: {msg.get('message', '')}"
+                )
+                done_now.append(idx)
+                try:
+                    reader.close()
+                except Exception:
+                    pass
+            else:
+                error_msg = msg.get("message", "Unknown error")
+                traceback_info = msg.get("traceback", "")
+                if traceback_info:
+                    logging.error(f"DashSc server traceback: {traceback_info}")
+                raise Exception(
+                    f"DashSc server rank_idx={idx} start failed: {error_msg}"
+                )
+        for idx in done_now:
+            startup_status["remaining"].discard(idx)
+        return not startup_status["remaining"]
+
+    if process_manager:
+        process_manager.register_health_check(
+            processes=dash_sc_processes,
+            process_name="dash_sc_server",
+            check_ready_fn=check_dash_sc_ready,
+            retry_interval_seconds=0.1,
+        )
+
+    return dash_sc_processes
+
+
 @timer_wrapper(description="start frontend server")
 def start_frontend_server_impl(
     global_controller,
@@ -226,6 +338,14 @@ def start_server(py_env_configs: PyEnvConfigs):
             global_controller, py_env_configs, process_manager
         )
         process_manager.add_processes(frontend_process)
+
+        if py_env_configs.role_config.role_type != RoleType.VIT:
+            logging.info("start dash_sc server")
+            dash_sc_processes = start_dash_sc_server_impl(
+                global_controller, py_env_configs, process_manager
+            )
+            if dash_sc_processes:
+                process_manager.add_processes(dash_sc_processes)
 
         # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():
