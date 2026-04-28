@@ -238,6 +238,11 @@ def _collect_base_files(rootdir: Path) -> List[str]:
     ):
         if (rootdir / name).exists():
             files.append(name)
+    # _build/*.py is imported by setup.py and prepare_venv.py (detect_build_config).
+    # Without these the remote venv install fails with: "Cannot import _build.platform".
+    for p in (rootdir / "_build").glob("*.py"):
+        if p.is_file():
+            files.append(str(p.relative_to(rootdir)))
     return files
 
 
