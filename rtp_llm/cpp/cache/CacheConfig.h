@@ -22,9 +22,9 @@ struct CacheConfig {
     std::vector<std::vector<int>> full_groups;    // for hybrid attention
     std::vector<CacheGroupType>   group_types;    // for hybrid attention
     std::vector<CacheGroupType>   layer_attn_types;
-    std::vector<KVCacheAttnType>  group_attn_types;            // group id -> cache identity
-    std::vector<std::vector<int>> layer_to_group_ids;          // layer id -> all group ids needed by the layer
-    std::vector<std::vector<int>> layer_attn_to_group_id;      // layer id -> attn type id -> group id
+    std::vector<KVCacheAttnType>  group_attn_types;        // group id -> cache identity
+    std::vector<std::vector<int>> layer_to_group_ids;      // layer id -> all group ids needed by the layer
+    std::vector<std::vector<int>> layer_attn_to_group_id;  // layer id -> attn type id -> group id
     std::vector<int>              layer_to_group_id;
     std::vector<int>              layer_to_block_stride_bytes;
     std::vector<size_t>           group_seq_size_per_block;
@@ -65,7 +65,9 @@ struct CacheConfig {
     size_t kv_scale_stride_bytes = 0;
 
     // Attention-specific configuration
-    int linear_step      = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
+    int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
+    int linear_fixed_cap =
+        0;  // >0 = ring buffer of this many blocks per LINEAR group (per request); 0 = legacy unbounded
     int group_layer_num  = 1;  // Number of layers per group for hybrid attention
     int linear_group_num = 0;  // Number of linear attention groups
     int full_group_num   = 0;  // Number of full attention groups
@@ -123,6 +125,7 @@ struct CacheConfig {
         // Attention-specific configuration section
         os << indent1 << "# Attention Configuration:\n";
         OUTPUT_FIELD(linear_step);
+        OUTPUT_FIELD(linear_fixed_cap);
         OUTPUT_FIELD(group_layer_num);
         OUTPUT_FIELD(linear_group_num);
         OUTPUT_FIELD(full_group_num);

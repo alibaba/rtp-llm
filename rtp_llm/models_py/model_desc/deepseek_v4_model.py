@@ -909,15 +909,29 @@ class DeepSeekV4Model(GptModelBase):
             return
 
         # Build per-layer pool list from compress_ratio
+        # _layer_pools: all pools for scatter (write all 7 pools)
+        # _layer_gather_pools: only paged pools for gather (skip SWA/State which
+        #   get overwritten during decode, making cached data unreliable)
+        # _layer_reuse_gather_pools: paged + state pools for prefill reuse gather
+        #   (restores compressor overlap carry, but skips SWA ring buffer which
+        #   holds data at the wrong position)
         self._layer_pools = []
+        self._layer_gather_pools = []
+        self._layer_reuse_gather_pools = []
         for i, layer in enumerate(self.v4.layers):
             ratio = layer.attn.compress_ratio
             if ratio == 4:
                 self._layer_pools.append([7, 1, 3, 4, 5])
+                self._layer_gather_pools.append([1, 3])  # CSA_KV, INDEXER_KV only
+                self._layer_reuse_gather_pools.append([1, 3, 4, 5])  # + STATE pools
             elif ratio == 128:
                 self._layer_pools.append([7, 2, 6])
+                self._layer_gather_pools.append([2])  # HCA_KV only
+                self._layer_reuse_gather_pools.append([2, 6])  # + STATE pool
             else:
                 self._layer_pools.append([7])
+                self._layer_gather_pools.append([])  # SWA-only, nothing to gather
+                self._layer_reuse_gather_pools.append([])  # SWA-only
 
         # Debug: log shapes for layer 0 and layer 2
         for dbg in [0, 2]:
@@ -1087,11 +1101,21 @@ class DeepSeekV4Model(GptModelBase):
             return None
         return slots[attn_type]
 
-    def _gather_all_layers(self, attn_inputs, B=1, batch_offset=0):
+    def _gather_all_layers(
+        self, attn_inputs, B=1, batch_offset=0, paged_only=False, reuse_gather=False
+    ):
         """Gather cached KV from BlockPool pages into each layer's buffers.
 
         batch_offset: row offset into by_group block_ids. In prefill loop,
         request b uses batch_offset=b so we read the correct block_ids row.
+
+        paged_only: if True, only gather paged pools (CSA_KV, HCA_KV, INDEXER_KV).
+        Skip SWA and State pools because their fixed blocks get overwritten
+        during decode, making cached data unreliable for prefix cache reuse.
+        Continuation prefill recomputes them. Decode must set paged_only=False.
+
+        reuse_gather: if True, gather paged + state pools (skip SWA).
+        Used for prefill reuse to restore compressor overlap carry state.
         """
         if not hasattr(self, "_fw_pool_tensors") or not self._fw_pool_tensors:
             return
@@ -1110,7 +1134,14 @@ class DeepSeekV4Model(GptModelBase):
             win = attn_mod.window_size
             hd = attn_mod.head_dim
 
-            for attn_type in self._layer_pools[i]:
+            # Select pool list based on gather mode
+            if reuse_gather:
+                pools = self._layer_reuse_gather_pools[i]
+            elif paged_only:
+                pools = self._layer_gather_pools[i]
+            else:
+                pools = self._layer_pools[i]
+            for attn_type in pools:
                 gid = attn_type_to_gid.get(attn_type)
                 if gid is None or gid >= len(by_group):
                     continue
@@ -1511,7 +1542,27 @@ class DeepSeekV4Model(GptModelBase):
                     and attn is not None
                     and prefix_len > 0
                 ):
-                    self._gather_all_layers(attn, B=1, batch_offset=b)
+                    self._gather_all_layers(
+                        attn, B=1, batch_offset=b, reuse_gather=True
+                    )
+                    # After gather, State pools restore kv_state/score_state.
+                    # For CSA (overlap=True), kv_state[:, :ratio] holds the
+                    # overlap carry from the prefix tail — keep it so the
+                    # compressor can inject it into window 0's overlap slots.
+                    # Only zero the partial-window portion (offset onwards).
+                    for layer in self.v4.layers:
+                        a = layer.attn
+                        if a.compressor is not None:
+                            r = a.compressor.compress_ratio
+                            off = r if a.compressor.overlap else 0
+                            a.compressor.kv_state[:1, off:].zero_()
+                            a.compressor.score_state[:1, off:].fill_(float("-inf"))
+                        if a.indexer is not None:
+                            ic = a.indexer.compressor
+                            ir = ic.compress_ratio
+                            ioff = ir if ic.overlap else 0
+                            ic.kv_state[:1, ioff:].zero_()
+                            ic.score_state[:1, ioff:].fill_(float("-inf"))
 
                 h = self.v4(batch_ids, start_pos=start_pos, apply_lm_head=False)
                 all_hidden.append(h)
@@ -1561,6 +1612,16 @@ class DeepSeekV4Model(GptModelBase):
                 and self._framework_kv_enabled
                 and attn is not None
             ):
+                # Reset compressor/indexer state for all B slots before gather.
+                # New requests joining the batch may have stale data in their slots.
+                for layer in self.v4.layers:
+                    a = layer.attn
+                    if a.compressor is not None:
+                        a.compressor.kv_state[:B].zero_()
+                        a.compressor.score_state[:B].fill_(float("-inf"))
+                    if a.indexer is not None:
+                        a.indexer.compressor.kv_state[:B].zero_()
+                        a.indexer.compressor.score_state[:B].fill_(float("-inf"))
                 self._gather_all_layers(attn, B=B)
 
             hidden = self.v4(input_ids, start_pos=start_pos, apply_lm_head=False)
