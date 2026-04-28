@@ -68,6 +68,10 @@ public:
                     int           seq_size_per_block,
                     bool          forbid_realloc = false);
 
+    void fillDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
+                                   torch::Tensor kv_cache_block_id_device,
+                                   int           seq_size_per_block);
+
     // Tensor views into buf_h and buf_d
     torch::Tensor batch_indice_h;
     torch::Tensor page_indice_h;

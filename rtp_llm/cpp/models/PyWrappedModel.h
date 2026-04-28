@@ -42,6 +42,7 @@ public:
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);

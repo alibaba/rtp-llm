@@ -3,6 +3,8 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
+#include <cstdint>
+#include <cstring>
 #include <string>
 
 namespace rtp_llm {
@@ -44,8 +46,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.kv_cache_update_mapping.defined() ? inputs.kv_cache_update_mapping.size(0) : 0;
     shape_hints_ptr[GptModelInputIndex::lmOutputIndexes] =
         inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 0;
-    shape_hints_ptr[GptModelInputIndex::lmOutputLengthes] =
-        inputs.lm_output_lengths.defined() ? inputs.lm_output_lengths.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::comboPositionIds] =
         inputs.combo_position_ids.defined() ? inputs.combo_position_ids.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::textTokensMask] =
@@ -197,8 +197,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                 {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
-        inputs.lm_output_lengths =
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputLengthes]});
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)combo_position_ids_size});
         }
@@ -260,7 +258,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
     collect(inputs.lm_output_indexes);
-    collect(inputs.lm_output_lengths);
     if (combo_position_ids_size) {
         collect(inputs.combo_position_ids);
     }
@@ -326,12 +323,31 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (gpu_total_bytes > 0) {
         gpu_packed = torch::empty({gpu_total_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
         if (is_root) {
+            auto*              packed_base = static_cast<uint8_t*>(gpu_packed.data_ptr());
+            FusedD2DCopyParams fused_params;
+            auto               flush_fused_copy = [&]() {
+                if (fused_params.num_copies > 0) {
+                    fusedCopy(fused_params);
+                    fused_params.clear();
+                }
+            };
             for (auto& e : gpu_entries) {
+                if (e.tensor->is_contiguous()) {
+                    if (fused_params.num_copies == MAX_FUSED_D2D_COPIES) {
+                        flush_fused_copy();
+                    }
+                    fused_params.add(e.tensor->data_ptr(), packed_base + e.offset, static_cast<size_t>(e.nbytes));
+                    continue;
+                }
+
+                // Preserve the old logical-order copy for rare non-contiguous tensors.
+                flush_fused_copy();
                 auto contig    = e.tensor->contiguous();
                 auto src_bytes = torch::from_blob(
                     contig.data_ptr(), {e.nbytes}, torch::TensorOptions(torch::kUInt8).device(contig.device()));
                 gpu_packed.narrow(0, e.offset, e.nbytes).copy_(src_bytes);
             }
+            flush_fused_copy();
         }
     }
 
@@ -354,11 +370,28 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             }
         }
         if (gpu_total_bytes > 0) {
+            auto*              packed_base = static_cast<uint8_t*>(gpu_packed.data_ptr());
+            FusedD2DCopyParams fused_params;
+            auto               flush_fused_copy = [&]() {
+                if (fused_params.num_copies > 0) {
+                    fusedCopy(fused_params);
+                    fused_params.clear();
+                }
+            };
             for (auto& e : gpu_entries) {
-                auto dst_bytes = torch::from_blob(
-                    e.tensor->data_ptr(), {e.nbytes}, torch::TensorOptions(torch::kUInt8).device(e.tensor->device()));
-                dst_bytes.copy_(gpu_packed.narrow(0, e.offset, e.nbytes));
+                if (e.tensor->is_contiguous()) {
+                    if (fused_params.num_copies == MAX_FUSED_D2D_COPIES) {
+                        flush_fused_copy();
+                    }
+                    fused_params.add(packed_base + e.offset, e.tensor->data_ptr(), static_cast<size_t>(e.nbytes));
+                    continue;
+                }
+
+                flush_fused_copy();
+                auto src_tensor = torch::from_blob(packed_base + e.offset, e.tensor->sizes(), e.tensor->options());
+                e.tensor->copy_(src_tensor);
             }
+            flush_fused_copy();
         }
     }
 }

@@ -725,6 +725,19 @@ class PyFlashinferDecodeAttnOp(object):
         buffers in-place via fill_params — the pre-allocated buffers are already
         wired into the decode_wrapper from the initial prepare() call.
         """
+        fill_decode = getattr(self.fmha_params, "fill_decode_cuda_graph_params", None)
+        if (
+            callable(fill_decode)
+            and attn_inputs.sequence_lengths_plus_1_d is not None
+            and attn_inputs.sequence_lengths_plus_1_d.numel() > 0
+        ):
+            fill_decode(
+                attn_inputs.sequence_lengths_plus_1_d,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                self.seq_size_per_block,
+            )
+            return
+
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,

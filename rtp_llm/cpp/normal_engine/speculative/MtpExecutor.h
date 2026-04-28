@@ -36,6 +36,7 @@ public:
         tensor_holder_.push_back(model_input.sequence_lengths);
         tensor_holder_.push_back(model_input.lm_output_indexes);
         tensor_holder_.push_back(model_input.prefix_lengths);
+        tensor_holder_.push_back(model_input.sequence_lengths_plus_1);
     }
 
     void release() {
@@ -107,6 +108,11 @@ protected:
                           const StreamGroups&         stream_groups,
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t);
+
+    bool useMtpDeviceInput() const;
+    bool checkMtpDeviceInput() const;
+    void ensureMtpModelInputsOnCuda(GptModelInputs& model_input, const char* tag);
+    void checkMtpModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,

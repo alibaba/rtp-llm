@@ -16,7 +16,7 @@ namespace rtp_llm {
 
 template<typename T>
 std::vector<T> toVec(const torch::Tensor& t) {
-    auto c = t.contiguous();
+    auto c = t.is_cuda() ? t.cpu().contiguous() : t.contiguous();
     return std::vector<T>(c.data_ptr<T>(), c.data_ptr<T>() + c.numel());
 }
 

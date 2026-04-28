@@ -182,7 +182,7 @@ class FusedRopeKVCacheDecodeOp:
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
         assert params.kv_cache_offset is not None
-        assert params.sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory"
+        assert params.sequence_lengths.is_cuda, "sequence_lengths must be a CUDA tensor"
         return decode_fused_rope_kvcache(
             qkv,
             params.sequence_lengths,

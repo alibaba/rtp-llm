@@ -1,9 +1,11 @@
 #pragma once
 
 #include "absl/status/statusor.h"
+#include "c10/core/Event.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 namespace rtp_llm {
 
@@ -13,6 +15,13 @@ struct SpeculativeSamplerOutput {
 public:
     torch::Tensor accept_tokens;
     torch::Tensor accept_len;
+
+    torch::Tensor accept_tokens_cpu;
+    torch::Tensor accept_len_cpu;
+
+    std::shared_ptr<torch::Event> transfer_done_event;
+
+    SpeculativeSamplerOutput(): transfer_done_event(std::make_shared<torch::Event>(cuda_graph::makeGraphEvent())) {}
 };
 
 struct FastTopKSamplerOutput {

@@ -691,11 +691,14 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
         {draft_sampler_output_1, draft_sampler_output_2, draft_sampler_output_3, next_draft_sampler_output});
 
     // set fake speculative sampler outputs
-    auto accept_tokens              = torch::tensor({{3, 2, 0, 0, 0}}, torch::kInt32);
-    auto speculative_sampler_output = spec::SpeculativeSamplerOutput{
-        accept_tokens, torch::tensor({3}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))};
-    auto draft_spec_sample_input  = SamplerOutput{};
-    auto target_spec_sample_input = SamplerOutput{};
+    auto accept_tokens                           = torch::tensor({{3, 2, 0, 0, 0}}, torch::kInt32);
+    auto speculative_sampler_output              = spec::SpeculativeSamplerOutput();
+    speculative_sampler_output.accept_tokens_cpu = accept_tokens;
+    speculative_sampler_output.accept_tokens     = accept_tokens.to(torch::kCUDA);
+    speculative_sampler_output.accept_len_cpu    = torch::tensor({3}, torch::kInt32);
+    speculative_sampler_output.accept_len        = speculative_sampler_output.accept_len_cpu.to(torch::kCUDA);
+    auto draft_spec_sample_input                 = SamplerOutput{};
+    auto target_spec_sample_input                = SamplerOutput{};
 
     vector<vector<float>> draft_all_probs_list;
     draft_all_probs_list.push_back(toVec<float>(stream1_draft_token_probs));
@@ -866,11 +869,14 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     components.fake_sampler->setOutputs({sampler_output});
 
     // set fake speculative sampler outputs
-    auto accept_tokens              = torch::tensor({{3, 0, 0, 0, 0}, {3, 0, 2, 2, 1}}, torch::kInt32);
-    auto speculative_sampler_output = spec::SpeculativeSamplerOutput{
-        accept_tokens, torch::tensor({1, 5}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))};
-    auto draft_spec_sample_input  = SamplerOutput{};
-    auto target_spec_sample_input = SamplerOutput{};
+    auto accept_tokens                           = torch::tensor({{3, 0, 0, 0, 0}, {3, 0, 2, 2, 1}}, torch::kInt32);
+    auto speculative_sampler_output              = spec::SpeculativeSamplerOutput();
+    speculative_sampler_output.accept_tokens_cpu = accept_tokens;
+    speculative_sampler_output.accept_tokens     = accept_tokens.to(torch::kCUDA);
+    speculative_sampler_output.accept_len_cpu    = torch::tensor({1, 5}, torch::kInt32);
+    speculative_sampler_output.accept_len        = speculative_sampler_output.accept_len_cpu.to(torch::kCUDA);
+    auto draft_spec_sample_input                 = SamplerOutput{};
+    auto target_spec_sample_input                = SamplerOutput{};
 
     vector<vector<float>> draft_all_probs_list;
     draft_all_probs_list.push_back({0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0});

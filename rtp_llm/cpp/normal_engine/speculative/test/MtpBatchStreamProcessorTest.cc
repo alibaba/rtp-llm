@@ -20,7 +20,7 @@ namespace rtp_llm {
 
 template<typename T>
 std::vector<T> toVec(const torch::Tensor& t) {
-    auto c = t.contiguous();
+    auto c = t.is_cuda() ? t.cpu().contiguous() : t.contiguous();
     return std::vector<T>(c.data_ptr<T>(), c.data_ptr<T>() + c.numel());
 }
 
@@ -154,8 +154,10 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     auto stream_groups = StreamGroups({stream1, stream2});
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len    = torch::tensor({5, 1}, torch::kInt32);
-    spec_decode_output.accept_tokens = torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32);
+    spec_decode_output.accept_len_cpu    = torch::tensor({5, 1}, torch::kInt32);
+    spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32);
+    spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
+    spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
 
     MergedOutput draft_prefill_output;
     draft_prefill_output.model_output.all_hidden_states =
@@ -319,6 +321,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
 
     auto        lm_output_indexes        = model_input.lm_output_indexes;
     vector<int> expect_lm_output_indexes = {0, 1, 2, 3};
+    EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 }
 
@@ -406,6 +409,7 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
 
     auto        lm_output_indexes        = model_input.lm_output_indexes;
     vector<int> expect_lm_output_indexes = {0, 1};
+    EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 }
 
@@ -511,8 +515,10 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     auto& model_input = model_input_status.value();
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len    = torch::tensor({3, 1}, torch::kInt32).to(torch::kCUDA);
-    spec_decode_output.accept_tokens = torch::tensor({{2, 3, 1}, {2, 0, 0}}, torch::kInt32).to(torch::kCUDA);
+    spec_decode_output.accept_len_cpu    = torch::tensor({3, 1}, torch::kInt32);
+    spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1}, {2, 0, 0}}, torch::kInt32);
+    spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
+    spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
 
     torch::Tensor hidden_states_d_t;
 
@@ -527,6 +533,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     vector<int> expect_combo_tokens = {2, 3, 1, 2, 0, 0};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
 
+    EXPECT_TRUE(model_input.lm_output_indexes.is_cuda());
     auto        lm_output_indexes        = model_input.lm_output_indexes.cpu();
     vector<int> expect_lm_output_indexes = {2, 3};
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
