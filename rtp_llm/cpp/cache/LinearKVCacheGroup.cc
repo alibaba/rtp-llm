@@ -181,6 +181,7 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {
+        zeroLinearWriteRegion(blocks_to_free);
         block_pool_->requestFree(blocks_to_free);
         block_ids.remove(pos_to_remove);  // null-out by position, updates kernel slots incrementally
     }
@@ -195,7 +196,49 @@ void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     if (valid.empty()) {
         return;
     }
+    zeroLinearWriteRegion(valid);
     block_pool_->requestFree(valid);
+}
+
+void LinearKVCacheGroup::zeroLinearWriteRegion(const BlockIndicesType& block_ids) const {
+    if (block_ids.empty() || !kvcache_spec_) {
+        return;
+    }
+    // Bytes this LINEAR group has written into each layer's row of the cache:
+    // ssm_state_size_bytes + conv_state_size_bytes (typically ~2 MB per layer
+    // per block with SSM_STATE_DTYPE=fp32). Cleaning only this prefix is
+    // sufficient because:
+    //   * the dangerous reinterpretation only happens on the prior fp32-SSM
+    //     bytes — once they are zero, XQA reads (page-tail padding) yield 0
+    //     instead of denormals/Inf, no NaN possible;
+    //   * the rest of the row, if it carries prior FULL ATTN K/V, is already
+    //     bf16-encoded so reinterpretation does not introduce extreme values.
+    const size_t linear_write_bytes = kvcache_spec_->block_size_bytes();
+    if (linear_write_bytes == 0) {
+        return;
+    }
+    for (auto& [global_layer_id, layer_tensor] : global_layer_to_kv_tensors) {
+        if (!layer_tensor.defined() || layer_tensor.numel() == 0 || layer_tensor.dim() < 2) {
+            continue;
+        }
+        const size_t elem_size = static_cast<size_t>(layer_tensor.element_size());
+        if (elem_size == 0 || (linear_write_bytes % elem_size) != 0) {
+            continue;
+        }
+        const int64_t write_elems = static_cast<int64_t>(linear_write_bytes / elem_size);
+        const int64_t row_count   = layer_tensor.size(0);
+        const int64_t row_elems   = layer_tensor.size(1);
+        if (write_elems > row_elems) {
+            continue;
+        }
+        for (auto block_id : block_ids) {
+            const int64_t idx = static_cast<int64_t>(block_id);
+            if (idx < 0 || idx >= row_count) {
+                continue;
+            }
+            layer_tensor.select(0, idx).narrow(0, 0, write_elems).zero_();
+        }
+    }
 }
 
 void LinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {

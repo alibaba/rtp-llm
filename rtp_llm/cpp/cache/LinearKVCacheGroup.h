@@ -36,6 +36,16 @@ public:
 
 private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
+    // Zero only the bytes this LINEAR group actually wrote (ssm_state +
+    // conv_state, ~2 MB per layer per block) before returning blocks to the
+    // pool. This breaks the chain "LINEAR fp32 SSM -> recycled by FULL ATTN
+    // -> XQA paged-load reads stale fp32 bytes as bf16 K/V -> softmax NaN".
+    // Cheaper than zeroing the full kv_block_stride (8 MB) in BlockPool::malloc:
+    // we touch only the dirty region (1/4 the bandwidth) and only on the
+    // LINEAR free path (not every malloc). FULL group's K/V residue is bf16
+    // already so reusing it does not produce NaN, just bf16-magnitude noise
+    // on padding positions, so we don't need a symmetric clean for FULL frees.
+    void zeroLinearWriteRegion(const BlockIndicesType& block_ids) const;
 
 private:
     // NOTE: linear attention cache can be sparsified; current implementation is conservative:
