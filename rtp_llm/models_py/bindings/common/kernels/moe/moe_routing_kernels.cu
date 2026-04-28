@@ -24,7 +24,6 @@
 #include "3rdparty/cub/device/device_radix_sort.cuh"
 #include "3rdparty/cub/util_type.cuh"
 #endif
-#include "3rdparty/cub_compat.h"
 
 using namespace tensorrt_llm::kernels;
 using namespace tensorrt_llm::common;

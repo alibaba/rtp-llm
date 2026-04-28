@@ -187,7 +187,6 @@ cc_library(
     srcs = glob(["moe/*.cu"]),
     hdrs = glob(["moe/*.h"]),
     deps = any_cuda_deps + [
-        "//3rdparty:cub_compat",
         "//rtp_llm/models_py/bindings/cuda:trt_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
         "@cutlass_h_moe//:cutlass",

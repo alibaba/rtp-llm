@@ -11,7 +11,6 @@ cc_library(
     ]),
     deps = [
         ":trt_beam_search_header",
-        "//3rdparty:cub_compat",
         "//rtp_llm/models_py/bindings/cuda:trt_utils",
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
