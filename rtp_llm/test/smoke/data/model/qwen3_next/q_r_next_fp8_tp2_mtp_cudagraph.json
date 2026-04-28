@@ -23,7 +23,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate for clarity).\n    *   **Goal:** The questions should be thought-prov"
+                            "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate for clarity).\n    *   **Goal:** To generate thought-provoking,"
                         },
                         "finish_reason": "length"
                     }
