@@ -216,21 +216,22 @@ def _build_window_topk_idxs(
     ).view(
         1, q_len
     )  # [B, q_len]
-    # base ring offset for read: starts after the new write
-    # When the ring is full (abs_pos >= win-1), the OLDEST slot is at (abs_pos+1) % win,
-    # and we read win consecutive cyclic positions ending at abs_pos % win.
-    # For abs_pos < win-1, valid tokens are [0..abs_pos]; we put them in the LAST slots
-    # of the [win] indices (so the kernel sees a "right-aligned" decode window).
-    # Implementation: for each col k in [0..win), read pos = (abs_pos - (win-1-k)) when >=0, else -1.
+    # LEFT-aligned: valid entries first, -1 padding at the tail.
+    # Full ring (abs_pos >= win-1): cyclic read oldest→newest starting at (sp+1)%win.
+    # Partial ring (abs_pos < win-1): ascending [0..abs_pos], then -1 padding.
     k_range = torch.arange(window_size, device=device, dtype=torch.int32).view(
         1, 1, window_size
     )
     abs_pos_b = abs_pos.unsqueeze(-1)  # [B, q_len, 1]
-    desired_pos = abs_pos_b - (window_size - 1) + k_range  # [B, q_len, win]
-    valid = desired_pos >= 0
-    # Map to ring slot, mask invalid to -1.
-    ring_slot = desired_pos % window_size
-    return torch.where(valid, ring_slot, torch.full_like(ring_slot, -1))
+    sp = (abs_pos % window_size).unsqueeze(-1)  # [B, q_len, 1] ring write position
+    # Full ring: k-th entry = (sp + 1 + k) % win  (oldest slot first)
+    ring_full_idx = (sp + 1 + k_range) % window_size
+    # Partial ring: k-th entry = k if k <= abs_pos, else -1
+    partial_idx = torch.where(
+        k_range <= abs_pos_b, k_range, torch.full_like(k_range, -1)
+    )
+    is_full = abs_pos_b >= (window_size - 1)
+    return torch.where(is_full, ring_full_idx, partial_idx)
 
 
 def allocate_decode_metadata(
@@ -389,19 +390,21 @@ def update_decode_metadata_in_place(
     swa_slots = (req_base + in_ring).reshape(-1)
     meta.slot_mapping_swa[: bs * q_len].copy_(swa_slots)
 
-    # Window topk indices [:bs, :, :]
+    # Window topk indices [:bs, :, :] — left-aligned (mirrors _build_window_topk_idxs)
     abs_pos = s_offsets  # [bs, q_len]
     k_range = torch.arange(window_size, device=device, dtype=torch.int32).view(
         1,
         1,
         window_size,
     )
-    desired_pos = (
-        abs_pos.unsqueeze(-1) - (window_size - 1) + k_range
-    )  # [bs, q_len, win]
-    valid = desired_pos >= 0
-    ring_slot = desired_pos % window_size
-    window_idxs = torch.where(valid, ring_slot, torch.full_like(ring_slot, -1))
+    abs_pos_b = abs_pos.unsqueeze(-1)  # [bs, q_len, 1]
+    sp = (abs_pos % window_size).unsqueeze(-1)  # [bs, q_len, 1]
+    ring_full_idx = (sp + 1 + k_range) % window_size
+    partial_idx = torch.where(
+        k_range <= abs_pos_b, k_range, torch.full_like(k_range, -1)
+    )
+    is_full = abs_pos_b >= (window_size - 1)
+    window_idxs = torch.where(is_full, ring_full_idx, partial_idx)
     meta.topk_window_idxs[:bs].copy_(window_idxs)
 
     # Indexer output buffer reset to -1 prefix [:bs]
