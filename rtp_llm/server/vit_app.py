@@ -140,7 +140,7 @@ class VitEndpointApp:
         @app.post("/health")
         @app.post("/health_check")
         async def health():
-            return "ok"
+            return {"status": "ok"}
 
         @app.get("/worker_status")
         @app.post("/worker_status")
@@ -151,12 +151,20 @@ class VitEndpointApp:
         @app.post("/start_profile")
         async def start_profile(request: RawRequest):
             body = await request.json()
-            count = body.get("count", 10)
-            if not isinstance(count, int) or count <= 0:
+            count_raw = body.get("count", 10)
+            # Accept int and float-int (JSON has no distinct int type for many
+            # client SDKs); reject non-numeric, fractional, or non-positive.
+            if (
+                not isinstance(count_raw, (int, float))
+                or isinstance(count_raw, bool)
+                or count_raw != int(count_raw)
+                or int(count_raw) <= 0
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="'count' must be a positive integer",
                 )
+            count = int(count_raw)
             engine = self.vit_endpoint_server.mm_process_engine
             if engine is None:
                 raise HTTPException(

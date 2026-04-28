@@ -1,0 +1,123 @@
+{
+    "model_type": "qwen3_vl_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3-VL-30B-A3B-Instruct/",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen3-VL-30B-A3B-Instruct/",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data/model/qwen_vl/1.jpeg"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": "Describe this image."
+                            }
+                        ]
+                    }
+                ],
+                "extra_configs": {
+                    "add_vision_id": false
+                },
+                "max_tokens": 100,
+                "temperature": 0.0,
+                "top_p": 0.01,
+                "n": 2
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705334081,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Of course, here is a detailed description of the image.\n\nThis is a heartwarming and serene photograph capturing a tender moment between a woman and her dog on a beach during what appears to be sunrise or sunset.\n\n- **Main Subjects and Interaction:** The central focus is a woman and a large, light-colored dog, likely a yellow Labrador Retriever, sitting on the sand. They are facing each other, engaged in a gentle \"high-five\" or paw shake. The woman is smiling warmly",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    },
+                    {
+                        "index": 1,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Of course, here is a detailed description of the image.\n\nThis is a heartwarming and serene photograph capturing a tender moment between a woman and her dog on a beach during what appears to be sunrise or sunset.\n\n- **Main Subjects and Interaction:** The central focus is a woman and a large, light-colored dog, likely a yellow Labrador Retriever, sitting on the sand. They are facing each other, engaged in a gentle \"high-five\" or paw shake. The woman is smiling warmly",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 964,
+                    "total_tokens": 1164,
+                    "completion_tokens": 200,
+                    "prompt_tokens_details": {
+                        "image_tokens": 950
+                    }
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "video_url",
+                                "video_url": {
+                                    "url": "data/model/llava/1.mp4"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": "Describe this video."
+                            }
+                        ]
+                    }
+                ],
+                "extra_configs": {
+                    "add_vision_id": false
+                },
+                "max_tokens": 20,
+                "temperature": 0.0,
+                "top_p": 0.01
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705334081,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "This is a close-up shot from an animated film, focusing on two gorillas in a tense moment",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1154,
+                    "total_tokens": 1174,
+                    "completion_tokens": 20,
+                    "prompt_tokens_details": {
+                        "video_tokens": 1140
+                    }
+                }
+            }
+        }
+    ]
+}

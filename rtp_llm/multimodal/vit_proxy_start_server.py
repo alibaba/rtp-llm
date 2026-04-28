@@ -141,6 +141,12 @@ async def _forward_to_workers(
     elif len(bodies) == 1:
         per_worker = bodies * n
     else:
+        # bodies must match worker count exactly when not broadcasting;
+        # otherwise zip below would silently drop the longer side.
+        assert len(bodies) == n, (
+            f"bodies count {len(bodies)} != workers {n}; "
+            f"either pass a single-element list to broadcast or one body per worker"
+        )
         per_worker = bodies
 
     loop = asyncio.get_running_loop()
@@ -182,57 +188,48 @@ def create_proxy_app(
     async def health():
         """
         健康检查接口
-        只有当所有 VIT worker 进程都准备就绪时才返回健康状态
+        只有当所有 VIT worker 进程都准备就绪时才返回健康状态。
+
+        复用 proxy_server.connection_pool 里的长连 stub（避免每次新建 channel
+        TCP+HTTP2 握手），并用 asyncio.to_thread 把 sync gRPC 调用挪到线程池
+        后并行 gather，避免阻塞 FastAPI 事件循环、把串行 2s*N 降到并行 2s。
         """
         if not worker_addresses:
-            return "ok"
+            return {"status": "ok"}
 
-        request = StatusVersionPB()
-        healthy_count = 0
+        req = StatusVersionPB()
 
-        for worker_address in worker_addresses:
+        async def probe(addr: str):
             try:
-                # context manager guarantees channel.close() on exception path
-                with grpc.insecure_channel(
-                    worker_address,
-                    options=[
-                        ("grpc.max_send_message_length", 1024 * 1024 * 1024),
-                        ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
-                    ],
-                ) as channel:
-                    stub = MultimodalRpcServiceStub(channel)
-                    worker_status_response = stub.GetWorkerStatus(request, timeout=2)
-
-                if worker_status_response.alive:
-                    healthy_count += 1
-                    logging.debug(
-                        f"[VIT_PROXY_HEALTH] Worker {worker_address} is ready"
-                    )
-                else:
-                    logging.warning(
-                        f"[VIT_PROXY_HEALTH] Worker {worker_address} is not alive"
-                    )
-
+                stub = proxy_server.connection_pool.get_stub(addr)
+                resp = await asyncio.to_thread(stub.GetWorkerStatus, req, timeout=2)
+                return addr, bool(resp.alive)
             except Exception as e:
                 logging.warning(
-                    f"[VIT_PROXY_HEALTH] Failed to check worker {worker_address}: {e}"
+                    f"[VIT_PROXY_HEALTH] Failed to check worker {addr}: {e}"
                 )
-                continue
+                return addr, False
 
-        if healthy_count == len(worker_addresses):
-            logging.debug(
-                f"[VIT_PROXY_HEALTH] All {len(worker_addresses)} workers are healthy"
-            )
-            return "ok"
+        results = await asyncio.gather(*(probe(a) for a in worker_addresses))
+        healthy_count = sum(1 for _, ok in results if ok)
+        n = len(worker_addresses)
+
+        for addr, ok in results:
+            if ok:
+                logging.debug(f"[VIT_PROXY_HEALTH] Worker {addr} is ready")
+            else:
+                logging.warning(f"[VIT_PROXY_HEALTH] Worker {addr} is not alive")
+
+        if healthy_count == n:
+            logging.debug(f"[VIT_PROXY_HEALTH] All {n} workers are healthy")
+            return {"status": "ok"}
         else:
             logging.warning(
-                f"[VIT_PROXY_HEALTH] Only {healthy_count}/{len(worker_addresses)} workers are healthy"
+                f"[VIT_PROXY_HEALTH] Only {healthy_count}/{n} workers are healthy"
             )
             return ORJSONResponse(
                 status_code=503,
-                content={
-                    "error": f"Only {healthy_count}/{len(worker_addresses)} VIT workers are healthy"
-                },
+                content={"error": f"Only {healthy_count}/{n} VIT workers are healthy"},
             )
 
     # ------------------------------------------------------------------
