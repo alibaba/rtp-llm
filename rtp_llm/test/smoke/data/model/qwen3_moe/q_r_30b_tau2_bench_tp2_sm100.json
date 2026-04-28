@@ -10,7 +10,7 @@
             "tau2_bench": true,
             "tau2_model": "Qwen3-30B",
             "tau2_task_ids_file": "passing_tasks.json",
-            "tau2_threshold": 0.75
+            "tau2_threshold": 0.8
         }
     ]
 }
