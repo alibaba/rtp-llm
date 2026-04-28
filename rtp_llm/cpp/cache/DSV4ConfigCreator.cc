@@ -168,8 +168,14 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
     config.cache_specs.clear();
     config.group_types.clear();
 
-    // Find max block_size_bytes across all specs for uniform physical stride
+    // Build per-pool spec and record per-pool strides so BlockPool sizing and
+    // block_num calculation both use each pool's real dimensions.
     size_t max_block_stride = 0;
+    config.group_kv_block_stride_bytes.assign(DSV4_NUM_POOLS, 0);
+    config.group_kv_scale_stride_bytes.assign(DSV4_NUM_POOLS, 0);
+    config.group_block_size_bytes.assign(DSV4_NUM_POOLS, 0);
+    config.group_seq_size_per_block.assign(DSV4_NUM_POOLS, DSV4CacheConfig::TOKENS_PER_BLOCK);
+
     for (int i = 0; i < DSV4_NUM_POOLS; i++) {
         KVCacheSpecPtr spec;
         const auto&    pool = dsv4_config.pool_specs[i];
@@ -184,7 +190,14 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
         // Paged pools (0/1/2): FULL — left-to-right prefix cache matching
         // Fixed pools (3/4/5/6): LINEAR — right-to-left matching of last block
         config.group_types.push_back(pool.is_paged ? CacheGroupType::FULL : CacheGroupType::LINEAR);
-        max_block_stride = std::max(max_block_stride, spec->block_size_bytes());
+
+        const size_t per_layer_stride         = spec->block_size_bytes();
+        config.group_kv_block_stride_bytes[i] = per_layer_stride;
+        config.group_kv_scale_stride_bytes[i] = spec->scale_block_size_bytes();
+        // Aggregate bytes per request-block across all layers in this pool.
+        config.group_block_size_bytes[i] = static_cast<size_t>(pool.layer_num) * per_layer_stride;
+
+        max_block_stride = std::max(max_block_stride, per_layer_stride);
     }
 
     // Map each group to its KVCacheAttnType so kv_cache_base_by_layer_attn
@@ -230,12 +243,31 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
         }
     }
 
-    // Physical sizes: use max stride so all groups fit in uniform blocks
-    config.kv_block_stride_bytes = max_block_stride;
-    config.kv_block_size_bytes   = static_cast<size_t>(max_group_layers) * max_block_stride;
+    // Global block_size_bytes feeds CacheConfigCreator::createBasicConfig's
+    //   block_num = kv_cache_mem_size / block_size_bytes
+    // In DSV4 that divisor must match what ONE paged request-block actually
+    // costs across the FULL pools (0/1/2), NOT max_stride × all_layers.
+    // The fixed pools (3/4/5/6) have their own group_block_nums set above and
+    // contribute a fixed memory reservation regardless of block_num.
+    size_t paged_bytes_per_block = 0;
+    size_t fixed_pool_reserve    = 0;
+    for (int i = 0; i < DSV4_NUM_POOLS; i++) {
+        const size_t pool_block_bytes = config.group_block_size_bytes[i];
+        if (dsv4_config.pool_specs[i].is_paged) {
+            paged_bytes_per_block += pool_block_bytes;
+        } else {
+            fixed_pool_reserve += static_cast<size_t>(config.group_block_nums[i]) * pool_block_bytes;
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(paged_bytes_per_block > 0, "DSV4 paged pools produced zero block bytes");
+    config.kv_block_stride_bytes = max_block_stride;  // kept for legacy consumers only
+    config.kv_block_size_bytes   = paged_bytes_per_block;
     config.kv_scale_stride_bytes = 0;
     config.kv_scale_size_bytes   = 0;
-    config.block_size_bytes      = config.kv_block_size_bytes;
+    config.block_size_bytes      = paged_bytes_per_block;
+    // Pre-reservation for fixed pools; CacheConfigCreator deducts this from
+    // the budget before dividing by block_size_bytes.
+    config.fixed_pool_reserve_bytes = fixed_pool_reserve;
 
     // Per-layer group mapping
     config.layer_to_group_id.assign(num_layers, 6);  // default to SWA group
