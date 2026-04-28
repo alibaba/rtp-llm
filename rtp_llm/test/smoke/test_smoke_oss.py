@@ -40,6 +40,7 @@ from smoke.multi_inst_case_runner import (  # noqa: E402
 )
 from smoke.smoke_defs_oss import build_smoke_params, get_gpu_count  # noqa: E402
 from smoke.task_info import TaskInfo  # noqa: E402
+from smoke.utils import resolve_prompt_refs  # noqa: E402
 
 
 def check_use_prompt_batch(task_info: TaskInfo) -> bool:
@@ -128,9 +129,14 @@ def run_smoke_test(test_name: str, test_config: dict):
 
     with open(os.path.join(REL_PATH, task_info_path), "r") as f:
         x = json.load(f)
-        task_info = TaskInfo(
-            **x, taskinfo_rel_path=os.path.join(REL_PATH, task_info_path)
-        )
+    # Resolve $prompt:xxx refs against rtp_llm/test/smoke/data/prompt_candidates.json
+    # (entry.py does the same — pytest entry must too, otherwise the literal
+    # "$prompt:s2" gets sent to the server instead of the real prompt text).
+    if "query_result" in x:
+        x["query_result"] = [resolve_prompt_refs(qr) for qr in x["query_result"]]
+    task_info = TaskInfo(
+        **x, taskinfo_rel_path=os.path.join(REL_PATH, task_info_path)
+    )
 
     runner_class = get_runner_type(smoke_args, envs)
     logging.info("runner_class: %s", str(runner_class))
