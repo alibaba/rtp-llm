@@ -9,7 +9,7 @@
 accelerate==0.25.0 \
     --hash=sha256:c7bb817eb974bba0ff3ea1ba0f24d55afb86d50e3d4fe98d6922dc69cf2ccff1 \
     --hash=sha256:ecf55b0ab278a1dac8539dde0d276977aff04683f07ede73eaf02478538576a1
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 aiohappyeyeballs==2.4.0 \
     --hash=sha256:55a1714f084e63d49639800f95716da97a1f173d46a16dfcfda0016abb93b6b2 \
     --hash=sha256:7ce92076e249169a13c2f49320d1967425eaf1f407522d707d59cac7628d62bd
@@ -107,7 +107,7 @@ aiohttp==3.10.5 \
     --hash=sha256:f8112fb501b1e0567a1251a2fd0747baae60a4ab325a871e975b7bb67e59221f \
     --hash=sha256:fd31f176429cecbc1ba499d4aba31aaccfea488f418d60376b911269d3b883c5
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   dashscope
 aiosignal==1.3.1 \
     --hash=sha256:54cd96e15e1649b75d6c87526a6ff0b6c1b0dd3459f43d9ca11d48c339b68cfc \
@@ -318,7 +318,7 @@ charset-normalizer==3.3.2 \
 click==8.1.7 \
     --hash=sha256:ae74fb96c20a0277a1d615f1e4d73c8414f5a98db8b799a7931d1582f3390c28 \
     --hash=sha256:ca9853ad459e787e2192211578cc907e7594e294c7ccc834310722b41b9ca6de
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 concurrent-log-handler==0.9.25 \
     --hash=sha256:157bee12914aa2a72246d1d0641ce07c1aa7a55faa3322bed02f21e60395eb82 \
     --hash=sha256:1e2c6f021414e214d3dac66107894827a3e78db63018304a4f29e55ba549ac22
@@ -392,7 +392,7 @@ contourpy==1.3.0 \
     # via matplotlib
 cpm-kernels==1.0.11 \
     --hash=sha256:eab7f211f3b3f6a0686ded4c15cd7d9158393cdf69a931fa5b96a5fbcd366822
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 crcmod==1.7 \
     --hash=sha256:dc7051a0db5f2bd48665a990d3ec1cc305a466a77358ca4492826f41f283601e
     # via oss2
@@ -438,10 +438,10 @@ cycler==0.12.1 \
     # via matplotlib
 dacite==1.8.1 \
     --hash=sha256:cc31ad6fdea1f49962ea42db9421772afe01ac5442380d9a99fcf3d188c61afe
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 dashscope==1.20.10 \
     --hash=sha256:174df27ea798a7cd01b7cea710e149f1e6ca43f3e1a86598440fab37bcef31b4
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 decorator==5.1.1 \
     --hash=sha256:637996211036b6385ef91435e4fae22989472f9d571faba8927ba8253acbc330 \
     --hash=sha256:b8c3f85900b9dc423225913c5aace94729fe1fa9763b38939a95226f02d37186
@@ -453,7 +453,7 @@ distro==1.9.0 \
 einops==0.8.0 \
     --hash=sha256:63486517fed345712a8385c100cb279108d9d47e6ae59099b07657e983deae85 \
     --hash=sha256:9572fb63046264a862693b0a87088af3bdc8c068fde03de63453cbbde245465f
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 exceptiongroup==1.2.2 \
     --hash=sha256:3111b9d131c238bec2f8f516e123e14ba243563fb135d3fe885990585aa7795b \
     --hash=sha256:47c2edf7c6738fafb49fd34290706d1a1a2f4d1c6df275526b62cbb4aa5393cc
@@ -461,12 +461,12 @@ exceptiongroup==1.2.2 \
 fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 filelock==3.13.1 \
     --hash=sha256:521f5f56c50f8426f5e03ad3b281b490a87ef15bc6c526f168290f0c7148d44e \
     --hash=sha256:57dbda9b35157b05fb3e58ee91448612eb674172fab98ee235ccb0b5bee19a1c
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   huggingface-hub
     #   torch
     #   transformers
@@ -657,7 +657,7 @@ grpcio==1.62.0 \
     --hash=sha256:fc2836cb829895ee190813446dce63df67e6ed7b9bf76060262c55fcd097d270 \
     --hash=sha256:fcc98cff4084467839d0a20d16abc2a76005f3d1b38062464d088c07f500d170
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   grpcio-tools
 grpcio-tools==1.57.0 \
     --hash=sha256:02d78c034109f46032c7217260066d49d41e6bcaf588fa28fa40fe2f83445347 \
@@ -705,7 +705,7 @@ grpcio-tools==1.57.0 \
     --hash=sha256:f64f8ab22d27d4a5693310748d35a696061c3b5c7b8c4fb4ab3b4bc1068b6b56 \
     --hash=sha256:f717cce5093e6b6049d9ea6d12fdf3658efdb1a80772f7737db1f8510b876df6 \
     --hash=sha256:fb81ff861692111fa81bd85f64584e624cb4013bd66fbce8a209b8893f5ce398
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 h11==0.14.0 \
     --hash=sha256:8f19fbbe99e72420ff35c00b27a34cb9937e902a8b810e2c88300c6f0a3b699d \
     --hash=sha256:e3fe4ac4b851c468cc8363d500db52c2ead036020723024a109d37346efaa761
@@ -740,15 +740,15 @@ idna==3.10 \
 importlib-metadata==8.5.0 \
     --hash=sha256:45e54197d28b7a7f1559e60b95e7c567032b602131fbd588f1497f47880aa68b \
     --hash=sha256:71522656f0abace1d072b9e5481a48f07c138e00f079c38c8f883823f9c26bd7
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 jieba==0.42.1 \
     --hash=sha256:055ca12f62674fafed09427f176506079bc135638a14e23e25be909131928db2
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 jinja2==3.1.4 \
     --hash=sha256:4a3aee7acbbe7303aede8e9648d13b8bf88a429282aa6122a993f0ac800cb369 \
     --hash=sha256:bc5dd2abb727a5319567b7a813e6a2e7318c39f4f487cfe6c89c6f9c7d25197d
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   torch
 jiter==0.5.0 \
     --hash=sha256:044f2f1148b5248ad2c8c3afb43430dccf676c5a5834d2f5089a4e6c5bbd64df \
@@ -826,7 +826,7 @@ joblib==1.4.2 \
 json5==0.9.25 \
     --hash=sha256:34ed7d834b1341a86987ed52f3f76cd8ee184394906b6e22a1e0deb9ab294e8f \
     --hash=sha256:548e41b9be043f9426776f05df8635a00fe06104ea51ed24b67f908856e151ae
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 kiwisolver==1.4.7 \
     --hash=sha256:073a36c8273647592ea332e816e75ef8da5c303236ec0167196793eb1e34657a \
     --hash=sha256:08471d4d86cbaec61f86b217dd938a83d85e03785f51121e791a6e6689a3be95 \
@@ -950,7 +950,7 @@ lazy-loader==0.4 \
 librosa==0.10.2.post1 \
     --hash=sha256:cd99f16717cbcd1e0983e37308d1db46a6f7dfc2e396e5a9e61e6821e44bd2e7 \
     --hash=sha256:dc882750e8b577a63039f25661b7e39ec4cfbacc99c1cffba666cd664fb0a7a0
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 llvmlite==0.43.0 \
     --hash=sha256:14f0e4bf2fd2d9a75a3534111e8ebeb08eda2f33e9bdd6dfa13282afacdde0ed \
     --hash=sha256:18e9953c748b105668487b7c81a3e97b046d8abf95c4ddc0cd3c94f4e4651ae8 \
@@ -1056,7 +1056,7 @@ lru-dict==1.3.0 \
     --hash=sha256:f27c078b5d75989952acbf9b77e14c3dadc468a4aafe85174d548afbc5efc38b \
     --hash=sha256:f5b88a7c39e307739a3701194993455968fcffe437d1facab93546b1b8a334c1 \
     --hash=sha256:f8f7824db5a64581180ab9d09842e6dd9fcdc46aac9cb592a0807cd37ea55680
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 markupsafe==2.1.5 \
     --hash=sha256:00e046b6dd71aa03a41079792f8473dc494d564611a8f89bbbd7cb93295ebdcf \
     --hash=sha256:075202fa5b72c86ad32dc7d0b56024ebdbcf2048c0ba09f1cde31bfdd57bcfff \
@@ -1160,7 +1160,7 @@ matplotlib==3.9.2 \
     --hash=sha256:f32c7410c7f246838a77d6d1eff0c0f87f3cb0e7c4247aebea71a6d5a68cab49 \
     --hash=sha256:f6ee45bc4245533111ced13f1f2cace1e7f89d1c793390392a80c139d6cf0e6c \
     --hash=sha256:f7c0410f181a531ec4e93bbc27692f2c71a15c2da16766f5ba9761e7ae518413
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 mpmath==1.3.0 \
     --hash=sha256:7a28eb2a9774d00c7bc92411c19a89209d5da7c4c9a9e227be8330a23a25b91f \
     --hash=sha256:a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c
@@ -1330,7 +1330,7 @@ multidict==6.1.0 \
 nest-asyncio==1.6.0 \
     --hash=sha256:6f172d5449aca15afd6c646851f4e31e02c598d553a667e38cafa997cfec55fe \
     --hash=sha256:87af6efd6b5e897c81050477ef65c62e2b2f35d51703cae01aff2905b1852e1c
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 networkx==3.3 \
     --hash=sha256:0c127d8b2f4865f59ae9cb8aafcd60b5c70f3241ebd66f7defad7c4ab90126c9 \
     --hash=sha256:28575580c6ebdaf4505b22c6256a2b9de86b316dc63ba9e93abde3d78dfdbcf2
@@ -1388,7 +1388,7 @@ numpy==1.24.1 \
     --hash=sha256:ef85cf1f693c88c1fd229ccd1055570cb41cdf4875873b7728b6301f12cd05bf \
     --hash=sha256:f1b739841821968798947d3afcefd386fa56da0caf97722a5de53e07c4ccedc7
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   accelerate
     #   contourpy
     #   librosa
@@ -1434,11 +1434,11 @@ onnx==1.16.0 \
     --hash=sha256:e5752bbbd5717304a7643643dba383a2fb31e8eb0682f4e7b7d141206328a73b \
     --hash=sha256:ec22a43d74eb1f2303373e2fbe7fbcaa45fb225f4eb146edfed1356ada7a9aea \
     --hash=sha256:f51179d4af3372b4f3800c558d204b592c61e4b4a18b8f61e0eea7f46211221a
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 openai==1.46.0 \
     --hash=sha256:0c5a783530d7cd90e2370dbd52d9239d2d53dc7a0badf9ee1e2e23d3f148969b \
     --hash=sha256:8e423690b121d0268c7bb83b552e14f339b0ba250e1d0f70d145c194e79c4e1b
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 orjson==3.10.7 \
     --hash=sha256:084e537806b458911137f76097e53ce7bf5806dda33ddf6aaa66a028f8d43a23 \
     --hash=sha256:09b2d92fd95ad2402188cf51573acde57eb269eddabaa60f69ea0d733e789fe9 \
@@ -1497,10 +1497,10 @@ orjson==3.10.7 \
     --hash=sha256:eef44224729e9525d5261cc8d28d6b11cafc90e6bd0be2157bde69a52ec83024 \
     --hash=sha256:f4db56635b58cd1a200b0a23744ff44206ee6aa428185e2b6c4a65b3197abdcd \
     --hash=sha256:fdf5197a21dd660cf19dfd2a3ce79574588f8f5e2dbf21bda9ee2d2b46924d84
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 oss2==2.19.0 \
     --hash=sha256:9ca54a7921f32f32651a36f2a527bf45e03bb02f3a744877e30f1e842b0f2a0b
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 packaging==24.1 \
     --hash=sha256:026ed72c8ed3fcce5bf8950572258698927fd1dbda10a5e981cdf0ac37f4f002 \
     --hash=sha256:5b8f2217dbdbd2f7f384c41c628544e6d52f2d0f53c6d0c3ea61aa5d1d7ff124
@@ -1593,7 +1593,7 @@ pillow==10.4.0 \
     --hash=sha256:ff25afb18123cea58a591ea0244b92eb1e61a1fd497bf6d6384f09bc3262ec3e \
     --hash=sha256:ff337c552345e95702c5fde3158acb0625111017d0e5f24bf3acdb9cc16b90d1
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   matplotlib
     #   pillow-heif
     #   sentence-transformers
@@ -1674,7 +1674,7 @@ pillow-avif-plugin==1.4.6 \
     --hash=sha256:fdd6ee615d948a2b68fd293f74a1a73d22e9d075f5d714b95a90ec2cb8da8de0 \
     --hash=sha256:fe06bdb3ec104f5e1b8c03a0bfb22e3d23b4e94591ae73caec1940ce54eccc67 \
     --hash=sha256:fe32db84ba0c9d9b364e2b36a55620d6112133107f82854f19a4fdaa93fce66b
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 pillow-heif==0.20.0 \
     --hash=sha256:039f0c82ab3c0b364947979583d53ec9aad42d22159b9497e3c20ddde92c99bd \
     --hash=sha256:0919f7738b886ed88367b9d0247132b1cbe5d40411bac5d7536d1876980af23e \
@@ -1722,7 +1722,7 @@ pillow-heif==0.20.0 \
     --hash=sha256:ef2ad418f42adc9ef5d5e709547e799fb32141543856cb14f04fa4b22f83bfd7 \
     --hash=sha256:f446a78a9d84ef75761638a7e72a477aadeffb282ac70ffe67360a98d54775b1 \
     --hash=sha256:f9430a33f69965d067be7e5c15dc70f1e43d5e3c8b5e9dc16c8c8d52179ce1cc
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 platformdirs==4.3.6 \
     --hash=sha256:357fb2acbc885b0419afd3ce3ed34564c13c9b95c89360cd9563f73aa5e2b907 \
     --hash=sha256:73e575e1408ab8103900836b97580d5307456908a03e92031bab39e4554cc3fb
@@ -1730,7 +1730,7 @@ platformdirs==4.3.6 \
 pooch==1.8.2 \
     --hash=sha256:3529a57096f7198778a5ceefd5ac3ef0e4d06a6ddaf9fc2d609b806f25302c47 \
     --hash=sha256:76561f0de68a01da4df6af38e9955c4c9d1a5c90da73f7e40276a5728ec83d10
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 portalocker==3.1.1 \
     --hash=sha256:80e984e24de292ff258a5bea0e4f3f778fff84c0ae1275dbaebc4658de4aacb3 \
     --hash=sha256:ec20f6dda2ad9ce89fa399a5f31f4f1495f515958f0cb7ca6543cef7bb5a749e
@@ -1738,7 +1738,7 @@ portalocker==3.1.1 \
 prettytable==3.11.0 \
     --hash=sha256:7e23ca1e68bbfd06ba8de98bf553bf3493264c96d5e8a615c0471025deeba722 \
     --hash=sha256:aa17083feb6c71da11a68b2c213b04675c4af4ce9c541762632ca3f2cb3546dd
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 protobuf==4.25.0 \
     --hash=sha256:1a3ba712877e6d37013cdc3476040ea1e313a6c2e1580836a94f76b3c176d575 \
     --hash=sha256:1a53d6f64b00eecf53b65ff4a8c23dc95df1fa1e97bb06b8122e5a64f49fc90a \
@@ -1752,7 +1752,7 @@ protobuf==4.25.0 \
     --hash=sha256:cf21faba64cd2c9a3ed92b7a67f226296b10159dbb8fbc5e854fc90657d908e4 \
     --hash=sha256:d94a33db8b7ddbd0af7c467475fb9fde0c705fb315a8433c0e2020942b863a1f
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   grpcio-tools
     #   onnx
 psutil==6.0.0 \
@@ -1774,7 +1774,7 @@ psutil==6.0.0 \
     --hash=sha256:fc8c9510cde0146432bbdb433322861ee8c3efbf8589865c8bf8d21cb30c4d14 \
     --hash=sha256:ffe7fc9b6b36beadc8c322f84e1caff51e8703b88eee1da46d1e3a6ae11b4fd0
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   accelerate
 py-spy==0.3.14 \
     --hash=sha256:3e8e48032e71c94c3dd51694c39e762e4bbfec250df5bf514adcdd64e79371e0 \
@@ -1784,7 +1784,7 @@ py-spy==0.3.14 \
     --hash=sha256:f59b0b52e56ba9566305236375e6fc68888261d0d36b5addbe3cf85affbefc0e \
     --hash=sha256:fd6211fe7f587b3532ba9d300784326d9a6f2b890af7bf6fff21a029ebbc812b \
     --hash=sha256:fe7efe6c91f723442259d428bf1f9ddb9c1679828866b353d539345ca40d9dd2
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 pyarrow==17.0.0 \
     --hash=sha256:0071ce35788c6f9077ff9ecba4858108eebe2ea5a3f7cf2cf55ebc1dbc6ee24a \
     --hash=sha256:02dae06ce212d8b3244dd3e7d12d9c4d3046945a5933d28026598e9dbbda1fca \
@@ -1865,7 +1865,7 @@ pydantic==2.7.0 \
     --hash=sha256:9dee74a271705f14f9a1567671d144a851c675b072736f0a7b2608fd9e495352 \
     --hash=sha256:b5ecdd42262ca2462e2624793551e80911a1e989f462910bb81aef974b4bb383
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   fastapi
     #   openai
 pydantic-core==2.18.1 \
@@ -1952,7 +1952,7 @@ pydantic-core==2.18.1 \
 pynvml==11.5.3 \
     --hash=sha256:183d223ae487e5f00402d8da06c68c978ef8a9295793ee75559839c6ade7b229 \
     --hash=sha256:a5fba3ab14febda50d19dbda012ef62ae0aed45b7ccc07af0bc5be79223e450c
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 pyodps==0.11.6.5 \
     --hash=sha256:025714a3c8066df2a4b611dd2dc8278d390c05782886c1b2996ba92ef1f10e8c \
     --hash=sha256:05786981c72625b59169d2c48eaa81f13c582f19d3313c6eef8fec23308b52a5 \
@@ -1999,11 +1999,11 @@ pyodps==0.11.6.5 \
     --hash=sha256:db382098de7a148c3be87a8bdecf243603225edf0dcd413e84864d938dc85c0d \
     --hash=sha256:e867818ce3951d8c662af8d05f07231f24d699a893b4c00f583ba08eda4e85bb \
     --hash=sha256:eb1a5088a06d3953e39681b9b880cc02ff95113d53a14a86495bbf33c602b191
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 pyopenssl==24.1.0 \
     --hash=sha256:17ed5be5936449c5418d1cd269a1a9e9081bc54c17aed272b45856a3d3dc86ad \
     --hash=sha256:cabed4bfaa5df9f1a16c0ef64a0cb65318b5cd077a7eda7d6970131ca2f41a6f
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 pyparsing==3.1.4 \
     --hash=sha256:a6a7ee4235a3f944aa1fa2249307708f893fe5717dc603503c6c7969c070fb7c \
     --hash=sha256:f86ec8d1a83f11977c9a6ea7598e8c27fc5cddfa5b07ea2241edbbde1d7bc032
@@ -2293,7 +2293,7 @@ safetensors==0.4.5 \
     --hash=sha256:fd33da8e9407559f8779c82a0448e2133737f922d71f884da27184549416bfed \
     --hash=sha256:fdadf66b5a22ceb645d5435a0be7a0292ce59648ca1d46b352f13cff3ea80410
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   accelerate
     #   timm
     #   transformers
@@ -2363,7 +2363,7 @@ scipy==1.14.1 \
 sentence-transformers==2.7.0 \
     --hash=sha256:2f7df99d1c021dded471ed2d079e9d1e4fc8e30ecb06f957be060511b36f24ea \
     --hash=sha256:6a7276b05a95931581bbfa4ba49d780b2cf6904fa4a171ec7fd66c343f761c98
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 sentencepiece==0.2.0 \
     --hash=sha256:0461324897735512a32d222e3d886e24ad6a499761952b6bda2a9ee6e4313ea5 \
     --hash=sha256:0993dbc665f4113017892f1b87c3904a44d0640eda510abcacdfb07f74286d36 \
@@ -2506,14 +2506,14 @@ setproctitle==1.3.5 \
     --hash=sha256:fe3bfd5e51c24349d022e062a96c316a1b8862ea9a0cf5ea2a8b2ae008b77cec \
     --hash=sha256:fec8340ab543144d04a9d805d80a0aad73fdeb54bea6ff94e70d39a676ea4ec0
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   concurrent-log-handler
 
 # The following packages are considered to be unsafe in a requirements file:
 setuptools==60.5.0 \
     --hash=sha256:2404879cda71495fc4d5cbc445ed52fdaddf352b36e40be8dcc63147cb4edabe \
     --hash=sha256:68eb94073fc486091447fcb0501efd6560a0e5a1839ba249e5ff3c4c93f05f90
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 six==1.16.0 \
     --hash=sha256:1e61c37477a1626458e36f7b1d82aa5c9b094fa4802892072e49de9c60c4c926 \
     --hash=sha256:8abb2f1d86890a2dfb989f9a77cfcfd3e47c2a354b01111771326f8aa26e0254
@@ -2569,7 +2569,7 @@ sympy==1.13.3 \
     --hash=sha256:54612cf55a62755ee71824ce692986f23c88ffa77207b30c1368eda4a7060f73 \
     --hash=sha256:b27fd2c6530e0ab39e275fc9b683895367e51d5da91baa8d3d64db2565fec4d9
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   torch
 threadpoolctl==3.5.0 \
     --hash=sha256:082433502dd922bf738de0d8bcc4fdcbf0979ff44c42bd40f5af8a282f6fa107 \
@@ -2577,7 +2577,7 @@ threadpoolctl==3.5.0 \
     # via scikit-learn
 thrift==0.20.0 \
     --hash=sha256:4dd662eadf6b8aebe8a41729527bd69adf6ceaa2a8681cbef64d1273b3e8feba
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 tiktoken==0.7.0 \
     --hash=sha256:03c6c40ff1db0f48a7b4d2dafeae73a5607aacb472fa11f125e7baf9dce73704 \
     --hash=sha256:084cec29713bc9d4189a937f8a35dbdfa785bd1235a34c1124fe2323821ee93f \
@@ -2615,11 +2615,11 @@ tiktoken==0.7.0 \
     --hash=sha256:e215292e99cb41fbc96988ef62ea63bb0ce1e15f2c147a61acc319f8b4cbe5bf \
     --hash=sha256:e54be9a2cd2f6d6ffa3517b064983fb695c9a9d8aa7d574d1ef3c3f931a99225 \
     --hash=sha256:fffdcb319b614cf14f04d02a52e26b1d1ae14a570f90e9b55461a72672f7b13d
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 timm==0.9.12 \
     --hash=sha256:2a828afac5b710a80ec66d0f85807e171e342faf5c0703b33102d8aa206f19dc \
     --hash=sha256:9121d1cf320f7f32490d893340fd33117bda0a0270eb8282dfd52ae5fd3e1af6
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 tokenizers==0.20.3 \
     --hash=sha256:04627b7b502fa6a2a005e1bd446fa4247d89abcb1afaa1b81eb90e21aba9a60f \
     --hash=sha256:07d7851a72717321022f3774e84aa9d595a041d643fafa2e87fbc9b18711dac0 \
@@ -2776,13 +2776,13 @@ transformers==4.46.2 \
     --hash=sha256:3d85410881e1c074be767877bf33c83231ec11529f274a6044ecb20c157ba14e \
     --hash=sha256:c921f4406b78e6518c97b618c5acd1cf8a4f2315b6b727f4bf9e01496eef849c
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   sentence-transformers
 typing-extensions==4.12.2 \
     --hash=sha256:04e5ca0351e0f3f85c6853954072df659d0d13fac324d0072316b67d7794700d \
     --hash=sha256:1a7ead55c7e559dd4dee8856e3a88b41225abfe1ce8df57b7c13915fe121ffb8
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   anyio
     #   fastapi
     #   huggingface-hub
@@ -2800,7 +2800,7 @@ urllib3==2.2.3 \
 uvicorn==0.30.0 \
     --hash=sha256:78fa0b5f56abb8562024a59041caeb555c86e48d0efdd23c3fe7de7a4075bdab \
     --hash=sha256:f678dec4fa3a39706bbf49b9ec5fc40049d42418716cea52b53f07828a60aa37
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via -r internal_source/deps/requirements_base.txt
 wcwidth==0.2.13 \
     --hash=sha256:3da69048e4540d84af32131829ff948f1e022c1c6bdb8d6102117aac784f6859 \
     --hash=sha256:72ea0c06399eb286d978fdedb6923a9eb47e1c486ce63e9b4e64fc18303972b5
@@ -2907,5 +2907,5 @@ zipp==3.20.2 \
     --hash=sha256:a817ac80d6cf4b23bf7f2828b7cabf326f15a001bea8b1f9b49631780ba28350 \
     --hash=sha256:bc9eb26f4506fda01b81bcde0ca78103b6e62f991b381fec825435c836edbc29
     # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   -r internal_source/deps/requirements_base.txt
     #   grpcio-tools
