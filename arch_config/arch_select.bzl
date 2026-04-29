@@ -78,3 +78,11 @@ def no_block_copy_link_deps():
             "@rtp_llm//rtp_llm/models_py/bindings:no_block_copy_default",
         ],
     })
+
+def torch_deps():
+    """Torch cc deps; same as //bazel:defs.bzl — @flashinfer_ppu loads this from @arch_config."""
+    return [
+        "@torch//:torch_api",
+        "@torch//:torch",
+        "@torch//:torch_libs",
+    ]

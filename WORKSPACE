@@ -13,6 +13,9 @@ http_archive(
         "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/releases/download/0.10.1/rules_pkg-0.10.1.tar.gz",
         "https://github.com/bazelbuild/rules_pkg/releases/download/0.10.1/rules_pkg-0.10.1.tar.gz",
     ],
+    # rules_pkg 0.9+ moved providers under //pkg:; @havenask still loads @rules_pkg//:providers.bzl.
+    patches = ["//patches/rules_pkg:0001-add-providers-root-shim-for-havenask.patch"],
+    patch_args = ["-p1"],
 )
 
 load("@rules_pkg//:deps.bzl", "rules_pkg_dependencies")

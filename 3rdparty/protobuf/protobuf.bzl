@@ -317,6 +317,32 @@ def cc_proto_library(
         **kargs
     )
 
+def internal_copied_filegroup(name, srcs, strip_prefix, dest, **kwargs):
+    """Copy files to dest (stripping strip_prefix) and expose them as a filegroup.
+
+    Used by BUILD for well-known protos; upstream protobuf.bzl includes this macro.
+    """
+    outs = [_RelativeOutputPath(s, strip_prefix, dest) for s in srcs]
+
+    native.genrule(
+        name = name + "_genrule",
+        srcs = srcs,
+        outs = outs,
+        cmd = " && ".join(
+            [
+                "cp $(location %s) $(location %s)" %
+                (s, _RelativeOutputPath(s, strip_prefix, dest))
+                for s in srcs
+            ],
+        ),
+    )
+
+    native.filegroup(
+        name = name,
+        srcs = outs,
+        **kwargs
+    )
+
 def internal_gen_well_known_protos_java(srcs):
     """Bazel rule to generate the gen_well_known_protos_java genrule
 
