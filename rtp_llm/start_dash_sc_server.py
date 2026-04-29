@@ -32,7 +32,7 @@ def start_dash_sc_server(
         f"[PROCESS_START]Start dash_sc server process rank_{rank_id}_server_{server_id}"
     )
     start_time = time.time()
-    from rtp_llm.dash_sc.dash_sc_app import DashScApp
+    from rtp_llm.dash_sc import DashScApp
 
     if rank_id == 0 and server_id == 0:
         logging.info(f"import DashScApp took {time.time() - start_time:.2f}s")

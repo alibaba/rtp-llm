@@ -5,7 +5,7 @@ DashSc gRPC client (ModelStreamInfer, wire: predict_v2.proto). Same tokenizer as
 prints the response (generated_ids, finish_reason).
 
 Usage (tokenizer same as frontend: ckpt_path, tokenizer_path, model_type):
-  python -m rtp_llm.dash_sc.dash_sc_grpc_client \\
+  python -m rtp_llm.dash_sc.client \\
     --grpc_addr 127.0.0.1:8096 \\
     --ckpt_path /path/to/checkpoint \\
     --tokenizer_path /path/to/tokenizer \\
@@ -21,7 +21,7 @@ from typing import Any
 
 import grpc
 
-from rtp_llm.dash_sc.dash_sc_grpc_request import SamplingParams
+from rtp_llm.dash_sc.codec import SamplingParams
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.server.server_args.grpc_group_args import default_dash_sc_grpc_config_json
@@ -139,7 +139,7 @@ def build_model_infer_request(
     return request
 
 
-def _decode_finish_reason(out: Any, raw: bytes) -> int | None:
+def decode_finish_reason(out: Any, raw: bytes) -> int | None:
     if out.datatype == "INT64" and len(raw) >= 8:
         return struct.unpack("<q", raw[:8])[0]
     if out.datatype == "INT32" and len(raw) >= 4:
@@ -261,7 +261,7 @@ def print_model_stream_infer_response(
             decoded = tokenizer.decode(ids_list)
             print(f"[client]   decoded: {decoded!r}")
         elif out.name == "finish_reason":
-            finish = _decode_finish_reason(out, raw)
+            finish = decode_finish_reason(out, raw)
             print(f"[client]   finish_reason: {finish}")
         elif out.name == "prompt_token_num" and out.datatype == "INT32":
             prompt_token_num = struct.unpack("<i", raw[:4])[0]

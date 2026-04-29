@@ -1,19 +1,32 @@
-"""Unit tests for ``rtp_llm.dash_sc.dash_sc_grpc_request``."""
+"""Unit tests for ``rtp_llm.dash_sc.codec`` (request parsing + response builders)."""
 
 from __future__ import annotations
 
 import struct
 from unittest import TestCase, main
 
-from rtp_llm.dash_sc.dash_sc_grpc_request import (
+import torch
+
+from rtp_llm.dash_sc.codec import (
     OtherParams,
     SamplingParams,
+    build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
     parse_other_params,
     parse_sampling_params,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.dash_sc.service import stream_log_tag
+from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
+
+
+def _unpack_int32_le(raw: bytes) -> list[int]:
+    return list(struct.unpack("<%di" % (len(raw) // 4), raw))
+
+
+def _unpack_int64_le(raw: bytes) -> list[int]:
+    return [int(x) for x in struct.unpack("<%dq" % (len(raw) // 8), raw)]
 
 
 def _add_tensor(
@@ -164,6 +177,147 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(gc.top_k, 1)
         self.assertEqual(gc.stop_words_list, [[42]])
         self.assertTrue(gc.return_input_ids)
+
+
+class BuildStreamResponseFromGenerateOutputsTest(TestCase):
+    def test_empty_generate_outputs_raises(self) -> None:
+        go = GenerateOutputs(generate_outputs=[])
+        with self.assertRaises(ValueError) as ctx:
+            build_stream_response_from_generate_outputs(
+                dash_sc_request_id="r1",
+                model_name="m",
+                go=go,
+                request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r1"),
+            )
+        self.assertIn("non-empty", str(ctx.exception))
+
+    def test_basic_generated_ids_finish_aux(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7, 8, 9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=10, reuse_len=4),
+        )
+        go = GenerateOutputs(generate_outputs=[out])
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="req-a",
+            model_name="mdl",
+            go=go,
+            request_log_tag=stream_log_tag(request_id_numeric=99, trace_id="req-a"),
+            return_input_ids=False,
+        )
+        self.assertFalse(resp.error_message)
+        infer = resp.infer_response
+        self.assertEqual(infer.id, "req-a")
+        self.assertEqual(infer.model_name, "mdl")
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [7, 8, 9])
+        self.assertEqual(list(infer.outputs[0].shape), [1, 3])
+        self.assertEqual(_unpack_int64_le(by_name["finish_reason"]), [0])
+        self.assertEqual(_unpack_int32_le(by_name["prompt_token_num"]), [10])
+        self.assertEqual(_unpack_int32_le(by_name["prompt_cached_token_num"]), [4])
+
+    def test_not_finished_finish_reason_two(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([1], dtype=torch.int32),
+            finished=False,
+            aux_info=None,
+        )
+        go = GenerateOutputs(generate_outputs=[out])
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="r",
+            model_name="m",
+            go=go,
+            request_log_tag=stream_log_tag(request_id_numeric=0, trace_id="r"),
+        )
+        infer = resp.infer_response
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(_unpack_int64_le(by_name["finish_reason"]), [2])
+        self.assertEqual(_unpack_int32_le(by_name["prompt_token_num"]), [0])
+        self.assertEqual(_unpack_int32_le(by_name["prompt_cached_token_num"]), [0])
+
+    def test_output_ids_2d_uses_first_row(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([[100, 101]], dtype=torch.int32),
+            finished=True,
+        )
+        go = GenerateOutputs(generate_outputs=[out])
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="r",
+            model_name="m",
+            go=go,
+            request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
+        )
+        infer = resp.infer_response
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [100, 101])
+
+    def test_return_input_ids_prepends_prompt_tensor(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([5], dtype=torch.int32),
+            finished=True,
+        )
+        go = GenerateOutputs(generate_outputs=[out])
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="r",
+            model_name="m",
+            go=go,
+            request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
+            request_input_ids=[1, 2, 3],
+            return_input_ids=True,
+        )
+        infer = resp.infer_response
+        names = [infer.outputs[i].name for i in range(len(infer.outputs))]
+        self.assertEqual(
+            names,
+            [
+                "prompt_token_ids",
+                "generated_ids",
+                "finish_reason",
+                "finished",
+                "prompt_token_num",
+                "prompt_cached_token_num",
+            ],
+        )
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(_unpack_int32_le(by_name["prompt_token_ids"]), [1, 2, 3])
+        self.assertEqual(list(infer.outputs[0].shape), [1, 3])
+
+    def test_missing_output_ids_empty_generated(self) -> None:
+        out = GenerateOutput(output_ids=None, finished=False, aux_info=AuxInfo())
+        go = GenerateOutputs(generate_outputs=[out])
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="r",
+            model_name="m",
+            go=go,
+            request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
+        )
+        infer = resp.infer_response
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(by_name["generated_ids"], struct.pack("<i", 0))
+        self.assertEqual(list(infer.outputs[0].shape), [1, 0])
+
+
+class StreamLogTagTest(TestCase):
+    def test_stream_log_tag_format(self) -> None:
+        self.assertEqual(
+            stream_log_tag(request_id_numeric=-1, trace_id="tid"),
+            "request_id=-1 trace_id=tid",
+        )
 
 
 if __name__ == "__main__":
