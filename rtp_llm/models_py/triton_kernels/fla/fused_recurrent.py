@@ -162,13 +162,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
                 block_map + i_n * max_block_size + write_block_offset
             ).to(tl.int64)
             # H1 intercept: block 0 is BlockPool's reserved "safe zero" block;
-            # writing fp32 SSM state here corrupts it for every later FULL ATTN
-            # reader. -1 is a legitimate sparse-NULL slot. Reject both, log 0.
-            if write_block_id == 0:
-                tl.device_print(
-                    "H1_intercept fused_recurrent_write block0 offset=",
-                    write_block_offset,
-                )
             write_active = write_block_id > 0
             # Use 0 as a safe pointer base when not writing — the store mask
             # below suppresses the actual store, so block 0 stays untouched.

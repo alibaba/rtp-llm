@@ -96,7 +96,9 @@ class XQAImpl(FMHAImplBase):
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        out = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+        return out
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         common.update_trt_params(
@@ -155,7 +157,9 @@ class XQADecodeImpl(FMHAImplBase):
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        out = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+        return out
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         new_fmha_params = self.fmha_impl.prepare(attn_inputs)

@@ -155,11 +155,6 @@ def store_ssm_state_to_block_map_kernel(
     # H1 intercept: block 0 is BlockPool's reserved sentinel; the existing
     # `<= 0` skip already prevents the write, but log so we know if the
     # fill_(0) artifact ever lines up with a real store request.
-    if block_idx == 0:
-        tl.device_print(
-            "H1_intercept store_ssm_state block0 dest_block_pos=",
-            dest_block_pos,
-        )
 
     if block_idx <= 0:
         return
