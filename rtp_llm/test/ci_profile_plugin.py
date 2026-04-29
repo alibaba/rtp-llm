@@ -15,72 +15,25 @@ unless PYTEST_ARGS is already set in the environment.
 from __future__ import annotations
 
 import shlex
-import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import pytest
 
-
-def _load_toml(path: Path) -> Dict[str, Any]:
-    if sys.version_info >= (3, 11):
-        import tomllib
-    else:
-        import tomli as tomllib  # type: ignore[import-not-found]
-    with path.open("rb") as f:
-        return tomllib.load(f)
-
-
-def _find_pyproject(start: Path) -> Optional[Path]:
-    """Resolve pyproject.toml that contains CI profiles."""
-    cur = start.resolve()
-    for base in (cur, *cur.parents):
-        candidates = [
-            base / "pyproject.toml",
-            base / "github-opensource" / "pyproject.toml",
-            base / "internal_source" / "pyproject.toml",
-            base / "open_source" / "pyproject.toml",
-        ]
-        for pp in candidates:
-            if not pp.is_file():
-                continue
-            try:
-                data = _load_toml(pp)
-            except Exception:
-                continue
-            profiles = (
-                data.get("tool", {})
-                .get("rtp_llm", {})
-                .get("pytest_ci", {})
-                .get("profiles")
-            )
-            if isinstance(profiles, dict):
-                return pp
-    return None
-
-
-def _resolve_profile_paths(repo_root: Path, paths: list[str]) -> list[str]:
-    """Resolve profile path entries relative to the directory that contains pyproject.toml.
-
-    CI runs with ``cwd == github-opensource/``; internal smoke tests live under
-    ``../internal_source/...``. Listing ``../internal_source/...`` avoids relying
-    on a workspace-local ``internal_source`` symlink under ``github-opensource/``.
-    """
-    pyproject = _find_pyproject(repo_root)
-    base = pyproject.parent if pyproject is not None else repo_root
-    out: list[str] = []
-    for p in paths:
-        out.append(str((base / p).resolve()))
-    return out
+from rtp_llm.test.ci_profile_support import (
+    find_pyproject_with_ci_profiles,
+    load_toml,
+    resolve_profile_paths,
+)
 
 
 def _get_profile(root: Path, name: str) -> Dict[str, Any]:
-    pyproject = _find_pyproject(root)
+    pyproject = find_pyproject_with_ci_profiles(root)
     if pyproject is None:
         raise pytest.UsageError(
             f"--rtp-ci-profile: no pyproject.toml found (searched from {root})"
         )
-    data = _load_toml(pyproject)
+    data = load_toml(pyproject)
     try:
         profiles = data["tool"]["rtp_llm"]["pytest_ci"]["profiles"]
     except KeyError as exc:
@@ -103,10 +56,10 @@ def _get_profile(root: Path, name: str) -> Dict[str, Any]:
 
 
 def _get_pytest_ci_section(root: Path) -> Dict[str, Any]:
-    pyproject = _find_pyproject(root)
+    pyproject = find_pyproject_with_ci_profiles(root)
     if pyproject is None:
         return {}
-    data = _load_toml(pyproject)
+    data = load_toml(pyproject)
     return data.get("tool", {}).get("rtp_llm", {}).get("pytest_ci", {}) or {}
 
 
@@ -185,4 +138,4 @@ def pytest_configure(config: pytest.Config) -> None:
                 f"--rtp-ci-profile: profile {name!r} 'paths' must be a list of strings"
             )
         # Restrict collection roots (e.g. smoke file or frontend dirs only)
-        config.args[:] = _resolve_profile_paths(root, paths)
+        config.args[:] = resolve_profile_paths(root, paths)

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Validate smoke path wiring without Bazel-built .so or full pytest (no root conftest).
+"""Validate smoke path wiring without Bazel-built .so, pytest, or pydantic.
 
-Run from repo with ``cwd == github-opensource/`` (needs **pydantic** — use CI venv or
-``/opt/conda310/bin/python`` after ``pip install pydantic``).
+Run with ``cwd == github-opensource/``. Uses only stdlib + **tomli** (Python 3.10)
+for ``ci_profile_support`` when reading ``pyproject.toml``.
 
 Exit 0 if internal/OSS smoke layout and CI profile path resolution are consistent.
 """
 from __future__ import annotations
 
-import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -49,9 +48,9 @@ def main() -> int:
     assert (gho_smoke / "test_smoke_oss.py").is_file()
 
     sys.path.insert(0, str(gho / "rtp_llm" / "test"))
-    from ci_profile_plugin import _resolve_profile_paths  # noqa: E402
+    from ci_profile_support import resolve_profile_paths  # noqa: E402
 
-    resolved = _resolve_profile_paths(
+    resolved = resolve_profile_paths(
         gho, ["../internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
     )
     assert len(resolved) == 1
@@ -59,21 +58,14 @@ def main() -> int:
         internal_smoke / "test_smoke_internal.py"
     ).resolve()
 
+    from smoke.rel_path_config import compute_smoke_rel_path  # noqa: E402
+
     os.environ["SMOKE_REL_PATH_PREFER"] = "internal"
-    cd_path = gho_smoke / "common_def.py"
-    spec = importlib.util.spec_from_file_location("_smoke_common_def", cd_path)
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    rel = Path(mod.REL_PATH).resolve()
+    rel = Path(compute_smoke_rel_path(str(gho_smoke))).resolve()
     assert rel == internal_smoke.resolve(), (rel, internal_smoke)
 
     os.environ["SMOKE_REL_PATH_PREFER"] = "oss"
-    spec2 = importlib.util.spec_from_file_location("_smoke_common_def_oss", cd_path)
-    mod2 = importlib.util.module_from_spec(spec2)
-    assert spec2 and spec2.loader
-    spec2.loader.exec_module(mod2)
-    rel2 = Path(mod2.REL_PATH).resolve()
+    rel2 = Path(compute_smoke_rel_path(str(gho_smoke))).resolve()
     assert rel2 == gho_smoke.resolve(), (rel2, gho_smoke)
 
     _warn_incomplete_rules_pkg_cache()
