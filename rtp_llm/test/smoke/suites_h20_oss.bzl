@@ -290,6 +290,19 @@ def h20_oss_suites():
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="next_bf16_tp2_dp2_pd",
+                task_info="data/model/qwen35/qwen35_bf16_tp2_dp2_pd.json",
+                envs={
+                    "prefill": [],
+                    "decode": ["ACCL_LOW_LATENCY_OPTIMIZE=1"],
+                },
+                smoke_args={
+                    "prefill": "--warm_up 0 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
+                    "decode": "--warm_up 0 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
+                },
+                gpu_type=["H20"],
+            ),
+            smoke_test(
                 name="next_load_quant_tp2",
                 task_info="data/model/qwen35/qwen35_bf16_tp2_load_quant.json",
                 smoke_args="--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --quantization fp8_per_block",

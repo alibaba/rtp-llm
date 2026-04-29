@@ -37,15 +37,15 @@
                     "completion_tokens": 100
                 },
                 "aux_info": {
-                    "cost_time": 6758.758,
+                    "cost_time": 7088.068,
                     "iter_count": 100,
                     "prefix_len": 0,
                     "input_len": 11,
                     "output_len": 100,
-                    "step_output_len": 100,
-                    "first_token_cost_time": 243.253,
+                    "step_output_len": 99,
+                    "first_token_cost_time": 303.282,
                     "wait_time": 0.0,
-                    "pd_sep": false,
+                    "pd_sep": true,
                     "cum_log_probs": [],
                     "beam_responses": [],
                     "softmax_probs": [],
@@ -61,7 +61,14 @@
                     "decode_local_reuse_len": 0,
                     "decode_remote_reuse_len": 0,
                     "decode_memory_reuse_len": 0,
-                    "role_addrs": [],
+                    "role_addrs": [
+                        {
+                            "role": "DECODE",
+                            "ip": "127.0.0.1",
+                            "http_port": 10301,
+                            "grpc_port": 10302
+                        }
+                    ],
                     "aux_string": ""
                 }
             }
