@@ -36,9 +36,15 @@ from rtp_llm.dash_sc.codec import (
     parse_sampling_params,
     unpack_int_tensor_flat,
 )
+from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 
 DASH_SC_GRPC_ACCESS_LOGGER_NAME = "dash_sc_grpc_access_logger"
 DASH_SC_GRPC_ACCESS_LOG_FILENAME = "dash_sc_grpc_access.log"
+
+# Protocol tag appended to every kmonitor report emitted from this interceptor, so
+# dashboards/alerts can split the gRPC path from the HTTP frontend path that shares
+# the same metric names (py_rtp_framework_qps / rt etc.).
+_PROTOCOL_TAG = "grpc"
 
 _STREAM_TYPE = {
     (False, False): "unary",
@@ -140,6 +146,7 @@ class _RpcAggregate:
     peer: str
     start_ts: float
     first_resp_ts: Optional[float] = None
+    last_chunk_ts: Optional[float] = None
     req_count: int = 0
     resp_count: int = 0
     request_id: Optional[str] = None
@@ -244,7 +251,17 @@ class _RpcAggregate:
 
 
 class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
-    """Wrap every RPC with latency + content capture, emit one JSON line at completion."""
+    """Wrap every RPC with latency + content capture, emit one JSON line at completion.
+
+    Also fans out the same lifecycle events to ``kmonitor`` so the gRPC path reports the
+    same metric family (``py_rtp_framework_qps`` / ``py_rtp_framework_rt`` /
+    ``py_rtp_response_first_token_rt`` / …) as the HTTP frontend in
+    :class:`rtp_llm.frontend.frontend_server.FrontendServer`. Every report carries a
+    ``protocol=grpc`` tag so dashboards can slice gRPC vs HTTP off the shared metric name,
+    plus ``rank_id`` / ``server_id`` to mirror frontend tagging. Non-OK RPCs also emit
+    ``error_code`` (the gRPC status code name, e.g. ``UNAVAILABLE``) so alert rules stay
+    symmetric with the HTTP error path.
+    """
 
     def __init__(
         self,
@@ -254,6 +271,64 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         self._logger = logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME)
         self._rank_id = rank_id
         self._server_id = server_id
+        self._base_tags: dict[str, str] = {
+            "protocol": _PROTOCOL_TAG,
+            "rank_id": str(rank_id) if rank_id is not None else "",
+            "server_id": str(server_id) if server_id is not None else "",
+        }
+
+    def _tags(self, method: str, **extra: str) -> dict[str, str]:
+        tags = dict(self._base_tags)
+        tags["method"] = method
+        for k, v in extra.items():
+            if v is not None:
+                tags[k] = v
+        return tags
+
+    def _report_request_arrived(self, agg: "_RpcAggregate") -> None:
+        """Mirror ``FrontendServer.embedding`` entry-point QPS_METRIC."""
+        kmonitor.report(AccMetrics.QPS_METRIC, 1, self._tags(agg.method))
+
+    def _report_chunk(self, agg: "_RpcAggregate", *, is_first: bool) -> None:
+        """Mirror ``_call_generate_with_report`` per-chunk metrics.
+
+        ``is_first`` picks FIRST_TOKEN_RT vs ITER_RT/ITER_QPS — same split as the HTTP path.
+        """
+        now = time.time()
+        tags = self._tags(agg.method)
+        if is_first:
+            ttfb_ms = (now - agg.start_ts) * 1000.0
+            kmonitor.report(GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC, ttfb_ms, tags)
+        else:
+            last = agg.last_chunk_ts or agg.first_resp_ts or agg.start_ts
+            iter_rt_ms = (now - last) * 1000.0
+            kmonitor.report(GaugeMetrics.RESPONSE_ITER_RT_METRIC, iter_rt_ms, tags)
+        kmonitor.report(AccMetrics.ITER_QPS_METRIC, 1, tags)
+        agg.last_chunk_ts = now
+
+    def _report_rpc_done(
+        self, agg: "_RpcAggregate", *, status: str, status_detail: Optional[str]
+    ) -> None:
+        """Mirror ``_call_generate_with_report`` tail metrics + HTTP success/error QPS."""
+        total_ms = (time.time() - agg.start_ts) * 1000.0
+        tags = self._tags(agg.method)
+        kmonitor.report(GaugeMetrics.LANTENCY_METRIC, total_ms, tags)
+        kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, agg.resp_count, tags)
+        if agg.input_len is not None:
+            kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, agg.input_len, tags)
+        kmonitor.report(
+            GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC, len(agg.generated_ids), tags
+        )
+        if status == "OK":
+            kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, tags)
+        elif status == "CANCELLED":
+            kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, tags)
+        else:
+            kmonitor.report(
+                AccMetrics.ERROR_QPS_METRIC,
+                1,
+                self._tags(agg.method, error_code=status),
+            )
 
     def intercept_service(self, continuation, handler_call_details):
         handler = continuation(handler_call_details)
@@ -299,6 +374,14 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
             start_ts=time.time(),
         )
 
+    def _on_response_chunk(self, agg: _RpcAggregate, resp) -> None:
+        """Unified per-chunk hook: count, capture content, emit first-token / iter metrics."""
+        is_first = agg.first_resp_ts is None
+        agg.mark_first_resp()
+        agg.resp_count += 1
+        agg.capture_response_chunk(resp)
+        self._report_chunk(agg, is_first=is_first)
+
     def _finalize(self, agg: _RpcAggregate, context, exc: Optional[BaseException]) -> None:
         if exc is not None:
             agg.status = "UNKNOWN"
@@ -318,6 +401,8 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
                 except Exception:
                     agg.status_detail = code.name
 
+        self._report_rpc_done(agg, status=agg.status, status_detail=agg.status_detail)
+
         record = agg.build_record(self._server_id, self._rank_id)
         try:
             # orjson: ~5-10x faster than stdlib json.dumps on token-list payloads,
@@ -326,17 +411,20 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         except Exception as e:
             logging.warning("[DashScGrpc] access log emit failed: %s", e)
 
+    def _capture_first_request(self, agg: _RpcAggregate, request) -> None:
+        """Capture request content and fire the arrival QPS metric (exactly once per RPC)."""
+        agg.capture_request(request)
+        self._report_request_arrived(agg)
+
     def _wrap_unary_unary(self, inner, method, stream_type):
         def behavior(request, context):
             agg = self._new_aggregate(method, stream_type, context)
             agg.req_count = 1
-            agg.capture_request(request)
+            self._capture_first_request(agg, request)
             exc: Optional[BaseException] = None
             try:
                 resp = inner(request, context)
-                agg.mark_first_resp()
-                agg.resp_count = 1
-                agg.capture_response_chunk(resp)
+                self._on_response_chunk(agg, resp)
                 return resp
             except BaseException as e:
                 exc = e
@@ -350,13 +438,11 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         def behavior(request, context):
             agg = self._new_aggregate(method, stream_type, context)
             agg.req_count = 1
-            agg.capture_request(request)
+            self._capture_first_request(agg, request)
             exc: Optional[BaseException] = None
             try:
                 for resp in inner(request, context):
-                    agg.mark_first_resp()
-                    agg.resp_count += 1
-                    agg.capture_response_chunk(resp)
+                    self._on_response_chunk(agg, resp)
                     yield resp
             except BaseException as e:
                 exc = e
@@ -376,15 +462,13 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
                 for req in request_iterator:
                     agg.req_count += 1
                     if first:
-                        agg.capture_request(req)
+                        self._capture_first_request(agg, req)
                         first = False
                     yield req
 
             try:
                 resp = inner(counted_reqs(), context)
-                agg.mark_first_resp()
-                agg.resp_count = 1
-                agg.capture_response_chunk(resp)
+                self._on_response_chunk(agg, resp)
                 return resp
             except BaseException as e:
                 exc = e
@@ -404,15 +488,13 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
                 for req in request_iterator:
                     agg.req_count += 1
                     if first:
-                        agg.capture_request(req)
+                        self._capture_first_request(agg, req)
                         first = False
                     yield req
 
             try:
                 for resp in inner(counted_reqs(), context):
-                    agg.mark_first_resp()
-                    agg.resp_count += 1
-                    agg.capture_response_chunk(resp)
+                    self._on_response_chunk(agg, resp)
                     yield resp
             except BaseException as e:
                 exc = e
