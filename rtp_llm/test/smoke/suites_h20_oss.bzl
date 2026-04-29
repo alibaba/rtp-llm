@@ -330,7 +330,6 @@ def h20_oss_suites():
                 smoke_args="--max_seq_len 16384 --ft_disable_custom_ar 1 --eplb_mode NONE --redundant_expert 0 --act_type FP16 --concurrency_limit 16 --frontend_server_count 1 --warm_up 0 --reserver_runtime_mem_mb 42000 --seq_size_per_block 64 --enable_xqa 1 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --sp_act_type FP16 --decode_capture_config '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16' --prefill_capture_config '80:1' --enable_cuda_graph 1 --tp_size 2",
                 envs=["NCCL_DISABLE_ABORT=1", "NCCL_DEBUG=INFO", "LOG_LEVEL=INFO"],
                 gpu_type=["H20"],
-                concurrency_test=True,
             ),
             smoke_test(
                 name="eagle_mtp_no_cudagraph_concurrent",
@@ -338,7 +337,6 @@ def h20_oss_suites():
                 smoke_args="--max_seq_len 16384 --ft_disable_custom_ar 1 --eplb_mode NONE --redundant_expert 0 --act_type FP16 --concurrency_limit 16 --frontend_server_count 1 --warm_up 0 --reserver_runtime_mem_mb 42000 --seq_size_per_block 64 --enable_xqa 1 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --sp_act_type FP16 --tp_size 2",
                 envs=["NCCL_DISABLE_ABORT=1", "NCCL_DEBUG=INFO", "LOG_LEVEL=INFO"],
                 gpu_type=["H20"],
-                concurrency_test=True,
             ),
             smoke_test(
                 name="eagle_remote_cache_tp2",
