@@ -1,10 +1,14 @@
-"""生成式推荐场景：从 prompt 中解析「已推荐曝光的商品序列」并构造 banned_combo_token_ids。
+"""生成式推荐场景:从 prompt 中解析「已推荐曝光的商品序列」并构造 banned_combo_token_ids。
 
-典型 prompt 片段（格式严格）：
+典型 prompt 片段(格式严格):
     已推荐曝光的商品序列和位置:pos0:C1071C2997C4163,pos1:C741C3248C4162,...
 
 本模块只在 generate_config.auto_parse_banned_combo=True 且 combo_token_size>0
-时被 pipeline 调用；对非推荐场景零侵入。
+时被 pipeline 调用;对非推荐场景零侵入。
+
+附加:对 qwen3 等默认输出 think 占位 token 的模型,若用户未显式设置
+end_think_token_ids,这里会自动用 tokenizer 编码默认 prelude 并填入 generate_config,
+使得 C++ 侧 RecommendationLogitsProcessor 能跳过 prelude 再开始累 combo 前缀。
 """
 
 import logging
@@ -15,12 +19,15 @@ from typing import Any, List, Optional
 _POS_ITEM_PREFIX_RE = re.compile(r"pos\d+:((?:C\d+)+)")
 _SEMANTIC_ID_RE = re.compile(r"C\d+")
 
+# qwen3 系列默认 chat_template 在 assistant 开头固定输出的占位 prelude 字符串。
+_DEFAULT_THINK_PRELUDE = "<think>\n\n</think>\n\n"
+
 
 def _extract_exposed_items(prompt: str, combo_token_size: int) -> List[List[str]]:
-    """从 prompt 中抽出所有已曝光商品，按 combo_token_size 切分为语义 ID 组合。
+    """从 prompt 中抽出所有已曝光商品,按 combo_token_size 切分为语义 ID 组合。
 
-    返回每个商品对应的 combo_token_size 个语义 ID 字符串（例如 ["C1071", "C2997", "C4163"]）。
-    若商品段包含的 CXXX 数量与 combo_token_size 不符，则跳过该商品。
+    返回每个商品对应的 combo_token_size 个语义 ID 字符串(例如 ["C1071", "C2997", "C4163"])。
+    若商品段包含的 CXXX 数量与 combo_token_size 不符,则跳过该商品。
     """
     exposed_items: List[List[str]] = []
     for match in _POS_ITEM_PREFIX_RE.finditer(prompt):
@@ -39,12 +46,11 @@ def _extract_exposed_items(prompt: str, combo_token_size: int) -> List[List[str]
 
 
 def _encode_semantic_id(tokenizer: Any, semantic_id: str) -> Optional[int]:
-    """把单个语义 ID 字符串（如 'C1071'）编码成一个 token id。
+    """把单个语义 ID 字符串(如 'C1071')编码成一个 token id。
 
-    语义 ID 在训练时被扩展为词表中的独立 token，因此优先用 convert_tokens_to_ids 精确查询；
-    若 tokenizer 不支持或返回 unk，则回退到 encode（add_special_tokens=False）并要求长度为 1。
+    语义 ID 在训练时被扩展为词表中的独立 token,因此优先用 convert_tokens_to_ids 精确查询;
+    若 tokenizer 不支持或返回 unk,则回退到 encode(add_special_tokens=False)并要求长度为 1。
     """
-    # 路径 1：convert_tokens_to_ids
     if hasattr(tokenizer, "convert_tokens_to_ids"):
         try:
             token_id = tokenizer.convert_tokens_to_ids(semantic_id)
@@ -54,7 +60,6 @@ def _encode_semantic_id(tokenizer: Any, semantic_id: str) -> Optional[int]:
         except Exception:
             pass
 
-    # 路径 2：encode 回退
     try:
         ids = tokenizer.encode(semantic_id, add_special_tokens=False)
         if isinstance(ids, list) and len(ids) == 1:
@@ -65,6 +70,33 @@ def _encode_semantic_id(tokenizer: Any, semantic_id: str) -> Optional[int]:
     return None
 
 
+def _auto_fill_end_think_prelude(generate_config: Any, tokenizer: Any) -> None:
+    """若用户未显式设置 end_think_token_ids,则用 tokenizer 编码默认 prelude 并填入。
+
+    仅在用户未显式配置时填充;任何异常(tokenizer 不支持、encode 返回空等)都静默降级为
+    不填,Processor 行为等同历史版本。
+    """
+    existing = getattr(generate_config, "end_think_token_ids", None)
+    if existing:
+        return
+    if tokenizer is None or not hasattr(tokenizer, "encode"):
+        return
+    try:
+        ids = tokenizer.encode(_DEFAULT_THINK_PRELUDE, add_special_tokens=False)
+    except Exception:
+        return
+    if not isinstance(ids, list) or not ids:
+        return
+    try:
+        generate_config.end_think_token_ids = [int(x) for x in ids]
+    except Exception:
+        return
+    logging.info(
+        "recommendation_parser: auto-filled end_think_token_ids=%s for think prelude skip",
+        generate_config.end_think_token_ids,
+    )
+
+
 def parse_and_fill_banned_combo(
     prompt: str,
     generate_config: Any,
@@ -73,8 +105,10 @@ def parse_and_fill_banned_combo(
     """解析 prompt 中的已曝光商品并合并到 generate_config.banned_combo_token_ids。
 
     只有 generate_config.auto_parse_banned_combo=True 且 combo_token_size>0 时才会执行。
-    已有的 banned_combo_token_ids 会被保留，通过 set 去重合并新解析出的组合。
-    返回本次追加的商品数量（用于日志/监控）。
+    已有的 banned_combo_token_ids 会被保留,通过 set 去重合并新解析出的组合。
+    当确定启用了推荐约束(存在可用的 banned_combo)时,会顺带自动填充 end_think_token_ids,
+    用于 C++ Processor 跳过模型默认输出的 think prelude。
+    返回本次追加的商品数量(用于日志/监控)。
     """
     combo_token_size = getattr(generate_config, "combo_token_size", 0)
     auto_parse = getattr(generate_config, "auto_parse_banned_combo", False)
@@ -85,7 +119,6 @@ def parse_and_fill_banned_combo(
     if not exposed_items:
         return 0
 
-    # 已有组合先放入 set 做去重基准
     existing = {tuple(combo) for combo in generate_config.banned_combo_token_ids}
     appended = 0
     for semantic_ids in exposed_items:
@@ -117,4 +150,9 @@ def parse_and_fill_banned_combo(
             appended,
             len(generate_config.banned_combo_token_ids),
         )
+
+    # 仅当真正启用推荐约束(有 banned_combo)时,才需要 Processor 跳过 think prelude
+    if generate_config.banned_combo_token_ids:
+        _auto_fill_end_think_prelude(generate_config, tokenizer)
+
     return appended
