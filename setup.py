@@ -674,7 +674,9 @@ def build_bazel_extensions(build_config: str) -> None:
     print(f"\nBazel build completed successfully!")
     print(f"Full log available at: {log_file}")
 
-    # Copy built .so files to package
+    # Stage fresh libs only after Bazel succeeded (if the build failed above, we
+    # never wipe — previous rtp_llm/libs is left intact).
+    _wipe_rtp_llm_libs(project_root)
     copy_extensions(project_root, build_config)
 
 
@@ -863,6 +865,20 @@ def generate_pyi_stubs(project_root: Path) -> None:
             print(f"  WARNING: pybind11_stubgen skipped for {module}: {e}")
 
 
+def _wipe_rtp_llm_libs(project_root: Path) -> None:
+    """Clear ``rtp_llm/libs`` before staging artifacts from ``bazel-bin``.
+
+    Only call this immediately before ``copy_extensions`` when we know we will
+    repopulate the directory. Do **not** call when ``RTP_SKIP_BAZEL_BUILD`` is
+    set but ``bazel-bin`` has no outputs — otherwise a deps-only ``pip install``
+    would erase a previously staged ``libs/`` from an earlier successful build.
+    """
+    target_dir = project_root / "rtp_llm" / "libs"
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+
 def copy_extensions(project_root: Path, build_config: str) -> None:
     """Copy built .so files and proto files from bazel-bin to package.
 
@@ -910,30 +926,27 @@ def build_all():
 
     ensure_proto_files_generated(project_root)
 
-    # Always wipe target_dir before copying so stale .so from a previous build
-    # (different platform, removed targets) cannot leak into the new install.
-    # This applies even when bazel build is skipped — e.g. when prepare_venv.py
-    # ran bazel separately and we're only re-staging libs/ via copy_extensions.
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    target_dir.mkdir(parents=True, exist_ok=True)
-
     if not should_skip_bazel_build():
         # Auto-detect platform if RTP_BAZEL_CONFIG not set
         build_config = detect_build_config()
-        # build_bazel_extensions will call copy_extensions, which copies proto files
+        # build_bazel_extensions runs Bazel, then wipes+stages libs only on success.
         build_bazel_extensions(build_config)
+        return
+
+    print("Skipping Bazel build (RTP_SKIP_BAZEL_BUILD is set)")
+    bazel_bin = project_root / "bazel-bin"
+    if bazel_bin.exists() and (bazel_bin / "libth_transformer.so").exists():
+        build_config = detect_build_config()
+        _wipe_rtp_llm_libs(project_root)
+        copy_extensions(project_root, build_config)
     else:
-        print("Skipping Bazel build (RTP_SKIP_BAZEL_BUILD is set)")
-        # Skip mode: still need to copy whatever bazel-bin already produced
-        # into the freshly cleared libs/. Skip if bazel-bin is absent — that's
-        # a deps-only install path where libs/ is intentionally empty.
-        bazel_bin = project_root / "bazel-bin"
-        if bazel_bin.exists() and (bazel_bin / "libth_transformer.so").exists():
-            build_config = detect_build_config()
-            copy_extensions(project_root, build_config)
-        else:
-            print(f"  bazel-bin/libth_transformer.so absent — leaving {target_dir} empty")
+        # Deps-only pass: do not wipe rtp_llm/libs — keep any .so from a prior
+        # successful build_ext; otherwise prepare_venv pass 1 empties libs and
+        # pass 2 has nothing until Bazel runs.
+        print(
+            f"  bazel-bin/libth_transformer.so absent — "
+            f"leaving {target_dir} unchanged (deps-only install)"
+        )
 
 
 # a placeholder to make setuptools happy
