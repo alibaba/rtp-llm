@@ -15,6 +15,7 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -481,6 +482,12 @@ class OpenaiEndpoint(object):
         )
         rendered_input = self.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
+
+        # 生成式推荐：chat 链路同样需要从 rendered_prompt 解析已曝光商品并填充
+        # banned_combo_token_ids。函数内部做了开关与空值短路，对非推荐场景零侵入。
+        parse_and_fill_banned_combo(
+            rendered_input.rendered_prompt, generate_config, self.tokenizer
+        )
 
         mm_inputs = rendered_input.multimodal_inputs
 
