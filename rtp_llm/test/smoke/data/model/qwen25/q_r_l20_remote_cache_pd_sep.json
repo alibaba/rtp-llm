@@ -50,7 +50,7 @@
           "prefix_len": 0,
           "input_len": 35,
           "output_len": 100,
-          "step_output_len": 99,
+          "step_output_len": 1,
           "first_token_cost_time": 328.19,
           "wait_time": 0.017,
           "pd_sep": true,
@@ -73,8 +73,14 @@
             {
               "role": "DECODE",
               "ip": "127.0.0.1",
-              "http_port": 10613,
-              "grpc_port": 10614
+              "http_port": 10712,
+              "grpc_port": 10713
+            },
+            {
+              "role": "PREFILL",
+              "ip": "127.0.0.1",
+              "http_port": 10512,
+              "grpc_port": 10513
             }
           ],
           "aux_string": ""
@@ -142,7 +148,7 @@
           "prefix_len": 0,
           "input_len": 149,
           "output_len": 78,
-          "step_output_len": 77,
+          "step_output_len": 1,
           "first_token_cost_time": 60.417,
           "wait_time": 0.019,
           "pd_sep": true,
@@ -165,8 +171,14 @@
             {
               "role": "DECODE",
               "ip": "127.0.0.1",
-              "http_port": 10613,
-              "grpc_port": 10614
+              "http_port": 10712,
+              "grpc_port": 10713
+            },
+            {
+              "role": "PREFILL",
+              "ip": "127.0.0.1",
+              "http_port": 10512,
+              "grpc_port": 10513
             }
           ],
           "aux_string": ""

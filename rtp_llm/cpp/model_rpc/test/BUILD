@@ -78,3 +78,17 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "prefill_server_caller_context_test",
+    srcs = [
+        "PrefillServerCallerTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:prefill_server_caller",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

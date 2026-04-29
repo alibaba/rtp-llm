@@ -67,6 +67,10 @@ bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(prefill_worker_computed_request_count_metric,
                                   "rtp_llm_p2p_connector_prefill_worker_computed_request_count");
 
+    // cache write op-level failure metrics
+    REGISTER_QPS_MUTABLE_METRIC(cache_write_op_failure_qps_metric,
+                                "rtp_llm_p2p_connector_cache_write_op_failure_qps");
+
     return true;
 }
 
@@ -160,5 +164,9 @@ void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, PrefillWorke
     if (collector->store_wait_done_time_us > 0) {
         REPORT_MUTABLE_METRIC(prefill_worker_store_store_wait_done_time_us_metric, collector->store_wait_done_time_us);
     }
+}
+
+void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, CacheWriteOpFailureMetricsCollector* collector) {
+    REPORT_MUTABLE_QPS(cache_write_op_failure_qps_metric);
 }
 }  // namespace rtp_llm

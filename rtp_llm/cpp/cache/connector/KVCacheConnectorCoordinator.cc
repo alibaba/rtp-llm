@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #ifdef USE_REMOTE_KV_CACHE
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 #endif
@@ -192,6 +193,20 @@ KVCacheConnectorCoordinator::asyncWriteByLayer(int                              
     return p2p_connector_->asyncWriteByLayer(layer_id, layer_context);
 }
 
+std::shared_ptr<KVCacheResource>
+KVCacheConnectorCoordinator::holdKVCacheResourceForConnector(const KVCacheResource& resource) {
+    if (resource.cacheKeys().empty()) {
+        RTP_LLM_LOG_DEBUG("holdKVCacheResourceForConnector skipped, resource cache keys is empty");
+        return nullptr;
+    }
+    auto held_resource = allocator_->incrKVCacheRef(resource, resource.cacheKeys(), true);
+    if (!held_resource) {
+        RTP_LLM_LOG_WARNING("holdKVCacheResourceForConnector failed, incr kvcache ref failed, resource: [%s]",
+                            resource.debugString().c_str());
+    }
+    return held_resource;
+}
+
 std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
     auto memory_connector = std::make_shared<KVCacheMemoryConnector>(
         cache_config_, kv_cache_config_, allocator_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
@@ -305,6 +320,13 @@ void KVCacheConnectorCoordinator::handleRead(const P2PConnectorStartLoadRequestP
     p2p_connector_->handleRead(request, response, std::move(is_cancelled));
 }
 
+void KVCacheConnectorCoordinator::notifySideChannelReady(const std::string&                                unique_key,
+                                                         int64_t                                           deadline_ms,
+                                                         const P2PConnectorResourceEntry::SideChannelData& data) {
+    if (p2p_connector_) {
+        p2p_connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    }
+}
 bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (request.has_mem_request()) {
         RTP_LLM_CHECK(memory_connector_ != nullptr);
@@ -368,6 +390,13 @@ std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeys() const {
         return {};
     }
     return memory_connector_->cacheKeys();
+}
+
+void KVCacheConnectorCoordinator::reportP2PCacheWriteFailure() {
+    if (metrics_reporter_) {
+        CacheWriteOpFailureMetricsCollector collector;
+        metrics_reporter_->report<P2PConnectorMetrics, CacheWriteOpFailureMetricsCollector>(nullptr, &collector);
+    }
 }
 
 }  // namespace rtp_llm

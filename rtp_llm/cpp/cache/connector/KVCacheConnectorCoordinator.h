@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -50,6 +51,7 @@ public:
     asyncWrite(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) override;
     virtual std::shared_ptr<AsyncContext>
     asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) override;
+    virtual std::shared_ptr<KVCacheResource> holdKVCacheResourceForConnector(const KVCacheResource& resource) override;
 
     virtual bool              executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
     std::vector<CacheKeyType> memoryCacheKeys() const;
@@ -58,11 +60,16 @@ public:
         return allocator_->convertToGlobalLayerId(model_id, layer_id);
     }
 
+    void reportP2PCacheWriteFailure() override;
+
     /// Prefill-side StartLoad path; P2P connector wiring fills this in when enabled.
     virtual void handleRead(const P2PConnectorStartLoadRequestPB& request,
                             P2PConnectorStartLoadResponsePB&      response,
                             std::function<bool()>                 is_cancelled = nullptr);
-
+    /// Notify side-channel data ready (called by prefill engine when first token / SP data is produced)
+    void notifySideChannelReady(const std::string&                                unique_key,
+                                int64_t                                           deadline_ms,
+                                const P2PConnectorResourceEntry::SideChannelData& data);
 private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();
     std::shared_ptr<RemoteConnector>        initRemoteConnector();

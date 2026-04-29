@@ -753,6 +753,34 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnContextAndEnqueue_WhenH
     coordinator.reset();  // ensure no lingering references before next tests
 }
 
+TEST_F(KVCacheConnectorCoordinatorTest, HoldKVCacheResourceForConnector_UsesConnectorRefAndAutoReleases) {
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
+        cache_config_, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
+
+    KVCacheResource req_resource;
+    req_resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+    req_resource.cacheKeys() = CacheKeysType{11, 22, 33};
+    auto resource            = makeResourceWithAutoDecr();
+
+    auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, true))
+        .WillOnce(testing::Invoke([resource_holder](const KVCacheResource&, const CacheKeysType&, bool is_connector) {
+            EXPECT_TRUE(is_connector);
+            auto out = *resource_holder;
+            resource_holder->reset();
+            return out;
+        }));
+
+    auto held_resource = coordinator->holdKVCacheResourceForConnector(req_resource);
+    ASSERT_NE(held_resource, nullptr);
+    EXPECT_EQ(held_resource, resource);
+
+    EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_, testing::_)).Times(1);
+    held_resource.reset();
+    resource.reset();
+    coordinator.reset();
+}
+
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_SkipsNonMatchAndUpdatesReuseAndSetsFusedReadContext) {
     auto fused_read_ctx = makeFusedReadContextAndExpectAsyncRead();
     coordinator_->asyncReadAfterMatch(fused_read_ctx);

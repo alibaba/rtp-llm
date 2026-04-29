@@ -64,6 +64,7 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
         }
         return false;
     }
+    layer_cache_buffer->setKVCacheResource(resource);
     collector->total_block_count = layer_cache_buffer->blockIdMap().size();
 
     int64_t deadline_ms = currentTimeMs() + store_wait_timeout_ms_;

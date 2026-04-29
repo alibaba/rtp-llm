@@ -1,4 +1,26 @@
 
+def _ensure_decode_entrance_in_arg_string(arg_string):
+    if not arg_string:
+        return "--decode_entrance 1"
+    if "--decode_entrance" in arg_string:
+        return arg_string
+    return arg_string + " --decode_entrance 1"
+
+def ensure_decode_entrance(smoke_args):
+    if type(smoke_args) == "string":
+        return _ensure_decode_entrance_in_arg_string(smoke_args)
+    if type(smoke_args) == "dict":
+        normalized = {}
+        for k, v in smoke_args.items():
+            normalized[k] = _ensure_decode_entrance_in_arg_string(v)
+        return normalized
+    if type(smoke_args) == "list":
+        merged = " ".join(smoke_args)
+        if "--decode_entrance" in merged:
+            return smoke_args
+        return smoke_args + ["--decode_entrance 1"]
+    return smoke_args
+
 def extract_data(envs):
     data = []
     prefix = 'internal_source/rtp_llm/test/smoke/'
@@ -89,7 +111,10 @@ def get_aiter_envs(name, envs):
     return ["AITER_ASM_DIR=../../../../../../../bin/internal_source/rtp_llm/test/smoke/" + name + ".runfiles/pip_gpu_rocm_torch_aiter/site-packages/aiter_meta/hsa/"]
 
 def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_args="",
-               kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False):
+               kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False,
+               enable_decode_entrance=True):
+    if enable_decode_entrance:
+        smoke_args = ensure_decode_entrance(smoke_args)
     path = '/'.join(task_info.split('/')[:-1])
     data = data + native.glob([path + '/*.pt',
                                path + '/*.jpg',

@@ -15,9 +15,10 @@ class KVCacheConnectorLayerContext {
 public:
     virtual ~KVCacheConnectorLayerContext() = default;
 
-    virtual const KVCacheResource&    kvCacheResource() const = 0;
-    virtual int64_t                   requestId() const       = 0;
-    virtual std::optional<c10::Event> attentionEvent() const  = 0;
+    virtual const KVCacheResource&    kvCacheResource() const     = 0;
+    virtual KVCacheResourcePtr        heldKVCacheResource() const = 0;
+    virtual int64_t                   requestId() const           = 0;
+    virtual std::optional<c10::Event> attentionEvent() const      = 0;
 };
 
 }  // namespace rtp_llm

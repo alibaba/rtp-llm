@@ -99,9 +99,15 @@ class BackendRPCServerVisitor:
 
         config_role_type = pd_sep_config.role_type
 
-        if config_role_type == RoleType.PREFILL and not pd_sep_config.decode_entrance:
+        if config_role_type == RoleType.PREFILL:
             role_list.append(RoleType.DECODE)
-            logging.info("Added DECODE role for PREFILL type")
+            if pd_sep_config.decode_entrance:
+                role_list.append(RoleType.PREFILL)
+                logging.info(
+                    "Added DECODE and PREFILL roles for PREFILL type in decode_entrance mode"
+                )
+            else:
+                logging.info("Added DECODE role for PREFILL type")
         elif config_role_type == RoleType.DECODE and pd_sep_config.decode_entrance:
             role_list.append(RoleType.PREFILL)
             logging.info("Added PREFILL role for DECODE type")
@@ -118,6 +124,11 @@ class BackendRPCServerVisitor:
             if host_args.pdfusion_domain:
                 role_list.append(RoleType.PDFUSION)
                 logging.info("Added PDFUSION role for FRONTEND type")
+            if not role_list and pd_sep_config.decode_entrance:
+                role_list.append(RoleType.DECODE)
+                logging.info(
+                    "Added DECODE role for FRONTEND type as decode_entrance fallback"
+                )
 
         logging.info(f"configured backend role list: {role_list}")
         return role_list
@@ -176,6 +187,12 @@ class BackendRPCServerVisitor:
         missing_roles = [
             role for role in self.backend_role_list if role not in specified_roles
         ]
+        if not missing_roles:
+            route_logger.debug(
+                "skip domain routing, request_id=%s, no missing backend roles",
+                input.request_id,
+            )
+            return
         role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             missing_roles
         )

@@ -118,18 +118,17 @@ protected:
     /// P2P 路由所需字段（unique_key, request_id, deadline_ms），返回 owning shared_ptr。
     /// timeout_ms 是超时毫秒数（相对值），begin_time_us 是当前微秒时间戳，
     /// deadlineMs() = timeout_ms + begin_time_us/1000。
-    std::shared_ptr<GenerateStream> createGenerateStream(const std::string& unique_key,
-                                                         int64_t            request_id,
-                                                         int64_t            timeout_ms) {
-        auto config         = std::make_shared<GenerateConfig>();
-        config->unique_key  = unique_key;
-        config->timeout_ms  = static_cast<int>(timeout_ms);  // timeout in milliseconds (relative)
+    std::shared_ptr<GenerateStream>
+    createGenerateStream(const std::string& unique_key, int64_t request_id, int64_t timeout_ms) {
+        auto config        = std::make_shared<GenerateConfig>();
+        config->unique_key = unique_key;
+        config->timeout_ms = static_cast<int>(timeout_ms);  // timeout in milliseconds (relative)
 
-        auto input                 = std::make_shared<GenerateInput>();
-        input->request_id          = request_id;
-        input->generate_config     = config;
-        input->input_ids           = torch::zeros({1}, torch::kInt32);
-        input->begin_time_us       = currentTimeUs();  // Set begin_time_us to current time
+        auto input             = std::make_shared<GenerateInput>();
+        input->request_id      = request_id;
+        input->generate_config = config;
+        input->input_ids       = torch::zeros({1}, torch::kInt32);
+        input->begin_time_us   = currentTimeUs();  // Set begin_time_us to current time
 
         return std::make_shared<MockGenerateStream>(input);
     }
@@ -210,7 +209,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenSchedulerHandleReadFailed
     // 2. 添加有效的 resource entry
     std::string unique_key  = "test_scheduler_handle_read_failed";
     int64_t     request_id  = 5003;
-    int64_t     timeout_ms  = 5000;  // timeout in milliseconds (relative)
+    int64_t     timeout_ms  = 5000;                          // timeout in milliseconds (relative)
     int64_t     deadline_ms = currentTimeMs() + timeout_ms;  // absolute deadline for request
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
@@ -236,7 +235,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
     // 1. 添加有效的 resource entry
     std::string unique_key  = "test_wait_side_channel_timeout";
     int64_t     request_id  = 5004;
-    int64_t     timeout_ms  = 5000;  // timeout in milliseconds (relative)
+    int64_t     timeout_ms  = 5000;                          // timeout in milliseconds (relative)
     int64_t     deadline_ms = currentTimeMs() + timeout_ms;  // absolute deadline for request
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
@@ -268,7 +267,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     // 1. 创建有效的 resource entry
     std::string unique_key  = "test_notify_side_channel_success";
     int64_t     request_id  = 5001;
-    int64_t     timeout_ms  = 5000;  // timeout in milliseconds (relative)
+    int64_t     timeout_ms  = 5000;                          // timeout in milliseconds (relative)
     int64_t     deadline_ms = currentTimeMs() + timeout_ms;  // absolute deadline for request
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
@@ -285,6 +284,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     //    然后 handleRead steal entry 时，entry 已经是 ready 状态
     //    waitAndFillResponse 会立即返回
     P2PConnectorResourceEntry::SideChannelData data;
+    data.has_first_token  = true;
     data.first_token_id   = 12345;
     data.total_reuse_len  = 10;
     data.local_reuse_len  = 5;
@@ -297,7 +297,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
 
     // 注意：notifySideChannelReady 需要在 handleRead steal entry 之前调用
     // 这样 entry 的 side_channel_ready 才会被设置
-    connector_->streamStore()->notifySideChannelReady(unique_key, data);
+    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
 
     // 4. 创建 request 并调用 handleRead
     //    使用 num_workers = 1 简化测试
@@ -308,6 +308,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
 
     // 5. 验证响应
     EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_TRUE(response.payload().has_first_generate_token());
     EXPECT_EQ(response.payload().first_generate_token_id(), 12345);
     EXPECT_EQ(response.payload().total_reuse_len(), 10);
 
@@ -315,6 +316,35 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
         EXPECT_GE(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
     }
+}
+
+TEST_F(P2PConnectorTest, HandleRead_PreservesZeroFirstToken) {
+    std::string unique_key  = "test_zero_token";
+    int64_t     request_id  = 5002;
+    int64_t     timeout_ms  = 5000;
+    int64_t     deadline_ms = currentTimeMs() + timeout_ms;
+    auto        resource    = createValidKVCacheResource(2, 2);
+    auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
+    auto        meta        = createMockMeta(stream.get());
+    connector_->asyncMatch(resource, meta);
+
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setP2PResponseSuccess(true);
+    }
+
+    P2PConnectorResourceEntry::SideChannelData data;
+    data.has_first_token = true;
+    data.first_token_id  = 0;
+    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+
+    auto request = createValidStartLoadRequest(unique_key, deadline_ms, 1);
+
+    P2PConnectorStartLoadResponsePB response;
+    connector_->handleRead(request, response);
+
+    EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_TRUE(response.payload().has_first_generate_token());
+    EXPECT_EQ(response.payload().first_generate_token_id(), 0);
 }
 
 }  // namespace rtp_llm

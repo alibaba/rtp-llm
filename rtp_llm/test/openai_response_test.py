@@ -10,7 +10,7 @@ from unittest import IsolatedAsyncioTestCase, main
 import torch
 from typing_extensions import override
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, RoleType
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -49,6 +49,7 @@ from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
 )
 from rtp_llm.ops import FfnDisAggregateConfig, PDSepConfig, SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.host_service import HostServiceArgs
 from rtp_llm.test.utils.stream_util import (
     is_valid_tool_call_chunk,
     merge_stream_responses,
@@ -2451,6 +2452,57 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             sorted(self.endpoint.stop_words_str_list),
             sorted(["<|user|>", "<|observation|>"]),
         )
+
+    def test_frontend_decode_entrance_fallback_backend_role(self):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.FRONTEND
+        pd_sep_config.decode_entrance = True
+        host_args = HostServiceArgs()
+
+        roles = BackendRPCServerVisitor.get_backend_role_list(pd_sep_config, host_args)
+
+        self.assertEqual(roles, [RoleType.DECODE])
+
+    def test_prefill_decode_entrance_routes_to_decode_backend(self):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.PREFILL
+        pd_sep_config.decode_entrance = True
+        host_args = HostServiceArgs()
+
+        roles = BackendRPCServerVisitor.get_backend_role_list(pd_sep_config, host_args)
+
+        self.assertEqual(roles, [RoleType.DECODE, RoleType.PREFILL])
+
+    async def test_domain_routing_skips_when_no_missing_roles(self):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.FRONTEND
+        pd_sep_config.decode_entrance = True
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["localhost:8080"],
+        )
+        visitor.backend_role_list = []
+
+        called = False
+
+        def _unexpected_call(_roles, refresh=False):
+            nonlocal called
+            called = True
+            return []
+
+        visitor.host_service.get_backend_role_addrs = _unexpected_call
+        input_obj = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        await visitor.get_domain_route_addrs(input_obj)
+
+        self.assertFalse(called)
 
     async def test_think_label_real_situation_union(self):
         tokenizer = TokenizerFactory.create(
