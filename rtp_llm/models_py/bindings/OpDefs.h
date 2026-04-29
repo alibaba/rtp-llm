@@ -44,7 +44,7 @@ struct KVCache {
     int                        kv_lora_rank              = 0;
     int                        rope_head_dim             = 0;
 
-    // Per-layer attention type (CacheGroupType::FULL or LINEAR).
+    // Per-layer attention type (CacheGroupType::FULL, LINEAR, or SWA).
     std::vector<rtp_llm::CacheGroupType>    layer_group_types;
     std::vector<rtp_llm::KVCacheRegionName> group_region_names;
     std::vector<std::vector<int>>           layer_region_to_group_id;

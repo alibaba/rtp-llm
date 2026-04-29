@@ -46,20 +46,35 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVC
 
     int                       pos = min_full_reuse_blocks - 1;
     std::vector<BlockIdxType> linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
+    std::vector<BlockIdxType> swa_tail_blocks(swa_group_ids_.size(), NULL_BLOCK_IDX);
     for (; pos >= 0; --pos) {
-        bool all_linear_matched = true;
+        bool all_tail_groups_matched = true;
         for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
             const int gid      = linear_group_ids_[i];
             auto* linear_group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
             RTP_LLM_CHECK_WITH_INFO(linear_group != nullptr, "group %d is not LinearKVCacheGroup", gid);
             auto result = linear_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
             if (result.block_indices.empty()) {
-                all_linear_matched = false;
+                all_tail_groups_matched = false;
                 break;
             }
             linear_tail_blocks[i] = result.block_indices[0];
         }
-        if (all_linear_matched) {
+        if (!all_tail_groups_matched) {
+            continue;
+        }
+        for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
+            const int gid       = swa_group_ids_[i];
+            auto*     swa_group = dynamic_cast<SWAKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
+            RTP_LLM_CHECK_WITH_INFO(swa_group != nullptr, "group %d is not SWAKVCacheGroup", gid);
+            auto result = swa_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
+            if (result.block_indices.empty()) {
+                all_tail_groups_matched = false;
+                break;
+            }
+            swa_tail_blocks[i] = result.block_indices[0];
+        }
+        if (all_tail_groups_matched) {
             break;
         }
     }
@@ -85,6 +100,10 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVC
     for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
         const int gid = linear_group_ids_[i];
         kv_resource.mutableBlockIds(0, gid).setAt(static_cast<size_t>(reuse_blocks_len - 1), linear_tail_blocks[i]);
+    }
+    for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
+        const int gid = swa_group_ids_[i];
+        kv_resource.mutableBlockIds(0, gid).setAt(static_cast<size_t>(reuse_blocks_len - 1), swa_tail_blocks[i]);
     }
     return reuse_blocks_len;
 }

@@ -28,13 +28,19 @@ TEST(DecodeCacheLoadPlannerTest, BlockPositionsForRpcHandlesHybridLinearAndFullG
                                    /*use_hybrid=*/true,
                                    CacheGroupType::LINEAR,
                                    /*hybrid_full_from_begin=*/true),
-              (std::vector<size_t>{3, 4}));
+              (std::vector<size_t>{4}));
     EXPECT_EQ(blockPositionsForRpc(/*block_num=*/1,
                                    /*reuse_block_size=*/0,
                                    /*use_hybrid=*/true,
                                    CacheGroupType::LINEAR,
                                    /*hybrid_full_from_begin=*/true),
               (std::vector<size_t>{0}));
+    EXPECT_EQ(blockPositionsForRpc(/*block_num=*/5,
+                                   /*reuse_block_size=*/2,
+                                   /*use_hybrid=*/true,
+                                   CacheGroupType::SWA,
+                                   /*hybrid_full_from_begin=*/true),
+              (std::vector<size_t>{3, 4}));
     EXPECT_EQ(blockPositionsForRpc(/*block_num=*/4,
                                    /*reuse_block_size=*/2,
                                    /*use_hybrid=*/true,

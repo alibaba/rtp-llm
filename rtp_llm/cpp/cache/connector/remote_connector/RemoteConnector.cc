@@ -181,7 +181,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                             register_buffer_size};
     init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
     std::vector<int32_t> full_group_ids, linear_group_ids;
-    if (cache_config.linear_group_num == 0) {
+    if (cache_config.linear_group_num == 0 && cache_config.swa_group_num == 0) {
         full_group_ids.push_back(0);
         group_policy_ =
             std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_ids, linear_group_ids);

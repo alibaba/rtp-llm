@@ -10,6 +10,13 @@ std::vector<size_t> blockPositionsForCacheTransfer(size_t         block_num,
     std::vector<size_t> block_pos_list;
     block_pos_list.reserve(block_num);
     if (use_hybrid && block_num > 0 && group_type == CacheGroupType::LINEAR) {
+        const size_t start = block_num - 1;
+        for (size_t block_pos = start; block_pos < block_num; ++block_pos) {
+            block_pos_list.push_back(block_pos);
+        }
+        return block_pos_list;
+    }
+    if (use_hybrid && block_num > 0 && group_type == CacheGroupType::SWA) {
         const size_t start = block_num > 2 ? block_num - 2 : 0;
         for (size_t block_pos = start; block_pos < block_num; ++block_pos) {
             block_pos_list.push_back(block_pos);

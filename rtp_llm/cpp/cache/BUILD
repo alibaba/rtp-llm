@@ -116,11 +116,13 @@ cc_library(
         "FullKVCacheGroup.cc",
         "KVCacheGroup.cc",
         "LinearKVCacheGroup.cc",
+        "SWAKVCacheGroup.cc",
     ],
     hdrs = [
         "FullKVCacheGroup.h",
         "KVCacheGroup.h",
         "LinearKVCacheGroup.h",
+        "SWAKVCacheGroup.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

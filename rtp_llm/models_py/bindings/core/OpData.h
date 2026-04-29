@@ -55,7 +55,7 @@ struct GptModelInputs {
     torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
 
     torch::Tensor kv_cache_layer_to_group;  // [layer_num], int32
-    torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
+    torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL, 2 -> SWA.
     torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 2] kv cache update mapping
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
@@ -174,7 +174,7 @@ struct CacheStoreInputs {
 
     torch::Tensor kv_cache_layer_to_group_host;
     torch::Tensor kv_cache_layer_region_to_group_host;
-    torch::Tensor kv_cache_group_types_host;  // 0 -> LINEAR, 1 -> FULL.
+    torch::Tensor kv_cache_group_types_host;  // 0 -> LINEAR, 1 -> FULL, 2 -> SWA.
 
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;

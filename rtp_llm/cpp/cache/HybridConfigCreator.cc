@@ -1,11 +1,26 @@
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 
+#include <initializer_list>
 #include <numeric>
 
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 
 namespace rtp_llm {
+namespace {
+
+int calculateGroupLayerNumForCounts(std::initializer_list<int> counts) {
+    int group_layer_num = 0;
+    for (int count : counts) {
+        if (count <= 0) {
+            continue;
+        }
+        group_layer_num = group_layer_num == 0 ? count : std::gcd(group_layer_num, count);
+    }
+    return std::max(group_layer_num, 1);
+}
+
+}  // namespace
 
 std::vector<std::vector<int>> HybridConfigCreator::splitIntoGroups(const std::vector<int>& ids, int group_layer_num) {
     std::vector<std::vector<int>> groups;
@@ -33,30 +48,33 @@ int HybridConfigCreator::calculateGroupLayerNum(int linear_layer_count, int full
     return group_layer_num;
 }
 
-std::pair<std::vector<int>, std::vector<int>>
+HybridConfigCreator::AttentionLayerSplit
 HybridConfigCreator::splitLayersByAttentionType(const ModelConfig& model_config) {
     int64_t layer_num = model_config.num_layers;
     RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "invalid model_config.num_layers=%ld", layer_num);
 
-    std::vector<int> linear_layers;
-    std::vector<int> full_layers;
-    linear_layers.reserve(layer_num);
-    full_layers.reserve(layer_num);
+    AttentionLayerSplit split;
+    split.linear_layers.reserve(layer_num);
+    split.swa_layers.reserve(layer_num);
+    split.full_layers.reserve(layer_num);
 
     const auto& types = model_config.hybrid_attention_config.hybrid_attention_types;
     for (int i = 0; i < static_cast<int>(layer_num); ++i) {
         if (types[static_cast<size_t>(i)] == HybridAttentionType::LINEAR) {
-            linear_layers.push_back(i);
+            split.linear_layers.push_back(i);
+        } else if (types[static_cast<size_t>(i)] == HybridAttentionType::SLIDING_WINDOW) {
+            split.swa_layers.push_back(i);
         } else {
-            full_layers.push_back(i);
+            split.full_layers.push_back(i);
         }
     }
 
-    return std::make_pair(std::move(linear_layers), std::move(full_layers));
+    return split;
 }
 
 CacheConfig HybridConfigCreator::initializeConfig(const ModelConfig&      model_config,
                                                   const std::vector<int>& linear_layers,
+                                                  const std::vector<int>& swa_layers,
                                                   const std::vector<int>& full_layers,
                                                   rtp_llm::DataType       dtype) {
     int64_t layer_num = model_config.num_layers;
@@ -71,8 +89,10 @@ CacheConfig HybridConfigCreator::initializeConfig(const ModelConfig&      model_
     config.linear_step        = 1;
 
     config.global_layer_ids.push_back(linear_layers);
+    config.global_layer_ids.push_back(swa_layers);
     config.global_layer_ids.push_back(full_layers);
     config.layer_ids.push_back(linear_layers);
+    config.layer_ids.push_back(swa_layers);
     config.layer_ids.push_back(full_layers);
 
     return config;
@@ -100,20 +120,25 @@ KVCacheSpecPtr HybridConfigCreator::createLinearAttentionSpec(const ModelConfig&
     return linear_spec;
 }
 
-std::pair<std::vector<std::vector<int>>, std::vector<std::vector<int>>> HybridConfigCreator::createLayerGroups(
-    const std::vector<int>& linear_layers, const std::vector<int>& full_layers, int& group_layer_num) {
+HybridConfigCreator::AttentionGroupSplit HybridConfigCreator::createLayerGroups(const std::vector<int>& linear_layers,
+                                                                                const std::vector<int>& swa_layers,
+                                                                                const std::vector<int>& full_layers,
+                                                                                int& group_layer_num) {
     const int linear_cnt = static_cast<int>(linear_layers.size());
+    const int swa_cnt    = static_cast<int>(swa_layers.size());
     const int full_cnt   = static_cast<int>(full_layers.size());
-    group_layer_num      = HybridConfigCreator::calculateGroupLayerNum(linear_cnt, full_cnt);
+    group_layer_num      = calculateGroupLayerNumForCounts({linear_cnt, swa_cnt, full_cnt});
 
-    const auto linear_groups = HybridConfigCreator::splitIntoGroups(linear_layers, group_layer_num);
-    const auto full_groups   = HybridConfigCreator::splitIntoGroups(full_layers, group_layer_num);
-
-    return std::make_pair(std::move(linear_groups), std::move(full_groups));
+    AttentionGroupSplit groups;
+    groups.linear_groups = HybridConfigCreator::splitIntoGroups(linear_layers, group_layer_num);
+    groups.swa_groups    = HybridConfigCreator::splitIntoGroups(swa_layers, group_layer_num);
+    groups.full_groups   = HybridConfigCreator::splitIntoGroups(full_layers, group_layer_num);
+    return groups;
 }
 
 void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                         config,
                                                 const std::vector<std::vector<int>>& linear_groups,
+                                                const std::vector<std::vector<int>>& swa_groups,
                                                 const std::vector<std::vector<int>>& full_groups,
                                                 const KVCacheSpecPtr&                linear_spec,
                                                 const KVCacheSpecPtr&                full_spec) {
@@ -122,12 +147,18 @@ void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                    
     config.cache_specs.clear();
     config.group_types.clear();
 
-    // Keep order: all full groups first, then linear groups.
+    // Keep order: all full groups first, then SWA groups, then linear groups.
     for (const auto& g : full_groups) {
         config.global_layer_ids.push_back(g);
         config.layer_ids.push_back(g);
         config.cache_specs.push_back(full_spec);
         config.group_types.push_back(CacheGroupType::FULL);
+    }
+    for (const auto& g : swa_groups) {
+        config.global_layer_ids.push_back(g);
+        config.layer_ids.push_back(g);
+        config.cache_specs.push_back(full_spec);
+        config.group_types.push_back(CacheGroupType::SWA);
     }
     for (const auto& g : linear_groups) {
         config.global_layer_ids.push_back(g);
@@ -136,6 +167,7 @@ void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                    
         config.group_types.push_back(CacheGroupType::LINEAR);
     }
     config.linear_group_num = static_cast<int>(linear_groups.size());
+    config.swa_group_num    = static_cast<int>(swa_groups.size());
     config.full_group_num   = static_cast<int>(full_groups.size());
 }
 
@@ -174,23 +206,25 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
 
     // Split layers by attention type
-    auto [linear_layers, full_layers] = HybridConfigCreator::splitLayersByAttentionType(model_config);
+    auto split = HybridConfigCreator::splitLayersByAttentionType(model_config);
 
     // Initialize config
-    CacheConfig config = HybridConfigCreator::initializeConfig(model_config, linear_layers, full_layers, dtype);
+    CacheConfig config = HybridConfigCreator::initializeConfig(
+        model_config, split.linear_layers, split.swa_layers, split.full_layers, dtype);
 
     // Create attention specs
     auto full_spec   = HybridConfigCreator::createFullAttentionSpec(model_config, parallelism_config, dtype);
     auto linear_spec = HybridConfigCreator::createLinearAttentionSpec(model_config, parallelism_config, dtype);
 
     // Create layer groups and calculate group layer number
-    int group_layer_num = 0;
-    auto [linear_groups, full_groups] =
-        HybridConfigCreator::createLayerGroups(linear_layers, full_layers, group_layer_num);
+    int  group_layer_num = 0;
+    auto groups          = HybridConfigCreator::createLayerGroups(
+        split.linear_layers, split.swa_layers, split.full_layers, group_layer_num);
     config.group_layer_num = group_layer_num;
 
     // Setup cache config specs
-    HybridConfigCreator::setupCacheConfigSpecs(config, linear_groups, full_groups, linear_spec, full_spec);
+    HybridConfigCreator::setupCacheConfigSpecs(
+        config, groups.linear_groups, groups.swa_groups, groups.full_groups, linear_spec, full_spec);
 
     // Setup physical sizes
     HybridConfigCreator::setupPhysicalSizes(config, full_spec, linear_spec);

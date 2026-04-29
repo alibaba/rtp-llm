@@ -67,6 +67,7 @@ struct CacheConfig {
     int linear_step      = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
     int group_layer_num  = 1;  // Number of layers per group for hybrid attention
     int linear_group_num = 0;  // Number of linear attention groups
+    int swa_group_num    = 0;  // Number of sliding-window attention groups
     int full_group_num   = 0;  // Number of full attention groups
 
     // mtp-model configurations
@@ -121,6 +122,7 @@ struct CacheConfig {
         OUTPUT_FIELD(linear_step);
         OUTPUT_FIELD(group_layer_num);
         OUTPUT_FIELD(linear_group_num);
+        OUTPUT_FIELD(swa_group_num);
         OUTPUT_FIELD(full_group_num);
         os << "\n";
 

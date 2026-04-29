@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
 
 namespace rtp_llm {
 
@@ -55,6 +56,7 @@ protected:
     std::vector<KVCacheGroupPtr> kv_cache_groups_;
     std::vector<int>             full_group_ids_;
     std::vector<int>             linear_group_ids_;
+    std::vector<int>             swa_group_ids_;
 };
 
 using HybridKVCacheAllocatorPtr = std::shared_ptr<HybridKVCacheAllocator>;

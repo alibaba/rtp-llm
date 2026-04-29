@@ -6,6 +6,7 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::enum_<rtp_llm::CacheGroupType>(m, "CacheGroupType")
         .value("LINEAR", rtp_llm::CacheGroupType::LINEAR)
         .value("FULL", rtp_llm::CacheGroupType::FULL)
+        .value("SWA", rtp_llm::CacheGroupType::SWA)
         .export_values();
 
     pybind11::enum_<rtp_llm::KVCacheRegionName>(m, "KVCacheRegionName")
@@ -42,7 +43,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("rope_head_dim", &KVCache::rope_head_dim, "MLA RoPE head dimension")
         .def_readwrite("layer_group_types",
                        &KVCache::layer_group_types,
-                       "Per-layer attention type (CacheGroupType::FULL or LINEAR). "
+                       "Per-layer attention type (CacheGroupType::FULL, LINEAR, or SWA). "
                        "Empty = all layers treated as FULL (backward compatibility).")
         .def_readwrite("group_region_names", &KVCache::group_region_names, "Per-group KV cache attention types")
         .def_readwrite("layer_region_to_group_id",
