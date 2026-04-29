@@ -168,6 +168,14 @@ build:cuda13 --copt=-Wno-missing-field-initializers
 build:cuda13 --copt=-Wno-error=missing-field-initializers
 build:cuda13 --host_copt=-Wno-missing-field-initializers
 build:cuda13_arm --host_copt=-Wno-error=missing-field-initializers
+# Triton ships its own ptxas (CUDA 12.8) which doesn't know sm_103a (the arch
+# some B200 SKUs report as cap (10, 3)).  Pointing Triton at CUDA 13.2 ptxas
+# directly fails: Triton 3.4 parses `release 13.x` from `ptxas --version` and
+# bails with `Triton only support CUDA 10.0 or higher, but got CUDA version: 13.2`.
+# Use the wrapper baked into the prod image (internal_source/package/maga.Dockerfile)
+# which spoofs `--version` as CUDA 12.9 but delegates the real assembly to CUDA
+# 13.2 ptxas.  See docs/dsv4/B200/prod_image_detail.md §"Triton 3.4 bundled ptxas".
+test:cuda13 --test_env=TRITON_PTXAS_PATH=/usr/local/bin/triton_ptxas_cuda_wrapper.sh
 # CUDA 13 ARM base image ships glibc 2.32, but the CUDA-12 PyTorch wheels we
 # depend on (via pip_cuda12_arm_torch_*) include libcufile.so.0 which assumes
 # glibc >= 2.34 (shm_open moved to libc there).  Preload librt.so.1 so the
