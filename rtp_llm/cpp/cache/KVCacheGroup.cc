@@ -57,6 +57,9 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
                                 need_evict);
             return false;
         }
+        if (block_cache_free_hook_) {
+            block_cache_free_hook_(evicted_blocks);
+        }
         block_pool_->blockCacheFree(evicted_blocks);
     }
 

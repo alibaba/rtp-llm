@@ -46,6 +46,7 @@ private:
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
     int          getNeedBlocks(const MallocInfo& malloc_info) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
+    void         cleanBlocksBeforeBlockCacheFree(const BlockIndicesType& blocks) const override;
 
     // Joint match across groups. Returns reuse_blocks decided by full groups + linear groups.
     int  reuseCache(const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource);

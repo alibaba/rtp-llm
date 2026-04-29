@@ -89,6 +89,7 @@ protected:
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info)                              = 0;
     virtual int          getNeedBlocks(const MallocInfo& malloc_info) const                                 = 0;
     virtual void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
+    virtual void         cleanBlocksBeforeBlockCacheFree(const BlockIndicesType& blocks) const {}
 
     CacheConfig                        config_;
     AllocationType                     allocation_type_;

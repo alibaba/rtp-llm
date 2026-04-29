@@ -4,6 +4,8 @@
 #include <vector>
 #include <cstdint>
 #include <unordered_map>
+#include <functional>
+#include <utility>
 
 #include <torch/torch.h>
 
@@ -23,13 +25,20 @@ struct NeedBlocksInfo {
 
 class KVCacheGroup {
 public:
-    KVCacheGroup(const LayerIdsType& layer_ids, KVCacheSpecPtr kvcache_spec, BlockPoolPtr block_pool, int group_id):
+    using BlockCacheFreeHook = std::function<void(const BlockIndicesType&)>;
+
+    KVCacheGroup(const LayerIdsType& layer_ids,
+                 KVCacheSpecPtr      kvcache_spec,
+                 BlockPoolPtr        block_pool,
+                 int                 group_id,
+                 BlockCacheFreeHook  block_cache_free_hook = nullptr):
         layer_ids_(layer_ids),
         kvcache_spec_(std::move(kvcache_spec)),
         block_pool_(block_pool),
         block_cache_(block_pool_->blockCache()),
         group_id_(group_id),
-        seq_size_per_block_(kvcache_spec_->seq_size_per_block) {}
+        seq_size_per_block_(kvcache_spec_->seq_size_per_block),
+        block_cache_free_hook_(std::move(block_cache_free_hook)) {}
 
     virtual ~KVCacheGroup() = default;
 
@@ -68,6 +77,7 @@ protected:
     int            group_id_ = 0;
 
     int                                    seq_size_per_block_;
+    BlockCacheFreeHook                     block_cache_free_hook_;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_scale_tensors;
     std::unordered_map<int, int>           global_layer_to_local_layer;

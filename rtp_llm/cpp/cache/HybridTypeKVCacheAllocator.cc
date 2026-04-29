@@ -33,15 +33,17 @@ bool HybridTypeKVCacheAllocator::doInit() {
     layer_to_group_id_ = config_.layer_to_group_id;
 
     for (int gid = 0; gid < group_nums; ++gid) {
-        KVCacheSpecPtr spec = config_.cache_specs[static_cast<size_t>(gid)];
-        const auto&    ids  = layer_groups[static_cast<size_t>(gid)];
+        KVCacheSpecPtr spec                  = config_.cache_specs[static_cast<size_t>(gid)];
+        const auto&    ids                   = layer_groups[static_cast<size_t>(gid)];
+        auto           block_cache_free_hook = [this](const BlockIndicesType& blocks) { zeroLinearGroupBytes(blocks); };
 
         KVCacheGroupPtr group;
         if (spec && spec->type == KVCacheSpecType::LinearAttention) {
-            group = std::make_shared<LinearKVCacheGroup>(ids, spec, block_pool_, gid, config_.linear_step);
+            group = std::make_shared<LinearKVCacheGroup>(
+                ids, spec, block_pool_, gid, config_.linear_step, block_cache_free_hook);
             linear_group_ids_.push_back(gid);
         } else {
-            group = std::make_shared<FullKVCacheGroup>(ids, spec, block_pool_, gid);
+            group = std::make_shared<FullKVCacheGroup>(ids, spec, block_pool_, gid, block_cache_free_hook);
             full_group_ids_.push_back(gid);
         }
 
@@ -94,12 +96,15 @@ void HybridTypeKVCacheAllocator::zeroLinearGroupBytes(const BlockIndicesType& bl
     // owns, so iterating all linear groups is correct (and idempotent across
     // groups because each owns disjoint global layer ids).
     for (int gid : linear_group_ids_) {
-        auto* linear_group =
-            dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
+        auto* linear_group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
         if (linear_group) {
             linear_group->zeroLinearWriteRegion(valid);
         }
     }
+}
+
+void HybridTypeKVCacheAllocator::cleanBlocksBeforeBlockCacheFree(const BlockIndicesType& blocks) const {
+    zeroLinearGroupBytes(blocks);
 }
 
 int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource) {
