@@ -150,17 +150,19 @@ def _prepare_cg_spec_decode_kernel(
     total_bm,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Spec-decode: seq_lens_out = prefix + q_len[0], block_id -> kv_offset.
+    """Spec-decode: seq_lens_out = prefix + q_len, block_id -> kv_offset.
 
-    Only q_len[0] is read because speculative decoding requires all requests
-    in the batch to share the same speculative query length.
+    Valid speculative requests in the batch share the same query length, but
+    CUDA-graph padding rows are zeroed independently in `q_len_ptr`. Read
+    per-row q_len so padding rows can stay fully masked out instead of
+    inheriting the first request's speculative length.
     """
     pid = tl.program_id(0)
     if pid == 0:
         offsets_n = tl.arange(0, BLOCK_SIZE)
         mask_n = offsets_n < N
-        q_len = tl.load(q_len_ptr)
-        prefix = tl.load(prefix_ptr + offsets_n, mask=mask_n)
+        q_len = tl.load(q_len_ptr + offsets_n, mask=mask_n, other=0)
+        prefix = tl.load(prefix_ptr + offsets_n, mask=mask_n, other=0)
         tl.store(seq_lens_out_ptr + offsets_n, prefix + q_len, mask=mask_n)
     _convert_block_id_to_kv_offset(
         pid,
