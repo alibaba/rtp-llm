@@ -1,4 +1,4 @@
-"""Unit tests for ``rtp_llm.dash_sc.dash_sc_grpc_access_log``.
+"""Unit tests for ``rtp_llm.dash_sc.access_log``.
 
 Covers the four stream-type code paths, content capture, status handling, and
 JSON line shape. Does not spin up a real gRPC server — builds ``RpcMethodHandler``
@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import grpc
 
-from rtp_llm.dash_sc.dash_sc_grpc_access_log import (
+from rtp_llm.dash_sc.access_log import (
     DASH_SC_GRPC_ACCESS_LOGGER_NAME,
     DashScGrpcAccessLogInterceptor,
     init_dash_sc_grpc_access_logger,
@@ -324,7 +324,7 @@ class BidiStreamTest(InterceptorTestBase):
     def test_bidi_empty_generated_ids_chunk_not_polluting(self) -> None:
         """Empty generated_ids chunk (shape=[1,0] with 4-byte filler) must not pollute the accumulator.
 
-        ``dash_sc_grpc_response_real._append_generated_ids_output`` writes
+        ``codec._append_generated_ids_output`` writes
         ``struct.pack("<i", 0)`` when the delta is empty (e.g., a finish-only
         chunk). Without shape-aware decoding this would become a bogus ``[0]``.
         """
