@@ -126,7 +126,7 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
     }
     for (auto& mm_feature : mm_features) {
         if (!mm_feature.is_cuda()) {
-            gathered_mm_features.emplace_back(mm_feature.to(torch::kCUDA));
+            gathered_mm_features.emplace_back(mm_feature.to(torch::kCUDA, /*non_blocking=*/true));
         } else {
             gathered_mm_features.emplace_back(mm_feature);
         }
@@ -188,7 +188,7 @@ torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor) {
     if (tensor.numel() == 0) {
         return torch::empty(tensor.sizes(), cuda_i32);
     }
-    return tensor.to(cuda_i32);
+    return tensor.to(cuda_i32, /*non_blocking=*/true);
 }
 
 void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input) {

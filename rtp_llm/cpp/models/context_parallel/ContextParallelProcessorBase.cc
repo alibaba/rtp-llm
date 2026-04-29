@@ -93,21 +93,22 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         input_length_ptr[num_decode_stream + p] = input_chunk_length;
     }
 
-    model_input.combo_tokens     = cp_split_input_tokens.to(torch::kCUDA);
-    model_input.input_lengths    = input_lengths.to(torch::kCUDA);
-    model_input.sequence_lengths = sequence_lengths.is_cuda() ? sequence_lengths : sequence_lengths.to(torch::kCUDA);
-    auto cp_padding_lengths      = prefill_cp_padding_lengths;
-    auto cp_chunk_lengths        = prefill_cp_chunk_lengths;
-    auto shuffle_indices         = prefill_shuffle_indices;
+    model_input.combo_tokens  = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);
+    model_input.input_lengths = input_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+    model_input.sequence_lengths =
+        sequence_lengths.is_cuda() ? sequence_lengths : sequence_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+    auto cp_padding_lengths = prefill_cp_padding_lengths;
+    auto cp_chunk_lengths   = prefill_cp_chunk_lengths;
+    auto shuffle_indices    = prefill_shuffle_indices;
 
     auto qkv_restore_indice = generateQKVRestoreIndices(cp_chunk_lengths, prefill_cp_size);
     auto qkv_padding_mask   = generateQKVPaddingMask(cp_chunk_lengths, cp_padding_lengths, prefill_cp_size);
 
-    cp_params.prefill_cp_padding_lengths       = cp_padding_lengths.cuda();
-    cp_params.prefill_cp_chunk_lengths         = cp_chunk_lengths.cuda();
-    cp_params.prefill_shuffle_indices          = shuffle_indices.cuda();
-    cp_params.prefill_qkv_restore_indice       = qkv_restore_indice.cuda();
-    cp_params.prefill_qkv_padding_mask         = qkv_padding_mask.cuda();
+    cp_params.prefill_cp_padding_lengths       = cp_padding_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+    cp_params.prefill_cp_chunk_lengths         = cp_chunk_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+    cp_params.prefill_shuffle_indices          = shuffle_indices.to(torch::kCUDA, /*non_blocking=*/true);
+    cp_params.prefill_qkv_restore_indice       = qkv_restore_indice.to(torch::kCUDA, /*non_blocking=*/true);
+    cp_params.prefill_qkv_padding_mask         = qkv_padding_mask.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_actual_input_lengths_cpu = input_lengths_cpu_tensor;
 #endif
 }

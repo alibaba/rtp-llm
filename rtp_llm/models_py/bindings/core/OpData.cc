@@ -44,6 +44,9 @@ std::string GptModelInputs::debugString(bool force) const {
                  << "trace_ids: " << combineStrings(trace_ids) << ", combo_tokens: " << tb(combo_tokens)
                  << ", input_lengths: " << tb(input_lengths) << ", sequence_lengths: " << tb(sequence_lengths)
                  << ", prefix_lengths: " << tb(prefix_lengths);
+    if (sequence_lengths_plus_1.defined()) {
+        debug_string << ", sequence_lengths_plus_1: " << tb(sequence_lengths_plus_1);
+    }
     if (combo_position_ids.defined()) {
         debug_string << ", combo_position_ids: " << tb(combo_position_ids);
     }

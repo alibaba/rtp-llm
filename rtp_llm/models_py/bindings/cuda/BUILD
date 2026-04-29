@@ -171,6 +171,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
+        "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_ep_util",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache",
         "//rtp_llm/models_py/bindings/cuda/kernels:fast_topk",

@@ -100,7 +100,7 @@ torch::Tensor toCudaInt32ModelInput(const torch::Tensor& tensor) {
     if (tensor.numel() == 0) {
         return torch::empty(tensor.sizes(), options);
     }
-    return tensor.to(options);
+    return tensor.to(options, /*non_blocking=*/true);
 }
 }  // namespace
 

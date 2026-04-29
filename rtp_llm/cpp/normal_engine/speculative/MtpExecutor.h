@@ -36,6 +36,7 @@ public:
         tensor_holder_.push_back(model_input.sequence_lengths);
         tensor_holder_.push_back(model_input.lm_output_indexes);
         tensor_holder_.push_back(model_input.prefix_lengths);
+        tensor_holder_.push_back(model_input.sequence_lengths_plus_1);
     }
 
     void release() {

@@ -418,12 +418,30 @@ def _register_process_groups_to_cpp():
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             return
-        device_id = torch.cuda.current_device()
-        rank = pg.rank()
         world_size = pg.size()
+        device_id: Optional[int] = None
+        rank = pg.rank() if inplace else 0
         for i, recv_buf in enumerate(recv_buffers):
-            data_num = recv_buf.numel() // world_size
             recv_on_cpu = not recv_buf.is_cuda
+            data_num = recv_buf.numel() // world_size
+            if not inplace:
+                send_tensor = send_buffers[i]
+                if (
+                    not recv_on_cpu
+                    and send_tensor.is_cuda
+                    and recv_buf.is_contiguous()
+                    and send_tensor.is_contiguous()
+                ):
+                    # Fast path for C++ explicit-send allgather: keep the 2D
+                    # output shape so c10d can launch directly without local
+                    # rank-slice packing or Python-side CUDA promotion.
+                    torch.distributed.all_gather_into_tensor(
+                        recv_buf, send_tensor, group=pg
+                    )
+                    continue
+
+            if device_id is None:
+                device_id = torch.cuda.current_device()
             gpu_recv = (
                 recv_buf.to(torch.device("cuda", device_id))
                 if recv_on_cpu
@@ -435,8 +453,7 @@ def _register_process_groups_to_cpp():
                     0, rank * data_num, data_num
                 ).contiguous()
             else:
-                send_t = send_buffers[i]
-                send_tensor, _ = _ensure_cuda(send_t, device_id)
+                send_tensor, _ = _ensure_cuda(send_tensor, device_id)
             torch.distributed.all_gather_into_tensor(
                 gpu_recv_flat, send_tensor, group=pg
             )
