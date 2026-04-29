@@ -14,7 +14,7 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
         return nullptr;
     }
 
-    // 过滤掉与 combo_token_size 不一致的 banned combo（保持鲁棒性）
+    // 过滤掉与 combo_token_size 不一致的 banned combo(保持鲁棒性)
     std::set<std::vector<int>> banned_combos;
     for (const auto& combo : config->banned_combo_token_ids) {
         if ((int32_t)combo.size() == config->combo_token_size) {
@@ -23,6 +23,8 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
     }
 
     const bool is_beam_search = config->hasNumBeams() || config->num_return_sequences > 1;
+    // 若为空,think_done 初始为 true,Processor 行为等同历史版本(从首个 token 起累 combo)。
+    const std::vector<int>& end_think_token_ids = config->end_think_token_ids;
 
     auto processor_ptr = std::make_shared<RecommendationLogitsProcessor>();
     for (int32_t i = 0; i < num; ++i) {
@@ -30,7 +32,8 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
                                       generate_input->inputLength(),
                                       /*current_output_length=*/0,
                                       is_beam_search,
-                                      banned_combos);
+                                      banned_combos,
+                                      end_think_token_ids);
         processor_ptr->infos_.push_back(std::move(info));
     }
     return processor_ptr;
@@ -58,7 +61,7 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
     auto         logits     = inputs.logits.narrow(0, start_idx, batch_size);
     const size_t vocab_size = logits.size(1);
 
-    // 黑名单掩码：全 0，仅命中的位置为 1
+    // 黑名单掩码:全 0,仅命中的位置为 1
     auto mask_cpu = torch::zeros({(int64_t)batch_size, (int64_t)vocab_size}, torch::kUInt8);
     auto mask_ptr = mask_cpu.data_ptr<uint8_t>();
 
@@ -69,7 +72,7 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
             continue;
         }
         const int combo_last_idx = info.combo_token_size - 1;
-        // 对所有前 n-1 个 token 等于 current_prefix 的 banned combo，屏蔽其最后一位
+        // 对所有前 n-1 个 token 等于 current_prefix 的 banned combo,屏蔽其最后一位
         for (const auto& combo : info.banned_combos) {
             RTP_LLM_CHECK((int32_t)combo.size() == info.combo_token_size);
             bool prefix_match = true;
@@ -113,12 +116,27 @@ void RecommendationLogitsProcessor::advanceOneToken(StreamRecommendationInfo& in
         return;
     }
 
+    // 未完成 think prelude 跳过时,本 token 只用于推进 DFA,不进 combo 前缀。
+    // 遇到不匹配立即复位 match_pos,允许下一个 token 重新起算。
+    if (!info.think_done) {
+        if (info.end_think_match_pos < info.end_think_token_ids.size()
+            && token_id == info.end_think_token_ids[info.end_think_match_pos]) {
+            info.end_think_match_pos += 1;
+            if (info.end_think_match_pos >= info.end_think_token_ids.size()) {
+                info.think_done = true;
+            }
+        } else {
+            info.end_think_match_pos = 0;
+        }
+        return;
+    }
+
     if (info.pos_in_combo < info.combo_token_size - 1) {
-        // combo 未结束：追加到前缀
+        // combo 未结束:追加到前缀
         info.current_prefix.push_back(token_id);
         info.pos_in_combo += 1;
     } else {
-        // 本次 token 即 combo 的最后一位：形成完整 combo 并加入去重集合
+        // 本次 token 即 combo 的最后一位:形成完整 combo 并加入去重集合
         std::vector<int> full_combo = info.current_prefix;
         full_combo.push_back(token_id);
         info.banned_combos.insert(std::move(full_combo));
