@@ -90,10 +90,13 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache",
         "//rtp_llm/models_py/bindings/rocm/kernels:rocm_atrex_pa",
+        "//rtp_llm/models_py/bindings/rocm/kernels:rocm_trtllm_allreduce_fusion",
+        "//rtp_llm/models_py/bindings/rocm/kernels:rocm_ds_v4_compress",
+        "//rtp_llm/models_py/bindings/rocm/kernels:rocm_ds_v4_topk512",
+        "//rtp_llm/models_py/bindings/rocm/kernels:rocm_ds_v4_store_cache",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
-        "//rtp_llm/models_py/bindings/rocm/kernels:rocm_trtllm_allreduce_fusion",
     ],
 )
 
@@ -102,11 +105,15 @@ cc_library(
     name = "rocm_bindings_base",
     hdrs = [
         "RegisterBaseBindings.hpp",
+        "DeepSeekV4Ops.h",
     ],
     copts = copts(),
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":rocm_bindings",
+        "//rtp_llm/models_py/bindings/rocm/kernels:rocm_ds_v4_compress",
+        "//rtp_llm/models_py/bindings/rocm/kernels:rocm_ds_v4_topk512",
+        "//rtp_llm/models_py/bindings/rocm/kernels:rocm_ds_v4_store_cache",
     ],
     visibility = ["//visibility:public"],
     alwayslink = 1,

@@ -71,7 +71,37 @@ cc_library(
         ":rocm_basic",
         "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
         ":rocm_rope_kvcache",
+        ":rocm_ds_v4_compress",
+        ":rocm_ds_v4_topk512",
+        ":rocm_ds_v4_store_cache",
     ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "rocm_ds_v4_compress",
+    srcs = ["ds_v4_compress_kernel.cu"],
+    hdrs = ["ds_v4_compress_kernel.h"],
+    deps = rocm_deps,
+    copts = rocm_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "rocm_ds_v4_topk512",
+    srcs = ["ds_v4_topk512_kernel.cu"],
+    hdrs = ["ds_v4_topk512_kernel.h"],
+    deps = rocm_deps,
+    copts = rocm_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "rocm_ds_v4_store_cache",
+    srcs = ["ds_v4_store_cache_kernel.cu"],
+    hdrs = ["ds_v4_store_cache_kernel.h"],
+    deps = rocm_deps,
+    copts = rocm_copts(),
     visibility = ["//visibility:public"],
 )
 

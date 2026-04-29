@@ -7,6 +7,7 @@
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
 #include "rtp_llm/models_py/bindings/rocm/TrtllmAllReduceFusion.h"
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
+#include "rtp_llm/models_py/bindings/rocm/DeepSeekV4Ops.h"
 namespace py = pybind11;
 
 namespace rtp_llm {
@@ -107,8 +108,10 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
 
 void registerBaseRocmBindings(py::module& rtp_ops_m) {
     registerBasicRocmOps(rtp_ops_m);
+    registerDeepSeekV4Ops(rtp_ops_m);
     // RtpProcessGroup is deprecated, use rtp_llm.distribute.collective_torch instead
     // registerRtpProcessGroup(rtp_ops_m);
 }
 
 }  // namespace rtp_llm
+ 
