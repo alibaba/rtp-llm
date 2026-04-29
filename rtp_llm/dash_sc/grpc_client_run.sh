@@ -73,7 +73,7 @@ run_once() {
   local idx="$1"
   # 单数组 + 条件 +=，避免 set -u 下空数组 "${seed_args[@]}" 报 unbound
   local -a cmd=(
-    "$PYTHON" -m rtp_llm.dash_sc.dash_sc_grpc_client
+    "$PYTHON" -m rtp_llm.dash_sc.client
     --grpc_addr "$GRPC_ADDR"
     --ckpt_path "$CKPT_PATH"
     --model_type "$MODEL_TYPE"

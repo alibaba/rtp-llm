@@ -14,12 +14,13 @@ from smoke.common_def import QueryStatus, SmokeException
 from smoke.normal_comparer import NormalComparer, QueryInfo
 from smoke.utils import no_compare, save_response
 
-from rtp_llm.dash_sc.dash_sc_grpc_client import (
-    _decode_finish_reason,
-    dash_sc_grpc_client_channel_options,
+from rtp_llm.dash_sc import (
+    OtherParams,
+    SamplingParams,
     build_model_infer_request,
+    dash_sc_grpc_client_channel_options,
+    decode_finish_reason,
 )
-from rtp_llm.dash_sc.dash_sc_grpc_request import OtherParams, SamplingParams
 from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import ServerConfig
@@ -90,7 +91,7 @@ def _parse_infer_chunk(
             n = len(raw) // 4
             generated = list(struct.unpack("<%di" % n, raw))
         elif name == "finish_reason":
-            finish = _decode_finish_reason(out, raw)
+            finish = decode_finish_reason(out, raw)
         elif name == "prompt_token_num" and out.datatype == "INT32" and len(raw) >= 4:
             ptn = struct.unpack("<i", raw[:4])[0]
         elif (

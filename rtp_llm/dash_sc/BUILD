@@ -16,17 +16,13 @@ py_library(
     name = "dash_sc_grpc_server",
     srcs = [
         "__init__.py",
-        "dash_sc_app.py",
-        "dash_sc_grpc_access_log.py",
-        "dash_sc_grpc_enqueue_loop.py",
-        "dash_sc_grpc_request.py",
-        "dash_sc_grpc_response_fake.py",
-        "dash_sc_grpc_response_real.py",
-        "dash_sc_grpc_real_infer.py",
-        "dash_sc_grpc_service.py",
-        "dash_sc_grpc_pure_forward_service.py",
-        "dash_sc_grpc_server.py",
-        "dash_sc_grpc_client.py",
+        "access_log.py",
+        "app.py",
+        "client.py",
+        "codec.py",
+        "forward_service.py",
+        "server.py",
+        "service.py",
     ],
     data = [":grpc_client_scripts"],
     visibility = ["//visibility:public"],
@@ -39,32 +35,32 @@ py_library(
 )
 
 py_test(
-    name = "dash_sc_grpc_request_test",
-    srcs = ["test/dash_sc_grpc_request_test.py"],
+    name = "codec_test",
+    srcs = ["test/codec_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},
 )
 
 py_test(
-    name = "dash_sc_grpc_response_server_test",
-    srcs = ["test/dash_sc_grpc_response_server_test.py"],
+    name = "service_test",
+    srcs = ["test/service_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},
 )
 
 py_test(
-    name = "dash_sc_grpc_pure_forward_service_test",
-    srcs = ["test/dash_sc_grpc_pure_forward_service_test.py"],
+    name = "forward_service_test",
+    srcs = ["test/forward_service_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},
 )
 
 py_test(
-    name = "dash_sc_grpc_access_log_test",
-    srcs = ["test/dash_sc_grpc_access_log_test.py"],
+    name = "access_log_test",
+    srcs = ["test/access_log_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},
