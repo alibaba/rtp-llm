@@ -232,8 +232,11 @@ def dequantize_v4_kv_slot(
     """
     assert slot_view.dtype == torch.uint8 and slot_view.shape == (ENTRY_BYTES,)
 
-    # NoPE: 7 tiles
-    nope_out = torch.empty(NOPE_DIM, dtype=torch.bfloat16)
+    # NoPE: 7 tiles. Match the input device — slot_view comes from kv_cache_fp8
+    # which is on the model's CUDA device; allocating ``nope_out`` on the
+    # default (CPU) device caused ``torch.cat([nope_out, rope_out])`` to fail
+    # because rope_out (a view of slot_view) is on CUDA.
+    nope_out = torch.empty(NOPE_DIM, dtype=torch.bfloat16, device=slot_view.device)
     scale_bytes = slot_view[NOPE_BYTES + ROPE_BYTES :]  # [8] uint8
     for tile_idx in range(NOPE_TILES):
         scale = _ue8m0_byte_to_scale(int(scale_bytes[tile_idx].item()))

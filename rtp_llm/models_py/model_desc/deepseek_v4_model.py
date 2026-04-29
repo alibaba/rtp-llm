@@ -55,20 +55,28 @@ class _RequestSlotAllocator:
         self.num_slots = int(num_slots)
         self._block_to_slot: Dict[int, int] = {}
         self._lru: List[int] = []  # block_ids, MRU at the end
+        # Free-slot pool. Tracks which slot indices in [0, num_slots) are
+        # currently NOT mapped to a block_id. Picking the next slot via
+        # ``len(self._block_to_slot)`` was a latent collision bug: after
+        # freeing a low slot and adding a new mapping, ``len(dict)`` could
+        # wrap to point at an already-occupied high slot, silently mapping
+        # two block_ids to the same row.
+        self._free_slots: List[int] = list(range(self.num_slots))
 
     def _free_slot(self, bid: int) -> None:
         """Drop the mapping for ``bid`` so its slot is available for reuse.
         Caller is responsible for re-allocating + bookkeeping."""
         if bid in self._block_to_slot:
-            self._block_to_slot.pop(bid)
+            slot = self._block_to_slot.pop(bid)
             try:
                 self._lru.remove(bid)
             except ValueError:
                 pass
+            self._free_slots.append(slot)
 
     def _allocate_new_slot(self, bid: int, active: set) -> int:
-        if len(self._block_to_slot) < self.num_slots:
-            slot = len(self._block_to_slot)
+        if self._free_slots:
+            slot = self._free_slots.pop(0)
         else:
             # Evict LRU row that's NOT in the current batch.
             evict_bid: Optional[int] = None
@@ -339,9 +347,25 @@ def _extract_first_block_ids(attn_inputs) -> List[int]:
     Returns ``[]`` if the tensor isn't usable (warmup probe, no real
     request) — callers must treat this as "stash management not applicable".
     """
-    t = getattr(attn_inputs, "kv_cache_block_id_host", None)
+    # PRIORITY: kv_cache_kernel_block_id_host — this is the field the C++
+    # side refreshes every CUDA-graph replay (cuda_graph_runner.cc:219
+    # ``stridedCopyHost``). The physical ``kv_cache_block_id_host`` is
+    # bound at capture time and NEVER refreshed during replay (cache-store
+    # ops run outside the captured graph; see cuda_graph_runner.cc:81),
+    # so reading it during replay returns the CAPTURE-TIME first request's
+    # block_ids — which is exactly the cross-request KV leakage symptom we
+    # were seeing (request A's prefill captures block_id=N → every replay
+    # routes to slot N regardless of which request is actually running).
+    # The kernel block_id table has the same ``[batch, blocks_per_seq]``
+    # shape and is just as stable per request.
+    t = getattr(attn_inputs, "kv_cache_kernel_block_id_host", None)
     if t is None or t.numel() == 0:
-        return []
+        # Eager path doesn't always populate the kernel field (PyWrappedModel
+        # only sets it when the engine binds a real KV cache; warmup probes
+        # often don't). Fall back to the physical block_id table.
+        t = getattr(attn_inputs, "kv_cache_block_id_host", None)
+        if t is None or t.numel() == 0:
+            return []
     if t.dim() == 3:
         # [layers, batch_size, max_blocks_per_seq] — collapse the layer
         # dim by taking layer 0 (per-request first-block-id is shared
@@ -738,7 +762,7 @@ class DeepSeekV4Model(GptModelBase):
                 self._stash_num_slots,
             )
             if os.environ.get("DSV4_LOG_STASH", "0") == "1":
-                for nm, b, s in self._stash._buffers[:10]:
+                for nm, b, s, _init in self._stash._buffers[:10]:
                     logging.info(
                         "[DSv4 stash buffer] %s shape=%s dtype=%s",
                         nm,
@@ -782,9 +806,24 @@ class DeepSeekV4Model(GptModelBase):
         if self._stash is None or self._slot_alloc is None:
             return 0
         block_ids = _extract_first_block_ids(attn_inputs)
-        if not block_ids:
-            return 0
         is_prefill = bool(getattr(attn_inputs, "is_prefill", False))
+        if not block_ids:
+            if os.environ.get("DSV4_LOG_STASH", "0") == "1":
+                t = getattr(attn_inputs, "kv_cache_block_id_host", None)
+                k = getattr(attn_inputs, "kv_cache_kernel_block_id_host", None)
+                shape = tuple(t.shape) if t is not None else None
+                kshape = tuple(k.shape) if k is not None else None
+                logging.info(
+                    "[DSv4 stash] EARLY-RETURN is_prefill=%s "
+                    "kv_cache_block_id_host shape=%s numel=%s "
+                    "kv_cache_kernel_block_id_host shape=%s numel=%s",
+                    is_prefill,
+                    shape,
+                    None if t is None else t.numel(),
+                    kshape,
+                    None if k is None else k.numel(),
+                )
+            return 0
         slots, slots_needing_reset = self._slot_alloc.get_slots(
             block_ids,
             is_prefill=is_prefill,
@@ -1090,6 +1129,23 @@ class DeepSeekV4Model(GptModelBase):
             prefill_bsz = self._update_slot_indices_for_batch(attn)
         if self._stash is not None and prefill_bsz > 0:
             self._stash.reset_batch_rows(prefill_bsz)
+        # Multi-request bundled prefill is a known correctness gap: the
+        # bridge code below does ``input_ids.unsqueeze(0)`` and V4Transformer
+        # treats the result as B=1 with seqlen=T_total — every request's KV
+        # state writes into row 0 of every per-batch-row buffer, then the
+        # stash scatter saves only row 0 back to the FIRST request's slot,
+        # leaving every other request's slot uninitialized. Their decodes
+        # then read garbage. Until V4 prefill is rewritten to honor
+        # cu_seqlens, log loudly so smoke runs surface this immediately.
+        if prefill_bsz > 1:
+            logging.warning(
+                "[DeepSeekV4Model] BUNDLED PREFILL prefill_bsz=%d — V4Transformer "
+                "treats this as a single B=1 prefill, mixing all requests' KV into "
+                "row 0; only request 0's stash slot will hold valid KV.  Set the "
+                "scheduler's ``--max_batch_tokens_size`` low enough that one prompt "
+                "fills the budget if you need correct multi-request decode.",
+                prefill_bsz,
+            )
 
         if should_capture:
             try:
