@@ -190,7 +190,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_                 = py_instance;
     auto py_initialize_method = py_model_.attr("initialize");
-    py_init_result            = py_initialize_method(init_resources);
+    try {
+        py_init_result = py_initialize_method(init_resources);
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
+        throw;
+    }
     if (enable_cuda_graph_) {
 #if USING_CUDA || USING_ROCM
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
@@ -264,7 +269,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
-        py_init_result            = py_initialize_method(init_resources);
+        try {
+            py_init_result = py_initialize_method(init_resources);
+        } catch (const py::error_already_set& e) {
+            RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
+            throw;
+        }
         graph_runner_->initCapture();
     }
 

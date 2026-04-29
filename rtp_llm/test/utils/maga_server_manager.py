@@ -80,12 +80,12 @@ class MagaServerManager(object):
 
     @property
     def server_proc_status(self) -> Optional[str]:
-        """Pre-captured /proc/<pid>/status snapshot for diagnostics.
+        """Read /proc/<pid>/status for the server process.
 
-        Returns None when no snapshot is available (e.g. the server process
-        has already been reaped or its /proc entry is unreadable). Callers
-        such as smoke gpu_diagnostics.dump_gpu_state will fall back to
-        reading /proc/<server_pid>/status live when this is None.
+        Returns the contents while the process is still visible in /proc,
+        or None if no server process or its /proc entry is unreadable.
+        Callers such as smoke gpu_diagnostics.dump_gpu_state will fall back
+        to reading /proc/<server_pid>/status live when this is None.
         """
         pid = self.server_pid
         if pid is None:
@@ -111,7 +111,11 @@ class MagaServerManager(object):
             if rc is not None:
                 if rc < 0:
                     sig = -rc
-                    sig_name = signal_mod.Signals(sig).name if sig in signal_mod.Signals._value2member_map_ else f"signal {sig}"
+                    sig_name = (
+                        signal_mod.Signals(sig).name
+                        if sig in signal_mod.Signals._value2member_map_
+                        else f"signal {sig}"
+                    )
                     logging.warning(
                         f"Server process pid={self._server_process.pid} killed by {sig_name} (exit code {rc})"
                     )
@@ -308,7 +312,10 @@ class MagaServerManager(object):
                         all_lines = f.readlines()
                         content = "".join(all_lines[-max_lines:])
                         if len(all_lines) > max_lines:
-                            content = f"... ({len(all_lines) - max_lines} lines truncated)\n" + content
+                            content = (
+                                f"... ({len(all_lines) - max_lines} lines truncated)\n"
+                                + content
+                            )
                     else:
                         content = f.read()
                 if content:

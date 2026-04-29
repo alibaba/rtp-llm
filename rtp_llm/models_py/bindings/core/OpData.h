@@ -190,6 +190,13 @@ struct CacheStoreInputs {
 
     int layer_id = 0;
 
+    // Per-pool override for hybrid caches like DSV4 where one layer touches
+    // multiple groups. -1 means "look up via kv_cache_layer_to_group_host";
+    // any non-negative value is used directly for both the offset table
+    // selection (when host_kv_cache_offset is 3D) and the "_g{gid}" key
+    // suffix.
+    int32_t group_id_override = -1;
+
     // Pre-created event from the main thread to avoid cudaEventRecord
     // contention on background threads. nullptr means writeCacheStore will
     // create an event on the spot (single-threaded / C++ path).
