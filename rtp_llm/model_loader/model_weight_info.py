@@ -429,7 +429,13 @@ class ModelDeployWeightInfo:
                     attn_q_weight_info = weight.weights[0]
                     break
 
-            assert attn_q_weight_info is not None
+            if attn_q_weight_info is None:
+                # Models with non-standard attention layouts (e.g. DSv4's MQA
+                # path that doesn't expose ``attn_qkv_w``) won't have a weight
+                # to seed the reciprocal off — skip those layers.  The FP8 KV
+                # decode path on DSv4 supplies its own quant constants via
+                # ``Attention.enable_fp8_kv_cache``.
+                continue
             weights.append(
                 AtomicWeight(
                     W.attention_output_static_quant_reciprocal,

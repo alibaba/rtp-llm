@@ -144,4 +144,17 @@ class DSv4DecodeFmhaImpl:
         accidental buffer reallocation surfaces as an immediate error
         rather than a silent correctness bug (a captured graph still
         holds the old pointer and would compute on stale values)."""
+        import os
+
+        if os.environ.get("DSV4_LOG_STASH", "0") == "1":
+            import logging
+
+            seq = getattr(attn_inputs, "sequence_lengths", None)
+            blk = getattr(attn_inputs, "kv_cache_block_id_host", None)
+            logging.info(
+                "[DSv4DecodeFmhaImpl.prepare_cuda_graph] called: "
+                "seq_lens.shape=%s blk_host.shape=%s",
+                None if seq is None else tuple(seq.shape),
+                None if blk is None else tuple(blk.shape),
+            )
         self.prepare(attn_inputs, forbid_realloc=True)

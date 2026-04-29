@@ -149,9 +149,9 @@ class SparseAttnV4DecodeFp8Op:
         )
 
         B, q_len, H, D = q.shape
-        # Flatten (B, q_len) → [T, H, D] for FlashMLA (per-request layout).
-        T = B * q_len
-        q_batched = q.reshape(T, H, D)
+        # FlashMLA expects 4D q ``(batch_size, seq_len_q, num_heads_q, head_dim)``
+        # and 3D indices ``(batch_size, seq_len_q, topk)`` per the installed
+        # wheel's ``flash_mla_interface.flash_mla_with_kvcache`` docstring.
 
         # block_table[r, 0] = r: each request r uses FP8 block r (one block per request).
         if block_table is None:
@@ -170,18 +170,19 @@ class SparseAttnV4DecodeFp8Op:
         # FlashMLA FP8 kernel requires 4D k_cache: [num_blocks, block_size, num_heads_k=1, kv_dim].
         kv_4d = kv_cache.unsqueeze(-2)  # [B, block_size, 1, 584]
 
-        # topk_idxs: [B, q_len, topk] or [B, q_len, 1, topk] → reshape to [T, 1, topk].
+        # topk_idxs: [B, q_len, topk] preferred; collapse a stray num_heads_k axis if present.
         if topk_idxs.dim() == 4:
-            topk_flat = topk_idxs.reshape(T, 1, -1)
+            # [B, q_len, num_heads_k=1, topk] → [B, q_len, topk]
+            topk_3d = topk_idxs.squeeze(2).contiguous()
         else:
-            topk_flat = topk_idxs.reshape(T, 1, -1)
+            topk_3d = topk_idxs.contiguous()
+        topk = topk_3d.shape[-1]
 
         # get_mla_metadata is a no-op stub that returns empty scheduler structures;
         # calling it inline is graph-safe (no stream sync, no alloc).
-        topk = topk_flat.shape[-1]
         tile_scheduler_metadata, num_splits = get_mla_metadata(
             cache_seqlens=None,
-            num_q_tokens_per_head_k=T * H,
+            num_q_tokens_per_head_k=B * q_len * H,
             topk=topk,
             num_heads_q=H,
             num_heads_k=1,
@@ -189,7 +190,7 @@ class SparseAttnV4DecodeFp8Op:
         )
 
         attn_out, _ = flash_mla_with_kvcache(
-            q=q_batched,
+            q=q,
             k_cache=kv_4d,
             block_table=block_table,
             head_dim_v=self.head_dim,
@@ -197,7 +198,7 @@ class SparseAttnV4DecodeFp8Op:
             tile_scheduler_metadata=tile_scheduler_metadata,
             num_splits=num_splits,
             is_fp8_kvcache=True,
-            indices=topk_flat,
+            indices=topk_3d,
             softmax_scale=self.softmax_scale,
         )
         # V4-Flash attn_sink is zero; non-zero case is unsupported by FlashMLA native path.
