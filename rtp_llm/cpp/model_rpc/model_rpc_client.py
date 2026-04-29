@@ -156,6 +156,14 @@ def trans_input(input_py: GenerateInput):
         stop_words = generate_config_pb.stop_words_list.rows.add()
         stop_words.values.extend(input_py.generate_config.stop_words_list[i])
 
+    # 生成式推荐：组合 token 约束
+    generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
+    for i in range(len(input_py.generate_config.banned_combo_token_ids)):
+        banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
+        banned_combo.values.extend(
+            input_py.generate_config.banned_combo_token_ids[i]
+        )
+
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
         role_addr_pb.role = trans_role_type(role_addr.role)

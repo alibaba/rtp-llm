@@ -1,1 +1,3 @@
-../../../../../../../test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/m6/global_step200/global_step200/mp_rank_00_model_states.pt
+version https://git-lfs.github.com/spec/v1
+oid sha256:42e7d351db977481999f44a79c28255bc19fc076a1eb260dd6756b32a85c0ac0
+size 146

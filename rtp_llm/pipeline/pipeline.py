@@ -8,6 +8,7 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
@@ -188,6 +189,10 @@ class Pipeline(object):
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "expect string prompt, actual: " + str(prompt),
             )
+        # 生成式推荐：由开关控制，默认关闭、对非推荐场景零侵入。
+        # 在 tokenizer.encode(prompt) 之前解析及填充 banned_combo_token_ids，
+        # 避免重复编码 prompt。
+        parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
         token_ids = self.tokenizer.encode(prompt)
 
         if generate_config.sp_advice_prompt != "":

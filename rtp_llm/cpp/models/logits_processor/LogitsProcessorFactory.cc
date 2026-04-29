@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/RecommendationLogitsProcessor.h"
 
 namespace rtp_llm {
 
@@ -25,6 +26,12 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
     auto tree_processor = TreeLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);
     if (tree_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(tree_processor));
+    }
+
+    // 生成式推荐：combo 粒度去重 + 曝光过滤
+    auto rec_processor = RecommendationLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);
+    if (rec_processor != nullptr) {
+        result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(rec_processor));
     }
 
     auto multi_seq_processor = MultiSeqLogitsProcessor::fromGenerateInput(generate_input, eos_token_id);
