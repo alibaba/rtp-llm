@@ -221,8 +221,14 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         inputs.push_back(input);
     }
 
+    // batchEnqueue contract: returned vector is 1:1 with `inputs` (same size, same order).
+    // Streams that failed checkInputLength carry an error reported via reportError() and surface
+    // it through collectStreamOutput → nextOutput → ErrorInfo path below.
     auto streams = engine_->batchEnqueue(inputs);
 
+    // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
+    // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
+    // mixed-length batches.
     for (int i = 0; i < (int)streams.size(); i++) {
         auto* result = response->add_results();
 

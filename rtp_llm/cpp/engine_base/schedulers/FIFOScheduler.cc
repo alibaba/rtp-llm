@@ -98,10 +98,14 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
 
 std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const vector<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_FUNCTION();
+    // Preserve 1:1 correspondence with the caller's input vector: failing streams are still
+    // returned (already marked errored by checkInputLength via reportError) but only valid ones
+    // enter the waiting queue.
     std::vector<std::shared_ptr<GenerateStream>> stream_enqueued;
-    for (auto it = streams.begin(); it != streams.end(); ++it) {
-        if (checkInputLength((*it))) {
-            stream_enqueued.emplace_back((*it));
+    stream_enqueued.reserve(streams.size());
+    for (const auto& stream : streams) {
+        if (checkInputLength(stream)) {
+            stream_enqueued.emplace_back(stream);
         }
     }
     {
@@ -110,7 +114,7 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
         schedule_trigger_ = true;
     }
     cond_.notify_all();
-    return stream_enqueued;
+    return streams;
 }
 
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,

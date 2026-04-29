@@ -9,7 +9,7 @@ overlays target_tpot + best_bs annotations when present.
 import json
 import logging
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # (label, batch_size, tpot_ms)
 DataPoint = Tuple[str, int, float]
