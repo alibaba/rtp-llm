@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/models/logits_processor/RecommendationLogitsProcessor.h"
 
+#include <limits>
+#include <vector>
+
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -61,11 +64,9 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
     auto         logits     = inputs.logits.narrow(0, start_idx, batch_size);
     const size_t vocab_size = logits.size(1);
 
-    // 黑名单掩码:全 0,仅命中的位置为 1
-    auto mask_cpu = torch::zeros({(int64_t)batch_size, (int64_t)vocab_size}, torch::kUInt8);
-    auto mask_ptr = mask_cpu.data_ptr<uint8_t>();
-
-    bool any_masked = false;
+    // 只收集要屏蔽的 (row, col) 坐标,避开按 batch*vocab 分配 mask 张量与 H2D 拷贝的热路径开销。
+    std::vector<int64_t> rows;
+    std::vector<int64_t> cols;
     for (size_t i = 0; i < batch_size; ++i) {
         auto& info = infos_[i];
         if (info.combo_token_size <= 0 || info.pos_in_combo != info.combo_token_size - 1) {
@@ -87,18 +88,20 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
             }
             const int banned_token = combo[combo_last_idx];
             if (banned_token >= 0 && (size_t)banned_token < vocab_size) {
-                mask_ptr[i * vocab_size + banned_token] = 1;
-                any_masked                              = true;
+                rows.push_back(static_cast<int64_t>(i));
+                cols.push_back(static_cast<int64_t>(banned_token));
             }
         }
     }
 
-    if (!any_masked) {
+    if (rows.empty()) {
         return;
     }
 
-    auto mask = mask_cpu.to(logits.device());
-    maskLogits(logits, mask);
+    // 直接在 logits 上按坐标批量写 -inf,按命中数量分摊 H2D 拷贝,体积 O(K) 远小于 O(B*V)。
+    auto rows_t = torch::tensor(rows, torch::kLong).to(logits.device());
+    auto cols_t = torch::tensor(cols, torch::kLong).to(logits.device());
+    logits.index_put_({rows_t, cols_t}, -std::numeric_limits<float>::infinity());
 }
 
 void RecommendationLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
@@ -147,6 +150,8 @@ void RecommendationLogitsProcessor::advanceOneToken(StreamRecommendationInfo& in
 
 void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
     RTP_LLM_CHECK(2 == new_tokens.dim());
+    // 明确 sampler 输出契约:仅接受 int32,避免 dtype 变动后 data_ptr<int>() 静默读错字节。
+    RTP_LLM_CHECK(new_tokens.scalar_type() == torch::kInt32);
     RTP_LLM_CHECK(size() == (size_t)new_tokens.size(0));
 
     for (size_t i = 0; i < size(); ++i) {
