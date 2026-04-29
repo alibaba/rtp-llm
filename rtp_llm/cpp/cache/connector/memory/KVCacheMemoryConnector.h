@@ -102,15 +102,13 @@ private:
                                   std::vector<torch::Tensor>& dst,
                                   std::vector<torch::Tensor>& src);
 
-    void                         checkLayerBlockStrideBytes() const;
-    std::vector<LayerRegionSlot> layerRegionSlots() const;
-    bool                         hasTypedLayerRegionSlots(const std::vector<LayerRegionSlot>& slots) const;
-    bool                         checkLayerRegionBlocks(const LayerRegionBlockIds&          layer_region_block_ids,
-                                                        const std::vector<LayerRegionSlot>& slots,
-                                                        size_t                              required_len) const;
-    bool                         gpuBlocksAllValid(const LayerRegionBlockIds&          layer_region_block_ids,
-                                                   const std::vector<LayerRegionSlot>& slots,
-                                                   size_t                              key_index) const;
+    void checkLayerBlockStrideBytes() const;
+    bool checkLayerRegionBlocks(const LayerRegionBlockIds&          layer_region_block_ids,
+                                const std::vector<LayerRegionSlot>& slots,
+                                size_t                              required_len) const;
+    bool gpuBlocksAllValid(const LayerRegionBlockIds&          layer_region_block_ids,
+                           const std::vector<LayerRegionSlot>& slots,
+                           size_t                              key_index) const;
 
     bool mallocBlocks(size_t need_blocks, std::vector<BlockIdxType>& malloced_blocks);
     bool freeBlocks(const std::vector<BlockIdxType>& blocks, bool cache_free = true);
@@ -139,6 +137,8 @@ private:
     std::shared_ptr<MemoryBlockCache>          block_cache_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
     std::shared_ptr<autil::LockFreeThreadPool> wait_done_thread_pool_;
+    std::vector<LayerRegionSlot>               layer_region_slots_;
+    bool                                       has_typed_layer_region_slots_{false};
 
     // metrics reporter
     kmonitor::MetricsReporterPtr metrics_reporter_;

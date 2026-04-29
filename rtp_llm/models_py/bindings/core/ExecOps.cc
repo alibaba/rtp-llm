@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
@@ -290,15 +291,13 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
         };
 
-        if (group_type == CacheGroupType::LINEAR) {
-            const int start = std::max(0, total_blocks - 2);
-            for (int index = start; index < total_blocks; ++index) {
-                addBlock(index);
-            }
-        } else {
-            for (int index = 0; index < total_blocks; ++index) {
-                addBlock(index);
-            }
+        const auto block_positions = blockPositionsForCacheTransfer(static_cast<size_t>(total_blocks),
+                                                                    /*reuse_block_size=*/0,
+                                                                    is_hybrid,
+                                                                    group_type,
+                                                                    /*hybrid_full_from_begin=*/true);
+        for (const auto block_pos : block_positions) {
+            addBlock(static_cast<int>(block_pos));
         }
 
         auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {

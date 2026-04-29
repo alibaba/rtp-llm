@@ -211,6 +211,12 @@ private:
         return memoryCacheBlockBytes(cache_config_);
     }
 
+    void initLayerRegionSlotsForTest(const std::shared_ptr<KVCacheMemoryConnector>& conn,
+                                     const CacheConfig&                             cfg) const {
+        conn->layer_region_slots_           = buildLayerRegionSlots(cfg, cfg.layer_all_num);
+        conn->has_typed_layer_region_slots_ = hasTypedLayerRegionSlots(conn->layer_region_slots_, cfg.layer_all_num);
+    }
+
     void setBlockBytes(const BlockInfo& b, size_t byte_offset, size_t byte_len, char c) const {
         ASSERT_NE(b.addr, nullptr);
         ASSERT_LE(byte_offset + byte_len, b.size_bytes);
@@ -605,6 +611,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, server_addrs_);
+    initLayerRegionSlotsForTest(conn, cache_config_);
     EXPECT_THROW(conn->initBlockPool(), std::runtime_error);
 }
 
@@ -633,6 +640,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenCreateBlockPoolFails)
     kv_cfg.memory_cache_sync_timeout_ms = 1000;  // not used by initBlockPool but keep valid
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    initLayerRegionSlotsForTest(conn, cfg);
     EXPECT_THROW(conn->initBlockPool(), std::runtime_error);
 }
 
@@ -642,6 +650,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_ReturnTrue_AndRegistersPool) {
     kv_cfg.memory_cache_sync_timeout_ms = 1000;  // not used by initBlockPool but keep valid
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, server_addrs_);
+    initLayerRegionSlotsForTest(conn, cache_config_);
     EXPECT_NO_THROW(conn->initBlockPool());
     auto pool = conn->block_pool_;
     ASSERT_NE(pool, nullptr);
@@ -668,9 +677,10 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndAttnSlots) 
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
     auto conn          = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
     conn->block_cache_ = std::make_shared<MemoryBlockCache>();
+    initLayerRegionSlotsForTest(conn, cfg);
     ASSERT_NO_THROW(conn->initBlockPool());
 
-    auto slots = conn->layerRegionSlots();
+    const auto& slots = conn->layer_region_slots_;
     ASSERT_EQ(slots.size(), 2u);
     EXPECT_EQ(slots[0].layer_id, 0);
     EXPECT_EQ(slots[0].region_name, KVCacheRegionName::CSA_KV);

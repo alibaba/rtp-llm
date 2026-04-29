@@ -599,6 +599,72 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     block_pool->requestFree(keep);
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, InitMallocRollbackFreesPartiallyAllocatedCommonBlocks) {
+    auto config      = makeTinyHybridConfig();
+    config.block_num = 2;  // free=1, enough for linear group but not for full group.
+    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    const auto free_before = allocator->freeBlocksNum();
+    ASSERT_EQ(free_before, 1u);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_to_group_id=*/config.layer_to_group_id,
+                                       CacheKeysType{100, 101});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+
+    MallocInfo info{batch_res, token_ids};
+    info.enable_device_cache = false;
+    info.reuse_cache         = false;
+    auto result              = allocator->malloc(info);
+    EXPECT_FALSE(result.success);
+
+    EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/0), 0);
+    EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/1), 0);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackRestoresTouchedBatchesOnly) {
+    auto config      = makeTinyHybridConfig();
+    config.block_num = 6;  // free=5
+    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    auto batch_res = makeBatchResource(/*batch_size=*/2,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_to_group_id=*/config.layer_to_group_id,
+                                       CacheKeysType{100, 101, 102});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/4, /*seq_size_per_block=*/4);
+
+    MallocInfo init_info{batch_res, token_ids};
+    init_info.enable_device_cache = false;
+    init_info.reuse_cache         = false;
+    ASSERT_TRUE(allocator->malloc(init_info).success);
+
+    const auto free_before_incr = allocator->freeBlocksNum();
+    ASSERT_EQ(free_before_incr, 3u);
+    const auto batch0_linear_before = batch_res->blocks(0, /*gid=*/0);
+    const auto batch0_full_before   = batch_res->blocks(0, /*gid=*/1);
+    const auto batch1_linear_before = batch_res->blocks(1, /*gid=*/0);
+    const auto batch1_full_before   = batch_res->blocks(1, /*gid=*/1);
+
+    token_ids->setSeqLength(9);
+    MallocInfo incr_info{batch_res, token_ids};
+    incr_info.enable_device_cache = false;
+    incr_info.reuse_cache         = false;
+    auto incr_result              = allocator->malloc(incr_info);
+    EXPECT_FALSE(incr_result.success);
+
+    EXPECT_EQ(batch_res->blocks(0, /*gid=*/0), batch0_linear_before);
+    EXPECT_EQ(batch_res->blocks(0, /*gid=*/1), batch0_full_before);
+    EXPECT_EQ(batch_res->blocks(1, /*gid=*/0), batch1_linear_before);
+    EXPECT_EQ(batch_res->blocks(1, /*gid=*/1), batch1_full_before);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before_incr);
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, InitMallocRollbackReleasesReferencedReuseBlocksOnReserveReject) {
     auto config      = makeTinyHybridConfig();
     config.block_num = 8;
@@ -664,6 +730,106 @@ TEST_F(HybridTypeKVCacheAllocatorTest, HybridPoolAllLayerCacheBaseRejectsTypedMa
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
     EXPECT_ANY_THROW((void)allocator->allLayerCacheBase());
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, HybridPoolReserveCheckIsPerGroup) {
+    auto config             = makeTinyHybridConfig();
+    config.group_block_nums = {2, 10};
+    auto allocator          = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+    allocator->setReserveBlockNum(1);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_to_group_id=*/config.layer_to_group_id,
+                                       CacheKeysType{100, 101});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+
+    MallocInfo info{batch_res, token_ids};
+    info.enable_device_cache = false;
+    info.reuse_cache         = false;
+    auto result              = allocator->malloc(info);
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/0), 0);
+    EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/1), 0);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, HybridPoolInitMallocRollbackFreesAllocatedGroupBlocks) {
+    auto config             = makeTinyHybridConfig();
+    config.group_block_nums = {2, 1};  // group0 has one free block, group1 has none.
+    auto allocator          = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    const auto free_before = allocator->freeBlocksNum();
+    ASSERT_EQ(free_before, 1u);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_to_group_id=*/config.layer_to_group_id,
+                                       CacheKeysType{100, 101});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+
+    MallocInfo info{batch_res, token_ids};
+    info.enable_device_cache = false;
+    info.reuse_cache         = false;
+    auto result              = allocator->malloc(info);
+    EXPECT_FALSE(result.success);
+
+    EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/0), 0);
+    EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/1), 0);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, HybridPoolPopBlocksFromCacheReturnsEvictedResource) {
+    auto config             = makeTinyHybridConfig();
+    config.group_block_nums = {8, 8};
+    auto allocator          = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_to_group_id=*/config.layer_to_group_id,
+                                       CacheKeysType{100, 101, 102});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_info{batch_res, token_ids};
+    malloc_info.enable_device_cache = false;
+    malloc_info.reuse_cache         = false;
+    ASSERT_TRUE(allocator->malloc(malloc_info).success);
+
+    InsertInfo insert_info{batch_res, token_ids, /*is_resident=*/false};
+    allocator->insertIntoCache(insert_info);
+    allocator->free(FreeInfo{batch_res, token_ids});
+
+    auto evicted = allocator->popBlocksFromCache(/*min_blocks_to_free=*/1);
+    ASSERT_NE(evicted, nullptr);
+    ASSERT_TRUE(evicted->hasCacheKeys());
+    ASSERT_EQ(evicted->batchSize(), 1);
+    ASSERT_EQ(evicted->groupNums(), 2);
+
+    size_t valid_blocks = 0;
+    for (int gid = 0; gid < evicted->groupNums(); ++gid) {
+        valid_blocks += countValidBlocks(evicted->blocks(0, gid));
+    }
+    EXPECT_GE(valid_blocks, 1u);
+    allocator->blockCacheFree(evicted);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, HybridUpdateKVBlockFailsFast) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    auto                     batch_res = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_to_group_id=*/config.layer_to_group_id,
+                                       CacheKeysType{100});
+    std::vector<BlockIdPair> mapping;
+    EXPECT_ANY_THROW((void)allocator->updateKVBlock(batch_res, std::vector<int>{0}, false, mapping));
 }
 
 }  // namespace test

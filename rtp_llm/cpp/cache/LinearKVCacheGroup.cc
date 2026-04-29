@@ -115,19 +115,24 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
         }
     }
 
+    BlockIndicesType allocated_blocks;
+    if (need_alloc_blocks > 0) {
+        allocated_blocks = block_pool_->malloc(need_alloc_blocks);
+        if (allocated_blocks.size() != static_cast<size_t>(need_alloc_blocks)) {
+            return false;
+        }
+    }
+
     BlockIndicesType new_ids;
     new_ids.reserve(static_cast<size_t>(new_blocks_len));
+    size_t allocated_pos = 0;
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
         const bool is_seq_tail  = (seq_slots > 0) && (i == seq_slots - 1);
         const bool is_reserve   = (reserve_step > 0) && (i >= seq_slots);
         const bool step_hit     = (((i + 1) % step) == 0);
         const bool should_alloc = is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
         if (should_alloc) {
-            auto result = block_pool_->malloc(1);
-            if (result.empty()) {
-                return false;
-            }
-            new_ids.push_back(result[0]);
+            new_ids.push_back(allocated_blocks[allocated_pos++]);
         } else {
             new_ids.push_back(NULL_BLOCK_IDX);
         }

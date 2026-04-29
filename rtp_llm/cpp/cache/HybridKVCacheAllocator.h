@@ -43,6 +43,14 @@ protected:
 
     virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const = 0;
     virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false)            = 0;
+    virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
+    void         rollbackBlockIdsToSize(int gid, BlockIds& block_ids, size_t original_size);
+    void         rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
+                                    const std::vector<BlockIndicesType>& referenced_blocks,
+                                    const std::vector<size_t>&           original_sizes);
+    void         rollbackIncrMalloc(BatchKVCacheResource&                   kv_resource,
+                                    const std::vector<std::vector<size_t>>& original_sizes,
+                                    int                                     failed_batch);
 
     std::vector<KVCacheGroupPtr> kv_cache_groups_;
     std::vector<int>             full_group_ids_;

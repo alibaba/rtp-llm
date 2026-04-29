@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -232,8 +234,68 @@ size_t HybridPoolKVCacheAllocator::availableBlocksNum() const {
 }
 
 BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
-    (void)min_blocks_to_free;
-    return nullptr;
+    if (min_blocks_to_free == 0 || group_block_pools_.empty()) {
+        return nullptr;
+    }
+
+    std::vector<CacheKeyType>                                            evicted_keys;
+    std::unordered_set<CacheKeyType>                                     seen_keys;
+    std::unordered_map<CacheKeyType, std::vector<BlockCache::CacheItem>> evicted_items;
+
+    size_t evicted_blocks = 0;
+    for (const auto& pool : group_block_pools_) {
+        if (!pool || !pool->blockCache()) {
+            continue;
+        }
+        const size_t group_need         = min_blocks_to_free > evicted_blocks ? min_blocks_to_free - evicted_blocks : 1;
+        auto         group_evict_result = pool->blockCache()->selectAndEvict(group_need);
+        for (const auto cache_key : group_evict_result.evicted_keys) {
+            auto items_it = group_evict_result.evicted_items.find(cache_key);
+            if (items_it == group_evict_result.evicted_items.end() || items_it->second.empty()) {
+                continue;
+            }
+            if (seen_keys.insert(cache_key).second) {
+                evicted_keys.push_back(cache_key);
+            }
+            auto& items_for_key = evicted_items[cache_key];
+            evicted_blocks += items_it->second.size();
+            items_for_key.insert(items_for_key.end(), items_it->second.begin(), items_it->second.end());
+        }
+        if (evicted_blocks >= min_blocks_to_free) {
+            break;
+        }
+    }
+
+    if (evicted_keys.empty()) {
+        return nullptr;
+    }
+
+    auto batch_resource = std::make_shared<BatchKVCacheResource>();
+    batch_resource->resetBatchSize(1);
+    batch_resource->initGroups(config_.groupNums(),
+                               static_cast<int>(config_.layer_all_num),
+                               config_.layer_to_group_id,
+                               config_.kernelBlocksPerKvBlock(),
+                               config_.group_types,
+                               config_.layer_region_to_group_id);
+    batch_resource->setLastBlockAligned(true);
+
+    for (int gid = 0; gid < config_.groupNums(); ++gid) {
+        batch_resource->mutableBlockIds(0, gid).resize(evicted_keys.size(), NULL_BLOCK_IDX);
+    }
+
+    for (size_t evicted_idx = 0; evicted_idx < evicted_keys.size(); ++evicted_idx) {
+        const auto cache_key = evicted_keys[evicted_idx];
+        batch_resource->pushBackCacheKey(0, cache_key);
+        for (const auto& item : evicted_items[cache_key]) {
+            RTP_LLM_CHECK_WITH_INFO(item.group_id >= 0 && item.group_id < config_.groupNums(),
+                                    "invalid evicted group id=%d for cache key=%ld",
+                                    item.group_id,
+                                    cache_key);
+            batch_resource->mutableBlockIds(0, item.group_id).setAt(evicted_idx, item.block_index);
+        }
+    }
+    return batch_resource;
 }
 
 void HybridPoolKVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {
@@ -339,6 +401,43 @@ int64_t HybridPoolKVCacheAllocator::getMrCostTimeMs() const {
         total += pool->getMrCostTimeMs();
     }
     return total;
+}
+
+bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& malloc_info,
+                                                              size_t            reserve_blocks) const {
+    if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
+        return true;
+    }
+    const int  batch_size     = malloc_info.batch_kv_cache_resource->batchSize();
+    const int  total_seq_len  = malloc_info.complete_token_ids->totalSeqLength();
+    const int  common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
+    const int  seq_len        = malloc_info.complete_token_ids->seqLength();
+    const int  reserve_step   = malloc_info.complete_token_ids->getReserveStep();
+    const bool reuse_enabled  = malloc_info.reuse_cache;
+
+    for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
+        const int  group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
+        const auto need                   = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
+            common_seq_len, seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled);
+        const int need_blocks = need.common_blocks + batch_size * need.extra_blocks;
+        if (need_blocks <= 0) {
+            continue;
+        }
+        const size_t available_blocks = group_block_pools_[static_cast<size_t>(gid)]->availableBlocksNum();
+        if (available_blocks < static_cast<size_t>(need_blocks) + reserve_blocks) {
+            if (malloc_info.verbose) {
+                RTP_LLM_LOG_INFO("HybridPool initMalloc rejected by reserve blocks: request_id=%ld group=%d "
+                                 "need_blocks=%d available_blocks=%zu reserve_blocks=%zu",
+                                 malloc_info.request_id,
+                                 gid,
+                                 need_blocks,
+                                 available_blocks,
+                                 reserve_blocks);
+            }
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace rtp_llm
