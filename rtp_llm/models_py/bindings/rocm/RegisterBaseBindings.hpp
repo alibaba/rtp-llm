@@ -19,7 +19,9 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
                   py::arg("prefix_lengths"),
                   py::arg("kv_cache_block_id_host"),
                   py::arg("cache_store_member"),
-                  py::arg("kv_cache"));
+                  py::arg("kv_cache"),
+                  py::arg("group_id")              = -1,
+                  py::arg("kv_block_stride_bytes") = 0);
 
     rtp_ops_m.def("fused_add_layernorm",
                   &fused_add_layernorm,

@@ -227,7 +227,7 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
     config.linear_fixed_cap            = 2;     // Each LINEAR group is a ring buffer of 2 blocks per request
     config.use_independent_block_pools = true;  // DSV4: each group gets its own BlockPool
 
-    // Per-group block counts: fixed pools (3/4/5/6) only need
+// Per-group block counts: fixed pools (3/4/5/6) only need
     // fixed_blocks_per_req * max_batch blocks.
     // Paged pools (0/1/2) use the global block_num (0 = fallback).
     // Use a conservative max_batch estimate; the actual concurrency limit

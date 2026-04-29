@@ -257,6 +257,13 @@ class DeepSeekV4Model(GptModelBase):
             )
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
+        try:
+            return self._initialize_impl(init_resource)
+        except BaseException:
+            logging.exception("[DeepSeekV4Model] initialize failed")
+            raise
+
+    def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
         super().initialize(init_resource)
         if self._materialized:
@@ -376,6 +383,15 @@ class DeepSeekV4Model(GptModelBase):
         flat = getattr(self.kv_cache, "kv_cache_base_by_layer_attn_flat", None)
         attn_type_count = 8
         self._fw_pool_tensors = []
+        # Fingerprint the underlying pool storage so we can detect when the
+        # framework rebuilds the KV cache (warmup→real transition: NormalEngine
+        # first allocates a stub allocator with block_num=1 to measure GPU
+        # memory, then tears it down and creates the real one with the
+        # measured block_num). Without re-wiring, _fw_pool_tensors keeps
+        # pointing at the freed warmup tensors and gather hits IndexError
+        # because the warmup CSA_KV/INDEXER_KV pools only had 1 block each.
+        self._wired_kv_cache_id = id(self.kv_cache)
+        self._wired_first_data_ptr = None
         if flat is not None and len(flat) > 0:
             num_layers = len(flat) // attn_type_count
             for i in range(len(self.v4.layers)):
@@ -385,6 +401,8 @@ class DeepSeekV4Model(GptModelBase):
                         t = flat[i * attn_type_count + a]
                         if t is not None and t.numel() > 0:
                             slots[a] = t
+                            if self._wired_first_data_ptr is None:
+                                self._wired_first_data_ptr = t.data_ptr()
                 self._fw_pool_tensors.append(slots)
         else:
             logging.warning(
@@ -798,6 +816,96 @@ class DeepSeekV4Model(GptModelBase):
                             B,
                         )
 
+    def _write_pd_cache_store(self, attn) -> None:
+        """Register prefill-side KV blocks with cache_store for PD separation.
+
+        DSV4 has up to 5 pools per layer (CSA layer: SWA_KV, CSA_KV,
+        INDEXER_KV, INDEXER_STATE, CSA_STATE; HCA layer: SWA_KV, HCA_KV,
+        HCA_STATE; SWA-only layer: SWA_KV). Each pool has its own layout
+        (head_dim × entries_per_block × dtype) and its own block_id table.
+        The shared write_cache_store path assumes one pool per layer, so
+        we call it once per (layer × pool), passing the pool-specific
+        block_id table, raw [num_blocks, stride_bytes] tensor, group_id
+        (used in the "_g{gid}" cache key suffix that decode mirrors in
+        DecodeRpcServer) and per-pool stride.
+        """
+        cache_store_inputs = getattr(attn, "cache_store_inputs", None)
+        if cache_store_inputs is None:
+            return
+        by_group_host = getattr(attn, "kv_cache_kernel_block_id_host_by_group", None)
+        if not by_group_host:
+            return
+        if not getattr(self, "_layer_pools", None):
+            return
+        if self.kv_cache is None:
+            return
+
+        # attn_type → group_id mirrors DSV4ConfigCreator.cc pool_attn_types
+        # (CSA_KV=1→0, HCA_KV=2→1, INDEXER_KV=3→2, INDEXER_STATE=4→3,
+        # CSA_STATE=5→4, HCA_STATE=6→5, SWA_KV=7→6).
+        attn_type_to_gid = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6}
+
+        import rtp_llm.ops.compute_ops as compute_ops
+        from rtp_llm.ops.compute_ops import KVCacheAttnType
+
+        attn_type_enum_by_int = {
+            1: KVCacheAttnType.CSA_KV,
+            2: KVCacheAttnType.HCA_KV,
+            3: KVCacheAttnType.INDEXER_KV,
+            4: KVCacheAttnType.INDEXER_STATE,
+            5: KVCacheAttnType.CSA_STATE,
+            6: KVCacheAttnType.HCA_STATE,
+            7: KVCacheAttnType.SWA_KV,
+        }
+
+        for layer_idx in range(len(self.v4.layers)):
+            if layer_idx >= len(self._layer_pools):
+                continue
+            for attn_type_int in self._layer_pools[layer_idx]:
+                gid = attn_type_to_gid.get(attn_type_int)
+                attn_type_enum = attn_type_enum_by_int.get(attn_type_int)
+                if gid is None or attn_type_enum is None or gid >= len(by_group_host):
+                    continue
+                block_ids_2d = by_group_host[gid]
+                if block_ids_2d is None or block_ids_2d.numel() == 0:
+                    continue
+                # LINEAR pools (state pools 4/5/6 + SWA_KV 7) have only 2
+                # valid slots per request (DSV4 linear_fixed_cap=2). The
+                # framework's per-pool block_id tensor is padded to the
+                # FULL group's max_blocks_num, so slice to the first 2
+                # entries — otherwise ExecOps reads the zero-padding past
+                # the valid slots, registering wrong block_ids and using
+                # cache_keys[max-2..max-1] which decode (which sees a
+                # 2-entry block_ids vector, indices 0/1) won't match.
+                if attn_type_int in (4, 5, 6, 7):
+                    block_ids_2d = block_ids_2d[:, :2].contiguous()
+                try:
+                    layer_kv = self.kv_cache.get_layer_cache(layer_idx, attn_type_enum)
+                except Exception:
+                    continue
+                pool_t = layer_kv.kv_cache_base
+                if pool_t is None or pool_t.numel() == 0 or pool_t.dim() != 2:
+                    continue
+                # pool_t.size(1) is in ELEMENTS (kv_block_stride_elems per
+                # MemoryLayoutStrategy::processKVTensor reshape). State pools
+                # use fp32 (element_size=4) so per-block bytes is 4× the
+                # element count; paged pools use uint8 (element_size=1) so
+                # the count is already in bytes. Either way, multiply by
+                # element_size() to get the per-block stride in bytes —
+                # which matches what convertIndexToBuffer reports on decode.
+                stride_bytes = int(pool_t.size(1)) * int(pool_t.element_size())
+                if stride_bytes <= 0:
+                    continue
+                compute_ops.write_cache_store(
+                    attn.input_lengths,
+                    attn.prefix_lengths,
+                    block_ids_2d,
+                    cache_store_inputs,
+                    layer_kv,
+                    group_id=gid,
+                    kv_block_stride_bytes=stride_bytes,
+                )
+
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
@@ -832,6 +940,41 @@ class DeepSeekV4Model(GptModelBase):
                 "[DeepSeekV4Model] framework KV cache wired (deferred) for %d layers",
                 len(self.v4.layers),
             )
+
+        # Re-wire if the framework rebuilt the KV cache (warmup→real
+        # transition). NormalEngine first allocates a stub allocator with
+        # block_num=1 to measure GPU memory, then tears it down and creates
+        # the real allocator with the measured block_num. The stub's pool
+        # tensors get freed; without re-wiring, gather hits IndexError on
+        # the dead warmup tensors.
+        if (
+            use_framework_kv
+            and self.kv_cache is not None
+            and getattr(self, "_framework_kv_enabled", False)
+        ):
+            cur_id = id(self.kv_cache)
+            cur_first_ptr = None
+            flat_now = getattr(self.kv_cache, "kv_cache_base_by_layer_attn_flat", None)
+            if flat_now is not None:
+                for t in flat_now:
+                    if t is not None and t.numel() > 0:
+                        cur_first_ptr = t.data_ptr()
+                        break
+            wired_id = getattr(self, "_wired_kv_cache_id", None)
+            wired_ptr = getattr(self, "_wired_first_data_ptr", None)
+            if cur_id != wired_id or (
+                cur_first_ptr is not None
+                and wired_ptr is not None
+                and cur_first_ptr != wired_ptr
+            ):
+                logging.info(
+                    "[DeepSeekV4Model] kv_cache changed (id %s→%s, first_ptr %s→%s); re-wiring",
+                    wired_id,
+                    cur_id,
+                    wired_ptr,
+                    cur_first_ptr,
+                )
+                self._wire_framework_kv_cache(str(input_ids.device))
 
         if is_prefill:
             # Prefill: split by cu_seqlens, process each request separately
@@ -905,6 +1048,18 @@ class DeepSeekV4Model(GptModelBase):
 
                 self._running_pos = prefix_len + inp_len
                 offset += inp_len
+
+            # PD separation: register all (layer × pool) block_ids in
+            # cache_store so the decode side can fetch them. Done after the
+            # whole prefill loop because the cache_store hand-off iterates
+            # all batches internally via context_batch_size.
+            if (
+                use_framework_kv
+                and hasattr(self, "_framework_kv_enabled")
+                and self._framework_kv_enabled
+                and attn is not None
+            ):
+                self._write_pd_cache_store(attn)
 
             hidden = (
                 torch.cat(all_hidden, dim=1) if len(all_hidden) > 1 else all_hidden[0]
