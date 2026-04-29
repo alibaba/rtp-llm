@@ -59,6 +59,21 @@ def _find_pyproject(start: Path) -> Optional[Path]:
     return None
 
 
+def _resolve_profile_paths(repo_root: Path, paths: list[str]) -> list[str]:
+    """Resolve profile path entries relative to the directory that contains pyproject.toml.
+
+    CI runs with ``cwd == github-opensource/``; internal smoke tests live under
+    ``../internal_source/...``. Listing ``../internal_source/...`` avoids relying
+    on a workspace-local ``internal_source`` symlink under ``github-opensource/``.
+    """
+    pyproject = _find_pyproject(repo_root)
+    base = pyproject.parent if pyproject is not None else repo_root
+    out: list[str] = []
+    for p in paths:
+        out.append(str((base / p).resolve()))
+    return out
+
+
 def _get_profile(root: Path, name: str) -> Dict[str, Any]:
     pyproject = _find_pyproject(root)
     if pyproject is None:
@@ -170,4 +185,4 @@ def pytest_configure(config: pytest.Config) -> None:
                 f"--rtp-ci-profile: profile {name!r} 'paths' must be a list of strings"
             )
         # Restrict collection roots (e.g. smoke file or frontend dirs only)
-        config.args[:] = list(paths)
+        config.args[:] = _resolve_profile_paths(root, paths)

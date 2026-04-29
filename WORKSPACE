@@ -6,7 +6,11 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 http_archive(
     name = "rules_pkg",
     sha256 = "d250924a2ecc5176808fc4c25d5cf5e9e79e6346d79d5ab1c493e289e722d1d0",
+    # Prefer mirror.bazel.build first: UrlRewriter rewrites github.com to internal OSS mirrors;
+    # a bad mirror response can yield an incomplete rules_pkg (missing providers.bzl) and break
+    # @havenask//.../bundle.bzl analysis. Same tarball as GitHub (sha256 verified).
     urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/releases/download/0.10.1/rules_pkg-0.10.1.tar.gz",
         "https://github.com/bazelbuild/rules_pkg/releases/download/0.10.1/rules_pkg-0.10.1.tar.gz",
     ],
 )

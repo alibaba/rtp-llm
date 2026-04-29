@@ -298,22 +298,22 @@ markexpr = "manual and smoke and remote_cache"
 # -------- Internal smoke profiles (drive test_smoke_internal.py) --------
 [tool.rtp_llm.pytest_ci.profiles.smoke_h20_internal]
 description = "Internal smoke H20 (smoke-h20-internal)"
-paths = ["internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
+paths = ["../internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
 markexpr = "manual and smoke and H20"
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_sm8x_internal]
 description = "Internal smoke SM8x (smoke-sm8x-internal)"
-paths = ["internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
+paths = ["../internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
 markexpr = "manual and smoke and not H20 and not MI308X and not SM100 and not SM100_ARM and not PPU_ZW810E"
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_ppu_internal]
 description = "Internal smoke PPU (smoke-ppu-internal)"
-paths = ["internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
+paths = ["../internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
 markexpr = "manual and smoke and PPU_ZW810E"
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_amd_internal]
 description = "Internal smoke AMD MI308X (smoke-amd-internal)"
-paths = ["internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
+paths = ["../internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
 markexpr = "manual and smoke and MI308X"
 
 [tool.rtp_llm.pytest_ci.profiles.perf_sm9x]
