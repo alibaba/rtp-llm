@@ -1,3 +1,12 @@
 #!/bin/sh
 
-pre-commit run
+if command -v pre-commit >/dev/null 2>&1; then
+    exec pre-commit run "$@"
+fi
+
+if command -v python3 >/dev/null 2>&1 && python3 -m pre_commit --version >/dev/null 2>&1; then
+    exec python3 -m pre_commit run "$@"
+fi
+
+echo "pre-commit is not installed. Install it with: python3 -m pip install pre-commit" >&2
+exit 127
