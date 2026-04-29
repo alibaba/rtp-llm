@@ -1,3 +1,1 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:79b3bd09fb6c37a8366c768c7237ea78a62447203f3ad7da31463ffae3bb582a
-size 141
+../../../../../../../test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx_xx/iter_0008000/mp_rank_00_001/model_rng.pt
