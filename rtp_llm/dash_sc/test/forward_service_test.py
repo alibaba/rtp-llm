@@ -1,4 +1,4 @@
-"""Unit tests for ``rtp_llm.dash_sc.dash_sc_grpc_pure_forward_service``.
+"""Unit tests for ``rtp_llm.dash_sc.forward_service``.
 
 Tests verify that request_iterator is passed correctly to downstream stub
 (not converted to list, which was a bug in the initial implementation).
@@ -12,10 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import grpc
 
-from rtp_llm.dash_sc.dash_sc_grpc_pure_forward_service import (
-    PureForwardServicer,
-    _parse_forward_addrs,
-)
+from rtp_llm.dash_sc.forward_service import PureForwardServicer, _parse_forward_addrs
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 
 
@@ -124,7 +121,7 @@ class IteratorBehaviorTest(TestCase):
         mock_resp = _make_response()
         self.mock_stub.ModelStreamInfer.return_value = iter([mock_resp, mock_resp])
 
-        with patch("rtp_llm.dash_sc.dash_sc_grpc_pure_forward_service.logging.info"):
+        with patch("rtp_llm.dash_sc.forward_service.logging.info"):
             responses = list(self.servicer.ModelStreamInfer(request_gen(), MagicMock()))
 
         # KEY ASSERTION: stub received iterator (has __next__)
@@ -146,7 +143,7 @@ class IteratorBehaviorTest(TestCase):
 
         # The logged_iterator inside ModelStreamInfer uses nonlocal req_count
         # This test verifies that pattern works
-        with patch("rtp_llm.dash_sc.dash_sc_grpc_pure_forward_service.logging.info"):
+        with patch("rtp_llm.dash_sc.forward_service.logging.info"):
             responses = list(self.servicer.ModelStreamInfer(request_gen(), MagicMock()))
 
         self.assertEqual(len(responses), 3)
@@ -273,7 +270,7 @@ class BufferFirstTokenTest(TestCase):
         def request_gen():
             yield _make_request("req1")
 
-        with patch("rtp_llm.dash_sc.dash_sc_grpc_pure_forward_service.logging.info"):
+        with patch("rtp_llm.dash_sc.forward_service.logging.info"):
             out = list(self.servicer.ModelStreamInfer(request_gen(), MagicMock()))
         self.assertEqual([r.error_message for r in out], ["a", "b", "c"])
 

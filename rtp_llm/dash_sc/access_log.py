@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import struct
 import time
 from typing import Any, Optional
 
@@ -32,9 +31,10 @@ import grpc
 import orjson
 
 from rtp_llm.access_logger.log_utils import get_handler
-from rtp_llm.dash_sc.dash_sc_grpc_request import (
+from rtp_llm.dash_sc.codec import (
     parse_input_ids_from_request,
     parse_sampling_params,
+    unpack_int_tensor_flat,
 )
 
 DASH_SC_GRPC_ACCESS_LOGGER_NAME = "dash_sc_grpc_access_logger"
@@ -73,23 +73,6 @@ def init_dash_sc_grpc_access_logger(
         logger.addHandler(handler)
 
 
-def _unpack_int_tensor(datatype: str, raw: bytes) -> Optional[list[int]]:
-    """Fast bulk unpack — one ``struct.unpack`` C call instead of per-element list comp."""
-    if not raw:
-        return None
-    if datatype == "INT32":
-        if len(raw) & 3:
-            return None
-        n = len(raw) >> 2
-        return list(struct.unpack(f"<{n}i", raw)) if n else []
-    if datatype == "INT64":
-        if len(raw) & 7:
-            return None
-        n = len(raw) >> 3
-        return [int(x) for x in struct.unpack(f"<{n}q", raw)] if n else []
-    return None
-
-
 def _declared_element_count(shape) -> int:
     """Return element count from tensor shape, or -1 when shape contains dynamic dims."""
     count = 1
@@ -109,7 +92,7 @@ def _scan_response_outputs(
     Respects the declared tensor ``shape`` — some producers append a 4-byte filler
     for empty ``generated_ids`` (shape=[1, 0]); without this check the accumulator
     would pick up spurious ``0`` tokens. See ``_append_generated_ids_output`` in
-    ``dash_sc_grpc_response_real.py``.
+    ``codec.py``.
     """
     gen_ids: Optional[list[int]] = None
     finish_reason: Optional[int] = None
@@ -126,16 +109,16 @@ def _scan_response_outputs(
             continue  # empty tensor — ignore filler bytes
         name = out.name
         if name == "generated_ids":
-            ids = _unpack_int_tensor(out.datatype, raw)
+            ids = unpack_int_tensor_flat(out.datatype, raw)
             if ids is not None and declared > 0 and len(ids) > declared:
                 ids = ids[:declared]  # trim over-sized raw to declared shape
             gen_ids = ids
         elif name == "finish_reason":
-            ids = _unpack_int_tensor(out.datatype, raw)
+            ids = unpack_int_tensor_flat(out.datatype, raw)
             if ids:
                 finish_reason = int(ids[0])
         elif name == "prompt_cached_token_num":
-            ids = _unpack_int_tensor(out.datatype, raw)
+            ids = unpack_int_tensor_flat(out.datatype, raw)
             if ids:
                 cached = int(ids[0])
     return gen_ids, finish_reason, cached

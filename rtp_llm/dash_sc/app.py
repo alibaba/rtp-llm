@@ -16,13 +16,8 @@ from typing import Optional
 
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.dash_sc.dash_sc_grpc_enqueue_loop import (
-    set_dash_sc_grpc_enqueue_event_loop,
-)
-from rtp_llm.dash_sc.dash_sc_grpc_server import (
-    start_dash_sc_grpc_server_in_thread,
-    stop_dash_sc_grpc_server,
-)
+from rtp_llm.dash_sc.server import DashScGrpcServer
+from rtp_llm.dash_sc.service import set_dash_sc_grpc_enqueue_event_loop
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
 
@@ -35,7 +30,7 @@ class DashScApp:
       2. Build ``BackendRPCServerVisitor`` via the shared factory.
       3. Spin up a dedicated asyncio loop in a background thread and register it
          as the enqueue loop so servicer coroutines have somewhere to run.
-      4. Call ``start_dash_sc_grpc_server_in_thread`` (blocks until bind succeeds
+      4. Call ``self._grpc_server.start_in_thread`` (blocks until bind succeeds
          or raises on bind/start error).
       5. Notify the parent via the pipe, then block the main thread waiting on
          SIGTERM/SIGINT.
@@ -49,6 +44,9 @@ class DashScApp:
         self._enqueue_loop: Optional[asyncio.AbstractEventLoop] = None
         self._enqueue_loop_thread: Optional[threading.Thread] = None
         self._shutdown_event = threading.Event()
+        self._grpc_server = DashScGrpcServer(
+            dash_sc_grpc_config=self.dash_sc_grpc_config
+        )
 
     def _start_enqueue_loop(self) -> asyncio.AbstractEventLoop:
         loop = asyncio.new_event_loop()
@@ -127,10 +125,9 @@ class DashScApp:
                 self.server_config.frontend_server_id,
                 port,
             )
-            start_dash_sc_grpc_server_in_thread(
+            self._grpc_server.start_in_thread(
                 port,
                 backend_visitor=backend_visitor,
-                dash_sc_grpc_config=self.dash_sc_grpc_config,
                 ip=self.server_config.ip,
                 server_id=self.server_config.frontend_server_id,
                 log_path=get_log_path(),
@@ -186,7 +183,7 @@ class DashScApp:
         to = self.server_config.shutdown_timeout
         grace = None if to < 0 else float(to)
         try:
-            stop_dash_sc_grpc_server(grace)
+            self._grpc_server.stop(grace)
         except Exception as e:
-            logging.warning("[DashScApp] stop_dash_sc_grpc_server failed: %s", e)
+            logging.warning("[DashScApp] grpc_server.stop failed: %s", e)
         self._stop_enqueue_loop()

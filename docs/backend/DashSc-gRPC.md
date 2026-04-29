@@ -45,13 +45,13 @@ DashSc gRPC 在进程内提供 **predict_v2 协议**（`predict_v2.proto`）的 
 
 ```bash
 # 仓库根目录，PYTHONPATH 含 rtp_llm
-python -m rtp_llm.dash_sc.dash_sc_grpc_server --port 8000
+python -m rtp_llm.dash_sc.server --port 8000
 ```
 
 可选：与主服务相同形状的 JSON，覆盖通道选项与线程池（见下节）：
 
 ```bash
-python -m rtp_llm.dash_sc.dash_sc_grpc_server --port 8000 \
+python -m rtp_llm.dash_sc.server --port 8000 \
   --dash_sc_grpc_config_json '{"client_config":{},"server_config":{},"max_server_workers":4}'
 ```
 
@@ -74,10 +74,10 @@ JSON 结构（逻辑上）包含：
 
 ## 使用自带 Python 客户端访问
 
-客户端模块：`rtp_llm.dash_sc.dash_sc_grpc_client`。需本地 tokenizer 与 checkpoint 路径与 Frontend 一致（`TokenizerFactory`）。
+客户端模块：`rtp_llm.dash_sc.client`。需本地 tokenizer 与 checkpoint 路径与 Frontend 一致（`TokenizerFactory`）。
 
 ```bash
-python -m rtp_llm.dash_sc.dash_sc_grpc_client \
+python -m rtp_llm.dash_sc.client \
   --grpc_addr 127.0.0.1:<dash_sc_grpc_server_port> \
   --ckpt_path /path/to/checkpoint \
   --model_type qwen2 \
@@ -108,17 +108,20 @@ python -m rtp_llm.dash_sc.generate_proto_py
 
 ## 相关代码路径（便于深入）
 
-- 服务实现：`rtp_llm/dash_sc/dash_sc_grpc_server.py`
-- 请求解析 / 张量约定：`rtp_llm/dash_sc/dash_sc_grpc_request.py`
-- 客户端：`rtp_llm/dash_sc/dash_sc_grpc_client.py`
-- Frontend 挂载：`rtp_llm/frontend/frontend_app.py`（`start_dash_sc_grpc_server_in_thread`）
+- 服务实现：`rtp_llm/dash_sc/server.py`、`rtp_llm/dash_sc/service.py`
+- 请求解析 / 张量约定 / 响应构建：`rtp_llm/dash_sc/codec.py`
+- 客户端：`rtp_llm/dash_sc/client.py`
+- 进程级 App：`rtp_llm/dash_sc/app.py`（`DashScApp`,独立 asyncio loop + signal handler）
 - 参数定义：`rtp_llm/server/server_args/grpc_group_args.py`（`init_dash_sc_grpc_group_args`）
 
 ## 单测
 
 ```bash
-bazel test //rtp_llm/dash_sc:dash_sc_grpc_request_test
-bazel test //rtp_llm/dash_sc:dash_sc_grpc_response_server_test
+bazel test //rtp_llm/dash_sc:codec_test
+bazel test //rtp_llm/dash_sc:service_test
+bazel test //rtp_llm/dash_sc:forward_service_test
+bazel test //rtp_llm/dash_sc:access_log_test
 ```
 
-`dash_sc_grpc_response_server_test` 覆盖 `build_stream_response_from_generate_outputs`、`iter_real_model_stream_infer`（mock `run_enqueue_sync`）以及 `DashScGrpcInferenceServicer.ModelStreamInfer`（fake / real 分支与缺 `input_ids` 错误路径）。
+`codec_test` 覆盖请求解析、`SamplingParams` / `OtherParams` 以及 `build_stream_response_from_generate_outputs`；
+`service_test` 覆盖 `iter_real_model_stream_infer`（mock `run_enqueue_sync`）、`DashScGrpcInferenceServicer.ModelStreamInfer`（fake / real 分支与缺 `input_ids` 错误路径）以及 `_iter_enqueue_sync` 的 gRPC 取消 / 异常传播路径。
