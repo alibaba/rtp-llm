@@ -261,6 +261,7 @@ void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_ca
         }
     }
     if (!blocks_to_free.empty()) {
+        cleanBlocksBeforeBlockCacheFree(blocks_to_free);
         block_pool_->blockCacheFree(blocks_to_free);
     }
 }

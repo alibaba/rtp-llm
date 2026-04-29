@@ -97,7 +97,6 @@ class XQAImpl(FMHAImplBase):
         )
 
         out = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
-        out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         return out
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
@@ -158,7 +157,6 @@ class XQADecodeImpl(FMHAImplBase):
         )
 
         out = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
-        out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         return out
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
