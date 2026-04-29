@@ -31,6 +31,7 @@ py_library(
         ":grpcio",
         "//rtp_llm/access_logger:access_logger",
         "//rtp_llm/dash_sc/proto:predict_v2_py_proto",
+        "//rtp_llm/metrics:metrics",
     ],
 )
 
