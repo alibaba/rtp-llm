@@ -294,10 +294,11 @@ def _register_process_groups_to_cpp():
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             return
+        global_root = torch.distributed.get_global_rank(pg, root)
         device_id = torch.cuda.current_device()
         for t in tensors:
             gpu_t, was_cpu = _ensure_cuda(t, device_id)
-            torch.distributed.broadcast(gpu_t, root, group=pg)
+            torch.distributed.broadcast(gpu_t, global_root, group=pg)
             if was_cpu:
                 t.copy_(gpu_t)
 

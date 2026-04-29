@@ -1,0 +1,70 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/home/models/Qwen3.5-35B-A3B",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "你是谁"
+                    }
+                ],
+                "max_tokens": 100,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1777370097,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "嗯，用户问“你是谁”，这是一个非常基础的问题，需要明确我的身份。我是 Qwen3.5，阿里巴巴最新推出的通义千问大语言模型。我应该简洁地介绍自己，突出关键升级点，但避免过于技术化的术语。\n\n首先，要说明我是通义千问系列的最新版本，然后简要提到主要能力，比如上下文窗口、多语言支持、推理能力等。但用户可能不需要太详细的技术参数，所以应该用更易懂的语言。"
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "total_tokens": 111,
+                    "completion_tokens": 100
+                },
+                "aux_info": {
+                    "cost_time": 6758.758,
+                    "iter_count": 100,
+                    "prefix_len": 0,
+                    "input_len": 11,
+                    "output_len": 100,
+                    "step_output_len": 100,
+                    "first_token_cost_time": 243.253,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "role_addrs": [],
+                    "aux_string": ""
+                }
+            }
+        }
+    ]
+}
