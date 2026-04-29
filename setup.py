@@ -24,7 +24,8 @@ import sys
 from distutils.cmd import Command
 from pathlib import Path
 
-from setuptools import Extension, setup as setuptools_setup
+from setuptools import Extension
+from setuptools import setup as setuptools_setup
 from setuptools.command.build_ext import build_ext
 
 # Force line-buffered stdout so prints appear in real-time in CI (no TTY)
@@ -1346,22 +1347,11 @@ class BazelTest(Command):
 # or uv sees two torch pins (install_requires + extras).
 #
 _merged_extras = get_merged_optional_dependencies()
-_non_gpu_extras = {k: v for k, v in _merged_extras.items() if k in ("dev", "docs", "all")}
+_non_gpu_extras = {
+    k: v for k, v in _merged_extras.items() if k in ("dev", "docs", "all")
+}
 
 all_deps = dynamic_install_requires()
-
-
-def _sync_install_requires_for_uv_file(requirements: list[str]) -> None:
-    """Keep ``[tool.setuptools.dynamic] dependencies`` file aligned with ``all_deps`` (per platform)."""
-    out = get_project_root() / "_build" / "install_requires_for_uv.txt"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    text = "\n".join(requirements) + "\n"
-    if out.is_file() and out.read_text(encoding="utf-8") == text:
-        return
-    out.write_text(text, encoding="utf-8")
-
-
-_sync_install_requires_for_uv_file(all_deps)
 version = dynamic_version()
 print(f"Building rtp-llm version: {version}")
 

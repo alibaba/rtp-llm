@@ -187,32 +187,23 @@ def _detect_rocm() -> bool:
 
 
 def _ensure_rocm_target_list() -> None:
-    """Validate ROCm target list is gfx942 only.
+    """Validate /opt/rocm/bin/target.lst is gfx942 only.
 
-    Resolution order:
-    1. ``RTP_ROCM_TARGET_LST`` — explicit path (file must exist or be creatable).
-    2. ``/opt/rocm/bin/target.lst`` — standard ROCm install.
-    3. ``~/.rtp_llm/rocm_target.lst`` — auto-created with ``gfx942`` when the
-       system path is missing (dev containers without root).
+    The dev-container creation script (`internal_source/.claude/skills/dev-container/
+    create_dev_containers.sh`) writes this file at container build time. CI images
+    must do the same in their Dockerfile. No env override or home fallback —
+    keeps detection deterministic and a missing file is a real container-setup bug,
+    not something to paper over.
     """
-    env_path = os.environ.get("RTP_ROCM_TARGET_LST", "").strip()
-    default_sys = Path("/opt/rocm/bin/target.lst")
-    fallback_home = Path.home() / ".rtp_llm" / "rocm_target.lst"
-
-    if env_path:
-        target_list_path = Path(env_path).expanduser()
-    elif default_sys.exists():
-        target_list_path = default_sys
-    else:
-        fallback_home.parent.mkdir(parents=True, exist_ok=True)
-        if not fallback_home.is_file():
-            fallback_home.write_text("gfx942\n", encoding="utf-8")
-            print(
-                f"[rocm] Created default target list at {fallback_home} "
-                "(system /opt/rocm/bin/target.lst missing). "
-                "Override with RTP_ROCM_TARGET_LST if needed."
-            )
-        target_list_path = fallback_home
+    target_list_path = Path("/opt/rocm/bin/target.lst")
+    if not target_list_path.exists():
+        raise RuntimeError(
+            "ROCm target list not found: /opt/rocm/bin/target.lst. "
+            "Container is missing the gfx942 target. Recreate via "
+            "internal_source/.claude/skills/dev-container/create_dev_containers.sh "
+            "or write it manually: "
+            "echo gfx942 | sudo tee /opt/rocm/bin/target.lst"
+        )
 
     try:
         with open(target_list_path, "r") as f:
@@ -226,8 +217,7 @@ def _ensure_rocm_target_list() -> None:
     if targets != ["gfx942"]:
         raise RuntimeError(
             f"ROCm target list mismatch in {target_list_path}: "
-            f"expected only 'gfx942', got {targets}. "
-            "Please follow the ROCm pre-setup step to set gfx942."
+            f"expected only 'gfx942', got {targets}."
         )
 
 

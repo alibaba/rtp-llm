@@ -43,11 +43,12 @@ rtp-ci-profile = "rtp_llm.test.ci_profile_plugin"
 package-dir = {"" = "."}
 packages = ["rtp_llm"]
 
-# ``dependencies`` must use ``file`` (setuptools 80 schema does not allow ``attr`` here).
-# setup.py refreshes this file before ``setup()`` so it matches the detected platform.
+# ``dependencies`` is dynamic but no source is declared here: setuptools accepts
+# ``install_requires=`` from setup.py for any field marked dynamic in [project]
+# without an explicit dynamic source. setup.py builds the per-platform list from
+# pyproject.toml [tool.rtp-llm].base-dependencies + extras at import time.
 [tool.setuptools.dynamic]
 version = {attr = "setup.dynamic_version"}
-dependencies = {file = ["_build/install_requires_for_uv.txt"]}
 
 [tool.setuptools.package-data]
 rtp_llm = [
