@@ -99,6 +99,9 @@ message GenerateConfigPB {
     google.protobuf.Int32Value force_batch = 55;
     google.protobuf.Int32Value batch_group_timeout = 56;
     string profile_trace_name = 57;
+    // 生成式推荐：组合 token 粒度去重与曝光过滤
+    int32 combo_token_size = 58;
+    IntMatrix banned_combo_token_ids = 59;
 }
 
 message MMPreprocessConfigPB {

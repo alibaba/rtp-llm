@@ -67,6 +67,14 @@ class GenerateConfig(BaseModel):
     frequency_penalty: Union[List[float], float] = 0.0
     min_new_tokens: Union[List[int], int] = 0
     no_repeat_ngram_size: Optional[Union[List[int], int]] = None
+    # 生成式推荐：组合 token 粒度去重与曝光过滤。
+    # combo_token_size 表示一个商品由多少个连续 token 组成（例如三层语义 ID = 3），0 表示关闭该功能。
+    # banned_combo_token_ids 是禁止生成的商品 token 组合列表，每项长度必须等于 combo_token_size。
+    # auto_parse_banned_combo 为 True 时，frontend 会自动从 prompt 中解析「已推荐曝光的商品序列」并
+    # 填充到 banned_combo_token_ids；默认关闭，避免影响非推荐场景。
+    combo_token_size: int = 0
+    banned_combo_token_ids: List[List[int]] = []
+    auto_parse_banned_combo: bool = False
     random_seed: Optional[Union[List[int], int]] = None
     top_p_decay: Optional[Union[List[float], float]] = None
     top_p_min: Optional[Union[List[float], float]] = None
@@ -345,6 +353,22 @@ class GenerateConfig(BaseModel):
                 is_list_positive_integer_list(self.stop_words_list),
                 f"stop_words_list {self.stop_words_list} is wrong data type",
             )
+            check_with_info(
+                is_positive_integer(self.combo_token_size),
+                f"combo_token_size {self.combo_token_size} is wrong data type",
+            )
+            check_with_info(
+                is_list_positive_integer_list(self.banned_combo_token_ids),
+                f"banned_combo_token_ids {self.banned_combo_token_ids} is wrong data type",
+            )
+            if self.combo_token_size > 0:
+                check_with_info(
+                    all(
+                        len(combo) == self.combo_token_size
+                        for combo in self.banned_combo_token_ids
+                    ),
+                    f"every item in banned_combo_token_ids must have length == combo_token_size {self.combo_token_size}",
+                )
             check_with_info(
                 is_union_positive_integer(self.sp_advice_prompt_token_ids),
                 f"sp_advice_prompt_token_ids {self.sp_advice_prompt_token_ids} is wrong data type",

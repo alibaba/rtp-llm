@@ -1,0 +1,156 @@
+#include "rtp_llm/cpp/models/logits_processor/RecommendationLogitsProcessor.h"
+
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+
+namespace rtp_llm {
+
+RecommendationLogitsProcessor::RecommendationLogitsProcessor(std::vector<StreamRecommendationInfo> infos):
+    infos_(std::move(infos)) {}
+
+std::shared_ptr<RecommendationLogitsProcessor>
+RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input, int32_t num) {
+    const auto& config = generate_input->generate_config;
+    if (config->combo_token_size <= 0) {
+        return nullptr;
+    }
+
+    // 过滤掉与 combo_token_size 不一致的 banned combo（保持鲁棒性）
+    std::set<std::vector<int>> banned_combos;
+    for (const auto& combo : config->banned_combo_token_ids) {
+        if ((int32_t)combo.size() == config->combo_token_size) {
+            banned_combos.insert(combo);
+        }
+    }
+
+    const bool is_beam_search = config->hasNumBeams() || config->num_return_sequences > 1;
+
+    auto processor_ptr = std::make_shared<RecommendationLogitsProcessor>();
+    for (int32_t i = 0; i < num; ++i) {
+        StreamRecommendationInfo info(config->combo_token_size,
+                                      generate_input->inputLength(),
+                                      /*current_output_length=*/0,
+                                      is_beam_search,
+                                      banned_combos);
+        processor_ptr->infos_.push_back(std::move(info));
+    }
+    return processor_ptr;
+}
+
+void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
+    const size_t batch_size = finish_idx - start_idx;
+    RTP_LLM_CHECK(batch_size == size());
+
+    // 仅在位于 combo 最后一位时需要施加掩码
+    bool need_process = false;
+    for (const auto& info : infos_) {
+        if (info.combo_token_size <= 0) {
+            continue;
+        }
+        if (info.pos_in_combo == info.combo_token_size - 1 && !info.banned_combos.empty()) {
+            need_process = true;
+            break;
+        }
+    }
+    if (!need_process) {
+        return;
+    }
+
+    auto         logits     = inputs.logits.narrow(0, start_idx, batch_size);
+    const size_t vocab_size = logits.size(1);
+
+    // 黑名单掩码：全 0，仅命中的位置为 1
+    auto mask_cpu = torch::zeros({(int64_t)batch_size, (int64_t)vocab_size}, torch::kUInt8);
+    auto mask_ptr = mask_cpu.data_ptr<uint8_t>();
+
+    bool any_masked = false;
+    for (size_t i = 0; i < batch_size; ++i) {
+        auto& info = infos_[i];
+        if (info.combo_token_size <= 0 || info.pos_in_combo != info.combo_token_size - 1) {
+            continue;
+        }
+        const int combo_last_idx = info.combo_token_size - 1;
+        // 对所有前 n-1 个 token 等于 current_prefix 的 banned combo，屏蔽其最后一位
+        for (const auto& combo : info.banned_combos) {
+            RTP_LLM_CHECK((int32_t)combo.size() == info.combo_token_size);
+            bool prefix_match = true;
+            for (int32_t k = 0; k < combo_last_idx; ++k) {
+                if (combo[k] != info.current_prefix[k]) {
+                    prefix_match = false;
+                    break;
+                }
+            }
+            if (!prefix_match) {
+                continue;
+            }
+            const int banned_token = combo[combo_last_idx];
+            if (banned_token >= 0 && (size_t)banned_token < vocab_size) {
+                mask_ptr[i * vocab_size + banned_token] = 1;
+                any_masked                              = true;
+            }
+        }
+    }
+
+    if (!any_masked) {
+        return;
+    }
+
+    auto mask = mask_cpu.to(logits.device());
+    maskLogits(logits, mask);
+}
+
+void RecommendationLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
+    std::vector<StreamRecommendationInfo> new_infos;
+    new_infos.reserve(src_batch_indices.size());
+    for (const auto src_idx : src_batch_indices) {
+        RTP_LLM_CHECK((size_t)src_idx < infos_.size());
+        new_infos.push_back(infos_[src_idx].copy());
+    }
+    infos_ = std::move(new_infos);
+}
+
+void RecommendationLogitsProcessor::advanceOneToken(StreamRecommendationInfo& info, int token_id) {
+    if (info.combo_token_size <= 0) {
+        return;
+    }
+
+    if (info.pos_in_combo < info.combo_token_size - 1) {
+        // combo 未结束：追加到前缀
+        info.current_prefix.push_back(token_id);
+        info.pos_in_combo += 1;
+    } else {
+        // 本次 token 即 combo 的最后一位：形成完整 combo 并加入去重集合
+        std::vector<int> full_combo = info.current_prefix;
+        full_combo.push_back(token_id);
+        info.banned_combos.insert(std::move(full_combo));
+        info.current_prefix.clear();
+        info.pos_in_combo = 0;
+    }
+}
+
+void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
+    RTP_LLM_CHECK(2 == new_tokens.dim());
+    RTP_LLM_CHECK(size() == (size_t)new_tokens.size(0));
+
+    for (size_t i = 0; i < size(); ++i) {
+        auto& info = infos_[i];
+        if (info.combo_token_size <= 0) {
+            continue;
+        }
+
+        const int64_t offset = info.is_beam_search ? (info.current_output_length + info.input_length) : 0;
+
+        if (!info.is_beam_search) {
+            RTP_LLM_CHECK(num_new_tokens == new_tokens.size(1));
+        }
+
+        const int64_t stride = new_tokens.size(1);
+        for (int32_t j = 0; j < num_new_tokens; ++j) {
+            const int token_id = new_tokens.data_ptr<int>()[i * stride + j + offset];
+            advanceOneToken(info, token_id);
+        }
+
+        info.current_output_length += num_new_tokens;
+    }
+}
+
+}  // namespace rtp_llm

@@ -91,6 +91,17 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(batch_group_timeout);
     TRANS_OPTIONAL(force_batch);
 
+    // 生成式推荐：组合 token 约束
+    generate_config->combo_token_size = config_proto->combo_token_size();
+    for (const auto& combo_proto : config_proto->banned_combo_token_ids().rows()) {
+        std::vector<int> combo;
+        combo.reserve(combo_proto.values_size());
+        for (const int value : combo_proto.values()) {
+            combo.push_back(value);
+        }
+        generate_config->banned_combo_token_ids.push_back(std::move(combo));
+    }
+
     return generate_config;
 }
 
