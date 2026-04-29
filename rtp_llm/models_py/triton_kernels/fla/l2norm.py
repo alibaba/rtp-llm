@@ -66,12 +66,14 @@ def fused_l2norm_qk_kernel_small(
 
     b_q = tl.load(q + offs, mask=mask, other=0.0).to(tl.float32)
     b_q_var = tl.sum(b_q * b_q, axis=1)
-    b_q_out = b_q / tl.sqrt(b_q_var + eps)[:, None]
+    b_q_rstd = tl.math.rsqrt(b_q_var + eps)
+    b_q_out = b_q * b_q_rstd[:, None]
     tl.store(q_out + offs, b_q_out.to(q_out.dtype.element_ty), mask=mask)
 
     b_k = tl.load(k + offs, mask=mask, other=0.0).to(tl.float32)
     b_k_var = tl.sum(b_k * b_k, axis=1)
-    b_k_out = b_k / tl.sqrt(b_k_var + eps)[:, None]
+    b_k_rstd = tl.math.rsqrt(b_k_var + eps)
+    b_k_out = b_k * b_k_rstd[:, None]
     tl.store(k_out + offs, b_k_out.to(k_out.dtype.element_ty), mask=mask)
 
 
@@ -93,12 +95,14 @@ def fused_l2norm_qk_kernel(
 
     b_q = tl.load(q + offs, mask=mask, other=0.0).to(tl.float32)
     b_q_var = tl.sum(b_q * b_q, axis=0)
-    b_q_out = b_q / tl.sqrt(b_q_var + eps)
+    b_q_rstd = tl.math.rsqrt(b_q_var + eps)
+    b_q_out = b_q * b_q_rstd
     tl.store(q_out + offs, b_q_out.to(q_out.dtype.element_ty), mask=mask)
 
     b_k = tl.load(k + offs, mask=mask, other=0.0).to(tl.float32)
     b_k_var = tl.sum(b_k * b_k, axis=0)
-    b_k_out = b_k / tl.sqrt(b_k_var + eps)
+    b_k_rstd = tl.math.rsqrt(b_k_var + eps)
+    b_k_out = b_k * b_k_rstd
     tl.store(k_out + offs, b_k_out.to(k_out.dtype.element_ty), mask=mask)
 
 
