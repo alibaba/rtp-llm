@@ -14,9 +14,9 @@ StoreWaitContextChecker::StoreWaitContextChecker(
 
 StoreWaitContextChecker::~StoreWaitContextChecker() {}
 
-void StoreWaitContextChecker::addContext(StoreWaitContext context) {
+void StoreWaitContextChecker::addContext(const StoreWaitContext& context) {
     std::lock_guard<std::mutex> lock(contexts_mutex_);
-    contexts_.push_back(std::move(context));
+    contexts_.push_back(context);
 }
 
 size_t StoreWaitContextChecker::getContextCount() const {
@@ -48,7 +48,7 @@ void StoreWaitContextChecker::checkOnce() {
         }
 
         // check event readiness
-        if (!context.event.has_value() || context.event->query()) {
+        if (context.event == nullptr || context.event->checkReadiness()) {
             if (computed_buffers_) {
                 computed_buffers_->addBuffer(context.request_id, context.layer_cache_buffer, context.deadline_ms);
             }

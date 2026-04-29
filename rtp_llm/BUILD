@@ -92,7 +92,6 @@ requirement([
     "thrift",
     "torch",
     "torchvision",
-    "triton",
     "numpy",
     "safetensors",
     "einops",
@@ -135,6 +134,13 @@ py_library(
     name = "empty_target",
     srcs = [],
     deps = [],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "triton",
+    srcs = [],
+    deps = triton_deps(["triton"]),
     visibility = ["//visibility:public"],
 )
 

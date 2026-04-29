@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 
 namespace rtp_llm {
 
@@ -62,6 +63,9 @@ public:
     virtual void handleRead(const P2PConnectorStartLoadRequestPB& request,
                             P2PConnectorStartLoadResponsePB&      response,
                             std::function<bool()>                 is_cancelled = nullptr);
+
+    /// Notify side-channel data ready (called by prefill engine when first token / SP data is produced)
+    void notifySideChannelReady(const std::string& unique_key, const P2PConnectorResourceEntry::SideChannelData& data);
 
 private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();

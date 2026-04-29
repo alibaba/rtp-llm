@@ -199,27 +199,37 @@ void P2PConnectorResourceStore::reportMetrics(bool timeout, bool cancelled, int6
 
 void P2PConnectorResourceStore::notifySideChannelReady(const std::string&                                unique_key,
                                                        const P2PConnectorResourceEntry::SideChannelData& data) {
-    std::shared_ptr<P2PConnectorResourceEntry> entry;
+    // Store side-channel data in the independent map so it can be retrieved
+    // even after the resource entry has been stolen from resource_map_.
+    {
+        std::lock_guard<std::mutex> lock(side_channel_map_mutex_);
+        side_channel_data_map_[unique_key] = data;
+    }
+    side_channel_cv_.notify_all();
+
+    // Also set on the resource entry if it still exists in resource_map_ (hasn't been stolen yet).
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         auto                        it = resource_map_.find(unique_key);
-        if (it == resource_map_.end()) {
-            RTP_LLM_LOG_WARNING("notifySideChannelReady: entry not found, unique_key: %s", unique_key.c_str());
-            return;
+        if (it != resource_map_.end()) {
+            std::lock_guard<std::mutex> sc_lock(it->second->side_channel_mutex);
+            it->second->side_channel_data  = data;
+            it->second->side_channel_ready = true;
+            it->second->side_channel_cv.notify_all();
         }
-        entry = it->second;
     }
-    if (!entry) {
-        return;
+}
+
+bool P2PConnectorResourceStore::consumeSideChannelData(const std::string&                          unique_key,
+                                                       P2PConnectorResourceEntry::SideChannelData& out_data) {
+    std::lock_guard<std::mutex> lock(side_channel_map_mutex_);
+    auto                        it = side_channel_data_map_.find(unique_key);
+    if (it != side_channel_data_map_.end()) {
+        out_data = it->second;
+        side_channel_data_map_.erase(it);
+        return true;
     }
-    {
-        std::lock_guard<std::mutex> lock(entry->side_channel_mutex);
-        entry->side_channel_data  = data;
-        entry->side_channel_ready = true;
-    }
-    entry->side_channel_cv.notify_all();
-    RTP_LLM_LOG_DEBUG(
-        "notifySideChannelReady: unique_key: %s, first_token: %ld", unique_key.c_str(), data.first_token_id);
+    return false;
 }
 
 bool P2PConnectorResourceStore::waitSideChannelReady(const std::string&    unique_key,

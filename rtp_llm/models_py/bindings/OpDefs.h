@@ -13,6 +13,7 @@
 namespace rtp_llm {
 class CacheStore;
 class CacheStoreAsyncWriter;
+class IKVCacheConnectorCoordinator;
 }  // namespace rtp_llm
 
 namespace torch_ext {
@@ -136,8 +137,9 @@ struct PyCacheStoreInputs {
     bool                     mla_kvcache     = false;
 
     // Opaque cache_store reference (C++ only; passes through Python without inspection)
-    std::shared_ptr<rtp_llm::CacheStore> cache_store;
-    rtp_llm::CacheStoreAsyncWriter*      cache_store_async_writer = nullptr;
+    std::shared_ptr<rtp_llm::CacheStore>   cache_store;
+    rtp_llm::CacheStoreAsyncWriter*        cache_store_async_writer = nullptr;
+    rtp_llm::IKVCacheConnectorCoordinator* connector_coordinator    = nullptr;
 };
 
 struct PyPrefillCudaGaphCopyParams {

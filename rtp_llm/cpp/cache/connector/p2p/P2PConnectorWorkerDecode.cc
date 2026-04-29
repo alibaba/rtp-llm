@@ -113,11 +113,6 @@ P2PConnectorWorkerDecode::waitRecvTasksWithReadDeadlinePolicy(const std::shared_
                 receiver_->stealTask(key);
             }
             store_stolen = true;
-            RTP_LLM_LOG_DEBUG(
-                "read: stole recv tasks from store at steal_deadline_ms=%ld, request_id=%ld, unique_key=%s",
-                steal_deadline_ms,
-                request_id,
-                unique_key.c_str());
         }
         if (now >= return_deadline_ms) {
             RTP_LLM_LOG_WARNING(

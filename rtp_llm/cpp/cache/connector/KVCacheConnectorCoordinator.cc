@@ -184,12 +184,8 @@ KVCacheConnectorCoordinator::asyncWriteByLayer(int                              
         RTP_LLM_LOG_WARNING("asyncWriteByLayer: layer_context is null, skip P2P write for layer %d", layer_id);
         return nullptr;
     }
-    if (layer_id == 0) {
-        RTP_LLM_LOG_INFO("asyncWriteByLayer [P2P]: dispatching layer_id=%d, request_id=%ld to P2PConnector",
-                         layer_id,
-                         layer_context->requestId());
-    }
-    return p2p_connector_->asyncWriteByLayer(layer_id, layer_context);
+    auto ret = p2p_connector_->asyncWriteByLayer(layer_id, layer_context);
+    return ret;
 }
 
 std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
@@ -305,6 +301,13 @@ void KVCacheConnectorCoordinator::handleRead(const P2PConnectorStartLoadRequestP
     p2p_connector_->handleRead(request, response, std::move(is_cancelled));
 }
 
+void KVCacheConnectorCoordinator::notifySideChannelReady(const std::string&                                unique_key,
+                                                         const P2PConnectorResourceEntry::SideChannelData& data) {
+    if (p2p_connector_) {
+        p2p_connector_->streamStore()->notifySideChannelReady(unique_key, data);
+    }
+}
+
 bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (request.has_mem_request()) {
         RTP_LLM_CHECK(memory_connector_ != nullptr);
@@ -335,9 +338,6 @@ bool KVCacheConnectorCoordinator::isPdInvertMode() const {
 }
 
 bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
-    // TODO: P2P connector initialization is disabled until the next PR enables
-    // scheduler async load cache support. Change to `#if 1` to activate.
-#if 0
     if (!isPdInvertMode()) {
         return true;
     }
@@ -359,7 +359,6 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
         connectors_.emplace_back(p2p_connector_);
     }
     RTP_LLM_LOG_INFO("P2PConnector initialized successfully, total connectors: %zu", connectors_.size());
-#endif
     return true;
 }
 

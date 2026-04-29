@@ -715,12 +715,11 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     auto                  load_ctx1 = std::make_shared<FusedAsyncReadContext>(fused_match1, kv_resource1, meta1);
     load_ctx1->setFusedReadContext(nullptr);
 
-    // Second call: load_cache_once_ prevents re-issue (no asyncRead call expected)
     // loadCacheSync runs once inside initKVBlock; second initKVBlock skips async read (load_cache_once_).
     EXPECT_CALL(*mock_coord, asyncRead(testing::_))
         .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(load_ctx1)));
 
-    // First initKVBlock + asyncLoadCache + loadCacheDone: sets reuse lengths
+    // First initKVBlock: malloc + loadCacheSync applies connector reuse lengths on stream.
     ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
     ASSERT_GT(resource.curBlocksNum(), 0);
     ASSERT_TRUE(resource.asyncLoadCache());
@@ -731,9 +730,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
 
-    // Second initKVBlock + asyncLoadCache + loadCacheDone: load_cache_once_ prevents re-issue.
-    // The once-per-lifecycle guard means the second asyncLoadCache() returns false (skipped),
-    // which inherently preserves the reuse lengths set by the first load.
+    // Second initKVBlock: incr malloc path; embedded loadCacheSync must not re-read or clear reuse.
     ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
     ASSERT_TRUE(resource.asyncLoadCache());
     ASSERT_TRUE(resource.loadCacheDone());

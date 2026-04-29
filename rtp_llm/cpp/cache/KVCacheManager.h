@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace rtp_llm {
@@ -115,6 +116,8 @@ public:
 
     bool hasActiveConnectors() const;
     bool hasP2PConnector() const;
+
+    void notifySideChannelReady(const std::string& unique_key, const P2PConnectorResourceEntry::SideChannelData& data);
 
     std::shared_ptr<KVCacheConnectorCoordinator> connectorCoordinator() const {
         return coordinator_;

@@ -133,37 +133,26 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         stream->step();
         auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
         new_tokens.data_ptr<int32_t>()[0] = static_cast<int32_t>(payload->first_token_id);
-        stream->incLastOutputPos();
-        stream->update({.new_tokens        = new_tokens,
-                        .num_new_tokens    = 1,
-                        .hidden_states     = {},
-                        .logits            = {},
-                        .softmax_probs     = {},
-                        .cum_log_probs     = {},
-                        .all_probs         = {},
-                        .loss              = {},
-                        .src_batch_indices = {},
-                        .all_hidden_states = {}});
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
-                          payload->first_token_id,
-                          stream->streamId());
+        stream->updateWithoutLock({.new_tokens        = new_tokens,
+                                   .num_new_tokens    = 1,
+                                   .hidden_states     = {},
+                                   .logits            = {},
+                                   .softmax_probs     = {},
+                                   .cum_log_probs     = {},
+                                   .all_probs         = {},
+                                   .loss              = {},
+                                   .src_batch_indices = {},
+                                   .all_hidden_states = {},
+                                   // This update is replaying the prefill side-channel payload on decode.
+                                   // It must not re-trigger NeedRemoteGenerate / notifySideChannelReady on decode.
+                                   .update_remote_generate = false});
     }
 
     // 2. Reuse lengths
     if (payload->total_reuse_len > 0) {
-        stream->setInitialReuseLength(payload->total_reuse_len);
-        stream->setReuseLength(payload->total_reuse_len);
-        stream->setLocalReuseLength(payload->local_reuse_len + payload->memory_reuse_len);
-        stream->setMtpTokenIndex(payload->total_reuse_len);
-        stream->setMemoryReuseLength(payload->memory_reuse_len);
-        stream->setRemoteReuseLength(payload->remote_reuse_len);
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: reuse total=%d, local=%d, remote=%d, memory=%d",
-                          payload->total_reuse_len,
-                          payload->local_reuse_len,
-                          payload->remote_reuse_len,
-                          payload->memory_reuse_len);
+        stream->setPrefillReuseLength(
+            payload->total_reuse_len, payload->local_reuse_len, payload->remote_reuse_len, payload->memory_reuse_len);
     }
-
     // 3. Speculative proposal info
     if (!payload->propose_tokens.empty()) {
         stream->setReuseLength(stream->seqLength() - 1);
@@ -179,14 +168,12 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                payload->propose_tokens.size() * sizeof(int));
 
         stream->setSPOutputBuffer(sp_output_buffer);
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: propose_tokens count=%zu", payload->propose_tokens.size());
     }
 
     // 4. Position IDs
     if (!payload->position_ids.empty()) {
         auto position_ids = torch::tensor(payload->position_ids, torch::dtype(torch::kInt32).device(torch::kCPU));
         stream->setContextPositionIds(std::move(position_ids));
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: position_ids count=%zu", payload->position_ids.size());
     }
 
     return true;
@@ -642,6 +629,8 @@ std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
     const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
     RTP_LLM_PROFILE_FUNCTION();
     auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
+    meta->generate_stream_ = stream_;
+    meta->fillRoutingContext(stream_);
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
     auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
     if (resource_context_.write_cache_sync) {

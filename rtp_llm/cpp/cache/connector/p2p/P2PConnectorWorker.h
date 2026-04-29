@@ -8,8 +8,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
-#include <c10/core/Event.h>
-#include <optional>
+#include "rtp_llm/cpp/core/Event.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <memory>
 #include <string>
@@ -29,8 +28,7 @@ public:
     bool init(int64_t store_wait_timeout_ms = 10 * 1000);
 
 public:
-    bool
-    writeByLayer(int layer_id, const KVCacheResourcePtr& resource, int64_t request_id, std::optional<c10::Event> event);
+    bool writeByLayer(int layer_id, const KVCacheResourcePtr& resource, int64_t request_id, AsyncEventPtr event);
 
     ErrorInfo sendKVCache(int64_t                                              request_id,
                           const std::string&                                   unique_key,

@@ -1,0 +1,57 @@
+syntax = "proto2";
+
+import "arpc/proto/rpc_extensions.proto";
+option cc_generic_services = true;
+
+package transfer;
+
+enum TransferErrorCodePB {
+    TRANSFER_NONE_ERROR = 0;
+    TRANSFER_UNKNOWN_ERROR = 1;
+    TRANSFER_RDMA_FAILED = 2;
+    TRANSFER_BUFFER_MISMATCH = 3;
+}
+
+message RdmaNicRKey {
+    optional uint32 nicid = 1;
+    optional uint32 rkey = 2;
+}
+
+message RdmaBlockBufferAddrInfo {
+    optional uint64 addr = 1;
+    repeated RdmaNicRKey nic_rkeys = 2;
+}
+
+message BlockBufferInfo {
+    optional uint32 len = 1;
+    optional RdmaBlockBufferAddrInfo rdma_info = 2; // RDMA mode only
+    optional bytes content = 3;                     // TCP mode only
+}
+
+// 单个 cache key 对应的 block buffer 列表（kv + 可选 kv_scale）
+message CacheKeyBlockBufferInfo {
+    optional int64 key = 1;
+    repeated BlockBufferInfo blocks = 2;
+}
+
+// 每次 transfer 只传一层一个 partition（unique_key = base + "_" + layer_id + "_" + remote_partition_id）
+message LayerBlockTransferRequest {
+    repeated CacheKeyBlockBufferInfo blocks = 1;
+    optional string unique_key = 2;
+    optional string server_rdma_ip = 3;
+    optional uint32 server_rdma_port = 4;
+    optional int64 deadline_ms = 5;
+}
+
+message LayerBlockTransferResponse {
+    optional TransferErrorCodePB error_code = 1;
+    optional string error_message = 2;
+}
+
+service TransferService {
+    option (arpc.global_service_id) = 10009;
+
+    rpc transfer(LayerBlockTransferRequest) returns (LayerBlockTransferResponse) {
+        option (arpc.local_method_id) = 10010;
+    }
+}

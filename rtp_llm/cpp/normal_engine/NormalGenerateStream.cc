@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 
 namespace rtp_llm {
 
@@ -173,7 +175,40 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         setSoftmaxProbs(update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
     }
 
-    finished_ = needFinish();
+    // P2P side-channel: must be before finished_ assignment, because in PD-sep prefill
+    // the first (and only) token generation triggers needFinish()=true, and we need
+    // to send side-channel data before finished_ becomes true.
+    if (!finished_ && queryPdSep() && update_info.update_remote_generate
+        && resourceContext().role_type == RoleType::PREFILL) {
+        reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
+
+        // Notify P2P side-channel data ready so that waitAndFillResponse can proceed
+        auto& rc = resourceContext();
+        if (rc.cache_manager && rc.cache_manager->hasP2PConnector()) {
+            P2PConnectorResourceEntry::SideChannelData side_data;
+            auto                                       tokens = currentExecuteTokens(0);
+            if (!tokens.empty()) {
+                side_data.first_token_id = tokens.back();
+            }
+            side_data.total_reuse_len  = reuseLength();
+            side_data.local_reuse_len  = localReuseLength();
+            side_data.remote_reuse_len = remoteReuseLength();
+            side_data.memory_reuse_len = memoryReuseLength();
+            if (getContainProposeToken()) {
+                side_data.propose_tokens = getProposeToken();
+            }
+            auto pos_ids = getContextPositionIds();
+            if (pos_ids.defined() && pos_ids.numel() > 0) {
+                auto pos_cpu = pos_ids.to(torch::kCPU).contiguous();
+                side_data.position_ids.assign(pos_cpu.data_ptr<int32_t>(),
+                                              pos_cpu.data_ptr<int32_t>() + pos_cpu.numel());
+            }
+            rc.cache_manager->notifySideChannelReady(uniqueKey(), side_data);
+        }
+    }
+
+    bool need_finish_result = needFinish();
+    finished_               = need_finish_result;
     if (finished_) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);
@@ -183,20 +218,6 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
     if (update_info.all_probs.defined()) {
         all_probs_ = update_info.all_probs.cpu();
-    }
-
-    // TODO: move it to better position
-    RTP_LLM_LOG_DEBUG("stream [%ld] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
-                      streamId(),
-                      finished_,
-                      queryPdSep(),
-                      isStreaming(),
-                      update_info.update_remote_generate);
-
-    if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
-        holdKVCacheForPDSep();
-        reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
-        reportEventWithoutLock(StreamEvents::GenerateDone);
     }
 
     bool pd_sep_first_token = queryPdSep();

@@ -196,8 +196,23 @@ void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourc
             response.set_error_message("waitAndFillResponse: cancelled");
             return;
         }
-        resource_entry->side_channel_cv.wait_until(lock, timeout_tp);
+        // Check independent side-channel data map (entry may have been stolen before notify)
+        P2PConnectorResourceEntry::SideChannelData sc_data;
+        if (stream_store_->consumeSideChannelData(unique_key, sc_data)) {
+            resource_entry->side_channel_data  = sc_data;
+            resource_entry->side_channel_ready = true;
+            break;
+        }
+        // Wait with short timeout to poll the side-channel data map
+        auto short_tp = std::min(timeout_tp, std::chrono::system_clock::now() + std::chrono::milliseconds(10));
+        resource_entry->side_channel_cv.wait_until(lock, short_tp);
         if (!resource_entry->side_channel_ready) {
+            // Double-check the independent map after wakeup
+            if (stream_store_->consumeSideChannelData(unique_key, sc_data)) {
+                resource_entry->side_channel_data  = sc_data;
+                resource_entry->side_channel_ready = true;
+                break;
+            }
             if (std::chrono::system_clock::now() >= timeout_tp) {
                 RTP_LLM_LOG_WARNING("waitAndFillResponse: timeout, unique_key: %s", unique_key.c_str());
                 response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));

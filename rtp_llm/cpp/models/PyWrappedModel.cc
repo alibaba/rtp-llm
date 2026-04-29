@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
@@ -288,7 +289,8 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                               description_.attention_conf.use_mla
                                                   && mla_ops_type_ != rtp_llm::MlaOpsType::MHA,
                                               cache_manager_ ? cache_manager_->getCacheStore() : nullptr,
-                                              cache_store_async_writer_.get()};
+                                              cache_store_async_writer_.get(),
+                                              cache_manager_ ? cache_manager_->connectorCoordinator().get() : nullptr};
         params = cache_store_inputs;
     }
     return params;
