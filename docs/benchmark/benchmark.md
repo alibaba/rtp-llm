@@ -25,42 +25,37 @@ Set **`--model_type`** explicitly for grid mode (and whenever `model_type` canno
 
 `batch_size` is the batch on **each** DP rank when `dp_size` > 1.
 
-### Bazel targets (manual)
+### Pytest entrypoints
 
-Repository defaults (see `rtp_llm/test/perf_test/BUILD`):
+CI performance tests run through pytest profile `perf_sm9x`, backed by
+`rtp_llm/test/remote_tests/test_perf_remote.py` and
+`internal_source/rtp_llm/test/perf_test/perf_defs.py`.
 
-- **`//rtp_llm/test/perf_test:grid_perf_test`** — grid example with `qwen35_moe`, small `batch_size` / `input_len`, decode-only (`--partial 1`), `seq_size_per_block=1024`.
-- **`//rtp_llm/test/perf_test:distribution_perf_test`** — distribution sampling with ShareGPT (`--dataset_name sharegpt`), tunable `max_seq_len` / `concurrency_limit`.
-
-Example (SM90; adjust configs for your stack e.g. `cuda12_9` + `sm9x`):
+For local/manual single-node experiments, call the perf entrypoint directly:
 
 ```shell
 # Grid: override sizes and run decode + prefill (partial=0) or decode-only
-bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda12_9 --config=sm9x \
-    --test_arg=--batch_size=1,2,4,8 \
-    --test_arg=--input_len=128,1024,2048 \
-    --test_arg=--partial=0
+python rtp_llm/test/perf_test/batch_decode_test.py \
+    --batch_size=1,2,4,8 \
+    --input_len=128,1024,2048 \
+    --partial=0
 
 # Grid: custom local checkpoint and model type
-bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda12_9 --config=sm9x \
-    --test_arg=--checkpoint_path=/path/to/local/ckpt \
-    --test_arg=--tokenizer_path=/path/to/local/tokenizer \
-    --test_arg=--model_type=qwen35_moe
+python rtp_llm/test/perf_test/batch_decode_test.py \
+    --checkpoint_path=/path/to/local/ckpt \
+    --tokenizer_path=/path/to/local/tokenizer \
+    --model_type=qwen35_moe
 
-# Distribution mode (use distribution_perf_test or pass dataset flags via test_arg)
-bazelisk test //rtp_llm/test/perf_test:distribution_perf_test \
-    --config=cuda12_9 --config=sm9x \
-    --test_arg=--model_type=qwen35_moe
+# Distribution mode
+python rtp_llm/test/perf_test/batch_decode_test.py \
+    --dataset_name=sharegpt \
+    --model_type=qwen35_moe
 ```
 
 Optional environment for the engine, e.g. `INT8_MODE=1`:
 
 ```shell
-bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda12_9 --config=sm9x \
-    --test_env=INT8_MODE=1
+INT8_MODE=1 python rtp_llm/test/perf_test/batch_decode_test.py
 ```
 
 ### Prefill vs decode only
@@ -68,9 +63,7 @@ bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
 When prefill and decode need different engine configs, restrict phases with **`--partial`**: `0` = both (default), `1` = decode grid only, `2` = prefill only. Example decode-only:
 
 ```shell
-bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda12_9 --config=sm9x \
-    --test_arg=--partial=1
+python rtp_llm/test/perf_test/batch_decode_test.py --partial=1
 ```
 
 ## Multi Node Benchmark

@@ -28,167 +28,6 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-[project.optional-dependencies]
-# ============================================================
-# CUDA 12 (开源版本 - 使用公开 PyPI 包)
-# ============================================================
-cuda12 = [
-    "pynvml",
-
-    # PyTorch CUDA 12 (from PyPI)
-    "torch==2.6.0+cu126",
-    "torchvision==0.21.0+cu126",
-
-    # Flash Attention
-    "flash_attn @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl",
-
-    # FlashInfer (from PyPI)
-    "flashinfer-python==0.2.5",
-    "apache-tvm-ffi==0.1.1",
-
-    # TensorRT (from PyPI)
-    "tensorrt==10.3.0",
-    "tensorrt-cu12-bindings==10.3.0",
-    "tensorrt-cu12-libs==10.3.0",
-
-    # Quantization
-    "auto_gptq",
-    "autoawq>=0.2.9",
-
-    # Data
-    # Keep datasets aligned with pinned pyarrow 16.x.
-    "datasets==3.1.0",
-
-    # Deep EP & Deep Gemm
-    "deep-ep @ http://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_ep-1.2.1%2B29d31c0-cp310-cp310-linux_x86_64.whl",
-    "deep_gemm @ http://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_gemm-2.2.0%2B9b680f4-cp310-cp310-linux_x86_64.whl",
-
-    # NVSHMEM
-    "nvidia-nvshmem-cu12==3.4.5",
-]
-
-# ============================================================
-# ROCm/AMD (开源版本)
-# ============================================================
-rocm = [
-    # ALIGNED with deps/requirements_rocm.txt — AMD CI image is ROCm 7.2.
-    # torch/torchvision/triton/aiter wheels MUST be the +rocm7.2 build;
-    # older +rocm6.4 wheels fail `import torch` due to system librocblas
-    # major mismatch. Internal overlay (pyproject_internal.toml) MUST stay
-    # in sync with this list — divergence = silent ROCm breakage.
-
-    # PyTorch ROCm 7.2
-    "torch @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.9.1%2Bgit7e1940d-cp310-cp310-linux_x86_64.whl",
-    "torchvision @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torchvision/torchvision-0.24.0%2Brocm7.2.0.gitb919bd0c-cp310-cp310-linux_x86_64.whl",
-
-    # Triton ROCm 7.2 (URL wheel — PyPI triton is CUDA-only)
-    "triton @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.5.1%2Brocm7.2.0.gita272dfa8-cp310-cp310-linux_x86_64.whl",
-
-    "pyrsmi==0.2.0",
-    "pyyaml==6.0.2",
-
-    # AITer (ROCm 7.2 build)
-    "aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.13.dev14%2Bgfa35072d0.d20260402-cp310-cp310-linux_x86_64.whl",
-]
-
-# ============================================================
-# CUDA 12.9 ARM (开源版本)
-# ============================================================
-cuda12_arm = [
-    # PyTorch CUDA 12.9 ARM
-    "torch @ https://download.pytorch.org/whl/cu129/torch-2.9.0%2Bcu129-cp310-cp310-manylinux_2_28_aarch64.whl",
-    "torchvision @ https://download.pytorch.org/whl/cu128/torchvision-0.24.0-cp310-cp310-manylinux_2_28_aarch64.whl",
-
-    "mysql-connector-python",
-    "flashinfer-python==0.2.5",
-
-    # Fast Hadamard Transform (ARM)
-    "fast_hadamard_transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl",
-
-    # Flash MLA (ARM)
-    "flash_mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2B47c35a7-cp310-cp310-linux_aarch64.whl",
-]
-
-# ============================================================
-# CUDA 12.9 (开源版本 - 使用公开 OSS 包)
-# ============================================================
-cuda12_9 = [
-    "pynvml",
-
-    # PyTorch CUDA 12.9
-    "torch @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl",
-    "torchvision @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torchvision-0.23.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl",
-
-    # Flash Attention
-    "flash_attn @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_attn-2.8.3%2Bcu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl",
-    "flash_attn_3 @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl",
-
-    # Fast Safetensors
-    "fast-safetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl",
-    "fastsafetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fastsafetensors-0.1.19rc5%2Bali-cp310-cp310-linux_x86_64.whl",
-
-    # Deep EP & Deep Gemm
-    "deep-ep @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_ep-1.2.1.10%2Bd7d7b48-cp310-cp310-linux_x86_64.whl",
-    "deep_gemm @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_gemm-2.1.1%2Blocal-cp310-cp310-linux_x86_64.whl",
-
-    # FlashInfer
-    "flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_python-0.6.0%2Bmla384-py3-none-any.whl",
-    "flashinfer-jit-cache @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_jit_cache-0.6.0%2Bmla384-cp39-abi3-manylinux_2_28_x86_64.whl",
-    "flashinfer-cubin @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_cubin-0.6.0%2Bmla384-py3-none-any.whl",
-
-    # Flash MLA
-    "flash_mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2Bca58fed-cp310-cp310-linux_x86_64.whl",
-
-    # Fast Hadamard Transform
-    "fast_hadamard_transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_x86_64.whl",
-
-    # RTP Kernel
-    "rtp_kernel @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/rtp_kernel_260317/rtp_kernel-0.1.0-cp310-cp310-linux_x86_64.whl",
-
-    # TensorRT
-    "tensorrt==10.3.0",
-    "tensorrt-cu12-bindings==10.3.0",
-    "tensorrt_cu12_libs @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/tensorrt_cu12_libs-10.3.0-py2.py3-none-manylinux_2_17_x86_64.whl",
-
-    # Quantization
-    "auto_gptq",
-    "autoawq",
-    "apache-tvm-ffi",
-
-    # Data & Utils
-    # Keep datasets aligned with pinned pyarrow 16.x.
-    "datasets==3.1.0",
-    "mysql-connector-python",
-    "sqlglot @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/sqlglot-19.8.4.dev4-py3-none-any.whl",
-    "tabulate==0.9.0",
-    "tilelang>=0.1.8",
-]
-
-# ============================================================
-# Development & Testing
-# ============================================================
-dev = [
-    "pytest>=7.0",
-    "pytest-asyncio>=0.21",
-    "pytest-timeout>=2.0",
-    "pytest-xdist>=3.0",
-    "httpx>=0.24.0",
-    "coverage>=7.0",
-]
-
-# ============================================================
-# Documentation
-# ============================================================
-docs = [
-    "sphinx>=5.0",
-    "sphinx-rtd-theme",
-]
-
-# ============================================================
-# All (CUDA 12 + dev + docs)
-# ============================================================
-all = ["rtp-llm[cuda12,dev,docs]"]
-
 [project.scripts]
 rtp-llm = "rtp_llm.cli.main:main"
 rtp-llm-server = "rtp_llm.start_server:main"
@@ -203,6 +42,12 @@ rtp-ci-profile = "rtp_llm.test.ci_profile_plugin"
 [tool.setuptools]
 package-dir = {"" = "."}
 packages = ["rtp_llm"]
+
+# ``dependencies`` must use ``file`` (setuptools 80 schema does not allow ``attr`` here).
+# setup.py refreshes this file before ``setup()`` so it matches the detected platform.
+[tool.setuptools.dynamic]
+version = {attr = "setup.dynamic_version"}
+dependencies = {file = ["_build/install_requires_for_uv.txt"]}
 
 [tool.setuptools.package-data]
 rtp_llm = [
@@ -442,7 +287,8 @@ markexpr = "manual and smoke and (SM100 or SM100_ARM)"
 [tool.rtp_llm.pytest_ci.profiles.smoke_rocm_oss]
 description = "OSS smoke ROCm (smoke-rocm-oss)"
 paths = ["rtp_llm/test/smoke/test_smoke_oss.py"]
-markexpr = "manual and smoke and MI308X"
+# Must match smoke_defs_oss.py gpu markers (MI308X_ROCM7), not the hyphenated gpu_type string.
+markexpr = "manual and smoke and MI308X_ROCM7"
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_remote_cache_oss]
 description = "OSS smoke remote cache (smoke-remote-cache-oss)"

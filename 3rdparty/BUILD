@@ -1,5 +1,4 @@
-load("//:def.bzl", "rpm_library", "copts", "cuda_copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//:def.bzl", "copts", "cuda_copts")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
@@ -13,7 +12,7 @@ cc_library(
         "@local_config_cuda//cuda:cuda_driver",
     ],
     copts = copts(),
-    visibility = ["//visibility:public"],  
+    visibility = ["//visibility:public"],
 )
 
 cc_library(

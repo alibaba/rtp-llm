@@ -1,0 +1,72 @@
+filelock>=3.20.0
+jinja2
+sympy
+typing-extensions
+importlib_metadata
+transformers==4.51.2
+sentencepiece==0.2.0
+safetensors
+numpy<2.0a0,>=1.25
+einops
+timm==0.9.12
+bitsandbytes>=0.41.0
+fastapi==0.115.6
+uvicorn==0.30.0
+grpcio==1.62.0
+grpcio-tools==1.57.0
+protobuf==4.25
+aiohttp
+orjson
+pydantic
+pyarrow==16.1.0
+setuptools>=64.0,<82
+dacite
+psutil
+tiktoken==0.7.0
+lru-dict
+py-spy
+cpm_kernels
+prettytable
+setproctitle
+portalocker
+concurrent_log_handler
+pybind11_stubgen
+pyOpenSSL==24.1.0
+Pillow
+pillow-heif
+pillow-avif-plugin==1.5.2
+librosa
+matplotlib
+oss2
+pyodps
+blobfile
+onnx==1.16.0
+sentence-transformers==2.7.0
+json5
+dashscope>=1.11.0
+jieba
+openai
+nest_asyncio
+partial_json_parser
+thrift
+decord==0.6.0 ; platform_machine == 'x86_64'
+ninja
+pynvml
+torch @ https://artlab.alibaba-inc.com/1/PYPI/pytorch/whl/torch/%252Fwhl%252Fcu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl
+torchvision @ https://artlab.alibaba-inc.com/1/PYPI/pytorch/whl/torchvision/%252Fwhl%252Fcu129/torchvision-0.23.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl
+flash_attn @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/flash_attn-2.8.3%2Bcu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
+flash_attn_3 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260228/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl
+fastsafetensors @ https://artlab.alibaba-inc.com/1/pypi/pypi-releases/fastsafetensors/fastsafetensors-0.1.19rc5+ali-cp310-cp310-linux_x86_64.whl
+fast-safetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/c2/yuanyuxing.yyx/dist/nv/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl
+deep-ep @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/deepep/deep_ep-1.2.1.10%2Bd7d7b48-cp310-cp310-linux_x86_64.whl
+deep_gemm @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm-2.1.1%2Blocal-cp310-cp310-linux_x86_64.whl
+flashinfer-python @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/flashinfer_260225/flashinfer_python-0.6.0%2Bmla384-py3-none-any.whl
+flashinfer-jit-cache @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/flashinfer_260225/flashinfer_jit_cache-0.6.0%2Bmla384-cp39-abi3-manylinux_2_28_x86_64.whl
+flashinfer-cubin @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/flashinfer_260225/flashinfer_cubin-0.6.0%2Bmla384-py3-none-any.whl
+flash_mla @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/cu129/flash_mla-1.0.0%2Bca58fed-cp310-cp310-linux_x86_64.whl
+fast_hadamard_transform @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_x86_64.whl
+nvidia_cutlass_dsl @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/flashinfer_260115/nvidia_cutlass_dsl-4.3.5-cp310-cp310-manylinux_2_28_x86_64.whl
+rtp_kernel @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260317/rtp_kernel-0.1.0-cp310-cp310-linux_x86_64.whl
+apache-tvm-ffi
+datasets==3.1.0
+tilelang>=0.1.8

@@ -24,7 +24,7 @@ import sys
 from distutils.cmd import Command
 from pathlib import Path
 
-from setuptools import Extension, setup
+from setuptools import Extension, setup as setuptools_setup
 from setuptools.command.build_ext import build_ext
 
 # Force line-buffered stdout so prints appear in real-time in CI (no TTY)
@@ -107,7 +107,7 @@ def get_platform_tag() -> str:
     """
     machine = platform.machine()
 
-    # Extract platform from RTP_BAZEL_CONFIG
+    # Same platform key as Bazel build (RTP_BAZEL_CONFIG if set, else auto-detect)
     build_config = detect_build_config()
 
     # ARM builds
@@ -530,8 +530,10 @@ def build_bazel_extensions(build_config: str) -> None:
     """Build C++ extensions using Bazel.
 
     Args:
-        build_config: Platform name (ppu, cuda12_6, rocm) used for logging.
-                      Actual bazel args come from RTP_BAZEL_CONFIG.
+        build_config: Platform name from detect_build_config() (ppu, cuda12_9,
+            rocm, …) used for logging and as the default ``--config=`` when
+            RTP_BAZEL_CONFIG is unset. If RTP_BAZEL_CONFIG is set, it overrides
+            that default via parse_bazel_config().
     """
     # Rewrite .torch_bazelrc with actual torch installation path
     rewrite_torch_root()
@@ -1108,36 +1110,35 @@ def _load_overlay_meta(path) -> dict:
         return {}
 
 
-def get_platform_dependencies() -> list:
-    """Resolve platform dependencies via root + overlay chain.
+def get_merged_optional_dependencies() -> dict:
+    """Return [project.optional-dependencies] merged with internal overlays.
 
-    Layer 1 — root pyproject.toml (open-source defaults).
-    Layer 2 — internal_source/pyproject_internal.toml (override mode for
-             cuda12*/rocm GPU extras with internal-mirror URLs).
-    Layer 3 — internal_source/RTP_LLM-PPU/pyproject_ppu.toml (extend mode
-             for ppu extras; only consulted when build_config == "ppu").
+    OSS extras are loaded from ``_build/oss_optional_extras.toml`` when present
+    (GPU pins split out of ``pyproject.toml`` to avoid duplicating them under
+    PEP621). ``setup()`` only exposes ``dev``/``docs``/``all`` via
+    ``extras_require``; platform stacks are merged into ``install_requires``
+    (``get_all_dependencies()``) so installers never see two torch pins.
+    Otherwise fall back to ``pyproject.toml``.
+
+    Layer 1 — OSS extras file or pyproject.toml.
+    Layer 2 — internal_source/pyproject_internal.toml (override / extend).
+    Layer 3 — internal_source/RTP_LLM-PPU/pyproject_ppu.toml (extend ``ppu``).
     """
-    build_config = detect_build_config()
-    if not build_config:
-        return []
-
     project_root = get_project_root()
-    repo_root = project_root.parent  # github-opensource sits next to internal_source
+    repo_root = project_root.parent
+    extras_file = project_root / "_build" / "oss_optional_extras.toml"
+    if extras_file.exists():
+        root_extras = dict(_load_extras_from_toml(extras_file))
+    else:
+        root_extras = dict(_load_extras_from_toml(project_root / "pyproject.toml"))
 
-    # Layer 1 — root extras (open-source defaults)
-    root_extras = _load_extras_from_toml(project_root / "pyproject.toml")
-
-    # OSS-only mode (set by build-open_source_* CI jobs to bypass internal
-    # overlays even when /aoneci/runner/work/source/internal_source/ still
-    # exists at repo_root). Without this, setup.py would silently use
-    # internal-mirror torch URLs that may not match the OSS test container.
     oss_only = bool(os.environ.get("RTP_LLM_OSS_BUILD"))
     if oss_only:
         print("[overlay] RTP_LLM_OSS_BUILD=1 — skipping internal/PPU overlays")
+        return root_extras
 
-    # Layer 2 — internal overlay (override target_extras)
     internal_overlay = repo_root / "internal_source" / "pyproject_internal.toml"
-    if not oss_only and internal_overlay.exists():
+    if internal_overlay.exists():
         meta = _load_overlay_meta(internal_overlay)
         internal_extras = _load_extras_from_toml(internal_overlay)
         mode = meta.get("mode", "extend")
@@ -1153,23 +1154,33 @@ def get_platform_dependencies() -> list:
                     root_extras[key] = list(internal_extras[key])
                 else:
                     root_extras.setdefault(key, []).extend(internal_extras[key])
-        # Apply non-target extend keys as additive (e.g. dev_extra)
         for key, deps in internal_extras.items():
             if key in (targets or []):
                 continue
             print(f"[overlay] internal: extend {key} (+{len(deps)} pkgs)")
             root_extras.setdefault(key, []).extend(deps)
 
-    # Layer 3 — PPU overlay (extend, only when ppu build)
-    if not oss_only and build_config == "ppu":
-        ppu_overlay = (
-            repo_root / "internal_source" / "RTP_LLM-PPU" / "pyproject_ppu.toml"
-        )
-        if ppu_overlay.exists():
-            ppu_extras = _load_extras_from_toml(ppu_overlay)
-            for key, deps in ppu_extras.items():
-                print(f"[overlay] ppu: extend {key} (+{len(deps)} pkgs)")
-                root_extras.setdefault(key, []).extend(deps)
+    ppu_overlay = repo_root / "internal_source" / "RTP_LLM-PPU" / "pyproject_ppu.toml"
+    if ppu_overlay.exists():
+        ppu_extras = _load_extras_from_toml(ppu_overlay)
+        for key, deps in ppu_extras.items():
+            print(f"[overlay] ppu: extend {key} (+{len(deps)} pkgs)")
+            root_extras.setdefault(key, []).extend(deps)
+
+    return root_extras
+
+
+def get_platform_dependencies() -> list:
+    """Resolve platform dependencies via root + overlay chain.
+
+    Same merge rules as get_merged_optional_dependencies(); returns only the
+    extra list for the auto-detected build_config.
+    """
+    build_config = detect_build_config()
+    if not build_config:
+        return []
+
+    root_extras = get_merged_optional_dependencies()
 
     config_to_key = {
         "ppu": "ppu",
@@ -1238,6 +1249,18 @@ def get_all_dependencies() -> list:
     return result
 
 
+def dynamic_version() -> str:
+    """Hook for [tool.setuptools.dynamic] (pyproject.toml) — PEP 621."""
+
+    return get_version_with_platform()
+
+
+def dynamic_install_requires() -> list:
+    """Hook for [tool.setuptools.dynamic] — must match setup(install_requires=...)."""
+
+    return get_all_dependencies()
+
+
 class BazelTest(Command):
     """Run C++ tests via Bazel.
 
@@ -1246,7 +1269,8 @@ class BazelTest(Command):
         python setup.py test --compile-only           # compile test targets only
         python setup.py test --test-target=//rtp_llm/cpp/cache/test:...
 
-    Bazel config comes from RTP_BAZEL_CONFIG env var (same as build).
+    Bazel flags: same as build — RTP_BAZEL_CONFIG / RTP_BAZEL_APPEND_CONFIG when set,
+    otherwise auto-detected platform (detect_build_config) supplies ``--config=``.
     Set RTP_REMOTE=1 to enable remote execution (REAPI endpoints from pyproject.toml).
     """
 
@@ -1303,26 +1327,49 @@ class BazelTest(Command):
             raise SystemExit(result.returncode)
 
 
-# Get all dependencies (base + platform-specific)
-all_deps = get_all_dependencies()
+# install_requires carries base + auto-detected platform (merged URLs).
+# GPU extras (cuda12_9, rocm, …) live in _build/oss_optional_extras.toml for
+# reference / tooling only — do NOT also pass them as setuptools extras_require
+# or uv sees two torch pins (install_requires + extras).
+#
+_merged_extras = get_merged_optional_dependencies()
+_non_gpu_extras = {k: v for k, v in _merged_extras.items() if k in ("dev", "docs", "all")}
 
-# Get dynamic version
-version = get_version_with_platform()
+all_deps = dynamic_install_requires()
+
+
+def _sync_install_requires_for_uv_file(requirements: list[str]) -> None:
+    """Keep ``[tool.setuptools.dynamic] dependencies`` file aligned with ``all_deps`` (per platform)."""
+    out = get_project_root() / "_build" / "install_requires_for_uv.txt"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    text = "\n".join(requirements) + "\n"
+    if out.is_file() and out.read_text(encoding="utf-8") == text:
+        return
+    out.write_text(text, encoding="utf-8")
+
+
+_sync_install_requires_for_uv_file(all_deps)
+version = dynamic_version()
 print(f"Building rtp-llm version: {version}")
 
 cmdclass = {"build_ext": BuildBazelExtension, "test": BazelTest}
 if BdistWheelWithPlatform is not None:
     cmdclass["bdist_wheel"] = BdistWheelWithPlatform
 
-setup(
-    version=version,
-    install_requires=all_deps if all_deps else None,
-    ext_modules=[BazelExtension()],
-    cmdclass=cmdclass,
-    entry_points={
-        "pytest11": [
-            "remote-gpu = rtp_llm.test.remote_tests.plugin",
-            "rtp-ci-profile = rtp_llm.test.ci_profile_plugin",
-        ],
-    },
-)
+# Only invoke setuptools when running as a script (`python setup.py …`). PEP 517 / setuptools
+# imports this file to resolve ``dynamic_version`` / metadata; a top-level ``setup()`` call would
+# re-enter setuptools while the module is still loading and break ``read_attr("setup.dynamic_version")``.
+if __name__ == "__main__":
+    setuptools_setup(
+        version=version,
+        install_requires=all_deps if all_deps else None,
+        extras_require=_non_gpu_extras if _non_gpu_extras else None,
+        ext_modules=[BazelExtension()],
+        cmdclass=cmdclass,
+        entry_points={
+            "pytest11": [
+                "remote-gpu = rtp_llm.test.remote_tests.plugin",
+                "rtp-ci-profile = rtp_llm.test.ci_profile_plugin",
+            ],
+        },
+    )

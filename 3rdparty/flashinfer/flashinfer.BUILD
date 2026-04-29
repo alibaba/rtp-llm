@@ -1,5 +1,5 @@
 load("@//:def.bzl", "cuda_copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 common_copts = [
     '-DFLASHINFER_ENABLE_BF16',

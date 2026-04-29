@@ -88,7 +88,7 @@ build_code() {
     # Kill bazel build processes
     (ps axuww | grep 'bazelisk --batch --output_user_root' | grep -v grep | awk '{print $2}' | xargs kill -9) || true;
     # Build with all arguments
-    BAZEL_TARGETS=${BAZEL_TARGETS:-"//:th_transformer //rtp_llm:rtp_llm_lib"}
+    BAZEL_TARGETS=${BAZEL_TARGETS:-"//:th_transformer //:rtp_compute_ops //:th_transformer_config"}
     (bazelisk --batch --output_user_root=$WORK_DIR/bazel_cache build ${BAZEL_TARGETS} ${BAZEL_BUILD_ARGS}) || exit 1;
     # Create symbolic links for proto files
     bazel_subdir=k8-opt

@@ -19,10 +19,13 @@ from pathlib import Path
 # ============================================================================
 #
 # RTP_BAZEL_CONFIG is passed directly to bazelisk as command-line arguments.
-# RTP_BAZEL_APPEND_CONFIG appends args to the auto-detected default config.
+# RTP_BAZEL_APPEND_CONFIG appends args after the default (auto-detect or RTP_BAZEL_CONFIG).
 # Use native Bazel argument format.
 #
-# Examples:
+# Default (recommended): leave RTP_BAZEL_CONFIG unset — detect_build_config()
+# infers ppu / cuda12_* / rocm from the machine and setup.py passes ``--config=...``.
+#
+# Optional override when auto-detect is wrong or you need extra flags:
 #   export RTP_BAZEL_CONFIG="--config=ppu"
 #   export RTP_BAZEL_CONFIG="--config=cuda12_6 --config=sm9x"
 #   export RTP_BAZEL_CONFIG="--config=rocm --jobs=200"
@@ -184,13 +187,32 @@ def _detect_rocm() -> bool:
 
 
 def _ensure_rocm_target_list() -> None:
-    """Validate ROCm target list is gfx942 only."""
-    target_list_path = Path("/opt/rocm/bin/target.lst")
-    if not target_list_path.exists():
-        raise RuntimeError(
-            "ROCm target list not found: /opt/rocm/bin/target.lst. "
-            "Please follow the ROCm pre-setup step to add gfx942."
-        )
+    """Validate ROCm target list is gfx942 only.
+
+    Resolution order:
+    1. ``RTP_ROCM_TARGET_LST`` — explicit path (file must exist or be creatable).
+    2. ``/opt/rocm/bin/target.lst`` — standard ROCm install.
+    3. ``~/.rtp_llm/rocm_target.lst`` — auto-created with ``gfx942`` when the
+       system path is missing (dev containers without root).
+    """
+    env_path = os.environ.get("RTP_ROCM_TARGET_LST", "").strip()
+    default_sys = Path("/opt/rocm/bin/target.lst")
+    fallback_home = Path.home() / ".rtp_llm" / "rocm_target.lst"
+
+    if env_path:
+        target_list_path = Path(env_path).expanduser()
+    elif default_sys.exists():
+        target_list_path = default_sys
+    else:
+        fallback_home.parent.mkdir(parents=True, exist_ok=True)
+        if not fallback_home.is_file():
+            fallback_home.write_text("gfx942\n", encoding="utf-8")
+            print(
+                f"[rocm] Created default target list at {fallback_home} "
+                "(system /opt/rocm/bin/target.lst missing). "
+                "Override with RTP_ROCM_TARGET_LST if needed."
+            )
+        target_list_path = fallback_home
 
     try:
         with open(target_list_path, "r") as f:
@@ -203,7 +225,7 @@ def _ensure_rocm_target_list() -> None:
     targets = [line for line in lines if line]
     if targets != ["gfx942"]:
         raise RuntimeError(
-            "ROCm target list mismatch in /opt/rocm/bin/target.lst: "
+            f"ROCm target list mismatch in {target_list_path}: "
             f"expected only 'gfx942', got {targets}. "
             "Please follow the ROCm pre-setup step to set gfx942."
         )

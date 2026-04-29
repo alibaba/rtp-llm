@@ -10,9 +10,14 @@ rocm_configure(name = "local_config_rocm")
 
 python_configure(name = "local_config_python")
 
+# @rtp_deps — Starlark deps (http.bzl / git.bzl). In the internal monorepo, sources live in
+# internal_source/deps (sibling of github-opensource/). Use path="../internal_source/deps":
+# relying on a github-opensource/deps symlink out of the workspace can make Bazel resolve the
+# repo to github-opensource/internal_source/deps (missing) instead of following "..".
+# OSS-only clones without internal_source should vendor deps under github-opensource/deps locally.
 local_repository(
     name = "rtp_deps",
-    path = "deps",
+    path = "../internal_source/deps",
 )
 
 local_repository(
@@ -31,31 +36,6 @@ git_deps()
 load("@rules_python//python:repositories.bzl", "py_repositories")
 
 py_repositories()
-
-load("@rtp_deps//:pip.bzl", "pip_deps")
-
-pip_deps()
-
-load("@pip_cpu_torch//:requirements.bzl", pip_cpu_torch_install_deps = "install_deps")
-pip_cpu_torch_install_deps()
-
-load("@pip_arm_torch//:requirements.bzl", pip_arm_torch_install_deps = "install_deps")
-pip_arm_torch_install_deps()
-
-load("@pip_ppu_torch//:requirements.bzl", pip_ppu_torch_install_deps = "install_deps")
-pip_ppu_torch_install_deps()
-
-load("@pip_gpu_cuda12_torch//:requirements.bzl", pip_gpu_cuda12_torch_install_deps = "install_deps")
-pip_gpu_cuda12_torch_install_deps()
-
-load("@pip_gpu_cuda12_9_torch//:requirements.bzl", pip_gpu_cuda12_9_torch_install_deps = "install_deps")
-pip_gpu_cuda12_9_torch_install_deps()
-
-load("@pip_cuda12_arm_torch//:requirements.bzl", pip_cuda12_arm_torch_install_deps = "install_deps")
-pip_cuda12_arm_torch_install_deps()
-
-load("@pip_gpu_rocm_torch//:requirements.bzl", pip_gpu_rocm_torch_install_deps = "install_deps")
-pip_gpu_rocm_torch_install_deps()
 
 load("//:def.bzl", "read_release_version", "torch_local_repository")
 read_release_version(name = "release_version")

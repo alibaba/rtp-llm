@@ -217,7 +217,9 @@ def build_remote_setup_command(rootdir: Path) -> str:
         "export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64; "
         + gpu_diag
         + 'echo ">>>PHASE:pip_install_start $(date +%s)"; '
-        'eval "$(/opt/conda310/bin/python internal_source/ci/prepare_venv.py)"; '
+        "mkdir -p logs; "
+        "OUT=$(/opt/conda310/bin/python internal_source/ci/prepare_venv.py 2>logs/prepare_venv.err); "
+        'eval "$OUT"; cat logs/prepare_venv.err >&2; '
         'echo ">>>PHASE:pip_install_done $(date +%s)"; '
     )
 

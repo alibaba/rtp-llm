@@ -1,16 +1,13 @@
 """Cross-platform GPU detection test.
 
-Self-contained (no pip deps), designed to run in Bazel sandbox on
-CUDA/ROCm/PPU remote workers via:
-  bazelisk test //rtp_llm/test/utils:test_device_detection \
-    --config=<platform> --config=daily_aone_bazel_remote ...
+Self-contained (no pip deps), designed to run under pytest on CUDA/ROCm/PPU
+remote workers.
 
 PPU exposes a CUDA-compatible driver, so nvidia-smi detects it the same
 way as NVIDIA GPUs — no separate PPU detection branch needed.
 
-NOTE: Detection logic is intentionally duplicated from device_resource.py.
-Bazel sandbox py_test cannot import rtp_llm packages, so this test must
-be fully self-contained using only stdlib + subprocess.
+NOTE: Detection logic is intentionally duplicated from device_resource.py so
+this test stays fully self-contained using only stdlib + subprocess.
 """
 
 import subprocess

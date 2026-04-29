@@ -256,6 +256,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "manual: test requires manual execution (deselected by default)"
     )
+    config.addinivalue_line(
+        "markers",
+        "remote_cache: OSS smoke using KV cache manager remote cache (see smoke_remote_cache_oss profile)",
+    )
     config._synthetic_gpu_markers = set()
 
     marker_expr = config.option.markexpr

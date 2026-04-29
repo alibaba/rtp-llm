@@ -974,6 +974,13 @@ def build_smoke_params(pytest_module):
                 marks.append(getattr(pytest_module.mark, marker_name))
             marks.append(pytest_module.mark.manual)
 
+            # Align with pyproject profile smoke_remote_cache_oss (markexpr: remote_cache).
+            if suite_name == "smoke_cuda_remote_cache" or test_name in (
+                "next_long_reuse_remote",
+                "eagle_remote_cache_tp2",
+            ):
+                marks.append(pytest_module.mark.remote_cache)
+
             if suite_name in COMPOSITE_SUITES.get("maga_model_smoke_light", []):
                 marks.append(pytest_module.mark.light)
 

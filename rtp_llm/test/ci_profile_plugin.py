@@ -37,6 +37,7 @@ def _find_pyproject(start: Path) -> Optional[Path]:
     for base in (cur, *cur.parents):
         candidates = [
             base / "pyproject.toml",
+            base / "github-opensource" / "pyproject.toml",
             base / "internal_source" / "pyproject.toml",
             base / "open_source" / "pyproject.toml",
         ]

@@ -1,29 +1,5 @@
-# to wrapper target relate with different system config
-load("@pip_cpu_torch//:requirements.bzl", requirement_cpu="requirement")
-load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
-load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
-load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
-load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
-load("@rtp_llm//bazel:defs.bzl", "copy_so")
-
-def copy_all_so():
-    copy_so("@rtp_llm//:th_transformer")
-    copy_so("@rtp_llm//:th_transformer_config")
-    copy_so("@rtp_llm//:rtp_compute_ops")
-
-def requirement(names):
-    for name in names:
-        native.py_library(
-            name = name,
-            deps = select({
-                "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
-                "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
-                "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
-                "@rtp_llm//:using_arm": [requirement_arm(name)],
-                "//conditions:default": [requirement_cpu(name)],
-            }),
-            visibility = ["//visibility:public"],
-        )
+# Wrapper targets for different system configs.
+# Python deps are managed by pip/pyproject.toml; Bazel only keeps C++ platform selections here.
 
 def cache_store_deps():
     native.alias(
@@ -55,51 +31,6 @@ def subscribe_deps():
         actual = "@rtp_llm//rtp_llm/cpp/disaggregate/load_balancer/subscribe:subscribe_service_impl"
     )
 
-def whl_deps():
-    return select({
-        "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
-        "@rtp_llm//:using_rocm": ["pyrsmi==0.2.0", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.13.dev14%2Bgfa35072d0.d20260402-cp310-cp310-linux_x86_64.whl"],
-        "//conditions:default": ["torch==2.1.2"],
-    })
-
-def platform_deps():
-    return select({
-        "@rtp_llm//:using_arm": [],
-        "@rtp_llm//:using_cuda12_arm": [],
-        "@rtp_llm//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0"],
-        "//conditions:default": ["decord==0.6.0"],
-    })
-
-def torch_deps():
-    deps = select({
-        "@rtp_llm//:using_rocm": [
-            "@torch_rocm//:torch_api",
-            "@torch_rocm//:torch",
-            "@torch_rocm//:torch_libs",
-        ],
-        "@rtp_llm//:using_arm": [
-            "@torch_2.3_py310_cpu_aarch64//:torch_api",
-            "@torch_2.3_py310_cpu_aarch64//:torch",
-            "@torch_2.3_py310_cpu_aarch64//:torch_libs",
-        ],
-        "@rtp_llm//:cuda_pre_12_9": [
-            "@torch_2.6_py310_cuda//:torch_api",
-            "@torch_2.6_py310_cuda//:torch",
-            "@torch_2.6_py310_cuda//:torch_libs",
-        ],
-        "@rtp_llm//:using_cuda12_9_x86": [
-            "@torch_2.8_py310_cuda//:torch_api",
-            "@torch_2.8_py310_cuda//:torch",
-            "@torch_2.8_py310_cuda//:torch_libs",
-        ],
-        "//conditions:default": [
-            "@torch_2.1_py310_cpu//:torch_api",
-            "@torch_2.1_py310_cpu//:torch",
-            "@torch_2.1_py310_cpu//:torch_libs",
-        ]
-    })
-    return deps
-
 def flashinfer_deps():
     native.alias(
         name = "flashinfer",
@@ -112,12 +43,6 @@ def flashmla_deps():
         actual = "@flashmla//:flashmla"
     )
 
-def deep_ep_py_deps():
-    native.alias(
-        name = "deep_ep_py",
-        actual = "@rtp_llm//rtp_llm:empty_target",
-    )
-
 def cuda_register():
     native.alias(
         name = "cuda_register",
@@ -126,17 +51,6 @@ def cuda_register():
         }),
         visibility = ["//visibility:public"],
     )
-
-def triton_deps(names):
-    return select({
-        "//conditions:default": [],
-    })
-
-def internal_deps():
-    return []
-
-def jit_deps():
-    return []
 
 def select_py_bindings():
     return select({
