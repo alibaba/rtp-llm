@@ -327,6 +327,10 @@ class FrontendServer(object):
     async def batch_infer(self, req: dict, raw_request: Request):
         from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
 
+        # Concurrency accounting: a batch counts as ONE scheduling unit because the engine
+        # atomically enqueues all prompts via BatchGenerateCall. Per-item counting would over-
+        # reject under the same concurrency_limit; the trade-off is that a large batch occupies
+        # only one slot regardless of N.
         sequence = self._global_controller.increment() % 4096
         request_id = generate_request_id(
             self.py_env_configs.server_config.ip,

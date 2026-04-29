@@ -37,7 +37,23 @@ public:
     }
     virtual ~BatchDecodeScheduler() = default;
 
+    // Reject inputs longer than the KV cache can hold; mark the stream errored so the caller
+    // sees the failure via collectStreamOutput / pollStreamOutput. Mirrors FIFOScheduler.
+    bool checkInputLength(const GenerateStreamPtr& stream) {
+        if (cache_manager_ && stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
+            stream->reportError(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
+                                "input len " + std::to_string(stream->inputLength())
+                                    + " is greater than kv cache max available tokens num "
+                                    + std::to_string(cache_manager_->maxAvailableTokensNum()));
+            return false;
+        }
+        return true;
+    }
+
     absl::Status enqueue(const GenerateStreamPtr& stream) override {
+        if (!checkInputLength(stream)) {
+            return absl::InvalidArgumentError("Check input length failed");
+        }
         {
             std::lock_guard<std::mutex> lock(lock_);
             waiting_streams_.emplace_back(stream);
@@ -50,10 +66,20 @@ public:
         return absl::OkStatus();
     }
 
+    // Returns the input vector unchanged so callers can index 1:1 with their original list.
+    // Streams that fail checkInputLength are NOT added to the waiting queue but are still in the
+    // returned vector with their error already reported via reportError().
     std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override {
+        std::vector<GenerateStreamPtr> stream_enqueued;
+        stream_enqueued.reserve(streams.size());
+        for (const auto& stream : streams) {
+            if (checkInputLength(stream)) {
+                stream_enqueued.emplace_back(stream);
+            }
+        }
         {
             std::lock_guard<std::mutex> lock(lock_);
-            waiting_streams_.insert(waiting_streams_.end(), streams.begin(), streams.end());
+            waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
         }
         cond_.notify_all();
         return streams;

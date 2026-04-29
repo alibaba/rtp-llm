@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import logging
 import queue
 import threading
@@ -587,11 +588,14 @@ class Pipeline(object):
                 )
 
             input_tensor = torch.tensor(token_ids, dtype=torch.int)
+            # Shallow copy is enough: GenerateConfig is treated as immutable from here on,
+            # and at the RPC layer it is converted to a per-request protobuf so any brief
+            # list aliasing across siblings is dropped before it reaches the engine.
             gen_input = GenerateInput(
                 request_id=base_request_id + i,
                 token_ids=input_tensor,
                 mm_inputs=[],
-                generate_config=generate_config,
+                generate_config=copy.copy(generate_config),
                 tokenizer=self.tokenizer,
             )
             inputs.append(gen_input)

@@ -31,9 +31,10 @@ public:
     // Caller must check the return status to know whether the stream was actually enqueued.
     absl::Status enqueue(const GenerateStreamPtr& stream) override;
 
-    // Enqueue multiple streams. Silently filters out streams that fail checkInputLength (their errors
-    // are reported via reportError()). Returns only the streams that were successfully enqueued.
-    // Caller should compare the returned vector size with the input size to detect dropped streams.
+    // Enqueue multiple streams. Returns the input vector unchanged so callers can index 1:1 with
+    // their original input list. Streams that fail checkInputLength are NOT added to the waiting
+    // queue, but their errors are reported via reportError() and they are still returned in the
+    // output vector — collectStreamOutput / pollStreamOutput will surface the error per-stream.
     std::vector<std::shared_ptr<GenerateStream>> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
     absl::Status                                 stop() override;
