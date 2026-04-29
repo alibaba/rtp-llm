@@ -30,7 +30,7 @@ The eager path is unchanged.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 import torch
 
@@ -68,16 +68,9 @@ class DSv4DecodeFmhaImpl:
         config: DSv4DecodeFmhaImplConfig,
         device: torch.device,
         attn_inputs=None,
-        slot_update_cb=None,
     ) -> None:
         self.config = config
         self.device = device
-        # Optional callback (DeepSeekV4Model._update_slot_indices_for_batch)
-        # — runs every ``prepare`` so the persistent slot_indices tensor
-        # consumed by the captured forward's gather/scatter holds the
-        # current batch's stash slots. Without this hook the captured
-        # graph would replay against stale slot_indices contents.
-        self._slot_update_cb = slot_update_cb
         self.metadata: DSv4DecodeAttnMetadata = allocate_decode_metadata(
             max_batch_size=config.max_batch_size,
             q_len=config.q_len,
@@ -121,22 +114,6 @@ class DSv4DecodeFmhaImpl:
             start_pos,
             forbid_realloc=forbid_realloc,
         )
-        # Refresh the persistent stash slot_indices for this batch BEFORE
-        # the captured forward replays. Inside the captured graph the
-        # gather/scatter ops read slot_indices.contents from the same
-        # storage every replay; the callback updates that storage to
-        # reflect the current batch's per-request stash slots.
-        if self._slot_update_cb is not None:
-            try:
-                self._slot_update_cb(attn_inputs)
-            except Exception as exc:  # pragma: no cover — surface clearly
-                import logging
-
-                logging.error(
-                    "[DSv4DecodeFmhaImpl] slot_update_cb failed: %s",
-                    exc,
-                )
-                raise
 
     def prepare_cuda_graph(self, attn_inputs) -> None:
         """Called by ``CudaGraphRunner::prepareInputs`` between every
@@ -144,17 +121,4 @@ class DSv4DecodeFmhaImpl:
         accidental buffer reallocation surfaces as an immediate error
         rather than a silent correctness bug (a captured graph still
         holds the old pointer and would compute on stale values)."""
-        import os
-
-        if os.environ.get("DSV4_LOG_STASH", "0") == "1":
-            import logging
-
-            seq = getattr(attn_inputs, "sequence_lengths", None)
-            blk = getattr(attn_inputs, "kv_cache_block_id_host", None)
-            logging.info(
-                "[DSv4DecodeFmhaImpl.prepare_cuda_graph] called: "
-                "seq_lens.shape=%s blk_host.shape=%s",
-                None if seq is None else tuple(seq.shape),
-                None if blk is None else tuple(blk.shape),
-            )
         self.prepare(attn_inputs, forbid_realloc=True)

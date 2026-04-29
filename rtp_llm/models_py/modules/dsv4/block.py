@@ -4,6 +4,7 @@ Mirrors `inference/model.py:Block`. Each call applies hc_pre/F/hc_post
 twice — once for Attention and once for MoE FFN.
 """
 
+import os
 from typing import Dict, Optional
 
 import torch
@@ -240,6 +241,25 @@ class Block(nn.Module):
             self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
             self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
+    def _hc_fn_bf16(self, hc_fn: torch.Tensor) -> torch.Tensor:
+        """Lazy-cached bf16 view of an FP32 hc_fn parameter.
+
+        The FP32 → BF16 cast is ~30 µs on a [24, 16384] tensor; we cache by
+        ``id(hc_fn)`` so attn vs ffn fns get separate slots.  Memory: ~768 KB
+        per fn × 2 fns / layer × 43 layers ≈ 64 MB total — acceptable for
+        cutting per-call cast latency to zero.
+        """
+        cache = getattr(self, "_bf16_cache", None)
+        if cache is None:
+            cache = {}
+            self._bf16_cache = cache
+        key = id(hc_fn)
+        bf = cache.get(key)
+        if bf is None or bf.shape != hc_fn.shape or bf.device != hc_fn.device:
+            bf = hc_fn.to(torch.bfloat16)
+            cache[key] = bf
+        return bf
+
     def _hc_pre(
         self,
         x: torch.Tensor,
@@ -247,7 +267,7 @@ class Block(nn.Module):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
     ):
-        """x: [B,S,hc,d] -> y: [B,S,d], post: [B,S,hc], comb: [B,S,hc,hc]"""
+        """x: [B,S,hc,d] -> y: [B,S,d], post: [B,S,hc,1], comb: [B,S,hc,hc]."""
         shape, dtype = x.size(), x.dtype
         x_flat = x.flatten(2)  # [B, T, hc*d] bf16
         # FP32 squared mean → rsqrt, single cast.  Kept in fp32 because the
@@ -278,7 +298,37 @@ class Block(nn.Module):
         post: torch.Tensor,
         comb: torch.Tensor,
     ):
-        y = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
+        """Combine sublayer output ``x`` with per-stream residual via post/comb.
+
+        Three paths, fastest-first:
+          1. TileKernels ``mhc_post`` — single fused kernel, ~35× the REF.
+          2. BF16 BMM rewrite — ``comb.T @ residual`` runs as a tensor-core BMM.
+          3. Original 5D broadcast+sum — last resort for non-bf16 / odd shapes.
+
+        ``post`` arrives shaped ``[..., hc, 1]`` (``_hc_pre`` unsqueezes).
+        Path 1 consumes that shape directly; paths 2/3 squeeze back to ``[..., hc]``.
+        """
+        if (
+            _use_tk_mhc_post(residual, self.hc_mult)
+            and x.dtype == torch.bfloat16
+            and post.dim() == residual.dim()
+        ):
+            return _tk_mhc_post(x, residual, post, comb)
+
+        if post.dim() == residual.dim():
+            post_b = post.squeeze(-1)
+        else:
+            post_b = post
+
+        if x.dtype == torch.bfloat16 and residual.dtype == torch.bfloat16:
+            post_bf16 = post_b.to(x.dtype)
+            first = post_bf16.unsqueeze(-1) * x.unsqueeze(-2)
+            comb_bf16 = comb.to(x.dtype)
+            # REF reduces over the FIRST hc dim of comb (= comb.T @ residual).
+            second = torch.matmul(comb_bf16.transpose(-2, -1), residual)
+            return (first + second).to(x.dtype)
+
+        y = post_b.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
             comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2
         )
         return y.type_as(x)
