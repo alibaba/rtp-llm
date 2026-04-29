@@ -94,6 +94,45 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 1);
 }
 
+TEST_F(BlockPoolTest, BlockPoolConfigUsesSpecDtypeWhenCacheConfigDtypeDiffers) {
+    CacheConfig cache_config;
+    cache_config.dtype              = rtp_llm::DataType::TYPE_FP16;
+    cache_config.layer_num          = 2;
+    cache_config.layer_all_num      = 2;
+    cache_config.group_layer_num    = 1;
+    cache_config.block_num          = 4;
+    cache_config.seq_size_per_block = 1;
+
+    auto int8_spec  = rtp_llm::createTestKvCacheSpec(/*layer_num=*/1,
+                                                    /*dtype=*/rtp_llm::DataType::TYPE_INT8,
+                                                    /*local_head_num_kv=*/1,
+                                                    /*seq_size_per_block=*/1,
+                                                    /*k_block_stride_bytes=*/8,
+                                                    /*v_block_stride_bytes=*/8);
+    auto fp16_spec  = rtp_llm::createTestKvCacheSpec(/*layer_num=*/1,
+                                                    /*dtype=*/rtp_llm::DataType::TYPE_FP16,
+                                                    /*local_head_num_kv=*/1,
+                                                    /*seq_size_per_block=*/1,
+                                                    /*k_block_stride_bytes=*/8,
+                                                    /*v_block_stride_bytes=*/8);
+    int8_spec->type = KVCacheSpecType::MultiHeadAttention;
+    fp16_spec->type = KVCacheSpecType::MultiHeadAttention;
+
+    cache_config.cache_specs      = {int8_spec, fp16_spec};
+    cache_config.group_types      = {CacheGroupType::FULL, CacheGroupType::FULL};
+    cache_config.global_layer_ids = {{0}, {1}};
+    cache_config.layer_ids        = cache_config.global_layer_ids;
+    cache_config.full_group_num   = 2;
+
+    auto int8_group_config = BlockPoolConfigHelper::createConfigForGroup(cache_config, 0);
+    ASSERT_EQ(int8_group_config.memory_layouts.size(), 1u);
+    EXPECT_EQ(int8_group_config.memory_layouts[0].dtype, rtp_llm::DataType::TYPE_INT8);
+
+    auto fp16_group_config = BlockPoolConfigHelper::createConfigForGroup(cache_config, 1);
+    ASSERT_EQ(fp16_group_config.memory_layouts.size(), 1u);
+    EXPECT_EQ(fp16_group_config.memory_layouts[0].dtype, rtp_llm::DataType::TYPE_FP16);
+}
+
 TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     // Use createSpConfig logic so that global_layer_ids is filled for main + sub-model layers.
     // main(2 layers) + mtp1(1 layer) + mtp2(1 layer)

@@ -139,6 +139,7 @@ private:
     std::shared_ptr<autil::LockFreeThreadPool> wait_done_thread_pool_;
     std::vector<LayerRegionSlot>               layer_region_slots_;
     bool                                       has_typed_layer_region_slots_{false};
+    std::atomic<bool>                          split_kv_copy_disabled_logged_{false};
 
     // metrics reporter
     kmonitor::MetricsReporterPtr metrics_reporter_;

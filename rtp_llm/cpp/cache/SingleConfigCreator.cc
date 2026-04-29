@@ -34,7 +34,9 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     } else {
         spec = std::make_shared<MHAKVCacheSpec>(model_config.attn_config, parallelism_config);
     }
-    spec->dtype = dtype;
+    spec->dtype     = dtype;
+    spec->use_mla   = config.use_mla;
+    spec->is_sparse = config.is_sparse;
     config.cache_specs.push_back(spec);
     config.group_types.push_back(CacheGroupType::FULL);
 

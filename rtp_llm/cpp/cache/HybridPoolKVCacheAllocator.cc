@@ -58,6 +58,7 @@ bool HybridPoolKVCacheAllocator::doInit() {
         kv_cache_groups_.push_back(group);
     }
 
+    // HybridPool owns one BlockPool per group; do not read pool stats from block_pool_ in HybridPool mode.
     block_pool_ = group_block_pools_.empty() ? nullptr : group_block_pools_[0];
     RTP_LLM_LOG_INFO("HybridPoolKVCacheAllocator init success, group pools=%zu", group_block_pools_.size());
     return true;

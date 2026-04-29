@@ -574,7 +574,13 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
 
     if (!dst_buffers.empty()) {
         MultiCopyParams mc{dst_buffers, src_buffers};
-        const bool      can_use_split_kv_copy = !has_typed_layer_region_slots_;
+        // Typed layer-region layouts flatten multiple region slots per layer, so the split-KV scatter/gather
+        // kernel's contiguous per-layer [KV][scale] layout assumption no longer holds.
+        const bool can_use_split_kv_copy = !has_typed_layer_region_slots_;
+        if (kv_cache_config_.enable_memory_cache_sm_copy && !can_use_split_kv_copy
+            && !split_kv_copy_disabled_logged_.exchange(true)) {
+            RTP_LLM_LOG_INFO("memory cache split-KV SM copy disabled for typed layer-region layout");
+        }
         applySplitKvMultiCopyFieldsIfEligible(
             kv_cache_config_.enable_memory_cache_sm_copy && can_use_split_kv_copy, cache_config_, mc);
         execNoBlockCopy(mc);

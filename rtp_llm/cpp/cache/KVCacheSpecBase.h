@@ -38,6 +38,8 @@ struct KVCacheSpec {
 
     KVCacheSpecType   type;
     rtp_llm::DataType dtype;
+    bool              use_mla   = false;
+    bool              is_sparse = false;
 
     virtual size_t block_size() const   = 0;
     virtual size_t k_block_size() const = 0;
@@ -68,6 +70,8 @@ protected:
         std::ostringstream os;
         os << indent1 << "type=" << KVCacheSpecTypeToString(type) << "(" << static_cast<int>(type) << ")\n";
         os << indent1 << "dtype=" << static_cast<int>(dtype) << "\n";
+        os << indent1 << "use_mla=" << (use_mla ? "true" : "false") << "\n";
+        os << indent1 << "is_sparse=" << (is_sparse ? "true" : "false") << "\n";
         os << indent1 << "layer_num=" << layer_num << "\n";
         os << indent1 << "local_head_num_kv=" << local_head_num_kv << "\n";
         os << indent1 << "seq_size_per_block=" << seq_size_per_block << "\n";

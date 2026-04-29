@@ -107,7 +107,9 @@ KVCacheSpecPtr HybridConfigCreator::createFullAttentionSpec(const ModelConfig&  
     } else {
         full_spec = std::make_shared<MHAKVCacheSpec>(model_config.attn_config, parallelism_config);
     }
-    full_spec->dtype = dtype;
+    full_spec->dtype     = dtype;
+    full_spec->use_mla   = model_config.attn_config.use_mla;
+    full_spec->is_sparse = model_config.attn_config.is_sparse;
     return full_spec;
 }
 
@@ -116,7 +118,9 @@ KVCacheSpecPtr HybridConfigCreator::createLinearAttentionSpec(const ModelConfig&
                                                               rtp_llm::DataType        dtype) {
     auto linear_spec = std::make_shared<LinearKVCacheSpec>(
         model_config.attn_config, parallelism_config, model_config.linear_attention_config);
-    linear_spec->dtype = dtype;
+    linear_spec->dtype     = dtype;
+    linear_spec->use_mla   = false;
+    linear_spec->is_sparse = false;
     return linear_spec;
 }
 

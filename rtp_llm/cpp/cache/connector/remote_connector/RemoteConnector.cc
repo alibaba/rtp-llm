@@ -299,16 +299,20 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
     uint32_t block_size = init_params_->cache_config.seq_size_per_block;
 
     // ModelDeployment
-    const auto& model_name   = init_params_->runtime_config.model_name;
-    const auto& dtype_str    = getDataTypeStr(init_params_->cache_config.dtype);  // TODO(zhoushipei.zsp) is this right?
-    bool        use_mla      = init_params_->cache_config.use_mla;
-    int64_t     tp_size      = init_params_->parallelism_config.tp_size;
-    int64_t     dp_size      = init_params_->parallelism_config.dp_size;
-    int         fp8_kv_cache = init_params_->kv_cache_config.fp8_kv_cache;
-    auto        user_data    = init_params_->kv_cache_config.reco_model_user_data;
-    auto        extra_info   = init_params_->kv_cache_config.reco_model_extra_info;
-    auto        biz_name     = autil::EnvUtil::getEnv("BIZ_NAME", std::string(""));
-    auto        ckpt_path    = autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""));
+    const auto& model_name = init_params_->runtime_config.model_name;
+    const auto  main_spec =
+        init_params_->cache_config.cache_specs.empty() ? nullptr : init_params_->cache_config.cache_specs[0];
+    // ModelDeployment still exposes a single legacy dtype/use_mla pair. Per-pool memory layouts must read them from
+    // KVCacheSpec instead because hybrid pools may have different dtypes.
+    const auto dtype_str    = getDataTypeStr(main_spec ? main_spec->dtype : init_params_->cache_config.dtype);
+    bool       use_mla      = main_spec ? main_spec->use_mla : init_params_->cache_config.use_mla;
+    int64_t    tp_size      = init_params_->parallelism_config.tp_size;
+    int64_t    dp_size      = init_params_->parallelism_config.dp_size;
+    int        fp8_kv_cache = init_params_->kv_cache_config.fp8_kv_cache;
+    auto       user_data    = init_params_->kv_cache_config.reco_model_user_data;
+    auto       extra_info   = init_params_->kv_cache_config.reco_model_extra_info;
+    auto       biz_name     = autil::EnvUtil::getEnv("BIZ_NAME", std::string(""));
+    auto       ckpt_path    = autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""));
     extra_info += '/' + biz_name + '/' + std::to_string(hashString(ckpt_path));
 
     auto [location_spec_info_map, location_spec_groups] = genLocationSpecInfoMapAndGroups(tp_size);
