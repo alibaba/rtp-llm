@@ -16,12 +16,14 @@ from unittest.mock import MagicMock, patch
 
 import grpc
 
+from rtp_llm.dash_sc import access_log as access_log_module
 from rtp_llm.dash_sc.access_log import (
     DASH_SC_GRPC_ACCESS_LOGGER_NAME,
     DashScGrpcAccessLogInterceptor,
     init_dash_sc_grpc_access_logger,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.metrics import AccMetrics, GaugeMetrics
 
 
 def _make_infer_request(
@@ -172,6 +174,20 @@ class InitLoggerTest(TestCase):
 
 class InterceptorTestBase(TestCase):
     def setUp(self) -> None:
+        # Patch the module-level ``kmonitor`` for ALL interceptor tests — not just the
+        # dedicated KMonitorReportTest below. Otherwise MetricReporter.report would log
+        # "no metric named ..." warnings during every access-log test run (the reporter
+        # is only initialized inside DashScApp.start, not in the servicer tests).
+        # KMonitorReportTest extends this and uses ``self.kmon_calls`` for its assertions.
+        self.kmon_patch = patch.object(access_log_module, "kmonitor")
+        self.mock_kmon = self.kmon_patch.start()
+        self.kmon_calls: list[tuple[Any, float, dict]] = []
+
+        def _record(metric, value=1, tags=None):
+            self.kmon_calls.append((metric, value, dict(tags or {})))
+
+        self.mock_kmon.report.side_effect = _record
+
         self.interceptor = DashScGrpcAccessLogInterceptor(rank_id=0, server_id=1)
         self.records: list[dict[str, Any]] = []
 
@@ -187,6 +203,7 @@ class InterceptorTestBase(TestCase):
 
     def tearDown(self) -> None:
         self.logger_patch.stop()
+        self.kmon_patch.stop()
 
 
 class UnaryUnaryTest(InterceptorTestBase):
@@ -437,6 +454,158 @@ class JsonShapeTest(InterceptorTestBase):
         parsed = json.loads(line)
         self.assertIn("ts", parsed)
         self.assertIn("method", parsed)
+
+
+class KMonitorReportTest(InterceptorTestBase):
+    """Verify the interceptor fans lifecycle events out to kmonitor with ``protocol=grpc``.
+
+    The base class already patches ``access_log.kmonitor`` and records calls into
+    ``self.kmon_calls`` — we only assert on that here. The intent is to prove parity with
+    the HTTP path in ``FrontendServer``: same metric names, same rank_id/server_id tag
+    shape, plus ``protocol=grpc`` / ``method`` so dashboards can split the two transports.
+    """
+
+    def _metrics_called(self) -> list[Any]:
+        return [c[0] for c in self.kmon_calls]
+
+    def _calls_for(self, metric) -> list[tuple[Any, float, dict]]:
+        return [c for c in self.kmon_calls if c[0] == metric]
+
+    def _assert_base_tags(self, tags: dict, *, method: str) -> None:
+        self.assertEqual(tags["protocol"], "grpc")
+        self.assertEqual(tags["rank_id"], "0")
+        self.assertEqual(tags["server_id"], "1")
+        self.assertEqual(tags["method"], method)
+
+    def test_unary_happy_path_fires_arrival_chunk_success_and_gauges(self) -> None:
+        def inner(request, context):
+            return _make_stream_response(
+                generated_ids=[1, 2, 3], finish_reason=0, prompt_cached_token_num=4
+            )
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+        behavior(_make_infer_request(input_ids=[10, 20, 30]), ctx)
+
+        method = "/test.Service/TestMethod"
+        metrics = self._metrics_called()
+        # Arrival QPS reported exactly once.
+        self.assertEqual(metrics.count(AccMetrics.QPS_METRIC), 1)
+        # Single chunk -> first-token RT + one iter QPS.
+        self.assertEqual(metrics.count(GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC), 1)
+        self.assertNotIn(GaugeMetrics.RESPONSE_ITER_RT_METRIC, metrics)
+        self.assertEqual(metrics.count(AccMetrics.ITER_QPS_METRIC), 1)
+        # Tail metrics: success + latency + iterate_count + token sizes.
+        self.assertEqual(metrics.count(AccMetrics.SUCCESS_QPS_METRIC), 1)
+        self.assertEqual(metrics.count(AccMetrics.ERROR_QPS_METRIC), 0)
+        self.assertEqual(metrics.count(AccMetrics.CANCEL_QPS_METRIC), 0)
+        self.assertEqual(metrics.count(GaugeMetrics.LANTENCY_METRIC), 1)
+        self.assertEqual(metrics.count(GaugeMetrics.RESPONSE_ITERATE_COUNT), 1)
+        self.assertEqual(metrics.count(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC), 1)
+        self.assertEqual(metrics.count(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC), 1)
+
+        # Every call carries protocol=grpc + rank/server/method.
+        for _, _, tags in self.kmon_calls:
+            self._assert_base_tags(tags, method=method)
+
+        # Token-size gauges carry the right values.
+        _, input_len, _ = self._calls_for(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC)[0]
+        self.assertEqual(input_len, 3)
+        _, output_len, _ = self._calls_for(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC)[0]
+        self.assertEqual(output_len, 3)
+        _, iterate_count, _ = self._calls_for(GaugeMetrics.RESPONSE_ITERATE_COUNT)[0]
+        self.assertEqual(iterate_count, 1)
+
+    def test_server_stream_fires_first_then_iter_rt_per_chunk(self) -> None:
+        def inner(request, context):
+            yield _make_stream_response(generated_ids=[7])
+            yield _make_stream_response(generated_ids=[8])
+            yield _make_stream_response(generated_ids=[9], finish_reason=0)
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+        list(behavior(_make_infer_request(input_ids=[1]), ctx))
+
+        # First chunk -> FIRST_TOKEN_RT; remaining 2 -> ITER_RT. Three total iter QPS.
+        self.assertEqual(
+            len(self._calls_for(GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC)), 1
+        )
+        self.assertEqual(
+            len(self._calls_for(GaugeMetrics.RESPONSE_ITER_RT_METRIC)), 2
+        )
+        self.assertEqual(len(self._calls_for(AccMetrics.ITER_QPS_METRIC)), 3)
+        # Success on normal exit, no error/cancel.
+        self.assertEqual(len(self._calls_for(AccMetrics.SUCCESS_QPS_METRIC)), 1)
+        self.assertEqual(len(self._calls_for(AccMetrics.ERROR_QPS_METRIC)), 0)
+        # Iterate count = chunks seen.
+        _, iter_count, _ = self._calls_for(GaugeMetrics.RESPONSE_ITERATE_COUNT)[0]
+        self.assertEqual(iter_count, 3)
+
+    def test_cancelled_rpc_fires_cancel_qps_not_error(self) -> None:
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield _make_stream_response(generated_ids=[10])
+            context.set_code(grpc.StatusCode.CANCELLED)
+            context.set_details("client cancelled")
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+        list(behavior(iter([_make_infer_request(input_ids=[1])]), ctx))
+
+        self.assertEqual(len(self._calls_for(AccMetrics.CANCEL_QPS_METRIC)), 1)
+        self.assertEqual(len(self._calls_for(AccMetrics.ERROR_QPS_METRIC)), 0)
+        self.assertEqual(len(self._calls_for(AccMetrics.SUCCESS_QPS_METRIC)), 0)
+        # Cancel tag set doesn't include error_code (CANCELLED is its own metric).
+        _, _, cancel_tags = self._calls_for(AccMetrics.CANCEL_QPS_METRIC)[0]
+        self.assertNotIn("error_code", cancel_tags)
+
+    def test_exception_mid_rpc_fires_error_qps_with_error_code_tag(self) -> None:
+        def inner(request, context):
+            raise RuntimeError("boom")
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+        with self.assertRaises(RuntimeError):
+            behavior(_make_infer_request(input_ids=[1]), ctx)
+
+        self.assertEqual(len(self._calls_for(AccMetrics.ERROR_QPS_METRIC)), 1)
+        self.assertEqual(len(self._calls_for(AccMetrics.SUCCESS_QPS_METRIC)), 0)
+        _, _, error_tags = self._calls_for(AccMetrics.ERROR_QPS_METRIC)[0]
+        # Exception with no grpc code -> status "UNKNOWN" lands in error_code tag so
+        # alert rules can split crash vs handled gRPC codes.
+        self.assertEqual(error_tags["error_code"], "UNKNOWN")
+        self.assertEqual(error_tags["protocol"], "grpc")
+
+    def test_rpc_without_input_ids_omits_input_token_size_gauge(self) -> None:
+        """Health-check style RPC (no input_ids) must not emit a bogus 0-length gauge."""
+
+        def inner(request, context):
+            return _make_stream_response()
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        behavior(_make_infer_request(input_ids=None), FakeContext())
+
+        self.assertEqual(
+            len(self._calls_for(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC)), 0
+        )
+        # OUTPUT size is always reported (len of empty list = 0).
+        _, out_len, _ = self._calls_for(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC)[0]
+        self.assertEqual(out_len, 0)
 
 
 if __name__ == "__main__":

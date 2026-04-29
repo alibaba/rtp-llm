@@ -18,6 +18,7 @@ from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.dash_sc.server import DashScGrpcServer
 from rtp_llm.dash_sc.service import set_dash_sc_grpc_enqueue_event_loop
+from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
 
@@ -117,6 +118,12 @@ class DashScApp:
 
             loop = self._start_enqueue_loop()
             set_dash_sc_grpc_enqueue_event_loop(loop)
+
+            # Register py_rtp_* metrics so the access-log interceptor's kmonitor.report
+            # calls find their metric objects. Idempotent — matches FrontendServer.__init__
+            # so dashboards/alerts see gRPC and HTTP paths under the same metric family
+            # (split via the ``protocol`` tag the interceptor injects).
+            kmonitor.init()
 
             port = self.server_config.dash_sc_grpc_server_port
             logging.info(
