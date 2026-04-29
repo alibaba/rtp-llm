@@ -166,11 +166,21 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const size_t group_num = is_hybrid ? param.kv_cache_group_types_host.size(0) : 1;
 
     int gid = 0;
+    // DSV4 path: caller (deepseek_v4_model.py) passes group_id_override to
+    // pin the gid for this call (one (layer, pool) combination). When set,
+    // it wins over layer→group lookup and is also used for the "_g{gid}"
+    // key suffix below.
+    if (param.group_id_override >= 0) {
+        gid = param.group_id_override;
+    }
     if (param.host_kv_cache_offset.dim() == 3) {
-        gid = -1;
-        if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
-            && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
-            gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
+        if (param.group_id_override < 0) {
+            gid = -1;
+            if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
+                && static_cast<size_t>(param.layer_id)
+                       < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
+                gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
+            }
         }
         RTP_LLM_CHECK_WITH_INFO(
             gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
@@ -225,13 +235,24 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                                     index,
                                     max_blocks_per_batch);
             auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
-            std::string cache_key;
-            cache_key =
-                makeCacheKey(param.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
+            // -1 is the unallocated-block sentinel (e.g. trailing slot of a
+            // LINEAR ring buffer when only one step has been written).
+            if (block_id == -1) {
+                return;
+            }
+            // Append "_g{gid}" so cache_keys are unique per pool — DSV4 has
+            // multiple pools per layer (CSA/HCA/INDEXER + state pools), each
+            // with its own layout. Decode side mirrors this in
+            // DecodeRpcServer::loadCache.
+            std::string cache_key =
+                makeCacheKey(param.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id)
+                + "_g" + std::to_string(gid);
 
             void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
             std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
 
+            // Hybrid (DSV4 / Qwen3-Next) and MLA layouts treat the block as a
+            // single opaque KV chunk. Only the legacy MHA path splits k/v.
             if (is_hybrid || mla_kvcache) {
                 request_blocks->addBlock("kv_" + cache_key, kv_block_addr, param.kv_block_stride_bytes, true, true);
             } else {
@@ -263,7 +284,18 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         };
 
         if (group_type == CacheGroupType::LINEAR) {
-            addBlock(total_blocks - 1, group_type);
+            // LINEAR groups (DSV4 state pools / SWA KV) have a small per-pool
+            // block table (e.g. 2 fixed slots). total_blocks here is derived
+            // from input_len/tokens_per_block (the FULL group's accounting),
+            // so it would index PAST the end of this pool's block table AND
+            // mismatch the decode side which iterates [0, max_blocks_per_batch).
+            // Iterate the per-pool slots directly so prefill key indices
+            // align with what decode requests.
+            const int lin_total = static_cast<int>(max_blocks_per_batch);
+            const int lin_start = lin_total >= 2 ? lin_total - 2 : 0;
+            for (int index = lin_start; index < lin_total; ++index) {
+                addBlock(index, group_type);
+            }
         } else {
             for (int index = 0; index < total_blocks; ++index) {
                 addBlock(index, group_type);
