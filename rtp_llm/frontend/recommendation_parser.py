@@ -23,6 +23,18 @@ _SEMANTIC_ID_RE = re.compile(r"C\d+")
 _DEFAULT_THINK_PRELUDE = "<think>\n\n</think>\n\n"
 
 
+def _looks_like_qwen3_tokenizer(tokenizer: Any) -> bool:
+    """白名单判断:仅对 qwen3 系列 tokenizer 启用 prelude 自动填充。
+
+    检查 tokenizer.name_or_path 和 model_type 两个字段大小写不敏感子串匹配,
+    任一命中即视为 qwen3 家族。没命中的模型如果亦需 prelude 跳过,
+    应由调用方显式传 end_think_token_ids,避免静默错误屏蔽无关 token。
+    """
+    name_or_path = str(getattr(tokenizer, "name_or_path", "")).lower()
+    model_type = str(getattr(tokenizer, "model_type", "")).lower()
+    return "qwen3" in name_or_path or "qwen3" in model_type
+
+
 def _extract_exposed_items(prompt: str, combo_token_size: int) -> List[List[str]]:
     """从 prompt 中抽出所有已曝光商品,按 combo_token_size 切分为语义 ID 组合。
 
@@ -71,15 +83,26 @@ def _encode_semantic_id(tokenizer: Any, semantic_id: str) -> Optional[int]:
 
 
 def _auto_fill_end_think_prelude(generate_config: Any, tokenizer: Any) -> None:
-    """若用户未显式设置 end_think_token_ids,则用 tokenizer 编码默认 prelude 并填入。
+    """若用户未显式设置 end_think_token_ids,且 tokenizer 属于 qwen3 白名单,
+    则用 tokenizer 编码默认 prelude 并填入。
 
-    仅在用户未显式配置时填充;任何异常(tokenizer 不支持、encode 返回空等)都静默降级为
-    不填,Processor 行为等同历史版本。
+    设计原则:
+      - 用户显式配置优先,已设值绝不覆盖。
+      - 非白名单 tokenizer 不做假设,留一条 warning 让调用方可观测。
+      - 任何 encode 异常/空返回/赋值失败都静默降级为不填,Processor 行为等同历史版本。
     """
     existing = getattr(generate_config, "end_think_token_ids", None)
     if existing:
         return
     if tokenizer is None or not hasattr(tokenizer, "encode"):
+        return
+    if not _looks_like_qwen3_tokenizer(tokenizer):
+        logging.warning(
+            "recommendation_parser: tokenizer %s is not in qwen3 whitelist, "
+            "skip auto-filling end_think_token_ids. Set it explicitly if your "
+            "model also emits a think prelude.",
+            getattr(tokenizer, "name_or_path", type(tokenizer).__name__),
+        )
         return
     try:
         ids = tokenizer.encode(_DEFAULT_THINK_PRELUDE, add_special_tokens=False)

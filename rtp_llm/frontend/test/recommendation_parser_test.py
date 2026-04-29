@@ -1,10 +1,11 @@
 """单元测试：recommendation_parser
 
-覆盖 4 个关键场景：
+覆盖关键场景：
 1. 开关关闭时不解析
 2. combo_token_size<=0 时不解析
 3. 正常解析并填充（含 pos 不连续场景）
 4. 已有 banned_combo_token_ids 与解析结果合并去重
+5. auto-fill end_think_token_ids 的白名单/覆盖/encode 异常/空 banned 时不触发
 """
 
 import unittest
@@ -15,13 +16,26 @@ from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 
 
 class FakeTokenizer:
-    """最小的 fake tokenizer：C<N> -> N + 10000，保证每个语义 ID 是一个 token。"""
+    """最小的 fake tokenizer：C<N> -> N + 10000，保证每个语义 ID 是一个 token。
+
+    默认 name_or_path 不含 qwen3，不命中 auto-fill 白名单，与旧版本行为一致。
+    新测试需要 auto-fill 时显式覆写 name_or_path 为 'qwen3/...' 触发白名单。
+    """
 
     unk_token_id = -1
+    name_or_path = "fake/non-qwen"
+    model_type = ""
+    encode_raises = False
 
     def convert_tokens_to_ids(self, token: str) -> int:
         assert token.startswith("C")
         return 10000 + int(token[1:])
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> List[int]:
+        if self.encode_raises:
+            raise RuntimeError("mock encode failure")
+        # 将整段 prelude 字符串映射为四个固定 token，足以驱动 auto-fill 测试
+        return [1001, 1002, 1003, 1004]
 
 
 def _make_config(
@@ -76,6 +90,33 @@ class RecommendationParserTest(unittest.TestCase):
         n = parse_and_fill_banned_combo("", cfg, FakeTokenizer())
         self.assertEqual(0, n)
         self.assertEqual([], cfg.banned_combo_token_ids)
+
+    def test_auto_fill_skipped_when_user_preset(self):
+        """用户已显式配 end_think_token_ids 时，auto-fill 应跳过不覆盖。"""
+        tok = FakeTokenizer()
+        tok.name_or_path = "qwen3/fake"  # 命中白名单，验证 "已设值不覆盖" 优先级
+        cfg = _make_config(auto_parse=True, combo_token_size=3)
+        cfg.end_think_token_ids = [42, 43]
+        parse_and_fill_banned_combo(self.PROMPT, cfg, tok)
+        self.assertEqual([42, 43], cfg.end_think_token_ids)
+
+    def test_auto_fill_silent_on_encode_failure(self):
+        """白名单命中但 encode 抛异常时，end_think_token_ids 保持未设置。"""
+        tok = FakeTokenizer()
+        tok.name_or_path = "qwen3/fake"
+        tok.encode_raises = True
+        cfg = _make_config(auto_parse=True, combo_token_size=3)
+        parse_and_fill_banned_combo(self.PROMPT, cfg, tok)
+        self.assertIsNone(getattr(cfg, "end_think_token_ids", None))
+
+    def test_auto_fill_skipped_when_banned_combo_empty(self):
+        """prompt 不含 posN 且 existing banned_combo 为空 → 不触发 auto-fill。"""
+        tok = FakeTokenizer()
+        tok.name_or_path = "qwen3/fake"
+        cfg = _make_config(auto_parse=True, combo_token_size=3)
+        parse_and_fill_banned_combo("plain prompt without pos patterns", cfg, tok)
+        self.assertEqual([], cfg.banned_combo_token_ids)
+        self.assertIsNone(getattr(cfg, "end_think_token_ids", None))
 
 
 if __name__ == "__main__":
