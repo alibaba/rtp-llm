@@ -359,11 +359,6 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             # H1 intercept: block 0 is BlockPool's reserved sentinel (never
             # malloc'd, always zero). Writing here corrupts the safe-zero
             # block for every later reader.
-            if write_page_idx == 0:
-                tl.device_print(
-                    "H1_intercept causal_conv1d_fwd_write block0 dest_idx=",
-                    dest_idx,
-                )
 
         # changed from `>= 0` to `> 0` to reject block 0 in addition to -1
         if write_to_block and write_page_idx > 0:
@@ -787,13 +782,6 @@ def _causal_conv1d_update_kernel(
         write_block_id = tl.load(
             block_map_ptr + idx_seq * stride_block_map + write_block_offset
         ).to(tl.int64)
-        # H1 intercept: block 0 is BlockPool's reserved sentinel; writes here
-        # corrupt the safe-zero block for every later reader.
-        if write_block_id == 0:
-            tl.device_print(
-                "H1_intercept causal_conv1d_update_write block0 offset=",
-                write_block_offset,
-            )
 
         # changed from `!= -1` to `> 0` to also reject block 0
         if write_block_id > 0:
