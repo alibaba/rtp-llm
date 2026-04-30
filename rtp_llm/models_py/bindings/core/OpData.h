@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
@@ -172,6 +173,7 @@ struct CacheStoreInputs {
     torch::Tensor host_kv_cache_offset;
 
     torch::Tensor kv_cache_layer_to_group_host;
+    torch::Tensor kv_cache_layer_region_to_group_host;
     torch::Tensor kv_cache_group_types_host;  // 0 -> LINEAR, 1 -> FULL.
 
     size_t context_batch_size = 0;
@@ -188,14 +190,8 @@ struct CacheStoreInputs {
     bool                     decode_entrance       = false;
     bool                     warmup;
 
-    int layer_id = 0;
-
-    // Per-pool override for hybrid caches like DSV4 where one layer touches
-    // multiple groups. -1 means "look up via kv_cache_layer_to_group_host";
-    // any non-negative value is used directly for both the offset table
-    // selection (when host_kv_cache_offset is 3D) and the "_g{gid}" key
-    // suffix.
-    int32_t group_id_override = -1;
+    int               layer_id    = 0;
+    KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
 
     // Pre-created event from the main thread to avoid cudaEventRecord
     // contention on background threads. nullptr means writeCacheStore will

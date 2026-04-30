@@ -10,9 +10,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                        const torch::Tensor&                         prefix_lengths,
                        const torch::Tensor&                         kv_cache_block_id_host,
                        std::optional<torch_ext::PyCacheStoreInputs> cache_store_member,
-                       std::optional<torch_ext::LayerKVCache>       kv_cache,
-                       int32_t                                      group_id,
-                       int64_t                                      kv_block_stride_bytes) {
+                       std::optional<torch_ext::LayerKVCache>       kv_cache) {
     if (!kv_cache.has_value() || !cache_store_member.has_value()) {
         return;
     }
@@ -26,10 +24,6 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
     auto captured_kv_cache_block_id_host = kv_cache_block_id_host;
     auto captured_cache_store            = cache_store_inputs;
     auto captured_kv_cache               = kv_cache.value();
-    // Per-pool overrides (DSV4 has multiple pools per layer).
-    const int32_t captured_group_id    = group_id;
-    const size_t  captured_pool_stride = kv_block_stride_bytes > 0 ? static_cast<size_t>(kv_block_stride_bytes) :
-                                                                     captured_cache_store.kv_block_stride_bytes;
 
     // Create event in main thread to avoid cudaEventRecord contention on background threads.
     auto event = runtimeCreateEvent();
@@ -39,13 +33,23 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 captured_kv_cache_block_id_host,
                 captured_cache_store,
                 captured_kv_cache,
-                captured_group_id,
-                captured_pool_stride,
                 event = std::move(event)]() mutable {
+        size_t kv_block_stride_bytes = captured_cache_store.kv_block_stride_bytes;
+        if (captured_kv_cache.kv_cache_base.defined() && captured_kv_cache.kv_cache_base.dim() == 2) {
+            kv_block_stride_bytes = static_cast<size_t>(captured_kv_cache.kv_cache_base.size(1))
+                                    * captured_kv_cache.kv_cache_base.element_size();
+        }
+        size_t kv_scale_stride_bytes = captured_cache_store.kv_scale_stride_bytes;
+        if (captured_kv_cache.kv_scale_base.defined() && captured_kv_cache.kv_scale_base.dim() == 2) {
+            kv_scale_stride_bytes = static_cast<size_t>(captured_kv_cache.kv_scale_base.size(1))
+                                    * captured_kv_cache.kv_scale_base.element_size();
+        }
+
         CacheStoreInputs inputs{captured_input_lengths,
                                 captured_prefix_lengths,
                                 captured_kv_cache_block_id_host,
                                 captured_cache_store.kv_cache_layer_to_group,
+                                captured_cache_store.kv_cache_layer_region_to_group,
                                 captured_cache_store.kv_cache_group_types,
                                 captured_cache_store.context_batch_size,
                                 captured_cache_store.decoder_batch_size,
@@ -53,14 +57,14 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.request_pd_separation,
                                 captured_cache_store.cache_keys,
                                 captured_cache_store.tokens_per_block,
-                                captured_pool_stride,
-                                captured_cache_store.kv_scale_stride_bytes,
+                                kv_block_stride_bytes,
+                                kv_scale_stride_bytes,
                                 captured_cache_store.pd_separation,
                                 captured_cache_store.model_id,
                                 captured_cache_store.decode_entrance,
                                 captured_cache_store.warmup,
                                 captured_kv_cache.layer_id,
-                                captured_group_id,
+                                captured_kv_cache.region_name,
                                 std::move(event)};
 
         KvCacheInfo kv_cache_info;

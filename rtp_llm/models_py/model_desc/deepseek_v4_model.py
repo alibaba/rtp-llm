@@ -429,7 +429,7 @@ class DeepSeekV4Model(GptModelBase):
             return
 
         # Build per-layer per-pool tensor cache from flat field
-        flat = getattr(self.kv_cache, "kv_cache_base_by_layer_attn_flat", None)
+        flat = getattr(self.kv_cache, "kv_cache_base_by_layer_region_flat", None)
         attn_type_count = 8
         self._fw_pool_tensors = []
         # Fingerprint the underlying pool storage so we can detect when the
@@ -455,7 +455,7 @@ class DeepSeekV4Model(GptModelBase):
                 self._fw_pool_tensors.append(slots)
         else:
             logging.warning(
-                "[DeepSeekV4Model] kv_cache_base_by_layer_attn_flat empty, gather/scatter disabled"
+                "[DeepSeekV4Model] kv_cache_base_by_layer_region_flat empty, gather/scatter disabled"
             )
             return
 
@@ -872,11 +872,9 @@ class DeepSeekV4Model(GptModelBase):
         INDEXER_KV, INDEXER_STATE, CSA_STATE; HCA layer: SWA_KV, HCA_KV,
         HCA_STATE; SWA-only layer: SWA_KV). Each pool has its own layout
         (head_dim × entries_per_block × dtype) and its own block_id table.
-        The shared write_cache_store path assumes one pool per layer, so
-        we call it once per (layer × pool), passing the pool-specific
-        block_id table, raw [num_blocks, stride_bytes] tensor, group_id
-        (used in the "_g{gid}" cache key suffix that decode mirrors in
-        DecodeRpcServer) and per-pool stride.
+        We call it once per (layer x region), passing the pool-specific
+        block_id table and raw [num_blocks, stride_bytes] tensor. The C++ path
+        maps region_name to the group id and builds region-aware cache keys.
         """
         cache_store_inputs = getattr(attn, "cache_store_inputs", None)
         if cache_store_inputs is None:
@@ -895,16 +893,16 @@ class DeepSeekV4Model(GptModelBase):
         attn_type_to_gid = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6}
 
         import rtp_llm.ops.compute_ops as compute_ops
-        from rtp_llm.ops.compute_ops import KVCacheAttnType
+        from rtp_llm.ops.compute_ops import KVCacheRegionName
 
         attn_type_enum_by_int = {
-            1: KVCacheAttnType.CSA_KV,
-            2: KVCacheAttnType.HCA_KV,
-            3: KVCacheAttnType.INDEXER_KV,
-            4: KVCacheAttnType.INDEXER_STATE,
-            5: KVCacheAttnType.CSA_STATE,
-            6: KVCacheAttnType.HCA_STATE,
-            7: KVCacheAttnType.SWA_KV,
+            1: KVCacheRegionName.CSA_KV,
+            2: KVCacheRegionName.HCA_KV,
+            3: KVCacheRegionName.INDEXER_KV,
+            4: KVCacheRegionName.INDEXER_STATE,
+            5: KVCacheRegionName.CSA_STATE,
+            6: KVCacheRegionName.HCA_STATE,
+            7: KVCacheRegionName.SWA_KV,
         }
 
         for layer_idx in range(len(self.v4.layers)):
@@ -935,24 +933,12 @@ class DeepSeekV4Model(GptModelBase):
                 pool_t = layer_kv.kv_cache_base
                 if pool_t is None or pool_t.numel() == 0 or pool_t.dim() != 2:
                     continue
-                # pool_t.size(1) is in ELEMENTS (kv_block_stride_elems per
-                # MemoryLayoutStrategy::processKVTensor reshape). State pools
-                # use fp32 (element_size=4) so per-block bytes is 4× the
-                # element count; paged pools use uint8 (element_size=1) so
-                # the count is already in bytes. Either way, multiply by
-                # element_size() to get the per-block stride in bytes —
-                # which matches what convertIndexToBuffer reports on decode.
-                stride_bytes = int(pool_t.size(1)) * int(pool_t.element_size())
-                if stride_bytes <= 0:
-                    continue
                 compute_ops.write_cache_store(
                     attn.input_lengths,
                     attn.prefix_lengths,
                     block_ids_2d,
                     cache_store_inputs,
                     layer_kv,
-                    group_id=gid,
-                    kv_block_stride_bytes=stride_bytes,
                 )
 
     def prepare_fmha_impl(
@@ -1133,7 +1119,7 @@ class DeepSeekV4Model(GptModelBase):
         ):
             cur_id = id(self.kv_cache)
             cur_first_ptr = None
-            flat_now = getattr(self.kv_cache, "kv_cache_base_by_layer_attn_flat", None)
+            flat_now = getattr(self.kv_cache, "kv_cache_base_by_layer_region_flat", None)
             if flat_now is not None:
                 for t in flat_now:
                     if t is not None and t.numel() > 0:

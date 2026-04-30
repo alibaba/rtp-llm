@@ -34,12 +34,12 @@ public:
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
     virtual BlockAddrInfo
-    convertIndexToAddr(int layer_id, KVCacheAttnType attn_type, int block_id) const;
+    convertIndexToAddr(int layer_id, KVCacheRegionName region_name, int block_id) const;
     virtual std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, KVCacheAttnType attn_type, int block_id) const;
+    convertIndexToBuffer(int layer_id, KVCacheRegionName region_name, int block_id) const;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id,
-                         KVCacheAttnType attn_type,
+                         KVCacheRegionName region_name,
                          int block_id,
                          int partition_count,
                          int partition_id) const;
