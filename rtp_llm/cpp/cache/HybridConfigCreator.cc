@@ -218,11 +218,11 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     // Setup layer to group mapping
     HybridConfigCreator::setupLayerToGroupMapping(config);
 
-    config.layer_attn_types.assign(config.layer_num, CacheGroupType::FULL);
+    config.layer_group_types.assign(config.layer_num, CacheGroupType::FULL);
     for (size_t layer_id = 0; layer_id < config.layer_to_group_id.size(); ++layer_id) {
         const int gid = config.layer_to_group_id[layer_id];
         if (gid >= 0 && static_cast<size_t>(gid) < config.group_types.size()) {
-            config.layer_attn_types[layer_id] = config.group_types[static_cast<size_t>(gid)];
+            config.layer_group_types[layer_id] = config.group_types[static_cast<size_t>(gid)];
         }
     }
 

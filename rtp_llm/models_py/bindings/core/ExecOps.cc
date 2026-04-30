@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
@@ -16,6 +18,7 @@
 #include <cstdio>
 #include <mutex>
 #include <atomic>
+#include <algorithm>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
@@ -156,34 +159,46 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const int32_t* offset_addr          = nullptr;
     size_t         max_blocks_per_batch = 0;
 
-    bool is_hybrid = false;
-    if (param.kv_cache_group_types_host.defined() && param.kv_cache_group_types_host.size(0) > 1) {
-        is_hybrid =
-            !torch::all(param.kv_cache_group_types_host.index({param.kv_cache_layer_to_group_host}) == 1).item<bool>();
-    }
+    const size_t group_num = param.kv_cache_group_types_host.defined() ? param.kv_cache_group_types_host.size(0) : 1;
+    const bool   is_hybrid = group_num > 1;
 
-    const size_t group_num = is_hybrid ? param.kv_cache_group_types_host.size(0) : 1;
-
-    int gid = 0;
-    // DSV4 path: caller (deepseek_v4_model.py) passes group_id_override to
-    // pin the gid for this call (one (layer, pool) combination). When set,
-    // it wins over layer→group lookup and is also used for the "_g{gid}"
-    // key suffix below.
-    if (param.group_id_override >= 0) {
-        gid = param.group_id_override;
-    } else if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
-               && static_cast<size_t>(param.layer_id)
-                      < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
-        gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
-    }
-
-    RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
-
+    int  gid             = 0;
+    // DSV4 / hybrid lookup. region_name (per-pool tag set by caller) selects
+    // the column in kv_cache_layer_region_to_group_host so one layer with
+    // multiple pools (e.g. DSV4 has 7 pools) routes to the correct group.
+    // Falls back to the layer→group host vector when no region map exists.
+    auto mapped_group_id = [&param, group_num]() -> int {
+        if (param.kv_cache_layer_region_to_group_host.defined() && param.kv_cache_layer_region_to_group_host.dim() == 2
+            && param.layer_id >= 0
+            && static_cast<int64_t>(param.layer_id) < param.kv_cache_layer_region_to_group_host.size(0)) {
+            const auto region = static_cast<int64_t>(param.region_name);
+            if (region >= 0 && region < param.kv_cache_layer_region_to_group_host.size(1)) {
+                const int candidate =
+                    param.kv_cache_layer_region_to_group_host
+                        .data_ptr<int32_t>()[param.layer_id * param.kv_cache_layer_region_to_group_host.size(1)
+                                             + region];
+                if (candidate >= 0) {
+                    return candidate;
+                }
+            }
+        }
+        if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
+            && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
+            return param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
+        }
+        return group_num > 0 ? 0 : -1;
+    };
     if (param.host_kv_cache_offset.dim() == 3) {
+        gid = mapped_group_id();
+        RTP_LLM_CHECK_WITH_INFO(
+            gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
         const auto group_offset_view = param.host_kv_cache_offset[static_cast<int64_t>(gid)];
         max_blocks_per_batch         = group_offset_view.size(1);
         offset_addr                  = group_offset_view.data_ptr<int32_t>();
     } else {
+        gid = mapped_group_id();
+        RTP_LLM_CHECK_WITH_INFO(
+            gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
         max_blocks_per_batch = param.host_kv_cache_offset.size(1);
         offset_addr          = param.host_kv_cache_offset.data_ptr<int32_t>();
     }
@@ -218,31 +233,34 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             "write cache store, request id is %ld, blocks num is %ld", request_id, block_num + reuse_block_num);
 
         CacheGroupType group_type = CacheGroupType::FULL;
-        group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
+        if (param.kv_cache_group_types_host.defined()) {
+            group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
+        }
 
         const int total_blocks = block_num + reuse_block_num;
         if (total_blocks <= 0) {
             continue;
         }
 
-        auto addBlock = [&](int index, CacheGroupType group_type) {
+        auto addBlock = [&](int index) {
             RTP_LLM_CHECK_WITH_INFO(index >= 0 && index < static_cast<int>(max_blocks_per_batch),
                                     "invalid block index=%d (max_blocks_per_batch=%zu)",
                                     index,
                                     max_blocks_per_batch);
             auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
-            // -1 is the unallocated-block sentinel (e.g. trailing slot of a
-            // LINEAR ring buffer when only one step has been written).
-            if (block_id == -1) {
+            if (isNullBlockIdx(block_id)) {
+                RTP_LLM_LOG_DEBUG("skip null kv cache block, request id [%ld], layer id [%d], region [%d], index [%d]",
+                                  request_id,
+                                  param.layer_id,
+                                  static_cast<int>(param.region_name),
+                                  index);
                 return;
             }
-            // Append "_g{gid}" so cache_keys are unique per pool — DSV4 has
-            // multiple pools per layer (CSA/HCA/INDEXER + state pools), each
-            // with its own layout. Decode side mirrors this in
-            // DecodeRpcServer::loadCache.
             std::string cache_key =
-                makeCacheKey(param.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id)
-                + "_g" + std::to_string(gid);
+                makeCacheKey(param.model_id,
+                             param.cache_keys[batch_id * max_blocks_per_batch + index],
+                             param.layer_id,
+                             param.region_name);
 
             void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
             std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
@@ -279,23 +297,15 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
         };
 
-        if (group_type == CacheGroupType::LINEAR) {
-            // LINEAR groups (DSV4 state pools / SWA KV) have a small per-pool
-            // block table (e.g. 2 fixed slots). total_blocks here is derived
-            // from input_len/tokens_per_block (the FULL group's accounting),
-            // so it would index PAST the end of this pool's block table AND
-            // mismatch the decode side which iterates [0, max_blocks_per_batch).
-            // Iterate the per-pool slots directly so prefill key indices
-            // align with what decode requests.
-            const int lin_total = static_cast<int>(max_blocks_per_batch);
-            const int lin_start = lin_total >= 2 ? lin_total - 2 : 0;
-            for (int index = lin_start; index < lin_total; ++index) {
-                addBlock(index, group_type);
-            }
-        } else {
-            for (int index = 0; index < total_blocks; ++index) {
-                addBlock(index, group_type);
-            }
+        const auto block_positions = blockPositionsForCacheTransfer(static_cast<size_t>(std::min<int>(
+                                                                        total_blocks,
+                                                                        static_cast<int>(max_blocks_per_batch))),
+                                                                    /*reuse_block_size=*/0,
+                                                                    is_hybrid,
+                                                                    group_type,
+                                                                    /*hybrid_full_from_begin=*/true);
+        for (const auto block_pos : block_positions) {
+            addBlock(static_cast<int>(block_pos));
         }
 
         auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
@@ -308,7 +318,13 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                     ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str());
             }
         };
-        cache_store->store(request_blocks, storeCallback);
+        if (request_blocks->getBlocksCount() > 0) {
+            cache_store->store(request_blocks, storeCallback);
+        } else {
+            RTP_LLM_LOG_DEBUG("skip cache store because all selected blocks are null, request id [%ld], layer id [%d]",
+                              request_id,
+                              param.layer_id);
+        }
     }
 }
 

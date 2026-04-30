@@ -183,7 +183,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.mtp_sub_configs.clear();
     config.mtp_sub_configs.reserve(num_mtp_modules);
     config.layer_to_group_id.resize(total_layer_num, 0);
-    config.layer_attn_types.resize(total_layer_num, CacheGroupType::FULL);
+    config.layer_group_types.resize(total_layer_num, CacheGroupType::FULL);
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(total_layer_num), 0);
 
     // Main(score) model per-layer stride (kv + scale).
@@ -195,8 +195,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                             score_layers);
     for (size_t l = 0; l < score_layers; ++l) {
         config.layer_to_block_stride_bytes[l] = score_config.layer_to_block_stride_bytes[l];
-        if (l < score_config.layer_attn_types.size()) {
-            config.layer_attn_types[l] = score_config.layer_attn_types[l];
+        if (l < score_config.layer_group_types.size()) {
+            config.layer_group_types[l] = score_config.layer_group_types[l];
         }
     }
 
@@ -220,8 +220,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
             const int stride_bytes = sub_cfg->layer_to_block_stride_bytes[static_cast<size_t>(l)];
             config.layer_to_block_stride_bytes[static_cast<size_t>(global_layer_id)] = stride_bytes;
-            if (l < sub_cfg->layer_attn_types.size()) {
-                config.layer_attn_types[static_cast<size_t>(global_layer_id)] = sub_cfg->layer_attn_types[l];
+            if (l < sub_cfg->layer_group_types.size()) {
+                config.layer_group_types[static_cast<size_t>(global_layer_id)] = sub_cfg->layer_group_types[l];
             }
         }
 

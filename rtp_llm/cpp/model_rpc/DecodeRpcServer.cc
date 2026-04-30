@@ -5,6 +5,8 @@
 #include <condition_variable>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -635,59 +637,35 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 auto        block_num = block_ids.size();
                 size_t      model_id  = maga_init_params_.model_id;
 
-                // Hybrid cache: Linear group sends the last 2 blocks (DSV4 state
-                // pools / SWA KV need current + previous step for continuity).
-                // Full group sends all blocks. Skip block_id == -1 sentinels.
-                std::vector<size_t> block_pos_list;
-                block_pos_list.reserve(block_num);
-                if (use_hybrid && block_num > 0) {
-                    CacheGroupType group_type = CacheGroupType::FULL;
-                    if (gid < cache_config.group_types.size()) {
-                        group_type = cache_config.group_types[gid];
-                    }
-                    if (group_type == CacheGroupType::LINEAR) {
-                        const size_t lin_start = block_num >= 2 ? block_num - 2 : 0;
-                        for (size_t pos = lin_start; pos < block_num; ++pos) {
-                            if (static_cast<int>(block_ids[pos]) == -1) {
-                                continue;
-                            }
-                            block_pos_list.push_back(pos);
-                        }
-                    } else {
-                        for (size_t block_pos = 0; block_pos < block_num; ++block_pos) {
-                            block_pos_list.push_back(block_pos);
-                        }
-                    }
-                } else {
-                    for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; ++block_pos) {
-                        block_pos_list.push_back(block_pos);
-                    }
+                KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
+                if (use_hybrid && gid < cache_config.group_region_names.size()) {
+                    region_name = cache_config.group_region_names[gid];
+                }
+                CacheGroupType group_type = CacheGroupType::FULL;
+                if (use_hybrid && gid < cache_config.group_types.size()) {
+                    group_type = cache_config.group_types[gid];
                 }
 
-                // Use the per-attn-type overload so HybridPoolKVCacheAllocator
-                // routes to the correct pool for this group (DSV4 has 7 pools
-                // with different layouts).
-                KVCacheAttnType attn_type = KVCacheAttnType::DEFAULT;
-                if (use_hybrid && gid < cache_config.group_attn_types.size()) {
-                    attn_type = cache_config.group_attn_types[gid];
-                }
+                auto block_pos_list = blockPositionsForCacheTransfer(block_num,
+                                                                      load_context.reuse_block_size,
+                                                                      use_hybrid,
+                                                                      group_type,
+                                                                      /*hybrid_full_from_begin=*/true);
 
                 for (size_t block_pos : block_pos_list) {
-                    // Append "_g{gid}" so cache_keys are unique per pool — DSV4
-                    // has multiple pools per layer with different layouts;
-                    // each pool must have its own key. Prefill side mirrors
-                    // this in runtimeWriteCacheStore (ExecOps.cc).
-                    auto cache_key =
-                        makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id) + "_g"
-                        + std::to_string(gid);
                     auto block_id = block_ids[block_pos];
+                    if (isNullBlockIdx(block_id)) {
+                        continue;
+                    }
+                    auto cache_key = makeCacheKey(
+                        model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id, region_name);
 
                     const int local_part_cnt = peer_cnt;
                     const int local_part_id  = i;
                     auto      parts =
-                        (attn_type != KVCacheAttnType::DEFAULT) ?
+                        (region_name != KVCacheRegionName::DEFAULT) ?
                                  cache_manager->convertIndexToBuffer(
-                                block_id, layer_id, attn_type, local_part_cnt, local_part_id) :
+                                block_id, layer_id, region_name, local_part_cnt, local_part_id) :
                                  cache_manager->convertIndexToBuffer(block_id, layer_id, local_part_cnt, local_part_id);
 
                     auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
@@ -781,56 +759,36 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             auto        block_num = block_ids.size();
                             size_t      model_id  = mtp_base_model_id;
 
-                            // Hybrid cache: Linear group sends the last 2 blocks
-                            // (current + previous step). Full group sends all
-                            // blocks. Skip block_id == -1 sentinels.
-                            std::vector<size_t> block_pos_list;
-                            block_pos_list.reserve(block_num);
-                            if (mtp_use_hybrid && block_num > 0) {
-                                CacheGroupType group_type = CacheGroupType::FULL;
-                                if (gid < mtp_cache_cfg.group_types.size()) {
-                                    group_type = mtp_cache_cfg.group_types[gid];
-                                }
-                                if (group_type == CacheGroupType::LINEAR) {
-                                    const size_t lin_start = block_num >= 2 ? block_num - 2 : 0;
-                                    for (size_t pos = lin_start; pos < block_num; ++pos) {
-                                        if (static_cast<int>(block_ids[pos]) == -1) {
-                                            continue;
-                                        }
-                                        block_pos_list.push_back(pos);
-                                    }
-                                } else {
-                                    for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num;
-                                         ++block_pos) {
-                                        block_pos_list.push_back(block_pos);
-                                    }
-                                }
-                            } else {
-                                for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num;
-                                     ++block_pos) {
-                                    block_pos_list.push_back(block_pos);
-                                }
+                            KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
+                            if (mtp_use_hybrid && gid < mtp_cache_cfg.group_region_names.size()) {
+                                region_name = mtp_cache_cfg.group_region_names[gid];
                             }
-
-                            // Per-attn-type lookup so HybridPoolKVCacheAllocator
-                            // routes to the right pool for this group.
-                            KVCacheAttnType attn_type = KVCacheAttnType::DEFAULT;
-                            if (mtp_use_hybrid && gid < mtp_cache_cfg.group_attn_types.size()) {
-                                attn_type = mtp_cache_cfg.group_attn_types[gid];
+                            CacheGroupType group_type = CacheGroupType::FULL;
+                            if (mtp_use_hybrid && gid < mtp_cache_cfg.group_types.size()) {
+                                group_type = mtp_cache_cfg.group_types[gid];
                             }
+                            auto block_pos_list = blockPositionsForCacheTransfer(block_num,
+                                                                                  load_context.reuse_block_size,
+                                                                                  mtp_use_hybrid,
+                                                                                  group_type,
+                                                                                  /*hybrid_full_from_begin=*/true);
 
                             for (size_t block_pos : block_pos_list) {
-                                auto cache_key =
-                                    makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id)
-                                    + "_g" + std::to_string(gid);
                                 auto       block_id       = block_ids[block_pos];
+                                if (isNullBlockIdx(block_id)) {
+                                    continue;
+                                }
+                                auto cache_key = makeCacheKey(model_id,
+                                                              std::to_string(load_context.cache_keys[block_pos]),
+                                                              layer_id,
+                                                              region_name);
                                 const bool mtp_use_mla    = mtp_cache_cfg.use_mla;
                                 const int  local_part_cnt = peer_cnt;
                                 const int  local_part_id  = i;
                                 auto       parts =
-                                    (attn_type != KVCacheAttnType::DEFAULT) ?
+                                    (region_name != KVCacheRegionName::DEFAULT) ?
                                               cache_manager->convertIndexToBuffer(
-                                            block_id, global_layer_id, attn_type, local_part_cnt, local_part_id) :
+                                            block_id, global_layer_id, region_name, local_part_cnt, local_part_id) :
                                               cache_manager->convertIndexToBuffer(
                                             block_id, global_layer_id, local_part_cnt, local_part_id);
 
