@@ -113,6 +113,15 @@ class GenerateConfig(BaseModel):
     gen_timeline: bool = False
     profile_step: int = 3
     profile_trace_name: str = ""
+    # Force-batch override: lets the client side (e.g. smoke batch_test mode)
+    # bucket N independent HTTP requests into a single scheduler batch_group
+    # without going through the multi-prompt frontend path.  When
+    # batch_group_id_override >= 0, frontend_worker's single-prompt arm passes
+    # these values through to GenerateInput.batch_group_{id,size}; paired with
+    # force_batch=true the FIFOScheduler waits until batch_group_size_override
+    # streams with the same id are queued before scheduling them together.
+    batch_group_id_override: int = -1
+    batch_group_size_override: int = 1
     out_prefix: str = ""
     # for load balance
     role_addrs: List[RoleAddr] = []

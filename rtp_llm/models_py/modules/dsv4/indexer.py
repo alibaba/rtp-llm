@@ -14,6 +14,7 @@ import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_freqs_cis_local
+from rtp_llm.models_py.modules.dsv4.profile_util import record
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
@@ -182,6 +183,7 @@ class Indexer(nn.Module):
             out_topk_buffer[r : r + 1, :, :k_r] = topk_r
         return out_topk_buffer
 
+    @record("dsv4.indexer.decode")
     def forward_decode_vectorized(
         self,
         x: torch.Tensor,  # [B, 1, dim] bf16
@@ -275,6 +277,7 @@ class Indexer(nn.Module):
 
         return out_topk_buffer
 
+    @record("dsv4.indexer.prefill")
     def forward(
         self, x: torch.Tensor, qr: torch.Tensor, start_pos, offset: int
     ) -> torch.Tensor:

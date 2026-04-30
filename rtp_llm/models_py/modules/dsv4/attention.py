@@ -28,6 +28,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_freqs_cis_local,
 )
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
+from rtp_llm.models_py.modules.dsv4.profile_util import record
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
 from rtp_llm.models_py.modules.dsv4.weight_loader import _repack_v4_fp8_scale_to_int32
@@ -646,6 +647,7 @@ class Attention(nn.Module):
             out_full[:, :, g, :].copy_(out_g.view(B, S, R))
         return out_full
 
+    @record("dsv4.attn.decode")
     def forward_decode(
         self,
         x: torch.Tensor,  # [B, 1, dim] bf16  (q_len=1 pure decode)
@@ -1019,6 +1021,7 @@ class Attention(nn.Module):
             all_reduce(out, Group.TP)
         return out
 
+    @record("dsv4.attn.prefill")
     def forward(
         self, x: torch.Tensor, start_pos, sequence_lengths=None
     ) -> torch.Tensor:

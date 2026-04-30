@@ -222,11 +222,26 @@ class FrontendWorker:
                 request.batch_infer,
             )
         else:
+            # Single-prompt arm. Normally no batch_group is set (stream runs
+            # alone). Smoke "batch_test" mode bypasses the multi-prompt path
+            # and sends N independent HTTP requests, each carrying the same
+            # batch_group_id_override via extra_configs — propagate those so
+            # FIFOScheduler can bucket them into one batch_group (paired
+            # with force_batch=true and batch_group_timeout). See
+            # GenerateConfig.batch_group_{id,size}_override.
+            gc = request.generate_configs[0]
+            batch_group_id = gc.batch_group_id_override
+            batch_group_size = gc.batch_group_size_override
+            if batch_group_id < 0:
+                batch_group_id = -1
+                batch_group_size = 1
             return self._yield_generate(
                 request.request_id,
                 request.input_texts[0],
                 request.input_urls[0],
-                generate_config=request.generate_configs[0],
+                generate_config=gc,
+                batch_group_size=batch_group_size,
+                batch_group_id=batch_group_id,
                 **kwargs,
             )
 

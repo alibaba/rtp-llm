@@ -20,7 +20,11 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_all_gather_full,
     cp_should_gather,
 )
-from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, apply_rotary_emb_batched
+from rtp_llm.models_py.modules.dsv4.profile_util import record
+from rtp_llm.models_py.modules.dsv4.rope import (
+    apply_rotary_emb,
+    apply_rotary_emb_batched,
+)
 
 # P2 (prefill_opt/final_plan.md): fused softmax+weighted-sum Triton kernel.
 # Replaces the prefill `(kv * score.softmax(dim=2)).sum(dim=2)` chain
@@ -268,6 +272,7 @@ class Compressor(nn.Module):
             return None
         return out_compressed  # [B, 1, head_dim] bf16, zeros for non-boundary reqs
 
+    @record("dsv4.compressor.decode")
     def forward_decode_vectorized(
         self,
         x: torch.Tensor,  # [B, 1, dim]
@@ -395,6 +400,7 @@ class Compressor(nn.Module):
         )
         return out
 
+    @record("dsv4.compressor.prefill")
     def forward(self, x: torch.Tensor, start_pos) -> Optional[torch.Tensor]:
         assert self.kv_cache is not None, "Compressor.kv_cache must be bound by caller"
         assert (

@@ -15,6 +15,7 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     m_grouped_fp8_fp4_gemm_nt_contiguous,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.modules.dsv4.profile_util import record
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 
 # P2 (plan_0427.md): single-Triton-kernel router-gate epilogue for
@@ -22,7 +23,10 @@ from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 # (softplus → sqrt → bias-add → topk → gather → sum → div → mul) with one
 # fused kernel.  ~4× per-call speedup, identical top-k indices vs eager.
 try:
-    from rtp_llm.models_py.modules.dsv4._gate_fused_triton import fused_sqrtsoftplus_gate
+    from rtp_llm.models_py.modules.dsv4._gate_fused_triton import (
+        fused_sqrtsoftplus_gate,
+    )
+
     _GATE_FUSED_OK = True
 except Exception:  # pragma: no cover
     fused_sqrtsoftplus_gate = None
@@ -52,6 +56,7 @@ def _use_fused_gate(score_func: str, x_size_0: int) -> bool:
     if x_size_0 == 0:
         return False
     return True
+
 
 FP4_BLOCK = 32
 FP8_BLOCK = 128
@@ -287,12 +292,18 @@ class Gate(nn.Module):
         if self.weight.dtype == torch.bfloat16:
             return self.weight
         cached = getattr(self, "_w_bf16", None)
-        if cached is None or cached.shape != self.weight.shape or cached.device != self.weight.device:
+        if (
+            cached is None
+            or cached.shape != self.weight.shape
+            or cached.device != self.weight.device
+        ):
             cached = self.weight.to(torch.bfloat16)
             self._w_bf16 = cached
         return cached
 
-    def forward(self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         # x: [N, dim] flat.  Empty-batch safe — some paths (DP rank with
         # zero local tokens; F.softplus on certain degenerate shapes)
         # blow up with "unknown parameter type" on empty ``scores``, so
@@ -317,8 +328,10 @@ class Gate(nn.Module):
             and _use_fused_gate(self.score_func, x.size(0))
         ):
             return fused_sqrtsoftplus_gate(
-                scores.contiguous(), self.bias.contiguous(),
-                topk=self.topk, route_scale=float(self.route_scale),
+                scores.contiguous(),
+                self.bias.contiguous(),
+                topk=self.topk,
+                route_scale=float(self.route_scale),
                 norm_eps=1e-12,
             )
 
@@ -953,6 +966,7 @@ class MoE(nn.Module):
             torch.cat([weights, pad_w], dim=-1),
         )
 
+    @record("dsv4.moe.deepep")
     def _routed_experts_deepep(
         self,
         x: torch.Tensor,  # [N, D] local rank's tokens (BF16)
@@ -1047,6 +1061,7 @@ class MoE(nn.Module):
         )
         return y_combined.float()
 
+    @record("dsv4.moe")
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         shape = x.size()
         x = x.view(-1, self.dim)
