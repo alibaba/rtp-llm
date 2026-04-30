@@ -149,7 +149,11 @@ void gatherInputEmbeddingsForContextBatch(const GenerateStreamPtr&       stream,
         return;
     }
     for (const auto& embedding : stream->inputEmbeddings()) {
-        gathered_input_embeddings.emplace_back(embedding.clone());
+        if (embedding.is_cuda()) {
+            gathered_input_embeddings.emplace_back(embedding);
+        } else {
+            gathered_input_embeddings.emplace_back(embedding.to(torch::kCUDA));
+        }
     }
     for (int32_t loc : stream->inputEmbeddingsLocs()) {
         gathered_input_embedding_locs.push_back(loc - stream->reuseLength() + ctx.token_idx);

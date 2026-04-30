@@ -329,6 +329,13 @@ void GenerateStream::setReuseLength(int reuse_length) {
             }
         }
     }
+    // Cap reuseLength so it doesn't exceed any input_embeddings location.
+    // Otherwise the adjusted loc (loc - reuseLength) would become negative.
+    if (generate_input_->input_embeddings_locs) {
+        for (int32_t loc : generate_input_->input_embeddings_locs.value()) {
+            reuse_length_ = std::min(reuse_length_, loc);
+        }
+    }
 }
 
 void GenerateStream::setLocalReuseLength(int length) {
