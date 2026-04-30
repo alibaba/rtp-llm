@@ -148,16 +148,16 @@ build:cuda13 --copt=-Wno-array-bounds
 build:cuda13 --copt=-Wno-unused-result
 build:cuda13 --copt=-Wno-array-parameter
 build:cuda13 --copt=-Wno-narrowing
-# Mirror the cuda13_arm pattern (which sets using_cuda12_arm=true alongside
-# using_cuda13_arm=true): keep using_cuda12_9_x86=true so existing select()
-# branches that route x86 → cuda12_9-class deps (torch_2.8_py310_cuda,
-# pip_gpu_cuda12_9_torch_*, requirement_gpu_cuda12_9, etc.) keep matching.
-# using_cuda13_x86 then layers CUDA-13-specific overrides on top
-# (cutlass_cu13, flashinfer_cpp_cu13).  Without this, the torch_deps
-# select() falls through to //conditions:default → torch_2.1_py310_cpu
-# which has no libc10_cuda.so under @//:using_cuda → SolibSymlink failure.
+# cuda13 owns its own dep chain: torch 2.11+cu130, triton 3.6.0, dedicated
+# pip_gpu_cuda13_torch / torch_2.11_py310_cuda repos and a dedicated whl_deps
+# branch in arch_select.bzl.  Selects that need to treat cu13 the same as
+# cu12_9 use the using_cu12_9_or_13_x86 config_setting_group (BUILD).
 build:cuda13 --define=using_cuda13_x86=true
-build:cuda13 --define=using_cuda12_9_x86=true
+build:cuda13 --define=using_cuda12_9_x86=false
+# remote_kv_cache 3rdparty prebuilt (kv_cache_manager_client.so) is linked
+# against libcudart.so.12 — pulls a missing dep into libth_transformer.so on
+# cu13 toolchain. cuda13_arm already disables it; mirror here.
+build:cuda13 --define=use_remote_kv_cache=false
 # nvcc 13 dropped Volta (sm_70) and Turing (sm_75); supported set on
 # CUDA 13.x is sm_80..sm_120.  With sm_70/sm_75 left in the list nvcc
 # fatals out at:  Unsupported gpu architecture 'compute_70'.
@@ -168,14 +168,10 @@ build:cuda13 --copt=-Wno-missing-field-initializers
 build:cuda13 --copt=-Wno-error=missing-field-initializers
 build:cuda13 --host_copt=-Wno-missing-field-initializers
 build:cuda13_arm --host_copt=-Wno-error=missing-field-initializers
-# Triton ships its own ptxas (CUDA 12.8) which doesn't know sm_103a (the arch
-# some B200 SKUs report as cap (10, 3)).  Pointing Triton at CUDA 13.2 ptxas
-# directly fails: Triton 3.4 parses `release 13.x` from `ptxas --version` and
-# bails with `Triton only support CUDA 10.0 or higher, but got CUDA version: 13.2`.
-# Use the wrapper baked into the prod image (internal_source/package/maga.Dockerfile)
-# which spoofs `--version` as CUDA 12.9 but delegates the real assembly to CUDA
-# 13.2 ptxas.  See docs/dsv4/B200/prod_image_detail.md §"Triton 3.4 bundled ptxas".
-test:cuda13 --test_env=TRITON_PTXAS_PATH=/usr/local/bin/triton_ptxas_cuda_wrapper.sh
+# Triton 3.6.0 (shipped with cuda13 lock) supports CUDA 13.x ptxas natively;
+# the ptxas wrapper that triton 3.4 needed is no longer required.  The wrapper
+# is still baked into the prod image — keep it there harmlessly, just don't
+# point TRITON_PTXAS_PATH at it.
 # CUDA 13 ARM base image ships glibc 2.32, but the CUDA-12 PyTorch wheels we
 # depend on (via pip_cuda12_arm_torch_*) include libcufile.so.0 which assumes
 # glibc >= 2.34 (shm_open moved to libc there).  Preload librt.so.1 so the

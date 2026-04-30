@@ -32,6 +32,7 @@ config_setting(
     define_values = {
         "using_cuda12_9_x86": "false",
         "using_cuda12_arm": "false",
+        "using_cuda13_x86": "false",
     },
 )
 
@@ -52,9 +53,19 @@ config_setting(
 # x86_64 counterpart of using_cuda13_arm — same CUDA-13-vs-12 differentiation,
 # applied on x86 builds.  Enables the CUDA-13 variants of cutlass / flashinfer
 # on the x86 toolchain.
+#
+# define_values lists ALL flags this config requires, so Bazel can detect
+# specialization: a select() with both `using_cuda` and `using_cuda13_x86`
+# keys picks `using_cuda13_x86` for cuda13 builds (it's the strict superset).
+# Without listing using_cuda + using_cuda12 here, Bazel would report
+# "multiple matching configs" for those selects.
 config_setting(
     name = "using_cuda13_x86",
-    values = {"define": "using_cuda13_x86=true"},
+    define_values = {
+        "using_cuda": "true",
+        "using_cuda12": "true",
+        "using_cuda13_x86": "true",
+    },
 )
 
 config_setting(
@@ -91,6 +102,16 @@ selects.config_setting_group(
     match_any = [
         ":using_cuda12_9_x86",
         ":using_cuda12_arm",
+    ],
+)
+
+# Selects whose cuda13_x86 behavior is identical to cuda12_9_x86 use this
+# group so we don't have to add a parallel branch to every select().
+selects.config_setting_group(
+    name = "using_cu12_9_or_13_x86",
+    match_any = [
+        ":using_cuda12_9_x86",
+        ":using_cuda13_x86",
     ],
 )
 
