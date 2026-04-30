@@ -14,6 +14,7 @@ import psutil
 import requests
 
 from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
+from rtp_llm.test.utils.device_resource import get_smoke_gpu_pool
 from rtp_llm.test.utils.port_util import PortManager
 
 CHECKPOINT_PATH = "CHECKPOINT_PATH"
@@ -170,6 +171,15 @@ class MagaServerManager(object):
             current_env["CUDA_VISIBLE_DEVICES"] = ",".join(
                 [str(_) for _ in self._device_ids]
             )
+        elif not current_env.get("CUDA_VISIBLE_DEVICES") and not current_env.get(
+            "HIP_VISIBLE_DEVICES"
+        ):
+            # PD / multi-role runners set CUDA_VISIBLE_DEVICES in env_args per process;
+            # do not override here. Single-process smoke uses GPUs 4–7 unless parent
+            # already scoped the process (see get_smoke_gpu_pool).
+            pool = get_smoke_gpu_pool()
+            if pool:
+                current_env["CUDA_VISIBLE_DEVICES"] = ",".join(str(x) for x in pool)
 
         # Set DeepGEMM JIT cache directory to use a persistent global cache
         # instead of the temporary test.outputs directory. This allows kernel

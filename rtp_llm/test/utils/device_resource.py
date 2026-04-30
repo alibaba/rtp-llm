@@ -81,6 +81,25 @@ def get_gpu_ids():
     return total_gpus
 
 
+# Physical GPUs used by smoke when the test process is not already scoped by the parent
+# (e.g. CI run_under gpu_lock sets CUDA_VISIBLE_DEVICES — then we honor that list).
+SMOKE_DEFAULT_PHYSICAL_GPU_IDS = (4, 5, 6, 7)
+
+
+def get_smoke_gpu_pool():
+    """Return GPU id list for smoke server placement and PD slicing.
+
+    If CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES is already set on this process,
+    reuse ``get_gpu_ids()`` so gpu_lock and similar wrappers keep working.
+
+    Otherwise restrict to :data:`SMOKE_DEFAULT_PHYSICAL_GPU_IDS` so decode/prefill
+    split disjoint subsets from the same four-card pool.
+    """
+    if os.environ.get("CUDA_VISIBLE_DEVICES") or os.environ.get("HIP_VISIBLE_DEVICES"):
+        return list(get_gpu_ids())
+    return list(SMOKE_DEFAULT_PHYSICAL_GPU_IDS)
+
+
 class DeviceResource:
     def __init__(self, required_gpu_count: int):
         self.required_gpu_count = required_gpu_count
@@ -98,13 +117,22 @@ class DeviceResource:
         """Return PIDs of compute processes on a physical GPU via nvidia-smi."""
         try:
             result = subprocess.run(
-                ["nvidia-smi", "--query-compute-apps=pid",
-                 "--format=csv,noheader", f"--id={gpu_id}"],
-                capture_output=True, text=True, timeout=10,
+                [
+                    "nvidia-smi",
+                    "--query-compute-apps=pid",
+                    "--format=csv,noheader",
+                    f"--id={gpu_id}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode == 0 and result.stdout.strip():
-                return [int(p.strip()) for p in result.stdout.strip().splitlines()
-                        if p.strip()]
+                return [
+                    int(p.strip())
+                    for p in result.stdout.strip().splitlines()
+                    if p.strip()
+                ]
         except Exception:
             pass
         return []
@@ -179,7 +207,9 @@ class DeviceResource:
                 return True
             time.sleep(1)
 
-        logging.warning(f"GPU cleanup timed out after {timeout}s for GPUs {self.gpu_ids}")
+        logging.warning(
+            f"GPU cleanup timed out after {timeout}s for GPUs {self.gpu_ids}"
+        )
         return False
 
     def _lock_gpus(self):
@@ -214,7 +244,9 @@ class DeviceResource:
                         if gpus_clean:
                             break
                         # Zombie contexts found — release these GPUs and retry
-                        logging.warning(f"GPUs {self.gpu_ids} have zombie contexts, retrying")
+                        logging.warning(
+                            f"GPUs {self.gpu_ids} have zombie contexts, retrying"
+                        )
                         self.gpu_ids = []
                         self.gpu_locks.close()
                 except Exception as e:
