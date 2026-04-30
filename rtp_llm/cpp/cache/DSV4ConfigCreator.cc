@@ -187,9 +187,8 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
         config.cache_specs.push_back(spec);
         config.global_layer_ids.push_back(*group_layers[i]);
         config.layer_ids.push_back(*group_layers[i]);
-        // Paged pools (0/1/2): FULL — left-to-right prefix cache matching
-        // Fixed pools (3/4/5/6): LINEAR — right-to-left matching of last block
-        config.group_types.push_back(pool.is_paged ? CacheGroupType::FULL : CacheGroupType::LINEAR);
+        // Paged pools (0/1/2): FULL. Fixed/tail pools (3/4/5/6): SWA, keeping the last two blocks.
+        config.group_types.push_back(pool.is_paged ? CacheGroupType::FULL : CacheGroupType::SWA);
 
         const size_t per_layer_stride         = spec->block_size_bytes();
         config.group_kv_block_stride_bytes[i] = per_layer_stride;
@@ -200,19 +199,19 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
         max_block_stride = std::max(max_block_stride, per_layer_stride);
     }
 
-    // Map each group to its KVCacheAttnType so kv_cache_base_by_layer_attn
+    // Map each group to its KVCacheRegionName so kv_cache_base_by_layer_region
     // is populated per-pool (CSA_KV=1, HCA_KV=2, ..., SWA_KV=7).
-    static const KVCacheAttnType pool_attn_types[DSV4_NUM_POOLS] = {
-        KVCacheAttnType::CSA_KV,
-        KVCacheAttnType::HCA_KV,
-        KVCacheAttnType::INDEXER_KV,
-        KVCacheAttnType::INDEXER_STATE,
-        KVCacheAttnType::CSA_STATE,
-        KVCacheAttnType::HCA_STATE,
-        KVCacheAttnType::SWA_KV,
+    static const KVCacheRegionName pool_region_names[DSV4_NUM_POOLS] = {
+        KVCacheRegionName::CSA_KV,
+        KVCacheRegionName::HCA_KV,
+        KVCacheRegionName::INDEXER_KV,
+        KVCacheRegionName::INDEXER_STATE,
+        KVCacheRegionName::CSA_STATE,
+        KVCacheRegionName::HCA_STATE,
+        KVCacheRegionName::SWA_KV,
     };
     for (int i = 0; i < DSV4_NUM_POOLS; i++) {
-        config.group_attn_types.push_back(pool_attn_types[i]);
+        config.group_region_names.push_back(pool_region_names[i]);
     }
 
     // group_layer_num must be the max layer count across all groups,
@@ -223,8 +222,9 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
     }
     config.group_layer_num             = static_cast<int>(max_group_layers);
     config.full_group_num              = 3;     // Pool 0/1/2 (CSA_KV, HCA_KV, INDEXER_KV)
-    config.linear_group_num            = 4;     // Pool 3/4/5/6 (INDEXER_STATE, CSA_STATE, HCA_STATE, SWA_KV)
-    config.linear_fixed_cap            = 2;     // Each LINEAR group is a ring buffer of 2 blocks per request
+    config.linear_group_num            = 0;
+    config.swa_group_num               = 4;     // Pool 3/4/5/6 (INDEXER_STATE, CSA_STATE, HCA_STATE, SWA_KV)
+    config.linear_fixed_cap            = 0;
     config.use_independent_block_pools = true;  // DSV4: each group gets its own BlockPool
 
     // Per-group block counts: fixed pools (3/4/5/6) only need
@@ -271,21 +271,21 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
 
     // Per-layer group mapping
     config.layer_to_group_id.assign(num_layers, 6);  // default to SWA group
-    config.layer_attn_types.assign(num_layers, CacheGroupType::FULL);
+    config.layer_group_types.assign(num_layers, CacheGroupType::SWA);
     config.layer_to_block_stride_bytes.assign(num_layers, static_cast<int>(max_block_stride));
 
-    // Per-layer attn-type-to-group mapping for multi-pool access
-    const size_t attn_type_count = static_cast<size_t>(KVCacheAttnType::TYPE_COUNT);
-    config.layer_attn_to_group_id.resize(num_layers);
+    // Per-layer region-name-to-group mapping for multi-pool access
+    const size_t region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
+    config.layer_region_to_group_id.resize(num_layers);
     config.layer_to_group_ids.resize(num_layers);
     for (size_t i = 0; i < num_layers; i++) {
-        config.layer_attn_to_group_id[i].assign(attn_type_count, -1);
+        config.layer_region_to_group_id[i].assign(region_name_count, -1);
     }
     // Fill from group_layers: for each group, mark its layers
     for (int gid = 0; gid < DSV4_NUM_POOLS; gid++) {
-        auto attn_type = static_cast<size_t>(pool_attn_types[gid]);
+        auto region_name = static_cast<size_t>(pool_region_names[gid]);
         for (int layer_id : *group_layers[gid]) {
-            config.layer_attn_to_group_id[static_cast<size_t>(layer_id)][attn_type] = gid;
+            config.layer_region_to_group_id[static_cast<size_t>(layer_id)][region_name] = gid;
             config.layer_to_group_ids[static_cast<size_t>(layer_id)].push_back(gid);
         }
     }
