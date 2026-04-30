@@ -45,7 +45,7 @@ py_test(
     ],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":triton", ":torch"],
+    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
     visibility = ["//visibility:public"],
     exec_properties = {'gpu':'H20'},
 )
@@ -58,9 +58,9 @@ py_test(
     main = "test_l2norm.py",
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":triton", ":torch"],
+    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
     visibility = ["//visibility:public"],
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
+    exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
