@@ -216,6 +216,21 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_cache_transfer_planner",
+    srcs = [
+        "KVCacheTransferPlanner.cc",
+    ],
+    hdrs = [
+        "KVCacheTransferPlanner.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_group_type",
+    ],
+)
+
+cc_library(
     name = "kv_cache_group",
     srcs = [
         "FullKVCacheGroup.cc",
