@@ -10,13 +10,15 @@ PQ (Product Quantization) 加速 decode attention：
 """
 
 import logging
+import math
 import os
 from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
-from flash_attn import flash_attn_varlen_func
+
+import flashinfer
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.pq_kmeans_triton import (
@@ -533,34 +535,53 @@ class TorchNaivePQDecodeImpl(TorchNaiveDecodeImpl):
         max_seq_len: int,
         max_seqlen_k_bound: int,
     ) -> torch.Tensor:
-        bs = q_kv.shape[0]
+        bs, num_groups, head_dim = q_kv.shape
         device = q_kv.device
 
         kv_lens = mask.sum(dim=1).to(torch.int32)
-        sel_pairs = mask.nonzero(as_tuple=False)
-        flat_idx = sel_pairs[:, 0] * max_seq_len + sel_pairs[:, 1]
+        max_kv_len = int(kv_lens.max().item())
 
-        k_flat = k_full.reshape(-1, self.num_kv_heads, self.head_dim)
-        v_flat = v_full.reshape(-1, self.num_kv_heads, self.head_dim)
-        k_packed = k_flat.index_select(0, flat_idx)[:, kv_head_idx : kv_head_idx + 1, :]
-        v_packed = v_flat.index_select(0, flat_idx)[:, kv_head_idx : kv_head_idx + 1, :]
+        if max_kv_len == 0:
+            return torch.zeros_like(q_kv)
 
-        cu_seqlens_q = torch.arange(0, bs + 1, dtype=torch.int32, device=device)
-        cu_seqlens_k = torch.zeros(bs + 1, dtype=torch.int32, device=device)
-        cu_seqlens_k[1:] = kv_lens.cumsum(0).to(torch.int32)
+        cache_dtype = k_full.dtype
+        kv_cache = torch.empty(
+            bs, 1, 2, 1, max_kv_len, head_dim,
+            dtype=cache_dtype, device=device,
+        ).contiguous()
 
-        if k_packed.dtype != q_kv.dtype:
-            k_packed = k_packed.to(q_kv.dtype)
-            v_packed = v_packed.to(q_kv.dtype)
+        for b in range(bs):
+            sel = mask[b].nonzero(as_tuple=True)[0]
+            n = sel.shape[0]
+            if n > 0:
+                kv_cache[b, 0, 0, 0, :n] = k_full[b, sel, kv_head_idx]
+                kv_cache[b, 0, 1, 0, :n] = v_full[b, sel, kv_head_idx]
 
-        return flash_attn_varlen_func(
-            q_kv,
-            k_packed,
-            v_packed,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=1,
-            max_seqlen_k=max_seqlen_k_bound,
-            causal=False,
-            softmax_scale=self.scaling,
+        q_4d = q_kv.unsqueeze(1)                            # [bs, 1, num_groups, head_dim]
+        seq_lens_2d = kv_lens.to(torch.uint32).unsqueeze(1)  # [bs, 1]
+        output = torch.empty_like(q_4d)
+
+        if not hasattr(self, "_xqa_workspace") or self._xqa_workspace.device != device:
+            self._xqa_workspace = torch.empty(64 << 20, dtype=torch.uint8, device=device)
+
+        nb_seq = 1 * bs
+        nb_semaphores = ((nb_seq + 1) // 2) * 2 + 2 + nb_seq + 2
+        semaphores = torch.zeros(nb_semaphores, dtype=torch.uint32, device=device)
+
+        q_scale = self.scaling * math.sqrt(head_dim)
+
+        xqa_kwargs: dict = dict(
+            num_kv_heads=1,
+            max_seq_len=max_kv_len,
+            q_scale=q_scale,
         )
+        if cache_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            xqa_kwargs["kv_scale"] = torch.tensor(1.0, device=device)
+
+        flashinfer.xqa_continuous(
+            q_4d, kv_cache, seq_lens_2d, output,
+            self._xqa_workspace, semaphores,
+            **xqa_kwargs,
+        )
+
+        return output.squeeze(1)
