@@ -214,42 +214,44 @@ void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
 }
 
 void LinearKVCacheGroup::zeroLinearWriteRegion(const BlockIndicesType& block_ids) const {
-    if (block_ids.empty() || !kvcache_spec_) {
+    if (block_ids.empty()) {
         return;
     }
-    // Bytes this LINEAR group has written into each layer's row of the cache:
-    // ssm_state_size_bytes + conv_state_size_bytes (typically ~2 MB per layer
-    // per block with SSM_STATE_DTYPE=fp32). Cleaning only this prefix is
-    // sufficient because:
-    //   * the dangerous reinterpretation only happens on the prior fp32-SSM
-    //     bytes — once they are zero, XQA reads (page-tail padding) yield 0
-    //     instead of denormals/Inf, no NaN possible;
-    //   * the rest of the row, if it carries prior FULL ATTN K/V, is already
-    //     bf16-encoded so reinterpretation does not introduce extreme values.
-    const size_t linear_write_bytes = kvcache_spec_->block_size_bytes();
-    if (linear_write_bytes == 0) {
-        return;
-    }
+    // We MUST zero the ENTIRE per-layer per-block region, not just the
+    // linear_spec prefix.  Reason (root-cause of the post-eviction NaN bug):
+    //   * In hybrid layouts the BlockPool is sized as if there are only
+    //     `group_layer_num` layers, so a single physical layer slot
+    //     `layer_tensors[i]` is *shared* across one LINEAR group's i-th
+    //     owned layer AND the FULL group's i-th owned layer (e.g. for
+    //     Qwen3.5-Next layer 0 LINEAR shares slot 0 with layer 3 FULL).
+    //   * `kv_block_stride_bytes = max(full_block_size, linear_block_size)`,
+    //     i.e. the physical row stride is the *FULL* block size, while the
+    //     LINEAR spec's `block_size_bytes()` only describes the LINEAR view.
+    //   * Earlier code zeroed only `[0 .. linear_block_size_bytes)`.  When
+    //     the block was later re-malloc'd to FULL, FULL would write bf16
+    //     K/V to slots `[0 .. seq_pos)` and read all referenced page-table
+    //     entries (including unwritten tail slots inside the last active
+    //     block AND every block that page_table padding still points at).
+    //     Those untouched bytes still carried the previous LINEAR group's
+    //     fp32 SSM/conv state.  XQA read them as bf16, hit the fp32-low-
+    //     half = NaN/Inf bit pattern, and softmax poisoned the output.
+    // Zeroing the whole row is the only correctness-safe choice; the cost
+    // is bounded (one zero_() per evicted block per LINEAR-owned layer),
+    // and is dwarfed by the LINEAR write itself that follows on reuse.
     for (auto& [global_layer_id, layer_tensor] : global_layer_to_kv_tensors) {
         if (!layer_tensor.defined() || layer_tensor.numel() == 0 || layer_tensor.dim() < 2) {
             continue;
         }
-        const size_t elem_size = static_cast<size_t>(layer_tensor.element_size());
-        if (elem_size == 0 || (linear_write_bytes % elem_size) != 0) {
-            continue;
-        }
-        const int64_t write_elems = static_cast<int64_t>(linear_write_bytes / elem_size);
-        const int64_t row_count   = layer_tensor.size(0);
-        const int64_t row_elems   = layer_tensor.size(1);
-        if (write_elems > row_elems) {
-            continue;
-        }
+        const int64_t row_count = layer_tensor.size(0);
         for (auto block_id : block_ids) {
             const int64_t idx = static_cast<int64_t>(block_id);
             if (idx < 0 || idx >= row_count) {
                 continue;
             }
-            layer_tensor.select(0, idx).narrow(0, 0, write_elems).zero_();
+            // Wipe the whole physical block row (covers both the LINEAR
+            // write region AND the FULL-only suffix that LINEAR never wrote
+            // but that FULL would otherwise re-read after malloc).
+            layer_tensor.select(0, idx).zero_();
         }
     }
 }
