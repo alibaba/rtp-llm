@@ -491,13 +491,13 @@ def _get_local_jobs_args() -> list:
 # REAPI retry logic
 # ---------------------------------------------------------------------------
 
-# Bazel exit codes that indicate transient REAPI failures (worth retrying)
-_REAPI_RETRYABLE_EXIT_CODES = {
-    34,  # UNAVAILABLE — remote executor connection lost
-    38,  # LOCAL_ENVIRONMENTAL_ERROR — local env issue during remote exec
-}
+# Source-of-truth lives in _build/reapi_retry.py — shared with the pytest-remote
+# plugin (rtp_llm/test/remote_tests/plugin.py) so both wrap-points retry on the
+# same set of transient codes. See module docstring for rationale.
+from _build.reapi_retry import REAPI_RETRYABLE_EXIT_CODES, reapi_max_retries
 
-_REAPI_MAX_RETRIES = int(os.environ.get("RTP_BAZEL_MAX_RETRIES", "2"))
+_REAPI_RETRYABLE_EXIT_CODES = REAPI_RETRYABLE_EXIT_CODES
+_REAPI_MAX_RETRIES = reapi_max_retries()
 
 
 def _run_bazel_with_retry(
@@ -1346,10 +1346,13 @@ class BazelTest(Command):
 # reference / tooling only — do NOT also pass them as setuptools extras_require
 # or uv sees two torch pins (install_requires + extras).
 #
+# `dev` / `docs` are now declared statically in pyproject.toml
+# [project.optional-dependencies] (uv reads PEP 621 directly and drops
+# setup.py-only extras), so we MUST NOT also inject them here — setuptools
+# rejects duplicate static + dynamic declarations. Only `all` (which references
+# extras across files) stays here.
 _merged_extras = get_merged_optional_dependencies()
-_non_gpu_extras = {
-    k: v for k, v in _merged_extras.items() if k in ("dev", "docs", "all")
-}
+_non_gpu_extras = {k: v for k, v in _merged_extras.items() if k in ("all",)}
 
 all_deps = dynamic_install_requires()
 version = dynamic_version()

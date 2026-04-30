@@ -1,46 +1,29 @@
-"""Pytest entry for OSS (open-source) smoke tests.
+"""Smoke test runner — single canonical implementation used by both OSS and internal entries.
 
-Independent from internal_source — drives smoke_defs_oss.py via the
-case_runner / multi_inst_case_runner framework.
-
-Run:
-    pytest rtp_llm/test/smoke/test_smoke_oss.py --rtp-ci-profile=smoke_h20_oss
-    pytest rtp_llm/test/smoke/test_smoke_oss.py -k "mla_fp8"
+Replaces the byte-for-byte duplicated `run_smoke_test` / `get_runner_type` /
+`_build_env_args` / `check_use_prompt_batch` blocks in `test_smoke_oss.py` and
+`test_smoke_internal.py`. Internal smoke entries reduce to ~30 lines (data + parametrize).
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import os
-import sys
-from pathlib import Path
-from typing import Any, Dict, Type
+from typing import Any, Dict, List, Mapping, Type, Union
 
-logging.basicConfig(
-    level="INFO", format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-
-# Add the parent of "smoke/" to sys.path so the runner modules import as `smoke.*`.
-smoke_dir = str(Path(os.path.dirname(os.path.realpath(__file__))).parent)
-if smoke_dir not in sys.path:
-    sys.path.insert(0, smoke_dir)
-
-# Tell common_def to resolve REL_PATH against the OSS data tree
-# (rtp_llm/test/smoke/data/) even when internal_source/ is also present.
-# Must be set BEFORE the first `from smoke.common_def import ...`.
-os.environ.setdefault("SMOKE_REL_PATH_PREFER", "oss")
-
-import pytest  # noqa: E402
-from smoke.case_runner import CaseRunner  # noqa: E402
-from smoke.common_def import REL_PATH  # noqa: E402
-from smoke.multi_inst_case_runner import (  # noqa: E402
+from smoke.case_runner import CaseRunner
+from smoke.common_def import REL_PATH
+from smoke.multi_inst_case_runner import (
     DpSeperationCaseRunner,
     FrontAppSeperationCaseRunner,
     PdSeperationCaseRunner,
     VitSeperationCaseRunner,
 )
-from smoke.smoke_defs_oss import build_smoke_params, get_gpu_count  # noqa: E402
-from smoke.task_info import TaskInfo  # noqa: E402
-from smoke.utils import resolve_prompt_refs  # noqa: E402
+from smoke.task_info import TaskInfo
+from smoke.utils import resolve_prompt_refs
+
+from rtp_llm.test.smoke_framework.manifest import _parse_world_size, get_gpu_count
 
 
 def check_use_prompt_batch(task_info: TaskInfo) -> bool:
@@ -50,8 +33,11 @@ def check_use_prompt_batch(task_info: TaskInfo) -> bool:
     return False
 
 
-def get_runner_type(smoke_args, envs) -> Type[CaseRunner]:
-    """Determine runner type from smoke_args and envs structure."""
+def get_runner_type(
+    smoke_args: Union[str, Mapping[str, str]],
+    envs: Union[List[str], Mapping[str, List[str]]],
+) -> Type[CaseRunner]:
+    """Determine runner class from smoke_args / envs structure (multi-role aware)."""
     if isinstance(smoke_args, dict):
         if "prefill" in smoke_args:
             if "--role_type DECODE" in smoke_args.get(
@@ -73,12 +59,18 @@ def get_runner_type(smoke_args, envs) -> Type[CaseRunner]:
     return CaseRunner
 
 
-def _build_env_args(smoke_args, envs):
-    """Build env_args (list or dict) for CaseRunner from smoke_args + envs."""
-    from smoke.smoke_defs_oss import _parse_world_size
+def _build_env_args(
+    smoke_args: Union[str, Mapping[str, str]],
+    envs: Union[List[str], Mapping[str, List[str]]],
+):
+    """Build env_args (list or dict) for CaseRunner.
 
+    Single-role: returns flat list of "KEY=VAL" strings.
+    Multi-role: returns dict {role: [env strings]} — each role's WORLD_SIZE comes
+    from its own smoke_args.
+    """
     if isinstance(smoke_args, dict):
-        env_args: Dict[str, list] = {}
+        env_args: Dict[str, List[str]] = {}
         envs_dict = envs if isinstance(envs, dict) else {}
         for role, args_str in smoke_args.items():
             role_envs = list(envs_dict.get(role, []))
@@ -95,7 +87,15 @@ def _build_env_args(smoke_args, envs):
     return env_list
 
 
-def run_smoke_test(test_name: str, test_config: dict):
+def run_smoke_test(test_name: str, test_config: Mapping[str, Any]) -> None:
+    """Drive a single smoke test case end-to-end.
+
+    1. Build env_args (single-role list or multi-role dict).
+    2. Inject single-role envs into the parent process — multi-role envs reach
+       per-role subprocesses via MagaServerManager(env_args=...) (don't pollute
+       parent: see PR4 / A5 in the plan).
+    3. Restore parent env in `finally` so cross-case state doesn't leak.
+    """
     smoke_args = test_config.get("smoke_args", "")
     envs = test_config.get("envs", [])
     task_info_path = test_config["task_info"]
@@ -110,13 +110,6 @@ def run_smoke_test(test_name: str, test_config: dict):
                 key, value = env_str.split("=", 1)
                 _env_keys_set.append((key, os.environ.get(key)))
                 os.environ[key] = value
-    elif isinstance(env_args, dict):
-        for role_envs in env_args.values():
-            for env_str in role_envs:
-                if "=" in env_str:
-                    key, value = env_str.split("=", 1)
-                    _env_keys_set.append((key, os.environ.get(key)))
-                    os.environ[key] = value
 
     gpu_count = get_gpu_count(test_config)
     for k in ("GPU_COUNT", "WORLD_SIZE"):
@@ -125,13 +118,12 @@ def run_smoke_test(test_name: str, test_config: dict):
     os.environ.setdefault("GPU_COUNT", str(gpu_count))
     os.environ.setdefault("WORLD_SIZE", str(gpu_count))
 
-    logging.info("cwd: %s test_name: %s envs: %s", os.getcwd(), test_name, env_args)
+    logging.info(
+        "cwd: %s test_name: %s envs: %s", os.getcwd(), test_name, env_args
+    )
 
     with open(os.path.join(REL_PATH, task_info_path), "r") as f:
         x = json.load(f)
-    # Resolve $prompt:xxx refs against rtp_llm/test/smoke/data/prompt_candidates.json
-    # (entry.py does the same — pytest entry must too, otherwise the literal
-    # "$prompt:s2" gets sent to the server instead of the real prompt text).
     if "query_result" in x:
         x["query_result"] = [resolve_prompt_refs(qr) for qr in x["query_result"]]
     task_info = TaskInfo(
@@ -148,7 +140,7 @@ def run_smoke_test(test_name: str, test_config: dict):
         "smoke_args": smoke_args,
     }
 
-    for param in ["sleep_time_qr", "kill_remote", "concurrency_test"]:
+    for param in ("sleep_time_qr", "kill_remote", "concurrency_test"):
         if param in test_config:
             runner_params[param] = test_config[param]
 
@@ -168,15 +160,3 @@ def run_smoke_test(test_name: str, test_config: dict):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = old_val
-
-
-_test_params = build_smoke_params(pytest)
-
-
-# 7200s matches the --remote --timeout=7200 ceiling; a tighter local mark
-# kills cases that the remote worker is still actively executing (mistakenly
-# reporting them as FAILED while remote later returns PASS).
-@pytest.mark.timeout(7200)
-@pytest.mark.parametrize("test_name,test_config", _test_params)
-def test_smoke_oss(test_name: str, test_config: dict):
-    run_smoke_test(test_name, test_config)

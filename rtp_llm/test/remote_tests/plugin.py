@@ -37,8 +37,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+from _build.reapi_retry import REAPI_RETRYABLE_EXIT_CODES, reapi_max_retries
+
 DEFAULT_CONCURRENCY = 16
-MAX_RETRIES = 2
+# REAPI retry budget — shared with `setup.py` via _build/reapi_retry.py to keep
+# Bazel build retries and pytest-remote retries on the same policy.
+MAX_RETRIES = reapi_max_retries()
 MAX_REMOTE_TIMEOUT = 7200
 _GPU_COUNT_TIERS = [1, 2, 4]
 
@@ -506,8 +510,15 @@ class RemoteREAPIPlugin:
         )
 
     def _build_command(self, item, runtime: RemoteRuntimeConfig) -> List[str]:
+        from .remote_exec_rtp import _safe_rel_to_rootdir
+
         test_id = item.name
-        test_path = str(Path(str(item.fspath)).relative_to(self.rootdir))
+        # Use _safe_rel_to_rootdir so internal_source/.../suites/ paths (sibling
+        # of rootdir after PR12 split) produce "../internal_source/..." form
+        # instead of raising ValueError.
+        test_path = _safe_rel_to_rootdir(
+            Path(str(item.fspath)).resolve(), self.rootdir
+        )
         ignore_args = quote_args(runtime.ignore_args)
         # Forward markexpr so conftest.py doesn't deselect manual tests
         markexpr = getattr(self.config.option, "markexpr", "") or ""
@@ -559,17 +570,24 @@ class RemoteREAPIPlugin:
         last_result = None
         for attempt in range(MAX_RETRIES + 1):
             result = self.executor.execute(**kwargs)
-            should_retry = result.exit_code == -1 or self._is_gpu_lock_failure(result)
+            # REAPI codes 34/38 are transient infra failures — same policy as
+            # bazel build (setup.py imports the same constant from _build/reapi_retry).
+            should_retry = (
+                result.exit_code == -1
+                or result.exit_code in REAPI_RETRYABLE_EXIT_CODES
+                or self._is_gpu_lock_failure(result)
+            )
             if not should_retry:
                 return result
             last_result = result
             if attempt < MAX_RETRIES:
                 wait = 2 ** (attempt + 1)
-                reason = (
-                    "GPU lock contention"
-                    if self._is_gpu_lock_failure(result)
-                    else "REAPI infra error"
-                )
+                if self._is_gpu_lock_failure(result):
+                    reason = "GPU lock contention"
+                elif result.exit_code in REAPI_RETRYABLE_EXIT_CODES:
+                    reason = f"REAPI transient (exit={result.exit_code})"
+                else:
+                    reason = "REAPI infra error"
                 log.warning(
                     "[RETRY] %s (%s) after %ds (attempt %d/%d)",
                     (
@@ -1151,7 +1169,11 @@ class RemoteREAPIPlugin:
 
             env_vars.update(make_output_collection_env())
             output_files = make_output_files_decl()
-        result = self.executor.execute(
+        # Session path goes through _execute_with_retry so transient REAPI failures
+        # (exit_code==-1, codes 34/38) and GPU lock contention get the same 2x
+        # exponential-backoff retry as the per-test path. Without this, a single
+        # 504 from the REAPI gateway tanks the whole pytest session.
+        result = self._execute_with_retry(
             command=cmd,
             input_root_digest=input_root,
             env_vars=env_vars,

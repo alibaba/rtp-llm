@@ -39,6 +39,26 @@ rtp-ci-profile = "rtp_llm.test.ci_profile_plugin"
 [project.entry-points."rtp_llm.models"]
 # Model plugins can be registered here
 
+# `dev` and `docs` extras are declared statically here (not via setup.py
+# extras_require) so `uv pip install -e .[dev]` resolves them from PEP 621
+# metadata. Without this, uv warns "does not have an extra named dev" and
+# silently drops pytest, breaking REAPI workers that need pytest to run.
+# GPU platform extras (cuda12_9 / rocm / cuda12_arm) stay in
+# _build/oss_optional_extras.toml — they carry internal pin URLs.
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-timeout>=2.0",
+    "pytest-xdist>=3.0",
+    "httpx>=0.24.0",
+    "coverage>=7.0",
+]
+docs = [
+    "sphinx>=5.0",
+    "sphinx-rtd-theme",
+]
+
 [tool.setuptools]
 package-dir = {"" = "."}
 packages = ["rtp_llm"]
@@ -269,52 +289,52 @@ description = "Frontend Python UT (py-ut-frontend)"
 paths = ["rtp_llm/frontend/test", "rtp_llm/test/frontend_test"]
 markexpr = "not manual and not rocm and not cpu"
 
-# -------- OSS smoke profiles (drive test_smoke_oss.py) --------
+# -------- OSS smoke profiles (drive suite files in rtp_llm/test/smoke/suites/) --------
 [tool.rtp_llm.pytest_ci.profiles.smoke_h20_oss]
 description = "OSS smoke H20 (smoke-h20-oss)"
-paths = ["rtp_llm/test/smoke/test_smoke_oss.py"]
+paths = ["rtp_llm/test/smoke/suites/"]
 markexpr = "manual and smoke and H20"
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_sm8x_oss]
 description = "OSS smoke SM8x (smoke-sm8x-oss)"
-paths = ["rtp_llm/test/smoke/test_smoke_oss.py"]
+paths = ["rtp_llm/test/smoke/suites/"]
 markexpr = "manual and smoke and not H20 and not MI308X and not SM100 and not SM100_ARM and not PPU_ZW810E"
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_sm100_oss]
 description = "OSS smoke SM100 (smoke-sm100-oss)"
-paths = ["rtp_llm/test/smoke/test_smoke_oss.py"]
+paths = ["rtp_llm/test/smoke/suites/"]
 markexpr = "manual and smoke and (SM100 or SM100_ARM)"
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_rocm_oss]
 description = "OSS smoke ROCm (smoke-rocm-oss)"
-paths = ["rtp_llm/test/smoke/test_smoke_oss.py"]
+paths = ["rtp_llm/test/smoke/suites/"]
 # Must match smoke_defs_oss.py gpu markers (MI308X_ROCM7), not the hyphenated gpu_type string.
 markexpr = "manual and smoke and MI308X_ROCM7"
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_remote_cache_oss]
 description = "OSS smoke remote cache (smoke-remote-cache-oss)"
-paths = ["rtp_llm/test/smoke/test_smoke_oss.py"]
+paths = ["rtp_llm/test/smoke/suites/"]
 markexpr = "manual and smoke and remote_cache"
 
-# -------- Internal smoke profiles (drive test_smoke_internal.py) --------
+# -------- Internal smoke profiles (drive suite files in internal_source/rtp_llm/test/smoke/suites/) --------
 [tool.rtp_llm.pytest_ci.profiles.smoke_h20_internal]
 description = "Internal smoke H20 (smoke-h20-internal)"
-paths = ["../internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
+paths = ["../internal_source/rtp_llm/test/smoke/suites/"]
 markexpr = "manual and smoke and H20"
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_sm8x_internal]
 description = "Internal smoke SM8x (smoke-sm8x-internal)"
-paths = ["../internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
+paths = ["../internal_source/rtp_llm/test/smoke/suites/"]
 markexpr = "manual and smoke and not H20 and not MI308X and not SM100 and not SM100_ARM and not PPU_ZW810E"
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_ppu_internal]
 description = "Internal smoke PPU (smoke-ppu-internal)"
-paths = ["../internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
+paths = ["../internal_source/rtp_llm/test/smoke/suites/"]
 markexpr = "manual and smoke and PPU_ZW810E"
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_amd_internal]
 description = "Internal smoke AMD MI308X (smoke-amd-internal)"
-paths = ["../internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
+paths = ["../internal_source/rtp_llm/test/smoke/suites/"]
 markexpr = "manual and smoke and MI308X"
 
 [tool.rtp_llm.pytest_ci.profiles.perf_sm9x]

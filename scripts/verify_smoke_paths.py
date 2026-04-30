@@ -41,31 +41,32 @@ def main() -> int:
     internal_smoke = repo / "internal_source" / "rtp_llm" / "test" / "smoke"
     gho_smoke = gho / "rtp_llm" / "test" / "smoke"
 
+    # B0 split (PR12): each suite is its own test_<suite>.py + <suite>_cases.py
+    # under suites/. The monolith test_smoke_oss.py / test_smoke_internal.py
+    # files are gone — pyproject `paths` now points at the suites/ directory.
     assert internal_smoke.is_dir(), f"missing {internal_smoke}"
-    assert (internal_smoke / "test_smoke_internal.py").is_file()
     assert (internal_smoke / "data").is_dir()
+    assert (internal_smoke / "suites").is_dir(), "internal suites/ dir missing"
+    assert (internal_smoke / "suites" / "conftest.py").is_file()
     assert (gho_smoke / "case_runner.py").is_file()
-    assert (gho_smoke / "test_smoke_oss.py").is_file()
+    assert (gho_smoke / "suites").is_dir(), "OSS suites/ dir missing"
+    assert (gho_smoke / "suites" / "conftest.py").is_file()
 
     sys.path.insert(0, str(gho / "rtp_llm" / "test"))
     from ci_profile_support import resolve_profile_paths  # noqa: E402
 
     resolved = resolve_profile_paths(
-        gho, ["../internal_source/rtp_llm/test/smoke/test_smoke_internal.py"]
+        gho, ["../internal_source/rtp_llm/test/smoke/suites/"]
     )
     assert len(resolved) == 1
-    assert Path(resolved[0]).resolve() == (
-        internal_smoke / "test_smoke_internal.py"
-    ).resolve()
+    assert Path(resolved[0]).resolve() == (internal_smoke / "suites").resolve()
 
     from smoke.rel_path_config import compute_smoke_rel_path  # noqa: E402
 
-    os.environ["SMOKE_REL_PATH_PREFER"] = "internal"
-    rel = Path(compute_smoke_rel_path(str(gho_smoke))).resolve()
+    rel = Path(compute_smoke_rel_path(str(gho_smoke), prefer="internal")).resolve()
     assert rel == internal_smoke.resolve(), (rel, internal_smoke)
 
-    os.environ["SMOKE_REL_PATH_PREFER"] = "oss"
-    rel2 = Path(compute_smoke_rel_path(str(gho_smoke))).resolve()
+    rel2 = Path(compute_smoke_rel_path(str(gho_smoke), prefer="oss")).resolve()
     assert rel2 == gho_smoke.resolve(), (rel2, gho_smoke)
 
     _warn_incomplete_rules_pkg_cache()

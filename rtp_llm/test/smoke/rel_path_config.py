@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
+
+DataRoot = Literal["oss", "internal"]
 
 
 def _monorepo_internal_smoke_dir(abs_pkg: str) -> Optional[str]:
@@ -22,17 +24,18 @@ def _monorepo_internal_smoke_dir(abs_pkg: str) -> Optional[str]:
     return None
 
 
-def compute_smoke_rel_path(package_smoke_dir: str) -> str:
+def compute_smoke_rel_path(
+    package_smoke_dir: str, prefer: Optional[DataRoot] = None
+) -> str:
     """Return REL_PATH for golden JSON / task_info under ``package_smoke_dir``.
 
     ``package_smoke_dir`` must be the realpath of the ``smoke`` package directory
     (the parent of ``common_def.py``).
 
-    Honors ``SMOKE_REL_PATH_PREFER`` (``internal`` / ``oss`` / unset) set **before**
-    this module is first imported.
+    ``prefer`` is the explicit data-root choice (``"oss"`` / ``"internal"`` / ``None``).
+    Replaces the legacy ``SMOKE_REL_PATH_PREFER`` env-var indirection.
     """
     abs_pkg = os.path.realpath(package_smoke_dir)
-    prefer = os.environ.get("SMOKE_REL_PATH_PREFER", "")
 
     if prefer == "internal":
         resolved = _monorepo_internal_smoke_dir(abs_pkg)
@@ -52,6 +55,7 @@ def compute_smoke_rel_path(package_smoke_dir: str) -> str:
         ]
         return next((p for p in candidates if os.path.isdir(p)), abs_pkg)
 
+    # No explicit preference: try abs_pkg first, then fall back to monorepo siblings.
     candidates = [
         abs_pkg,
         "internal_source/rtp_llm/test/smoke",

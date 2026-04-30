@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import concurrent.futures
 import glob
 import json
@@ -6,12 +8,18 @@ import os
 import subprocess
 import traceback
 import time
+from typing import TYPE_CHECKING
 
 try:
     import torch
     _HAS_TORCH = True
 except ImportError:
     _HAS_TORCH = False
+
+if TYPE_CHECKING:
+    # Type-only import — kept out of runtime to keep `pytest --collect-only`
+    # working on CPU-only machines without the full rtp_llm .so chain loaded.
+    from rtp_llm.test.utils.maga_server_manager import MagaServerManager  # noqa: F401
 
 
 class _TensorEncoder(json.JSONEncoder):
@@ -25,6 +33,11 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 from smoke.cache_status_comparer import CacheStatusComparer
 from smoke.classifier_comparer import ClassifierComparer
 from smoke.common_def import QueryStatus, SmokeException, Tracer
+from smoke.comparer_registry import (
+    register_comparer,
+    resolve_comparer,
+    set_default_comparer,
+)
 from smoke.gpu_diagnostics import (
     ExceptionType,
     ProcessFailureType,
@@ -43,10 +56,49 @@ from smoke.task_info import TaskInfo, TaskStates
 from smoke.worker_status_comparer import WorkerStatusComparer
 from smoke.remote_kvcm_server import RemoteKVCMServer
 
-from rtp_llm.utils.util import (
-    str_to_bool,
+# NOTE: rtp_llm.utils.util / rtp_llm.test.utils.maga_server_manager are imported
+# lazily where used (str_to_bool inlined below; MagaServerManager imported inside
+# start_server). This keeps `pytest --collect-only` from triggering the full
+# rtp_llm .so loading chain on CPU-only machines (e.g., scripts/verify_smoke_*).
+
+
+def _str_to_bool(s: str) -> bool:
+    """Inlined copy of rtp_llm.utils.util.str_to_bool — avoids rtp_llm import at module level.
+
+    Keep behavior identical to the upstream function so callers see no change.
+    """
+    if s.lower() in ("yes", "true", "1"):
+        return True
+    if s.lower() in ("no", "false", "0"):
+        return False
+    raise ValueError("Cannot covert {} to a bool".format(s))
+
+
+# Backward-compat: existing call sites reference `str_to_bool` (no underscore prefix).
+str_to_bool = _str_to_bool
+
+
+# OSS comparer registrations — internal mainse comparers are registered separately
+# in internal_source/rtp_llm/test/smoke/conftest.py so OSS-only checkouts work.
+# Order matters: most-specific predicates first.
+_EMBEDDING_ENDPOINTS = {
+    "/v1/embeddings",
+    "/v1/embeddings/dense",
+    "/v1/embeddings/sparse",
+    "/v1/embeddings/colbert",
+}
+register_comparer(lambda q_r, ep: "messages" in q_r["query"], OpenaiComparer)
+register_comparer(lambda q_r, ep: ep in _EMBEDDING_ENDPOINTS, EmbeddingComparer)
+register_comparer(
+    lambda q_r, ep: ep.startswith("/rtp_llm/worker_status"), WorkerStatusComparer
 )
-from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+register_comparer(
+    lambda q_r, ep: ep.startswith("/rtp_llm/cache_status"), CacheStatusComparer
+)
+register_comparer(lambda q_r, ep: ep == "/v1/embeddings/similarity", SimilarityComparer)
+register_comparer(lambda q_r, ep: ep == "/v1/classifier", ClassifierComparer)
+register_comparer(lambda q_r, ep: ep == "/v1/reranker", RerankerComparer)
+set_default_comparer(NormalComparer)
 
 
 def _iterate_modidfy_qr(origin: Dict[str, Any], new: Dict[str, Any]):
@@ -231,36 +283,7 @@ class CaseRunner(object):
 
     @staticmethod
     def _get_comparer_cls(q_r: Dict[str, Any], request_endpoint: str) -> Type:
-        if "messages" in q_r["query"]:
-            return OpenaiComparer
-        elif request_endpoint in [
-            "/v1/embeddings",
-            "/v1/embeddings/dense",
-            "/v1/embeddings/sparse",
-            "/v1/embeddings/colbert",
-        ]:
-            return EmbeddingComparer
-        elif request_endpoint.startswith("/rtp_llm/worker_status"):
-            return WorkerStatusComparer
-        elif request_endpoint.startswith("/rtp_llm/cache_status"):
-            return CacheStatusComparer
-        elif request_endpoint == "/v1/embeddings/similarity":
-            return SimilarityComparer
-        elif request_endpoint == "/v1/classifier":
-            return ClassifierComparer
-        elif request_endpoint == "/v1/reranker":
-            return RerankerComparer
-        elif q_r.get("mainse_module", None) == True:
-            if q_r.get("use_decode_arpc", None) == True:
-                from smoke.mainse.mainse_decode_arpc_comparer import MainseDecodeArpcComparer
-                return MainseDecodeArpcComparer
-            elif q_r.get("use_emb_arpc", None) == True:
-                from smoke.mainse.mainse_embedding_arpc_comparer import MainseEmbeddingArpcComparer
-                return MainseEmbeddingArpcComparer
-            else:
-                from smoke.mainse.mainse_comparer import MainseComparer
-                return MainseComparer
-        return NormalComparer
+        return resolve_comparer(q_r, request_endpoint)
 
     def _run_stability_repeat(
         self,
@@ -400,7 +423,17 @@ class CaseRunner(object):
                     _iterate_modidfy_qr(origin_qr["result"], now_result)
 
             out_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
-            rewrite_path = os.path.join(out_dir, "smoke_actual", os.path.basename(task_info.taskinfo_rel_path))
+            # Prefix with the pytest parametrize id so two cases sharing the same
+            # task_info JSON don't overwrite each other's actual-result snapshot.
+            # PYTEST_CURRENT_TEST format: "<nodeid> (call)" where nodeid ends in
+            # "[<param_id>]". Falls back to plain basename outside pytest.
+            current = os.environ.get("PYTEST_CURRENT_TEST", "")
+            case_name = ""
+            if "[" in current and "]" in current:
+                case_name = current[current.rindex("[") + 1 : current.index("]", current.rindex("["))]
+            base = os.path.basename(task_info.taskinfo_rel_path)
+            rewrite_name = f"{case_name}__{base}" if case_name else base
+            rewrite_path = os.path.join(out_dir, "smoke_actual", rewrite_name)
             os.makedirs(os.path.dirname(rewrite_path), exist_ok=True)
             with open(rewrite_path, "w") as f:
                 json.dump(
@@ -423,6 +456,9 @@ class CaseRunner(object):
         role_name: str = "main",
         smoke_args_str: Optional[str] = None,
     ) -> Optional[MagaServerManager]:
+        # Lazy import — see module docstring at the top.
+        from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+
         # If smoke_args_str is not provided, try to get it from self.smoke_args dict based on role_name
         if smoke_args_str is None:
             if self.smoke_args and isinstance(self.smoke_args, dict):

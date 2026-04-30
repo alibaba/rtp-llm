@@ -12,6 +12,7 @@ It does not register pytest hooks or talk to REAPI directly.
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 import socket
 import sys
@@ -211,14 +212,31 @@ def build_remote_setup_command(rootdir: Path) -> str:
         "done; "
         'echo ">>>GPU_DIAG_END"; '
     )
+    # PV_RC must be captured *between* assignments — `OUT=$(...); rc=$?` puts the
+    # exit code from prepare_venv.py into rc. Without this guard, `eval "$OUT"`
+    # silently no-ops on failure and pytest fails downstream with a misleading
+    # ImportError. Pattern matches internal_source/ci/basic_test.sh:84-104.
+    # PWD on worker is the CAS rootdir (mirrors github-opensource/), so the
+    # uploaded `rtp_llm/libs/` ends up at $PWD/rtp_llm/libs. We MUST add it to
+    # LD_LIBRARY_PATH because libth_transformer.so DT_NEEDED carries
+    # `kv_cache_manager_client.so` and other co-resident libs without rpath
+    # (they're sibling .so files dlopen-resolved via the loader's search list).
+    # Without this, `from libth_transformer_config import …` raises
+    # `ImportError: kv_cache_manager_client.so: cannot open shared object file`,
+    # and downstream `torch.ops.rtp_llm.init_engine` is unregistered.
     return (
         "export HOME=/home/admin; "
         "export RTP_SKIP_BAZEL_BUILD=1; "
-        "export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64; "
+        'export LD_LIBRARY_PATH="$PWD/rtp_llm/libs:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64"; '
         + gpu_diag
         + 'echo ">>>PHASE:pip_install_start $(date +%s)"; '
         "mkdir -p logs; "
-        "OUT=$(/opt/conda310/bin/python internal_source/ci/prepare_venv.py 2>logs/prepare_venv.err); "
+        "OUT=$(/opt/conda310/bin/python internal_source/ci/prepare_venv.py 2>logs/prepare_venv.err); PV_RC=$?; "
+        'if [ "$PV_RC" -ne 0 ]; then '
+        "  cat logs/prepare_venv.err >&2; "
+        '  echo ">>>PHASE:pip_install_failed $(date +%s) rc=$PV_RC"; '
+        '  exit "$PV_RC"; '
+        "fi; "
         'eval "$OUT"; cat logs/prepare_venv.err >&2; '
         'echo ">>>PHASE:pip_install_done $(date +%s)"; '
     )
@@ -249,6 +267,16 @@ def _collect_base_files(rootdir: Path) -> List[str]:
     for p in (rootdir / "_build").glob("*.py"):
         if p.is_file():
             files.append(str(p.relative_to(rootdir)))
+    # _build/oss_optional_extras.toml carries platform-specific torch/flash-attn
+    # URL pins (cuda12_9, rocm, cuda12_arm). setup.py's
+    # get_merged_optional_dependencies() reads it to inject torch URL into
+    # install_requires. Without this file on the REAPI worker, setup.py falls
+    # back to pyproject.toml (which only declares dev/docs) → no torch pin →
+    # uv installs torch from PyPI (latest) → ABI mismatch with bazel-built .so
+    # ("undefined symbol: ..._compute_strides_like_channels_last_3d...").
+    extras_toml = rootdir / "_build" / "oss_optional_extras.toml"
+    if extras_toml.is_file():
+        files.append(str(extras_toml.relative_to(rootdir)))
     return files
 
 
@@ -317,12 +345,28 @@ def _collect_session_extra_files(rootdir: Path) -> List[str]:
     return files
 
 
+def _safe_rel_to_rootdir(item_path: Path, rootdir: Path) -> str:
+    """Turn an absolute test-file path into a rootdir-relative string.
+
+    PR12 (B0) per-suite split moved internal smoke tests to
+    `internal_source/rtp_llm/test/smoke/suites/test_*.py` — these live as a
+    sibling of rootdir (`github-opensource/`), so plain `relative_to(rootdir)`
+    raises ValueError. Fall back to ``os.path.relpath`` which produces
+    ``"../internal_source/..."`` form (REAPI worker resolves relative to its
+    cwd, which mirrors local rootdir).
+    """
+    try:
+        return str(item_path.relative_to(rootdir))
+    except ValueError:
+        return os.path.relpath(item_path, rootdir)
+
+
 def collect_remote_files(rootdir: Path, items: List[Any]) -> List[str]:
     """Collect per-test remote execution inputs (only called for gpu-marked items)."""
     files = _collect_base_files(rootdir)
 
     for item in items:
-        rel = str(Path(str(item.fspath)).relative_to(rootdir))
+        rel = _safe_rel_to_rootdir(Path(str(item.fspath)).resolve(), rootdir)
         if rel not in files:
             files.append(rel)
 
