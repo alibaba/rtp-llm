@@ -23,12 +23,14 @@ DEFAULT_MODEL_ARG = "Qwen3-30B"
 DEFAULT_TASK_IDS_FILE = "passing_tasks.json"
 DEFAULT_SCRIPT_FILE = "run_tau2_bench.py"
 
-_SCORE_RE = re.compile(r"model_name=['\"][^'\"]+['\"]\s*,\s*score=([0-9]*\.?[0-9]+)")
-_FALLBACK_SCORE_RE = re.compile(r"score=([0-9]*\.?[0-9]+)")
+_OVERALL_RE = re.compile(
+    r"\|\s*mean_acc\s*\|\s*OVERALL\s*\|\s*\d+\s*\|\s*([0-9]*\.?[0-9]+)\s*\|"
+)
+_REPORT_RE = re.compile(r"model_name=['\"][^'\"]+['\"]\s*,\s*score=([0-9]*\.?[0-9]+)")
 
 
 class Tau2BenchComparer(BaseComparer):
-    """Runs tau2-bench against the running smoke server and asserts score > threshold."""
+    """Runs tau2-bench against the running smoke server and asserts OVERALL score >= threshold."""
 
     def run(self):
         out_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
@@ -58,12 +60,12 @@ class Tau2BenchComparer(BaseComparer):
                 QueryStatus.OTHERS,
                 f"failed to parse tau2-bench score from log {log_path}",
             )
-        if score <= threshold:
+        if score < threshold:
             raise SmokeException(
                 QueryStatus.COMPARE_FAILED,
-                f"tau2-bench score {score} <= threshold {threshold}",
+                f"tau2-bench OVERALL score {score} < threshold {threshold}",
             )
-        logging.info(f"[TAU2] PASS: score={score} > threshold={threshold}")
+        logging.info(f"[TAU2] PASS: OVERALL score={score} >= threshold={threshold}")
 
     def _pip_install(self, args: List[str]) -> None:
         cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + args
@@ -246,9 +248,9 @@ class Tau2BenchComparer(BaseComparer):
 
     @staticmethod
     def _parse_score(text: str) -> Optional[float]:
-        m = _SCORE_RE.search(text)
+        m = _OVERALL_RE.search(text)
         if m is None:
-            m = _FALLBACK_SCORE_RE.search(text)
+            m = _REPORT_RE.search(text)
         if m is None:
             return None
         try:
