@@ -95,7 +95,7 @@ TEST(DSV4ConfigCreatorTest, ProPoolSpecs) {
     auto dsv4 = DSV4ConfigCreator::buildDSV4Config(mc);
 
     EXPECT_EQ(dsv4.pool_specs[0].layer_num, 30u);
-    EXPECT_EQ(dsv4.pool_specs[0].entry_elems, 584u);
+    EXPECT_EQ(dsv4.pool_specs[0].entry_elems, DSV4CacheConfig::KV_ENTRY_BYTES);
     EXPECT_EQ(dsv4.pool_specs[0].entries_per_block, 64u);
     EXPECT_TRUE(dsv4.pool_specs[0].is_paged);
 
@@ -103,7 +103,7 @@ TEST(DSV4ConfigCreatorTest, ProPoolSpecs) {
     EXPECT_EQ(dsv4.pool_specs[1].entries_per_block, 2u);
 
     EXPECT_EQ(dsv4.pool_specs[2].layer_num, 30u);
-    EXPECT_EQ(dsv4.pool_specs[2].entry_elems, 132u);
+    EXPECT_EQ(dsv4.pool_specs[2].entry_elems, DSV4CacheConfig::INDEXER_ENTRY_BYTES);
 
     EXPECT_EQ(dsv4.pool_specs[3].layer_num, 30u);
     EXPECT_FALSE(dsv4.pool_specs[3].is_paged);
@@ -134,13 +134,14 @@ TEST(DSV4ConfigCreatorTest, FlashPoolSpecs) {
 TEST(DSV4ConfigCreatorTest, BlockSizeBytes) {
     auto mc   = makeProModelConfig();
     auto dsv4 = DSV4ConfigCreator::buildDSV4Config(mc);
-    EXPECT_EQ(dsv4.pool_specs[0].block_size_bytes(), 64u * 584u);
-    EXPECT_EQ(dsv4.pool_specs[1].block_size_bytes(), 2u * 584u);
-    EXPECT_EQ(dsv4.pool_specs[2].block_size_bytes(), 64u * 132u);
+    EXPECT_EQ(dsv4.pool_specs[0].block_size_bytes(), 64u * DSV4CacheConfig::KV_ENTRY_BYTES);
+    EXPECT_EQ(dsv4.pool_specs[1].block_size_bytes(), 2u * DSV4CacheConfig::KV_ENTRY_BYTES);
+    EXPECT_EQ(dsv4.pool_specs[2].block_size_bytes(), 64u * DSV4CacheConfig::INDEXER_ENTRY_BYTES);
     EXPECT_EQ(dsv4.pool_specs[3].block_size_bytes(), 4u * 512u * 4u);
     EXPECT_EQ(dsv4.pool_specs[4].block_size_bytes(), 4u * 2048u * 4u);
     EXPECT_EQ(dsv4.pool_specs[5].block_size_bytes(), 8u * 1024u * 4u);
-    EXPECT_EQ(dsv4.pool_specs[6].block_size_bytes(), 256u * 584u);  // SWA: 256 entries × 584 bytes
+    EXPECT_EQ(dsv4.pool_specs[6].block_size_bytes(),
+              DSV4CacheConfig::TOKENS_PER_BLOCK * DSV4CacheConfig::KV_ENTRY_BYTES);
 }
 
 // ============================================================
@@ -285,34 +286,23 @@ TEST(DSV4ConfigCreatorTest, PagedPoolsShareTokensPerBlock) {
 }
 
 TEST(DSV4ConfigCreatorTest, AllPagedPoolsShareBlockNum) {
-    // When block_num is set, all 7 groups share the same BlockPool,
-    // so they all have the same physical block_num.
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     auto              config = DSV4ConfigCreator::createConfig(mc, pc);
     config.block_num         = 100;
 
-    // All 7 groups share one BlockPool — same block_num
-    // This is verified by the allocator init test, but let's also verify
-    // the CacheConfig structure is consistent
+    // Paged groups derive their block count from the global block_num; fixed/SWA
+    // groups use per-group fixed block counts.
     EXPECT_EQ(config.groupNums(), 7);
-    // All specs should produce valid block_size_bytes
     for (int i = 0; i < 7; i++) {
         EXPECT_GT(config.cache_specs[i]->block_size_bytes(), 0u) << "pool " << i;
     }
 }
 
 TEST(DSV4ConfigCreatorTest, BlockIdConsistencyAcrossGroups) {
-    // Critical for model integration: when the framework allocates block_id=X,
-    // all 7 groups use the same block_id to index into their respective tensors.
-    // The physical memory layout is: [block_num, group_layer_num, kv_block_stride_bytes]
-    // Each group's layer tensor is a view into this shared buffer.
-    //
-    // For DSV4 model to work:
-    //   block_table[group_0][i] == block_table[group_1][i] == ... == block_table[group_6][i]
-    //   (same block_id for the same token position across all groups)
-    //
-    // This is guaranteed by HybridTypeKVCacheAllocator which allocates from a single BlockPool.
+    // DSV4 has multiple cache regions per logical layer. The config must expose
+    // every region's group id for the layer so model/runtime code can request the
+    // correct region by KVCacheRegionName.
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     auto              config = DSV4ConfigCreator::createConfig(mc, pc);
@@ -469,14 +459,14 @@ TEST_F(DSV4AllocatorTest, SevenGroupLayerMapping) {
     // Group 6: SWA KV → all_layer_ids
     EXPECT_EQ(config.global_layer_ids[6].size(), dsv4.num_all_layers());
 
-    // All 7 groups should be FULL (all participate in reuse cache)
+    // Paged DSV4 pools are FULL; fixed/state and SWA pools keep a sliding-window tail.
     EXPECT_EQ(config.group_types[0], CacheGroupType::FULL);
     EXPECT_EQ(config.group_types[1], CacheGroupType::FULL);
     EXPECT_EQ(config.group_types[2], CacheGroupType::FULL);
-    EXPECT_EQ(config.group_types[3], CacheGroupType::FULL);
-    EXPECT_EQ(config.group_types[4], CacheGroupType::FULL);
-    EXPECT_EQ(config.group_types[5], CacheGroupType::FULL);
-    EXPECT_EQ(config.group_types[6], CacheGroupType::FULL);
+    EXPECT_EQ(config.group_types[3], CacheGroupType::SWA);
+    EXPECT_EQ(config.group_types[4], CacheGroupType::SWA);
+    EXPECT_EQ(config.group_types[5], CacheGroupType::SWA);
+    EXPECT_EQ(config.group_types[6], CacheGroupType::SWA);
 }
 
 TEST_F(DSV4AllocatorTest, SpecBlockSizesMatchPoolSpecs) {
@@ -503,8 +493,7 @@ TEST_F(DSV4AllocatorTest, KVBlockStrideIsMaxAcrossGroups) {
         expected_max = std::max(expected_max, dsv4.pool_specs[i].block_size_bytes());
     }
     EXPECT_EQ(config.kv_block_stride_bytes, expected_max);
-    // For Pro: max is Pool 6 (SWA) = 256*584 = 149504
-    EXPECT_EQ(expected_max, 256u * 584u);
+    EXPECT_EQ(expected_max, DSV4CacheConfig::TOKENS_PER_BLOCK * DSV4CacheConfig::KV_ENTRY_BYTES);
 }
 
 TEST_F(DSV4AllocatorTest, AllGroupsParticipateInPrefixCache) {
@@ -554,14 +543,14 @@ TEST_F(DSV4AllocatorTest, FlashGroupTypes) {
     EXPECT_EQ(dsv4.num_hca_layers(), 20u);
     EXPECT_EQ(dsv4.num_swa_only_layers(), 2u);
 
-    // Same group type: all FULL
+    // Same group type split as Pro: 3 FULL paged groups, 4 SWA tail groups.
     EXPECT_EQ(config.group_types[0], CacheGroupType::FULL);  // CSA KV
     EXPECT_EQ(config.group_types[1], CacheGroupType::FULL);  // HCA KV
     EXPECT_EQ(config.group_types[2], CacheGroupType::FULL);  // Indexer KV
-    EXPECT_EQ(config.group_types[3], CacheGroupType::FULL);  // Indexer State
-    EXPECT_EQ(config.group_types[4], CacheGroupType::FULL);  // CSA State
-    EXPECT_EQ(config.group_types[5], CacheGroupType::FULL);  // HCA State
-    EXPECT_EQ(config.group_types[6], CacheGroupType::FULL);  // SWA KV
+    EXPECT_EQ(config.group_types[3], CacheGroupType::SWA);   // Indexer State
+    EXPECT_EQ(config.group_types[4], CacheGroupType::SWA);   // CSA State
+    EXPECT_EQ(config.group_types[5], CacheGroupType::SWA);   // HCA State
+    EXPECT_EQ(config.group_types[6], CacheGroupType::SWA);   // SWA KV
 }
 
 TEST_F(DSV4AllocatorTest, FlashAddressLookupAllGroups) {
