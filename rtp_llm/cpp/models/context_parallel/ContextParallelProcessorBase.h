@@ -19,8 +19,14 @@ enum class ProcessorType {
 
 class IContextParallelProcessor {
 public:
-    explicit IContextParallelProcessor(const ParallelismConfig& parallelism_config):
-        parallelism_config_(parallelism_config) {}
+    /// @param cp_chunk_alignment Additional alignment factor on top of (cp_size * 2).
+    ///        Pure attention models can use 1. Hybrid models with linear attention
+    ///        (FLA chunked algorithm) must pass the FLA chunk_size (64) so that
+    ///        each rank's half-segment is a chunk_size multiple — this is required
+    ///        for segment-internal h states to coincide with full-sequence chunk
+    ///        boundaries, enabling correct SSM cache writes.
+    explicit IContextParallelProcessor(const ParallelismConfig& parallelism_config, int cp_chunk_alignment = 1):
+        parallelism_config_(parallelism_config), cp_chunk_alignment_(cp_chunk_alignment) {}
     virtual ~IContextParallelProcessor() = default;
 
     /// @brief Prepare context parallel inputs: split and shuffle tokens, compute restore indices and masks.
@@ -53,12 +59,15 @@ protected:
                                                  int                  cp_size) = 0;
 
     ParallelismConfig parallelism_config_;
+    int               cp_chunk_alignment_ = 1;
 };
 
 class ContextParallelProcessorFactory {
 public:
-    static std::unique_ptr<IContextParallelProcessor> create(ProcessorType            type,
-                                                             const ParallelismConfig& parallelism_config);
+    /// @param cp_chunk_alignment See IContextParallelProcessor ctor doc. Hybrid
+    ///        models with linear attention should pass 64 (FLA chunk_size).
+    static std::unique_ptr<IContextParallelProcessor>
+    create(ProcessorType type, const ParallelismConfig& parallelism_config, int cp_chunk_alignment = 1);
 };
 
 }  // namespace rtp_llm

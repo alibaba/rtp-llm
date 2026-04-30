@@ -1,6 +1,6 @@
 py_library(
     name = "fla",
-    srcs = glob(["fla/*.py"]),
+    srcs = glob(["fla/**/*.py"], exclude = ["fla/test/**"]),
     deps = [":common"],
     visibility = ["//visibility:public"]
 )

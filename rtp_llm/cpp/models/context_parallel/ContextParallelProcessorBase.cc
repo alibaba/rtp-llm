@@ -13,7 +13,12 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
 #else
     int prefill_cp_rank = parallelism_config_.tp_rank;
     int prefill_cp_size = parallelism_config_.tp_size;
-    int cp_align_size   = prefill_cp_size * 2;
+    // For pure attention CP, cp_chunk_alignment_ defaults to 1 (only need
+    // 2*cp_size alignment for zigzag pairing). For hybrid models with FLA
+    // linear attention, the caller passes 64 (FLA chunk_size) so that each
+    // rank's half-segment is a chunk_size multiple — see Plan A in
+    // CpChunkAlignInfo (Python side) for why this matters.
+    int cp_align_size = prefill_cp_size * 2 * cp_chunk_alignment_;
 
     static const auto pinned_i32 = torch::TensorOptions(torch::kInt32).pinned_memory(true);
 

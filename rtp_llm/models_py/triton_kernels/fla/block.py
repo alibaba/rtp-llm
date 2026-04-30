@@ -217,3 +217,129 @@ def store_ssm_state_to_block_map(
         CONV_STRIDE_TOKEN=token_stride_ssm_state,
         CHUNK_SIZE=chunk_size,
     )
+
+
+@triton.jit
+def store_conv_state_kernel(
+    full_qkv,  # [DIM, total_padded] channel-first
+    conv_states,  # [num_blocks, DIM, CTX_LEN] (transposed view)
+    prefix_lengths_ptr,  # [batch] int32, abs prefix per seq
+    input_lengths_ptr,  # [batch] int32, new-token count per seq (orig N)
+    padded_cu_ptr,  # [batch+1] int32, full_qkv offsets per seq
+    block_map_ptr,  # [batch, max_blocks] int32
+    max_blocks: tl.int32,
+    DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,  # tokens_per_block
+    CTX_LEN: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    stride_qkv_dim: tl.constexpr,
+    stride_qkv_token: tl.constexpr,
+    stride_cs_block: tl.constexpr,
+    stride_cs_dim: tl.constexpr,
+    stride_cs_ctx: tl.constexpr,
+):
+    """Each program handles one write for one (batch, write_idx_within_seq).
+
+    Per seq with N new tokens, num_writes = ceil(N / BLOCK_SIZE).
+    Write k (k = 0 .. num_writes-2) targets block boundary at abs P + (k+1)*B - 1.
+    Last write (k = num_writes - 1) targets seq end at abs P + N - 1.
+    Programs with i_write >= num_writes early-return.
+    """
+    i_write = tl.program_id(0)
+    i_batch = tl.program_id(1)
+    i_d = tl.program_id(2)
+
+    P = tl.load(prefix_lengths_ptr + i_batch).to(tl.int32)
+    N = tl.load(input_lengths_ptr + i_batch).to(tl.int32)
+    if N <= 0:
+        return
+
+    num_writes = (N + BLOCK_SIZE - 1) // BLOCK_SIZE
+    if i_write >= num_writes:
+        return
+
+    last_idx = num_writes - 1
+    if i_write < last_idx:
+        abs_pos = P + (i_write + 1) * BLOCK_SIZE - 1  # block boundary
+    else:
+        abs_pos = P + N - 1  # seq end (may equal last boundary)
+
+    block_idx_in_seq = abs_pos // BLOCK_SIZE
+    block_id = tl.load(block_map_ptr + i_batch * max_blocks + block_idx_in_seq).to(
+        tl.int64
+    )
+    if block_id <= 0:
+        return
+
+    seq_padded_off = tl.load(padded_cu_ptr + i_batch).to(tl.int32)
+    src_start = seq_padded_off + (abs_pos - P) - CTX_LEN + 1
+
+    d_offset = i_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    d_mask = d_offset < DIM
+
+    for c in tl.static_range(CTX_LEN):
+        src_ptr = (
+            full_qkv + d_offset * stride_qkv_dim + (src_start + c) * stride_qkv_token
+        )
+        dst_ptr = (
+            conv_states
+            + block_id * stride_cs_block
+            + d_offset * stride_cs_dim
+            + c * stride_cs_ctx
+        )
+        val = tl.load(src_ptr, mask=d_mask, other=0.0)
+        tl.store(dst_ptr, val, mask=d_mask)
+
+
+def store_conv_state_to_block_map(
+    full_qkv: torch.Tensor,
+    conv_states: torch.Tensor,
+    prefix_lengths_d: torch.Tensor,
+    input_lengths_d: torch.Tensor,
+    padded_cu_d: torch.Tensor,
+    block_map_d: torch.Tensor,
+    seq_size_per_block: int,
+    max_writes_per_seq: int,
+    block_d: int = 128,
+):
+    """Self-describing variant of store_conv_state_to_block_map.
+
+    Args:
+        full_qkv: [dim, total_padded] channel-first, post all_gather + restore.
+                  Same data layout as single-card mixed_qkv (pre-conv).
+        conv_states: [num_blocks, dim, ctx_len] block cache (transposed view).
+        prefix_lengths_d: [batch] int32, prefix per seq.
+        input_lengths_d: [batch] int32, new-token count per seq (orig N).
+        padded_cu_d: [batch+1] int32, cumulative offsets in full_qkv per seq.
+        block_map_d: [batch, max_blocks] int32, block_id table.
+        seq_size_per_block: tokens_per_block.
+        max_writes_per_seq: upper bound for grid dim 0; pass max(ceil(N_b / B)).
+                            Programs beyond actual num_writes early-return.
+    """
+    batch_size = block_map_d.shape[0]
+    max_blocks = block_map_d.shape[1]
+    dim = full_qkv.shape[0]
+    ctx_len = conv_states.shape[2]
+
+    if max_writes_per_seq <= 0 or batch_size <= 0:
+        return
+
+    grid = (max_writes_per_seq, batch_size, triton.cdiv(dim, block_d))
+    store_conv_state_kernel[grid](
+        full_qkv,
+        conv_states,
+        prefix_lengths_d,
+        input_lengths_d,
+        padded_cu_d,
+        block_map_d,
+        max_blocks,
+        DIM=dim,
+        BLOCK_SIZE=seq_size_per_block,
+        CTX_LEN=ctx_len,
+        BLOCK_D=block_d,
+        stride_qkv_dim=full_qkv.stride(0),
+        stride_qkv_token=full_qkv.stride(1),
+        stride_cs_block=conv_states.stride(0),
+        stride_cs_dim=conv_states.stride(1),
+        stride_cs_ctx=conv_states.stride(2),
+    )
