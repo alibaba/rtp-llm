@@ -213,11 +213,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;
-        } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 1
+        } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
                    && (!params.model_id || is_prefill_cuda_graph_mode)) {
             // for target model verify and draft model prefill
-            // Only use multi-token capture when SP is actually enabled;
-            // gen_num_per_cycle may be >1 from config even when SP is disabled.
             graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
         } else {
             graph_params.num_tokens_per_bs = 1;
