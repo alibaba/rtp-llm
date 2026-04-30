@@ -35,6 +35,21 @@ TEST(P2PConnectorConfigLiteTest, WorkerConfigCarriesMooncakeTcpTransportSettings
     EXPECT_EQ(config.worker_config.transfer_backend_config.cache_store_listen_port, 12345);
 }
 
+TEST(P2PConnectorConfigLiteTest, WorkerConfigNormalizesMooncakeNvlinkAlias) {
+    RuntimeConfig runtime_config;
+    CacheStoreConfig cache_store_config;
+    cache_store_config.cache_store_mooncake_mode = true;
+    cache_store_config.cache_store_mooncake_transport = "nvlink_intraNode";
+
+    ParallelismConfig parallelism_config;
+    PDSepConfig pd_sep_config;
+
+    auto config = P2PConnectorConfig::create(
+        runtime_config, cache_store_config, parallelism_config, pd_sep_config, /*layer_all_num=*/4);
+
+    EXPECT_EQ(config.worker_config.transfer_backend_config.mooncake.classic.transport, "nvlink_intra");
+}
+
 TEST(P2PConnectorConfigLiteTest, WorkerConfigPrefersMooncakeBackendOverLegacyRdmaFlag) {
     RuntimeConfig runtime_config;
     CacheStoreConfig cache_store_config;

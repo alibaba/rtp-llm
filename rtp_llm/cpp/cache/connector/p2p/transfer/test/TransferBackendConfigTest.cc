@@ -33,6 +33,12 @@ TEST(TransferBackendConfigTest, MooncakeConfigKeepsDedicatedDefaults) {
     EXPECT_EQ(config.mooncake.control_plane_port, 0);
 }
 
+TEST(TransferBackendConfigTest, NormalizeMooncakeTransportSupportsNvlinkAlias) {
+    EXPECT_EQ(normalizeMooncakeTransport(""), "tcp");
+    EXPECT_EQ(normalizeMooncakeTransport("nvlink"), "nvlink");
+    EXPECT_EQ(normalizeMooncakeTransport("nvlink_intraNode"), "nvlink_intra");
+}
+
 }  // namespace
 }  // namespace transfer
 }  // namespace rtp_llm

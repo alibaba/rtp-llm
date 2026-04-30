@@ -20,6 +20,17 @@ struct MooncakeTransferEngineInitConfig {
     uint16_t    rpc_port             = 12345;
 };
 
+inline std::string normalizeMooncakeTransport(std::string transport) {
+    if (transport.empty()) {
+        return "tcp";
+    }
+    // Mooncake TE 对内使用 nvlink_intra，兼容历史别名。
+    if (transport == "nvlink_intraNode") {
+        return "nvlink_intra";
+    }
+    return transport;
+}
+
 struct MooncakeBackendConfig {
     MooncakeTransferEngineInitConfig classic;
     std::string                      location           = "*";
