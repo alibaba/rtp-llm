@@ -269,7 +269,7 @@ class ServerArgsSetTest(TestCase):
             "--cache_store_mooncake_ip_or_host_name",
             "127.0.0.1",
             "--cache_store_mooncake_transport",
-            "tcp",
+            "nvlink_intraNode",
             "--cache_store_mooncake_rpc_port",
             "23545",
             "--cache_store_mooncake_control_plane_port",
@@ -302,7 +302,7 @@ class ServerArgsSetTest(TestCase):
         )
         self.assertEqual(
             py_env_configs.cache_store_config.cache_store_mooncake_transport,
-            "tcp",
+            "nvlink_intraNode",
         )
         self.assertEqual(
             py_env_configs.cache_store_config.cache_store_mooncake_rpc_port,

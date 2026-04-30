@@ -26,7 +26,7 @@ std::string resolveLocalServerName(const MooncakeTransferEngineInitConfig& confi
 }
 
 std::string resolveTransportProto(const MooncakeTransferEngineInitConfig& config) {
-    return config.transport.empty() ? std::string("tcp") : config.transport;
+    return normalizeMooncakeTransport(config.transport);
 }
 
 constexpr ::mooncake::SegmentHandle kInvalidSegmentHandle = static_cast<::mooncake::SegmentHandle>(-1);
@@ -76,6 +76,9 @@ public:
             engine_.reset();
             return false;
         }
+        RTP_LLM_LOG_INFO("MooncakeClassicTransferEngineAdapter install transport success, transport=%s, local_server=%s",
+                         transport_proto.c_str(),
+                         local_server_name.c_str());
         return true;
     }
 

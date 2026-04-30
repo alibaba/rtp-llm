@@ -54,7 +54,7 @@ struct P2PConnectorWorkerConfig {
         config.transfer_backend_config.mooncake.classic.ip_or_host_name =
             cache_store_config.cache_store_mooncake_ip_or_host_name;
         config.transfer_backend_config.mooncake.classic.transport =
-            cache_store_config.cache_store_mooncake_transport;
+            transfer::normalizeMooncakeTransport(cache_store_config.cache_store_mooncake_transport);
         config.transfer_backend_config.mooncake.classic.rpc_port =
             static_cast<uint16_t>(cache_store_config.cache_store_mooncake_rpc_port);
         config.transfer_backend_config.mooncake.control_plane_port =
