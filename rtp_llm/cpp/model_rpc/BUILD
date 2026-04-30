@@ -43,10 +43,33 @@ cc_library(
 )
 
 cc_library(
+    name = "decode_cache_load_planner",
+    srcs = [
+        "DecodeCacheLoadPlanner.cc",
+    ],
+    hdrs = [
+        "DecodeCacheLoadPlanner.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/engine_base/stream:generate_types",
+        "//rtp_llm/cpp/models:position_ids_generator",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_types",
+    ],
+)
+
+cc_library(
     name = "model_rpc_server",
     srcs = glob(
         ["*.cc"],
-        exclude = ["TensorPbConvert.cc"],
+        exclude = [
+            "DecodeCacheLoadPlanner.cc",
+            "TensorPbConvert.cc",
+        ],
     ),
     hdrs = glob(
         ["*.h"],
@@ -55,10 +78,13 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":embedding_arpc_deps",
+        ":decode_cache_load_planner",
         ":model_rpc_pool",
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache:kv_cache_layer_region_utils",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/engine_base/stream:generate_types",

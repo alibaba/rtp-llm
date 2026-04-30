@@ -33,9 +33,14 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
+    virtual BlockAddrInfo convertIndexToAddr(int layer_id, KVCacheRegionName region_name, int block_id) const;
+    virtual std::vector<BlockInfo>
+    convertIndexToBuffer(int layer_id, KVCacheRegionName region_name, int block_id) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, KVCacheRegionName region_name, int block_id, int partition_count, int partition_id) const;
     virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                             const CacheKeysType&   cache_keys,
-                                                            bool                   is_connector = false)            = 0;
+                                                            bool                   is_connector = false) = 0;
 
     virtual CacheLayerLayout allLayerCacheBase() const                                     = 0;
     virtual bool             updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -48,10 +53,10 @@ public:
                                                    int                            reserve_step) const                 = 0;
 
     MallocResult malloc(const MallocInfo& malloc_info);
-    void         blockCopy(int src_block_index, int dest_block_index);
-    void         blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
-    void         blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
-    void         blockBatchCopy(const torch::Tensor& copy_mapping);
+    virtual void blockCopy(int src_block_index, int dest_block_index);
+    virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
+    virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
+    virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
 
     BlockPoolPtr getBlockPool() const {
         return block_pool_;
@@ -66,19 +71,19 @@ public:
         return reserve_block_num_;
     }
 
-    void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
-    int64_t                 getMrCostTimeMs() const;
-    size_t                  freeBlocksNum() const;
-    size_t                  availableBlocksNum() const;
-    BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
-    void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);
-    size_t                  requestRefBlocksNum() const;
-    size_t                  connectorRefBlocksNum() const;
-    size_t                  blockCacheRefBlocksNum() const;
-    size_t                  notInUseBlocksNum() const;
-    size_t                  availableTokensNum() const;
-    size_t                  totalBlocksNum() const;
-    size_t                  maxAvailableTokensNum() const;
+    virtual void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    virtual int64_t                 getMrCostTimeMs() const;
+    virtual size_t                  freeBlocksNum() const;
+    virtual size_t                  availableBlocksNum() const;
+    virtual BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
+    virtual void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);
+    virtual size_t                  requestRefBlocksNum() const;
+    virtual size_t                  connectorRefBlocksNum() const;
+    virtual size_t                  blockCacheRefBlocksNum() const;
+    virtual size_t                  notInUseBlocksNum() const;
+    virtual size_t                  availableTokensNum() const;
+    virtual size_t                  totalBlocksNum() const;
+    virtual size_t                  maxAvailableTokensNum() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 

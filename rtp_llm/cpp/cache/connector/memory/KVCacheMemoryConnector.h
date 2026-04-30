@@ -11,6 +11,7 @@
 #include "autil/LockFreeThreadPool.h"
 #include <torch/torch.h>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheLayerRegionUtils.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -71,15 +72,17 @@ private:
         CopyDirection               direction;
     };
 
-    std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType& cache_keys,
-                                                   const LayerBlockIds& layer_block_ids,
-                                                   int                  start_index,
-                                                   int                  read_num);
-    std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType& cache_keys,
-                                                    const LayerBlockIds& layer_block_ids,
-                                                    int                  start_index,
-                                                    int                  write_num,
-                                                    bool&                no_need_write);
+    std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType&                cache_keys,
+                                                   const LayerRegionBlockIds&          layer_region_block_ids,
+                                                   const std::vector<LayerRegionSlot>& slots,
+                                                   int                                 start_index,
+                                                   int                                 read_num);
+    std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType&                cache_keys,
+                                                    const LayerRegionBlockIds&          layer_region_block_ids,
+                                                    const std::vector<LayerRegionSlot>& slots,
+                                                    int                                 start_index,
+                                                    int                                 write_num,
+                                                    bool&                               no_need_write);
     std::shared_ptr<CopyPlan> createCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos,
                                              const CopyDirection&               direction);
     bool startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context, const std::shared_ptr<CopyPlan>& copy_plan);
@@ -100,8 +103,12 @@ private:
                                   std::vector<torch::Tensor>& src);
 
     void checkLayerBlockStrideBytes() const;
-    bool checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
-    bool gpuBlocksAllValid(const LayerBlockIds& layer_block_ids, size_t key_index) const;
+    bool checkLayerRegionBlocks(const LayerRegionBlockIds&          layer_region_block_ids,
+                                const std::vector<LayerRegionSlot>& slots,
+                                size_t                              required_len) const;
+    bool gpuBlocksAllValid(const LayerRegionBlockIds&          layer_region_block_ids,
+                           const std::vector<LayerRegionSlot>& slots,
+                           size_t                              key_index) const;
 
     bool mallocBlocks(size_t need_blocks, std::vector<BlockIdxType>& malloced_blocks);
     bool freeBlocks(const std::vector<BlockIdxType>& blocks, bool cache_free = true);
@@ -125,11 +132,14 @@ private:
     std::shared_ptr<KVCacheAllocator> allocator_;
     const std::vector<std::string>    tp_addrs_;
 
-    std::shared_ptr<BlockPool> block_pool_;
+    std::shared_ptr<BlockPool>                 block_pool_;
     mutable std::mutex                         malloc_mutex_;
     std::shared_ptr<MemoryBlockCache>          block_cache_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
     std::shared_ptr<autil::LockFreeThreadPool> wait_done_thread_pool_;
+    std::vector<LayerRegionSlot>               layer_region_slots_;
+    bool                                       has_typed_layer_region_slots_{false};
+    std::atomic<bool>                          split_kv_copy_disabled_logged_{false};
 
     // metrics reporter
     kmonitor::MetricsReporterPtr metrics_reporter_;

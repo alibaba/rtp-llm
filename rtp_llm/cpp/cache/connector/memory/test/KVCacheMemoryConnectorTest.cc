@@ -211,12 +211,19 @@ private:
         return memoryCacheBlockBytes(cache_config_);
     }
 
+    void initLayerRegionSlotsForTest(const std::shared_ptr<KVCacheMemoryConnector>& conn,
+                                     const CacheConfig&                             cfg) const {
+        conn->layer_region_slots_           = buildLayerRegionSlots(cfg, cfg.layer_all_num);
+        conn->has_typed_layer_region_slots_ = hasTypedLayerRegionSlots(conn->layer_region_slots_, cfg.layer_all_num);
+    }
+
     void setBlockBytes(const BlockInfo& b, size_t byte_offset, size_t byte_len, char c) const {
         ASSERT_NE(b.addr, nullptr);
         ASSERT_LE(byte_offset + byte_len, b.size_bytes);
         auto* addr = static_cast<char*>(b.addr) + byte_offset;
         if (b.is_cuda) {
             check_cuda_value(cudaMemset(addr, c, byte_len));
+            check_cuda_value(cudaDeviceSynchronize());
         } else {
             memset(addr, c, byte_len);
         }
@@ -421,6 +428,12 @@ private:
         auto res             = std::make_shared<KVCacheResource>();
         res->cache_keys      = cache_keys;
         res->layer_block_ids = makeLayerBlockIds(per_layer_block_indices, cache_keys.size());
+        res->layer_region_block_ids.resize(cache_config_.layer_num);
+        for (size_t layer = 0; layer < cache_config_.layer_num; ++layer) {
+            res->layer_region_block_ids[layer].assign(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), nullptr);
+            res->layer_region_block_ids[layer][static_cast<size_t>(KVCacheRegionName::DEFAULT)] =
+                res->layer_block_ids[layer];
+        }
         // reuse_len in these tests means "GPU already-reused prefix length".
         // KVCacheResource::reuseBlockNum() is derived from (device + memory + remote),
         // so set device reuse here to make asyncMatch/asyncRead semantics consistent.
@@ -598,6 +611,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, server_addrs_);
+    initLayerRegionSlotsForTest(conn, cache_config_);
     EXPECT_THROW(conn->initBlockPool(), std::runtime_error);
 }
 
@@ -626,6 +640,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenCreateBlockPoolFails)
     kv_cfg.memory_cache_sync_timeout_ms = 1000;  // not used by initBlockPool but keep valid
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    initLayerRegionSlotsForTest(conn, cfg);
     EXPECT_THROW(conn->initBlockPool(), std::runtime_error);
 }
 
@@ -635,9 +650,71 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_ReturnTrue_AndRegistersPool) {
     kv_cfg.memory_cache_sync_timeout_ms = 1000;  // not used by initBlockPool but keep valid
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, server_addrs_);
+    initLayerRegionSlotsForTest(conn, cache_config_);
     EXPECT_NO_THROW(conn->initBlockPool());
     auto pool = conn->block_pool_;
     ASSERT_NE(pool, nullptr);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndAttnSlots) {
+    auto cfg          = cache_config_;
+    cfg.layer_num     = 1;
+    cfg.layer_all_num = 1;
+    cfg.layer_to_group_id.assign(1, 0);
+    cfg.layer_to_group_ids.assign(1, std::vector<int>{0, 1});
+    cfg.layer_region_to_group_id.assign(1, std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
+    cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)] = 1;
+    cfg.group_types        = {CacheGroupType::FULL, CacheGroupType::FULL};
+    cfg.group_region_names = {KVCacheRegionName::CSA_KV, KVCacheRegionName::SWA_KV};
+    cfg.cache_specs.resize(2, cfg.cache_specs[0]);
+    cfg.group_kv_block_stride_bytes = {16, 32};
+    cfg.group_kv_scale_stride_bytes = {0, 0};
+    cfg.layer_to_block_stride_bytes = {999};
+
+    auto kv_cfg                         = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb         = 64;
+    kv_cfg.memory_cache_sync_timeout_ms = 1000;
+    auto conn          = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    conn->block_cache_ = std::make_shared<MemoryBlockCache>();
+    initLayerRegionSlotsForTest(conn, cfg);
+    ASSERT_NO_THROW(conn->initBlockPool());
+
+    const auto& slots = conn->layer_region_slots_;
+    ASSERT_EQ(slots.size(), 2u);
+    EXPECT_EQ(slots[0].layer_id, 0);
+    EXPECT_EQ(slots[0].region_name, KVCacheRegionName::CSA_KV);
+    EXPECT_EQ(slots[0].group_id, 0);
+    EXPECT_EQ(slots[0].stride_bytes, 16u);
+    EXPECT_EQ(slots[1].layer_id, 0);
+    EXPECT_EQ(slots[1].region_name, KVCacheRegionName::SWA_KV);
+    EXPECT_EQ(slots[1].group_id, 1);
+    EXPECT_EQ(slots[1].stride_bytes, 32u);
+
+    auto resource         = std::make_shared<KVCacheResource>();
+    resource->cacheKeys() = {101, 102, 103};
+    resource->initGroups(/*group_num=*/2,
+                         /*layer_num=*/1,
+                         cfg.layer_to_group_id,
+                         /*kernel_blocks_per_kv_block=*/1,
+                         cfg.group_types,
+                         cfg.layer_region_to_group_id);
+    resource->mutableBlockIds(/*group_id=*/0).assign({11, 12, 13});
+    resource->mutableBlockIds(/*group_id=*/1).assign({21, NULL_BLOCK_IDX, 23});
+
+    bool no_need_write = true;
+    auto plan          = conn->buildCopyPlanForWrite(
+        resource->cacheKeys(), resource->layerRegionBlocks(), slots, /*start_index=*/0, /*write_num=*/3, no_need_write);
+
+    ASSERT_NE(plan, nullptr);
+    EXPECT_FALSE(no_need_write);
+    ASSERT_EQ(plan->copy_infos.size(), 3u);
+    EXPECT_TRUE(plan->copy_infos[0].is_complete);
+    EXPECT_FALSE(plan->copy_infos[1].is_complete);
+    EXPECT_TRUE(plan->copy_infos[2].is_complete);
+    EXPECT_EQ(plan->copy_infos[0].gpu_blocks, (std::vector<BlockIdxType>{11, 21}));
+    EXPECT_EQ(plan->copy_infos[1].gpu_blocks, (std::vector<BlockIdxType>{12, NULL_BLOCK_IDX}));
+    EXPECT_EQ(plan->copy_infos[2].gpu_blocks, (std::vector<BlockIdxType>{13, 23}));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenGpuReuseLenGEKeysSize) {
@@ -1687,11 +1764,11 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SingleLayer) {
 
 // MLA FP8 online-style: separate kv + kv-scale blobs per layer (656 + 132 bytes/token at seq_size_per_block=512).
 // copyCache uses execNoBlockCopy split KV path (sm_copy scatter/gather) when eligible.
-// ~40k prompt tokens => 79 full blocks in one request.
+// Keep the unit footprint modest while still covering multiple split KV blocks.
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlockCopyOpt) {
     constexpr int      kLayerNum    = 78;
     constexpr uint32_t kSeqPerBlock = 512;
-    constexpr int      kCopySeqLen  = 40000;
+    constexpr int      kCopySeqLen  = 2048;
     constexpr int kCopyBlockCount = (kCopySeqLen + static_cast<int>(kSeqPerBlock) - 1) / static_cast<int>(kSeqPerBlock);
     constexpr int kGpuBlockBase   = 2;
     // Block pool must include GPU indices [kGpuBlockBase, kGpuBlockBase + kCopyBlockCount - 1] (from kCopySeqLen).
@@ -1740,7 +1817,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     const int pool_mb =
         static_cast<int>((merged_one_key * static_cast<size_t>(kCopyBlockCount) + (1024ULL * 1024 - 1)) / (1024 * 1024))
         + 256;
-    kv_cache_config_.memory_cache_size_mb = std::max(pool_mb, 512);
+    kv_cache_config_.memory_cache_size_mb = std::max(pool_mb, 128);
 
     allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());

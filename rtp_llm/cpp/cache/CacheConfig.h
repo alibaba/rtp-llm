@@ -14,15 +14,24 @@ namespace rtp_llm {
 
 struct CacheConfig {
     // Cache specification and layer mapping
-    std::vector<KVCacheSpecPtr>   cache_specs;
-    std::vector<std::vector<int>> global_layer_ids;  // including mtp module layers
-    std::vector<std::vector<int>> layer_ids;
-    std::vector<std::vector<int>> linear_groups;  // for hybrid attention
-    std::vector<std::vector<int>> full_groups;    // for hybrid attention
-    std::vector<CacheGroupType>   group_types;    // for hybrid attention
-    std::vector<CacheGroupType>   layer_attn_types;
-    std::vector<int>              layer_to_group_id;
-    std::vector<int>              layer_to_block_stride_bytes;
+    std::vector<KVCacheSpecPtr>    cache_specs;
+    std::vector<std::vector<int>>  global_layer_ids;  // including mtp module layers
+    std::vector<std::vector<int>>  layer_ids;
+    std::vector<std::vector<int>>  linear_groups;  // for hybrid attention
+    std::vector<std::vector<int>>  full_groups;    // for hybrid attention
+    std::vector<CacheGroupType>    group_types;    // for hybrid attention
+    std::vector<CacheGroupType>    layer_group_types;
+    std::vector<KVCacheRegionName> group_region_names;        // group id -> cache identity
+    std::vector<std::vector<int>>  layer_to_group_ids;        // layer id -> all group ids needed by the layer
+    std::vector<std::vector<int>>  layer_region_to_group_id;  // layer id -> region ordinal -> group id
+    std::vector<int>               layer_to_group_id;
+    std::vector<int>               layer_to_block_stride_bytes;
+    std::vector<size_t>            group_seq_size_per_block;
+    std::vector<size_t>            group_kv_block_stride_bytes;
+    std::vector<size_t>            group_kv_scale_stride_bytes;
+    std::vector<size_t>            group_block_size_bytes;
+    std::vector<uint32_t>          group_block_nums;
+    bool                           use_independent_block_pools = false;
 
     // Model configuration
     rtp_llm::DataType dtype;
@@ -58,6 +67,7 @@ struct CacheConfig {
     int linear_step      = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
     int group_layer_num  = 1;  // Number of layers per group for hybrid attention
     int linear_group_num = 0;  // Number of linear attention groups
+    int swa_group_num    = 0;  // Number of sliding-window attention groups
     int full_group_num   = 0;  // Number of full attention groups
 
     // mtp-model configurations
@@ -112,6 +122,7 @@ struct CacheConfig {
         OUTPUT_FIELD(linear_step);
         OUTPUT_FIELD(group_layer_num);
         OUTPUT_FIELD(linear_group_num);
+        OUTPUT_FIELD(swa_group_num);
         OUTPUT_FIELD(full_group_num);
         os << "\n";
 
@@ -146,11 +157,22 @@ struct CacheConfig {
             }
         }
         os << "]\n";
-        OUTPUT_FIELD_EXPR("layer_attn_types.size()", layer_attn_types.size());
-        os << indent1 << "layer_attn_types=[";
-        for (size_t i = 0; i < layer_attn_types.size(); ++i) {
-            os << static_cast<int>(layer_attn_types[i]);
-            if (i + 1 < layer_attn_types.size()) {
+        OUTPUT_FIELD_EXPR("group_region_names.size()", group_region_names.size());
+        os << indent1 << "group_region_names=[";
+        for (size_t i = 0; i < group_region_names.size(); ++i) {
+            os << static_cast<int>(group_region_names[i]);
+            if (i + 1 < group_region_names.size()) {
+                os << ",";
+            }
+        }
+        os << "]\n";
+        OUTPUT_FIELD_EXPR("layer_to_group_ids.size()", layer_to_group_ids.size());
+        os << indent1 << "layer_to_group_ids=" << rtp_llm::vectorsToString(layer_to_group_ids) << "\n";
+        OUTPUT_FIELD_EXPR("layer_group_types.size()", layer_group_types.size());
+        os << indent1 << "layer_group_types=[";
+        for (size_t i = 0; i < layer_group_types.size(); ++i) {
+            os << static_cast<int>(layer_group_types[i]);
+            if (i + 1 < layer_group_types.size()) {
                 os << ",";
             }
         }

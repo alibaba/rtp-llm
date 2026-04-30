@@ -34,7 +34,9 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     } else {
         spec = std::make_shared<MHAKVCacheSpec>(model_config.attn_config, parallelism_config);
     }
-    spec->dtype = dtype;
+    spec->dtype     = dtype;
+    spec->use_mla   = config.use_mla;
+    spec->is_sparse = config.is_sparse;
     config.cache_specs.push_back(spec);
     config.group_types.push_back(CacheGroupType::FULL);
 
@@ -64,7 +66,7 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.global_layer_ids.push_back(all_layer_ids);
     config.layer_ids.push_back(all_layer_ids);
     config.layer_to_group_id.assign(config.layer_num, 0);
-    config.layer_attn_types.assign(config.layer_num, CacheGroupType::FULL);
+    config.layer_group_types.assign(config.layer_num, CacheGroupType::FULL);
     return config;
 }
 

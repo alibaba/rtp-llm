@@ -65,6 +65,20 @@ cc_test(
 )
 
 cc_test(
+    name = "decode_cache_load_planner_test",
+    srcs = [
+        "DecodeCacheLoadPlannerTest.cc",
+    ],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/model_rpc:decode_cache_load_planner",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "broadcast_manager_test",
     srcs = [
         "BroadcastManagerTest.cc",

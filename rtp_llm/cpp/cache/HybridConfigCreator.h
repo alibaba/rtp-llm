@@ -19,25 +19,40 @@ public:
     static int calculateGroupLayerNum(int linear_layer_count, int full_layer_count);
 
 private:
+    struct AttentionLayerSplit {
+        std::vector<int> linear_layers;
+        std::vector<int> swa_layers;
+        std::vector<int> full_layers;
+    };
+    struct AttentionGroupSplit {
+        std::vector<std::vector<int>> linear_groups;
+        std::vector<std::vector<int>> swa_groups;
+        std::vector<std::vector<int>> full_groups;
+    };
+
     // Helper functions for creating hybrid config in the order they appear in the main flow
-    static std::pair<std::vector<int>, std::vector<int>> splitLayersByAttentionType(const ModelConfig& model_config);
-    static CacheConfig                                   initializeConfig(const ModelConfig&      model_config,
-                                                                          const std::vector<int>& linear_layers,
-                                                                          const std::vector<int>& full_layers,
-                                                                          rtp_llm::DataType       dtype);
-    static KVCacheSpecPtr                                createFullAttentionSpec(const ModelConfig&       model_config,
-                                                                                 const ParallelismConfig& parallelism_config,
-                                                                                 rtp_llm::DataType        dtype);
-    static KVCacheSpecPtr                                createLinearAttentionSpec(const ModelConfig&       model_config,
-                                                                                   const ParallelismConfig& parallelism_config,
-                                                                                   rtp_llm::DataType        dtype);
-    static std::pair<std::vector<std::vector<int>>, std::vector<std::vector<int>>>
-    createLayerGroups(const std::vector<int>& linear_layers, const std::vector<int>& full_layers, int& group_layer_num);
-    static void setupCacheConfigSpecs(CacheConfig&                         config,
-                                      const std::vector<std::vector<int>>& linear_groups,
-                                      const std::vector<std::vector<int>>& full_groups,
-                                      const KVCacheSpecPtr&                linear_spec,
-                                      const KVCacheSpecPtr&                full_spec);
+    static AttentionLayerSplit splitLayersByAttentionType(const ModelConfig& model_config);
+    static CacheConfig         initializeConfig(const ModelConfig&      model_config,
+                                                const std::vector<int>& linear_layers,
+                                                const std::vector<int>& swa_layers,
+                                                const std::vector<int>& full_layers,
+                                                rtp_llm::DataType       dtype);
+    static KVCacheSpecPtr      createFullAttentionSpec(const ModelConfig&       model_config,
+                                                       const ParallelismConfig& parallelism_config,
+                                                       rtp_llm::DataType        dtype);
+    static KVCacheSpecPtr      createLinearAttentionSpec(const ModelConfig&       model_config,
+                                                         const ParallelismConfig& parallelism_config,
+                                                         rtp_llm::DataType        dtype);
+    static AttentionGroupSplit createLayerGroups(const std::vector<int>& linear_layers,
+                                                 const std::vector<int>& swa_layers,
+                                                 const std::vector<int>& full_layers,
+                                                 int&                    group_layer_num);
+    static void                setupCacheConfigSpecs(CacheConfig&                         config,
+                                                     const std::vector<std::vector<int>>& linear_groups,
+                                                     const std::vector<std::vector<int>>& swa_groups,
+                                                     const std::vector<std::vector<int>>& full_groups,
+                                                     const KVCacheSpecPtr&                linear_spec,
+                                                     const KVCacheSpecPtr&                full_spec);
     static void
     setupPhysicalSizes(CacheConfig& config, const KVCacheSpecPtr& full_spec, const KVCacheSpecPtr& linear_spec);
     static void setupLayerToGroupMapping(CacheConfig& config);

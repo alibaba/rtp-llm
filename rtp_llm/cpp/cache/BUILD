@@ -46,6 +46,42 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_cache_layer_region_utils",
+    srcs = [
+        "KVCacheLayerRegionUtils.cc",
+    ],
+    hdrs = [
+        "KVCacheLayerRegionUtils.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_types",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/engine_base/stream:generate_types",
+        "//rtp_llm/cpp/models:position_ids_generator",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_types",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)
+
+cc_library(
+    name = "kv_cache_transfer_planner",
+    srcs = [
+        "KVCacheTransferPlanner.cc",
+    ],
+    hdrs = [
+        "KVCacheTransferPlanner.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_group_type",
+    ],
+)
+
+cc_library(
     name = "block_pool",
     srcs = [
         "BlockCache.cc",
@@ -80,11 +116,13 @@ cc_library(
         "FullKVCacheGroup.cc",
         "KVCacheGroup.cc",
         "LinearKVCacheGroup.cc",
+        "SWAKVCacheGroup.cc",
     ],
     hdrs = [
         "FullKVCacheGroup.h",
         "KVCacheGroup.h",
         "LinearKVCacheGroup.h",
+        "SWAKVCacheGroup.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -96,11 +134,15 @@ cc_library(
 cc_library(
     name = "kv_cache_allocator",
     srcs = [
+        "HybridKVCacheAllocator.cc",
+        "HybridPoolKVCacheAllocator.cc",
         "HybridTypeKVCacheAllocator.cc",
         "KVCacheAllocator.cc",
         "SingleTypeKVCacheAllocator.cc",
     ],
     hdrs = [
+        "HybridKVCacheAllocator.h",
+        "HybridPoolKVCacheAllocator.h",
         "HybridTypeKVCacheAllocator.h",
         "KVCacheAllocator.h",
         "SingleTypeKVCacheAllocator.h",

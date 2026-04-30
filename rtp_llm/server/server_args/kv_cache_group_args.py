@@ -127,6 +127,22 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="在测试时强制指定BLOCK的数量",
     )
     kv_cache_group.add_argument(
+        "--enable_independent_pool",
+        env_name="ENABLE_INDEPENDENT_POOL",
+        bind_to=(kv_cache_config, "enable_independent_pool"),
+        type=str2bool,
+        default=False,
+        help="是否使用独立的 Block Pool（每个 cache group 一个独立的内存池）。设置为 True 使用 HybridPoolKVCacheAllocator，False 使用 HybridTypeKVCacheAllocator。",
+    )
+    kv_cache_group.add_argument(
+        "--pool_ratio",
+        env_name="POOL_RATIO",
+        bind_to=(kv_cache_config, "pool_ratio"),
+        type=str,
+        default="",
+        help="独立 Block Pool 的显存分配比例，冒号分隔，例如 '4:1' 表示两个 pool 按 4:1 比例分配显存。仅在 enable_independent_pool=True 时生效。",
+    )
+    kv_cache_group.add_argument(
         "--enable_memory_cache",
         env_name="ENABLE_MEMORY_CACHE",
         bind_to=(kv_cache_config, "enable_memory_cache"),

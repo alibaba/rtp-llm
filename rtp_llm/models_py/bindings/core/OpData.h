@@ -1,5 +1,6 @@
 #pragma once
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
@@ -54,7 +55,7 @@ struct GptModelInputs {
     torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
 
     torch::Tensor kv_cache_layer_to_group;  // [layer_num], int32
-    torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
+    torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL, 2 -> SWA.
     torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 2] kv cache update mapping
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
@@ -172,7 +173,8 @@ struct CacheStoreInputs {
     torch::Tensor host_kv_cache_offset;
 
     torch::Tensor kv_cache_layer_to_group_host;
-    torch::Tensor kv_cache_group_types_host;  // 0 -> LINEAR, 1 -> FULL.
+    torch::Tensor kv_cache_layer_region_to_group_host;
+    torch::Tensor kv_cache_group_types_host;  // 0 -> LINEAR, 1 -> FULL, 2 -> SWA.
 
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;
@@ -188,7 +190,8 @@ struct CacheStoreInputs {
     bool                     decode_entrance       = false;
     bool                     warmup;
 
-    int layer_id = 0;
+    int               layer_id    = 0;
+    KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
 
     // Pre-created event from the main thread to avoid cudaEventRecord
     // contention on background threads. nullptr means writeCacheStore will

@@ -23,10 +23,11 @@ namespace torch_ext {
 //   MHA: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
 //   MLA: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
 struct LayerKVCache {
-    torch::Tensor kv_cache_base;
-    torch::Tensor kv_scale_base;
-    int           seq_size_per_block = 0;
-    int           layer_id           = -1;
+    torch::Tensor              kv_cache_base;
+    torch::Tensor              kv_scale_base;
+    int                        seq_size_per_block = 0;
+    int                        layer_id           = -1;
+    rtp_llm::KVCacheRegionName region_name        = rtp_llm::KVCacheRegionName::DEFAULT;
 };
 
 // Whole-model KV cache holding tensors for all layers.
@@ -43,15 +44,19 @@ struct KVCache {
     int                        kv_lora_rank              = 0;
     int                        rope_head_dim             = 0;
 
-    // Per-layer attention type (CacheGroupType::FULL or LINEAR).
-    std::vector<rtp_llm::CacheGroupType> layer_attn_types;
+    // Per-layer attention type (CacheGroupType::FULL, LINEAR, or SWA).
+    std::vector<rtp_llm::CacheGroupType>    layer_group_types;
+    std::vector<rtp_llm::KVCacheRegionName> group_region_names;
+    std::vector<std::vector<int>>           layer_region_to_group_id;
+    std::vector<std::vector<torch::Tensor>> kv_cache_base_by_layer_attn;
+    std::vector<std::vector<torch::Tensor>> kv_scale_base_by_layer_attn;
 
     LayerKVCache getLayerCache(int idx) {
         LayerKVCache layer_cache;
         layer_cache.layer_id = idx;
 
         // Determine whether this layer is a full-attention layer.
-        if (idx < 0 || static_cast<size_t>(idx) >= layer_attn_types.size())
+        if (idx < 0 || static_cast<size_t>(idx) >= layer_group_types.size())
             throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
         auto          base = kv_cache_base_by_layer[idx];
         torch::Tensor scale;
@@ -59,7 +64,7 @@ struct KVCache {
             scale = kv_scale_base_by_layer[idx];
         }
 
-        const bool is_full = layer_attn_types[static_cast<size_t>(idx)] == rtp_llm::CacheGroupType::FULL;
+        const bool is_full = layer_group_types[static_cast<size_t>(idx)] == rtp_llm::CacheGroupType::FULL;
 
         if (!is_full) {
             // Linear/SSM attention layer: return the raw cache tensor unchanged.
@@ -112,6 +117,50 @@ struct KVCache {
         }
         return layer_cache;
     }
+
+    LayerKVCache getLayerCache(int idx, rtp_llm::KVCacheRegionName region_name) {
+        if (region_name == rtp_llm::KVCacheRegionName::DEFAULT) {
+            auto layer_cache        = getLayerCache(idx);
+            layer_cache.region_name = region_name;
+            return layer_cache;
+        }
+        if (kv_cache_base_by_layer_attn.empty()) {
+            throw std::runtime_error("Typed KV cache layout is empty for region "
+                                     + std::to_string(static_cast<int>(region_name)));
+        }
+
+        const auto layer = static_cast<size_t>(idx);
+        const auto attn  = static_cast<size_t>(region_name);
+        if (idx < 0 || layer >= kv_cache_base_by_layer_attn.size()) {
+            throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
+        }
+        if (attn >= kv_cache_base_by_layer_attn[layer].size()) {
+            throw std::runtime_error("Invalid KV cache attention type: " + std::to_string(attn));
+        }
+        if (!layer_region_to_group_id.empty()
+            && (layer >= layer_region_to_group_id.size() || attn >= layer_region_to_group_id[layer].size()
+                || layer_region_to_group_id[layer][attn] < 0)) {
+            throw std::runtime_error("Layer " + std::to_string(idx) + " does not own KV cache attention type "
+                                     + std::to_string(attn));
+        }
+
+        auto base = kv_cache_base_by_layer_attn[layer][attn];
+        if (!base.defined()) {
+            throw std::runtime_error("Missing KV cache tensor for layer " + std::to_string(idx) + ", attn type "
+                                     + std::to_string(attn));
+        }
+
+        LayerKVCache layer_cache;
+        layer_cache.layer_id           = idx;
+        layer_cache.region_name        = region_name;
+        layer_cache.seq_size_per_block = seq_size_per_block;
+        layer_cache.kv_cache_base      = base;
+        if (!kv_scale_base_by_layer_attn.empty() && layer < kv_scale_base_by_layer_attn.size()
+            && attn < kv_scale_base_by_layer_attn[layer].size()) {
+            layer_cache.kv_scale_base = kv_scale_base_by_layer_attn[layer][attn];
+        }
+        return layer_cache;
+    }
 };
 
 struct PyModelInitResources {
@@ -124,6 +173,7 @@ struct PyCacheStoreInputs {
     torch::Tensor            request_id;
     torch::Tensor            request_pd_separation;
     torch::Tensor            kv_cache_layer_to_group;
+    torch::Tensor            kv_cache_layer_region_to_group;
     torch::Tensor            kv_cache_group_types;
     std::vector<std::string> cache_keys;  // [context_batch_size]
     size_t                   tokens_per_block;

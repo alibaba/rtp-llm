@@ -11,6 +11,7 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/cpp/cache/connector:connector_base",
+        "//rtp_llm/cpp/cache:kv_cache_layer_region_utils",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/metrics:metrics",
