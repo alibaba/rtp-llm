@@ -304,6 +304,8 @@ void HybridTypeKVCacheAllocator::free(const FreeInfo& free_info) {
     kv_cache_resource->clearBlocks();
 }
 
+// NOTE: Same as SingleTypeKVCacheAllocator::insertIntoCache — preserved for unit tests.
+// Production path goes through KVCacheManager::insertIntoCache → upsertCacheItem.
 void HybridTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     auto&        kv_cache_resource = insert_info.batch_kv_cache_resource;
     const size_t mid               = modelId();

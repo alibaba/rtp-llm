@@ -364,7 +364,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_input.kv_block_stride_bytes   = mtp_cache_cfg.getAllocatorConfig(0).kv_block_stride_bytes;
         model_input.kv_scale_stride_bytes   = mtp_cache_cfg.getAllocatorConfig(0).kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
-        draft_model_output                  = std::move(draft_model_->forward(model_input));
+        // Switch kv_cache block IDs to draft model's allocator (allocators_[1]).
+        RETURN_IF_STATUS_ERROR(batch_stream_processor_->updateKvCacheBlockIds(model_input, stream_groups, 1));
+        draft_model_output = std::move(draft_model_->forward(model_input));
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -564,9 +566,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (propose_step_ > 1) {
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+        // Switch to draft model's block IDs (allocators_[1]) for draftModelDecode loop.
+        RETURN_IF_STATUS_ERROR(batch_stream_processor_->updateKvCacheBlockIds(model_input, stream_groups, 1));
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
+        // Restore main model's block IDs (allocators_[0]) for target model verify.
+        RETURN_IF_STATUS_ERROR(batch_stream_processor_->updateKvCacheBlockIds(model_input, stream_groups, 0));
     }
 
     {
@@ -647,6 +653,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_input.kv_block_stride_bytes   = mtp_cache_cfg.getAllocatorConfig(0).kv_block_stride_bytes;
         model_input.kv_scale_stride_bytes   = mtp_cache_cfg.getAllocatorConfig(0).kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+        // Switch to draft model's block IDs (allocators_[1]) for the draft prefill forward.
+        RETURN_IF_STATUS_ERROR(batch_stream_processor_->updateKvCacheBlockIds(model_input, stream_groups, 1));
     }
 
     {

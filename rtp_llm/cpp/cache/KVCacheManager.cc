@@ -47,7 +47,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     const uint32_t log_block_num = config_.allocator_configs.empty() ? 0 : config_.getAllocatorConfig(0).block_num;
     const size_t   log_block_size =
         config_.allocator_configs.empty() ? 0 : config_.getAllocatorConfig(0).block_size_bytes;
-    RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_num=%d, block_size=%zuB, seq_size_per_block=%zu",
+    RTP_LLM_LOG_INFO("cache config: layer_num=%u, block_num=%u, block_size=%zuB, seq_size_per_block=%zu",
                      log_layer_num,
                      log_block_num,
                      log_block_size,
@@ -192,8 +192,52 @@ void KVCacheManager::free(const FreeInfo& free_info) {
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     RTP_LLM_PROFILE_FUNCTION();
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
-    for (auto& allocator : allocators_) {
-        allocator->insertIntoCache(insert_info);
+
+    auto& batch_kv = insert_info.batch_kv_cache_resource;
+    if (!batch_kv || batch_kv->batchSize() == 0) {
+        return;
+    }
+
+    // Use batch_id = 0 (single-stream insert path; beam-search multi-batch not supported).
+    const auto& cache_keys = batch_kv->cacheKeys(0);
+    if (cache_keys.empty()) {
+        return;
+    }
+
+    const size_t model_num = allocators_.size();
+
+    // Assemble full_slots[model_id][group_id] for each cache_key, then call
+    // shared_block_cache_->upsertCacheItem once per key so all models are written
+    // atomically and ref-counts are managed internally.
+    // Iterate from the last key downward (consistent with per-allocator legacy order).
+    for (int i = static_cast<int>(cache_keys.size()) - 1; i >= 0; --i) {
+        const CacheKeyType cache_key = cache_keys[static_cast<size_t>(i)];
+
+        std::vector<std::vector<BlockCache::CacheSlot>> full_slots(model_num);
+        bool has_valid_slot = false;
+
+        for (size_t mid = 0; mid < model_num; ++mid) {
+            if (mid >= batch_kv->modelNum()) {
+                // Model not yet populated in this BatchKVCacheResource — skip.
+                continue;
+            }
+            const int group_num = per_model_configs_[mid].groupNums();
+            full_slots[mid].resize(static_cast<size_t>(group_num));
+            for (int gid = 0; gid < group_num; ++gid) {
+                const auto& blks = batch_kv->blocks(0, gid, mid);
+                if (static_cast<size_t>(i) < blks.size()) {
+                    const BlockIdxType block_id = blks[static_cast<size_t>(i)];
+                    if (!isNullBlockIdx(block_id)) {
+                        full_slots[mid][static_cast<size_t>(gid)].block_id = block_id;
+                        has_valid_slot = true;
+                    }
+                }
+            }
+        }
+
+        if (has_valid_slot) {
+            shared_block_cache_->upsertCacheItem(cache_key, full_slots, insert_info.is_resident);
+        }
     }
 }
 
@@ -234,22 +278,30 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache
                                    bool                           copy_last_block,
                                    std::vector<BlockIdPair>&      block_update_mapping) {
     RTP_LLM_PROFILE_FUNCTION();
-    // For single-model, delegate directly.
-    // For multi-model (MTP), only the main model's updateKVBlock modifies the shared resource
-    // structure (resetAndReturnOldResources / initGroups). Sub-model block shuffling requires
-    // a separate per-model mechanism; TODO: implement full multi-model updateKVBlock.
+    // Delegate to the main model (model 0).  It updates the shared BatchKVCacheResource
+    // structure (resetAndReturnOldResources / initGroups) and returns the block copy mapping
+    // for the main model's block ID space.
     bool ok =
         allocators_[0]->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
     if (!ok || allocators_.size() == 1) {
         return ok;
     }
-    // For MTP sub-models: shuffle blocks in each allocator's pool using the same mapping.
-    // The resource reset was already performed by allocators_[0]; sub-models only need
-    // to copy block data in their respective pools.
-    for (size_t i = 1; i < allocators_.size(); ++i) {
-        if (!block_update_mapping.empty()) {
-            allocators_[i]->blockBatchCopy(block_update_mapping);
-        }
+
+    // MTP sub-models (allocators_[1..N]) have their own independent block ID spaces.
+    // The block_update_mapping produced by allocators_[0] references main-model block IDs
+    // and MUST NOT be re-used to copy data in sub-model pools.
+    //
+    // Full multi-model beam-search block shuffling is not yet implemented. Silently skipping
+    // the sub-model copy would leave sub-model KV data in a stale/incorrect state which would
+    // cause decode correctness failures. Therefore we return false to signal to the caller that
+    // the beam-search fork cannot be completed, preventing data corruption.
+    if (!block_update_mapping.empty()) {
+        RTP_LLM_LOG_ERROR(
+            "updateKVBlock: beam-search block fork is not supported when %zu MTP sub-model allocator(s) "
+            "are active. Sub-model block copy is not yet implemented. Returning failure to prevent "
+            "data corruption.",
+            allocators_.size() - 1);
+        return false;
     }
     return true;
 }
@@ -416,17 +468,42 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
 }
 
 // 资源统计和信息查询
+// NOTE(multi-model): In MTP scenarios, each allocator has its own independent BlockPool.
+// The methods below return the minimum across all allocators so the scheduler sees the
+// most constrained model's headroom (one request consumes one block from every model).
+// For pure metrics/monitoring use getKVCacheInfo() or sum across allocators directly.
 
 size_t KVCacheManager::freeBlocksNum() const {
-    return allocators_[0]->freeBlocksNum();
+    if (allocators_.empty()) {
+        return 0;
+    }
+    size_t min_free = allocators_[0]->freeBlocksNum();
+    for (size_t i = 1; i < allocators_.size(); ++i) {
+        min_free = std::min(min_free, allocators_[i]->freeBlocksNum());
+    }
+    return min_free;
 }
 
 size_t KVCacheManager::availableBlocksNum() const {
-    return allocators_[0]->availableBlocksNum();
+    if (allocators_.empty()) {
+        return 0;
+    }
+    size_t min_avail = allocators_[0]->availableBlocksNum();
+    for (size_t i = 1; i < allocators_.size(); ++i) {
+        min_avail = std::min(min_avail, allocators_[i]->availableBlocksNum());
+    }
+    return min_avail;
 }
 
 size_t KVCacheManager::notInUseBlocksNum() const {
-    return allocators_[0]->notInUseBlocksNum();
+    if (allocators_.empty()) {
+        return 0;
+    }
+    size_t min_not_in_use = allocators_[0]->notInUseBlocksNum();
+    for (size_t i = 1; i < allocators_.size(); ++i) {
+        min_not_in_use = std::min(min_not_in_use, allocators_[i]->notInUseBlocksNum());
+    }
+    return min_not_in_use;
 }
 
 BatchKVCacheResourcePtr KVCacheManager::popBlocksFromCache(size_t min_blocks_to_free) {
@@ -438,15 +515,28 @@ void KVCacheManager::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cach
 }
 
 size_t KVCacheManager::availableTokensNum() const {
-    return allocators_[0]->availableTokensNum();
+    // Return the min across all models (bottleneck model governs scheduling capacity).
+    if (allocators_.empty()) {
+        return 0;
+    }
+    size_t min_tokens = allocators_[0]->availableTokensNum();
+    for (size_t i = 1; i < allocators_.size(); ++i) {
+        min_tokens = std::min(min_tokens, allocators_[i]->availableTokensNum());
+    }
+    return min_tokens;
 }
 
 size_t KVCacheManager::totalBlocksNum() const {
-    return allocators_[0]->totalBlocksNum();
+    // Return the main model's total block count to preserve backward-compatible metrics semantics.
+    // The main model is always the scheduling bottleneck in a single-request view; summing across
+    // all models would inflate the reported capacity in MTP scenarios and break existing monitors.
+    return allocators_.empty() ? 0 : allocators_[0]->totalBlocksNum();
 }
 
 size_t KVCacheManager::maxAvailableTokensNum() const {
-    return allocators_[0]->maxAvailableTokensNum();
+    // Return the main model's max available tokens for scheduling capacity estimates.
+    // (Consistent with totalBlocksNum semantics above.)
+    return allocators_.empty() ? 0 : allocators_[0]->maxAvailableTokensNum();
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
@@ -489,7 +579,9 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
 // 系统资源管理
 
 void KVCacheManager::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
-    allocators_[0]->regUserMr(model_id, std::move(cache_store));
+    for (auto& allocator : allocators_) {
+        allocator->regUserMr(model_id, cache_store);
+    }
 }
 
 void KVCacheManager::setCacheStore(std::shared_ptr<CacheStore> cache_store) {
@@ -506,11 +598,20 @@ bool KVCacheManager::hasActiveConnectors() const {
     return coordinator_ && coordinator_->hasActiveConnectors();
 }
 
-// PD separation: increment KV cache reference count
+// PD separation: increment KV cache reference count.
+// Iterates all allocators so that every model's blocks are reference-counted.
+// Returns the main model (allocators_[0]) KVCacheResource for backward-compatible callers.
 std::shared_ptr<KVCacheResource> KVCacheManager::incrKVCacheRef(const ModelKVResources& model_resources,
                                                                 const CacheKeysType&    cache_keys,
                                                                 bool                    is_connector) {
-    return allocators_[0]->incrKVCacheRef(model_resources, cache_keys, is_connector);
+    std::shared_ptr<KVCacheResource> main_resource;
+    for (size_t mid = 0; mid < allocators_.size(); ++mid) {
+        auto res = allocators_[mid]->incrKVCacheRef(model_resources, cache_keys, is_connector);
+        if (mid == 0) {
+            main_resource = std::move(res);
+        }
+    }
+    return main_resource;
 }
 
 bool KVCacheManager::hasP2PConnector() const {
@@ -572,7 +673,12 @@ void KVCacheManager::allocateAndSync() {
         } else {
             synced_main_block_num = static_cast<uint32_t>(*std::min_element(block_num_ptr, block_num_ptr + world_size));
         }
-        // Propagate the synced block_num into all allocator configs (preserving current equal-block behavior).
+        // Propagate the synced block_num into all allocator configs.
+        // NOTE(P1-4): This sets every model's block_num to the same value, which overrides
+        // any ratio-based allocation computed by CacheConfigCreator::createSpConfig when
+        // MAIN_MODEL_KVCACHE_RATIO is non-zero.  A proper fix would sync each model's
+        // block_num independently (one allgather per model), but this is deferred until
+        // ratio-based multi-model allocation is validated end-to-end.
         for (auto& alloc_config : config_.allocator_configs) {
             alloc_config.block_num = synced_main_block_num;
         }

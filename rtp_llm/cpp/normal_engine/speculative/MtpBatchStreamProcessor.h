@@ -27,6 +27,9 @@ public:
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups) const;
 
+    // Gather model input populated with the MTP draft model's (model_id=1) KVCache block IDs.
+    absl::StatusOr<GptModelInputs> gatherDraftModelInput(const StreamGroups& stream_groups) const;
+
     absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&    stream_groups,
                                                          const GptModelInputs&  model_inputs,
                                                          const GptModelOutputs& model_output) const;

@@ -49,7 +49,7 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
 
 absl::StatusOr<GptModelInputs>
 MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_groups) const {
-    auto model_input = NormalBatchStreamProcessor::gatherModelInput(stream_groups);
+    auto model_input = NormalBatchStreamProcessor::gatherModelInput(stream_groups, /*kv_model_id=*/0);
 
     RTP_LLM_CHECK(model_input.ok());
 
@@ -58,6 +58,23 @@ MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_group
     }
 
     gatherHiddenStates(stream_groups, model_input.value());
+
+    return model_input;
+}
+
+absl::StatusOr<GptModelInputs>
+MtpBatchStreamProcessor::gatherDraftModelInput(const StreamGroups& stream_groups) const {
+    // Gather model input with draft model's (model_id=1) KVCache block IDs.
+    // The draft model lives in allocators_[1] with its own independent block pool,
+    // so its block IDs may differ from the main model's even for the same sequence.
+    constexpr size_t kDraftModelId = 1;
+    auto model_input = NormalBatchStreamProcessor::gatherModelInput(stream_groups, kDraftModelId);
+
+    RTP_LLM_CHECK(model_input.ok());
+
+    if (propose_step_ > 1) {
+        gatherHiddenStates(stream_groups, model_input.value());
+    }
 
     return model_input;
 }

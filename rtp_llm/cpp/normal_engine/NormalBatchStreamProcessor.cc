@@ -18,15 +18,19 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.position_id_len_factor     = model_config.attn_config.rope_config.index_factor;
     model_input_gatherer_config_.role_type                  = pd_sep_config.role_type;
     model_input_gatherer_config_.decode_entrance            = pd_sep_config.decode_entrance;
-    const auto& main_ac                                     = cache_config.getAllocatorConfig(0);
-    model_input_gatherer_config_.block_stride_bytes         = main_ac.kv_block_stride_bytes;
-    model_input_gatherer_config_.scale_stride_bytes         = main_ac.kv_scale_stride_bytes;
+    // cache_config may have empty allocator_configs during prefillWarmUp (cache_manager=nullptr).
+    // In that case, skip allocator-specific fields; they default to 0 which is correct for warmup.
+    if (!cache_config.allocator_configs.empty()) {
+        const auto& main_ac                                 = cache_config.getAllocatorConfig(0);
+        model_input_gatherer_config_.block_stride_bytes     = main_ac.kv_block_stride_bytes;
+        model_input_gatherer_config_.scale_stride_bytes     = main_ac.kv_scale_stride_bytes;
+        model_input_gatherer_config_.kv_cache_group_types   = main_ac.group_types;
+    }
     model_input_gatherer_config_.seq_size_per_block         = cache_config.seq_size_per_block;
     model_input_gatherer_config_.kernel_seq_size_per_block  = cache_config.kernel_seq_size_per_block;
     model_input_gatherer_config_.kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     model_input_gatherer_config_.kv_cache_group_nums        = cache_config.groupNums();
     model_input_gatherer_config_.layer_to_kv_cache_group_id = cache_config.layer_to_group_id;
-    model_input_gatherer_config_.kv_cache_group_types       = main_ac.group_types;
     model_input_gatherer_config_.warm_up                    = warm_up;
     model_input_gatherer_config_.enable_detail_log          = profiling_debug_logging_config.enable_detail_log;
 
@@ -40,13 +44,20 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     return output_dispatcher_->dispatch(stream_groups, merge_outputs);
 }
 
-absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups) const {
-    return model_input_gatherer_->gather(stream_groups);
+absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups,
+                                                                            size_t              kv_model_id) const {
+    return model_input_gatherer_->gather(stream_groups, kv_model_id);
 }
 
 absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
     const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
     return sampler_input_gatherer_->gather(stream_groups, model_inputs, model_output);
+}
+
+absl::Status NormalBatchStreamProcessor::updateKvCacheBlockIds(GptModelInputs&     model_input,
+                                                                const StreamGroups& stream_groups,
+                                                                size_t              kv_model_id) const {
+    return model_input_gatherer_->updateKvCacheBlockIds(model_input, stream_groups, kv_model_id);
 }
 
 SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups& stream_groups,

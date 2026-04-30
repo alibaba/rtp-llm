@@ -190,6 +190,11 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
     kv_cache_resource->clearBlocks();
 }
 
+// NOTE: This per-allocator insertIntoCache path uses putSlot (per-slot write + manual
+// blockCacheReference). It is preserved for unit-test usage where tests drive allocators
+// directly without going through KVCacheManager. In production, KVCacheManager::insertIntoCache
+// bypasses this method and calls shared_block_cache_->upsertCacheItem() directly to achieve
+// an atomic multi-model write with internal ref-count management.
 void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     auto&        kv_resource = insert_info.batch_kv_cache_resource;
     int          batch_size  = kv_resource->batchSize();

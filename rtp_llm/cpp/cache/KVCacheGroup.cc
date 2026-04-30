@@ -12,6 +12,10 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
         return true;
     }
 
+    // Use the new popAndFree path (joint eviction across all models) when the BlockCache has
+    // registered pools — this is always the case in production (KVCacheManager::init registers
+    // every model). Fall back to the legacy pop + manual blockCacheFree path only in standalone
+    // unit-test scenarios where registerModel() has not been called.
     const bool use_pop_and_free = block_cache_->registeredModelNum() > 0;
 
     // blocks popped by block cache might be occupied by request

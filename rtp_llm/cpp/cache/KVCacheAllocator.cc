@@ -206,10 +206,14 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
     for (const auto cache_key : evict_result.evicted_keys) {
         batch_resource->pushBackCacheKey(0, cache_key);
         const auto& item = evict_result.evicted_items.at(cache_key);
-        // Extract blocks from slots[model_id=0][group_id] for the current allocator
-        if (!item.slots.empty()) {
-            for (int gid = 0; gid < static_cast<int>(item.slots[0].size()) && gid < config_.groupNums(); ++gid) {
-                const auto& slot = item.slots[0][gid];
+        // Extract blocks from slots[this_model_id][group_id] for the current allocator.
+        // modelId() gives this allocator's model_id in the multi-model hierarchy
+        // (0 for main model, 1..N for MTP sub-models).
+        const size_t this_mid = modelId();
+        if (this_mid < item.slots.size()) {
+            for (int gid = 0; gid < static_cast<int>(item.slots[this_mid].size()) && gid < config_.groupNums();
+                 ++gid) {
+                const auto& slot = item.slots[this_mid][gid];
                 if (slot.valid()) {
                     auto& block_ids = batch_resource->mutableBlockIds(0, gid);
                     RTP_LLM_CHECK_WITH_INFO(evicted_idx < block_ids.blocksNum(),

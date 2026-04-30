@@ -83,11 +83,22 @@ public:
     // Slot-level match: returns matched block_id for the given (model_id, group_id).
     MatchResult matchSlot(CacheKeyType cache_key, size_t model_id = 0, int group_id = 0);
 
+    // Full-snapshot upsert: atomically insert/update all model/group slots for a
+    // cache_key in one call. Internally manages blockCacheReference / blockCacheFree
+    // through registered BlockPools. Designed for the KVCacheManager::insertIntoCache
+    // path where all models write simultaneously.
+    // full_slots[model_id][group_id] — CacheSlot with valid block_id for each position.
+    // Returns true if the CacheItem was created or any slot was updated.
+    bool upsertCacheItem(CacheKeyType                                     cache_key,
+                         const std::vector<std::vector<CacheSlot>>&       full_slots,
+                         bool                                             is_resident);
+
     // Insert/update a single slot. Returns true if a new CacheItem was created.
     // Caller is responsible for blockCacheReference when return is true (or when
     // the slot is newly filled in an existing item).
     bool putSlot(CacheKeyType cache_key, size_t model_id, int group_id, BlockIdxType block_id, bool is_resident);
 
+    // O(1) const check using LRUCache::peek (does not update LRU order).
     bool containsSlot(CacheKeyType cache_key, size_t model_id = 0, int group_id = 0) const;
 
     // Remove the entire CacheItem for a cache_key. Returns the removed item if found.

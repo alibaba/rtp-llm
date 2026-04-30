@@ -227,6 +227,20 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         mtp_alloc.linear_step            = 1;
         // MTP sub-models always route all layers to a single FULL group (group 0 locally).
         mtp_alloc.layer_to_group_id.assign(static_cast<size_t>(mtp_layer_num), 0);
+
+        // Validate sub-model block alignment: each sub-model's seq_size_per_block must be
+        // an integer multiple of the shared kernel_seq_size_per_block so that
+        // kernelBlocksPerKvBlock() returns a whole number without silent truncation.
+        if (config.kernel_seq_size_per_block > 0 && mtp_alloc.seq_size_per_block > 0) {
+            RTP_LLM_CHECK_WITH_INFO(
+                mtp_alloc.seq_size_per_block % config.kernel_seq_size_per_block == 0,
+                "MTP sub-model %d: seq_size_per_block (%zu) must be divisible by "
+                "kernel_seq_size_per_block (%zu)",
+                m + 1,
+                mtp_alloc.seq_size_per_block,
+                config.kernel_seq_size_per_block);
+        }
+
         config.allocator_configs.push_back(std::move(mtp_alloc));
     }
 

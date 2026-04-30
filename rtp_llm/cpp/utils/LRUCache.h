@@ -52,6 +52,25 @@ public:
 
     bool contains(const KeyType& key) const;
 
+    // Peek at value without updating LRU order. Returns nullptr if key not found.
+    // Caller must hold any external lock protecting the cache.
+    const ValueType* peek(const KeyType& key) const {
+        auto it = cache_items_map_.find(key);
+        if (it == cache_items_map_.end()) {
+            return nullptr;
+        }
+        return &it->second->second;
+    }
+
+    // Non-const peek that allows in-place modification (no LRU order update).
+    ValueType* peekMutable(const KeyType& key) {
+        auto it = cache_items_map_.find(key);
+        if (it == cache_items_map_.end()) {
+            return nullptr;
+        }
+        return &it->second->second;
+    }
+
     bool remove(const KeyType& key, ValueType* removed_value = nullptr);
 
     void printCache() const;

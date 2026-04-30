@@ -25,10 +25,18 @@ public:
                                bool                               warm_up);
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
-    virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const;
+    // kv_model_id: which model's KVCache block IDs to populate (0 = main model, 1 = MTP draft).
+    virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,
+                                                            size_t              kv_model_id = 0) const;
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
                                                               const GptModelInputs&  model_inputs,
                                                               const GptModelOutputs& model_output) const;
+
+    // Lightweight: update only the kv_cache block ID arrays in an already-gathered model_input.
+    // Use to switch block IDs between main (0) and draft (1) allocators without re-gathering all fields.
+    absl::Status updateKvCacheBlockIds(GptModelInputs&     model_input,
+                                       const StreamGroups& stream_groups,
+                                       size_t              kv_model_id) const;
 
 protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,

@@ -39,13 +39,26 @@ class NormalModelInputGatherer {
 public:
     explicit NormalModelInputGatherer(const NormalModelInputGathererConfig& config);
 
-    absl::StatusOr<GptModelInputs> gather(const StreamGroups& stream_groups) const;
+    // kv_model_id selects which model's KVCache block IDs to populate into model_input.
+    // Default 0 = main model. Pass 1 for MTP draft model.
+    absl::StatusOr<GptModelInputs> gather(const StreamGroups& stream_groups,
+                                          size_t              kv_model_id = 0) const;
+
+    // Lightweight: update only the kv_cache block ID arrays in an already-allocated model_input.
+    // Skips all other field initialization. Safe to call after gather() since step() is idempotent.
+    absl::Status updateKvCacheBlockIds(GptModelInputs&     model_input,
+                                       const StreamGroups& stream_groups,
+                                       size_t              kv_model_id) const;
 
 private:
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;
     void           initializeKvCacheMetadata(GptModelInputs& model_input) const;
-    absl::Status   processDecodeStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
-    absl::Status   processContextStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
+    absl::Status   processDecodeStreams(GptModelInputs&     model_input,
+                                       const StreamGroups& stream_groups,
+                                       size_t              kv_model_id) const;
+    absl::Status   processContextStreams(GptModelInputs&     model_input,
+                                        const StreamGroups& stream_groups,
+                                        size_t              kv_model_id) const;
 
     NormalModelInputGathererConfig config_;
 };

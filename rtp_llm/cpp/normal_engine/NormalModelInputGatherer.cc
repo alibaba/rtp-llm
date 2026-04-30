@@ -88,7 +88,8 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
                                    int                         stream_batch_idx,
                                    int                         model_batch_idx,
                                    size_t                      max_blocks_num,
-                                   size_t                      kernel_blocks_per_kv_block) {
+                                   size_t                      kernel_blocks_per_kv_block,
+                                   size_t                      kv_model_id) {
     if (!model_input.kv_cache_kernel_block_id.defined() || max_blocks_num == 0) {
         return;
     }
@@ -100,14 +101,14 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
     int32_t*     kernel_dst_base = model_input.kv_cache_kernel_block_id.data_ptr<int32_t>();
     int32_t*     store_dst_base  = model_input.kv_cache_block_id.data_ptr<int32_t>();
 
-    for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
-        auto&    kernel_blocks = kv_cache.kernelBlocks(stream_batch_idx, gid);
+    for (int gid = 0; gid < kv_cache.groupNums(kv_model_id); ++gid) {
+        auto&    kernel_blocks = kv_cache.kernelBlocks(stream_batch_idx, gid, kv_model_id);
         int32_t* kernel_dst    = kernel_dst_base
                               + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx))
                                     * max_blocks_num * kernel_blocks_per_kv_block;
         std::memcpy(kernel_dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
 
-        auto&    physical_blocks = kv_cache.blocks(stream_batch_idx, gid);
+        auto&    physical_blocks = kv_cache.blocks(stream_batch_idx, gid, kv_model_id);
         int32_t* store_dst =
             store_dst_base + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx)) * max_blocks_num;
         std::memcpy(store_dst, physical_blocks.data(), physical_blocks.size() * sizeof(int32_t));
@@ -231,7 +232,8 @@ void NormalModelInputGatherer::initializeKvCacheMetadata(GptModelInputs& model_i
 }
 
 absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     model_input,
-                                                            const StreamGroups& stream_groups) const {
+                                                            const StreamGroups& stream_groups,
+                                                            size_t              kv_model_id) const {
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
 
     for (const auto& stream : stream_groups.decodeStreams()) {
@@ -259,7 +261,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
             ctx.lm_output_indexes[ctx.batch_idx] = ctx.batch_idx;
             ctx.lm_output_lengths[ctx.batch_idx] = 1;
             copyKvCacheBlocksToModelInput(
-                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
+                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num,
+                config_.kernel_blocks_per_kv_block, kv_model_id);
             ctx.batch_idx += 1;
         }
         addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping());
@@ -269,7 +272,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 }
 
 absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&     model_input,
-                                                             const StreamGroups& stream_groups) const {
+                                                             const StreamGroups& stream_groups,
+                                                             size_t              kv_model_id) const {
     std::vector<torch::Tensor> gathered_mm_features;
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
 
@@ -319,7 +323,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             }
 
             copyKvCacheBlocksToModelInput(
-                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
+                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num,
+                config_.kernel_blocks_per_kv_block, kv_model_id);
 
             if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && stream->hasCacheKeys()) {
                 std::memcpy(model_input.cache_keys.data_ptr<int64_t>()
@@ -346,16 +351,46 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     return absl::OkStatus();
 }
 
-absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups) const {
+absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups,
+                                                                size_t              kv_model_id) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
                       stream_groups.decodeStreams().size());
     auto model_input = allocateModelInputBuffers(stream_groups);
     initializeKvCacheMetadata(model_input);
-    RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
-    RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups));
+    RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups, kv_model_id));
+    RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, kv_model_id));
     return model_input;
+}
+
+absl::Status NormalModelInputGatherer::updateKvCacheBlockIds(GptModelInputs&     model_input,
+                                                              const StreamGroups& stream_groups,
+                                                              size_t              kv_model_id) const {
+    if (!model_input.kv_cache_kernel_block_id.defined() || stream_groups.curBlocksNum() == 0) {
+        return absl::OkStatus();
+    }
+    const size_t max_blocks_num = stream_groups.curBlocksNum();
+    int          batch_idx      = 0;
+    for (const auto& stream : stream_groups.decodeStreams()) {
+        const auto& kv_cache          = *stream->kvCachePtr();
+        const int   current_batch_size = stream->currentBatchSize();
+        for (int i = 0; i < current_batch_size; ++i) {
+            copyKvCacheBlocksToModelInput(
+                model_input, kv_cache, i, batch_idx++, max_blocks_num,
+                config_.kernel_blocks_per_kv_block, kv_model_id);
+        }
+    }
+    for (const auto& stream : stream_groups.contextStreams()) {
+        const auto& kv_cache          = *stream->kvCachePtr();
+        const int   current_batch_size = stream->currentBatchSize();
+        for (int i = 0; i < current_batch_size; ++i) {
+            copyKvCacheBlocksToModelInput(
+                model_input, kv_cache, i, batch_idx++, max_blocks_num,
+                config_.kernel_blocks_per_kv_block, kv_model_id);
+        }
+    }
+    return absl::OkStatus();
 }
 
 }  // namespace rtp_llm

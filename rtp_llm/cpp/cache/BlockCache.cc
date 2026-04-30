@@ -72,22 +72,99 @@ bool BlockCache::putSlot(
     return true;  // newly created
 }
 
-bool BlockCache::containsSlot(CacheKeyType cache_key, size_t model_id, int group_id) const {
+bool BlockCache::upsertCacheItem(CacheKeyType                               cache_key,
+                                 const std::vector<std::vector<CacheSlot>>& full_slots,
+                                 bool                                       is_resident) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
-    if (!lru_cache_.contains(cache_key)) {
-        return false;
-    }
-    // LRUCache::contains is const, but we need to peek at the value.
-    // Walk the items list to find the entry without mutating LRU order.
-    for (const auto& [key, item] : lru_cache_.items()) {
-        if (key == cache_key) {
-            if (model_id >= item.slots.size() || group_id >= static_cast<int>(item.slots[model_id].size())) {
-                return false;
+
+    // Safety: popAndFree calls blockCacheFree while holding mu_.
+    // BlockPool::blockCacheFree only acquires BlockPool-internal mutexes (free_mu_, ref_mu_)
+    // and never calls back into BlockCache. So there is no lock-order inversion here.
+
+    auto* existing = lru_cache_.peekMutable(cache_key);
+    if (existing == nullptr) {
+        // New entry: create CacheItem and call blockCacheReference for all valid slots.
+        CacheItem item;
+        item.cache_key   = cache_key;
+        item.is_resident = is_resident;
+        item.slots       = full_slots;
+
+        for (size_t mid = 0; mid < full_slots.size(); ++mid) {
+            for (const auto& slot : full_slots[mid]) {
+                if (slot.valid() && mid < registry_.size() && registry_[mid].block_pool) {
+                    registry_[mid].block_pool->blockCacheReference(slot.block_id);
+                }
             }
-            return item.slots[model_id][group_id].valid();
+        }
+        lru_cache_.put(cache_key, item);
+        return true;
+    }
+
+    // Existing entry: diff-update slots and manage ref counts.
+    CacheItem& item = *existing;
+
+    // Ensure slots matrix is large enough for the new data.
+    if (item.slots.size() < full_slots.size()) {
+        item.slots.resize(full_slots.size());
+    }
+
+    bool any_change = false;
+    for (size_t mid = 0; mid < full_slots.size(); ++mid) {
+        const auto& new_model_slots = full_slots[mid];
+        auto&       old_model_slots = item.slots[mid];
+        if (old_model_slots.size() < new_model_slots.size()) {
+            old_model_slots.resize(new_model_slots.size());
+        }
+        BlockPoolPtr pool = (mid < registry_.size()) ? registry_[mid].block_pool : nullptr;
+
+        for (size_t gid = 0; gid < new_model_slots.size(); ++gid) {
+            const auto& new_slot = new_model_slots[gid];
+            auto&       old_slot = old_model_slots[gid];
+
+            if (!old_slot.valid() && new_slot.valid()) {
+                // Newly filled slot: acquire cache reference.
+                if (pool) {
+                    pool->blockCacheReference(new_slot.block_id);
+                }
+                old_slot = new_slot;
+                any_change = true;
+            } else if (old_slot.valid() && new_slot.valid() && old_slot.block_id != new_slot.block_id) {
+                // Replaced slot: release old, acquire new.
+                if (pool) {
+                    pool->blockCacheFree(old_slot.block_id);
+                    pool->blockCacheReference(new_slot.block_id);
+                }
+                old_slot = new_slot;
+                any_change = true;
+            } else if (old_slot.valid() && !new_slot.valid()) {
+                // Slot explicitly cleared: release the cache hold on the old block.
+                if (pool) {
+                    pool->blockCacheFree(old_slot.block_id);
+                }
+                old_slot = new_slot;
+                any_change = true;
+            }
+            // old invalid && new invalid: nothing to do.
         }
     }
-    return false;
+
+    // Always touch to refresh LRU position (re-access counts as a use even if no slot changed).
+    lru_cache_.put(cache_key, item);
+    return any_change;
+}
+
+bool BlockCache::containsSlot(CacheKeyType cache_key, size_t model_id, int group_id) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    // Use O(1) peek to avoid updating LRU order.
+    const auto* item = lru_cache_.peek(cache_key);
+    if (item == nullptr) {
+        return false;
+    }
+    if (model_id >= item->slots.size() || group_id >= static_cast<int>(item->slots[model_id].size())) {
+        return false;
+    }
+    return item->slots[model_id][group_id].valid();
 }
 
 std::optional<BlockCache::CacheItem> BlockCache::removeItem(CacheKeyType cache_key) {
@@ -135,13 +212,17 @@ size_t BlockCache::popAndFree(size_t required_blocks, size_t trigger_model_id) {
 
     auto cond = [&](const CacheKeyType& /*key*/, const CacheItem& item) { return !item.is_resident; };
 
+    // Holding mu_ while calling BlockPool::blockCacheFree is safe:
+    // BlockPool::blockCacheFree only acquires BlockPool-internal mutexes (free_mu_, ref_mu_)
+    // and never calls back into BlockCache, so there is no lock-order inversion.
+
     size_t freed_count = 0;
     while (freed_count < required_blocks && !lru_cache_.empty()) {
         auto [success, item] = lru_cache_.popWithCond(cond);
         if (!success)
             break;
 
-        // Free blocks through registered BlockPools
+        // Free blocks through registered BlockPools — each block back to its own pool.
         for (size_t mid = 0; mid < item.slots.size(); ++mid) {
             BlockIndicesType blocks_to_free;
             for (const auto& slot : item.slots[mid]) {
@@ -154,7 +235,8 @@ size_t BlockCache::popAndFree(size_t required_blocks, size_t trigger_model_id) {
             }
         }
 
-        // Count freed blocks for the trigger model
+        // Count freed blocks for the trigger model only — caller uses this to decide
+        // whether enough space has been reclaimed in its own pool.
         freed_count += item.validSlotsForModel(trigger_model_id);
     }
 
@@ -220,22 +302,17 @@ BlockCache::EvictResult BlockCache::selectAndEvict(size_t min_blocks) {
         }
     }
 
-    // Select keys until we have enough blocks
+    // Select keys until we have enough blocks (O(1) peek per key via cache_items_map_).
     std::vector<CacheKeyType> selected_keys;
     size_t                    selected_blocks = 0;
     for (const auto cache_key : lru_keys) {
-        // Peek at the item to count its blocks
-        bool found = false;
-        for (const auto& [key, item] : lru_cache_.items()) {
-            if (key == cache_key) {
-                selected_keys.push_back(cache_key);
-                selected_blocks += item.totalValidSlots();
-                found = true;
+        const auto* item = lru_cache_.peek(cache_key);
+        if (item != nullptr) {
+            selected_keys.push_back(cache_key);
+            selected_blocks += item->totalValidSlots();
+            if (selected_blocks >= min_blocks) {
                 break;
             }
-        }
-        if (found && selected_blocks >= min_blocks) {
-            break;
         }
     }
 
