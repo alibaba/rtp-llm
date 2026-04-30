@@ -88,7 +88,21 @@ void             execChainSpeculativeSampling(const SpeculativeSamplingParams& p
 // Communication ops (backed by c10d ProcessGroup)
 // ===================================================================
 
-void            execBroadcast(const BroadcastParams& params);
+void execBroadcast(const BroadcastParams& params);
+// CPU-only broadcast routed through CpuTpBroadcaster (Unix Domain Socket,
+// star topology, root=0) so the small per-step CPU tensors avoid NCCL's
+// cudaDeviceSynchronize stall (m2.md). When the broadcaster has not been
+// initialized — e.g. cross-node TP, or single-rank — falls back to
+// execBroadcast plus execSyncCommunication(false) and cudaSyncAndCheck, so
+// callers get the same immediate-read correctness guarantee as the original
+// tpSyncModelInputs callsites.
+//
+// Caller contract: every rank must invoke this at every callsite with
+// identical (tensor count, per-tensor nbytes). Per-rank device
+// classification routing is unsafe; callers must explicitly opt in for the
+// CPU path here (do NOT rely on execBroadcast auto-detecting CPU tensors).
+void            execBroadcastCpu(const BroadcastParams& params);
+bool            isCpuTpBroadcasterInitialized();
 AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);

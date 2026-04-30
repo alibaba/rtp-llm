@@ -6,7 +6,6 @@ GPU-to-GPU communication using CUDA IPC shared buffers.
 
 import logging
 import multiprocessing as mp
-import os
 import unittest
 from unittest import mock
 
@@ -33,6 +32,7 @@ from rtp_llm.ops import (
 from rtp_llm.test.utils.port_util import PortManager
 
 BUFFER_SIZE = 128 * 1024 * 1024
+NCCL_PORT_COUNT = 12
 
 
 def get_parallelism_config(world_rank, world_size, tp_size, dp_size, port):
@@ -52,15 +52,14 @@ def get_parallelism_config(world_rank, world_size, tp_size, dp_size, port):
     parallelism_config.prefill_cp_config.comm_buffer_size = BUFFER_SIZE
     parallelism_config.use_ub_comm = True
 
-    master_port = int(os.getenv("MASTER_PORT", "8376"))
-    base_port = master_port + 11
+    base_port = port + 11
     nccl_comm_config = NcclCommConfig(
         nccl_ip="127.0.0.1",
         tp_nccl_port=base_port - 2,
         dp_tp_nccl_port=base_port - 10,
         ffn_tp_nccl_port=base_port - 5,
     )
-    nccl_init_port = base_port - 11
+    nccl_init_port = port
 
     return parallelism_config, nccl_comm_config, nccl_init_port
 
@@ -182,7 +181,7 @@ class TestUserBufferCommunicator(unittest.TestCase):
         if torch.cuda.device_count() < world_size:
             self.skipTest(f"Need at least {world_size} GPUs")
 
-        ports, locks = self.port_manager.get_consecutive_ports(1)
+        ports, locks = self.port_manager.get_consecutive_ports(NCCL_PORT_COUNT)
         master_port = ports[0]
 
         try:
@@ -196,14 +195,27 @@ class TestUserBufferCommunicator(unittest.TestCase):
                 p.start()
                 processes.append(p)
 
-            # Wait for all processes to complete
+            # Wait for all processes to complete, then clean up every child
+            # before surfacing failures so later cases do not inherit sockets.
             for p in processes:
                 p.join(timeout=120)
-                if p.exitcode != 0:
-                    raise RuntimeError(
-                        f"Process {p.name} exited with code {p.exitcode}"
-                    )
+
+            failures = []
+            for p in processes:
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=10)
+                    failures.append(f"{p.name} timed out")
+                elif p.exitcode != 0:
+                    failures.append(f"{p.name} exited with code {p.exitcode}")
+
+            if failures:
+                raise RuntimeError(f"{test_name} failed: {', '.join(failures)}")
         finally:
+            for p in processes:
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=10)
             # Release port locks
             for lock in locks:
                 lock.__exit__(None, None, None)
