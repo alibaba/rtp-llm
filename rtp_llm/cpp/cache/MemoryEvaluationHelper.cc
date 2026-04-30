@@ -41,10 +41,7 @@ rtp_llm::DataType MemoryEvaluationHelper::getDataTypeForCache(const ModelConfig&
                  rtp_llm::DataType::TYPE_FP8_E4M3 :
                  (model_config.attn_config.kv_cache_dtype == KvCacheDataType::NVFP4 ? rtp_llm::DataType::TYPE_NVFP4 :
                                                                                       model_config.data_type));
-    if (device_type == rtp_llm::DeviceType::ArmCpu) {
-        dtype =
-            model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::TYPE_INT8 : rtp_llm::TYPE_FP32;
-    }
+#endif
     return dtype;
 }
 
