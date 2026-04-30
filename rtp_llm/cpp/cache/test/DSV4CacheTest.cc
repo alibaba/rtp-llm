@@ -718,10 +718,10 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
 }
 
 // ============================================================
-// Prefix cache: full reuse flow — all 7 groups participate
+// Prefix cache: paged FULL groups reuse; SWA/state groups recompute their tail
 // ============================================================
 
-TEST_F(DSV4AllocatorTest, PrefixCacheReuseAllGroups) {
+TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
     auto config    = makeDSV4AllocatorConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -768,16 +768,19 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAllGroups) {
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
-    // reuse_len should be > 0 (all 7 groups participate)
-    EXPECT_GT(result.reuse_len, 0) << "Prefix cache reuse should work with all 7 groups";
+    EXPECT_GT(result.reuse_len, 0) << "Prefix cache reuse should work with paged DSV4 groups";
 
-    // All groups should have reused cached blocks
-    for (int gid = 0; gid < 7; gid++) {
+    for (int gid = 0; gid < 3; gid++) {
         const auto& out_blocks = batch_res->blocks(0, gid);
         ASSERT_GE(out_blocks.size(), 3u) << "group " << gid << " should have >= 3 blocks";
-        // First 2 blocks should be reused from cache (last cached block may not be reused)
         EXPECT_EQ(out_blocks[0], cached_blocks[gid][0]) << "group " << gid << " block 0 should be reused";
         EXPECT_EQ(out_blocks[1], cached_blocks[gid][1]) << "group " << gid << " block 1 should be reused";
+    }
+    for (int gid = 3; gid < 7; gid++) {
+        const auto& out_blocks = batch_res->blocks(0, gid);
+        ASSERT_GE(out_blocks.size(), 2u) << "group " << gid << " should have tail slots";
+        EXPECT_TRUE(isNullBlockIdx(out_blocks[0])) << "group " << gid << " should not prefix-reuse SWA/state block 0";
+        EXPECT_TRUE(isNullBlockIdx(out_blocks[1])) << "group " << gid << " should not prefix-reuse SWA/state block 1";
     }
 
     // Clean up
@@ -785,7 +788,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAllGroups) {
     allocator->free(free_info);
 }
 
-TEST_F(DSV4AllocatorTest, FlashPrefixCacheReuseAllGroups) {
+TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -830,12 +833,17 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReuseAllGroups) {
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
-    EXPECT_GT(result.reuse_len, 0) << "Flash prefix cache reuse should work";
+    EXPECT_GT(result.reuse_len, 0) << "Flash prefix cache reuse should work for paged groups";
 
-    for (int gid = 0; gid < 7; gid++) {
+    for (int gid = 0; gid < 3; gid++) {
         const auto& out_blocks = batch_res->blocks(0, gid);
         ASSERT_GE(out_blocks.size(), 3u) << "Flash group " << gid;
         EXPECT_EQ(out_blocks[0], cached_blocks[gid][0]) << "Flash group " << gid << " block 0 should be reused";
+    }
+    for (int gid = 3; gid < 7; gid++) {
+        const auto& out_blocks = batch_res->blocks(0, gid);
+        ASSERT_GE(out_blocks.size(), 1u) << "Flash group " << gid;
+        EXPECT_TRUE(isNullBlockIdx(out_blocks[0])) << "Flash group " << gid << " should not prefix-reuse SWA/state";
     }
 
     FreeInfo free_info{batch_res};
@@ -896,10 +904,10 @@ TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
 }
 
 // ============================================================
-// SWA prefix cache: full reuse with all paged groups including SWA
+// SWA prefix cache: cache entries exist but direct prefix restore is vetoed
 // ============================================================
 
-TEST_F(DSV4AllocatorTest, SWAPrefixCacheFullReuse) {
+TEST_F(DSV4AllocatorTest, SWAPrefixCacheVetoesDirectReuse) {
     auto config    = makeDSV4AllocatorConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -942,10 +950,11 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheFullReuse) {
     ASSERT_TRUE(result.success);
     EXPECT_GT(result.reuse_len, 0);
 
-    // SWA group 6 should have reused block 0
+    // SWA group 6 stores only tail state. Prefix restore is intentionally vetoed
+    // to avoid restoring state at a stale sequence position.
     const auto& swa_out = batch_res->blocks(0, 6);
     ASSERT_GE(swa_out.size(), 2u);
-    EXPECT_EQ(swa_out[0], cached_blocks[6][0]) << "SWA block 0 should be reused from prefix cache";
+    EXPECT_TRUE(isNullBlockIdx(swa_out[0])) << "SWA block 0 should not be prefix-restored";
 
     FreeInfo free_info{batch_res};
     allocator->free(free_info);

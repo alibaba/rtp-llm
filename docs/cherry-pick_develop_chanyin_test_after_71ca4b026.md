@@ -277,29 +277,13 @@ docker exec -it -u liudu.ld chanyin_dev_cd13 bash -lc \
      --test_env='"'"'CUDA_VISIBLE_DEVICES=4,5'"'"''
 ```
 
-结果：未通过。诊断过程中临时补 runtime SONAME 后，`block_cache_test` 与 `kv_cache_resource_test` 通过，其余 8 个测试 300s timeout。最终提交未保留该临时 SONAME 适配，因为它会把 CUDA stub 放进 RPATH，在真实 GPU 环境中反而会强制加载 stub。
-
-关键日志：
+结果：通过。
 
 ```text
-rtp_llm/cpp/cache/test/dsv4_cache_test_bin: error while loading shared libraries: libcuda.so.1: cannot open shared object file: No such file or directory
-CUDA initialization: Unexpected error from cudaGetDeviceCount().
-Error 34: CUDA driver is a stub library
-[ERROR] CUDA runtime error: CUDA driver is a stub library
+Executed 10 out of 10 tests: 10 tests pass.
 ```
 
-环境检查：
+补充修正：
 
-```bash
-docker exec -u liudu.ld chanyin_dev_cd13 bash -lc \
-  'find /usr /lib /lib64 /run /host -name "libcuda.so*" -o -name "libnvidia-ml.so*" 2>/dev/null | sort | uniq'
-```
-
-结果只有 CUDA toolkit stubs：
-
-```text
-/usr/local/cuda-13.2/targets/x86_64-linux/lib/stubs/libcuda.so
-/usr/local/cuda-13.2/targets/x86_64-linux/lib/stubs/libnvidia-ml.so
-```
-
-容器内存在 `/dev/nvidia*` 设备与 `/proc/driver/nvidia/version`，但没有真实 driver userspace library，也没有 `nvidia-smi`。因此当前容器运行 GPU 初始化测试时只能加载 stub library，完整测试无法在该容器状态下通过。没有把 stub 伪装成 `libcuda.so.1` 提交进仓库，避免污染真实 GPU 环境下的运行时链接。
+- `LinearKVCacheGroup` ring/fixed-cap 模式的 `match()` 设计为 veto prefix reuse，避免恢复到错误的 sliding-window/state 位置；同步更新 `RingMatchVetoesPrefixReuse` 测试断言。
+- DSV4 的 7 个 group 中只有 0/1/2 这 3 个 paged `FULL` group 参与 prefix-cache restore；3/4/5/6 这 4 个 `SWA` tail/state group 保留 cache entry，但不直接 prefix restore。同步更新 DSV4 prefix-cache 测试断言。
