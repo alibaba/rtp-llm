@@ -13,6 +13,7 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
 import math
+import os
 from typing import Dict, Optional
 
 import torch
