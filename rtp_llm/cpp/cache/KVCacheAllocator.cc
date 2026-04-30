@@ -121,23 +121,23 @@ uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_lay
     return std::numeric_limits<uint32_t>::max();
 }
 
-BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, KVCacheAttnType attn_type, int block_id) const {
-    (void)attn_type;
+BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, KVCacheRegionName region_name, int block_id) const {
+    (void)region_name;
     return convertIndexToAddr(layer_id, block_id);
 }
 
 std::vector<BlockInfo>
-KVCacheAllocator::convertIndexToBuffer(int layer_id, KVCacheAttnType attn_type, int block_id) const {
-    (void)attn_type;
+KVCacheAllocator::convertIndexToBuffer(int layer_id, KVCacheRegionName region_name, int block_id) const {
+    (void)region_name;
     return convertIndexToBuffer(layer_id, block_id);
 }
 
 std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(int             layer_id,
-                                                              KVCacheAttnType attn_type,
+                                                              KVCacheRegionName region_name,
                                                               int             block_id,
                                                               int             partition_count,
                                                               int             partition_id) const {
-    (void)attn_type;
+    (void)region_name;
     return convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
@@ -244,7 +244,7 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
                                config_.layer_to_group_id,
                                config_.kernelBlocksPerKvBlock(),
                                config_.group_types,
-                               config_.layer_attn_to_group_id);
+                               config_.layer_region_to_group_id);
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {

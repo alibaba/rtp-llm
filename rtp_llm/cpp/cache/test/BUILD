@@ -7,6 +7,48 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+cc_import(
+    name = "cuda12_cudart",
+    shared_library = "@pip_gpu_cuda12_9_torch_nvidia_cuda_runtime_cu12//:site-packages/nvidia/cuda_runtime/lib/libcudart.so.12",
+)
+
+cc_import(
+    name = "cuda12_cublas",
+    shared_library = "@pip_gpu_cuda12_9_torch_nvidia_cublas_cu12//:site-packages/nvidia/cublas/lib/libcublas.so.12",
+)
+
+cc_import(
+    name = "cuda12_cublas_lt",
+    shared_library = "@pip_gpu_cuda12_9_torch_nvidia_cublas_cu12//:site-packages/nvidia/cublas/lib/libcublasLt.so.12",
+)
+
+cc_import(
+    name = "cuda12_cufft",
+    shared_library = "@pip_gpu_cuda12_9_torch_nvidia_cufft_cu12//:site-packages/nvidia/cufft/lib/libcufft.so.11",
+)
+
+cc_import(
+    name = "cuda12_cupti",
+    shared_library = "@pip_gpu_cuda12_9_torch_nvidia_cuda_cupti_cu12//:site-packages/nvidia/cuda_cupti/lib/libcupti.so.12",
+)
+
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda12_torch_link_deps = select({
+    "@//:using_cuda13_x86": [
+        ":cuda12_cublas",
+        ":cuda12_cublas_lt",
+        ":cuda12_cudart",
+        ":cuda12_cufft",
+        ":cuda12_cupti",
+        ":cuda13_torch_nvshmem",
+    ],
+    "//conditions:default": [],
+})
+
 test_deps = [
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
@@ -19,7 +61,7 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
-] + torch_deps()
+] + torch_deps() + cuda12_torch_link_deps
 
 block_cache_test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
@@ -31,7 +73,7 @@ block_cache_test_deps = [
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
-] + torch_deps()
+] + torch_deps() + cuda12_torch_link_deps
 
 
 cc_library(
@@ -160,6 +202,20 @@ cc_test(
     name = "hybrid_kv_cache_allocator_test",
     srcs = [
         "HybridTypeKVCacheAllocatorTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "hybrid_pool_kv_cache_allocator_test",
+    srcs = [
+        "HybridPoolKVCacheAllocatorTest.cc",
     ],
     data = [],
     copts = test_copts,

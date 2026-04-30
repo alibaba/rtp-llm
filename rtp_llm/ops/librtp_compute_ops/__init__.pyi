@@ -10,7 +10,7 @@ from . import rtp_llm_ops
 __all__: list[str] = [
     "BertEmbeddingInputs",
     "CacheGroupType",
-    "KVCacheAttnType",
+    "KVCacheRegionName",
     "LayerKVCache",
     "KVCache",
     "ParamsBase",
@@ -93,10 +93,13 @@ class CacheGroupType:
       LINEAR
 
       FULL
+
+      SWA
     """
 
     FULL: typing.ClassVar[CacheGroupType]
     LINEAR: typing.ClassVar[CacheGroupType]
+    SWA: typing.ClassVar[CacheGroupType]
     __members__: typing.ClassVar[dict[str, CacheGroupType]]
     def __eq__(self, other: typing.Any) -> bool: ...
     def __getstate__(self) -> int: ...
@@ -113,7 +116,7 @@ class CacheGroupType:
     @property
     def value(self) -> int: ...
 
-class KVCacheAttnType:
+class KVCacheRegionName:
     """
     Members:
 
@@ -127,15 +130,15 @@ class KVCacheAttnType:
       SWA_KV
     """
 
-    DEFAULT: typing.ClassVar[KVCacheAttnType]
-    CSA_KV: typing.ClassVar[KVCacheAttnType]
-    HCA_KV: typing.ClassVar[KVCacheAttnType]
-    INDEXER_KV: typing.ClassVar[KVCacheAttnType]
-    INDEXER_STATE: typing.ClassVar[KVCacheAttnType]
-    CSA_STATE: typing.ClassVar[KVCacheAttnType]
-    HCA_STATE: typing.ClassVar[KVCacheAttnType]
-    SWA_KV: typing.ClassVar[KVCacheAttnType]
-    __members__: typing.ClassVar[dict[str, KVCacheAttnType]]
+    DEFAULT: typing.ClassVar[KVCacheRegionName]
+    CSA_KV: typing.ClassVar[KVCacheRegionName]
+    HCA_KV: typing.ClassVar[KVCacheRegionName]
+    INDEXER_KV: typing.ClassVar[KVCacheRegionName]
+    INDEXER_STATE: typing.ClassVar[KVCacheRegionName]
+    CSA_STATE: typing.ClassVar[KVCacheRegionName]
+    HCA_STATE: typing.ClassVar[KVCacheRegionName]
+    SWA_KV: typing.ClassVar[KVCacheRegionName]
+    __members__: typing.ClassVar[dict[str, KVCacheRegionName]]
     def __eq__(self, other: typing.Any) -> bool: ...
     def __getstate__(self) -> int: ...
     def __hash__(self) -> int: ...
@@ -184,7 +187,7 @@ class LayerKVCache:
         """
 
     @property
-    def attn_type(self) -> KVCacheAttnType:
+    def region_name(self) -> KVCacheRegionName:
         """
         KV cache attention type
         """
@@ -201,17 +204,19 @@ class KVCache:
     use_mla: bool
     kv_lora_rank: int
     rope_head_dim: int
-    group_attn_types: list[KVCacheAttnType]
-    layer_attn_to_group_id: list[list[int]]
-    kv_cache_base_by_layer_attn: list[list[torch.Tensor]]
-    kv_scale_base_by_layer_attn: list[list[torch.Tensor]]
+    layer_group_types: list[CacheGroupType]
+    group_region_names: list[KVCacheRegionName]
+    layer_region_to_group_id: list[list[int]]
+    kv_cache_base_by_layer_region: list[list[torch.Tensor]]
+    kv_cache_base_by_layer_region_flat: list[torch.Tensor]
+    kv_scale_base_by_layer_region: list[list[torch.Tensor]]
     def __init__(self) -> None: ...
     @typing.overload
     def get_layer_cache(self, arg0: int) -> LayerKVCache:
         """Return the legacy/default per-layer LayerKVCache for the given global layer id."""
         ...
     @typing.overload
-    def get_layer_cache(self, arg0: int, arg1: KVCacheAttnType) -> LayerKVCache:
+    def get_layer_cache(self, arg0: int, arg1: KVCacheRegionName) -> LayerKVCache:
         """Return a raw per-layer LayerKVCache for the given global layer id and KV cache attention type."""
         ...
 

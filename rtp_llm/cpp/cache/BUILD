@@ -77,16 +77,33 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_cache_transfer_planner",
+    srcs = [
+        "KVCacheTransferPlanner.cc",
+    ],
+    hdrs = [
+        "KVCacheTransferPlanner.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_group_type",
+    ],
+)
+
+cc_library(
     name = "kv_cache_group",
     srcs = [
         "FullKVCacheGroup.cc",
         "KVCacheGroup.cc",
         "LinearKVCacheGroup.cc",
+        "SWAKVCacheGroup.cc",
     ],
     hdrs = [
         "FullKVCacheGroup.h",
         "KVCacheGroup.h",
         "LinearKVCacheGroup.h",
+        "SWAKVCacheGroup.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -98,12 +115,14 @@ cc_library(
 cc_library(
     name = "kv_cache_allocator",
     srcs = [
+        "HybridKVCacheAllocator.cc",
         "HybridPoolKVCacheAllocator.cc",
         "HybridTypeKVCacheAllocator.cc",
         "KVCacheAllocator.cc",
         "SingleTypeKVCacheAllocator.cc",
     ],
     hdrs = [
+        "HybridKVCacheAllocator.h",
         "HybridPoolKVCacheAllocator.h",
         "HybridTypeKVCacheAllocator.h",
         "KVCacheAllocator.h",

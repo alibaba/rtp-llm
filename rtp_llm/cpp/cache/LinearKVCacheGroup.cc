@@ -99,43 +99,10 @@ MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
         return result;
     }
 
-    // Ring-buffer groups (DSV4 SWA / State): ring blocks hold state at the
-    // LATEST sequence position.  Two cases:
-    //   (a) Full-sequence repeat (e.g. Q2 == Q0): the last `fixed_cap_`
-    //       keys of the incoming request match what's in block_cache, so
-    //       we can reuse the ring blocks directly — they hold the valid
-    //       end-of-sequence state for this exact sequence.
-    //   (b) Prefix match shorter than a prior request's cached tail
-    //       (e.g. Q1 shares Q0's first 20 blocks but diverges): the ring
-    //       blocks belong to a different sequence, so we can't reuse
-    //       them.  Return reuse_blocks = m with empty block_indices —
-    //       this is a "pass-through": HybridPool's min() falls back to
-    //       the FULL pools' prefix count, LINEAR pool starts fresh (0
-    //       blocks) and recordReuse() seeds last_seq_slots_ so the
-    //       subsequent malloc rotates the ring to the right position.
+    // Ring-buffer Linear groups do not own prefix-reuse matching. Their
+    // retained blocks represent a rolling tail/state window, so prefix reuse
+    // must be decided by the allocator or by a dedicated SWA group.
     if (fixed_cap_ > 0) {
-        const int        window = std::min(fixed_cap_, m);
-        BlockIndicesType ring_blocks;
-        ring_blocks.reserve(static_cast<size_t>(window));
-        bool all_match = (window > 0);
-        for (int k = 0; k < window; ++k) {
-            const int key_idx = m - window + k;  // last `window` keys, right-aligned
-            auto      single  = matchSingleKey(cache_keys[static_cast<size_t>(key_idx)]);
-            if (single.block_indices.empty()) {
-                all_match = false;
-                break;
-            }
-            ring_blocks.push_back(single.block_indices[0]);
-        }
-        result.reuse_blocks = static_cast<size_t>(m);
-        if (all_match) {
-            // Case (a): full-sequence repeat — claim the ring blocks.
-            result.block_indices = std::move(ring_blocks);
-            result.reuse_length  = result.reuse_blocks * static_cast<size_t>(seq_size_per_block_);
-        }
-        // else: case (b) — pass-through; block_indices stays empty so
-        // HybridPool assigns empty to this group, malloc starts fresh and
-        // rotates via recordReuse-seeded prev_seq_slots.
         return result;
     }
 

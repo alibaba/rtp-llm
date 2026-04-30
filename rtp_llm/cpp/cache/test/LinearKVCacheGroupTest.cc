@@ -532,7 +532,7 @@ TEST_F(LinearKVCacheGroupTest, RingRemoveSkippedBlocksIsNoop) {
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before_trim);
 }
 
-TEST_F(LinearKVCacheGroupTest, RingMatchReturnsRightAlignedResult) {
+TEST_F(LinearKVCacheGroupTest, RingMatchVetoesPrefixReuse) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
 
@@ -554,10 +554,8 @@ TEST_F(LinearKVCacheGroupTest, RingMatchReturnsRightAlignedResult) {
     group.insertIntoCache(CacheKeysType{keys[1], keys[2]}, ids, /*is_resident=*/false);
 
     auto mr = group.match(keys);
-    EXPECT_EQ(mr.reuse_blocks, 3u);          // rightmost hit at i=2 → i+1=3
-    ASSERT_EQ(mr.block_indices.size(), 2u);  // min(i+1, cap) = 2
-    EXPECT_EQ(mr.block_indices[0], ids[0]);  // older ring slot
-    EXPECT_EQ(mr.block_indices[1], ids[1]);  // newer ring slot
+    EXPECT_EQ(mr.reuse_blocks, 0u);
+    EXPECT_TRUE(mr.block_indices.empty());
 }
 
 TEST_F(LinearKVCacheGroupTest, RingMatchEmptyOnNoHit) {
