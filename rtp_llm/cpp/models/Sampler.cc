@@ -43,18 +43,17 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
-    // Move token_ids to CUDA once so sampleGreedy writes GPU→GPU (no blocking D2H sync).
-    // Callers that need CPU access should call .cpu() explicitly.
-    // Use blocking transfer: on ROCm, hipMemcpyAsync from pageable memory is truly async
-    // and can cause memory access faults if a kernel reads the buffer before transfer completes.
-    auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
-    auto all_token_ids_out     = variable_num_beams ?
-                                     torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},
+    // sampleGreedy / sampleBeamSearch will copy token_ids to CUDA internally,
+    // so we pass the original CPU (pinned) tensor directly to avoid a redundant
+    // blocking hipMemcpy that costs ~3.7ms per step on ROCm with pageable memory.
+    auto& inputs_token_ids_ref  = inputs.token_ids;
+    auto  all_token_ids_out     = variable_num_beams ?
+                                      torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},
                                               torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)) :
-                                     inputs_token_ids_cuda;
-    auto all_cum_log_probs_out = variable_num_beams && inputs.cum_log_probs.defined() ?
-                                     torch::empty({(int64_t)inputs.batch_size_out}, torch::kFloat32) :
-                                     inputs.cum_log_probs;
+                                      inputs.token_ids;
+    auto  all_cum_log_probs_out = variable_num_beams && inputs.cum_log_probs.defined() ?
+                                      torch::empty({(int64_t)inputs.batch_size_out}, torch::kFloat32) :
+                                      inputs.cum_log_probs;
 
     size_t from_batch_idx_in = 0, to_batch_idx_in = 0;
     size_t from_batch_idx_out = 0;
@@ -76,7 +75,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
         auto success           = all_success.narrow(0, from_batch_idx_in, batch_size_in);
         auto logits            = inputs.logits.narrow(0, from_batch_idx_in, batch_size_in);
-        auto token_ids_in      = inputs_token_ids_cuda.narrow(0, from_batch_idx_in, batch_size_in);
+        auto token_ids_in      = inputs_token_ids_ref.narrow(0, from_batch_idx_in, batch_size_in);
         auto token_ids_out     = all_token_ids_out.narrow(0, from_batch_idx_out, batch_size_out);
         auto input_lengths     = inputs.input_lengths.narrow(0, from_batch_idx_in, batch_size_in);
         auto sequence_lengths  = inputs.sequence_lengths.narrow(0, from_batch_idx_in, batch_size_in);

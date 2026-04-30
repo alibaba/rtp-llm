@@ -32,7 +32,7 @@ CKAttnPtr PagedAttnDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     }
 
     CKAttnPtr attn_params;
-    bool      use_fmha_fp8 = false;
+    bool      use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     auto      params       = PrepareCKAttn(
         attn_configs_, kv_cache_kernel_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
 
