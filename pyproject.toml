@@ -339,5 +339,5 @@ markexpr = "manual and smoke and MI308X"
 
 [tool.rtp_llm.pytest_ci.profiles.perf_sm9x]
 description = "Performance tests on H20 / SM9x (perf-test)"
-paths = ["rtp_llm/test/remote_tests/test_perf_remote.py"]
+paths = ["../internal_source/rtp_llm/test/perf_test/suites/"]
 markexpr = "manual and perf and H20"

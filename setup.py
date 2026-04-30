@@ -735,15 +735,10 @@ def copy_core_so_files(bazel_bin: Path, target_dir: Path) -> None:
     #
     # Whitelist rationale:
     #   kv_cache_manager_client  — remote KV-cache gRPC client (CUDA builds)
-    #   libdmmha / libmmha       — RTP-LLM decoder MHA attention kernels
     #   module_                  — ROCm aiter fused kernels
-    #   libacext                 — PPU custom extension kernels
     _SOLIB_INCLUDE_PREFIXES = (
         "kv_cache_manager_client",
-        "libdmmha",
-        "libmmha",
         "module_",
-        "libacext",
     )
     solib_dir = bazel_bin / "_solib_local"
     if solib_dir.exists():
@@ -769,9 +764,8 @@ def copy_kernel_so_files(bazel_bin: Path, target_dir: Path) -> int:
         actually loaded at runtime.
       - kv_cache_manager_client.so (CUDA-only RDMA KV-cache client) DOES need
         libhf3fs + boost + a handful of system libs; we keep those.
-      - ROCm aiter `module_*.so` and PPU `libacext*.so` are picked up via
-        _solib_local whitelist in copy_core_so_files, so they don't need
-        re-listing here.
+      - ROCm aiter `module_*.so` is picked up via _solib_local whitelist in
+        copy_core_so_files (single source of truth), so not re-listed here.
 
     Returns:
         int: Number of files copied
@@ -797,12 +791,6 @@ def copy_kernel_so_files(bazel_bin: Path, target_dir: Path) -> int:
         "libunwind.so.8",
         "libssl.so.1.1",
         "libcrypto.so.1.1",
-        # ROCm aiter fused kernels (defensive sweep — also picked up via
-        # _solib_local in copy_core_so_files; no-op on CUDA builds)
-        "module_*.so",
-        "libmodule_*.so",
-        # PPU custom extension kernels (no-op on CUDA/ROCm)
-        "libacext*.so",
     ]
 
     print(f"\nCopying kernel extensions:")

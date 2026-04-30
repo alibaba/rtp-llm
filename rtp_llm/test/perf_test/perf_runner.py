@@ -1,9 +1,10 @@
-"""Perf test framework runner — invoked by test_perf_remote.py.
+"""Perf test framework runner — invoked by per-suite ``test_perf_*.py`` modules.
 
-This file is FRAMEWORK code (lives in OSS). Test data (PERF_TESTS dict, baselines/,
-test_data/) lives in internal_source as a namespace-package contribution to
-`rtp_llm.test.perf_test`. The dict is passed in via build_perf_params(...) so the
-framework has no compile-time dependency on internal_source.
+This file is FRAMEWORK code (lives in OSS). Test data (PERF_TESTS dicts, baselines/,
+test_data/) lives in internal_source under ``rtp_llm/test/perf_test/suites/`` and
+adjacent ``baselines``/``test_data`` directories. Each suite resolves its own
+``data_dir`` from ``__file__`` and passes it into ``run_perf_test``, so the framework
+stays decoupled from data location.
 """
 
 import logging
@@ -11,7 +12,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 def build_perf_params(pytest_module, perf_tests: dict):
@@ -37,18 +38,7 @@ def build_perf_params(pytest_module, perf_tests: dict):
     return params
 
 
-def _resolve_data_dir() -> Path:
-    """Locate the perf test data directory.
-
-    Data (baselines/, test_data/) lives next to perf_defs.py. perf_defs.py lives
-    in internal_source as a namespace-package contribution to rtp_llm.test.perf_test.
-    """
-    from rtp_llm.test.perf_test import perf_defs
-
-    return Path(perf_defs.__file__).resolve().parent
-
-
-def run_perf_test(test_name: str, test_config: dict):
+def run_perf_test(test_name: str, test_config: dict, data_dir: Path):
     """Run a single perf test case.
 
     1. Set environment variables from test_config (restored in finally to avoid
@@ -56,6 +46,11 @@ def run_perf_test(test_name: str, test_config: dict):
     2. Build sys.argv for batch_decode_test.main()
     3. Run engine + benchmark
     4. Validate results against baseline (raise on regression)
+
+    ``data_dir`` is resolved by the suite file (typically
+    ``Path(__file__).resolve().parent.parent``) and points at the directory that
+    contains ``baselines/`` and ``test_data/``. Passing it explicitly keeps the
+    framework agnostic to where suite data is hosted (OSS vs internal).
     """
     # Track keys we set so we can restore them in finally — same pattern smoke uses.
     _env_keys_set: list = []
@@ -65,7 +60,6 @@ def run_perf_test(test_name: str, test_config: dict):
     _env_keys_set.append(("PERF_TEST_NAME", os.environ.get("PERF_TEST_NAME")))
     os.environ["PERF_TEST_NAME"] = test_name
 
-    data_dir = _resolve_data_dir()
     argv = _build_argv(test_name, test_config, data_dir)
 
     baseline_path = None
