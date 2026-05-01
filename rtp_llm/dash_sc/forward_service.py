@@ -16,7 +16,6 @@ import grpc
 from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
-_LOG_DEBUG_ENV_KEY = "DASH_SC_GRPC_FORWARD_LOG_DEBUG"
 
 # HTTP/2 keepalive for the forwarder -> real frontend channel. Production
 # topology places an LBS between the two with a 100s idle timeout; without
@@ -82,7 +81,6 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._forward_addrs = forward_addrs
         self._channels: List[grpc.Channel] = []
         self._stubs: List[predict_v2_pb2_grpc.GRPCInferenceServiceStub] = []
-        self._log_debug = os.environ.get(_LOG_DEBUG_ENV_KEY, "").lower() in ("true", "1", "on")
 
         for addr in forward_addrs:
             channel = grpc.insecure_channel(addr, options=_FORWARD_CHANNEL_OPTS)
@@ -91,10 +89,9 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             self._stubs.append(stub)
 
         logging.info(
-            "[DashScGrpc] PureForwardServicer initialized with %d addresses: %s, log_debug=%s",
+            "[DashScGrpc] PureForwardServicer initialized with %d addresses: %s",
             len(forward_addrs),
             forward_addrs,
-            self._log_debug,
         )
 
     def _next_stub(self) -> tuple[predict_v2_pb2_grpc.GRPCInferenceServiceStub, int]:
@@ -124,59 +121,19 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             except Exception:
                 pass
 
-        if self._log_debug:
-            req_count = 0
-            resp_count = 0
-
-            def logged_request_iterator():
-                nonlocal req_count
-                for req in request_iterator:
-                    req_count += 1
-                    logging.info(
-                        "[DashScGrpc] Forward req #%d to %s: model=%s id=%s inputs=%d",
-                        req_count,
-                        addr,
-                        req.model_name,
-                        req.id,
-                        len(req.inputs),
-                    )
-                    yield req
-
-            upstream_iter = stub.ModelStreamInfer(logged_request_iterator())
-
-            def logged_response_iter():
-                nonlocal resp_count
+        upstream_iter = stub.ModelStreamInfer(request_iterator)
+        if agg is not None:
+            def counting_response_iter():
                 for resp in upstream_iter:
-                    resp_count += 1
-                    if agg is not None:
-                        try:
-                            agg.downstream_resp_count += 1
-                        except Exception:
-                            pass
-                    logging.info(
-                        "[DashScGrpc] Forward resp #%d from %s: error=%s outputs=%d",
-                        resp_count,
-                        addr,
-                        resp.error_message or "none",
-                        len(resp.infer_response.outputs),
-                    )
+                    try:
+                        agg.downstream_resp_count += 1
+                    except Exception:
+                        pass
                     yield resp
 
-            downstream_iter = logged_response_iter()
+            downstream_iter = counting_response_iter()
         else:
-            upstream_iter = stub.ModelStreamInfer(request_iterator)
-            if agg is not None:
-                def counting_response_iter():
-                    for resp in upstream_iter:
-                        try:
-                            agg.downstream_resp_count += 1
-                        except Exception:
-                            pass
-                        yield resp
-
-                downstream_iter = counting_response_iter()
-            else:
-                downstream_iter = upstream_iter
+            downstream_iter = upstream_iter
 
         yield from self._buffered_iter(downstream_iter, agg)
 
@@ -236,6 +193,15 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             yield second
             _set_stage("flushed_both")
             yield from it
+        except GeneratorExit:
+            # Consumer called ``gen.close()`` on the outer RPC generator —
+            # yielding is forbidden after GeneratorExit (Python raises
+            # ``RuntimeError: generator ignored GeneratorExit`` and prints
+            # an "Exception ignored in:" traceback to stderr at GC time).
+            # The buffered frame is lost; there is no wire to flush to.
+            if buffered is not None:
+                _set_stage("dropped_buffered_on_exception")
+            raise
         except BaseException:
             if buffered is not None:
                 try:
