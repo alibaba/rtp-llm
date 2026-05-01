@@ -14,6 +14,7 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 
 import math
 import os
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 import torch
@@ -28,10 +29,45 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_freqs_cis_local,
 )
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
+from rtp_llm.models_py.modules.dsv4.paged_kv_write import (
+    write_paged_kv_per_req,
+    write_paged_kv_swa_per_req,
+)
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
 from rtp_llm.models_py.modules.dsv4.weight_loader import _repack_v4_fp8_scale_to_int32
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
+
+
+@dataclass
+class PagedPrefillCtx:
+    """Per-(layer, request) handles to the framework BlockPool tensors used
+    by a prefill forward, so the prefill arm can write KV directly into
+    paged storage and read sparse_attn KV from paged storage — bypassing
+    the per-Attention dense ``register_buffer("kv_cache", ...)`` mid-stage
+    that the original ``inference/model.py`` port relied on.
+
+    All fields are 1-request slices (the model's prefill loop calls each
+    layer once per request — see ``DeepSeekV4Model._forward_impl``).
+
+    SWA fields are mandatory for any layer that runs prefill attention.
+    CMP fields (compressed KV pool) are mandatory for CSA / HCA layers and
+    None for SWA-only layers.
+
+    The dense ``self.kv_cache`` register_buffer is left untouched in this
+    code path so:
+      * standalone PyTorch tests still work,
+      * the decode arm (which still uses gather/scatter on the dense
+        buffer) sees the same legacy state once paged prefill flushes.
+    """
+
+    swa_pool: torch.Tensor                      # [num_blocks, stride_bytes] uint8
+    swa_block_table: torch.Tensor               # [1, max_blocks_swa] int32
+    swa_tokens_per_block: int
+
+    cmp_pool: Optional[torch.Tensor] = None     # CSA_KV (CSA layer) or HCA_KV (HCA layer)
+    cmp_block_table: Optional[torch.Tensor] = None
+    cmp_tokens_per_block: Optional[int] = None
 
 # P4 (prefill_opt/final_plan.md, minimal C): fused RMSNorm Triton kernel.
 # Replaces the 6-launch ``.float().square().mean(-1).rsqrt().mul().to()``
@@ -548,6 +584,37 @@ class Attention(nn.Module):
 
         # CP context bound per-forward by V4Transformer.  None = no CP.
         self._cp_ctx: Optional[CPContext] = None
+
+        # Paged-prefill context bound per-forward by ``DeepSeekV4Model._forward_impl``
+        # before each request's ``self.v4(...)`` call.  When set, the prefill arm
+        # writes new SWA / compressed KV directly to BlockPool paged tensors and
+        # reads sparse_attn KV from BlockPool — eliminating the dense
+        # gather (``_gather_all_layers``) + scatter (``_scatter_all_layers``)
+        # roundtrips for KV pools (1/2/7).  STATE pools (4/5/6) are still
+        # gathered/scattered the legacy way (small data, compressor algorithm
+        # needs dense view for softmax pooling).
+        self._paged_prefill_ctx: Optional[PagedPrefillCtx] = None
+
+    def set_paged_prefill_ctx(self, ctx: Optional[PagedPrefillCtx]) -> None:
+        """Bind / clear the paged-prefill BlockPool handles.
+
+        Bound by ``DeepSeekV4Model._forward_impl`` before each prefill
+        request's forward; cleared (set to ``None``) for decode forwards
+        and when ``DSV4_USE_FRAMEWORK_KV=0`` (legacy register_buffer path).
+
+        Also propagates the cmp pool to the bound ``Compressor``: the
+        compressor's compressed-K writes go straight to the same pool.
+        """
+        self._paged_prefill_ctx = ctx
+        if self.compressor is not None:
+            if ctx is not None and ctx.cmp_pool is not None:
+                self.compressor.bind_paged_kv_cache(
+                    pool_tensor=ctx.cmp_pool,
+                    block_table_row=ctx.cmp_block_table[0],
+                    tokens_per_block=ctx.cmp_tokens_per_block,
+                )
+            else:
+                self.compressor.bind_paged_kv_cache(None, None, None)
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         """Bind CP context.  When active on a prefill call, ``forward``
@@ -1170,54 +1237,124 @@ class Attention(nn.Module):
         )
 
         if is_prefill_attn:
-            if sp_int == 0:
-                # Fresh prefill: write all tokens into ring buffer
-                if seqlen_full <= win:
-                    self.kv_cache[:bsz, :seqlen_full] = kv_full
+            if self._paged_prefill_ctx is not None:
+                # ----- Paged prefill: write KV directly into BlockPool, run
+                # paged sparse_attn against BlockPool — no dense intermediate. -----
+                pctx = self._paged_prefill_ctx
+                # 1) SWA K/V write: each of the seqlen new tokens lands at ring
+                # slot (sp_int + t) % win, which we compute / dispatch in one
+                # vectorized index_put inside ``write_paged_kv_swa_per_req``.
+                # Caller invokes Attention with bsz=1 (per-request prefill loop).
+                assert bsz == 1, (
+                    "paged prefill is per-request; expected bsz=1 but got "
+                    f"bsz={bsz}. Caller must split batched prefill."
+                )
+                write_paged_kv_swa_per_req(
+                    src_kv=kv_full[0],
+                    pool_tensor=pctx.swa_pool,
+                    block_table_row=pctx.swa_block_table[0],
+                    start_pos=sp_int,
+                    seqlen=seqlen_full,
+                    win=win,
+                    head_dim=self.head_dim,
+                    tokens_per_block=pctx.swa_tokens_per_block,
+                )
+                # 2) Compressor writes its own compressed-K straight into
+                # the cmp pool (Compressor.bind_paged_kv_cache was called by
+                # set_paged_prefill_ctx).  Returned tensor is unused —
+                # paged sparse_attn reads the cmp pool by block_table.
+                if self.compress_ratio:
+                    self.compressor(x, sp_int)
+                # 3) Split topk_idxs into SWA + CMP halves.  Builder layout
+                # is ``cat([swa_topk (ring [0,win)), cmp_topk + win])``; the
+                # paged CMP kernel expects cmp slots in [0, n_cmp) so we
+                # subtract back the +win offset (preserving -1 mask).
+                K_swa = win
+                if self.compress_ratio:
+                    swa_topk_p = topk_idxs[..., :K_swa].contiguous()
+                    cmp_topk_offset = topk_idxs[..., K_swa:]
+                    cmp_topk_p = torch.where(
+                        cmp_topk_offset >= 0,
+                        cmp_topk_offset - win,
+                        cmp_topk_offset,
+                    ).contiguous()
+                    o = _tl_kernels.sparse_attn_paged_two_pool(
+                        q,
+                        swa_pool=pctx.swa_pool,
+                        swa_block_table=pctx.swa_block_table,
+                        swa_topk_global=swa_topk_p,
+                        swa_tokens_per_block=pctx.swa_tokens_per_block,
+                        cmp_pool=pctx.cmp_pool,
+                        cmp_block_table=pctx.cmp_block_table,
+                        cmp_topk_global=cmp_topk_p,
+                        cmp_tokens_per_block=pctx.cmp_tokens_per_block,
+                        attn_sink=self.attn_sink,
+                        softmax_scale=self.softmax_scale,
+                        head_dim=self.head_dim,
+                    )
                 else:
-                    cutoff = seqlen_full % win
-                    self.kv_cache[:bsz, cutoff:win], self.kv_cache[:bsz, :cutoff] = (
-                        kv_full[:, -win:].split([win - cutoff, cutoff], dim=1)
+                    # SWA-only layer (compress_ratio == 0): topk_idxs is purely
+                    # the SWA ring topk in [0, win).
+                    o = _tl_kernels.sparse_attn_paged_single_pool(
+                        q,
+                        pool_tensor=pctx.swa_pool,
+                        block_table=pctx.swa_block_table,
+                        attn_sink=self.attn_sink,
+                        topk_global=topk_idxs.contiguous(),
+                        softmax_scale=self.softmax_scale,
+                        tokens_per_block=pctx.swa_tokens_per_block,
+                        head_dim=self.head_dim,
                     )
             else:
-                # Continuation prefill: prefix KV already in kv_cache (gathered from BlockPool).
-                # Write new tokens into ring buffer starting at start_pos.
-                total_len = sp_int + seqlen
-                if total_len <= win:
-                    self.kv_cache[:bsz, sp_int:total_len] = kv_full
-                else:
-                    # Ring buffer wrap: place last `win` tokens of [prefix..prefix+seqlen]
-                    # But we only have the new tokens (kv_full). Prefix is already in cache.
-                    # Write new tokens at their ring positions.
-                    for t in range(seqlen):
-                        pos = (sp_int + t) % win
-                        self.kv_cache[:bsz, pos] = kv_full[:, t]
-            if self.compress_ratio:
-                kv_compress = self.compressor(x, sp_int)
-                if kv_compress is not None:
-                    if sp_int == 0:
-                        kv_cat = torch.cat([kv_full, kv_compress], dim=1)
+                # ----- Legacy dense prefill (register_buffer kv_cache mid-stage). -----
+                if sp_int == 0:
+                    # Fresh prefill: write all tokens into ring buffer
+                    if seqlen_full <= win:
+                        self.kv_cache[:bsz, :seqlen_full] = kv_full
                     else:
-                        # Continuation: use ring buffer for attention (has prefix + new KV)
-                        kv_cat = self.kv_cache[:bsz]
+                        cutoff = seqlen_full % win
+                        self.kv_cache[:bsz, cutoff:win], self.kv_cache[:bsz, :cutoff] = (
+                            kv_full[:, -win:].split([win - cutoff, cutoff], dim=1)
+                        )
+                else:
+                    # Continuation prefill: prefix KV already in kv_cache (gathered from BlockPool).
+                    # Write new tokens into ring buffer starting at start_pos.
+                    total_len = sp_int + seqlen
+                    if total_len <= win:
+                        self.kv_cache[:bsz, sp_int:total_len] = kv_full
+                    else:
+                        # Ring buffer wrap: place last `win` tokens of [prefix..prefix+seqlen]
+                        # But we only have the new tokens (kv_full). Prefix is already in cache.
+                        # Write new tokens at their ring positions.
+                        for t in range(seqlen):
+                            pos = (sp_int + t) % win
+                            self.kv_cache[:bsz, pos] = kv_full[:, t]
+                if self.compress_ratio:
+                    kv_compress = self.compressor(x, sp_int)
+                    if kv_compress is not None:
+                        if sp_int == 0:
+                            kv_cat = torch.cat([kv_full, kv_compress], dim=1)
+                        else:
+                            # Continuation: use ring buffer for attention (has prefix + new KV)
+                            kv_cat = self.kv_cache[:bsz]
+                    else:
+                        if sp_int == 0:
+                            kv_cat = kv_full
+                        else:
+                            kv_cat = self.kv_cache[:bsz]
                 else:
                     if sp_int == 0:
                         kv_cat = kv_full
                     else:
                         kv_cat = self.kv_cache[:bsz]
-            else:
-                if sp_int == 0:
-                    kv_cat = kv_full
+                if _tl_kernels.tilelang_available():
+                    o = _tl_kernels.sparse_attn(
+                        q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
+                    )
                 else:
-                    kv_cat = self.kv_cache[:bsz]
-            if _tl_kernels.tilelang_available():
-                o = _tl_kernels.sparse_attn(
-                    q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
-                )
-            else:
-                o = _sparse_attn(
-                    q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
-                )
+                    o = _sparse_attn(
+                        q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
+                    )
         else:
             # Decode: write each batch element to its own ring position
             if is_batched_decode:

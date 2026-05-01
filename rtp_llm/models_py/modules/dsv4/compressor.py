@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_all_gather_full,
     cp_should_gather,
 )
+from rtp_llm.models_py.modules.dsv4.paged_kv_write import write_paged_kv_per_req
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, apply_rotary_emb_batched
 
 # P2 (prefill_opt/final_plan.md): fused softmax+weighted-sum Triton kernel.
@@ -128,6 +129,41 @@ class Compressor(nn.Module):
         # CP context bound per-forward by V4Transformer.  None = no CP,
         # falls through to single-rank path unchanged.
         self._cp_ctx: Optional[CPContext] = None
+
+        # Paged compressed-K target: when bound (via ``bind_paged_kv_cache``),
+        # ``forward`` writes the compressed-K straight into the BlockPool pool
+        # tensor instead of the dense ``self.kv_cache`` mid-stage that the
+        # original ``inference/model.py`` port relied on.  Bound by
+        # ``Attention.set_paged_prefill_ctx``; cleared on the legacy path.
+        # ``self.kv_state`` / ``self.score_state`` (the running compressor state)
+        # are *not* paged here — they live in fixed-size STATE pools that the
+        # framework still gathers/scatters via ``DeepSeekV4Model._gather_state_pool``
+        # for prefill reuse.  Only the per-token compressed-K output is paged.
+        self._paged_pool_tensor: Optional[torch.Tensor] = None
+        self._paged_block_table_row: Optional[torch.Tensor] = None
+        self._paged_tokens_per_block: Optional[int] = None
+
+    def bind_paged_kv_cache(
+        self,
+        pool_tensor: Optional[torch.Tensor],
+        block_table_row: Optional[torch.Tensor],
+        tokens_per_block: Optional[int],
+    ) -> None:
+        """Bind / clear the paged compressed-K pool target.
+
+        See ``Attention.set_paged_prefill_ctx`` for caller semantics.
+        Pass ``(None, None, None)`` to revert to dense ``self.kv_cache`` writes.
+        """
+        self._paged_pool_tensor = pool_tensor
+        self._paged_block_table_row = block_table_row
+        self._paged_tokens_per_block = tokens_per_block
+
+    def _paged_kv_cache_active(self) -> bool:
+        return (
+            self._paged_pool_tensor is not None
+            and self._paged_block_table_row is not None
+            and self._paged_tokens_per_block is not None
+        )
 
     def _rmsnorm(self, x: torch.Tensor) -> torch.Tensor:
         dtype = x.dtype
@@ -592,7 +628,27 @@ class Compressor(nn.Module):
 
         if seqlen > 1:
             write_start = sp_int // ratio
-            self.kv_cache[:bsz, write_start : write_start + cutoff // ratio] = kv
+            n_emit = cutoff // ratio
+            if self._paged_kv_cache_active() and n_emit > 0:
+                # Paged path — write straight into the BlockPool CSA / HCA pool;
+                # the dense ``self.kv_cache`` is left untouched.
+                # ``kv`` shape: [bsz=1, n_emit, head_dim] (per-request prefill).
+                assert (
+                    bsz == 1
+                ), "paged compressor write expects bsz=1 (per-request prefill)"
+                write_paged_kv_per_req(
+                    src_kv=kv[0],
+                    pool_tensor=self._paged_pool_tensor,
+                    block_table_row=self._paged_block_table_row,
+                    slot_offset=write_start,
+                    tokens_per_block=int(self._paged_tokens_per_block),
+                    head_dim=self.head_dim,
+                )
+            else:
+                self.kv_cache[:bsz, write_start : write_start + n_emit] = kv
         else:
+            # decode (seqlen == 1) is not paged in this rev — kept on the
+            # dense register_buffer + scatter path that ``DeepSeekV4Model``
+            # still drives via ``_scatter_all_layers`` after each forward.
             self.kv_cache[:bsz, start_pos // ratio] = kv.squeeze(1)
         return kv

@@ -466,23 +466,54 @@ class DeepSeekV4Model(GptModelBase):
         # _layer_reuse_gather_pools: paged + state pools for prefill reuse gather
         #   (restores compressor overlap carry, but skips SWA ring buffer which
         #   holds data at the wrong position)
+        # _layer_paged_reuse_gather_pools: narrowed reuse-gather list when the
+        #   paged prefill path is active (DSV4_USE_PAGED_PREFILL=1).  Drops the
+        #   KV pools (1=CSA_KV, 2=HCA_KV, 7=SWA_KV) that are now read directly
+        #   from BlockPool by the paged sparse_attn kernel; keeps INDEXER_KV
+        #   (3) plus STATE pools (4/5/6) which the legacy compressor /
+        #   indexer dense view still depend on.
+        # _layer_paged_scatter_pools: same narrowing for the post-prefill
+        #   scatter — paged prefill already wrote KV pools (1/2/7) directly,
+        #   so we only flush INDEXER_KV + STATE back to BlockPool here.
         self._layer_pools = []
         self._layer_gather_pools = []
         self._layer_reuse_gather_pools = []
+        self._layer_paged_reuse_gather_pools = []
+        self._layer_paged_scatter_pools = []
         for i, layer in enumerate(self.v4.layers):
             ratio = layer.attn.compress_ratio
             if ratio == 4:
                 self._layer_pools.append([7, 1, 3, 4, 5])
                 self._layer_gather_pools.append([1, 3])  # CSA_KV, INDEXER_KV only
                 self._layer_reuse_gather_pools.append([1, 3, 4, 5])  # + STATE pools
+                # Paged prefill: drop SWA_KV (7) and CSA_KV (1) from gather/scatter.
+                # Indexer is not paged yet, so INDEXER_KV (3) + STATE (4, 5) stay.
+                self._layer_paged_reuse_gather_pools.append([3, 4, 5])
+                self._layer_paged_scatter_pools.append([3, 4, 5])
             elif ratio == 128:
                 self._layer_pools.append([7, 2, 6])
                 self._layer_gather_pools.append([2])  # HCA_KV only
                 self._layer_reuse_gather_pools.append([2, 6])  # + STATE pool
+                # Paged prefill: drop SWA_KV (7) and HCA_KV (2). Only HCA_STATE (6) left.
+                self._layer_paged_reuse_gather_pools.append([6])
+                self._layer_paged_scatter_pools.append([6])
             else:
                 self._layer_pools.append([7])
                 self._layer_gather_pools.append([])  # SWA-only, nothing to gather
                 self._layer_reuse_gather_pools.append([])  # SWA-only
+                self._layer_paged_reuse_gather_pools.append([])
+                self._layer_paged_scatter_pools.append([])
+
+        # Read paged-prefill toggle once at wire time.  ``DSV4_USE_PAGED_PREFILL=0``
+        # forces the legacy dense gather/scatter loop for KV pools (1/2/7), which
+        # is useful as a regression baseline.  Default ON (=1).
+        self._paged_prefill_enabled = (
+            os.environ.get("DSV4_USE_PAGED_PREFILL", "1") != "0"
+        )
+        logging.info(
+            "[DeepSeekV4Model] paged prefill: enabled=%s (DSV4_USE_PAGED_PREFILL)",
+            self._paged_prefill_enabled,
+        )
 
         # Debug: log shapes for layer 0 and layer 2
         for dbg in [0, 2]:
@@ -653,7 +684,13 @@ class DeepSeekV4Model(GptModelBase):
         return slots[attn_type]
 
     def _gather_all_layers(
-        self, attn_inputs, B=1, batch_offset=0, paged_only=False, reuse_gather=False
+        self,
+        attn_inputs,
+        B=1,
+        batch_offset=0,
+        paged_only=False,
+        reuse_gather=False,
+        paged_mode=False,
     ):
         """Gather cached KV from BlockPool pages into each layer's buffers.
 
@@ -667,6 +704,11 @@ class DeepSeekV4Model(GptModelBase):
 
         reuse_gather: if True, gather paged + state pools (skip SWA).
         Used for prefill reuse to restore compressor overlap carry state.
+
+        paged_mode: if True (and ``reuse_gather=True``), uses the narrowed
+        ``_layer_paged_reuse_gather_pools`` list (drops KV pools that the
+        paged sparse_attn kernel reads directly from BlockPool — no dense
+        gather needed).  Only meaningful with ``reuse_gather=True``.
         """
         if not hasattr(self, "_fw_pool_tensors") or not self._fw_pool_tensors:
             return
@@ -687,7 +729,10 @@ class DeepSeekV4Model(GptModelBase):
 
             # Select pool list based on gather mode
             if reuse_gather:
-                pools = self._layer_reuse_gather_pools[i]
+                if paged_mode:
+                    pools = self._layer_paged_reuse_gather_pools[i]
+                else:
+                    pools = self._layer_reuse_gather_pools[i]
             elif paged_only:
                 pools = self._layer_gather_pools[i]
             else:
@@ -768,10 +813,17 @@ class DeepSeekV4Model(GptModelBase):
                             B,
                         )
 
-    def _scatter_all_layers(self, attn_inputs, B=1, batch_offset=0):
+    def _scatter_all_layers(self, attn_inputs, B=1, batch_offset=0, paged_mode=False):
         """Scatter updated KV from each layer's buffers back to BlockPool pages.
 
         batch_offset: row offset into by_group block_ids (same as gather).
+
+        paged_mode: when True, scatter only the narrowed
+        ``_layer_paged_scatter_pools`` list — KV pools (1=CSA_KV, 2=HCA_KV,
+        7=SWA_KV) were already written directly to BlockPool by the paged
+        prefill path, so re-flushing them from the dense ``self.kv_cache``
+        register_buffer would just write stale zeros over the live data.
+        Only INDEXER_KV (3) + STATE pools (4/5/6) still need flushing.
         """
         if not hasattr(self, "_fw_pool_tensors") or not self._fw_pool_tensors:
             return
@@ -789,7 +841,12 @@ class DeepSeekV4Model(GptModelBase):
             win = attn_mod.window_size
             hd = attn_mod.head_dim
 
-            for attn_type in self._layer_pools[i]:
+            scatter_pools = (
+                self._layer_paged_scatter_pools[i]
+                if paged_mode
+                else self._layer_pools[i]
+            )
+            for attn_type in scatter_pools:
                 gid = attn_type_to_gid.get(attn_type)
                 if gid is None or gid >= len(by_group):
                     continue
@@ -864,6 +921,95 @@ class DeepSeekV4Model(GptModelBase):
                             2 * hd,
                             B,
                         )
+
+    def _build_paged_prefill_ctx_for_layer(self, attn_inputs, layer_idx: int, batch_offset: int):
+        """Construct the per-(layer, request) BlockPool handles needed by
+        ``Attention.set_paged_prefill_ctx`` so the layer's prefill forward
+        writes new SWA / compressed KV directly into BlockPool and runs
+        sparse_attn against BlockPool — bypassing the dense
+        ``register_buffer("kv_cache")`` mid-stage.
+
+        SWA pool (attn_type=7) is present on every layer.  CMP pool is
+        CSA_KV (attn_type=1, tpb=64) for ratio=4 layers, HCA_KV
+        (attn_type=2, tpb=2) for ratio=128 layers, None for SWA-only
+        layers (ratio=0).
+
+        Returns ``None`` if any required pool tensor is missing — caller
+        falls back to the legacy dense path for that layer.
+        """
+        from rtp_llm.models_py.modules.dsv4.attention import PagedPrefillCtx
+
+        by_group = getattr(
+            attn_inputs, "kv_cache_kernel_block_id_device_by_group", None
+        )
+        if by_group is None or len(by_group) == 0:
+            return None
+        if not getattr(self, "_fw_pool_tensors", None):
+            return None
+        if layer_idx >= len(self._fw_pool_tensors):
+            return None
+
+        attn_type_to_gid = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6}
+
+        # SWA pool — every layer must have it.
+        swa_pool = self._fw_pool_tensors[layer_idx][7]
+        if swa_pool is None or swa_pool.numel() == 0:
+            return None
+        swa_gid = attn_type_to_gid[7]
+        if swa_gid >= len(by_group):
+            return None
+        swa_bt_full = by_group[swa_gid]  # [total_reqs, max_blocks_swa] int32
+        if swa_bt_full is None or swa_bt_full.numel() == 0:
+            return None
+        swa_bt = swa_bt_full[batch_offset : batch_offset + 1]  # [1, max_blocks_swa]
+
+        ratio = self.v4.layers[layer_idx].attn.compress_ratio
+        cmp_pool = None
+        cmp_bt = None
+        cmp_tpb = None
+        if ratio == 4:
+            cmp_pool = self._fw_pool_tensors[layer_idx][1]
+            cmp_gid = attn_type_to_gid[1]
+            cmp_tpb = 64
+        elif ratio == 128:
+            cmp_pool = self._fw_pool_tensors[layer_idx][2]
+            cmp_gid = attn_type_to_gid[2]
+            cmp_tpb = 2
+
+        if cmp_pool is not None:
+            if cmp_pool.numel() == 0 or cmp_gid >= len(by_group):
+                return None
+            cmp_bt_full = by_group[cmp_gid]
+            if cmp_bt_full is None or cmp_bt_full.numel() == 0:
+                return None
+            cmp_bt = cmp_bt_full[batch_offset : batch_offset + 1]
+
+        return PagedPrefillCtx(
+            swa_pool=swa_pool,
+            swa_block_table=swa_bt,
+            swa_tokens_per_block=256,
+            cmp_pool=cmp_pool,
+            cmp_block_table=cmp_bt,
+            cmp_tokens_per_block=cmp_tpb,
+        )
+
+    def _bind_paged_prefill_ctx(self, attn_inputs, batch_offset: int) -> bool:
+        """Build + bind paged prefill ctx on every layer.  Returns True if all
+        layers got a valid ctx (paged path is active), False otherwise (caller
+        must fall back to legacy dense path for this request)."""
+        ctxs = []
+        for i in range(len(self.v4.layers)):
+            ctx = self._build_paged_prefill_ctx_for_layer(attn_inputs, i, batch_offset)
+            if ctx is None:
+                return False
+            ctxs.append(ctx)
+        for layer, ctx in zip(self.v4.layers, ctxs):
+            layer.attn.set_paged_prefill_ctx(ctx)
+        return True
+
+    def _clear_paged_prefill_ctx(self) -> None:
+        for layer in self.v4.layers:
+            layer.attn.set_paged_prefill_ctx(None)
 
     def _write_pd_cache_store(self, attn) -> None:
         """Register prefill-side KV blocks with cache_store for PD separation.
@@ -1184,6 +1330,38 @@ class DeepSeekV4Model(GptModelBase):
                 )  # [1, inp_len]
                 start_pos = prefix_len  # reuse offset
 
+                # Decide whether to use the paged prefill path for this request.
+                # Paged is active iff (a) framework KV is enabled, (b) the global
+                # toggle ``DSV4_USE_PAGED_PREFILL`` is on, (c) prefix reuse hit
+                # (``prefix_len > 0``), (d) every layer can successfully bind a
+                # PagedPrefillCtx.  When active, KV pools (1=CSA_KV, 2=HCA_KV,
+                # 7=SWA_KV) are written/read directly via paged kernels — no
+                # dense gather/scatter needed for them.
+                #
+                # Why we gate on ``prefix_len > 0``: the legacy dense prefill
+                # path passes the *full* untruncated ``kv_full`` to ``sparse_attn``
+                # only on fresh prefill (``sp_int == 0``); the SWA topk indices
+                # there are absolute token positions ``[0, seqlen)``.  Once
+                # ``sp_int > 0`` it switches to ring-buffer reads with topk
+                # indices in ``[0, win)``.  The paged sparse_attn reads from
+                # the SWA BlockPool, which stores the ring-buffer snapshot —
+                # so it can only honor the ``[0, win)`` topk language.  Fresh
+                # prefill must therefore stay on the legacy dense path until
+                # we land a separate "absolute-positioned KV pass-through" for
+                # paged sparse_attn (out of scope for this rev).  Real prefix
+                # reuse — the case the gather/scatter copy was costly for —
+                # always has ``prefix_len > 0`` and is fully covered by paged.
+                paged_active_for_req = False
+                if (
+                    use_framework_kv
+                    and hasattr(self, "_framework_kv_enabled")
+                    and self._framework_kv_enabled
+                    and attn is not None
+                    and getattr(self, "_paged_prefill_enabled", False)
+                    and prefix_len > 0
+                ):
+                    paged_active_for_req = self._bind_paged_prefill_ctx(attn, batch_offset=b)
+
                 # Gather from BlockPool if reuse hit
                 if (
                     use_framework_kv
@@ -1193,7 +1371,11 @@ class DeepSeekV4Model(GptModelBase):
                     and prefix_len > 0
                 ):
                     self._gather_all_layers(
-                        attn, B=1, batch_offset=b, reuse_gather=True
+                        attn,
+                        B=1,
+                        batch_offset=b,
+                        reuse_gather=True,
+                        paged_mode=paged_active_for_req,
                     )
                     # After gather, State pools restore kv_state/score_state.
                     # For CSA (overlap=True), kv_state[:, :ratio] holds the
@@ -1217,14 +1399,24 @@ class DeepSeekV4Model(GptModelBase):
                 h = self.v4(batch_ids, start_pos=start_pos, apply_lm_head=False)
                 all_hidden.append(h)
 
-                # Scatter to BlockPool after forward
+                # Scatter to BlockPool after forward.  When paged was active for
+                # this request, KV pools (1/2/7) were already written directly
+                # by the paged kernels — only INDEXER_KV (3) + STATE pools
+                # (4/5/6) still need flushing from the dense register_buffers.
                 if (
                     use_framework_kv
                     and hasattr(self, "_framework_kv_enabled")
                     and self._framework_kv_enabled
                     and attn is not None
                 ):
-                    self._scatter_all_layers(attn, B=1, batch_offset=b)
+                    self._scatter_all_layers(
+                        attn, B=1, batch_offset=b, paged_mode=paged_active_for_req
+                    )
+
+                # Clear paged ctx so subsequent decode/forward calls revert to
+                # the dense path (the decode arm doesn't carry paged ctx).
+                if paged_active_for_req:
+                    self._clear_paged_prefill_ctx()
 
                 self._running_pos = prefix_len + inp_len
                 offset += inp_len
