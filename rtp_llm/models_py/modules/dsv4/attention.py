@@ -743,6 +743,78 @@ class Attention(nn.Module):
             merged_i = torch.cat([kv_i, sc_i], dim=-1)
             self._prefill_paged_write_kv(INDEXER_STATE, merged_i, bsz)
 
+    def _bind_compressor_state_for_prefill(self, bsz: int, sp_int: int) -> None:
+        """Phase E3: reset / restore compressor + indexer.compressor state
+        for this prefill call, replacing the retired
+        ``DeepSeekV4Model._reset_compressor_state`` +
+        ``_gather_all_layers(reuse_gather=True)`` external flow.
+
+        Fresh prefill (sp_int == 0): zero ``kv_state[:bsz]`` and fill
+        ``score_state[:bsz]`` with -inf.  Continuation prefill (sp_int > 0):
+        gather the prefix carry from the framework STATE pool.  The
+        compressor's forward body reads/writes these attrs unchanged;
+        Phase B.3's ``_prefill_paged_write_state`` at forward tail
+        scatters the post-forward values back to the pool.
+        """
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
+            CSA_STATE,
+            HCA_STATE,
+            INDEXER_STATE,
+        )
+
+        device = self.kv_cache.device
+        ctx = self._prefill_paged_ctx
+
+        def _bind_one(
+            comp: "Compressor",  # type: ignore[name-defined]
+            state_attn_type: int,
+        ) -> None:
+            comp.ensure_state_allocated(device)
+            # Zero/-inf or gather based on continuation flag.  For the
+            # CSA case (overlap=True), continuation retains only the
+            # overlap carry [:ratio] and zeros the partial-window tail
+            # [ratio:] — mirrors the old
+            # ``_reset_compressor_state`` + selective re-zeroing in
+            # ``_forward_impl``.
+            if sp_int == 0 or ctx is None:
+                comp.reset_state_for_new_prefill(bsz)
+                return
+            layer_descs = ctx["layer_descs"]
+            bt_by_type = ctx["block_tables"]
+            if state_attn_type not in layer_descs or state_attn_type not in bt_by_type:
+                # Pool unavailable for this layer — fall back to reset.
+                comp.reset_state_for_new_prefill(bsz)
+                return
+            desc = layer_descs[state_attn_type]
+            bt = bt_by_type[state_attn_type]
+            if bt is None or bt.numel() == 0:
+                comp.reset_state_for_new_prefill(bsz)
+                return
+            comp.restore_state_from_pool(bsz, desc.view(), bt, desc.entries_per_block)
+            # CSA overlap=True: only [:ratio] carry is reused; zero the
+            # partial-window tail ([ratio:]) + fill corresponding score
+            # slots with -inf, matching the old reuse path in
+            # ``_forward_impl`` (see the ``a.compressor.kv_state[:1,
+            # off:].zero_()`` block before Phase E3 in deepseek_v4_model.py).
+            if comp.overlap:
+                r = comp.compress_ratio
+                comp.kv_state[:bsz, r:].zero_()
+                comp.score_state[:bsz, r:].fill_(float("-inf"))
+
+        # Self compressor (CSA or HCA STATE).
+        if self.compressor is not None:
+            at_self = (
+                CSA_STATE
+                if self.compress_ratio == 4
+                else (HCA_STATE if self.compress_ratio == 128 else None)
+            )
+            if at_self is not None:
+                _bind_one(self.compressor, at_self)
+
+        # Indexer's nested compressor (INDEXER_STATE).
+        if self.indexer is not None and self.indexer.compressor is not None:
+            _bind_one(self.indexer.compressor, INDEXER_STATE)
+
     def _prefill_paged_read_kv(
         self,
         attn_type: int,
@@ -1741,6 +1813,12 @@ class Attention(nn.Module):
             # Leaves scatter_all_layers in place (belt-and-suspenders).
             self._prefill_paged_write_swa(bsz)
             if self.compress_ratio:
+                # Phase E3: bind compressor state before forward (replaces
+                # DeepSeekV4Model._reset_compressor_state + _gather_all_layers
+                # STATE branch).  Fresh prefill (sp_int==0) resets the
+                # [:bsz] rows to zero/-inf; continuation prefill (sp_int>0)
+                # gathers the prefix carry from the STATE pool.
+                self._bind_compressor_state_for_prefill(bsz, sp_int)
                 kv_compress = self.compressor(x, sp_int)
                 # Phase B: paged CSA/HCA + INDEXER_KV dual-write. Runs after
                 # compressor.forward has populated compressor.kv_cache for

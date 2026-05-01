@@ -20,7 +20,10 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_all_gather_full,
     cp_should_gather,
 )
-from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, apply_rotary_emb_batched
+from rtp_llm.models_py.modules.dsv4.rope import (
+    apply_rotary_emb,
+    apply_rotary_emb_batched,
+)
 
 # P2 (prefill_opt/final_plan.md): fused softmax+weighted-sum Triton kernel.
 # Replaces the prefill `(kv * score.softmax(dim=2)).sum(dim=2)` chain
@@ -103,31 +106,116 @@ class Compressor(nn.Module):
             self.norm = _CompressorNorm(head_dim)
         self.norm_eps = norm_eps
 
-        # State buffers for incremental decode-phase compression.
-        self.register_buffer(
-            "kv_state",
-            torch.zeros(
-                max_batch_size,
-                coff * compress_ratio,
-                coff * head_dim,
-                dtype=torch.float32,
-            ),
-            persistent=False,
-        )
-        self.register_buffer(
-            "score_state",
-            torch.full(
-                (max_batch_size, coff * compress_ratio, coff * head_dim),
-                float("-inf"),
-                dtype=torch.float32,
-            ),
-            persistent=False,
-        )
+        # Phase E3: kv_state / score_state are pool-backed (framework
+        # STATE BlockPool), not register_buffer.  ``ensure_state_allocated``
+        # lazily allocates the scratch on the first call (mirroring
+        # ``register_buffer`` semantics — persistent across steps).
+        # ``reset_state_for_new_prefill`` clears it for a fresh request;
+        # ``restore_state_from_pool`` gathers the prefix carry on
+        # continuation prefill (reuse_cache path).
+        #
+        # Layout identical to the retired register_buffers so the forward
+        # body below is unchanged:
+        #   kv_state     : [max_B, coff * compress_ratio, coff * head_dim] fp32
+        #   score_state  : [max_B, coff * compress_ratio, coff * head_dim] fp32
+        #                  (initial fill -inf so softmax-gated pooling
+        #                  ignores unfilled slots)
+        self.max_batch_size = max_batch_size
+        self._state_rows = coff * compress_ratio
+        self._state_dim = coff * head_dim
+        self.kv_state: Optional[torch.Tensor] = None
+        self.score_state: Optional[torch.Tensor] = None
         self.kv_cache: Optional[torch.Tensor] = None  # bind from caller (Attention)
         self.freqs_cis: Optional[torch.Tensor] = None
         # CP context bound per-forward by V4Transformer.  None = no CP,
         # falls through to single-rank path unchanged.
         self._cp_ctx: Optional[CPContext] = None
+
+    # ------------------------------------------------------------------
+    # Phase E3 — state lifecycle helpers (replaces the retired
+    # ``register_buffer("kv_state", ...)`` / ``register_buffer("score_state", ...)``
+    # + ``DeepSeekV4Model._reset_compressor_state`` /
+    # ``_gather_all_layers(reuse_gather=True)`` external management flow).
+    # ------------------------------------------------------------------
+
+    def ensure_state_allocated(self, device: torch.device) -> None:
+        """Lazily allocate ``kv_state`` / ``score_state`` on first use.
+        Idempotent so repeat calls (across decode steps) are free.  The
+        zero / -inf initial values mirror the retired register_buffer
+        defaults — any prefill loop calls ``reset_state_for_new_prefill``
+        to re-establish these values per request.
+        """
+        if self.kv_state is not None and self.kv_state.device == device:
+            return
+        self.kv_state = torch.zeros(
+            self.max_batch_size,
+            self._state_rows,
+            self._state_dim,
+            dtype=torch.float32,
+            device=device,
+        )
+        self.score_state = torch.full(
+            (self.max_batch_size, self._state_rows, self._state_dim),
+            float("-inf"),
+            dtype=torch.float32,
+            device=device,
+        )
+
+    def reset_state_for_new_prefill(self, bsz: int) -> None:
+        """Zero the ``kv_state[:bsz]`` rows and reset ``score_state[:bsz]``
+        to -inf for a fresh prefill request (sp_int == 0).  Mirrors the
+        retired ``DeepSeekV4Model._reset_compressor_state`` body."""
+        assert (
+            self.kv_state is not None and self.score_state is not None
+        ), "reset_state_for_new_prefill: call ensure_state_allocated first"
+        self.kv_state[:bsz].zero_()
+        self.score_state[:bsz].fill_(float("-inf"))
+
+    def restore_state_from_pool(
+        self,
+        bsz: int,
+        state_pool_view: torch.Tensor,  # [num_slots, state_dim] fp32
+        block_table: torch.Tensor,  # [1, max_blocks] per-request
+        entries_per_block: int,
+    ) -> None:
+        """Continuation prefill (reuse_cache) — gather ``kv_state`` and
+        ``score_state`` from the framework STATE pool.  Pool layout (set
+        by ``_prefill_paged_write_state`` in Attention):
+        per slot ``[state_dim]`` fp32 = ``kv_row || score_row`` where
+        ``kv_row`` is the first half and ``score_row`` the second.
+        Restores self._state_rows rows; positions past pool capacity
+        (``max_blocks * entries_per_block``) are zero-filled, matching
+        the retired ``_gather_state_pool``'s ``max_blks * eb`` bound.
+        """
+        assert (
+            self.kv_state is not None and self.score_state is not None
+        ), "restore_state_from_pool: call ensure_state_allocated first"
+        assert bsz == 1, f"Phase E3 restore assumes bsz==1 per v4() call (got {bsz})"
+        T = self._state_rows
+        half_dim = self._state_dim  # kv_state / score_state inner dim each
+        device = block_table.device
+        eb = entries_per_block
+        max_blocks = block_table.shape[1]
+        pool_capacity = max_blocks * eb
+        pos = torch.arange(T, device=device, dtype=torch.long)
+        in_capacity = pos < pool_capacity
+        safe_pos = torch.where(in_capacity, pos, torch.zeros_like(pos))
+        block_in_seq = safe_pos // eb
+        in_block = safe_pos % eb
+        bt_long = block_table.to(torch.long)
+        block_id = bt_long[0, block_in_seq]
+        valid = (block_id > 0) & in_capacity
+        safe_slot = torch.where(
+            valid, block_id * eb + in_block, torch.zeros_like(in_block)
+        )
+        # Pool slot shape: [num_slots, 2 * half_dim] fp32.
+        gathered = state_pool_view.index_select(0, safe_slot)  # [T, 2*half]
+        valid_bcast = valid.unsqueeze(-1)
+        zero_row = torch.zeros((), dtype=torch.float32, device=device)
+        kv_rows = torch.where(valid_bcast, gathered[:, :half_dim], zero_row)
+        sc_rows = torch.where(valid_bcast, gathered[:, half_dim:], zero_row)
+        self.kv_state[:bsz] = kv_rows.view(bsz, T, half_dim)
+        self.score_state[:bsz] = sc_rows.view(bsz, T, half_dim)
 
     def _rmsnorm(self, x: torch.Tensor) -> torch.Tensor:
         dtype = x.dtype
@@ -187,6 +275,7 @@ class Compressor(nn.Module):
             self.freqs_cis is not None
         ), "Compressor.freqs_cis must be bound by caller"
         assert x.shape[1] == 1, "decode-only: q_len must be 1"
+        self.ensure_state_allocated(x.device)  # Phase E3: lazy state alloc
         bsz = x.size(0)
         ratio, overlap, d, rd = (
             self.compress_ratio,
@@ -293,6 +382,7 @@ class Compressor(nn.Module):
             self.freqs_cis is not None
         ), "Compressor.freqs_cis must be bound by caller"
         assert x.shape[1] == 1, "decode-only: q_len must be 1"
+        self.ensure_state_allocated(x.device)  # Phase E3: lazy state alloc
 
         bsz = x.size(0)
         ratio, overlap, d, rd = (
@@ -400,6 +490,7 @@ class Compressor(nn.Module):
         assert (
             self.freqs_cis is not None
         ), "Compressor.freqs_cis must be bound by caller"
+        self.ensure_state_allocated(x.device)  # Phase E3: lazy state alloc
         bsz, seqlen, _ = x.size()
         ratio, overlap, d, rd = (
             self.compress_ratio,

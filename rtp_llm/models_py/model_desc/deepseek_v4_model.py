@@ -390,31 +390,22 @@ class DeepSeekV4Model(GptModelBase):
         return True
 
     def _reset_compressor_state(self):
-        """Reset compressor/indexer state for a new prefill request.
+        """Reset KV/compressed register_buffers for a new prefill.
 
-        When using framework KV cache, the kv_cache tensor persists across
-        requests (it's a framework-managed buffer, not a per-request register_buffer).
-        The compressor's kv_state/score_state and kv_cache must be zeroed on each
-        new prefill to avoid stale data from previous requests corrupting output.
-
-        NOTE: Do NOT set compressor.kv_cache = None here. The gather path
-        needs the buffer reference to exist so it can copy prefix-cache data
-        into it BEFORE forward() runs. The underlying storage is already
-        zeroed by attn.kv_cache.zero_() (compressor.kv_cache is a view).
+        Phase E3: compressor / indexer.compressor ``kv_state`` /
+        ``score_state`` are now self-managed — ``Attention.forward``'s
+        ``_bind_compressor_state_for_prefill`` resets or restores them
+        per-request from the STATE pool.  This helper now only clears
+        the KV register_buffers (``attn.kv_cache`` + ``indexer.kv_cache``)
+        which still rely on zero-init for stale-data hygiene.  Phase E5
+        will drop the KV register_buffers outright.
         """
         for layer in self.v4.layers:
             attn = layer.attn
             # Reset kv_cache (SWA + compressed KV) — also zeros compressor.kv_cache view
             attn.kv_cache.zero_()
-            # Reset compressor state
-            if attn.compressor is not None:
-                attn.compressor.kv_state.zero_()
-                attn.compressor.score_state.fill_(float("-inf"))
-            # Reset indexer state
             if attn.indexer is not None:
                 attn.indexer.kv_cache.zero_()
-                attn.indexer.compressor.kv_state.zero_()
-                attn.indexer.compressor.score_state.fill_(float("-inf"))
 
     def _wire_framework_kv_cache(self, device: str):
         """Wire framework BlockPool for 7-pool gather/scatter.
@@ -807,41 +798,14 @@ class DeepSeekV4Model(GptModelBase):
                             idx_hd,
                             B,
                         )
-                elif attn_type == 4:  # INDEXER_STATE
-                    if attn_mod.indexer is not None:
-                        comp = attn_mod.indexer.compressor
-                        idx_hd = attn_mod.indexer.head_dim
-                        self._gather_state_pool(
-                            fw_t,
-                            bid_slice,
-                            comp.kv_state[:B],
-                            comp.score_state[:B],
-                            4,
-                            4 * idx_hd,
-                            B,
-                        )
-                elif attn_type == 5:  # CSA_STATE
-                    if attn_mod.compressor is not None:
-                        self._gather_state_pool(
-                            fw_t,
-                            bid_slice,
-                            attn_mod.compressor.kv_state[:B],
-                            attn_mod.compressor.score_state[:B],
-                            4,
-                            4 * hd,
-                            B,
-                        )
-                elif attn_type == 6:  # HCA_STATE
-                    if attn_mod.compressor is not None:
-                        self._gather_state_pool(
-                            fw_t,
-                            bid_slice,
-                            attn_mod.compressor.kv_state[:B],
-                            attn_mod.compressor.score_state[:B],
-                            8,
-                            2 * hd,
-                            B,
-                        )
+                elif attn_type in (4, 5, 6):
+                    # Phase E3: STATE pools (INDEXER_STATE / CSA_STATE /
+                    # HCA_STATE) are self-gathered by
+                    # Compressor.restore_state_from_pool at Attention
+                    # forward entry — no longer touched here.  Layer pool
+                    # lists retain the types for inventory / dump; the
+                    # runtime path just skips them.
+                    continue
 
     def _bind_prefill_paged_ctx(self, attn_inputs, batch_offset: int = 0) -> bool:
         """Phase B: bind per-layer paged dual-write ctx on every Attention.
@@ -1330,27 +1294,14 @@ class DeepSeekV4Model(GptModelBase):
                     and attn is not None
                     and prefix_len > 0
                 ):
+                    # Phase E3: STATE restore is now self-contained inside
+                    # ``Attention._bind_compressor_state_for_prefill``
+                    # (including the overlap partial-window re-zero for
+                    # CSA that this block used to do after gather).
+                    # ``_gather_all_layers`` only pulls KV pools now.
                     self._gather_all_layers(
                         attn, B=1, batch_offset=b, reuse_gather=True
                     )
-                    # After gather, State pools restore kv_state/score_state.
-                    # For CSA (overlap=True), kv_state[:, :ratio] holds the
-                    # overlap carry from the prefix tail — keep it so the
-                    # compressor can inject it into window 0's overlap slots.
-                    # Only zero the partial-window portion (offset onwards).
-                    for layer in self.v4.layers:
-                        a = layer.attn
-                        if a.compressor is not None:
-                            r = a.compressor.compress_ratio
-                            off = r if a.compressor.overlap else 0
-                            a.compressor.kv_state[:1, off:].zero_()
-                            a.compressor.score_state[:1, off:].fill_(float("-inf"))
-                        if a.indexer is not None:
-                            ic = a.indexer.compressor
-                            ir = ic.compress_ratio
-                            ioff = ir if ic.overlap else 0
-                            ic.kv_state[:1, ioff:].zero_()
-                            ic.score_state[:1, ioff:].fill_(float("-inf"))
 
                 # Phase B: bind prefill paged dual-write ctx per-layer so
                 # Attention.forward writes SWA/CSA/HCA/INDEXER KV + STATE
