@@ -71,6 +71,22 @@ _STREAM_TYPE = {
     (True, True): "bidi_stream",
 }
 
+# grpcio surfaces request-iterator exceptions under this exact ``details``
+# string — matched verbatim rather than by regex so an unrelated error whose
+# message happens to contain "iterating requests" doesn't silently get
+# reclassified as a client fault.
+_CLIENT_REQ_ITER_DETAILS = "Exception iterating requests!"
+
+
+def _is_client_request_iter_failure(exc: BaseException) -> bool:
+    """True iff ``exc`` is grpcio's ``_MultiThreadedRendezvous`` for a failed request-iterator."""
+    if not isinstance(exc, grpc.RpcError):
+        return False
+    try:
+        return exc.details() == _CLIENT_REQ_ITER_DETAILS
+    except Exception:
+        return False
+
 # Raw-mode caps. LLM streams can span hundreds of chunks and a single input_ids
 # tensor can be tens of thousands of tokens; without these we'd dump multi-MB
 # lines and defeat the "readable JSON" goal.
@@ -645,6 +661,21 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
                 # which carries ``context_code="CANCELLED"`` from the peer.
                 agg.status = "CANCELLED"
                 agg.status_detail = "client closed generator"
+            elif _is_client_request_iter_failure(exc):
+                # grpcio's per-call reader thread wraps request-iterator
+                # failures as ``_MultiThreadedRendezvous(code=UNKNOWN,
+                # details="Exception iterating requests!")``. On the forwarder
+                # path we hand the client's ``request_iterator`` straight to
+                # the downstream stub — the iteration runs inside grpcio and
+                # the error surfaces on the response side after ~sub-ms of
+                # wall time. Signature: ``latency_total_ms<1 / req_count=0 /
+                # resp_count=0``. It's virtually always the client
+                # disappearing before sending a single frame, not a backend
+                # fault, so route to CANCEL_QPS instead of polluting error
+                # dashboards with something that looks like a timeout but
+                # isn't.
+                agg.status = "CANCELLED"
+                agg.status_detail = "client request iterator failed"
             else:
                 agg.status = "UNKNOWN"
                 agg.status_detail = repr(exc)
