@@ -18,6 +18,25 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 _LOG_DEBUG_ENV_KEY = "DASH_SC_GRPC_FORWARD_LOG_DEBUG"
 
+# HTTP/2 keepalive for the forwarder -> real frontend channel. Production
+# topology places an LBS between the two with a 100s idle timeout; without
+# keepalive, any RPC whose downstream stalls >100s (cold prefill, PD handoff,
+# backend GC pause, etc.) gets its TCP connection RST by the LBS and the
+# access log records a mystifying ``UNAVAILABLE / recvmsg:Connection reset
+# by peer / resp_count=0``. Sending a PING every 30s keeps the LBS idle
+# counter pinned at ~0 so only real downstream failure shows up.
+#
+# ``permit_without_calls=0`` means PINGs only fire while an RPC is active —
+# idle channels don't burn anything. ``max_pings_without_data=0`` removes
+# the grpcio default cap of 2 consecutive data-less PINGs, which would
+# otherwise GOAWAY us after 60s of PING-only traffic on a slow stream.
+_FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
+    ("grpc.keepalive_time_ms", 30000),
+    ("grpc.keepalive_timeout_ms", 10000),
+    ("grpc.keepalive_permit_without_calls", 0),
+    ("grpc.http2.max_pings_without_data", 0),
+]
+
 
 def _parse_forward_addrs(env_value: str) -> List[str]:
     """Parse forward addresses from env value.
@@ -70,7 +89,7 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
 
         for addr in forward_addrs:
-            channel = grpc.insecure_channel(addr)
+            channel = grpc.insecure_channel(addr, options=_FORWARD_CHANNEL_OPTS)
             stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
             self._channels.append(channel)
             self._stubs.append(stub)
@@ -97,6 +116,18 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         stub, idx = self._next_stub()
         addr = self._forward_addrs[idx]
 
+        # Grab the access-log aggregate (installed by the access-log
+        # interceptor) so forward-path diagnostics land inline on the access
+        # log line — ``downstream_addr`` / ``downstream_resp_count`` /
+        # ``buffered_stage`` are what lets an operator triage a
+        # ``resp_count=0`` RPC without cross-grepping the forwarder debug log.
+        agg = getattr(context, "_dash_sc_access_agg", None)
+        if agg is not None:
+            try:
+                agg.downstream_addr = addr
+            except Exception:
+                pass
+
         if self._log_debug:
             req_count = 0
             resp_count = 0
@@ -121,6 +152,11 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 nonlocal resp_count
                 for resp in upstream_iter:
                     resp_count += 1
+                    if agg is not None:
+                        try:
+                            agg.downstream_resp_count += 1
+                        except Exception:
+                            pass
                     logging.info(
                         "[DashScGrpc] Forward resp #%d from %s: error=%s outputs=%d",
                         resp_count,
@@ -132,12 +168,25 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
 
             downstream_iter = logged_response_iter()
         else:
-            downstream_iter = stub.ModelStreamInfer(request_iterator)
+            upstream_iter = stub.ModelStreamInfer(request_iterator)
+            if agg is not None:
 
-        yield from self._buffered_iter(downstream_iter)
+                def counting_response_iter():
+                    for resp in upstream_iter:
+                        try:
+                            agg.downstream_resp_count += 1
+                        except Exception:
+                            pass
+                        yield resp
+
+                downstream_iter = counting_response_iter()
+            else:
+                downstream_iter = upstream_iter
+
+        yield from self._buffered_iter(downstream_iter, agg)
 
     @staticmethod
-    def _buffered_iter(downstream_iter):
+    def _buffered_iter(downstream_iter, diag_agg=None):
         """Hold the first chunk until the second arrives, then yield both back-to-back.
 
         Smooths PD-disaggregation TPOT perception: in PD mode the gap between
@@ -145,32 +194,59 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         handoff) is much larger than steady-state TPOT. Buffering delays token 1
         until token 2 is ready, so clients see a uniform inter-token cadence.
 
+        ``diag_agg`` is the access-log aggregate (or ``None`` in tests); the
+        stage labels it receives are what distinguish the three failure shapes
+        at a glance on the access log line:
+
+        - ``waiting_first`` + exception -> backend produced zero frames (issue
+          is downstream / LBS, buffering is innocent);
+        - ``waiting_second`` + exception -> backend produced token 1 and we
+          blocked waiting for token 2; whether that token made it to the
+          client follows:
+        - ``flushed_first_on_exception`` -> buffered token 1 was still yielded
+          to the client before re-raise (client at least saw partial output);
+        - ``dropped_buffered_on_exception`` -> client went away first, token 1
+          was lost — this is the "HoL blocking burned the only output" case.
+
         Exception handling contract:
         - downstream ends after 1 chunk -> flush buffered, return cleanly;
         - downstream errors at any point -> flush buffered (best-effort), then re-raise;
         - downstream yields 0 chunks -> return cleanly.
         """
+
+        def _set_stage(s):
+            if diag_agg is not None:
+                try:
+                    diag_agg.buffered_stage = s
+                except Exception:
+                    pass
+
         it = iter(downstream_iter)
         buffered = None
+        _set_stage("waiting_first")
         try:
             try:
                 buffered = next(it)
             except StopIteration:
                 return
+            _set_stage("waiting_second")
             try:
                 second = next(it)
             except StopIteration:
                 yield buffered
                 buffered = None
+                _set_stage("flushed_first")
                 return
             yield buffered
             buffered = None
             yield second
+            _set_stage("flushed_both")
             yield from it
         except BaseException:
             if buffered is not None:
                 try:
                     yield buffered
+                    _set_stage("flushed_first_on_exception")
                 except BaseException:
-                    pass
+                    _set_stage("dropped_buffered_on_exception")
             raise

@@ -275,6 +275,200 @@ class BufferFirstTokenTest(TestCase):
         self.assertEqual([r.error_message for r in out], ["a", "b", "c"])
 
 
+class AccessLogDiagInjectionTest(TestCase):
+    """Forwarder writes ``downstream_addr`` / ``downstream_resp_count`` /
+    ``buffered_stage`` onto the access-log aggregate attached at
+    ``context._dash_sc_access_agg``.
+
+    The real aggregate object lives in :mod:`rtp_llm.dash_sc.access_log`;
+    we construct one directly and attach it to a fake context, bypassing the
+    interceptor. That way the forwarder's write-back path is exercised in
+    isolation and every assertion is against a real dataclass field (no mock
+    slippage where ``agg.downstream_resp_count += 1`` would silently no-op).
+    """
+
+    def setUp(self) -> None:
+        self.channel_patcher = patch("grpc.insecure_channel", return_value=MagicMock())
+        self.channel_patcher.start()
+
+        # Two-addr config -> randomness in _next_stub; we patch it to deterministic.
+        self.servicer = PureForwardServicer(["10.0.0.1:8096", "10.0.0.2:8096"])
+        self.mock_stub = MagicMock()
+        self.servicer._stubs = [self.mock_stub, self.mock_stub]
+        self.servicer._log_debug = False
+
+    def tearDown(self) -> None:
+        self.servicer.close()
+        self.channel_patcher.stop()
+
+    def _ctx_with_agg(self) -> tuple[MagicMock, object]:
+        """Return (context, agg) where agg is a real ``_RpcAggregate``."""
+        import time as _time
+
+        from rtp_llm.dash_sc.access_log import _RpcAggregate
+
+        agg = _RpcAggregate(
+            method="/x.Svc/M",
+            stream_type="bidi_stream",
+            peer="",
+            start_ts=_time.time(),
+        )
+        ctx = MagicMock()
+        ctx._dash_sc_access_agg = agg  # explicit attribute — overrides MagicMock auto
+        return ctx, agg
+
+    def _make_resp(self, tag: str) -> predict_v2_pb2.ModelStreamInferResponse:
+        resp = _make_response()
+        resp.error_message = tag
+        return resp
+
+    def _patch_addr(self, idx: int) -> None:
+        """Pin ``_next_stub`` to a deterministic addr index."""
+        self.servicer._next_stub = lambda: (self.mock_stub, idx)
+
+    def test_downstream_addr_set_to_chosen_backend(self) -> None:
+        self._patch_addr(1)
+        self.mock_stub.ModelStreamInfer.return_value = iter([self._make_resp("a")])
+        ctx, agg = self._ctx_with_agg()
+
+        def request_gen():
+            yield _make_request("req1")
+
+        list(self.servicer.ModelStreamInfer(request_gen(), ctx))
+        self.assertEqual(agg.downstream_addr, "10.0.0.2:8096")
+
+    def test_downstream_resp_count_tracks_upstream_frames(self) -> None:
+        self._patch_addr(0)
+        chunks = [self._make_resp("a"), self._make_resp("b"), self._make_resp("c")]
+        self.mock_stub.ModelStreamInfer.return_value = iter(chunks)
+        ctx, agg = self._ctx_with_agg()
+
+        def request_gen():
+            yield _make_request("req1")
+
+        list(self.servicer.ModelStreamInfer(request_gen(), ctx))
+        self.assertEqual(agg.downstream_resp_count, 3)
+
+    def test_stage_waiting_first_on_immediate_downstream_error(self) -> None:
+        """Downstream errors before any frame -> stuck at waiting_first.
+
+        This is the "backend never produced anything" signature; buffering
+        is innocent here, the issue is downstream or the LBS below it.
+        """
+        self._patch_addr(0)
+
+        class FakeRpcError(grpc.RpcError):
+            pass
+
+        def downstream_gen():
+            raise FakeRpcError("backend silent")
+            yield  # pragma: no cover
+
+        self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
+        ctx, agg = self._ctx_with_agg()
+
+        def request_gen():
+            yield _make_request("req1")
+
+        with self.assertRaises(FakeRpcError):
+            list(self.servicer.ModelStreamInfer(request_gen(), ctx))
+        self.assertEqual(agg.buffered_stage, "waiting_first")
+        self.assertEqual(agg.downstream_resp_count, 0)
+
+    def test_stage_flushed_first_on_single_chunk_clean_end(self) -> None:
+        """Downstream ends with exactly one chunk -> flushed_first (normal path)."""
+        self._patch_addr(0)
+        self.mock_stub.ModelStreamInfer.return_value = iter([self._make_resp("only")])
+        ctx, agg = self._ctx_with_agg()
+
+        def request_gen():
+            yield _make_request("req1")
+
+        out = list(self.servicer.ModelStreamInfer(request_gen(), ctx))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(agg.buffered_stage, "flushed_first")
+        self.assertEqual(agg.downstream_resp_count, 1)
+
+    def test_stage_flushed_both_on_happy_path(self) -> None:
+        """Multi-chunk happy path -> flushed_both after second frame yields."""
+        self._patch_addr(0)
+        self.mock_stub.ModelStreamInfer.return_value = iter(
+            [self._make_resp("a"), self._make_resp("b"), self._make_resp("c")]
+        )
+        ctx, agg = self._ctx_with_agg()
+
+        def request_gen():
+            yield _make_request("req1")
+
+        list(self.servicer.ModelStreamInfer(request_gen(), ctx))
+        self.assertEqual(agg.buffered_stage, "flushed_both")
+        self.assertEqual(agg.downstream_resp_count, 3)
+
+    def test_stage_flushed_first_on_exception_when_client_consumes(self) -> None:
+        """Downstream errors after token 1 and the client fully drains the stream
+        -> ``flushed_first_on_exception``: the buffered frame did reach the wire.
+
+        This is the "LBS cut downstream but client still alive" case; the
+        forwarder successfully flushed token 1 to the client before re-raising.
+        """
+        self._patch_addr(0)
+
+        class FakeRpcError(grpc.RpcError):
+            pass
+
+        def downstream_gen():
+            yield self._make_resp("a")
+            raise FakeRpcError("downstream cut after token 1")
+
+        self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
+        ctx, agg = self._ctx_with_agg()
+
+        def request_gen():
+            yield _make_request("req1")
+
+        got: list[str] = []
+        with self.assertRaises(FakeRpcError):
+            for r in self.servicer.ModelStreamInfer(request_gen(), ctx):
+                got.append(r.error_message)
+        self.assertEqual(got, ["a"])  # client got token 1
+        self.assertEqual(agg.buffered_stage, "flushed_first_on_exception")
+        self.assertEqual(agg.downstream_resp_count, 1)
+
+    def test_stage_dropped_buffered_when_client_went_away(self) -> None:
+        """Downstream errors after token 1, client-side yield raises (simulated
+        via generator.throw) -> ``dropped_buffered_on_exception``.
+
+        This is the pathological HoL case we saw in production: backend
+        produced token 1, forwarder buffered it waiting for token 2, client
+        disconnected, the buffered frame died with the generator.
+        """
+        self._patch_addr(0)
+
+        class FakeRpcError(grpc.RpcError):
+            pass
+
+        def downstream_gen():
+            yield self._make_resp("a")
+            raise FakeRpcError("downstream cut after token 1")
+
+        self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
+        ctx, agg = self._ctx_with_agg()
+
+        def request_gen():
+            yield _make_request("req1")
+
+        gen = self.servicer.ModelStreamInfer(request_gen(), ctx)
+        # Consumer receives token 1 via the except-path yield; generator is
+        # now suspended right after ``yield buffered`` inside the except block.
+        first = next(gen)
+        self.assertEqual(first.error_message, "a")
+        # Simulate the client handler dying — gRPC framework closes the
+        # generator, which inside our ``yield buffered`` reads as throw().
+        with self.assertRaises(BaseException):
+            gen.throw(RuntimeError("client gone"))
+        self.assertEqual(agg.buffered_stage, "dropped_buffered_on_exception")
+
+
 class NonlocalClosurePatternTest(TestCase):
     """Verify the nonlocal closure pattern used in logged_iterator."""
 

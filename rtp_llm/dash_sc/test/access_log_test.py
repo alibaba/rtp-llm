@@ -660,6 +660,73 @@ class KMonitorReportTest(InterceptorTestBase):
         self.assertEqual(out_len, 0)
 
 
+class DownstreamDiagnosticsTest(InterceptorTestBase):
+    """Forward-path diagnostics (``downstream_addr`` / ``downstream_resp_count`` /
+    ``buffered_stage``) must round-trip onto the access-log line.
+
+    These fields are populated by :class:`PureForwardServicer` via the
+    ``context._dash_sc_access_agg`` hook the interceptor installs; here we
+    simulate that write-back and assert the record ends up with the right
+    shape regardless of capture mode.
+    """
+
+    def test_context_gets_aggregate_attached(self) -> None:
+        """Interceptor must attach the aggregate to the context for servicer readback."""
+
+        captured: dict[str, Any] = {}
+
+        def inner(request, context):
+            captured["agg"] = getattr(context, "_dash_sc_access_agg", None)
+            return _make_stream_response(generated_ids=[1])
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        behavior(_make_infer_request(input_ids=[1]), FakeContext())
+        self.assertIsNotNone(captured["agg"])
+        # The aggregate exposes the writable diagnostics attributes.
+        self.assertTrue(hasattr(captured["agg"], "downstream_addr"))
+        self.assertTrue(hasattr(captured["agg"], "downstream_resp_count"))
+        self.assertTrue(hasattr(captured["agg"], "buffered_stage"))
+
+    def test_defaults_emitted_when_no_forwarder_writes(self) -> None:
+        """Struct-mode path doesn't touch diagnostics — record still has the fields."""
+
+        def inner(request, context):
+            return _make_stream_response(generated_ids=[1])
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        behavior(_make_infer_request(input_ids=[1]), FakeContext())
+        rec = self.records[0]
+        self.assertIsNone(rec["downstream_addr"])
+        self.assertEqual(rec["downstream_resp_count"], 0)
+        self.assertIsNone(rec["buffered_stage"])
+
+    def test_forwarder_writes_round_trip_to_record(self) -> None:
+        """Simulate the forwarder writing diag fields — record mirrors them verbatim."""
+
+        def inner(request, context):
+            agg = context._dash_sc_access_agg
+            agg.downstream_addr = "10.0.0.7:9000"
+            agg.downstream_resp_count = 42
+            agg.buffered_stage = "dropped_buffered_on_exception"
+            return _make_stream_response(generated_ids=[1])
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        behavior(_make_infer_request(input_ids=[1]), FakeContext())
+        rec = self.records[0]
+        self.assertEqual(rec["downstream_addr"], "10.0.0.7:9000")
+        self.assertEqual(rec["downstream_resp_count"], 42)
+        self.assertEqual(rec["buffered_stage"], "dropped_buffered_on_exception")
+
+
 class RawModeInterceptorTestBase(InterceptorTestBase):
     """Mirror of InterceptorTestBase with ``raw_mode=True``.
 
