@@ -87,6 +87,10 @@ def _prefill_paged_write_kv_ref(
     bt: torch.Tensor,  # [1, max_blocks] int
     source_buf: torch.Tensor,  # [1, T, vec_dim]
 ) -> None:
+    """Mirror of ``Attention._prefill_paged_write_kv`` (post-HCA-STATE-
+    overflow fix). Rows past ``max_blocks * eb`` are sentinel-masked so the
+    writer skips them, matching ``_scatter_state_pool``'s ``max_blks * eb``
+    write limit."""
     assert source_buf.shape[0] == 1 and bt.shape[0] == 1
     T = int(source_buf.shape[1])
     D = int(source_buf.shape[2])
@@ -94,13 +98,16 @@ def _prefill_paged_write_kv_ref(
         return
     device = source_buf.device
     eb = desc.entries_per_block
-    pos = torch.arange(T, device=device, dtype=torch.long)
     max_blocks = bt.shape[1]
-    block_in_seq = (pos // eb).clamp_(0, max(0, max_blocks - 1))
-    in_block = pos % eb
+    pool_capacity = max_blocks * eb
+    pos = torch.arange(T, device=device, dtype=torch.long)
+    in_capacity = pos < pool_capacity
+    safe_pos = torch.where(in_capacity, pos, torch.zeros_like(pos))
+    block_in_seq = safe_pos // eb
+    in_block = safe_pos % eb
     bt_long = bt.to(torch.long)
     block_id = bt_long[0, block_in_seq]
-    valid = block_id > 0
+    valid = (block_id > 0) & in_capacity
     slot_per = torch.where(
         valid,
         block_id * eb + in_block,
@@ -376,6 +383,24 @@ def test_hca_state():
     )
 
 
+def test_hca_state_overflow():
+    # CRITICAL regression guard: HCA compressor.kv_state has coff*ratio=128
+    # rows in production, but HCA_STATE pool only provisions 2 blocks × 8 eb
+    # = 16 rows. Earlier paged writer used ``clamp_(0, max_blocks-1)`` which
+    # collapsed rows 16..127 into block 1, silently overwriting valid data
+    # on every excess row. _scatter_state_pool stopped at max_blks*eb=16.
+    # Fixed by sentinel-masking positions past pool capacity.
+    _run_state_case(
+        attn_type=pl.HCA_STATE,
+        half_dim=512,
+        entries_per_block=8,
+        state_rows=128,  # ← production shape (coff=1, ratio=128)
+        num_blocks=8,
+        block_ids=[3, 5],
+        coff=1,
+    )
+
+
 def test_indexer_state():
     # INDEXER_STATE: coff=2, idx_hd=128 → half_dim=256, state_dim=512, eb=4.
     _run_state_case(
@@ -398,5 +423,6 @@ if __name__ == "__main__":
     test_swa_T_less_than_block()
     test_csa_state()
     test_hca_state()
+    test_hca_state_overflow()
     test_indexer_state()
     print("All Phase B dual-write byte-equal tests passed.")

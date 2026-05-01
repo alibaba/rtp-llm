@@ -630,14 +630,27 @@ class Attention(nn.Module):
             return
         device = source_buf.device
         eb = desc.entries_per_block
-        pos = torch.arange(T, device=device, dtype=torch.long)
         max_blocks = bt.shape[1]
-        block_in_seq = (pos // eb).clamp_(0, max(0, max_blocks - 1))
-        in_block = pos % eb
+        # Pool capacity = max_blocks * eb. When source_buf has more rows than
+        # pool capacity (e.g. HCA compressor.kv_state has coff*ratio=128 rows
+        # but HCA_STATE pool only provisions 2 blocks × 8 eb = 16 rows), the
+        # deleted ``_scatter_state_pool`` stopped at ``max_blks * eb``; we
+        # mirror that here by sentinel-masking positions past pool capacity
+        # so write_kv_to_pool(mask_negative=True) skips them instead of
+        # clamp-collapsing them into the last block (which silently
+        # overwrites valid rows on every excess position).
+        pool_capacity = max_blocks * eb
+        pos = torch.arange(T, device=device, dtype=torch.long)
+        in_capacity = pos < pool_capacity  # True for rows scatter would have written
+        # For rows past capacity, emit sentinel -1 (write_kv_to_pool skips).
+        safe_pos = torch.where(in_capacity, pos, torch.zeros_like(pos))
+        block_in_seq = safe_pos // eb  # always in [0, max_blocks) now
+        in_block = safe_pos % eb
         bt_long = bt.to(torch.long)
         block_id = bt_long[0, block_in_seq]  # [T]
-        # Mirror ``_scatter_kv_pool``'s ``if bid <= 0: continue`` sentinel.
-        valid = block_id > 0
+        # Mirror ``_scatter_kv_pool``'s ``if bid <= 0: continue`` sentinel:
+        # unallocated blocks (bid <= 0) and over-capacity rows both → -1.
+        valid = (block_id > 0) & in_capacity
         slot_per = torch.where(
             valid,
             block_id * eb + in_block,
