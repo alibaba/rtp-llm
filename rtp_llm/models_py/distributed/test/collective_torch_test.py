@@ -9,6 +9,8 @@ import multiprocessing as mp
 import os
 import unittest
 
+import pytest
+
 logging.basicConfig(level=logging.INFO)
 
 import torch
@@ -27,6 +29,8 @@ from rtp_llm.models_py.distributed.collective_torch import (
 )
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.port_util import PortManager
+
+pytestmark = [pytest.mark.gpu(type="H20", count=4)]
 
 
 def _calculate_group_ranks(rank: int, world_size: int, tp_size: int, group_type: Group):
@@ -334,12 +338,7 @@ class TestCollectiveOperations(unittest.TestCase):
         if not torch.cuda.is_available():
             self.skipTest("CUDA not available")
 
-        # Set spawn method for multiprocessing
-        try:
-            mp.set_start_method("spawn", force=True)
-        except RuntimeError:
-            pass  # Already set
-
+        self._mp_ctx = mp.get_context("spawn")
         self.port_manager = PortManager()
 
     def tearDown(self):
@@ -352,11 +351,11 @@ class TestCollectiveOperations(unittest.TestCase):
         """Helper to run a test with multiple processes"""
         ports, locks = self.port_manager.get_consecutive_ports(1)
         nccl_port = ports[0]
+        processes = []
 
         try:
-            processes = []
             for rank in range(world_size):
-                p = mp.Process(
+                p = self._mp_ctx.Process(
                     target=worker_func,
                     args=(rank, world_size, tp_size, dp_size, nccl_port),
                     name=f"rank-{rank}",
@@ -364,15 +363,25 @@ class TestCollectiveOperations(unittest.TestCase):
                 p.start()
                 processes.append(p)
 
-            # Wait for all processes to complete
+            # Wait for all processes and collect failures
+            failed = []
             for p in processes:
                 p.join(timeout=120)
-                if p.exitcode != 0:
-                    raise RuntimeError(
-                        f"Process {p.name} exited with code {p.exitcode}"
-                    )
+                if p.is_alive():
+                    failed.append(f"{p.name} timed out")
+                elif p.exitcode != 0:
+                    failed.append(f"{p.name} exited with code {p.exitcode}")
+            if failed:
+                raise RuntimeError("; ".join(failed))
         finally:
-            # Release port locks
+            # Terminate child processes to prevent orphans holding GPU memory
+            for p in processes:
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=10)
+                    if p.is_alive():
+                        p.kill()
+                        p.join(timeout=5)
             for lock in locks:
                 lock.__exit__(None, None, None)
 
@@ -414,7 +423,7 @@ class TestDistributedEnvironment(unittest.TestCase):
     """Test distributed environment initialization"""
 
     def setUp(self):
-        mp.set_start_method("spawn", force=True)
+        pass
 
     def test_distributed_environment_initialized(self):
         """Test checking if distributed environment is initialized"""
@@ -424,4 +433,5 @@ class TestDistributedEnvironment(unittest.TestCase):
 if __name__ == "__main__":
     os.environ["NCCL_DEBUG"] = "INFO"
     os.environ["NCCL_DEBUG_FILE"] = "nccl.log"
+if __name__ == "__main__":
     unittest.main()

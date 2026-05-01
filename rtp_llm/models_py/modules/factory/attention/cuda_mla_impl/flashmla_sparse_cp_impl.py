@@ -29,7 +29,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_full_causal_kv_indices,
     generate_q_indices,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
 from .flashmla_sparse_impl import (
@@ -185,9 +185,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         assert topk == self.top_k
         assert self.block_table is not None
         assert self.mla_params is not None
-        assert self.precomputed_req_ids is not None, (
-            "precomputed_req_ids must be set in plan() before _convert_topk_indices_to_global"
-        )
+        assert (
+            self.precomputed_req_ids is not None
+        ), "precomputed_req_ids must be set in plan() before _convert_topk_indices_to_global"
         req_id = self.precomputed_req_ids
         from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
             triton_convert_req_index_to_global_index,
@@ -363,11 +363,6 @@ class SparseMlaCpImpl(SparseMlaImpl):
         attn_for_prepare.input_lengths = cp_info.prefill_actual_input_lengths_cpu
         super().prepare(attn_for_prepare, forbid_realloc=forbid_realloc)
 
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        """Return FMHA type."""
-        return FMHAType.CP_SPARSE_FLASHMLA
-
     def create_params(self, attn_inputs: PyAttentionInputs):
         """Create FMHA parameters and pack CP indices into cp_params."""
         self.fmha_params = rtp_llm_ops.SparseMlaParams()
@@ -381,17 +376,15 @@ class SparseMlaCpImpl(SparseMlaImpl):
         total_local_ids = self.fmha_impl.total_local_ids
         has_tokens = total_global_ids is not None and total_global_ids.size(0) > 0
 
-        precomputed_ks = (
-            self.fmha_params.ks[total_global_ids] if has_tokens else None
-        )
-        precomputed_ke = (
-            self.fmha_params.ke[total_global_ids] if has_tokens else None
-        )
+        precomputed_ks = self.fmha_params.ks[total_global_ids] if has_tokens else None
+        precomputed_ke = self.fmha_params.ke[total_global_ids] if has_tokens else None
         precomputed_lengths = (
             self.fmha_params.expanded_seq_lens[total_global_ids] if has_tokens else None
         )
         precomputed_topk_off = (
-            self.fmha_params.topk_indices_offset[total_global_ids] if has_tokens else None
+            self.fmha_params.topk_indices_offset[total_global_ids]
+            if has_tokens
+            else None
         )
 
         # Pack CP indices from fmha_impl for use by indexer and others

@@ -6,9 +6,9 @@ from typing import Any, Dict, List, Union
 
 import requests
 from pydantic import BaseModel
-from smoke.common_def import QueryStatus, SmokeException, Tracer
-from smoke.utils import no_compare, save_response
 
+from rtp_llm.test.smoke.common_def import QueryStatus, SmokeException, Tracer
+from rtp_llm.test.smoke.utils import no_compare, save_response
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 
@@ -36,7 +36,7 @@ class BaseComparer(object):
         request_endpoint: str,
         q_r: Dict[str, Any],
         tracer: Tracer,
-        use_batch_scheduler: bool
+        use_batch_scheduler: bool,
     ):
         self.server_manager = server_manager
         self.request_endpoint = request_endpoint
@@ -106,7 +106,11 @@ class BaseComparer(object):
                     url, json={"batch_size": concurrecy_batch}, timeout=10
                 )
                 resp_json = response.json()
-                if response.status_code == 200 and "error" not in resp_json and resp_json.get("status") == "ok":
+                if (
+                    response.status_code == 200
+                    and "error" not in resp_json
+                    and resp_json.get("status") == "ok"
+                ):
                     return
                 logging.warning(
                     f"update_scheduler_info attempt {attempt+1}/{max_retries} error: {resp_json}"

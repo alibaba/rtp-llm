@@ -3,10 +3,10 @@ import logging
 from typing import Any, Dict
 
 from pydantic import BaseModel
-from smoke.base_comparer import BaseComparer
-from smoke.common_def import QueryStatus, SmokeException
 
 from rtp_llm.server.worker_status import WorkerStatusRequest, WorkStatus
+from rtp_llm.test.smoke.base_comparer import BaseComparer
+from rtp_llm.test.smoke.common_def import QueryStatus, SmokeException
 
 
 class WorkerStatusComparer(BaseComparer):
@@ -44,10 +44,16 @@ class WorkerStatusComparer(BaseComparer):
             if check_field == "finished_task_list":
                 # 对每个 task 过滤 end_time_ms 后比较
                 filtered_expect_tasks = [
-                    task.model_dump(exclude={"end_time_ms", "request_id", "waiting_time_ms"}) for task in expect_val
+                    task.model_dump(
+                        exclude={"end_time_ms", "request_id", "waiting_time_ms"}
+                    )
+                    for task in expect_val
                 ]
                 filtered_actual_tasks = [
-                    task.model_dump(exclude={"end_time_ms", "request_id", "waiting_time_ms"}) for task in actual_val
+                    task.model_dump(
+                        exclude={"end_time_ms", "request_id", "waiting_time_ms"}
+                    )
+                    for task in actual_val
                 ]
 
                 if filtered_expect_tasks != filtered_actual_tasks:
