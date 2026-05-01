@@ -152,12 +152,8 @@ class Indexer(nn.Module):
         q = q.unflatten(-1, (self.n_heads, self.head_dim))  # [B, 1, H_idx, D_idx]
 
         # Per-request RoPE on q_pe (each request has its own start_pos).
-        # Rather than loop, we gather per-request freqs_cis once.
         freqs_cis_per_req = self.freqs_cis[start_pos.long()]  # [B, freqs_dim]
-        # apply_rotary_emb expects a contiguous [seq, freqs_dim] view to
-        # broadcast over [B, S, H, last_dim]. Loop over B for simplicity.
-        for r in range(bsz):
-            apply_rotary_emb(q[r : r + 1, :, :, -rd:], freqs_cis_per_req[r : r + 1])
+        apply_rotary_emb_batched(q[..., -rd:], freqs_cis_per_req)
 
         # weights = weights_proj(x) * scale
         weights = self.weights_proj(x) * (
