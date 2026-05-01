@@ -19,7 +19,6 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import os
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
@@ -554,6 +553,12 @@ class Attention(nn.Module):
         # CP context bound per-forward by V4Transformer.  None = no CP.
         self._cp_ctx: Optional[CPContext] = None
 
+        # Phase B (kvcache-native refactor): prefill paged dual-write ctx.
+        # When set, prefill arm of forward() mirrors the SWA ring buffer
+        # write into the framework BlockPool alongside the legacy
+        # register_buffer write. Additive — scatter_all_layers still runs.
+        self._prefill_paged_ctx: Optional[Dict[str, object]] = None
+
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         """Bind CP context.  When active on a prefill call, ``forward``
         does rank-local Q × FULL-KV attention: RoPE uses global
@@ -564,6 +569,116 @@ class Attention(nn.Module):
         only so the output is ``[B, chunk_length, H, D]`` — the frame-
         work then all-gathers across ranks and strips padding."""
         self._cp_ctx = cp_ctx
+
+    def set_prefill_paged_ctx(
+        self,
+        layer_desc_dict: Optional[Dict[int, "PoolDescriptor"]] = None,  # type: ignore[name-defined]
+        block_tables_by_type: Optional[Dict[int, torch.Tensor]] = None,
+    ) -> None:
+        """Bind prefill paged dual-write context (Phase B of kvcache-native refactor).
+
+        ``layer_desc_dict``: this layer's ``attn_type -> PoolDescriptor`` (typed
+        pool view + entries_per_block).
+        ``block_tables_by_type``: ``attn_type -> [1, max_blocks_per_req]`` for the
+        request being prefilled this call.
+
+        Either arg None disables dual-write.
+        """
+        if layer_desc_dict is None or block_tables_by_type is None:
+            self._prefill_paged_ctx = None
+            return
+        self._prefill_paged_ctx = {
+            "layer_descs": layer_desc_dict,
+            "block_tables": block_tables_by_type,
+        }
+
+    def _prefill_paged_write_kv(
+        self,
+        attn_type: int,
+        source_buf: torch.Tensor,  # [bsz, T, vec_dim]
+        bsz: int,
+    ) -> None:
+        """Phase B generic dual-write: mirror ``source_buf[:bsz, :T]`` into
+        the framework BlockPool of ``attn_type``. No-op when no ctx bound or
+        the pool isn't registered for this layer. Sentinel block_id ≤ 0
+        entries are skipped via ``mask_negative=True``."""
+        ctx = self._prefill_paged_ctx
+        if ctx is None:
+            return
+        # Ctx is bound per-request (bt is [1, max_blocks]); bsz>1 would need
+        # per-row bts. Prefill loop today always calls v4(...) with bsz==1 —
+        # assert rather than silently mis-write under batched prefill.
+        assert bsz == 1, (
+            f"Phase B prefill paged dual-write assumes bsz==1 per v4() call "
+            f"(got {bsz}). Batched prefill must bind multi-row block tables."
+        )
+        from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
+            write_kv_to_pool,
+        )
+
+        layer_descs = ctx["layer_descs"]
+        bt_by_type = ctx["block_tables"]
+        if attn_type not in layer_descs or attn_type not in bt_by_type:
+            return
+        desc = layer_descs[attn_type]
+        bt = bt_by_type[attn_type]  # [1, max_blocks_per_req] (per-request row)
+        if bt is None or bt.numel() == 0:
+            return
+        T = int(source_buf.shape[1])
+        D = int(source_buf.shape[2])
+        if T == 0:
+            return
+        device = source_buf.device
+        eb = desc.entries_per_block
+        pos = torch.arange(T, device=device, dtype=torch.long)
+        max_blocks = bt.shape[1]
+        block_in_seq = (pos // eb).clamp_(0, max(0, max_blocks - 1))
+        in_block = pos % eb
+        bt_long = bt.to(torch.long)
+        block_id = bt_long[0, block_in_seq]  # [T]
+        # Mirror ``_scatter_kv_pool``'s ``if bid <= 0: continue`` sentinel.
+        valid = block_id > 0
+        slot_per = torch.where(
+            valid,
+            block_id * eb + in_block,
+            torch.full_like(in_block, -1),
+        )
+        slot_mapping = slot_per.unsqueeze(0).expand(bsz, -1).reshape(-1)
+        buf_flat = source_buf[:bsz].reshape(bsz * T, D)
+        write_kv_to_pool(buf_flat, slot_mapping, desc.view(), mask_negative=True)
+
+    def _prefill_paged_write_swa(self, bsz: int) -> None:
+        """Phase B dual-write: mirror ``self.kv_cache[:bsz, :win]`` into the
+        framework SWA BlockPool."""
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import SWA_KV
+
+        win = self.window_size
+        self._prefill_paged_write_kv(SWA_KV, self.kv_cache[:bsz, :win], bsz)
+
+    def _prefill_paged_write_compressed(self, bsz: int) -> None:
+        """Phase B dual-write: mirror ``self.compressor.kv_cache[:bsz]`` into
+        the framework CSA_KV (ratio=4) or HCA_KV (ratio=128) BlockPool."""
+        if self.compressor is None or self.compressor.kv_cache is None:
+            return
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import CSA_KV, HCA_KV
+
+        at = (
+            CSA_KV
+            if self.compress_ratio == 4
+            else (HCA_KV if self.compress_ratio == 128 else None)
+        )
+        if at is None:
+            return
+        self._prefill_paged_write_kv(at, self.compressor.kv_cache[:bsz], bsz)
+
+    def _prefill_paged_write_indexer(self, bsz: int) -> None:
+        """Phase B dual-write: mirror ``self.indexer.kv_cache[:bsz]`` into
+        the framework INDEXER_KV BlockPool."""
+        if self.indexer is None or self.indexer.kv_cache is None:
+            return
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import INDEXER_KV
+
+        self._prefill_paged_write_kv(INDEXER_KV, self.indexer.kv_cache[:bsz], bsz)
 
     def reset_rope_cache(self, device=None):
         """Recompute `freqs_cis` on the actual device — MUST be called after
@@ -1026,10 +1141,6 @@ class Attention(nn.Module):
                     cmp_local,
                     cmp_eb,
                 )
-                # Kernel signature: kv [b, n, d] (3D — KV per batch). For
-                # q_len=1 we collapse the q_len dim. q_len>1 (MTP) needs
-                # a different layout (one kv per q-token); not supported
-                # here yet.
                 assert q_len == 1, (
                     "Phase 2B-2b dual-pool paged read currently supports "
                     f"q_len=1 only (got {q_len})"
@@ -1056,6 +1167,18 @@ class Attention(nn.Module):
                 )
                 o = sparse_op.forward(q, kv_packed, self.attn_sink, identity_topk)
         else:
+            # Legacy fallback (register_buffer read). Retained for warmup /
+            # metadata-missing edge cases. Production decode populates paged
+            # metadata so this branch should not be hit; warn once per site
+            # if it is, so we can tighten to hard-assert once verified dead.
+            import logging as _legacy_log
+
+            _legacy_log.warning(
+                "[DSV4] forward_decode fell back to legacy register_buffer read "
+                "(layer=%d, ratio=%d) — paged metadata missing",
+                self.layer_id,
+                self.compress_ratio,
+            )
             kv_view = self.kv_cache[:bsz]  # [B, T, head_dim]
             o = sparse_op.forward(q, kv_view, self.attn_sink, topk_idxs)  # [B, 1, H, D]
 
@@ -1443,8 +1566,20 @@ class Attention(nn.Module):
                     for t in range(seqlen):
                         pos = (sp_int + t) % win
                         self.kv_cache[:bsz, pos] = kv_full[:, t]
+            # Phase B: paged SWA dual-write. Mirror the ring-buffered slice
+            # [:, :win] that scatter_all_layers would otherwise copy out at
+            # _forward_impl tail — same data, written via typed pool view.
+            # Leaves scatter_all_layers in place (belt-and-suspenders).
+            self._prefill_paged_write_swa(bsz)
             if self.compress_ratio:
                 kv_compress = self.compressor(x, sp_int)
+                # Phase B: paged CSA/HCA + INDEXER_KV dual-write. Runs after
+                # compressor.forward has populated compressor.kv_cache for
+                # this step (fresh or continuation). Mirrors the full
+                # compressor.kv_cache[:B] slice that _scatter_all_layers
+                # would otherwise copy out post-forward.
+                self._prefill_paged_write_compressed(bsz)
+                self._prefill_paged_write_indexer(bsz)
                 if kv_compress is not None:
                     if sp_int == 0:
                         kv_cat = torch.cat([kv_full, kv_compress], dim=1)

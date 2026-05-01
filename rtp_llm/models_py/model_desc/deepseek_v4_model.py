@@ -1006,6 +1006,57 @@ class DeepSeekV4Model(GptModelBase):
                             B,
                         )
 
+    def _bind_prefill_paged_ctx(self, attn_inputs, batch_offset: int = 0) -> bool:
+        """Phase B: bind per-layer paged dual-write ctx on every Attention.
+
+        Returns True if ctx was bound (caller must call
+        ``_clear_prefill_paged_ctx`` after the forward).
+
+        Mirror of ``_build_paged_pool_specs_for_phase2`` but for prefill:
+        we only need SWA_KV right now (CSA/HCA/INDEXER dual-write will be
+        layered on in Phase B.2).
+        """
+        if not getattr(self, "_layer_pool_descs", None):
+            return False
+        if attn_inputs is None:
+            return False
+        by_group = getattr(
+            attn_inputs, "kv_cache_kernel_block_id_device_by_group", None
+        )
+        if by_group is None or len(by_group) == 0:
+            return False
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
+            CSA_KV,
+            HCA_KV,
+            INDEXER_KV,
+            SWA_KV,
+        )
+
+        # attn_type → group_id (same mapping as gather/scatter):
+        # CSA_KV=1→0, HCA_KV=2→1, INDEXER_KV=3→2, SWA_KV=7→6.
+        attn_type_to_gid = {CSA_KV: 0, HCA_KV: 1, INDEXER_KV: 2, SWA_KV: 6}
+        bt_by_type: Dict[int, Any] = {}
+        for at, gid in attn_type_to_gid.items():
+            if gid >= len(by_group):
+                continue
+            bt_all = by_group[gid]
+            if bt_all is None or bt_all.numel() == 0:
+                continue
+            # [1, max_blocks_per_req] for this request's row.
+            bt_by_type[at] = bt_all[batch_offset : batch_offset + 1]
+        if not bt_by_type:
+            return False
+        for li, layer in enumerate(self.v4.layers):
+            layer_desc = (
+                self._layer_pool_descs[li] if li < len(self._layer_pool_descs) else {}
+            )
+            layer.attn.set_prefill_paged_ctx(layer_desc, bt_by_type)
+        return True
+
+    def _clear_prefill_paged_ctx(self) -> None:
+        for layer in self.v4.layers:
+            layer.attn.set_prefill_paged_ctx(None, None)
+
     def _write_pd_cache_store(self, attn) -> None:
         """Register prefill-side KV blocks with cache_store for PD separation.
 
@@ -1452,8 +1503,16 @@ class DeepSeekV4Model(GptModelBase):
                             ic.kv_state[:1, ioff:].zero_()
                             ic.score_state[:1, ioff:].fill_(float("-inf"))
 
+                # Phase B: bind prefill paged dual-write ctx per-layer so
+                # Attention.forward mirrors the SWA ring-buffer into the
+                # framework BlockPool. Additive alongside _scatter_all_layers.
+                paged_bound = self._bind_prefill_paged_ctx(attn, batch_offset=b)
+
                 h = self.v4(batch_ids, start_pos=start_pos, apply_lm_head=False)
                 all_hidden.append(h)
+
+                if paged_bound:
+                    self._clear_prefill_paged_ctx()
 
                 # Scatter to BlockPool after forward
                 if getattr(self, "_framework_kv_enabled", False) and attn is not None:
