@@ -665,6 +665,46 @@ class KMonitorReportTest(InterceptorTestBase):
         self.assertEqual(rec["status_detail"], "client closed generator")
         self.assertEqual(rec["exc_type"], "GeneratorExit")
 
+    def test_client_request_iter_failure_routes_to_cancel_qps(self) -> None:
+        """grpcio ``_MultiThreadedRendezvous`` with
+        ``details='Exception iterating requests!'`` — client disappeared
+        before sending a frame — must route to CANCEL_QPS, not ERROR_QPS.
+        Signature on the log line is ``latency_total_ms<1 / req_count=0 /
+        resp_count=0``, which is not a timeout despite status bucket
+        previously being the generic UNKNOWN.
+        """
+
+        class _FakeRendezvous(grpc.RpcError):
+            def details(self) -> str:
+                return "Exception iterating requests!"
+
+            def code(self):
+                return grpc.StatusCode.UNKNOWN
+
+        def inner(request_iterator, context):
+            # The forwarder's upstream stub call surfaces the error on the
+            # response-iteration side — mimic that shape here.
+            for _ in request_iterator:
+                pass
+            raise _FakeRendezvous()
+            yield  # pragma: no cover
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+
+        with self.assertRaises(_FakeRendezvous):
+            list(behavior(iter([]), ctx))
+
+        self.assertEqual(len(self._calls_for(AccMetrics.CANCEL_QPS_METRIC)), 1)
+        self.assertEqual(len(self._calls_for(AccMetrics.ERROR_QPS_METRIC)), 0)
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "CANCELLED")
+        self.assertEqual(rec["status_detail"], "client request iterator failed")
+        self.assertEqual(rec["exc_type"], "_FakeRendezvous")
+
     def test_rpc_without_input_ids_omits_input_token_size_gauge(self) -> None:
         """Health-check style RPC (no input_ids) must not emit a bogus 0-length gauge."""
 
