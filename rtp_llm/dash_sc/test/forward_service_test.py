@@ -70,7 +70,7 @@ class ParseForwardAddrsTest(TestCase):
 
 
 class IteratorBehaviorTest(TestCase):
-    """Core tests: verify iterator is passed to stub (not converted to list).
+    """Core test: verify iterator is passed to stub (not converted to list).
 
     This tests the bug fix where [req] was passed instead of an iterator,
     causing TypeError: 'list' object is not an iterator.
@@ -89,9 +89,8 @@ class IteratorBehaviorTest(TestCase):
         self.servicer.close()
         self.channel_patcher.stop()
 
-    def test_iterator_passed_not_list_no_log(self) -> None:
-        """BUG FIX: iterator must be passed, not list (when logging disabled)."""
-        self.servicer._log_debug = False
+    def test_iterator_passed_not_list(self) -> None:
+        """BUG FIX: iterator must be passed to the downstream stub, not a list."""
 
         def request_gen():
             yield _make_request("req1")
@@ -106,47 +105,10 @@ class IteratorBehaviorTest(TestCase):
         call_arg = self.mock_stub.ModelStreamInfer.call_args[0][0]
         self.assertTrue(hasattr(call_arg, "__iter__"), "Must be iterable")
         self.assertTrue(
-            hasattr(call_arg, "__next__"), "Must be iterator (has __next__), not list"
+            hasattr(call_arg, "__next__"),
+            "Must be iterator (has __next__), not list",
         )
         self.assertEqual(len(responses), 2)
-
-    def test_iterator_passed_not_list_with_log(self) -> None:
-        """BUG FIX: with logging enabled, iterator must still be passed."""
-        self.servicer._log_debug = True
-
-        def request_gen():
-            yield _make_request("req1")
-            yield _make_request("req2")
-
-        mock_resp = _make_response()
-        self.mock_stub.ModelStreamInfer.return_value = iter([mock_resp, mock_resp])
-
-        with patch("rtp_llm.dash_sc.forward_service.logging.info"):
-            responses = list(self.servicer.ModelStreamInfer(request_gen(), MagicMock()))
-
-        # KEY ASSERTION: stub received iterator (has __next__)
-        call_arg = self.mock_stub.ModelStreamInfer.call_args[0][0]
-        self.assertTrue(hasattr(call_arg, "__next__"), "Must be iterator, not list")
-        self.assertEqual(len(responses), 2)
-
-    def test_logged_iterator_closure_updates_counter(self) -> None:
-        """Verify nonlocal closure correctly updates request counter."""
-        self.servicer._log_debug = True
-        req_count = 0
-
-        def request_gen():
-            for i in range(3):
-                yield _make_request(f"req{i}")
-
-        mock_resp = _make_response()
-        self.mock_stub.ModelStreamInfer.return_value = iter([mock_resp] * 3)
-
-        # The logged_iterator inside ModelStreamInfer uses nonlocal req_count
-        # This test verifies that pattern works
-        with patch("rtp_llm.dash_sc.forward_service.logging.info"):
-            responses = list(self.servicer.ModelStreamInfer(request_gen(), MagicMock()))
-
-        self.assertEqual(len(responses), 3)
 
 
 class BufferFirstTokenTest(TestCase):
@@ -163,7 +125,6 @@ class BufferFirstTokenTest(TestCase):
         self.servicer = PureForwardServicer(["127.0.0.1:1"])
         self.mock_stub = MagicMock()
         self.servicer._stubs = [self.mock_stub]
-        self.servicer._log_debug = False
 
     def tearDown(self) -> None:
         self.servicer.close()
@@ -260,20 +221,6 @@ class BufferFirstTokenTest(TestCase):
                 collected.append(r)
         self.assertEqual(collected, [])
 
-    def test_buffer_with_log_debug_combination(self) -> None:
-        """Buffer + log_debug: both counters advance, order and count preserved."""
-        self.servicer._log_debug = True
-
-        chunks = [self._make_resp("a"), self._make_resp("b"), self._make_resp("c")]
-        self.mock_stub.ModelStreamInfer.return_value = iter(chunks)
-
-        def request_gen():
-            yield _make_request("req1")
-
-        with patch("rtp_llm.dash_sc.forward_service.logging.info"):
-            out = list(self.servicer.ModelStreamInfer(request_gen(), MagicMock()))
-        self.assertEqual([r.error_message for r in out], ["a", "b", "c"])
-
 
 class AccessLogDiagInjectionTest(TestCase):
     """Forwarder writes ``downstream_addr`` / ``downstream_resp_count`` /
@@ -295,7 +242,6 @@ class AccessLogDiagInjectionTest(TestCase):
         self.servicer = PureForwardServicer(["10.0.0.1:8096", "10.0.0.2:8096"])
         self.mock_stub = MagicMock()
         self.servicer._stubs = [self.mock_stub, self.mock_stub]
-        self.servicer._log_debug = False
 
     def tearDown(self) -> None:
         self.servicer.close()
@@ -467,39 +413,6 @@ class AccessLogDiagInjectionTest(TestCase):
         with self.assertRaises(BaseException):
             gen.throw(RuntimeError("client gone"))
         self.assertEqual(agg.buffered_stage, "dropped_buffered_on_exception")
-
-
-class NonlocalClosurePatternTest(TestCase):
-    """Verify the nonlocal closure pattern used in logged_iterator."""
-
-    def test_nonlocal_closure_works(self) -> None:
-        """Test that nonlocal closure correctly modifies outer variable."""
-        req_count = 0
-
-        def logged_iterator():
-            nonlocal req_count
-            for i in range(5):
-                req_count += 1
-                yield i
-
-        # Consume iterator
-        result = list(logged_iterator())
-
-        self.assertEqual(result, [0, 1, 2, 3, 4])
-        self.assertEqual(req_count, 5)  # Counter was updated
-
-    def test_iterator_vs_list_distinction(self) -> None:
-        """Verify iterator (generator) has __next__, list does not."""
-        gen = (x for x in range(3))
-        lst = [0, 1, 2]
-
-        # Generator is an iterator (has __next__)
-        self.assertTrue(hasattr(gen, "__next__"))
-        self.assertTrue(hasattr(gen, "__iter__"))
-
-        # List is iterable but NOT an iterator (no __next__)
-        self.assertFalse(hasattr(lst, "__next__"))
-        self.assertTrue(hasattr(lst, "__iter__"))
 
 
 if __name__ == "__main__":

@@ -638,8 +638,20 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
 
         if exc is not None:
             agg.exc_type = type(exc).__name__
-            agg.status = "UNKNOWN"
-            agg.status_detail = repr(exc)
+            if isinstance(exc, GeneratorExit):
+                # gRPC framework invoked ``gen.close()`` on our wrapper
+                # because the client handler terminated (peer disconnect,
+                # upstream cancel, server shutdown). This is benign — not a
+                # protocol-level failure — so route it to CANCEL_QPS instead
+                # of ERROR_QPS (otherwise every client hang-up pollutes the
+                # error dashboard). ``exc_type="GeneratorExit"`` on the log
+                # line still distinguishes it from a true gRPC CANCELLED,
+                # which carries ``context_code="CANCELLED"`` from the peer.
+                agg.status = "CANCELLED"
+                agg.status_detail = "client closed generator"
+            else:
+                agg.status = "UNKNOWN"
+                agg.status_detail = repr(exc)
         elif code is None or code == grpc.StatusCode.OK:
             agg.status = "OK"
             agg.status_detail = None
