@@ -190,3 +190,46 @@ py_test(
     ],
     tags = ["manual"],
 )
+
+# V4-Flash DP=4 + EP=4 captured-graph decode grid sweep.  Mirrors the
+# topology of smoke target v4_flash_decode_dp4_ep4_graph_mega_concurrent_sm100
+# (TP=1 / DP=4 / EP=4 / world=4, DeepEP non-low-latency, Mega MoE via
+# CUDA graph capture at BS=1,2,4,8) and drives the perf framework over
+# the same batch_size grid so per-BS decode timelines land in
+# TEST_UNDECLARED_OUTPUTS_DIR.  Local checkpoint avoids ModelScope.
+py_test(
+    name = "v4_flash_dp4_decode_grid_perf",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--checkpoint_path", "/data0/baowending.bwd/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/data0/baowending.bwd/DeepSeek-V4-Flash",
+        "--batch_size", "1",
+        "--input_len", "4096,8192",
+        "--partial", "1",
+        "--decode_test_length", "8",
+        "--seq_size_per_block", "64",
+        "--max_seq_len", "16384",
+        "--tp_size", "1",
+        "--dp_size", "4",
+        "--ep_size", "4",
+        "--world_size", "4",
+        "--use_deepep_moe", "1",
+        "--use_deepep_low_latency", "0",
+        "--act_type", "BF16",
+        "--load_method", "scratch",
+        "--concurrency_limit", "32",
+        "--enable_cuda_graph", "1",
+        "--reserver_runtime_mem_mb", "32768",
+        "--max_context_batch_size", "1"
+    ],
+    tags = ["manual"],
+)
