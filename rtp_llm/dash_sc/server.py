@@ -49,6 +49,40 @@ def dash_sc_grpc_server_max_server_workers(dash_sc_grpc_config) -> int:
 # Max time for grpc.Server.start() + bind before start_in_thread returns.
 _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S = 30.0
 
+# HTTP/2 keepalive permissions for the dash_sc gRPC server side. The upstream
+# (whoever calls us: dash_sc forwarder, client SDK, …) needs to be able to
+# send keepalive PINGs every ~30s to defeat the 100s LBS idle timeout — but
+# grpcio's server default is to GOAWAY any client that exceeds 2 PINGs in
+# 5 minutes without data (``min_ping_interval_without_data_ms=300000`` +
+# ``max_pings_without_data=2``). Raising permit here so the client-side
+# keepalive we ship in ``forward_service._FORWARD_CHANNEL_OPTS`` actually
+# works end-to-end instead of racing a GOAWAY.
+#
+# We also enable server-originated PINGs (``keepalive_time_ms=30000``) so
+# the server probes the client just as actively; this is symmetric and
+# catches the case where the downstream is healthy but the client went dark.
+#
+# Merged via ``setdefault`` — anything explicitly set by
+# ``DashScGrpcConfig.get_server_config()`` wins, so operators can still
+# override per-deployment.
+_SERVER_KEEPALIVE_OPTS: list[tuple[str, int]] = [
+    ("grpc.keepalive_time_ms", 30000),
+    ("grpc.keepalive_timeout_ms", 10000),
+    ("grpc.keepalive_permit_without_calls", 0),
+    ("grpc.http2.min_ping_interval_without_data_ms", 10000),
+    ("grpc.http2.max_pings_without_data", 0),
+]
+
+
+def _merge_server_keepalive(
+    opts: list[tuple[str, int]],
+) -> list[tuple[str, int]]:
+    """Add keepalive defaults to ``opts`` without overriding explicit config."""
+    merged = dict(opts)
+    for k, v in _SERVER_KEEPALIVE_OPTS:
+        merged.setdefault(k, v)
+    return sorted(merged.items())
+
 
 class DashScGrpcServer:
     """Per-process owner of the DashSc gRPC ``grpc.Server``.
@@ -106,7 +140,7 @@ class DashScGrpcServer:
                 logging.warning("[DashScGrpc] server already started")
                 return self._server
             cfg = _resolve_dash_sc_grpc_config(self._config)
-            opts = dash_sc_grpc_server_channel_options(cfg)
+            opts = _merge_server_keepalive(dash_sc_grpc_server_channel_options(cfg))
             pool_size = dash_sc_grpc_server_max_server_workers(cfg)
 
             server_id_int: Optional[int]
