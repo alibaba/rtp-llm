@@ -356,6 +356,15 @@ def _collect_session_extra_files(rootdir: Path) -> List[str]:
         files.extend(
             str(p.relative_to(rootdir)) for p in rootdir.glob(pattern) if p.is_file()
         )
+    # perf_test data: distribution CSVs, batch_seq_len configs, baselines.
+    # perf tests load these via Path(__file__).parent.parent (one level above suites/).
+    for pattern in (
+        "internal_source/rtp_llm/test/perf_test/test_data/**/*",
+        "internal_source/rtp_llm/test/perf_test/baselines/**/*",
+    ):
+        files.extend(
+            str(p.relative_to(rootdir)) for p in rootdir.glob(pattern) if p.is_file()
+        )
     return files
 
 
@@ -489,11 +498,18 @@ _KNOWN_GPU_TYPES = frozenset(
 #   build:rocm  --remote_default_exec_properties=gpu=MI308X-ROCM7
 #   build:ppu   --remote_default_exec_properties=gpu=PPU-ZW810E
 #   build:cuda12_9_arm --remote_default_exec_properties=gpu=SM100_ARM   # already underscore
-# A worker-pool mismatch (e.g. submitting gpu=MI308X_ROCM7 vs the pool's
+# A worker-pool mismatch (e.g. submitting gpu=MI308X vs the pool's
 # gpu=MI308X-ROCM7) silently leaves the action queued forever with no worker
-# matching, so this mapping MUST stay in sync with .cicd_bazelrc.
+# matching (verified 2026-05-01: amd session sat in QUEUED 12+min until gRPC
+# deadline, retried, sat another 12min, gave up — all because the marker
+# `MI308X` got submitted as-is instead of being mapped to `MI308X-ROCM7`).
+# This mapping MUST stay in sync with .cicd_bazelrc. The `MI308X` →
+# `MI308X-ROCM7` entry below covers the existing `pytest.mark.gpu(type="MI308X")`
+# call sites in rtp_llm/models_py/{kernels,modules}/.../rocm/test/ — they
+# all target the only AMD pool we currently have.
 _GPU_TYPE_TO_REAPI: Dict[str, str] = {
     "PPU_ZW810E": "PPU-ZW810E",
+    "MI308X": "MI308X-ROCM7",
     "MI308X_ROCM7": "MI308X-ROCM7",
 }
 

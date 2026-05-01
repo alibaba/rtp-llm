@@ -256,6 +256,32 @@ class RemoteExecutor:
         if _is_main_thread:
             signal.signal(signal.SIGTERM, _sigterm_handler)
 
+        # Wall-clock watchdog. The gRPC `timeout=...` on Execute() is supposed
+        # to deadline the entire stream, but in practice when a remote worker
+        # pool is congested the server holds the stream open indefinitely
+        # without sending any stage updates — gRPC's per-message deadline
+        # behavior is not enforced and the call hangs forever (no QUEUED→
+        # EXECUTING transition, no error). Fire a Timer that cancels the
+        # remote operation after `timeout + 180s`; the cancellation closes
+        # the stream server-side, raising RpcError here that breaks the
+        # for-loop. +180s buffer over the action timeout (vs the gRPC
+        # +120s) so the wall-clock fallback fires AFTER the server-side
+        # action timeout has had a chance.
+        _watchdog_fired = [False]
+
+        def _watchdog():
+            _watchdog_fired[0] = True
+            log.error(
+                "[REMOTE_WATCHDOG] action exceeded %ds wall-clock — cancelling "
+                "remote op (server didn't honor stream deadline)",
+                timeout + 180,
+            )
+            _cancel_remote()
+
+        watchdog_timer = threading.Timer(timeout + 180, _watchdog)
+        watchdog_timer.daemon = True
+        watchdog_timer.start()
+
         try:
             for op in self.stub.Execute(
                 request, metadata=self.metadata, timeout=timeout + 120
@@ -355,13 +381,21 @@ class RemoteExecutor:
                 log.debug("Operation %s stage=%s", op.name, stage)
         except grpc.RpcError as e:
             log.error("Execute RPC failed: %s", e)
+            category = "watchdog_timeout" if _watchdog_fired[0] else "executor_rpc"
             log.error(
-                "[RESULT] status=blocked category=executor_rpc detail=%s", e.code().name
+                "[RESULT] status=blocked category=%s detail=%s",
+                category,
+                e.code().name,
             )
             stop_event.set()
             for t in stream_threads:
                 t.join(timeout=5)
             detail = f"{e.code().name}: {e.details()}"
+            if _watchdog_fired[0]:
+                detail = (
+                    f"WATCHDOG_TIMEOUT after {timeout + 180}s wall-clock — "
+                    f"server didn't honor stream deadline. {detail}"
+                )
             tail = f"{detail}\n[reapi-targets] {self.reapi_targets_combined}"
             return ExecutionResult(
                 exit_code=-1,
@@ -374,6 +408,7 @@ class RemoteExecutor:
             # Unregister cancel handlers — action completed or errored
             _op_name_holder[0] = None
             atexit.unregister(_cancel_remote)
+            watchdog_timer.cancel()
             if _is_main_thread:
                 signal.signal(signal.SIGTERM, _original_sigterm)
 
