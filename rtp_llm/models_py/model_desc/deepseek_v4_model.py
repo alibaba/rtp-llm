@@ -262,6 +262,15 @@ class DeepSeekV4Model(GptModelBase):
             self._fp8_kv_requested = False
         self._fp8_kv_armed = False  # set True after the first prefill enables FP8
 
+        # Per-layer pre-final SWA snapshot captured during chunked prefill so
+        # the second-to-last SWA pool slot can hold the boundary-N-1 state.
+        # Cleared at start of each prefill request; populated only when the
+        # request straddles at least one 256-token boundary. Initialized in
+        # __init__ rather than in _wire_framework_kv_cache so forward() can
+        # always touch it (the wiring helper has early-return paths that
+        # otherwise leave the attribute unset).
+        self._pre_final_swa_snapshot: Dict[int, torch.Tensor] = {}
+
         # Optional on-demand timeline capture. Set DSV4_PROFILE_TRACE=/path/trace.json
         # and touch /tmp/dsv4_profile_trigger to capture the NEXT forward only.
         self._profile_path = os.environ.get("DSV4_PROFILE_TRACE")
@@ -483,12 +492,6 @@ class DeepSeekV4Model(GptModelBase):
                 self._layer_pools.append([7])
                 self._layer_gather_pools.append([])  # SWA-only, nothing to gather
                 self._layer_reuse_gather_pools.append([7])  # SWA snap only
-
-        # Per-layer pre-final SWA snapshot captured during chunked prefill so
-        # the second-to-last SWA pool slot can hold the boundary-N-1 state.
-        # Cleared at start of each prefill request; populated only when the
-        # request straddles at least one 256-token boundary.
-        self._pre_final_swa_snapshot: Dict[int, torch.Tensor] = {}
 
         # Debug: log shapes for layer 0 and layer 2
         for dbg in [0, 2]:
