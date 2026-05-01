@@ -940,37 +940,14 @@ class DeepSeekV4Model(GptModelBase):
                 bid_slice = block_ids[batch_offset : batch_offset + B]
                 fw_t = self._get_pool_tensor(attn_type, i)
 
-                if attn_type == 7:  # SWA_KV
-                    swa_buf = attn_mod.kv_cache[:B, :win]
-                    self._scatter_kv_pool(fw_t, bid_slice, swa_buf, 256, hd, B)
-                elif attn_type == 1:  # CSA_KV
-                    if (
-                        attn_mod.compressor is not None
-                        and attn_mod.compressor.kv_cache is not None
-                    ):
-                        self._scatter_kv_pool(
-                            fw_t, bid_slice, attn_mod.compressor.kv_cache[:B], 64, hd, B
-                        )
-                elif attn_type == 2:  # HCA_KV
-                    if (
-                        attn_mod.compressor is not None
-                        and attn_mod.compressor.kv_cache is not None
-                    ):
-                        self._scatter_kv_pool(
-                            fw_t, bid_slice, attn_mod.compressor.kv_cache[:B], 2, hd, B
-                        )
-                elif attn_type == 3:  # INDEXER_KV
-                    if attn_mod.indexer is not None:
-                        idx_hd = attn_mod.indexer.head_dim
-                        self._scatter_kv_pool(
-                            fw_t,
-                            bid_slice,
-                            attn_mod.indexer.kv_cache[:B],
-                            64,
-                            idx_hd,
-                            B,
-                        )
-                elif attn_type == 4:  # INDEXER_STATE
+                # Phase D (partial): KV pool scatter for attn_types 1/2/3/7
+                # removed — Attention.forward's prefill paged dual-write writes
+                # the same bytes via ``write_kv_to_pool`` (verified
+                # byte-equal by test_phase_b_prefill_dual_write). STATE
+                # scatter below still runs (B.3 view-ification pending).
+                if attn_type in (7, 1, 2, 3):
+                    continue
+                if attn_type == 4:  # INDEXER_STATE
                     if attn_mod.indexer is not None:
                         comp = attn_mod.indexer.compressor
                         idx_hd = attn_mod.indexer.head_dim
