@@ -19,6 +19,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import os
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
