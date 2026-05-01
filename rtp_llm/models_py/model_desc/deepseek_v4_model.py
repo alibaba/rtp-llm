@@ -16,7 +16,7 @@ flow (V4-Flash has 67k+ tensors in ~250 packed FP4/FP8 shards) and directly call
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -463,9 +463,9 @@ class DeepSeekV4Model(GptModelBase):
         # _layer_pools: all pools for scatter (write all 7 pools)
         # _layer_gather_pools: only paged pools for gather (skip SWA/State which
         #   get overwritten during decode, making cached data unreliable)
-        # _layer_reuse_gather_pools: paged + state pools for prefill reuse gather
-        #   (restores compressor overlap carry, but skips SWA ring buffer which
-        #   holds data at the wrong position)
+        # _layer_reuse_gather_pools: paged + state + SWA pools for prefill reuse
+        #   gather. SWA uses the snapshot path (see _gather_swa_snapshot); the
+        #   broken per-token-range slabbing of _gather_kv_pool no longer applies.
         self._layer_pools = []
         self._layer_gather_pools = []
         self._layer_reuse_gather_pools = []
@@ -474,15 +474,21 @@ class DeepSeekV4Model(GptModelBase):
             if ratio == 4:
                 self._layer_pools.append([7, 1, 3, 4, 5])
                 self._layer_gather_pools.append([1, 3])  # CSA_KV, INDEXER_KV only
-                self._layer_reuse_gather_pools.append([1, 3, 4, 5])  # + STATE pools
+                self._layer_reuse_gather_pools.append([1, 3, 4, 5, 7])  # + STATE + SWA snap
             elif ratio == 128:
                 self._layer_pools.append([7, 2, 6])
                 self._layer_gather_pools.append([2])  # HCA_KV only
-                self._layer_reuse_gather_pools.append([2, 6])  # + STATE pool
+                self._layer_reuse_gather_pools.append([2, 6, 7])  # + STATE + SWA snap
             else:
                 self._layer_pools.append([7])
                 self._layer_gather_pools.append([])  # SWA-only, nothing to gather
-                self._layer_reuse_gather_pools.append([])  # SWA-only
+                self._layer_reuse_gather_pools.append([7])  # SWA snap only
+
+        # Per-layer pre-final SWA snapshot captured during chunked prefill so
+        # the second-to-last SWA pool slot can hold the boundary-N-1 state.
+        # Cleared at start of each prefill request; populated only when the
+        # request straddles at least one 256-token boundary.
+        self._pre_final_swa_snapshot: Dict[int, torch.Tensor] = {}
 
         # Debug: log shapes for layer 0 and layer 2
         for dbg in [0, 2]:
@@ -652,6 +658,49 @@ class DeepSeekV4Model(GptModelBase):
             return None
         return slots[attn_type]
 
+    def _scatter_swa_snapshot(
+        self, fw_tensor, slot_block_id: int, snapshot: torch.Tensor, head_dim: int
+    ):
+        """Write a full SWA window snapshot to one BlockPool slot.
+
+        snapshot: [win, head_dim] bf16 — the live attn.kv_cache[b, :win] view
+        captured at a 256-token boundary. The block stride is 256 entries, but
+        the SWA window is 128 entries (win<<256), so the snapshot fits in the
+        first half of the slot. The remaining bytes are left untouched —
+        nothing else in the system reads them.
+        """
+        if fw_tensor is None or fw_tensor.numel() == 0 or slot_block_id <= 0:
+            return
+        bytes_per_entry = head_dim * 2  # bf16
+        win = snapshot.size(0)
+        n_bytes = win * bytes_per_entry
+        if n_bytes > fw_tensor.size(1):
+            return
+        data = snapshot.contiguous().view(torch.uint8).reshape(-1)
+        fw_tensor[slot_block_id, :n_bytes] = data
+
+    def _gather_swa_snapshot(
+        self,
+        fw_tensor,
+        slot_block_id: int,
+        swa_buf_dst: torch.Tensor,
+        head_dim: int,
+    ):
+        """Restore SWA window from one BlockPool slot into swa_buf_dst[win, hd]."""
+        if fw_tensor is None or fw_tensor.numel() == 0 or slot_block_id <= 0:
+            return
+        bytes_per_entry = head_dim * 2
+        win = swa_buf_dst.size(0)
+        n_bytes = win * bytes_per_entry
+        if n_bytes > fw_tensor.size(1):
+            return
+        page_bf16 = (
+            fw_tensor[slot_block_id, :n_bytes]
+            .view(torch.bfloat16)
+            .view(win, head_dim)
+        )
+        swa_buf_dst.copy_(page_bf16)
+
     def _gather_all_layers(
         self, attn_inputs, B=1, batch_offset=0, paged_only=False, reuse_gather=False
     ):
@@ -703,8 +752,40 @@ class DeepSeekV4Model(GptModelBase):
                 fw_t = self._get_pool_tensor(attn_type, i)
 
                 if attn_type == 7:  # SWA_KV
-                    swa_buf = attn_mod.kv_cache[:B, :win]
-                    self._gather_kv_pool(fw_t, bid_slice, swa_buf, 256, hd, B)
+                    if reuse_gather:
+                        # Approach B: SWA pool stores per-boundary snapshots
+                        # of the win=128 circular buffer. The memory cache
+                        # connector wrote Q-source's snapshot at the matched
+                        # cache_key index — for an identical-prompt reuse
+                        # that's the second-to-last allocated slot, since
+                        # the SWAKVCacheGroup malloc keeps real blocks at
+                        # tail positions [N-2, N-1]. Read that slot back
+                        # into attn.kv_cache[:, :win] so the continuation
+                        # forward sees the same circular state Q-source had
+                        # at the boundary it just resumed from.
+                        for b_i in range(B):
+                            row = bid_slice[b_i].cpu()
+                            real_slots = [
+                                k for k in range(row.size(0))
+                                if int(row[k].item()) > 0
+                            ]
+                            if len(real_slots) < 2:
+                                continue
+                            snap_slot = real_slots[-2]
+                            snap_bid = int(row[snap_slot].item())
+                            self._gather_swa_snapshot(
+                                fw_t,
+                                snap_bid,
+                                attn_mod.kv_cache[b_i, :win],
+                                hd,
+                            )
+                    else:
+                        # Decode / non-reuse gather: keep legacy slabbed read.
+                        # (Currently unreachable on the gather path because
+                        # SWA is excluded from _layer_gather_pools, but keep
+                        # the call shape for forward-compat.)
+                        swa_buf = attn_mod.kv_cache[:B, :win]
+                        self._gather_kv_pool(fw_t, bid_slice, swa_buf, 256, hd, B)
                 elif attn_type == 1:  # CSA_KV
                     if (
                         attn_mod.compressor is not None
@@ -800,8 +881,33 @@ class DeepSeekV4Model(GptModelBase):
                 fw_t = self._get_pool_tensor(attn_type, i)
 
                 if attn_type == 7:  # SWA_KV
-                    swa_buf = attn_mod.kv_cache[:B, :win]
-                    self._scatter_kv_pool(fw_t, bid_slice, swa_buf, 256, hd, B)
+                    # Approach B: per-boundary snapshots of attn.kv_cache[:, :win].
+                    # Slot N-1 (last real) gets the live circular buffer at the
+                    # END of this prefill chunk. Slot N-2 (second-to-last real)
+                    # gets the buffer state captured between chunked-prefill
+                    # halves — see _pre_final_swa_snapshot. The legacy slabbed
+                    # write was a no-op because win<<entries_per_block, so the
+                    # inner loop bailed on n<=0 for every real slot.
+                    snap_pre = self._pre_final_swa_snapshot.get(i)
+                    for b_i in range(B):
+                        row = bid_slice[b_i].cpu()
+                        real_slots = [
+                            k for k in range(row.size(0))
+                            if int(row[k].item()) > 0
+                        ]
+                        if not real_slots:
+                            continue
+                        last_slot = real_slots[-1]
+                        last_bid = int(row[last_slot].item())
+                        self._scatter_swa_snapshot(
+                            fw_t, last_bid, attn_mod.kv_cache[b_i, :win], hd
+                        )
+                        if len(real_slots) >= 2 and snap_pre is not None:
+                            prev_slot = real_slots[-2]
+                            prev_bid = int(row[prev_slot].item())
+                            self._scatter_swa_snapshot(
+                                fw_t, prev_bid, snap_pre[b_i], hd
+                            )
                 elif attn_type == 1:  # CSA_KV
                     if (
                         attn_mod.compressor is not None
@@ -916,16 +1022,10 @@ class DeepSeekV4Model(GptModelBase):
                 block_ids_2d = by_group_host[gid]
                 if block_ids_2d is None or block_ids_2d.numel() == 0:
                     continue
-                # LINEAR pools (state pools 4/5/6 + SWA_KV 7) have only 2
-                # valid slots per request (DSV4 linear_fixed_cap=2). The
-                # framework's per-pool block_id tensor is padded to the
-                # FULL group's max_blocks_num, so slice to the first 2
-                # entries — otherwise ExecOps reads the zero-padding past
-                # the valid slots, registering wrong block_ids and using
-                # cache_keys[max-2..max-1] which decode (which sees a
-                # 2-entry block_ids vector, indices 0/1) won't match.
-                if attn_type_int in (4, 5, 6, 7):
-                    block_ids_2d = block_ids_2d[:, :2].contiguous()
+                # SWA/state pools keep only two valid blocks, but they are
+                # stored at the original logical tail positions. Keep the
+                # padded logical block table here so write_cache_store uses
+                # the same tail cache_keys that decode load will request.
                 try:
                     layer_kv = self.kv_cache.get_layer_cache(layer_idx, attn_type_enum)
                 except Exception:
@@ -1222,7 +1322,51 @@ class DeepSeekV4Model(GptModelBase):
                             ic.kv_state[:1, ioff:].zero_()
                             ic.score_state[:1, ioff:].fill_(float("-inf"))
 
-                h = self.v4(batch_ids, start_pos=start_pos, apply_lm_head=False)
+                # Approach B: chunked prefill so we can capture the SWA
+                # window snapshot at the second-to-last 256-token boundary.
+                # The SWA pool's last real slot (N-1) gets the END-of-prefill
+                # state; slot N-2 needs the state right after token
+                # ((n_blocks-1)*256 - 1). Run forward in two halves and clone
+                # attn.kv_cache[:, :win] between them so the scatter has
+                # something to write into slot N-2. Skip when the request
+                # doesn't cross the pre-final boundary (short prompts /
+                # continuation reuse).
+                self._pre_final_swa_snapshot.clear()
+                total_seq = start_pos + inp_len
+                pre_final = (max(total_seq - 1, 0) // 256) * 256
+                # CP-on prefill builds its zigzag chunk-aware context inside
+                # V4Transformer.forward only when start_pos==0; chunking the
+                # forward would deny the second half a CP context. Disable
+                # the snapshot path under CP — CP runs don't currently use
+                # memory-cache reuse anyway.
+                chunk = (
+                    use_framework_kv
+                    and not cp_enabled
+                    and pre_final > start_pos
+                    and pre_final < total_seq
+                )
+                if chunk:
+                    split = pre_final - start_pos  # tokens in first chunk
+                    chunk_a = batch_ids[:, :split]
+                    chunk_b = batch_ids[:, split:]
+                    h_a = self.v4(chunk_a, start_pos=start_pos, apply_lm_head=False)
+                    # Snapshot the live SWA window per layer right at the
+                    # boundary. clone() makes the tensor independent so
+                    # chunk_b's forward (which mutates kv_cache in-place)
+                    # doesn't overwrite what we just captured.
+                    for li, layer in enumerate(self.v4.layers):
+                        win_li = layer.attn.window_size
+                        self._pre_final_swa_snapshot[li] = (
+                            layer.attn.kv_cache[:1, :win_li].detach().clone()
+                        )
+                    h_b = self.v4(
+                        chunk_b, start_pos=pre_final, apply_lm_head=False
+                    )
+                    h = torch.cat([h_a, h_b], dim=1)
+                else:
+                    h = self.v4(
+                        batch_ids, start_pos=start_pos, apply_lm_head=False
+                    )
                 all_hidden.append(h)
 
                 # Scatter to BlockPool after forward
@@ -1233,6 +1377,7 @@ class DeepSeekV4Model(GptModelBase):
                     and attn is not None
                 ):
                     self._scatter_all_layers(attn, B=1, batch_offset=b)
+                self._pre_final_swa_snapshot.clear()
 
                 self._running_pos = prefix_len + inp_len
                 offset += inp_len
