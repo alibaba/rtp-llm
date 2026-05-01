@@ -14,6 +14,20 @@ import pytest
 
 logging.basicConfig(level=logging.INFO)
 
+from rtp_llm.device.device_type import is_cuda
+
+# Hard platform gate: allocate_shared_buffer is a CUDA-only pybind binding
+# (defined in models_py/bindings/cuda/UserBuffersOp.cc). The chained import
+# from rtp_llm.models_py.distributed.user_buffers can raise ImportError OR
+# AttributeError depending on how the missing symbol surfaces — short-circuit
+# here on non-CUDA platforms.
+if not is_cuda():
+    pytest.skip(
+        "user_buffers_test requires CUDA IPC (allocate_shared_buffer is "
+        "a NVIDIA-only binding)",
+        allow_module_level=True,
+    )
+
 import torch
 import torch.distributed as dist
 
@@ -27,7 +41,7 @@ try:
         UserBufferCommunicator,
         get_user_buffers_communicator,
     )
-except ImportError as e:
+except (ImportError, AttributeError) as e:
     pytest.skip(
         f"CUDA-only (allocate_shared_buffer unavailable): {e}", allow_module_level=True
     )
