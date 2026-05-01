@@ -631,6 +631,40 @@ class KMonitorReportTest(InterceptorTestBase):
         self.assertEqual(error_tags["error_code"], "UNKNOWN")
         self.assertEqual(error_tags["protocol"], "grpc")
 
+    def test_generator_exit_routes_to_cancel_qps_not_error(self) -> None:
+        """Client disconnect mid-stream -> framework ``gen.close()`` injects
+        ``GeneratorExit`` at the wrapper's ``yield``. This is benign (not a
+        real RPC failure), so it must hit CANCEL_QPS, not ERROR_QPS. The log
+        line's ``status`` must be distinct from the generic ``UNKNOWN`` bucket
+        so operators can tell client-gone apart from actual errors at a glance.
+        """
+
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield _make_stream_response(generated_ids=[10])
+            yield _make_stream_response(generated_ids=[20])
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+
+        gen = behavior(iter([_make_infer_request(input_ids=[1])]), ctx)
+        # Drain one chunk, then simulate gRPC closing our generator because
+        # the client handler terminated. ``gen.close()`` injects GeneratorExit
+        # at the suspended ``yield resp`` and swallows it on the way out; the
+        # finally block still runs _finalize with the exception.
+        next(gen)
+        gen.close()
+
+        self.assertEqual(len(self._calls_for(AccMetrics.CANCEL_QPS_METRIC)), 1)
+        self.assertEqual(len(self._calls_for(AccMetrics.ERROR_QPS_METRIC)), 0)
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "CANCELLED")
+        self.assertEqual(rec["status_detail"], "client closed generator")
+        self.assertEqual(rec["exc_type"], "GeneratorExit")
+
     def test_rpc_without_input_ids_omits_input_token_size_gauge(self) -> None:
         """Health-check style RPC (no input_ids) must not emit a bogus 0-length gauge."""
 
