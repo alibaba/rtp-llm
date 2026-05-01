@@ -83,14 +83,86 @@ class Indexer(nn.Module):
             weights=weights,
             prefix=f"{prefix}.compressor" if self._factory_mode else "",
         )
-        self.register_buffer(
-            "kv_cache",
-            torch.zeros(max_batch_size, max_seq_len // compress_ratio, index_head_dim),
-            persistent=False,
-        )
+        # Phase E4: kv_cache is pool-backed (INDEXER_KV BlockPool), not
+        # register_buffer.  ``ensure_kv_cache_allocated`` lazily allocates
+        # the scratch on the first call (idempotent — mirrors register_
+        # buffer's cross-step persistence).  ``restore_kv_cache_from_pool``
+        # gathers the prefix compressed-K from INDEXER_KV pool on
+        # continuation prefill (reuse_cache path); Phase B's
+        # ``_prefill_paged_write_indexer`` scatters back at forward tail.
+        self.max_batch_size = max_batch_size
+        self._kv_cache_t = max_seq_len // compress_ratio
+        self._kv_cache_d = index_head_dim
+        self.kv_cache: Optional[torch.Tensor] = None
         self.freqs_cis: Optional[torch.Tensor] = None
         # CP context bound per-forward by V4Transformer; None = no CP.
         self._cp_ctx: Optional[CPContext] = None
+
+    def ensure_kv_cache_allocated(
+        self, device: torch.device, dtype: torch.dtype = torch.bfloat16
+    ) -> None:
+        """Phase E4: lazily allocate ``self.kv_cache`` on first use.
+        Idempotent so repeat calls (across decode steps) are free."""
+        if self.kv_cache is not None and self.kv_cache.device == device:
+            return
+        self.kv_cache = torch.zeros(
+            self.max_batch_size,
+            self._kv_cache_t,
+            self._kv_cache_d,
+            dtype=dtype,
+            device=device,
+        )
+
+    def reset_kv_cache_for_new_prefill(self, bsz: int) -> None:
+        """Zero ``kv_cache[:bsz]`` for a fresh prefill request.
+        Mirrors the retired ``attn.indexer.kv_cache.zero_()`` in
+        ``DeepSeekV4Model._reset_compressor_state`` but scoped to the
+        request row."""
+        assert (
+            self.kv_cache is not None
+        ), "reset_kv_cache_for_new_prefill: call ensure_kv_cache_allocated first"
+        self.kv_cache[:bsz].zero_()
+
+    def restore_kv_cache_from_pool(
+        self,
+        bsz: int,
+        pool_view: torch.Tensor,  # [num_slots, index_head_dim] bf16
+        block_table: torch.Tensor,  # [1, max_blocks]
+        entries_per_block: int,
+    ) -> None:
+        """Continuation prefill — gather ``kv_cache[:bsz, :T]`` from the
+        INDEXER_KV pool using the same slot_mapping formula as
+        ``_prefill_paged_write_kv`` so the write→read round trip is
+        byte-equal.  Positions past pool capacity or at sentinel
+        block_ids are zero-filled (matches the retired register_buffer's
+        zero-init)."""
+        assert (
+            self.kv_cache is not None
+        ), "restore_kv_cache_from_pool: call ensure_kv_cache_allocated first"
+        assert bsz == 1, f"Phase E4 restore assumes bsz==1 per v4() call (got {bsz})"
+        T = self._kv_cache_t
+        D = self._kv_cache_d
+        device = block_table.device
+        eb = entries_per_block
+        max_blocks = block_table.shape[1]
+        pool_capacity = max_blocks * eb
+        pos = torch.arange(T, device=device, dtype=torch.long)
+        in_capacity = pos < pool_capacity
+        safe_pos = torch.where(in_capacity, pos, torch.zeros_like(pos))
+        block_in_seq = safe_pos // eb
+        in_block = safe_pos % eb
+        bt_long = block_table.to(torch.long)
+        block_id = bt_long[0, block_in_seq]
+        valid = (block_id > 0) & in_capacity
+        safe_slot = torch.where(
+            valid, block_id * eb + in_block, torch.zeros_like(in_block)
+        )
+        gathered = pool_view.index_select(0, safe_slot)  # [T, D]
+        if gathered.dtype != self.kv_cache.dtype:
+            gathered = gathered.to(self.kv_cache.dtype)
+        zero_row = torch.zeros((), dtype=self.kv_cache.dtype, device=device)
+        out_flat = torch.where(valid.unsqueeze(-1), gathered, zero_row)
+        self.kv_cache[:bsz] = out_flat.view(bsz, T, D)
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         """Bind CP context.  When active, rank-local Q applies RoPE at
@@ -129,6 +201,7 @@ class Indexer(nn.Module):
         Decode-only — does NOT touch the prefill ``forward`` arm.
         """
         assert x.shape[1] == 1, "decode-only: q_len must be 1"
+        self.ensure_kv_cache_allocated(x.device)  # Phase E4: lazy alloc
         bsz = x.size(0)
         ratio = self.compress_ratio
         rd = self.rope_head_dim
@@ -200,6 +273,7 @@ class Indexer(nn.Module):
         the same tensor for caller convenience.
         """
         assert x.shape[1] == 1, "decode-only: q_len must be 1"
+        self.ensure_kv_cache_allocated(x.device)  # Phase E4: lazy alloc
 
         bsz = x.size(0)
         ratio = self.compress_ratio
@@ -274,6 +348,7 @@ class Indexer(nn.Module):
     def forward(
         self, x: torch.Tensor, qr: torch.Tensor, start_pos, offset: int
     ) -> torch.Tensor:
+        self.ensure_kv_cache_allocated(x.device)  # Phase E4: lazy alloc
         bsz, seqlen, _ = x.size()
         ratio = self.compress_ratio
         rd = self.rope_head_dim

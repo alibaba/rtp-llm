@@ -744,45 +744,39 @@ class Attention(nn.Module):
             self._prefill_paged_write_kv(INDEXER_STATE, merged_i, bsz)
 
     def _bind_compressor_state_for_prefill(self, bsz: int, sp_int: int) -> None:
-        """Phase E3: reset / restore compressor + indexer.compressor state
-        for this prefill call, replacing the retired
-        ``DeepSeekV4Model._reset_compressor_state`` +
+        """Phase E3+E4: reset / restore compressor + indexer.compressor
+        state AND indexer.kv_cache for this prefill call, replacing the
+        retired ``DeepSeekV4Model._reset_compressor_state`` +
         ``_gather_all_layers(reuse_gather=True)`` external flow.
 
-        Fresh prefill (sp_int == 0): zero ``kv_state[:bsz]`` and fill
-        ``score_state[:bsz]`` with -inf.  Continuation prefill (sp_int > 0):
-        gather the prefix carry from the framework STATE pool.  The
-        compressor's forward body reads/writes these attrs unchanged;
-        Phase B.3's ``_prefill_paged_write_state`` at forward tail
-        scatters the post-forward values back to the pool.
+        Fresh prefill (sp_int == 0): zero/-inf all three buffers.
+        Continuation prefill (sp_int > 0): gather kv_state/score_state
+        from the STATE pool and indexer.kv_cache from the INDEXER_KV
+        pool.  The compressor + indexer forward bodies read/write these
+        attrs unchanged; Phase B/B.3 dual-writes at forward tail scatter
+        the post-forward values back to the pool.
         """
         from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
             CSA_STATE,
             HCA_STATE,
+            INDEXER_KV,
             INDEXER_STATE,
         )
 
         device = self.kv_cache.device
         ctx = self._prefill_paged_ctx
 
-        def _bind_one(
+        def _bind_state(
             comp: "Compressor",  # type: ignore[name-defined]
             state_attn_type: int,
         ) -> None:
             comp.ensure_state_allocated(device)
-            # Zero/-inf or gather based on continuation flag.  For the
-            # CSA case (overlap=True), continuation retains only the
-            # overlap carry [:ratio] and zeros the partial-window tail
-            # [ratio:] — mirrors the old
-            # ``_reset_compressor_state`` + selective re-zeroing in
-            # ``_forward_impl``.
             if sp_int == 0 or ctx is None:
                 comp.reset_state_for_new_prefill(bsz)
                 return
             layer_descs = ctx["layer_descs"]
             bt_by_type = ctx["block_tables"]
             if state_attn_type not in layer_descs or state_attn_type not in bt_by_type:
-                # Pool unavailable for this layer — fall back to reset.
                 comp.reset_state_for_new_prefill(bsz)
                 return
             desc = layer_descs[state_attn_type]
@@ -792,10 +786,8 @@ class Attention(nn.Module):
                 return
             comp.restore_state_from_pool(bsz, desc.view(), bt, desc.entries_per_block)
             # CSA overlap=True: only [:ratio] carry is reused; zero the
-            # partial-window tail ([ratio:]) + fill corresponding score
-            # slots with -inf, matching the old reuse path in
-            # ``_forward_impl`` (see the ``a.compressor.kv_state[:1,
-            # off:].zero_()`` block before Phase E3 in deepseek_v4_model.py).
+            # partial-window tail — matches the old external re-zero in
+            # ``_forward_impl``.
             if comp.overlap:
                 r = comp.compress_ratio
                 comp.kv_state[:bsz, r:].zero_()
@@ -809,11 +801,36 @@ class Attention(nn.Module):
                 else (HCA_STATE if self.compress_ratio == 128 else None)
             )
             if at_self is not None:
-                _bind_one(self.compressor, at_self)
+                _bind_state(self.compressor, at_self)
 
         # Indexer's nested compressor (INDEXER_STATE).
         if self.indexer is not None and self.indexer.compressor is not None:
-            _bind_one(self.indexer.compressor, INDEXER_STATE)
+            _bind_state(self.indexer.compressor, INDEXER_STATE)
+
+        # Phase E4: Indexer.kv_cache (INDEXER_KV pool).  reset or restore
+        # from pool, then re-bind as nested compressor's kv_cache alias
+        # (Attention.forward_decode's legacy lazy-bind block relies on
+        # that alias being non-None).
+        if self.indexer is not None:
+            self.indexer.ensure_kv_cache_allocated(device)
+            do_restore = False
+            if sp_int > 0 and ctx is not None:
+                layer_descs = ctx["layer_descs"]
+                bt_by_type = ctx["block_tables"]
+                if INDEXER_KV in layer_descs and INDEXER_KV in bt_by_type:
+                    desc = layer_descs[INDEXER_KV]
+                    bt = bt_by_type[INDEXER_KV]
+                    if bt is not None and bt.numel() > 0:
+                        self.indexer.restore_kv_cache_from_pool(
+                            bsz, desc.view(), bt, desc.entries_per_block
+                        )
+                        do_restore = True
+            if not do_restore:
+                self.indexer.reset_kv_cache_for_new_prefill(bsz)
+            # Re-establish the alias that Attention.forward_decode's
+            # legacy lazy-bind block expects.
+            if self.indexer.compressor is not None:
+                self.indexer.compressor.kv_cache = self.indexer.kv_cache
 
     def _prefill_paged_read_kv(
         self,
@@ -1056,6 +1073,9 @@ class Attention(nn.Module):
             self.compressor.freqs_cis = self.freqs_cis
             if self.indexer is not None:
                 self.indexer.freqs_cis = self.freqs_cis
+                # Phase E4: Indexer.kv_cache is Optional[Tensor] — ensure
+                # allocated before aliasing into nested compressor.
+                self.indexer.ensure_kv_cache_allocated(x.device)
                 if self.indexer.compressor.kv_cache is None:
                     self.indexer.compressor.kv_cache = self.indexer.kv_cache
                     self.indexer.compressor.freqs_cis = self.freqs_cis

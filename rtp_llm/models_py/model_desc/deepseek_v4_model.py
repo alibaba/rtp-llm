@@ -390,22 +390,18 @@ class DeepSeekV4Model(GptModelBase):
         return True
 
     def _reset_compressor_state(self):
-        """Reset KV/compressed register_buffers for a new prefill.
+        """Reset ``attn.kv_cache`` register_buffer for a new prefill.
 
-        Phase E3: compressor / indexer.compressor ``kv_state`` /
-        ``score_state`` are now self-managed — ``Attention.forward``'s
-        ``_bind_compressor_state_for_prefill`` resets or restores them
-        per-request from the STATE pool.  This helper now only clears
-        the KV register_buffers (``attn.kv_cache`` + ``indexer.kv_cache``)
-        which still rely on zero-init for stale-data hygiene.  Phase E5
-        will drop the KV register_buffers outright.
+        Phase E3+E4: compressor / indexer.compressor ``kv_state`` /
+        ``score_state`` AND ``indexer.kv_cache`` are now self-managed —
+        ``Attention._bind_compressor_state_for_prefill`` resets or
+        restores them per-request.  This helper only clears
+        ``attn.kv_cache`` (the SWA + CSA/HCA register_buffer mirror)
+        which still needs zero-init for stale-data hygiene until Phase
+        E5 drops it entirely.
         """
         for layer in self.v4.layers:
-            attn = layer.attn
-            # Reset kv_cache (SWA + compressed KV) — also zeros compressor.kv_cache view
-            attn.kv_cache.zero_()
-            if attn.indexer is not None:
-                attn.indexer.kv_cache.zero_()
+            layer.attn.kv_cache.zero_()
 
     def _wire_framework_kv_cache(self, device: str):
         """Wire framework BlockPool for 7-pool gather/scatter.
@@ -787,17 +783,12 @@ class DeepSeekV4Model(GptModelBase):
                         self._gather_kv_pool(
                             fw_t, bid_slice, attn_mod.compressor.kv_cache[:B], 2, hd, B
                         )
-                elif attn_type == 3:  # INDEXER_KV
-                    if attn_mod.indexer is not None:
-                        idx_hd = attn_mod.indexer.head_dim
-                        self._gather_kv_pool(
-                            fw_t,
-                            bid_slice,
-                            attn_mod.indexer.kv_cache[:B],
-                            64,
-                            idx_hd,
-                            B,
-                        )
+                elif attn_type == 3:
+                    # Phase E4: INDEXER_KV self-gathered by
+                    # Indexer.restore_kv_cache_from_pool inside
+                    # Attention._bind_compressor_state_for_prefill — no
+                    # longer touched here.
+                    continue
                 elif attn_type in (4, 5, 6):
                     # Phase E3: STATE pools (INDEXER_STATE / CSA_STATE /
                     # HCA_STATE) are self-gathered by
