@@ -125,11 +125,100 @@ class Compressor(nn.Module):
         self._state_dim = coff * head_dim
         self.kv_state: Optional[torch.Tensor] = None
         self.score_state: Optional[torch.Tensor] = None
-        self.kv_cache: Optional[torch.Tensor] = None  # bind from caller (Attention)
+        # Phase E5: kv_cache is self-managed (was Attention.kv_cache[:, win:]
+        # view).  ``_kv_cache_t`` is set by caller via
+        # ``configure_kv_cache_shape(max_seq_len)`` because the Compressor
+        # doesn't know max_seq_len on its own (Indexer does; attn-level
+        # Compressor's max_seq_len comes through Attention.__init__).
+        self._kv_cache_t: int = 0
+        self._kv_cache_d: int = head_dim
+        self.kv_cache: Optional[torch.Tensor] = None
         self.freqs_cis: Optional[torch.Tensor] = None
         # CP context bound per-forward by V4Transformer.  None = no CP,
         # falls through to single-rank path unchanged.
         self._cp_ctx: Optional[CPContext] = None
+
+    def configure_kv_cache_shape(self, kv_cache_t: int) -> None:
+        """Phase E5: caller (Attention / Indexer) sets the compressed
+        kv_cache capacity (``max_seq_len // compress_ratio``) before the
+        first ensure_kv_cache_allocated.  Separate from __init__ because
+        the outer Attention passes ``max_seq_len`` but the inner
+        Indexer-owned Compressor inherits from Indexer's
+        ``max_seq_len``."""
+        self._kv_cache_t = kv_cache_t
+
+    def ensure_kv_cache_allocated(
+        self, device: torch.device, dtype: torch.dtype = torch.bfloat16
+    ) -> None:
+        """Phase E5: lazy alloc of ``self.kv_cache`` (was an alias into
+        ``Attention.kv_cache[:, win:]`` pre-refactor).  Idempotent — if
+        the tensor is already bound by a caller (e.g. Indexer aliases
+        ``indexer.compressor.kv_cache = indexer.kv_cache`` to share one
+        buffer between indexer and its nested compressor), this is a
+        no-op and preserves the caller's binding."""
+        if self.kv_cache is not None:
+            return
+        assert self._kv_cache_t > 0, (
+            "Compressor.configure_kv_cache_shape(...) required before "
+            "ensure_kv_cache_allocated (or caller must bind kv_cache "
+            "directly, e.g. Indexer → indexer.compressor.kv_cache)"
+        )
+        self.kv_cache = torch.zeros(
+            self.max_batch_size,
+            self._kv_cache_t,
+            self._kv_cache_d,
+            dtype=dtype,
+            device=device,
+        )
+
+    def reset_kv_cache_for_new_prefill(self, bsz: int) -> None:
+        """Zero ``kv_cache[:bsz]`` for a fresh prefill request.  Replaces
+        the retired ``attn.kv_cache[:bsz, win:].zero_()`` slice that the
+        pre-E5 view aliasing used to do implicitly through
+        ``attn.kv_cache.zero_()`` in ``_reset_compressor_state``."""
+        assert (
+            self.kv_cache is not None
+        ), "reset_kv_cache_for_new_prefill: call ensure_kv_cache_allocated first"
+        self.kv_cache[:bsz].zero_()
+
+    def restore_kv_cache_from_pool(
+        self,
+        bsz: int,
+        pool_view: torch.Tensor,  # [num_slots, head_dim] bf16
+        block_table: torch.Tensor,  # [1, max_blocks]
+        entries_per_block: int,
+    ) -> None:
+        """Continuation prefill — gather ``kv_cache[:bsz, :T]`` from
+        the CSA_KV or HCA_KV pool using the same slot_mapping formula
+        as the writer.  Zero-fills positions past pool capacity or at
+        sentinel block_ids."""
+        assert (
+            self.kv_cache is not None
+        ), "restore_kv_cache_from_pool: call ensure_kv_cache_allocated first"
+        assert bsz == 1, f"Phase E5 restore assumes bsz==1 per v4() call (got {bsz})"
+        T = self._kv_cache_t
+        D = self._kv_cache_d
+        device = block_table.device
+        eb = entries_per_block
+        max_blocks = block_table.shape[1]
+        pool_capacity = max_blocks * eb
+        pos = torch.arange(T, device=device, dtype=torch.long)
+        in_capacity = pos < pool_capacity
+        safe_pos = torch.where(in_capacity, pos, torch.zeros_like(pos))
+        block_in_seq = safe_pos // eb
+        in_block = safe_pos % eb
+        bt_long = block_table.to(torch.long)
+        block_id = bt_long[0, block_in_seq]
+        valid = (block_id > 0) & in_capacity
+        safe_slot = torch.where(
+            valid, block_id * eb + in_block, torch.zeros_like(in_block)
+        )
+        gathered = pool_view.index_select(0, safe_slot)  # [T, D]
+        if gathered.dtype != self.kv_cache.dtype:
+            gathered = gathered.to(self.kv_cache.dtype)
+        zero_row = torch.zeros((), dtype=self.kv_cache.dtype, device=device)
+        out_flat = torch.where(valid.unsqueeze(-1), gathered, zero_row)
+        self.kv_cache[:bsz] = out_flat.view(bsz, T, D)
 
     # ------------------------------------------------------------------
     # Phase E3 — state lifecycle helpers (replaces the retired
@@ -270,7 +359,7 @@ class Compressor(nn.Module):
         cut. B is small (≤~16 typical decode), layer count dominates;
         vectorizing is a Phase 4+ perf improvement.
         """
-        assert self.kv_cache is not None, "Compressor.kv_cache must be bound by caller"
+        self.ensure_kv_cache_allocated(x.device)  # Phase E5: lazy alloc
         assert (
             self.freqs_cis is not None
         ), "Compressor.freqs_cis must be bound by caller"
@@ -377,7 +466,7 @@ class Compressor(nn.Module):
         (c) only the CUDA-graph path uses this — Phase 2 eager keeps
         the loop variant for byte-equal regression safety.
         """
-        assert self.kv_cache is not None, "Compressor.kv_cache must be bound by caller"
+        self.ensure_kv_cache_allocated(x.device)  # Phase E5: lazy alloc
         assert (
             self.freqs_cis is not None
         ), "Compressor.freqs_cis must be bound by caller"
@@ -486,7 +575,7 @@ class Compressor(nn.Module):
         return out
 
     def forward(self, x: torch.Tensor, start_pos) -> Optional[torch.Tensor]:
-        assert self.kv_cache is not None, "Compressor.kv_cache must be bound by caller"
+        self.ensure_kv_cache_allocated(x.device)  # Phase E5: lazy alloc
         assert (
             self.freqs_cis is not None
         ), "Compressor.freqs_cis must be bound by caller"

@@ -494,6 +494,10 @@ class Attention(nn.Module):
                 weights=weights,
                 prefix=f"{prefix}.compressor" if self._factory_mode else "",
             )
+            # Phase E5: Compressor.kv_cache is self-managed (was an alias
+            # into ``Attention.kv_cache[:, win:]``).  Configure shape here
+            # because the Compressor doesn't know ``max_seq_len``.
+            self.compressor.configure_kv_cache_shape(max_seq_len // compress_ratio)
             if compress_ratio == 4:
                 self.indexer = Indexer(
                     dim=dim,
@@ -757,7 +761,9 @@ class Attention(nn.Module):
         the post-forward values back to the pool.
         """
         from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
+            CSA_KV,
             CSA_STATE,
+            HCA_KV,
             HCA_STATE,
             INDEXER_KV,
             INDEXER_STATE,
@@ -831,6 +837,30 @@ class Attention(nn.Module):
             # legacy lazy-bind block expects.
             if self.indexer.compressor is not None:
                 self.indexer.compressor.kv_cache = self.indexer.kv_cache
+
+        # Phase E5: Compressor.kv_cache (CSA_KV / HCA_KV pool) — the
+        # former ``Attention.kv_cache[:, win:]`` alias.
+        if self.compressor is not None:
+            self.compressor.ensure_kv_cache_allocated(device)
+            cmp_at = (
+                CSA_KV
+                if self.compress_ratio == 4
+                else (HCA_KV if self.compress_ratio == 128 else None)
+            )
+            do_restore_cmp = False
+            if sp_int > 0 and ctx is not None and cmp_at is not None:
+                layer_descs = ctx["layer_descs"]
+                bt_by_type = ctx["block_tables"]
+                if cmp_at in layer_descs and cmp_at in bt_by_type:
+                    desc = layer_descs[cmp_at]
+                    bt = bt_by_type[cmp_at]
+                    if bt is not None and bt.numel() > 0:
+                        self.compressor.restore_kv_cache_from_pool(
+                            bsz, desc.view(), bt, desc.entries_per_block
+                        )
+                        do_restore_cmp = True
+            if not do_restore_cmp:
+                self.compressor.reset_kv_cache_for_new_prefill(bsz)
 
     def _prefill_paged_read_kv(
         self,
@@ -1063,18 +1093,16 @@ class Attention(nn.Module):
         # broadcasts the same row to multiple slots and corrupts state.
         start_pos = attn_metadata.start_pos[:bsz]  # [bsz] int32
 
-        # bind compressor cache + freqs lazily (mirrors prefill arm).
-        # Indexer owns its OWN nested compressor (indexer.compressor) with
-        # its OWN kv_cache; the indexer prefill path binds it inside
-        # indexer.forward(), but the decode_vectorized path doesn't —
-        # bind it here so the captured graph sees the buffer.
-        if self.compress_ratio and self.compressor.kv_cache is None:
-            self.compressor.kv_cache = self.kv_cache[:, win:]
-            self.compressor.freqs_cis = self.freqs_cis
+        # Phase E5: Compressor.kv_cache is self-managed — ensure allocated
+        # lazily (idempotent across decode steps).  Indexer-owned nested
+        # compressor still aliases Indexer.kv_cache for shared storage;
+        # keep that bind here so the captured graph sees the buffer.
+        if self.compress_ratio:
+            self.compressor.ensure_kv_cache_allocated(x.device)
+            if self.compressor.freqs_cis is None:
+                self.compressor.freqs_cis = self.freqs_cis
             if self.indexer is not None:
                 self.indexer.freqs_cis = self.freqs_cis
-                # Phase E4: Indexer.kv_cache is Optional[Tensor] — ensure
-                # allocated before aliasing into nested compressor.
                 self.indexer.ensure_kv_cache_allocated(x.device)
                 if self.indexer.compressor.kv_cache is None:
                     self.indexer.compressor.kv_cache = self.indexer.kv_cache
@@ -1517,10 +1545,12 @@ class Attention(nn.Module):
         device = x.device
         start_pos = attn_metadata.start_pos  # [B] int32
 
-        # Bind compressor/indexer caches lazily (same as BF16 forward_decode).
-        if self.compress_ratio and self.compressor.kv_cache is None:
-            self.compressor.kv_cache = self.kv_cache[:, win:]
-            self.compressor.freqs_cis = self.freqs_cis
+        # Phase E5: Compressor.kv_cache self-managed (was
+        # ``self.kv_cache[:, win:]`` alias).  Lazy-alloc + bind freqs.
+        if self.compress_ratio:
+            self.compressor.ensure_kv_cache_allocated(x.device)
+            if self.compressor.freqs_cis is None:
+                self.compressor.freqs_cis = self.freqs_cis
             if self.indexer is not None:
                 self.indexer.freqs_cis = self.freqs_cis
 
@@ -1689,10 +1719,12 @@ class Attention(nn.Module):
             sp = int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
             freqs_cis = self.freqs_cis[sp : sp + seqlen]
 
-        # bind compressor cache + freqs on first call
-        if self.compress_ratio and self.compressor.kv_cache is None:
-            self.compressor.kv_cache = self.kv_cache[:, win:]
-            self.compressor.freqs_cis = self.freqs_cis
+        # Phase E5: Compressor.kv_cache self-managed; ensure alloc + bind
+        # freqs on first call (idempotent across calls).
+        if self.compress_ratio:
+            self.compressor.ensure_kv_cache_allocated(x.device)
+            if self.compressor.freqs_cis is None:
+                self.compressor.freqs_cis = self.freqs_cis
             if self.indexer is not None:
                 self.indexer.freqs_cis = self.freqs_cis
 
