@@ -29,8 +29,8 @@ The eager path is unchanged.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -39,6 +39,10 @@ from rtp_llm.models_py.modules.dsv4.decode.decode_attn_metadata import (
     allocate_decode_metadata,
     update_decode_metadata_in_place,
 )
+
+# attn_type id → group_id in attn_inputs.kv_cache_kernel_block_id_device_by_group.
+# Mirror the table in DeepSeekV4Model._gather_all_layers / _scatter_all_layers.
+ATTN_TYPE_TO_GROUP_ID = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6}
 
 
 @dataclass
@@ -53,6 +57,15 @@ class DSv4DecodeFmhaImplConfig:
     max_seq_len: int
     compress_ratios: List[int]
     index_topk: int
+
+    # Phase 2 paged-decode wiring. When provided, the impl pre-allocates
+    # per-attn_type block_table + slot_mapping buffers in the metadata
+    # and ``prepare`` populates them from
+    # ``attn_inputs.kv_cache_kernel_block_id_device_by_group``.
+    #
+    # ``paged_pool_specs[attn_type] = (entries_per_block, max_blocks_per_req)``.
+    # If empty, the legacy register_buffer-only path is used.
+    paged_pool_specs: Dict[int, Tuple[int, int]] = field(default_factory=dict)
 
 
 class DSv4DecodeFmhaImpl:
@@ -80,7 +93,13 @@ class DSv4DecodeFmhaImpl:
             compress_ratios=config.compress_ratios,
             index_topk=config.index_topk,
             device=device,
+            paged_pool_specs=config.paged_pool_specs,
         )
+        # Cache entries_per_block lookup — passed unchanged to
+        # update_decode_metadata_in_place every prepare call.
+        self._paged_entries_per_block: Dict[int, int] = {
+            at: spec[0] for at, spec in config.paged_pool_specs.items()
+        }
         # Populate metadata so the initial dtype-check forward (called by
         # CudaGraphRunner::initCapture BEFORE any prepare_cuda_graph) reads
         # valid values rather than the zero/-1 sentinels from allocation.
@@ -98,7 +117,8 @@ class DSv4DecodeFmhaImpl:
         ``attn_inputs.sequence_lengths`` (per
         ``NormalModelInputGatherer.cc:255`` this is exactly the absolute
         position of the new token's predecessor — i.e. our ``start_pos``).
-        Then update the persistent metadata in place.
+        Then update the persistent metadata in place, including paged
+        block_table snapshot when configured.
         """
         seq_lens = attn_inputs.sequence_lengths
         if seq_lens.device != self.device:
@@ -109,10 +129,33 @@ class DSv4DecodeFmhaImpl:
         # range. Same clamp used in DeepSeekV4Model._forward_decode.
         max_s = self.config.max_seq_len
         start_pos = torch.clamp(start_pos, min=0, max=max(0, max_s - 1))
+
+        # Phase 2: pull per-attn_type block_tables from the framework's
+        # by_group list. Empty paged_pool_specs ⇒ skip (legacy path).
+        paged_block_tables: Optional[Dict[int, torch.Tensor]] = None
+        if self._paged_entries_per_block:
+            by_group = getattr(
+                attn_inputs,
+                "kv_cache_kernel_block_id_device_by_group",
+                None,
+            )
+            if by_group is not None and len(by_group) > 0:
+                paged_block_tables = {}
+                for at, _ in self.config.paged_pool_specs.items():
+                    gid = ATTN_TYPE_TO_GROUP_ID.get(at)
+                    if gid is None or gid >= len(by_group):
+                        continue
+                    bt = by_group[gid]
+                    if bt is None or bt.numel() == 0:
+                        continue
+                    paged_block_tables[at] = bt
+
         update_decode_metadata_in_place(
             self.metadata,
             start_pos,
             forbid_realloc=forbid_realloc,
+            paged_block_tables=paged_block_tables,
+            paged_pool_entries_per_block=self._paged_entries_per_block,
         )
 
     def prepare_cuda_graph(self, attn_inputs) -> None:

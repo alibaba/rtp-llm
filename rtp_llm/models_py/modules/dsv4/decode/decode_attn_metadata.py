@@ -108,6 +108,41 @@ class DSv4DecodeAttnMetadata:
     # ---- Cuda graph: reserved for Phase 3 (forbid_realloc, fixed addr) ----
     is_cuda_graph: bool = False
 
+    # ------------------------------------------------------------------
+    # Paged-decode metadata (paged BlockPool read/write).
+    # All optional — when empty, decode falls back to the legacy
+    # register_buffer path. Populated by the model + impl once the
+    # framework block tables are wired.
+    # ------------------------------------------------------------------
+
+    # Per-attn_type framework block_table: [max_B, max_blocks_per_req] int32.
+    # Source: ``attn_inputs.kv_cache_kernel_block_id_device_by_group[gid]``.
+    # Keys are PoolDescriptor attn_type ids (1=CSA_KV..7=SWA_KV); only
+    # pools that the model actually uses are present.
+    pool_block_tables: Dict[int, torch.Tensor] = field(default_factory=dict)
+
+    # Per-attn_type new-token write slot mapping: [max_T_total] int64.
+    # ``slot[t] = block_table[req(t), abs_pos(t)//E] * E + abs_pos(t)%E``
+    # where ``E`` is the pool's entries_per_block; ``-1`` = skip
+    # (boundary-only writers like CSA-K / HCA-K / INDEXER-K).
+    pool_write_slot_mappings: Dict[int, torch.Tensor] = field(default_factory=dict)
+
+    # Per-step absolute positions for the SWA window — left-aligned,
+    # ``-1`` padded for pre-sequence-start entries. Shape ``[B, q_len, win]``
+    # int32. UNLIKE ``topk_window_idxs`` (which is request-local ring
+    # slots in [0, win)), this carries the actual absolute token
+    # positions in [0, max_seq_len) so it can be turned into global pool
+    # slot ids via ``translate_local_to_global_slots``. Optional —
+    # populated only when paged-decode read is enabled.
+    swa_abs_idx: torch.Tensor = field(default=None)  # type: ignore[assignment]
+
+    # Per-layer ``{attn_type: PoolDescriptor}``. Static reference (NOT a
+    # tensor) — the pool tensor inside each descriptor is the framework
+    # BlockPool handle, lifetime-managed by the C++ allocator. Attention
+    # layers grab their pool views via this map at call time. ``None``
+    # entries (or empty dict) mean "fall back to register_buffer".
+    layer_pool_descs: Optional[List[Dict[int, "PoolDescriptor"]]] = None
+
 
 def _build_swa_slot_mapping(
     start_pos: torch.Tensor, q_len: int, window_size: int, swa_buffer_stride: int
@@ -243,6 +278,7 @@ def allocate_decode_metadata(
     compress_ratios: List[int],
     index_topk: int,
     device: torch.device,
+    paged_pool_specs: Optional[Dict[int, Tuple[int, int]]] = None,
 ) -> "DSv4DecodeAttnMetadata":
     """Pre-allocate a ``DSv4DecodeAttnMetadata`` sized for ``max_batch_size``.
 
@@ -298,6 +334,31 @@ def allocate_decode_metadata(
             device=device,
         )
 
+    # Phase 2: paged pool block_table + write slot mapping buffers.
+    # paged_pool_specs maps attn_type → (entries_per_block, max_blocks_per_req).
+    # We never reallocate after construction, so the captured graph reads
+    # from these stable addresses. When a pool is absent on a layer, the
+    # corresponding entries are simply unused.
+    pool_block_tables: Dict[int, torch.Tensor] = {}
+    pool_write_slot_mappings: Dict[int, torch.Tensor] = {}
+    if paged_pool_specs:
+        for attn_type, (_, max_blocks) in paged_pool_specs.items():
+            pool_block_tables[attn_type] = torch.zeros(
+                B, max_blocks, dtype=torch.int32, device=device
+            )
+            pool_write_slot_mappings[attn_type] = torch.full(
+                (T_total,), -1, dtype=torch.int64, device=device
+            )
+
+    # Pre-allocate swa_abs_idx[B, q_len, win] int32 (always — Phase 2B-2a
+    # paged read may consume it; cost is trivial compared to the rest).
+    swa_abs_idx = torch.full(
+        (B, q_len, window_size),
+        -1,
+        dtype=torch.int32,
+        device=device,
+    )
+
     return DSv4DecodeAttnMetadata(
         batch_size=B,
         q_len_per_req=q_len,
@@ -315,6 +376,9 @@ def allocate_decode_metadata(
         topk_total_by_ratio=topk_total_by_ratio,
         compressed_offset=window_size,
         is_cuda_graph=True,
+        pool_block_tables=pool_block_tables,
+        pool_write_slot_mappings=pool_write_slot_mappings,
+        swa_abs_idx=swa_abs_idx,
     )
 
 
@@ -322,6 +386,8 @@ def update_decode_metadata_in_place(
     meta: "DSv4DecodeAttnMetadata",
     start_pos: torch.Tensor,
     forbid_realloc: bool = False,
+    paged_block_tables: Optional[Dict[int, torch.Tensor]] = None,
+    paged_pool_entries_per_block: Optional[Dict[int, int]] = None,
 ) -> None:
     """Recompute every metadata buffer IN PLACE for a new ``start_pos``.
 
@@ -454,6 +520,110 @@ def update_decode_metadata_in_place(
             # CSA: indexer fills the compressed half per-call. Reset to -1.
             total[:bs, :, window_size:].fill_(-1)
 
+    # ------------------------------------------------------------------
+    # Phase 2: paged write slot mappings (per attn_type).
+    # SWA-K writes EVERY decode token; CSA-K / HCA-K / INDEXER-K write
+    # ONLY on their respective compression boundaries (sentinel ``-1``
+    # otherwise — the write op honors that via ``mask_negative=True``).
+    # ------------------------------------------------------------------
+    if paged_block_tables is not None and paged_pool_entries_per_block is not None:
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
+            CSA_KV,
+            HCA_KV,
+            INDEXER_KV,
+            SWA_KV,
+        )
+        from rtp_llm.models_py.modules.dsv4.decode.pool_slot_mapping import (
+            compute_kv_pool_slot_mapping,
+        )
+
+        # Snapshot block_table content into the metadata's stable buffer
+        # (forbid_realloc-friendly: just `.copy_` the prefix). Skip pools
+        # without a metadata buffer (e.g. SWA-only layers don't carry CSA).
+        for at, src_bt in paged_block_tables.items():
+            dst_bt = meta.pool_block_tables.get(at)
+            if dst_bt is None:
+                continue
+            n_rows = min(src_bt.shape[0], dst_bt.shape[0])
+            n_cols = min(src_bt.shape[1], dst_bt.shape[1])
+            # Zero stale rows beyond current bs to avoid carrying old block
+            # ids (defensive — graph reads only [:bs] anyway).
+            dst_bt[bs:].zero_()
+            dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
+            if n_cols < dst_bt.shape[1]:
+                dst_bt[:n_rows, n_cols:].zero_()
+
+        # SWA: every token writes; abs_pos = start_pos + s.
+        if SWA_KV in meta.pool_block_tables:
+            slot = meta.pool_write_slot_mappings[SWA_KV]
+            E = paged_pool_entries_per_block.get(SWA_KV, window_size)
+            abs_pos_swa = (
+                start_pos.view(bs, 1)
+                + torch.arange(q_len, device=device, dtype=torch.int32).view(1, q_len)
+            ).reshape(-1)
+            mapped = compute_kv_pool_slot_mapping(
+                meta.pool_block_tables[SWA_KV][:bs],
+                abs_pos_swa,
+                E,
+            )
+            slot[: bs * q_len].copy_(mapped)
+
+        # Compressed pools (CSA / HCA / INDEXER): write only on boundary;
+        # abs_pos here is the COMPRESSED entry index for this token, with
+        # ``-1`` sentinel for non-boundary tokens. Indexer shares the
+        # ratio=4 boundary with CSA.
+        for ratio_key, attn_type_writers in (
+            (4, [CSA_KV, INDEXER_KV]),
+            (128, [HCA_KV]),
+        ):
+            if ratio_key not in meta.slot_mapping_compressed:
+                continue
+            # Per-request compressed entry index for THIS step's tokens,
+            # with ``-1`` sentinel for non-boundary tokens. The legacy
+            # ``meta.slot_mapping_compressed[ratio]`` is in register_buffer
+            # coordinates (req_idx*stride+offset); for paged we need the
+            # plain per-request entry index.
+            abs_pos_plus_1 = (
+                start_pos.view(bs, 1)
+                + torch.arange(q_len, device=device, dtype=torch.int32).view(1, q_len)
+                + 1
+            )
+            on_boundary = (abs_pos_plus_1 % ratio_key) == 0
+            cmp_idx = abs_pos_plus_1 // ratio_key - 1
+            cmp_idx_with_skip = torch.where(
+                on_boundary,
+                cmp_idx,
+                torch.full_like(cmp_idx, -1),
+            ).reshape(-1)
+            for at in attn_type_writers:
+                if at not in meta.pool_block_tables:
+                    continue
+                E = paged_pool_entries_per_block.get(at, 1)
+                mapped = compute_kv_pool_slot_mapping(
+                    meta.pool_block_tables[at][:bs],
+                    cmp_idx_with_skip,
+                    E,
+                )
+                meta.pool_write_slot_mappings[at][: bs * q_len].copy_(mapped)
+
+    # Phase 2B-2a: SWA absolute-position window (paged read). Left-aligned,
+    # ``-1`` padded for entries before sequence start. Same shape as
+    # ``topk_window_idxs`` but holds abs positions, not ring slots.
+    if meta.swa_abs_idx is not None:
+        win_range = torch.arange(window_size, device=device, dtype=torch.int32).view(
+            1,
+            1,
+            window_size,
+        )
+        win_start = (abs_pos.unsqueeze(-1) - window_size + 1).clamp(
+            min=0
+        )  # [bs,q_len,1]
+        candidate = win_start + win_range  # [bs, q_len, win]
+        valid_pos = candidate <= abs_pos.unsqueeze(-1)
+        meta.swa_abs_idx[:bs].copy_(
+            torch.where(valid_pos, candidate, torch.full_like(candidate, -1))
+        )
+
     # Update Python-scalar geometry (cheap — these are not captured into the graph)
     meta.batch_size = bs
     meta.total_tokens = bs * q_len
@@ -489,6 +659,8 @@ def build_decode_metadata(
     index_topk: int,
     device: torch.device,
     dtype: torch.dtype = torch.bfloat16,  # noqa: ARG001 — reserved for future
+    paged_block_tables: Optional[Dict[int, torch.Tensor]] = None,
+    paged_pool_entries_per_block: Optional[Dict[int, int]] = None,
 ) -> DSv4DecodeAttnMetadata:
     """Top-level builder. Call ONCE per decode forward step.
 
@@ -595,6 +767,83 @@ def build_decode_metadata(
         # else (r==4): compressed half stays -1 sentinel until IndexerDecodeV4Op fills it.
         topk_total_by_ratio[r] = total
 
+    # Phase 2 paged eager-path metadata (allocated fresh per step — eager
+    # path doesn't share buffers across steps, unlike DSv4DecodeFmhaImpl).
+    pool_block_tables: Dict[int, torch.Tensor] = {}
+    pool_write_slot_mappings: Dict[int, torch.Tensor] = {}
+    if paged_block_tables and paged_pool_entries_per_block:
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
+            CSA_KV,
+            HCA_KV,
+            INDEXER_KV,
+            SWA_KV,
+        )
+        from rtp_llm.models_py.modules.dsv4.decode.pool_slot_mapping import (
+            compute_kv_pool_slot_mapping,
+        )
+
+        # Snapshot block tables (clone so downstream writes can't surprise
+        # the framework's tensor).
+        for at, bt in paged_block_tables.items():
+            pool_block_tables[at] = bt[:B].contiguous().clone()
+
+        if SWA_KV in pool_block_tables:
+            E = paged_pool_entries_per_block.get(SWA_KV, window_size)
+            abs_pos_swa = (
+                start_pos.view(B, 1)
+                + torch.arange(q_len, device=device, dtype=torch.int32).view(1, q_len)
+            ).reshape(-1)
+            pool_write_slot_mappings[SWA_KV] = compute_kv_pool_slot_mapping(
+                pool_block_tables[SWA_KV],
+                abs_pos_swa,
+                E,
+            )
+
+        for ratio_key, attn_type_writers in (
+            (4, [CSA_KV, INDEXER_KV]),
+            (128, [HCA_KV]),
+        ):
+            if ratio_key not in compressed_lens:
+                continue
+            abs_pos_plus_1 = (
+                start_pos.view(B, 1)
+                + torch.arange(q_len, device=device, dtype=torch.int32).view(1, q_len)
+                + 1
+            )
+            on_boundary = (abs_pos_plus_1 % ratio_key) == 0
+            cmp_idx = abs_pos_plus_1 // ratio_key - 1
+            cmp_idx_with_skip = torch.where(
+                on_boundary,
+                cmp_idx,
+                torch.full_like(cmp_idx, -1),
+            ).reshape(-1)
+            for at in attn_type_writers:
+                if at not in pool_block_tables:
+                    continue
+                E = paged_pool_entries_per_block.get(at, 1)
+                pool_write_slot_mappings[at] = compute_kv_pool_slot_mapping(
+                    pool_block_tables[at],
+                    cmp_idx_with_skip,
+                    E,
+                )
+
+    # Phase 2B-2a: SWA absolute-position window (paged read).
+    abs_pos_eager = start_pos.view(B, 1) + torch.arange(
+        q_len, device=device, dtype=torch.int32
+    ).view(1, q_len)
+    win_range = torch.arange(window_size, device=device, dtype=torch.int32).view(
+        1,
+        1,
+        window_size,
+    )
+    win_start = (abs_pos_eager.unsqueeze(-1) - window_size + 1).clamp(min=0)
+    candidate = win_start + win_range
+    swa_abs_idx = torch.where(
+        candidate <= abs_pos_eager.unsqueeze(-1),
+        candidate,
+        torch.full_like(candidate, -1),
+    )
+
     return DSv4DecodeAttnMetadata(
         batch_size=B,
         q_len_per_req=q_len,
@@ -612,4 +861,7 @@ def build_decode_metadata(
         topk_total_by_ratio=topk_total_by_ratio,
         compressed_offset=window_size,
         is_cuda_graph=False,
+        pool_block_tables=pool_block_tables,
+        pool_write_slot_mappings=pool_write_slot_mappings,
+        swa_abs_idx=swa_abs_idx,
     )

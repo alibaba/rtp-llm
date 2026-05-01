@@ -16,7 +16,7 @@ flow (V4-Flash has 67k+ tensors in ~250 packed FP4/FP8 shards) and directly call
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 
@@ -375,11 +375,11 @@ class DeepSeekV4Model(GptModelBase):
         self._materialized = True
         self._running_pos = 0
 
-        # Wire framework KV cache if enabled — note: self.kv_cache may not
-        # be set yet (framework allocates it after initialize() returns).
-        # We defer wiring to the first forward() call via _framework_kv_pending.
-        self._framework_kv_pending = os.environ.get("DSV4_USE_FRAMEWORK_KV", "0") == "1"
-        if self._framework_kv_pending and self.kv_cache is not None:
+        # Wire framework KV cache — note: self.kv_cache may not be set yet
+        # (framework allocates it after initialize() returns). We defer wiring
+        # to the first forward() call via _framework_kv_pending.
+        self._framework_kv_pending = True
+        if self.kv_cache is not None:
             self._wire_framework_kv_cache(device_str)
             self._framework_kv_pending = False
             logging.info(
@@ -469,20 +469,27 @@ class DeepSeekV4Model(GptModelBase):
         self._layer_pools = []
         self._layer_gather_pools = []
         self._layer_reuse_gather_pools = []
+        # Phase 2B-3: STATE-only pool list per layer for the decode hot-path,
+        # used when paged read+write keep KV pools fresh and we only need to
+        # gather/scatter the compressor/indexer state pools (4/5/6).
+        self._layer_state_pools = []
         for i, layer in enumerate(self.v4.layers):
             ratio = layer.attn.compress_ratio
             if ratio == 4:
                 self._layer_pools.append([7, 1, 3, 4, 5])
                 self._layer_gather_pools.append([1, 3])  # CSA_KV, INDEXER_KV only
                 self._layer_reuse_gather_pools.append([1, 3, 4, 5])  # + STATE pools
+                self._layer_state_pools.append([4, 5])  # INDEXER_STATE + CSA_STATE
             elif ratio == 128:
                 self._layer_pools.append([7, 2, 6])
                 self._layer_gather_pools.append([2])  # HCA_KV only
                 self._layer_reuse_gather_pools.append([2, 6])  # + STATE pool
+                self._layer_state_pools.append([6])  # HCA_STATE only
             else:
                 self._layer_pools.append([7])
                 self._layer_gather_pools.append([])  # SWA-only, nothing to gather
                 self._layer_reuse_gather_pools.append([])  # SWA-only
+                self._layer_state_pools.append([])  # SWA-only has no state
 
         # Debug: log shapes for layer 0 and layer 2
         for dbg in [0, 2]:
@@ -504,6 +511,131 @@ class DeepSeekV4Model(GptModelBase):
             len(self.v4.layers),
             spb,
         )
+
+        # Phase 0 layout probe — print actual stride/blocks/entries for every
+        # pool of layer 0 and the first compress_ratio==4 / ==128 layers, so
+        # we can verify that "256 tokens/block, fixed 2 blocks/req for state
+        # & SWA, shared variable-length pool for CSA/HCA/INDEXER KV" holds
+        # against the actual framework allocator before writing paged ops.
+        self._dump_pool_layout(spb)
+
+        # Phase 2: build the per-layer PoolDescriptor cache for the paged
+        # decode path. ``self._layer_pool_descs[layer_idx][attn_type]``
+        # gives the typed view + entries_per_block at decode call time.
+        # Source-of-truth = framework pool stride (seen by build_pool_descriptor).
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
+            build_layer_pool_descriptors,
+        )
+
+        idx_hd = 0
+        for layer in self.v4.layers:
+            if layer.attn.indexer is not None:
+                idx_hd = layer.attn.indexer.head_dim
+                break
+        self._layer_pool_descs = []
+        for li, layer in enumerate(self.v4.layers):
+            self._layer_pool_descs.append(
+                build_layer_pool_descriptors(
+                    flat_pools=flat,
+                    layer_idx=li,
+                    head_dim=layer.attn.head_dim,
+                    indexer_head_dim=idx_hd,
+                    compress_ratio=layer.attn.compress_ratio,
+                    attn_type_count=attn_type_count,
+                )
+            )
+        logging.info(
+            "[DeepSeekV4Model] Phase 2: built per-layer PoolDescriptors for %d layers",
+            len(self._layer_pool_descs),
+        )
+
+    def _dump_pool_layout(self, tokens_per_block: int) -> None:
+        """One-shot dump of per-attn_type pool layout for the new paged decode
+        path. Logs (total_blocks, stride_bytes, expected_entries_per_block,
+        bytes_per_entry, slack_bytes) for layer 0 and one CSA/HCA exemplar."""
+        # attn_type → (vector dtype, vector dim, expected entries per 256-token block)
+        # KV vectors:
+        #   1=CSA_KV     bf16, head_dim,    256 / 4   = 64
+        #   2=HCA_KV     bf16, head_dim,    256 / 128 = 2
+        #   3=INDEXER_KV bf16, idx_head,    256 / 4   = 64   (indexer has compress_ratio=4)
+        #   7=SWA_KV     bf16, head_dim,    256       (cyclic, fixed 2 blocks/req → 512 cap)
+        # State vectors (paired kv_state ‖ score_state, fp32):
+        #   4=INDEXER_STATE  fp32, 2*coff_idx*idx_head   slots = coff_idx*ratio_idx
+        #   5=CSA_STATE      fp32, 2*coff*head_dim       slots = coff*ratio (overlap=True coff=2)
+        #   6=HCA_STATE      fp32, 2*head_dim            slots = ratio (overlap=False coff=1)
+        attn_type_names = {
+            1: "CSA_KV",
+            2: "HCA_KV",
+            3: "INDEXER_KV",
+            4: "INDEXER_STATE",
+            5: "CSA_STATE",
+            6: "HCA_STATE",
+            7: "SWA_KV",
+        }
+
+        def _describe_layer(layer_idx: int) -> None:
+            attn = self.v4.layers[layer_idx].attn
+            ratio = attn.compress_ratio
+            hd = attn.head_dim
+            idx_hd = attn.indexer.head_dim if attn.indexer is not None else 0
+            for at in range(1, 8):
+                t = self._get_pool_tensor(at, layer_idx)
+                if t is None or t.numel() == 0:
+                    logging.info(
+                        "[layout] L%02d ratio=%-3d %-13s : <empty>",
+                        layer_idx,
+                        ratio,
+                        attn_type_names[at],
+                    )
+                    continue
+                num_blocks, stride_bytes = int(t.shape[0]), int(t.shape[1])
+                # Expected geometry per attn_type
+                if at == 1:  # CSA_KV
+                    bpe, exp_eb = hd * 2, max(1, tokens_per_block // 4)
+                elif at == 2:  # HCA_KV
+                    bpe, exp_eb = hd * 2, max(1, tokens_per_block // 128)
+                elif at == 3:  # INDEXER_KV
+                    bpe, exp_eb = idx_hd * 2, max(1, tokens_per_block // 4)
+                elif at == 7:  # SWA_KV
+                    bpe, exp_eb = hd * 2, tokens_per_block
+                elif at == 5:  # CSA_STATE  (overlap=True, coff=2)
+                    bpe, exp_eb = (
+                        2 * 2 * hd
+                    ) * 4, 4  # 4 state slots/block × 2 blocks/req = 8 slots
+                elif at == 6:  # HCA_STATE  (overlap=False, coff=1)
+                    bpe, exp_eb = (
+                        2 * hd
+                    ) * 4, 8  # 8 state slots/block × 2 blocks/req = 16 slots
+                elif at == 4:  # INDEXER_STATE (overlap=True for idx ratio=4, coff=2)
+                    bpe, exp_eb = (2 * 2 * idx_hd) * 4, 4
+                else:
+                    bpe, exp_eb = 0, 0
+                eb_from_stride = stride_bytes // bpe if bpe > 0 else -1
+                slack = stride_bytes - eb_from_stride * bpe if bpe > 0 else 0
+                logging.info(
+                    "[layout] L%02d ratio=%-3d %-13s blocks=%-7d stride=%-7dB "
+                    "bytes/entry=%-5d entries=%-5d (expected=%d) slack=%dB",
+                    layer_idx,
+                    ratio,
+                    attn_type_names[at],
+                    num_blocks,
+                    stride_bytes,
+                    bpe,
+                    eb_from_stride,
+                    exp_eb,
+                    slack,
+                )
+
+        # First layer of each ratio class for compactness
+        seen: set[int] = set()
+        for li, layer in enumerate(self.v4.layers):
+            r = layer.attn.compress_ratio
+            if r in seen:
+                continue
+            seen.add(r)
+            _describe_layer(li)
+            if len(seen) >= 3:
+                break
 
     def _gather_kv_pool(
         self, fw_tensor, block_ids_2d, python_buf, entries_per_block, head_dim, B
@@ -653,7 +785,13 @@ class DeepSeekV4Model(GptModelBase):
         return slots[attn_type]
 
     def _gather_all_layers(
-        self, attn_inputs, B=1, batch_offset=0, paged_only=False, reuse_gather=False
+        self,
+        attn_inputs,
+        B=1,
+        batch_offset=0,
+        paged_only=False,
+        reuse_gather=False,
+        state_only=False,
     ):
         """Gather cached KV from BlockPool pages into each layer's buffers.
 
@@ -686,7 +824,9 @@ class DeepSeekV4Model(GptModelBase):
             hd = attn_mod.head_dim
 
             # Select pool list based on gather mode
-            if reuse_gather:
+            if state_only:
+                pools = self._layer_state_pools[i]
+            elif reuse_gather:
                 pools = self._layer_reuse_gather_pools[i]
             elif paged_only:
                 pools = self._layer_gather_pools[i]
@@ -768,7 +908,7 @@ class DeepSeekV4Model(GptModelBase):
                             B,
                         )
 
-    def _scatter_all_layers(self, attn_inputs, B=1, batch_offset=0):
+    def _scatter_all_layers(self, attn_inputs, B=1, batch_offset=0, state_only=False):
         """Scatter updated KV from each layer's buffers back to BlockPool pages.
 
         batch_offset: row offset into by_group block_ids (same as gather).
@@ -789,7 +929,8 @@ class DeepSeekV4Model(GptModelBase):
             win = attn_mod.window_size
             hd = attn_mod.head_dim
 
-            for attn_type in self._layer_pools[i]:
+            pools = self._layer_state_pools[i] if state_only else self._layer_pools[i]
+            for attn_type in pools:
                 gid = attn_type_to_gid.get(attn_type)
                 if gid is None or gid >= len(by_group):
                     continue
@@ -979,6 +1120,13 @@ class DeepSeekV4Model(GptModelBase):
 
         bs = int(attn.input_lengths.size(0)) if attn.input_lengths.numel() > 0 else 1
         device = next(self.v4.parameters()).device
+
+        # Phase 2: derive paged_pool_specs from wired PoolDescriptors so the
+        # impl pre-allocates the right block_table / slot_mapping buffers.
+        # We only wire the pools whose decode WRITE path has been migrated
+        # so far — this turn just SWA. Other entries can be added piecewise.
+        paged_pool_specs = self._build_paged_pool_specs_for_phase2()
+
         cfg = DSv4DecodeFmhaImplConfig(
             max_batch_size=bs,
             q_len=1,
@@ -989,12 +1137,54 @@ class DeepSeekV4Model(GptModelBase):
                 : self._v4_args.n_layers
             ],
             index_topk=int(self._v4_args.index_topk),
+            paged_pool_specs=paged_pool_specs,
         )
-        return DSv4DecodeFmhaImpl(
+        impl = DSv4DecodeFmhaImpl(
             cfg,
             device=device,
             attn_inputs=attn,
         )
+        # Stash the per-layer pool descriptors on the metadata so
+        # ``Attention.forward_decode`` can find its pool view at the
+        # right layer index without going through the model.
+        if getattr(self, "_layer_pool_descs", None):
+            impl.metadata.layer_pool_descs = self._layer_pool_descs
+        return impl
+
+    def _build_paged_pool_specs_for_phase2(self):
+        """Per-attn_type ``(entries_per_block, max_blocks_per_req)`` for the
+        decode-FMHA impl's metadata pre-allocation.
+
+        Phase 2 only wires SWA writes. We over-allocate ``max_blocks_per_req``
+        slightly so prepare() never has to grow buffers (would void the
+        forbid_realloc guarantee). Entries-per-block is read from the
+        actual framework allocation via PoolDescriptor (single source of
+        truth — see POOL_LAYOUT.md).
+        """
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
+            CSA_KV,
+            HCA_KV,
+            INDEXER_KV,
+            SWA_KV,
+        )
+
+        if not getattr(self, "_layer_pool_descs", None):
+            return {}
+        # Per "不动原则" pools 3-6 get fixed 2 blocks/req. SWA is a
+        # 128-entry ring → 2 blocks (256 entries/block) is plenty.
+        # HCA/INDEXER are intrinsically lossy under this allocation
+        # for long seqs — accepted by design.
+        specs: Dict[int, Tuple[int, int]] = {}
+        first = self._layer_pool_descs[0] if self._layer_pool_descs else {}
+        # CSA_KV is read-only in decode (frozen prefill data) but needed
+        # for Phase 2B-2b dual-pool paged read path.
+        for at in (SWA_KV, HCA_KV, INDEXER_KV, CSA_KV):
+            for descs in self._layer_pool_descs:
+                if at in descs:
+                    specs[at] = (descs[at].entries_per_block, 2)
+                    break
+            _ = first  # silence linter — kept for potential future use
+        return specs
 
     def _forward_decode(
         self, inputs: PyModelInputs, fmha_impl: Any = None
@@ -1046,6 +1236,32 @@ class DeepSeekV4Model(GptModelBase):
             # Clamp for warmup safety (probe at max_seq_len then decode).
             max_s = self._v4_args.max_seq_len
             start_pos = torch.clamp(start_pos, min=0, max=max(0, max_s - 1))
+
+            # Phase 2 paged: pull per-attn_type block_tables from
+            # attn_inputs and feed build_decode_metadata; eager allocates
+            # fresh per step (no graph capture, so no forbid_realloc).
+            paged_specs = self._build_paged_pool_specs_for_phase2()
+            paged_bts: Dict[int, Any] = {}
+            paged_ebs: Dict[int, int] = {}
+            if paged_specs:
+                from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
+                    ATTN_TYPE_TO_GROUP_ID,
+                )
+
+                by_group = getattr(
+                    attn, "kv_cache_kernel_block_id_device_by_group", None
+                )
+                if by_group is not None and len(by_group) > 0:
+                    for at, (eb, _) in paged_specs.items():
+                        gid = ATTN_TYPE_TO_GROUP_ID.get(at)
+                        if gid is None or gid >= len(by_group):
+                            continue
+                        bt = by_group[gid]
+                        if bt is None or bt.numel() == 0:
+                            continue
+                        paged_bts[at] = bt
+                        paged_ebs[at] = eb
+
             meta = build_decode_metadata(
                 start_pos=start_pos,
                 q_len=1,
@@ -1057,7 +1273,11 @@ class DeepSeekV4Model(GptModelBase):
                 ],
                 index_topk=self._v4_args.index_topk,
                 device=param_dev,
+                paged_block_tables=paged_bts or None,
+                paged_pool_entries_per_block=paged_ebs or None,
             )
+            if getattr(self, "_layer_pool_descs", None):
+                meta.layer_pool_descs = self._layer_pool_descs
 
         hidden = self.v4.forward_decode(input_ids, meta)  # [B, dim] packed
         return PyModelOutputs(hidden)
@@ -1092,26 +1312,28 @@ class DeepSeekV4Model(GptModelBase):
         attn = inputs.attention_inputs
         is_prefill = bool(attn.is_prefill) if attn is not None else True
 
-        # Decode arm — Phase 3: when fmha_impl is a DSv4DecodeFmhaImpl, route
-        # to the CUDA-graph replay path with persistent decode metadata.
+        # Decode arm.  Two paths share ``_forward_decode``:
+        #   * fmha_impl is a DSv4DecodeFmhaImpl → CUDA-graph replay with
+        #     persistent decode metadata.
+        #   * fmha_impl is None (eager / --enable_cuda_graph 0) → build
+        #     decode metadata inline inside ``_forward_decode``.
+        # Eager mode previously fell through to the unified prefill
+        # ``forward()`` path with q_len=1, which silently bypassed
+        # ``Attention.forward_decode`` (and thus the FP8/FlashMLA decode
+        # ops).  Routing both paths through ``_forward_decode`` keeps
+        # graph and eager behavior in lock-step so capture-time and
+        # replay-time semantics match.
         if (
             not is_prefill
-            and fmha_impl is not None
             and attn is not None
             and attn.sequence_lengths is not None
             and attn.sequence_lengths.numel() > 0
         ):
             return self._forward_decode(inputs, fmha_impl)
 
-        use_framework_kv = os.environ.get("DSV4_USE_FRAMEWORK_KV", "0") == "1"
-
         # Deferred wiring: framework allocates kv_cache after initialize(),
         # so we wire on first forward() when kv_cache becomes available.
-        if (
-            use_framework_kv
-            and getattr(self, "_framework_kv_pending", False)
-            and self.kv_cache is not None
-        ):
+        if getattr(self, "_framework_kv_pending", False) and self.kv_cache is not None:
             device_str = str(input_ids.device)
             self._wire_framework_kv_cache(device_str)
             self._framework_kv_pending = False
@@ -1126,11 +1348,7 @@ class DeepSeekV4Model(GptModelBase):
         # the real allocator with the measured block_num. The stub's pool
         # tensors get freed; without re-wiring, gather hits IndexError on
         # the dead warmup tensors.
-        if (
-            use_framework_kv
-            and self.kv_cache is not None
-            and getattr(self, "_framework_kv_enabled", False)
-        ):
+        if self.kv_cache is not None and getattr(self, "_framework_kv_enabled", False):
             cur_id = id(self.kv_cache)
             cur_first_ptr = None
             flat_now = getattr(self.kv_cache, "kv_cache_base_by_layer_attn_flat", None)
@@ -1208,9 +1426,7 @@ class DeepSeekV4Model(GptModelBase):
 
                 # Gather from BlockPool if reuse hit
                 if (
-                    use_framework_kv
-                    and hasattr(self, "_framework_kv_enabled")
-                    and self._framework_kv_enabled
+                    getattr(self, "_framework_kv_enabled", False)
                     and attn is not None
                     and prefix_len > 0
                 ):
@@ -1240,12 +1456,7 @@ class DeepSeekV4Model(GptModelBase):
                 all_hidden.append(h)
 
                 # Scatter to BlockPool after forward
-                if (
-                    use_framework_kv
-                    and hasattr(self, "_framework_kv_enabled")
-                    and self._framework_kv_enabled
-                    and attn is not None
-                ):
+                if getattr(self, "_framework_kv_enabled", False) and attn is not None:
                     self._scatter_all_layers(attn, B=1, batch_offset=b)
 
                 self._running_pos = prefix_len + inp_len
@@ -1255,12 +1466,7 @@ class DeepSeekV4Model(GptModelBase):
             # cache_store so the decode side can fetch them. Done after the
             # whole prefill loop because the cache_store hand-off iterates
             # all batches internally via context_batch_size.
-            if (
-                use_framework_kv
-                and hasattr(self, "_framework_kv_enabled")
-                and self._framework_kv_enabled
-                and attn is not None
-            ):
+            if getattr(self, "_framework_kv_enabled", False) and attn is not None:
                 self._write_pd_cache_store(attn)
 
             hidden = (
@@ -1277,7 +1483,7 @@ class DeepSeekV4Model(GptModelBase):
             # Use sequence_lengths as per-batch positions (tensor [B])
             seq_lens = attn.sequence_lengths if attn is not None else None
 
-            if use_framework_kv and seq_lens is not None and seq_lens.numel() > 0:
+            if seq_lens is not None and seq_lens.numel() > 0:
                 B = seq_lens.size(0)
                 start_pos = seq_lens.to(
                     input_ids.device
@@ -1289,35 +1495,12 @@ class DeepSeekV4Model(GptModelBase):
             if input_ids.dim() == 1:
                 input_ids = input_ids[:B].unsqueeze(1)  # [B, 1]
 
-            # Gather KV from BlockPool before decode
-            if (
-                use_framework_kv
-                and hasattr(self, "_framework_kv_enabled")
-                and self._framework_kv_enabled
-                and attn is not None
-            ):
-                # Reset compressor/indexer state for all B slots before gather.
-                # New requests joining the batch may have stale data in their slots.
-                for layer in self.v4.layers:
-                    a = layer.attn
-                    if a.compressor is not None:
-                        a.compressor.kv_state[:B].zero_()
-                        a.compressor.score_state[:B].fill_(float("-inf"))
-                    if a.indexer is not None:
-                        a.indexer.compressor.kv_state[:B].zero_()
-                        a.indexer.compressor.score_state[:B].fill_(float("-inf"))
-                self._gather_all_layers(attn, B=B)
-
+            # Paged decode read+write is the steady state: KV pools are kept
+            # fresh by paged dual-write each step and read directly via
+            # paged_topk_translator, and compressor/indexer state lives in
+            # ``compressor.kv_state`` across steps. The per-step gather/scatter
+            # round-trip is therefore unnecessary on this path.
             hidden = self.v4(input_ids, start_pos=start_pos, apply_lm_head=False)
-
-            # Scatter KV back to BlockPool after decode
-            if (
-                use_framework_kv
-                and hasattr(self, "_framework_kv_enabled")
-                and self._framework_kv_enabled
-                and attn is not None
-            ):
-                self._scatter_all_layers(attn, B=B)
 
             self._running_pos += 1
             reuse_len = 0

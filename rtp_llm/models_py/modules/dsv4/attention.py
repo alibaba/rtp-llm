@@ -30,7 +30,11 @@ from rtp_llm.models_py.modules.dsv4.cp import (
 )
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
-from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
+from rtp_llm.models_py.modules.dsv4.rope import (
+    apply_rotary_emb,
+    apply_rotary_emb_batched,
+    precompute_freqs_cis,
+)
 from rtp_llm.models_py.modules.dsv4.weight_loader import _repack_v4_fp8_scale_to_int32
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
@@ -713,17 +717,16 @@ class Attention(nn.Module):
             q = q * torch.rsqrt(
                 q.float().square().mean(-1, keepdim=True) + self.eps
             ).to(q.dtype)
-        # Per-request RoPE on q_pe — each req has its own start_pos.
+        # Per-request RoPE on q_pe — each req has its own start_pos. Vectorized
+        # via apply_rotary_emb_batched (mirrors vLLM's batched cos/sin lookup).
         freqs_cis_per_req = self.freqs_cis[start_pos.long()]  # [B, freqs_dim]
-        for r in range(bsz):
-            apply_rotary_emb(q[r : r + 1, :, :, -rd:], freqs_cis_per_req[r : r + 1])
+        apply_rotary_emb_batched(q[..., -rd:], freqs_cis_per_req)
 
         # KV path (single MQA head)
         kv = self._rmsnorm_weighted(
             self._lin(self.wkv, x), self.kv_norm.weight
         )  # [B, 1, head_dim]
-        for r in range(bsz):
-            apply_rotary_emb(kv[r : r + 1, :, -rd:], freqs_cis_per_req[r : r + 1])
+        apply_rotary_emb_batched(kv[..., -rd:], freqs_cis_per_req)
 
         # Write SWA K — flat slot mapping over [B*q_len].
         # Slice metadata to actual bsz (allocated for max_bs by graph impl;
@@ -735,12 +738,46 @@ class Attention(nn.Module):
         slot_mapping_swa = attn_metadata.slot_mapping_swa[: bsz * q_len]
         write_swa_k_decode(kv_flat, slot_mapping_swa, swa_buffer)
 
+        # Paged dual-write: when metadata carries the SWA paged mapping,
+        # ALSO write into the BlockPool. The legacy register_buffer write
+        # above stays for now; some read paths still consume it.
+        from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
+            write_kv_to_pool,
+        )
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import SWA_KV
+
+        layer_descs = (
+            attn_metadata.layer_pool_descs[self.layer_id]
+            if attn_metadata.layer_pool_descs is not None
+            and self.layer_id < len(attn_metadata.layer_pool_descs)
+            else None
+        )
+        swa_pool_slots = attn_metadata.pool_write_slot_mappings.get(SWA_KV)
+        if (
+            layer_descs is not None
+            and SWA_KV in layer_descs
+            and swa_pool_slots is not None
+            and swa_pool_slots.numel() > 0
+        ):
+            swa_desc = layer_descs[SWA_KV]
+            write_kv_to_pool(
+                kv_flat,
+                swa_pool_slots[: bsz * q_len],
+                swa_desc.view(),
+                mask_negative=False,
+            )
+
         # CSA / HCA: build / fill compressed topk; write compressed-K.
         # Stage 3B: when the metadata is from CUDA-graph capture, dispatch
         # to the vectorized (Python-branch-free) variants so the captured
         # forward holds no data-dependent control flow. Eager Phase 2 path
         # keeps the loop variants for byte-equal regression safety.
-        use_vec = bool(getattr(attn_metadata, "is_cuda_graph", False))
+        # Always use the vectorized compressor/indexer decode variants.
+        # Originally gated on cuda-graph capture for byte-equal regression
+        # safety; the loop variants do per-request .item() D2H syncs which
+        # serialize the GPU stream. vectorized is math-equivalent and
+        # graph-capturable.
+        use_vec = True
         topk_idxs: torch.Tensor
         if self.compress_ratio:
             # Slice topk_buffer_compressed to actual bsz so indexer writes
@@ -763,6 +800,42 @@ class Attention(nn.Module):
                         start_pos,
                         topk_buf_cmp,
                     )
+                # Phase 2B-1: INDEXER-K paged dual-write. The nested
+                # ``indexer.compressor.forward_decode_*`` (called inside
+                # ``indexer.forward_decode_*``) wrote the new compressed-K
+                # into ``self.indexer.kv_cache[r, (sp+1)//ratio - 1]`` for
+                # boundary requests; mirror that into the paged INDEXER_KV
+                # pool. Slot mapping carries -1 sentinels for non-boundary
+                # tokens so ``mask_negative=True`` skips them.
+                from rtp_llm.models_py.modules.dsv4.decode.pool_layout import INDEXER_KV
+
+                idx_pool_slots = attn_metadata.pool_write_slot_mappings.get(INDEXER_KV)
+                if (
+                    layer_descs is not None
+                    and INDEXER_KV in layer_descs
+                    and idx_pool_slots is not None
+                    and idx_pool_slots.numel() > 0
+                ):
+                    idx_desc = layer_descs[INDEXER_KV]
+                    idx_d = self.indexer.head_dim
+                    sp_l = start_pos.to(torch.long)
+                    cache_slot = torch.clamp((sp_l + 1) // 4 - 1, min=0)
+                    cache_slot = torch.where(
+                        cache_slot < self.indexer.kv_cache.shape[1],
+                        cache_slot,
+                        torch.zeros_like(cache_slot),
+                    )
+                    b_idx_l = torch.arange(bsz, device=sp_l.device, dtype=torch.long)
+                    new_idx_k = self.indexer.kv_cache[b_idx_l, cache_slot].reshape(
+                        -1, idx_d
+                    )
+                    write_kv_to_pool(
+                        new_idx_k,
+                        idx_pool_slots[: bsz * q_len],
+                        idx_desc.view(),
+                        mask_negative=True,
+                    )
+
                 # Stitch indexer output into topk_total compressed half (with +win offset).
                 topk_total = attn_metadata.topk_total_by_ratio[4][
                     :bsz
@@ -786,31 +859,208 @@ class Attention(nn.Module):
                 # HCA also writes the compressor's compressed-K output via
                 # the compressor.kv_cache view bound earlier.
                 if use_vec:
-                    self.compressor.forward_decode_vectorized(x, start_pos)
+                    hca_kv_compressed = self.compressor.forward_decode_vectorized(
+                        x, start_pos
+                    )
                 else:
-                    self.compressor.forward_decode(x, start_pos)
+                    hca_kv_compressed = self.compressor.forward_decode(x, start_pos)
+
+                # Phase 2B-1: HCA-K paged dual-write. Compressor returns
+                # ``[B, 1, head_dim]`` with non-boundary rows already
+                # zeroed (return contract); the pool slot mapping carries
+                # ``-1`` sentinels for non-boundary tokens, so
+                # ``mask_negative=True`` skips the same rows on the
+                # paged side. ``None`` return = no boundary requests this
+                # step → nothing to write.
+                from rtp_llm.models_py.modules.dsv4.decode.pool_layout import HCA_KV
+
+                hca_pool_slots = attn_metadata.pool_write_slot_mappings.get(HCA_KV)
+                if (
+                    hca_kv_compressed is not None
+                    and layer_descs is not None
+                    and HCA_KV in layer_descs
+                    and hca_pool_slots is not None
+                    and hca_pool_slots.numel() > 0
+                ):
+                    hca_desc = layer_descs[HCA_KV]
+                    hca_flat = hca_kv_compressed.reshape(-1, self.head_dim)
+                    write_kv_to_pool(
+                        hca_flat,
+                        hca_pool_slots[: bsz * q_len],
+                        hca_desc.view(),
+                        mask_negative=True,
+                    )
         else:
             # SWA-only layer: just window topk. Already request-local ring slots.
             topk_idxs = attn_metadata.topk_window_idxs[:bsz]
+
+        # Phase 2B-2b: capture raw (no +win offset) compressed local idx for
+        # the optional paged dual-pool read below. For CSA the indexer's
+        # output buffer holds raw values (the +win is added in-place later);
+        # for HCA we synthesize the dense [0..compressed_lens) range.
+        cmp_local_raw: Optional[torch.Tensor] = None
+        if self.compress_ratio:
+            ratio_l = int(self.compress_ratio)
+            if self.indexer is not None:
+                # CSA: indexer just wrote raw indices into topk_buf_cmp.
+                cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz].clone()
+            else:
+                # HCA: dense read of [0..compressed_lens) for each request.
+                cmp_lens_h = attn_metadata.compressed_lens.get(ratio_l)
+                tt_h = attn_metadata.topk_total_by_ratio.get(ratio_l)
+                if cmp_lens_h is not None and tt_h is not None:
+                    K_h = tt_h.shape[-1] - win
+                    dense = (
+                        torch.arange(K_h, device=cmp_lens_h.device, dtype=torch.int32)
+                        .view(1, 1, K_h)
+                        .expand(bsz, q_len, K_h)
+                    )
+                    cmp_local_raw = torch.where(
+                        dense < cmp_lens_h[:bsz].view(bsz, 1, 1),
+                        dense,
+                        torch.full_like(dense, -1),
+                    )
 
         # Sparse attn over per-request KV view.
         # NOTE: kv_cache layout is [max_B, win + max_seq_len/ratio, head_dim].
         # For SWA-only layers, only the [:, :win, :] slice carries valid data
         # but the buffer is allocated as [max_B, win, head_dim] (no compressed
         # tail). For CSA/HCA, the full buffer is used.
-        kv_view = self.kv_cache[:bsz]  # [B, T, head_dim]
         sparse_op = SparseAttnV4DecodeOp(
             n_heads=self.n_heads,
             head_dim=self.head_dim,
             softmax_scale=self.softmax_scale,
         )
-        o = sparse_op.forward(q, kv_view, self.attn_sink, topk_idxs)  # [B, 1, H, D]
 
-        # Inverse RoPE per request
-        for r in range(bsz):
-            apply_rotary_emb(
-                o[r : r + 1, :, :, -rd:], freqs_cis_per_req[r : r + 1], inverse=True
+        # Phase 2B-2a paged read (SWA-only layers, zero-copy):
+        #   q[B, 1, H, D] → reshape view [1, B, H, D]
+        #   kv = swa_pool_view [num_global_slots, D] → unsqueeze [1, num_slots, D]
+        #   topk = swa_global_slots [B, win] → unsqueeze [1, B, win]
+        # No gather, no packed buffer — TileLang kernel does indirect read
+        # through ``kv[by, idxs[i], j]`` (mirrors vLLM/flash_mla pattern).
+        # Gated on env flag for safe rollout; CSA/HCA paths fall through to
+        # legacy register_buffer below until Phase 2B-2b.
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
+            CSA_KV,
+            HCA_KV,
+            SWA_KV,
+        )
+
+        swa_pool_bt = attn_metadata.pool_block_tables.get(SWA_KV)
+
+        # Decide which paged read variant to use, if any.
+        use_paged_swa_read = (
+            not self.compress_ratio
+            and layer_descs is not None
+            and SWA_KV in layer_descs
+            and attn_metadata.swa_abs_idx is not None
+            and swa_pool_bt is not None
+            and swa_pool_bt.numel() > 0
+        )
+        # CSA layer cmp pool = CSA_KV; HCA layer cmp pool = HCA_KV.
+        cmp_attn_type = (
+            CSA_KV
+            if (self.compress_ratio == 4)
+            else HCA_KV if (self.compress_ratio == 128) else None
+        )
+        cmp_pool_bt = (
+            attn_metadata.pool_block_tables.get(cmp_attn_type)
+            if cmp_attn_type is not None
+            else None
+        )
+        use_paged_dual_read = (
+            self.compress_ratio in (4, 128)
+            and layer_descs is not None
+            and SWA_KV in layer_descs
+            and cmp_attn_type in (layer_descs or {})
+            and attn_metadata.swa_abs_idx is not None
+            and swa_pool_bt is not None
+            and swa_pool_bt.numel() > 0
+            and cmp_pool_bt is not None
+            and cmp_pool_bt.numel() > 0
+            and cmp_local_raw is not None
+        )
+
+        if use_paged_swa_read or use_paged_dual_read:
+            from rtp_llm.models_py.modules.dsv4.decode.paged_topk_translator import (
+                build_req_id_per_token,
+                gather_dual_pool_kv_packed,
+                translate_local_to_global_slots,
             )
+
+            T = bsz * q_len
+            req_id = build_req_id_per_token(bsz, q_len, swa_pool_bt.device)
+            swa_eb = layer_descs[SWA_KV].entries_per_block
+            swa_local = attn_metadata.swa_abs_idx[:bsz].reshape(T, win)
+            swa_global = translate_local_to_global_slots(
+                req_id,
+                swa_pool_bt[:bsz],
+                swa_local,
+                swa_eb,
+            )
+
+            if use_paged_swa_read:
+                # Zero-copy: pool view fed straight to TileLang kernel.
+                pool_view = layer_descs[SWA_KV].view()
+                q_packed = (
+                    q.transpose(0, 1).contiguous() if q_len > 1 else q.transpose(0, 1)
+                )
+                o_packed = sparse_op.forward(
+                    q_packed,
+                    pool_view.unsqueeze(0),
+                    self.attn_sink,
+                    swa_global.view(1, T, win).contiguous(),
+                )
+                o = o_packed.transpose(0, 1)
+            else:
+                # Dual-pool: TileLang kernel can't take 2 kv tensors so we
+                # gather both into a packed scratch and call sparse_attn
+                # with identity topk = arange(win+K). Memory cost noted in
+                # paged_topk_translator.gather_dual_pool_kv_packed docstring.
+                cmp_eb = layer_descs[cmp_attn_type].entries_per_block
+                K_cmp = cmp_local_raw.shape[-1]
+                cmp_local = cmp_local_raw.reshape(T, K_cmp)
+                cmp_global = translate_local_to_global_slots(
+                    req_id,
+                    cmp_pool_bt[:bsz],
+                    cmp_local,
+                    cmp_eb,
+                )
+                # Kernel signature: kv [b, n, d] (3D — KV per batch). For
+                # q_len=1 we collapse the q_len dim. q_len>1 (MTP) needs
+                # a different layout (one kv per q-token); not supported
+                # here yet.
+                assert q_len == 1, (
+                    "Phase 2B-2b dual-pool paged read currently supports "
+                    f"q_len=1 only (got {q_len})"
+                )
+                kv_packed_4d = gather_dual_pool_kv_packed(
+                    layer_descs[SWA_KV].view(),
+                    layer_descs[cmp_attn_type].view(),
+                    swa_global,
+                    cmp_global,
+                    self.head_dim,
+                    bsz,
+                    q_len,
+                )  # [B, 1, win+K, D]
+                kv_packed = kv_packed_4d.view(bsz, win + K_cmp, self.head_dim)
+                identity_topk = (
+                    torch.arange(
+                        win + K_cmp,
+                        device=kv_packed.device,
+                        dtype=torch.int32,
+                    )
+                    .view(1, 1, win + K_cmp)
+                    .expand(bsz, q_len, win + K_cmp)
+                    .contiguous()
+                )
+                o = sparse_op.forward(q, kv_packed, self.attn_sink, identity_topk)
+        else:
+            kv_view = self.kv_cache[:bsz]  # [B, T, head_dim]
+            o = sparse_op.forward(q, kv_view, self.attn_sink, topk_idxs)  # [B, 1, H, D]
+
+        # Inverse RoPE per request — vectorized.
+        apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
 
         # Grouped output projection (same as prefill)
         o = o.reshape(bsz, q_len, self.n_groups, -1)
@@ -900,13 +1150,11 @@ class Attention(nn.Module):
                 q.float().square().mean(-1, keepdim=True) + self.eps
             ).to(q.dtype)
         freqs_cis_per_req = self.freqs_cis[start_pos.long()]
-        for r in range(bsz):
-            apply_rotary_emb(q[r : r + 1, :, :, -rd:], freqs_cis_per_req[r : r + 1])
+        apply_rotary_emb_batched(q[..., -rd:], freqs_cis_per_req)
 
         # KV path.
         kv = self._rmsnorm_weighted(self._lin(self.wkv, x), self.kv_norm.weight)
-        for r in range(bsz):
-            apply_rotary_emb(kv[r : r + 1, :, -rd:], freqs_cis_per_req[r : r + 1])
+        apply_rotary_emb_batched(kv[..., -rd:], freqs_cis_per_req)
 
         # Write SWA K to FP8 cache.
         # BF16 slot_mapping_swa uses stride=win: slot = r * win + ring_pos.
@@ -917,7 +1165,12 @@ class Attention(nn.Module):
         swa_slot_fp8 = (swa_slot_bf16 // win) * block_size + (swa_slot_bf16 % win)
         quantize_v4_kv_decode(kv_flat, swa_slot_fp8, self.kv_cache_fp8)
 
-        use_vec = bool(getattr(attn_metadata, "is_cuda_graph", False))
+        # Always use the vectorized compressor/indexer decode variants.
+        # Originally gated on cuda-graph capture for byte-equal regression
+        # safety; the loop variants do per-request .item() D2H syncs which
+        # serialize the GPU stream. vectorized is math-equivalent and
+        # graph-capturable.
+        use_vec = True
         topk_idxs: torch.Tensor
         if self.compress_ratio:
             if self.indexer is not None:
@@ -999,11 +1252,8 @@ class Attention(nn.Module):
             block_table,
         )
 
-        # Inverse RoPE per request.
-        for r in range(bsz):
-            apply_rotary_emb(
-                o[r : r + 1, :, :, -rd:], freqs_cis_per_req[r : r + 1], inverse=True
-            )
+        # Inverse RoPE per request — vectorized.
+        apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
 
         # Grouped output projection (identical to BF16 path).
         o = o.reshape(bsz, q_len, self.n_groups, -1)
