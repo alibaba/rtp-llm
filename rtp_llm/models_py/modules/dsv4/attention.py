@@ -680,6 +680,45 @@ class Attention(nn.Module):
 
         self._prefill_paged_write_kv(INDEXER_KV, self.indexer.kv_cache[:bsz], bsz)
 
+    def _prefill_paged_write_state(self, bsz: int) -> None:
+        """Phase B.3 dual-write: mirror compressor + indexer.compressor
+        ``kv_state`` / ``score_state`` (fp32) into the framework STATE
+        BlockPool (CSA_STATE / HCA_STATE / INDEXER_STATE).
+
+        Layout per block: ``[entries_per_block, state_dim]`` fp32 where
+        ``state_dim = 2 * half_dim`` and first ``half_dim`` columns hold
+        ``kv_state`` rows, last ``half_dim`` hold ``score_state`` — matches
+        ``_scatter_state_pool``'s byte layout. We build a
+        ``[bsz, state_rows, state_dim]`` tensor via ``torch.cat`` along the
+        last axis and reuse ``_prefill_paged_write_kv`` with the STATE
+        pool's ``PoolDescriptor`` (fp32 vec_dim = 2 * inner)."""
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
+            CSA_STATE,
+            HCA_STATE,
+            INDEXER_STATE,
+        )
+
+        # Compressor's STATE (CSA or HCA).
+        if self.compressor is not None:
+            at_self = (
+                CSA_STATE
+                if self.compress_ratio == 4
+                else (HCA_STATE if self.compress_ratio == 128 else None)
+            )
+            if at_self is not None:
+                kv_s = self.compressor.kv_state[:bsz]
+                sc_s = self.compressor.score_state[:bsz]
+                merged = torch.cat([kv_s, sc_s], dim=-1)  # [bsz, rows, 2*inner]
+                self._prefill_paged_write_kv(at_self, merged, bsz)
+
+        # Indexer's nested compressor STATE (INDEXER_STATE).
+        if self.indexer is not None and self.indexer.compressor is not None:
+            comp = self.indexer.compressor
+            kv_i = comp.kv_state[:bsz]
+            sc_i = comp.score_state[:bsz]
+            merged_i = torch.cat([kv_i, sc_i], dim=-1)
+            self._prefill_paged_write_kv(INDEXER_STATE, merged_i, bsz)
+
     def reset_rope_cache(self, device=None):
         """Recompute `freqs_cis` on the actual device — MUST be called after
         `model.to_empty(device=...)` since meta-tensor construction leaves the
@@ -1580,6 +1619,10 @@ class Attention(nn.Module):
                 # would otherwise copy out post-forward.
                 self._prefill_paged_write_compressed(bsz)
                 self._prefill_paged_write_indexer(bsz)
+                # Phase B.3: paged STATE dual-write. Mirrors compressor +
+                # indexer.compressor kv_state / score_state to the 4/5/6
+                # STATE pools, matching _scatter_state_pool's byte layout.
+                self._prefill_paged_write_state(bsz)
                 if kv_compress is not None:
                     if sp_int == 0:
                         kv_cat = torch.cat([kv_full, kv_compress], dim=1)

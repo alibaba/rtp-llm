@@ -909,77 +909,15 @@ class DeepSeekV4Model(GptModelBase):
                         )
 
     def _scatter_all_layers(self, attn_inputs, B=1, batch_offset=0, state_only=False):
-        """Scatter STATE pools from each layer's buffers back to BlockPool.
+        """Retired (Phase D full) — kept as no-op shim for call-site API stability.
 
-        Phase D (partial): KV pools (attn_types 1/2/3/7) are now sole-written
-        by Attention.forward's prefill paged dual-write — verified byte-equal
-        by test_phase_b_prefill_dual_write. This scatter iterates STATE pools
-        only (attn_types 4/5/6); ``state_only`` is vestigial and kept for API
-        stability. B.3 will view-ify the STATE buffers and retire this method.
-
-        batch_offset: row offset into by_group block_ids (same as gather).
+        All KV pools (SWA/CSA/HCA/INDEXER_KV) and STATE pools (CSA/HCA/INDEXER_STATE)
+        are now written inside Attention.forward via the paged dual-write path.
+        Both halves of the former dual-write are byte-equivalent (verified by
+        test_phase_b_prefill_dual_write's 9 cases). This shim will be deleted
+        when call sites migrate (see Phase F in the plan doc).
         """
-        if not hasattr(self, "_fw_pool_tensors") or not self._fw_pool_tensors:
-            return
-
-        by_group = getattr(
-            attn_inputs, "kv_cache_kernel_block_id_device_by_group", None
-        )
-        if by_group is None or len(by_group) == 0:
-            return
-
-        attn_type_to_gid = {4: 3, 5: 4, 6: 5}  # STATE only: 4/5/6 → gid 3/4/5
-
-        for i, layer in enumerate(self.v4.layers):
-            attn_mod = layer.attn
-            hd = attn_mod.head_dim
-
-            # STATE-only loop — KV scatter retired.
-            for attn_type in self._layer_state_pools[i]:
-                gid = attn_type_to_gid.get(attn_type)
-                if gid is None or gid >= len(by_group):
-                    continue
-                block_ids = by_group[gid]
-                if block_ids is None or block_ids.numel() == 0:
-                    continue
-                bid_slice = block_ids[batch_offset : batch_offset + B]
-                fw_t = self._get_pool_tensor(attn_type, i)
-
-                if attn_type == 4:  # INDEXER_STATE
-                    if attn_mod.indexer is not None:
-                        comp = attn_mod.indexer.compressor
-                        idx_hd = attn_mod.indexer.head_dim
-                        self._scatter_state_pool(
-                            fw_t,
-                            bid_slice,
-                            comp.kv_state[:B],
-                            comp.score_state[:B],
-                            4,
-                            4 * idx_hd,
-                            B,
-                        )
-                elif attn_type == 5:  # CSA_STATE
-                    if attn_mod.compressor is not None:
-                        self._scatter_state_pool(
-                            fw_t,
-                            bid_slice,
-                            attn_mod.compressor.kv_state[:B],
-                            attn_mod.compressor.score_state[:B],
-                            4,
-                            4 * hd,
-                            B,
-                        )
-                elif attn_type == 6:  # HCA_STATE
-                    if attn_mod.compressor is not None:
-                        self._scatter_state_pool(
-                            fw_t,
-                            bid_slice,
-                            attn_mod.compressor.kv_state[:B],
-                            attn_mod.compressor.score_state[:B],
-                            8,
-                            2 * hd,
-                            B,
-                        )
+        return
 
     def _bind_prefill_paged_ctx(self, attn_inputs, batch_offset: int = 0) -> bool:
         """Phase B: bind per-layer paged dual-write ctx on every Attention.
@@ -1002,14 +940,26 @@ class DeepSeekV4Model(GptModelBase):
             return False
         from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
             CSA_KV,
+            CSA_STATE,
             HCA_KV,
+            HCA_STATE,
             INDEXER_KV,
+            INDEXER_STATE,
             SWA_KV,
         )
 
         # attn_type → group_id (same mapping as gather/scatter):
-        # CSA_KV=1→0, HCA_KV=2→1, INDEXER_KV=3→2, SWA_KV=7→6.
-        attn_type_to_gid = {CSA_KV: 0, HCA_KV: 1, INDEXER_KV: 2, SWA_KV: 6}
+        # CSA_KV=1→0, HCA_KV=2→1, INDEXER_KV=3→2, INDEXER_STATE=4→3,
+        # CSA_STATE=5→4, HCA_STATE=6→5, SWA_KV=7→6.
+        attn_type_to_gid = {
+            CSA_KV: 0,
+            HCA_KV: 1,
+            INDEXER_KV: 2,
+            INDEXER_STATE: 3,
+            CSA_STATE: 4,
+            HCA_STATE: 5,
+            SWA_KV: 6,
+        }
         bt_by_type: Dict[int, Any] = {}
         for at, gid in attn_type_to_gid.items():
             if gid >= len(by_group):

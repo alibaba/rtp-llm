@@ -245,6 +245,150 @@ def test_swa_T_less_than_block():
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase B.3: STATE pool byte-equal tests
+# ---------------------------------------------------------------------------
+
+
+def _scatter_state_pool_ref(
+    fw_tensor: torch.Tensor,  # [num_blocks, stride_bytes] uint8
+    block_ids_2d: torch.Tensor,  # [B, max_blocks] int
+    kv_state: torch.Tensor,  # [B, state_rows, half_dim] fp32
+    score_state: torch.Tensor,  # [B, state_rows, half_dim] fp32
+    entries_per_block: int,
+    state_dim: int,
+    B: int,
+) -> None:
+    """Exact mirror of ``DeepSeekV4Model._scatter_state_pool``."""
+    half_dim = state_dim // 2
+    bids_cpu = block_ids_2d[:B].cpu()
+    max_blks = min(2, bids_cpu.size(1))
+    state_rows = kv_state.size(1)
+    for b in range(B):
+        for blk_idx in range(max_blks):
+            bid = int(bids_cpu[b, blk_idx].item())
+            if bid <= 0:
+                continue
+            page_fp32 = (
+                fw_tensor[bid, : entries_per_block * state_dim * 4]
+                .view(torch.float32)
+                .view(entries_per_block, state_dim)
+            )
+            row_start = blk_idx * entries_per_block
+            n = min(entries_per_block, state_rows - row_start)
+            if n <= 0:
+                break
+            page_fp32[:n, :half_dim] = kv_state[b, row_start : row_start + n]
+            page_fp32[:n, half_dim:] = score_state[b, row_start : row_start + n]
+
+
+def _prefill_paged_write_state_ref(
+    desc: "pl.PoolDescriptor",
+    bt: torch.Tensor,  # [1, max_blocks]
+    kv_state: torch.Tensor,  # [1, state_rows, half_dim]
+    score_state: torch.Tensor,  # [1, state_rows, half_dim]
+) -> None:
+    """Mirror of Attention._prefill_paged_write_state — cat(kv||score) then
+    hand to the generic paged writer."""
+    merged = torch.cat([kv_state, score_state], dim=-1)
+    _prefill_paged_write_kv_ref(desc, bt, merged)
+
+
+def _run_state_case(
+    *,
+    attn_type: int,
+    half_dim: int,  # kv_state / score_state inner dim
+    entries_per_block: int,  # pool block capacity (state slots)
+    state_rows: int,  # rows in compressor.kv_state[:B, :, :]
+    num_blocks: int,
+    block_ids: list[int],
+    coff: int,
+) -> None:
+    device = torch.device("cpu")
+    state_dim = 2 * half_dim
+    stride_bytes = entries_per_block * state_dim * 4  # fp32
+
+    torch.manual_seed(0xBEEF + attn_type)
+    kv_s = torch.randn(1, state_rows, half_dim, dtype=torch.float32, device=device)
+    sc_s = torch.randn(1, state_rows, half_dim, dtype=torch.float32, device=device)
+
+    pool_scatter = torch.zeros(
+        num_blocks, stride_bytes, dtype=torch.uint8, device=device
+    )
+    pool_paged = torch.zeros(num_blocks, stride_bytes, dtype=torch.uint8, device=device)
+
+    bt = torch.tensor(block_ids, dtype=torch.int64, device=device).unsqueeze(0)
+
+    # Scatter path.
+    _scatter_state_pool_ref(
+        pool_scatter, bt, kv_s, sc_s, entries_per_block, state_dim, B=1
+    )
+
+    # Paged path. indexer_head_dim only matters for INDEXER_STATE.
+    desc = pl.build_pool_descriptor(
+        pool_paged,
+        attn_type=attn_type,
+        head_dim=half_dim // coff,
+        indexer_head_dim=half_dim // coff,
+        coff=coff,
+    )
+    assert desc is not None
+    assert desc.entries_per_block == entries_per_block, (
+        f"entries_per_block mismatch: desc={desc.entries_per_block} vs "
+        f"test={entries_per_block}"
+    )
+    _prefill_paged_write_state_ref(desc, bt, kv_s, sc_s)
+
+    diff_bytes = int((pool_scatter != pool_paged).sum().item())
+    assert diff_bytes == 0, (
+        f"STATE attn_type={attn_type} eb={entries_per_block} "
+        f"state_rows={state_rows} block_ids={block_ids}: {diff_bytes} byte(s) differ"
+    )
+
+
+def test_csa_state():
+    # CSA_STATE: coff=2, head_dim=512 → half_dim=1024, state_dim=2048, eb=4.
+    # state_rows = coff*ratio = 8 = eb*2, fills exactly 2 blocks.
+    _run_state_case(
+        attn_type=pl.CSA_STATE,
+        half_dim=1024,
+        entries_per_block=4,
+        state_rows=8,
+        num_blocks=8,
+        block_ids=[1, 2],
+        coff=2,
+    )
+
+
+def test_hca_state():
+    # HCA_STATE: coff=1, head_dim=512 → half_dim=512, state_dim=1024, eb=8.
+    # state_rows = ratio = 128? Actually HCA compressor: coff*ratio = 128.
+    # 128 rows / eb=8 per block = 16 blocks, but allocator gives only 2 →
+    # scatter only writes first 2*eb=16 rows. Test with state_rows=16.
+    _run_state_case(
+        attn_type=pl.HCA_STATE,
+        half_dim=512,
+        entries_per_block=8,
+        state_rows=16,
+        num_blocks=8,
+        block_ids=[3, 5],
+        coff=1,
+    )
+
+
+def test_indexer_state():
+    # INDEXER_STATE: coff=2, idx_hd=128 → half_dim=256, state_dim=512, eb=4.
+    _run_state_case(
+        attn_type=pl.INDEXER_STATE,
+        half_dim=256,
+        entries_per_block=4,
+        state_rows=8,
+        num_blocks=8,
+        block_ids=[7, 0],  # 2nd block sentinel
+        coff=2,
+    )
+
+
 if __name__ == "__main__":
     test_swa_exact_win()
     test_swa_sentinel_block()
@@ -252,4 +396,7 @@ if __name__ == "__main__":
     test_hca_ratio128()
     test_indexer_kv()
     test_swa_T_less_than_block()
+    test_csa_state()
+    test_hca_state()
+    test_indexer_state()
     print("All Phase B dual-write byte-equal tests passed.")
