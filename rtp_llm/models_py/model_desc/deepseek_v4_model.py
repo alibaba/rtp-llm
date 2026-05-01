@@ -1103,7 +1103,6 @@ class DeepSeekV4Model(GptModelBase):
         ):
             return self._forward_decode(inputs, fmha_impl)
 
-
         use_framework_kv = os.environ.get("DSV4_USE_FRAMEWORK_KV", "0") == "1"
 
         # Deferred wiring: framework allocates kv_cache after initialize(),
@@ -1155,6 +1154,29 @@ class DeepSeekV4Model(GptModelBase):
                     cur_first_ptr,
                 )
                 self._wire_framework_kv_cache(str(input_ids.device))
+
+        # --- Context Parallel setup (before forward loop) ---
+        # Must be before self.v4(...) — the transformer reads self.v4._cp_info
+        # at forward time, so a stale CP context (e.g. from warmup, where
+        # padded_seq_len comes from max_seq_len) would mismatch the current
+        # request's chunk_length and trip the assertion in build_cp_context.
+        pc_cfg = getattr(self, "parallelism_config", None)
+        cp_enabled = (
+            pc_cfg is not None
+            and getattr(pc_cfg, "prefill_cp_config", None) is not None
+            and pc_cfg.prefill_cp_config.is_enabled()
+            and is_prefill
+            and attn is not None
+            and getattr(attn, "context_parallel_info", None) is not None
+        )
+        if cp_enabled:
+            self.v4.set_cp_info(
+                cp_info=attn.context_parallel_info,
+                cp_size=int(pc_cfg.tp_size),
+                cp_rank=int(pc_cfg.tp_rank),
+            )
+        else:
+            self.v4.set_cp_info(None, 1, 0)
 
         if is_prefill:
             # Prefill: split by cu_seqlens, process each request separately
@@ -1299,25 +1321,6 @@ class DeepSeekV4Model(GptModelBase):
 
             self._running_pos += 1
             reuse_len = 0
-
-        # --- Context Parallel setup (before forward loop) ---
-        pc_cfg = getattr(self, "parallelism_config", None)
-        cp_enabled = (
-            pc_cfg is not None
-            and getattr(pc_cfg, "prefill_cp_config", None) is not None
-            and pc_cfg.prefill_cp_config.is_enabled()
-            and is_prefill
-            and attn is not None
-            and getattr(attn, "context_parallel_info", None) is not None
-        )
-        if cp_enabled:
-            self.v4.set_cp_info(
-                cp_info=attn.context_parallel_info,
-                cp_size=int(pc_cfg.tp_size),
-                cp_rank=int(pc_cfg.tp_rank),
-            )
-        else:
-            self.v4.set_cp_info(None, 1, 0)
 
         # Return flat [total_tokens, hidden_dim] for engine
         flat = hidden.reshape(-1, hidden.size(-1))
