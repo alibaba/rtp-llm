@@ -65,6 +65,17 @@ def _use_wo_fp8_fast() -> bool:
     return os.environ.get("DSV4_WO_FP8_FAST", "1") != "0"
 
 
+# Phase E1 (dsv4_kvcache_native_refactor_plan.md §9): route prefill
+# continuation reads through the framework BlockPool instead of the
+# register_buffer mirror.  Phase B dual-write keeps the pool fresh each
+# forward, so ``self.kv_cache[:bsz]`` and the pool gather are byte-equal
+# on all well-defined positions (sentinel / uninitialized slots return
+# zero in both paths).  Default ON; ``DSV4_READ_FROM_POOL=0`` restores
+# the legacy register_buffer read for regression bisection.
+def _use_read_from_pool() -> bool:
+    return os.environ.get("DSV4_READ_FROM_POOL", "1") != "0"
+
+
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
 # V4 author's TileLang sparse_attn kernel — vendored from
@@ -731,6 +742,112 @@ class Attention(nn.Module):
             sc_i = comp.score_state[:bsz]
             merged_i = torch.cat([kv_i, sc_i], dim=-1)
             self._prefill_paged_write_kv(INDEXER_STATE, merged_i, bsz)
+
+    def _prefill_paged_read_kv(
+        self,
+        attn_type: int,
+        bsz: int,
+        T: int,
+        vec_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Optional[torch.Tensor]:
+        """Phase E1 read-path counterpart to ``_prefill_paged_write_kv``.
+
+        Gathers a ``[bsz, T, vec_dim]`` dense tensor from the framework
+        BlockPool of ``attn_type`` using the same slot_mapping formula as
+        the writer, so the write-then-read round trip is byte-equal on
+        valid positions.  Sentinel positions (pos ≥ pool_capacity or
+        unallocated block_id) are zero-filled — matches the register_buffer
+        mirror's zero-initialized behavior under _reset_compressor_state.
+
+        Returns ``None`` when the ctx is unbound or the pool isn't
+        registered for this layer, so callers can fall back to the
+        register_buffer read.
+        """
+        ctx = self._prefill_paged_ctx
+        if ctx is None:
+            return None
+        assert bsz == 1, (
+            f"Phase E1 prefill paged read assumes bsz==1 per v4() call " f"(got {bsz})."
+        )
+        layer_descs = ctx["layer_descs"]
+        bt_by_type = ctx["block_tables"]
+        if attn_type not in layer_descs or attn_type not in bt_by_type:
+            return None
+        desc = layer_descs[attn_type]
+        bt = bt_by_type[attn_type]
+        if bt is None or bt.numel() == 0 or T == 0:
+            return None
+        eb = desc.entries_per_block
+        max_blocks = bt.shape[1]
+        pool_capacity = max_blocks * eb
+        pos = torch.arange(T, device=device, dtype=torch.long)
+        in_capacity = pos < pool_capacity
+        safe_pos = torch.where(in_capacity, pos, torch.zeros_like(pos))
+        block_in_seq = safe_pos // eb
+        in_block = safe_pos % eb
+        bt_long = bt.to(torch.long)
+        block_id = bt_long[0, block_in_seq]
+        valid = (block_id > 0) & in_capacity
+        safe_slot = torch.where(
+            valid,
+            block_id * eb + in_block,
+            torch.zeros_like(in_block),
+        )
+        pool_view = desc.view()
+        gathered = pool_view.index_select(0, safe_slot)  # [T, vec_dim]
+        # Pool storage dtype matches source_buf dtype by construction (see
+        # _prefill_paged_write_kv which writes via write_kv_to_pool →
+        # index_copy_).  BF16 KV pools, fp32 STATE pools.  Enforce dtype
+        # + zero-fill sentinels in one where().
+        if gathered.dtype != dtype:
+            gathered = gathered.to(dtype)
+        zero_row = torch.zeros((), dtype=dtype, device=device)
+        out_flat = torch.where(valid.unsqueeze(-1), gathered, zero_row)
+        return out_flat.view(bsz, T, vec_dim).contiguous()
+
+    def _gather_kv_cache_dense_from_pool(self, bsz: int) -> Optional[torch.Tensor]:
+        """Phase E1: reconstruct the ``[bsz, kv_cache_size, head_dim]``
+        dense tensor that ``self.kv_cache[:bsz]`` presents, but sourced
+        from the framework pools instead of the register_buffer mirror.
+
+        Layout (matches register_buffer):
+          ``[:, :win, :]``        -- SWA_KV pool (ring-buffered)
+          ``[:, win:win+T_cmp, :]`` -- CSA_KV or HCA_KV pool (compressed)
+
+        Returns ``None`` when ctx not bound — caller falls back to
+        register_buffer.  SWA-only layers (compress_ratio == 0) get a
+        bare ``[bsz, win, hd]`` read.
+        """
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
+            CSA_KV,
+            HCA_KV,
+            SWA_KV,
+        )
+
+        if self._prefill_paged_ctx is None:
+            return None
+        win = self.window_size
+        hd = self.head_dim
+        dtype = self.kv_cache.dtype
+        device = self.kv_cache.device
+        kv_cache_size = int(self.kv_cache.shape[1])
+        T_cmp = kv_cache_size - win
+
+        swa_dense = self._prefill_paged_read_kv(SWA_KV, bsz, win, hd, dtype, device)
+        if swa_dense is None:
+            return None
+        if T_cmp <= 0 or self.compress_ratio == 0:
+            return swa_dense
+        cmp_at = CSA_KV if self.compress_ratio == 4 else HCA_KV
+        cmp_dense = self._prefill_paged_read_kv(cmp_at, bsz, T_cmp, hd, dtype, device)
+        if cmp_dense is None:
+            # Compressed pool not bound for this layer — shouldn't happen in
+            # production but keep the safe fallback so caller can use
+            # register_buffer instead of a half-built view.
+            return None
+        return torch.cat([swa_dense, cmp_dense], dim=1)
 
     def reset_rope_cache(self, device=None):
         """Recompute `freqs_cis` on the actual device — MUST be called after
@@ -1640,18 +1757,37 @@ class Attention(nn.Module):
                     if sp_int == 0:
                         kv_cat = torch.cat([kv_full, kv_compress], dim=1)
                     else:
-                        # Continuation: use ring buffer for attention (has prefix + new KV)
-                        kv_cat = self.kv_cache[:bsz]
+                        # Phase E1: continuation prefill read — the ring
+                        # buffer view ``self.kv_cache[:bsz]`` is byte-equal
+                        # to a fresh gather from the SWA+compressed pools
+                        # because Phase B dual-write has just filled the
+                        # pool with the same bytes (writes happen a few
+                        # lines up via _prefill_paged_write_{swa,compressed}).
+                        # DSV4_READ_FROM_POOL=0 forces the register_buffer
+                        # path for regression bisection.
+                        kv_cat = None
+                        if _use_read_from_pool():
+                            kv_cat = self._gather_kv_cache_dense_from_pool(bsz)
+                        if kv_cat is None:
+                            kv_cat = self.kv_cache[:bsz]
                 else:
                     if sp_int == 0:
                         kv_cat = kv_full
                     else:
-                        kv_cat = self.kv_cache[:bsz]
+                        kv_cat = None
+                        if _use_read_from_pool():
+                            kv_cat = self._gather_kv_cache_dense_from_pool(bsz)
+                        if kv_cat is None:
+                            kv_cat = self.kv_cache[:bsz]
             else:
                 if sp_int == 0:
                     kv_cat = kv_full
                 else:
-                    kv_cat = self.kv_cache[:bsz]
+                    kv_cat = None
+                    if _use_read_from_pool():
+                        kv_cat = self._gather_kv_cache_dense_from_pool(bsz)
+                    if kv_cat is None:
+                        kv_cat = self.kv_cache[:bsz]
             if _tl_kernels.tilelang_available():
                 o = _tl_kernels.sparse_attn(
                     q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
