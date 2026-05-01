@@ -674,37 +674,6 @@ class DeepSeekV4Model(GptModelBase):
                 )
                 python_buf[b, entry_start:entry_end] = page_bf16
 
-    def _scatter_kv_pool(
-        self, fw_tensor, block_ids_2d, python_buf, entries_per_block, head_dim, B
-    ):
-        """Scatter python_buf[B, T, head_dim] (bf16) back to BlockPool pages."""
-        if fw_tensor is None or fw_tensor.numel() == 0:
-            return
-        bytes_per_entry = head_dim * 2
-        page_bytes_avail = fw_tensor.size(1)
-        capacity = min(entries_per_block, page_bytes_avail // bytes_per_entry)
-        T = python_buf.size(1)
-
-        bids_cpu = block_ids_2d[:B].cpu()
-        for b in range(B):
-            row = bids_cpu[b]
-            for k in range(row.size(0)):
-                bid = int(row[k].item())
-                if bid <= 0:
-                    continue
-                entry_start = k * capacity
-                entry_end = min(entry_start + capacity, T)
-                n = entry_end - entry_start
-                if n <= 0:
-                    break
-                data = (
-                    python_buf[b, entry_start:entry_end]
-                    .contiguous()
-                    .view(torch.uint8)
-                    .reshape(-1)
-                )
-                fw_tensor[bid, : n * bytes_per_entry] = data
-
     def _gather_state_pool(
         self,
         fw_tensor,
@@ -738,40 +707,6 @@ class DeepSeekV4Model(GptModelBase):
                     break
                 kv_state[b, row_start : row_start + n] = page_fp32[:n, :half_dim]
                 score_state[b, row_start : row_start + n] = page_fp32[:n, half_dim:]
-
-    def _scatter_state_pool(
-        self,
-        fw_tensor,
-        block_ids_2d,
-        kv_state,
-        score_state,
-        entries_per_block,
-        state_dim,
-        B,
-    ):
-        """Scatter kv_state + score_state (fp32) back to BlockPool pages."""
-        if fw_tensor is None or fw_tensor.numel() == 0:
-            return
-        half_dim = state_dim // 2
-        bids_cpu = block_ids_2d[:B].cpu()
-        max_blks = min(2, bids_cpu.size(1))
-        state_rows = kv_state.size(1)
-        for b in range(B):
-            for blk_idx in range(max_blks):
-                bid = int(bids_cpu[b, blk_idx].item())
-                if bid <= 0:
-                    continue
-                page_fp32 = (
-                    fw_tensor[bid, : entries_per_block * state_dim * 4]
-                    .view(torch.float32)
-                    .view(entries_per_block, state_dim)
-                )
-                row_start = blk_idx * entries_per_block
-                n = min(entries_per_block, state_rows - row_start)
-                if n <= 0:
-                    break
-                page_fp32[:n, :half_dim] = kv_state[b, row_start : row_start + n]
-                page_fp32[:n, half_dim:] = score_state[b, row_start : row_start + n]
 
     def _get_pool_tensor(self, attn_type: int, layer_idx: int):
         """Look up per-pool BlockPool tensor."""
@@ -907,17 +842,6 @@ class DeepSeekV4Model(GptModelBase):
                             2 * hd,
                             B,
                         )
-
-    def _scatter_all_layers(self, attn_inputs, B=1, batch_offset=0, state_only=False):
-        """Retired (Phase D full) — kept as no-op shim for call-site API stability.
-
-        All KV pools (SWA/CSA/HCA/INDEXER_KV) and STATE pools (CSA/HCA/INDEXER_STATE)
-        are now written inside Attention.forward via the paged dual-write path.
-        Both halves of the former dual-write are byte-equivalent (verified by
-        test_phase_b_prefill_dual_write's 9 cases). This shim will be deleted
-        when call sites migrate (see Phase F in the plan doc).
-        """
-        return
 
     def _bind_prefill_paged_ctx(self, attn_inputs, batch_offset: int = 0) -> bool:
         """Phase B: bind per-layer paged dual-write ctx on every Attention.
@@ -1429,8 +1353,9 @@ class DeepSeekV4Model(GptModelBase):
                             ic.score_state[:1, ioff:].fill_(float("-inf"))
 
                 # Phase B: bind prefill paged dual-write ctx per-layer so
-                # Attention.forward mirrors the SWA ring-buffer into the
-                # framework BlockPool. Additive alongside _scatter_all_layers.
+                # Attention.forward writes SWA/CSA/HCA/INDEXER KV + STATE
+                # pools directly via write_kv_to_pool. Replaces the old
+                # post-forward scatter round-trip (retired in Phase D).
                 paged_bound = self._bind_prefill_paged_ctx(attn, batch_offset=b)
 
                 h = self.v4(batch_ids, start_pos=start_pos, apply_lm_head=False)
@@ -1438,10 +1363,6 @@ class DeepSeekV4Model(GptModelBase):
 
                 if paged_bound:
                     self._clear_prefill_paged_ctx()
-
-                # Scatter to BlockPool after forward
-                if getattr(self, "_framework_kv_enabled", False) and attn is not None:
-                    self._scatter_all_layers(attn, B=1, batch_offset=b)
 
                 self._running_pos = prefix_len + inp_len
                 offset += inp_len
