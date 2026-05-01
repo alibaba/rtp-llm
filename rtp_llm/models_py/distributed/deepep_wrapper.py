@@ -14,15 +14,44 @@ from enum import IntEnum, auto
 from typing import Optional, Tuple
 
 import torch
+from torch.distributed import ProcessGroup
 
 try:
     from deep_ep import Buffer as DeepEPBuffer
     from deep_ep import Config as DeepEPConfig
-except ImportError:
-    DeepEPBuffer = None  # type: ignore[misc,assignment]
-    DeepEPConfig = None  # type: ignore[misc,assignment]
+except ImportError as _deep_ep_import_err:
+    # deep_ep wheel is omitted from some lock files (e.g. cuda13: no
+    # torch2.11+cu130 build yet, and the cu12.9 prebuilt links libcudart.so.12
+    # which is absent in the cu13 toolchain). Provide stubs so module-level
+    # `from .deepep_wrapper import ...` and type annotations resolve. Any code
+    # path that actually constructs / calls these (init_deepep_wrapper for an
+    # ep>1 MoE config) raises a clear error at the use-site instead of failing
+    # at import time for unrelated startup paths.
+    _DEEP_EP_IMPORT_ERROR = _deep_ep_import_err
 
-from torch.distributed import ProcessGroup
+    class _DeepEPUnavailable:
+        """Stub for deep_ep.Buffer / deep_ep.Config when the wheel is missing."""
+
+        def __init__(self, *args, **kwargs):
+            raise NotImplementedError(
+                "deep_ep is not available in this build "
+                "(likely cuda13 lock: torch 2.11+cu130 wheel not yet rebuilt). "
+                f"Original import error: {_DEEP_EP_IMPORT_ERROR}"
+            )
+
+        def __init_subclass__(cls, **kwargs):
+            raise NotImplementedError("deep_ep is not available in this build.")
+
+        @classmethod
+        def get_low_latency_rdma_size_hint(cls, *args, **kwargs):
+            raise NotImplementedError("deep_ep is not available in this build.")
+
+        @classmethod
+        def get_low_latency_rdma_size_hint_m2n(cls, *args, **kwargs):
+            raise NotImplementedError("deep_ep is not available in this build.")
+
+    DeepEPBuffer = _DeepEPUnavailable  # type: ignore[assignment,misc]
+    DeepEPConfig = _DeepEPUnavailable  # type: ignore[assignment,misc]
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig

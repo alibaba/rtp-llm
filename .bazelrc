@@ -178,6 +178,30 @@ build:cuda13_arm --host_copt=-Wno-error=missing-field-initializers
 # symbol resolves without having to rebuild the wheels.
 test:cuda13_arm --test_env=LD_PRELOAD=/usr/lib64/librt.so.1
 
+# deep_gemm JIT spawns nvcc at runtime to build SM100/SM103a kernels (called
+# from V4 weight loader → get_mn_major_tma_aligned_packed_ue8m0_tensor and
+# fp8_fp4_mega_moe in the routed-experts forward path). nvcc needs a host C++
+# compiler reachable via -ccbin / CUDAHOSTCXX.
+#
+# The fp8_fp4_mega_moe kernel uses a C++20 floating-point non-type template
+# parameter (`float kActivationClamp`). nvcc 13.2 + gcc 10.2.1 (the system
+# /usr/bin/g++) rejects this even with -std=c++20 — the FP-NTTP feature needs
+# gcc 12+ as host. Container ships /opt/rh/gcc-toolset-12/root/usr/bin/g++
+# (gcc 12.3.0), so point the JIT at that. gcc-toolset-12 lives outside PATH
+# by default, hence the explicit PATH / LD_LIBRARY_PATH overrides.
+#
+# These were previously hard-coded into smoke defs.bzl pointing at user-
+# private conda envs (/home/tanboyu.tby/..., /home/serina.wzq/...) which
+# only worked on those specific dev boxes. Centralize here so every cu13
+# test sees the same toolchain.
+test:cuda13 --test_env=DG_JIT_CPP_STANDARD=20
+test:cuda13 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
+test:cuda13 --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
+test:cuda13 --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
+test:cuda13 --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++
+test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+test:cuda13 --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64
+
 build:cpu --copt="-DENABLE_BF16=1"
 build:cpu --define=using_cuda=false --define=using_cuda_nvcc=false --define=using_cpu=true
 build:cpu --action_env TF_NEED_CUDA="0"
