@@ -1,0 +1,40 @@
+// ByteStream API subset for REAPI log streaming (Read) + CAS large uploads (Write).
+// Aligned with google/bytestream/bytestream.proto (method and field numbers).
+syntax = "proto3";
+package google.bytestream;
+
+service ByteStream {
+  rpc Read(ReadRequest) returns (stream ReadResponse);
+  rpc Write(stream WriteRequest) returns (WriteResponse);
+  rpc QueryWriteStatus(QueryWriteStatusRequest) returns (QueryWriteStatusResponse);
+}
+
+message ReadRequest {
+  string resource_name = 1;
+  int64 read_offset = 2;
+  int64 read_limit = 3;
+}
+
+message ReadResponse {
+  bytes data = 10;
+}
+
+message WriteRequest {
+  string resource_name = 1;
+  int64 write_offset = 2;
+  bool finish_write = 3;
+  bytes data = 10;
+}
+
+message WriteResponse {
+  int64 committed_size = 1;
+}
+
+message QueryWriteStatusRequest {
+  string resource_name = 1;
+}
+
+message QueryWriteStatusResponse {
+  int64 committed_size = 1;
+  bool complete = 2;
+}

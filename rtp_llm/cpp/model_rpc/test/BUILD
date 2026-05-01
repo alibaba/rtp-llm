@@ -1,5 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 load("//bazel:device_defs.bzl",
     "device_impl_target", "device_test_envs")
 
@@ -8,20 +8,6 @@ cc_test = cc_test_wrapper
 test_copts = [
     "-fno-access-control",
 ] + copts()
-
-py_test (
-    name = "model_rpc_client_test",
-    srcs = ["model_rpc_client_test.py"],
-    deps = [
-        "//rtp_llm/cpp/model_rpc:model_rpc_client",
-        "//rtp_llm:testlib",
-        "//rtp_llm/test/model_test/test_util:test_util",
-    ],
-    data = [
-        "//:th_transformer"
-    ],
-    exec_properties = {'gpu':'H20'},
-)
 
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",

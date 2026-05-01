@@ -1,19 +1,25 @@
 import unittest
 from dataclasses import dataclass
 
+import pytest
 import torch
-from flashinfer import (
-    ActivationType,
-    RoutingMethodType,
-    e2m1_and_ufp8sf_scale_to_float,
-    fp4_quantize,
-)
-from flashinfer.fp4_quantization import block_scale_interleave
-from flashinfer.fused_moe import WeightLayout, trtllm_fp4_block_scale_moe
-from flashinfer.fused_moe.core import (
-    _maybe_get_cached_w3_w1_permute_indices,
-    get_w2_permute_indices_with_cache,
-)
+
+pytestmark = [pytest.mark.gpu(type="SM100_ARM")]
+try:
+    from flashinfer import (
+        ActivationType,
+        RoutingMethodType,
+        e2m1_and_ufp8sf_scale_to_float,
+        fp4_quantize,
+    )
+    from flashinfer.fp4_quantization import block_scale_interleave
+    from flashinfer.fused_moe import WeightLayout, trtllm_fp4_block_scale_moe
+    from flashinfer.fused_moe.core import (
+        _maybe_get_cached_w3_w1_permute_indices,
+        get_w2_permute_indices_with_cache,
+    )
+except ImportError as e:
+    pytest.skip(f"flashinfer API not available: {e}", allow_module_level=True)
 from torch.nn import functional as F
 
 from rtp_llm.config.model_config import ModelConfig

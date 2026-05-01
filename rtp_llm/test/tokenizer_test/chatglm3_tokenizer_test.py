@@ -1,6 +1,10 @@
 from typing import Any
 from unittest import TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 from rtp_llm.frontend.tokenizer_factory.tokenizers import ChatGLMV3Tokenizer
 
 

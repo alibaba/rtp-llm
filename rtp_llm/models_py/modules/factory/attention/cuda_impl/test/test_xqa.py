@@ -2,11 +2,18 @@ import logging
 import unittest
 from typing import List
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest, compare_tensors
 
-from rtp_llm.ops.compute_ops import PyAttentionInputs, XQAAttnOp, XQAParams
+try:
+    from rtp_llm.ops.compute_ops import PyAttentionInputs, XQAAttnOp, XQAParams
+except ImportError as e:
+    pytest.skip(f"CUDA-only compute_ops unavailable: {e}", allow_module_level=True)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 

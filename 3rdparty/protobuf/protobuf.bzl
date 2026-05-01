@@ -204,8 +204,8 @@ proto_gen = rule(
 """Generates codes from Protocol Buffers definitions.
 
 This rule helps you to implement Skylark macros specific to the target
-language. You should prefer more specific `cc_proto_library `,
-`py_proto_library` and others unless you are adding such wrapper macros.
+language. You should prefer more specific `cc_proto_library` and other
+language-specific wrappers unless you are adding such wrapper macros.
 
 Args:
   srcs: Protocol Buffers definition files (.proto) to run the protocol compiler
@@ -317,6 +317,32 @@ def cc_proto_library(
         **kargs
     )
 
+def internal_copied_filegroup(name, srcs, strip_prefix, dest, **kwargs):
+    """Copy files to dest (stripping strip_prefix) and expose them as a filegroup.
+
+    Used by BUILD for well-known protos; upstream protobuf.bzl includes this macro.
+    """
+    outs = [_RelativeOutputPath(s, strip_prefix, dest) for s in srcs]
+
+    native.genrule(
+        name = name + "_genrule",
+        srcs = srcs,
+        outs = outs,
+        cmd = " && ".join(
+            [
+                "cp $(location %s) $(location %s)" %
+                (s, _RelativeOutputPath(s, strip_prefix, dest))
+                for s in srcs
+            ],
+        ),
+    )
+
+    native.filegroup(
+        name = name,
+        srcs = outs,
+        **kwargs
+    )
+
 def internal_gen_well_known_protos_java(srcs):
     """Bazel rule to generate the gen_well_known_protos_java genrule
 
@@ -340,130 +366,6 @@ def internal_gen_well_known_protos_java(srcs):
               " && mv $(@D)/wellknown.jar $(@D)/wellknown.srcjar",
         tools = [":protoc"],
     )
-
-def internal_copied_filegroup(name, srcs, strip_prefix, dest, **kwargs):
-    """Macro to copy files to a different directory and then create a filegroup.
-
-    This is used by the //:protobuf_python py_proto_library target to work around
-    an issue caused by Python source files that are part of the same Python
-    package being in separate directories.
-
-    Args:
-      srcs: The source files to copy and add to the filegroup.
-      strip_prefix: Path to the root of the files to copy.
-      dest: The directory to copy the source files into.
-      **kwargs: extra arguments that will be passesd to the filegroup.
-    """
-    outs = [_RelativeOutputPath(s, strip_prefix, dest) for s in srcs]
-
-    native.genrule(
-        name = name + "_genrule",
-        srcs = srcs,
-        outs = outs,
-        cmd = " && ".join(
-            ["cp $(location %s) $(location %s)" %
-             (s, _RelativeOutputPath(s, strip_prefix, dest)) for s in srcs],
-        ),
-    )
-
-    native.filegroup(
-        name = name,
-        srcs = outs,
-        **kwargs
-    )
-
-def py_proto_library(
-        name,
-        srcs = [],
-        deps = [],
-        py_libs = [],
-        py_extra_srcs = [],
-        include = None,
-        default_runtime = "@com_google_protobuf//:protobuf_python",
-        protoc = "@com_google_protobuf//:protoc",
-        use_grpc_plugin = False,
-        **kargs):
-    """Bazel rule to create a Python protobuf library from proto source files
-
-    NOTE: the rule is only an internal workaround to generate protos. The
-    interface may change and the rule may be removed when bazel has introduced
-    the native rule.
-
-    Args:
-      name: the name of the py_proto_library.
-      srcs: the .proto files of the py_proto_library.
-      deps: a list of dependency labels; must be py_proto_library.
-      py_libs: a list of other py_library targets depended by the generated
-          py_library.
-      py_extra_srcs: extra source files that will be added to the output
-          py_library. This attribute is used for internal bootstrapping.
-      include: a string indicating the include path of the .proto files.
-      default_runtime: the implicitly default runtime which will be depended on by
-          the generated py_library target.
-      protoc: the label of the protocol compiler to generate the sources.
-      use_grpc_plugin: a flag to indicate whether to call the Python C++ plugin
-          when processing the proto files.
-      **kargs: other keyword arguments that are passed to cc_library.
-
-    """
-    outs = _PyOuts(srcs, use_grpc_plugin)
-
-    includes = []
-    if include != None:
-        includes = [include]
-
-    grpc_python_plugin = None
-    if use_grpc_plugin:
-        grpc_python_plugin = "//external:grpc_python_plugin"
-        # Note: Generated grpc code depends on Python grpc module. This dependency
-        # is not explicitly listed in py_libs. Instead, host system is assumed to
-        # have grpc installed.
-
-    proto_gen(
-        name = name + "_genproto",
-        srcs = srcs,
-        deps = [s + "_genproto" for s in deps],
-        includes = includes,
-        protoc = protoc,
-        gen_py = 1,
-        outs = outs,
-        visibility = ["//visibility:public"],
-        plugin = grpc_python_plugin,
-        plugin_language = "grpc",
-    )
-
-    if default_runtime and not default_runtime in py_libs + deps:
-        py_libs = py_libs + [default_runtime]
-
-    native.py_library(
-        name = name,
-        srcs = outs + py_extra_srcs,
-        deps = py_libs + deps,
-        imports = includes,
-        **kargs
-    )
-
-def internal_protobuf_py_tests(
-        name,
-        modules = [],
-        **kargs):
-    """Bazel rules to create batch tests for protobuf internal.
-
-    Args:
-      name: the name of the rule.
-      modules: a list of modules for tests. The macro will create a py_test for
-          each of the parameter with the source "google/protobuf/%s.py"
-      kargs: extra parameters that will be passed into the py_test.
-
-    """
-    for m in modules:
-        s = "python/google/protobuf/internal/%s.py" % m
-        native.py_test(
-            name = "py_%s" % m,
-            srcs = [s],
-            main = s,
-            **kargs
-        )
 
 def check_protobuf_required_bazel_version():
     """For WORKSPACE files, to check the installed version of bazel.

@@ -1,3 +1,22 @@
+import os as _os
+
+# Phase-25 namespace merge: extend `rtp_llm.model_loader.__path__` with the
+# sibling internal_source counterpart so internal model_loader content (currently
+# `test/`) is reachable as `rtp_llm.model_loader.test`.
+_internal_dir = _os.path.normpath(
+    _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)),
+        "..",
+        "..",
+        "internal_source",
+        "rtp_llm",
+        "model_loader",
+    )
+)
+if _os.path.isdir(_internal_dir) and _internal_dir not in __path__:
+    __path__.append(_internal_dir)
+del _os, _internal_dir
+
 from .attn_weight import AttnAtomicWeight, AttnConfig, MlaAttnAtomicWeight, MlaConfig
 from .dynamic_fp8_quant_weight import LoadQuantDynamicPerTensorFp8Weight
 from .ffn_weight import (

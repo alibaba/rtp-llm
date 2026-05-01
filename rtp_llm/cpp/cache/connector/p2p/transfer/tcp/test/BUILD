@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts")
 
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_copts = [
