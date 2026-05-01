@@ -390,18 +390,14 @@ class DeepSeekV4Model(GptModelBase):
         return True
 
     def _reset_compressor_state(self):
-        """Reset ``attn.kv_cache`` register_buffer for a new prefill.
-
-        Phase E3+E4: compressor / indexer.compressor ``kv_state`` /
-        ``score_state`` AND ``indexer.kv_cache`` are now self-managed —
-        ``Attention._bind_compressor_state_for_prefill`` resets or
-        restores them per-request.  This helper only clears
-        ``attn.kv_cache`` (the SWA + CSA/HCA register_buffer mirror)
-        which still needs zero-init for stale-data hygiene until Phase
-        E5 drops it entirely.
-        """
-        for layer in self.v4.layers:
-            layer.attn.kv_cache.zero_()
+        """Phase E5b: no-op.  All per-layer buffers are now pool-backed
+        and self-managed: ``Attention._bind_compressor_state_for_prefill``
+        resets the Compressor / Indexer state and ``kv_cache`` on fresh
+        prefill; SWA / CSA / HCA pool slots are written by the paged
+        writers and only read through matching slot_mapping indices, so
+        stale bytes in unwritten pool slots can't leak into attention.
+        Retained as a shim to avoid churning the engine-side callers."""
+        return
 
     def _wire_framework_kv_cache(self, device: str):
         """Wire framework BlockPool for 7-pool gather/scatter.
@@ -715,88 +711,12 @@ class DeepSeekV4Model(GptModelBase):
         reuse_gather=False,
         state_only=False,
     ):
-        """Gather cached KV from BlockPool pages into each layer's buffers.
-
-        batch_offset: row offset into by_group block_ids. In prefill loop,
-        request b uses batch_offset=b so we read the correct block_ids row.
-
-        paged_only: if True, only gather paged pools (CSA_KV, HCA_KV, INDEXER_KV).
-        Skip SWA and State pools because their fixed blocks get overwritten
-        during decode, making cached data unreliable for prefix cache reuse.
-        Continuation prefill recomputes them. Decode must set paged_only=False.
-
-        reuse_gather: if True, gather paged + state pools (skip SWA).
-        Used for prefill reuse to restore compressor overlap carry state.
-        """
-        if not hasattr(self, "_fw_pool_tensors") or not self._fw_pool_tensors:
-            return
-
-        by_group = getattr(
-            attn_inputs, "kv_cache_kernel_block_id_device_by_group", None
-        )
-        if by_group is None or len(by_group) == 0:
-            return
-
-        # attn_type → group_id (0-indexed): CSA_KV=1→0, HCA_KV=2→1, ...SWA_KV=7→6
-        attn_type_to_gid = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6}
-
-        for i, layer in enumerate(self.v4.layers):
-            attn_mod = layer.attn
-            win = attn_mod.window_size
-            hd = attn_mod.head_dim
-
-            # Select pool list based on gather mode
-            if state_only:
-                pools = self._layer_state_pools[i]
-            elif reuse_gather:
-                pools = self._layer_reuse_gather_pools[i]
-            elif paged_only:
-                pools = self._layer_gather_pools[i]
-            else:
-                pools = self._layer_pools[i]
-            for attn_type in pools:
-                gid = attn_type_to_gid.get(attn_type)
-                if gid is None or gid >= len(by_group):
-                    continue
-                block_ids = by_group[gid]  # [total_requests, max_blocks]
-                if block_ids is None or block_ids.numel() == 0:
-                    continue
-                bid_slice = block_ids[batch_offset : batch_offset + B]
-                fw_t = self._get_pool_tensor(attn_type, i)
-
-                if attn_type == 7:  # SWA_KV
-                    swa_buf = attn_mod.kv_cache[:B, :win]
-                    self._gather_kv_pool(fw_t, bid_slice, swa_buf, 256, hd, B)
-                elif attn_type == 1:  # CSA_KV
-                    if (
-                        attn_mod.compressor is not None
-                        and attn_mod.compressor.kv_cache is not None
-                    ):
-                        self._gather_kv_pool(
-                            fw_t, bid_slice, attn_mod.compressor.kv_cache[:B], 64, hd, B
-                        )
-                elif attn_type == 2:  # HCA_KV
-                    if (
-                        attn_mod.compressor is not None
-                        and attn_mod.compressor.kv_cache is not None
-                    ):
-                        self._gather_kv_pool(
-                            fw_t, bid_slice, attn_mod.compressor.kv_cache[:B], 2, hd, B
-                        )
-                elif attn_type == 3:
-                    # Phase E4: INDEXER_KV self-gathered by
-                    # Indexer.restore_kv_cache_from_pool inside
-                    # Attention._bind_compressor_state_for_prefill — no
-                    # longer touched here.
-                    continue
-                elif attn_type in (4, 5, 6):
-                    # Phase E3: STATE pools (INDEXER_STATE / CSA_STATE /
-                    # HCA_STATE) are self-gathered by
-                    # Compressor.restore_state_from_pool at Attention
-                    # forward entry — no longer touched here.  Layer pool
-                    # lists retain the types for inventory / dump; the
-                    # runtime path just skips them.
-                    continue
+        """Phase E5b: retired — all gathers are now self-managed inside
+        ``Attention`` / ``Compressor`` / ``Indexer`` (``_gather_kv_cache_
+        dense_from_pool`` and ``_bind_compressor_state_for_prefill``).
+        Kept as a no-op shim so any stale caller is a silent no-op
+        instead of an AttributeError on the removed register_buffer."""
+        return
 
     def _bind_prefill_paged_ctx(self, attn_inputs, batch_offset: int = 0) -> bool:
         """Phase B: bind per-layer paged dual-write ctx on every Attention.
@@ -1279,20 +1199,13 @@ class DeepSeekV4Model(GptModelBase):
                 )  # [1, inp_len]
                 start_pos = prefix_len  # reuse offset
 
-                # Gather from BlockPool if reuse hit
-                if (
-                    getattr(self, "_framework_kv_enabled", False)
-                    and attn is not None
-                    and prefix_len > 0
-                ):
-                    # Phase E3: STATE restore is now self-contained inside
-                    # ``Attention._bind_compressor_state_for_prefill``
-                    # (including the overlap partial-window re-zero for
-                    # CSA that this block used to do after gather).
-                    # ``_gather_all_layers`` only pulls KV pools now.
-                    self._gather_all_layers(
-                        attn, B=1, batch_offset=b, reuse_gather=True
-                    )
+                # Phase E5b: reuse-cache gather is fully self-managed.
+                # ``Attention._gather_kv_cache_dense_from_pool`` reads
+                # SWA + compressed directly from the framework pool at
+                # prefill attention time; compressor / indexer state
+                # and compressed kv_cache are restored inside
+                # ``Attention._bind_compressor_state_for_prefill``.  No
+                # register_buffer mirror to populate here.
 
                 # Phase B: bind prefill paged dual-write ctx per-layer so
                 # Attention.forward writes SWA/CSA/HCA/INDEXER KV + STATE

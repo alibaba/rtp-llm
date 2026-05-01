@@ -519,14 +519,13 @@ class Attention(nn.Module):
             self.compressor = None
             self.indexer = None
 
-        # KV cache: [B, window_size + max_seq_len // ratio, head_dim]
+        # Phase E5b: kv_cache register_buffer retired.  KV storage now lives
+        # exclusively in the framework BlockPools (SWA_KV + CSA_KV / HCA_KV);
+        # prefill reads via ``_gather_kv_cache_dense_from_pool``, prefill
+        # writes via ``_prefill_write_swa_to_pool`` + ``_prefill_paged_write_compressed``,
+        # decode reads/writes via ``forward_decode``'s paged paths.
         kv_cache_size = window_size + (
             max_seq_len // compress_ratio if compress_ratio else 0
-        )
-        self.register_buffer(
-            "kv_cache",
-            torch.zeros(max_batch_size, kv_cache_size, head_dim),
-            persistent=False,
         )
 
         # Phase 4D FP8 KV cache (num_blocks=max_B, block_size=kv_cache_size, 584B/slot).
@@ -675,13 +674,89 @@ class Attention(nn.Module):
         buf_flat = source_buf[:bsz].reshape(bsz * T, D)
         write_kv_to_pool(buf_flat, slot_mapping, desc.view(), mask_negative=True)
 
-    def _prefill_paged_write_swa(self, bsz: int) -> None:
-        """Phase B dual-write: mirror ``self.kv_cache[:bsz, :win]`` into the
-        framework SWA BlockPool."""
+    def _prefill_write_swa_to_pool(
+        self, bsz: int, kv_full: torch.Tensor, sp_int: int
+    ) -> None:
+        """Phase E5b: direct SWA ring write to the framework SWA_KV pool
+        (replaces the retired ``self.kv_cache[:bsz, :win]`` register
+        _buffer ring-write + ``_prefill_paged_write_swa`` mirror pair).
+
+        For each of ``kv_full``'s ``seqlen`` new tokens at local index i:
+            global_pos = sp_int + i
+            ring_pos   = global_pos % win
+            slot       = block_id[ring_pos // eb] * eb + (ring_pos % eb)
+
+        Two write shapes depending on seqlen vs win:
+          * seqlen <= win: write all seqlen tokens (each to a unique
+            ring slot).
+          * seqlen  > win: the first ``seqlen - win`` tokens would have
+            been overwritten by the ring — skip them and only write the
+            last ``win`` tokens (each to a unique ring slot).  Matches
+            the retired ring-write's final state without relying on the
+            non-deterministic behavior of ``index_copy_`` under
+            duplicate slot_mapping entries.
+        """
+        from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
+            write_kv_to_pool,
+        )
         from rtp_llm.models_py.modules.dsv4.decode.pool_layout import SWA_KV
 
+        ctx = self._prefill_paged_ctx
+        if ctx is None:
+            return
+        assert bsz == 1, (
+            f"Phase E5b SWA ring write assumes bsz==1 per v4() call " f"(got {bsz})"
+        )
+        layer_descs = ctx["layer_descs"]
+        bt_by_type = ctx["block_tables"]
+        if SWA_KV not in layer_descs or SWA_KV not in bt_by_type:
+            return
+        desc = layer_descs[SWA_KV]
+        bt = bt_by_type[SWA_KV]
+        if bt is None or bt.numel() == 0:
+            return
+
         win = self.window_size
-        self._prefill_paged_write_kv(SWA_KV, self.kv_cache[:bsz, :win], bsz)
+        seqlen = int(kv_full.shape[1])
+        if seqlen == 0:
+            return
+        device = kv_full.device
+        eb = desc.entries_per_block
+        max_blocks = bt.shape[1]
+
+        if seqlen <= win:
+            n_write = seqlen
+            src_start = 0
+        else:
+            # Ring-overwrite: only the last ``win`` tokens survive the
+            # overwrite; each lands on a unique ring slot.
+            n_write = win
+            src_start = seqlen - win
+
+        # Global positions for the n_write tokens we actually write.
+        global_pos = (
+            sp_int + src_start + torch.arange(n_write, device=device, dtype=torch.long)
+        )
+        ring_pos = global_pos % win  # [n_write]
+        block_in_seq = ring_pos // eb
+        in_block = ring_pos % eb
+        bt_long = bt.to(torch.long)
+        # All ring positions must hit a block within the ring (2 blocks
+        # × 256 entries = 512 slots covers win=128 with margin).
+        in_capacity = block_in_seq < max_blocks
+        safe_in_seq = torch.where(
+            in_capacity, block_in_seq, torch.zeros_like(block_in_seq)
+        )
+        block_id = bt_long[0, safe_in_seq]
+        valid = (block_id > 0) & in_capacity
+        slot = torch.where(
+            valid, block_id * eb + in_block, torch.full_like(in_block, -1)
+        )
+        source = kv_full[:bsz, src_start : src_start + n_write].reshape(
+            bsz * n_write, self.head_dim
+        )
+        slot_mapping = slot.unsqueeze(0).expand(bsz, -1).reshape(-1)
+        write_kv_to_pool(source, slot_mapping, desc.view(), mask_negative=True)
 
     def _prefill_paged_write_compressed(self, bsz: int) -> None:
         """Phase B dual-write: mirror ``self.compressor.kv_cache[:bsz]`` into
@@ -769,7 +844,7 @@ class Attention(nn.Module):
             INDEXER_STATE,
         )
 
-        device = self.kv_cache.device
+        device = self.freqs_cis.device
         ctx = self._prefill_paged_ctx
 
         def _bind_state(
@@ -949,10 +1024,13 @@ class Attention(nn.Module):
             return None
         win = self.window_size
         hd = self.head_dim
-        dtype = self.kv_cache.dtype
-        device = self.kv_cache.device
-        kv_cache_size = int(self.kv_cache.shape[1])
-        T_cmp = kv_cache_size - win
+        dtype = torch.bfloat16
+        device = self.freqs_cis.device
+        T_cmp = (
+            self.compressor._kv_cache_t
+            if (self.compressor is not None and self.compress_ratio)
+            else 0
+        )
 
         swa_dense = self._prefill_paged_read_kv(SWA_KV, bsz, win, hd, dtype, device)
         if swa_dense is None:
@@ -1069,10 +1147,6 @@ class Attention(nn.Module):
         Decode-only — does NOT touch the prefill ``forward`` arm. Phase
         4 will swap the TileLang sparse_attn for FlashMLA + FP8 KV here.
         """
-        from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
-            write_compressed_k_decode,
-            write_swa_k_decode,
-        )
         from rtp_llm.models_py.modules.dsv4.decode.sparse_attn_decode_op import (
             SparseAttnV4DecodeOp,
         )
@@ -1132,19 +1206,8 @@ class Attention(nn.Module):
         )  # [B, 1, head_dim]
         apply_rotary_emb_batched(kv[..., -rd:], freqs_cis_per_req)
 
-        # Write SWA K — flat slot mapping over [B*q_len].
-        # Slice metadata to actual bsz (allocated for max_bs by graph impl;
-        # captured graph at BS=k must read only [:k] slots, else PyTorch
-        # broadcast-assigns the bsz-sized k_state across all max_bs slot
-        # positions, corrupting the KV cache).
+        # Phase E5b: direct SWA pool write (register_buffer retired).
         kv_flat = kv.reshape(bsz * q_len, self.head_dim)  # [T, head_dim]
-        swa_buffer = self.kv_cache[:, :win]  # [max_B, win, head_dim]
-        slot_mapping_swa = attn_metadata.slot_mapping_swa[: bsz * q_len]
-        write_swa_k_decode(kv_flat, slot_mapping_swa, swa_buffer)
-
-        # Paged dual-write: when metadata carries the SWA paged mapping,
-        # ALSO write into the BlockPool. The legacy register_buffer write
-        # above stays for now; some read paths still consume it.
         from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
             write_kv_to_pool,
         )
@@ -1456,20 +1519,13 @@ class Attention(nn.Module):
                 )
                 o = sparse_op.forward(q, kv_packed, self.attn_sink, identity_topk)
         else:
-            # Legacy fallback (register_buffer read). Retained for warmup /
-            # metadata-missing edge cases. Production decode populates paged
-            # metadata so this branch should not be hit; warn once per site
-            # if it is, so we can tighten to hard-assert once verified dead.
-            import logging as _legacy_log
-
-            _legacy_log.warning(
-                "[DSV4] forward_decode fell back to legacy register_buffer read "
-                "(layer=%d, ratio=%d) — paged metadata missing",
-                self.layer_id,
-                self.compress_ratio,
+            # Phase E5b: register_buffer retired.  Production decode must
+            # populate paged metadata; any path here is a caller bug.
+            raise RuntimeError(
+                "[DSV4] forward_decode requires paged metadata "
+                f"(layer={self.layer_id}, ratio={self.compress_ratio}); "
+                "Phase E5b removed the register_buffer fallback."
             )
-            kv_view = self.kv_cache[:bsz]  # [B, T, head_dim]
-            o = sparse_op.forward(q, kv_view, self.attn_sink, topk_idxs)  # [B, 1, H, D]
 
         # Inverse RoPE per request — vectorized.
         apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
@@ -1494,24 +1550,15 @@ class Attention(nn.Module):
     # ------------------------------------------------------------------
 
     def enable_fp8_kv_cache(self, bsz: int) -> None:
-        """Convert BF16 kv_cache → FP8 after prefill.
-
-        Call once after the prefill step when switching to the FP8 decode
-        path. All slots for requests [0, bsz) are bulk-converted; zeros
-        in unwritten slots are harmless (topk masking prevents reads).
-        """
-        from rtp_llm.models_py.modules.dsv4.decode.fp8_kv_quant_decode_op import (
-            quantize_v4_kv_decode,
+        """Phase E5b: BF16→FP8 bulk conversion path retired along with the
+        BF16 register_buffer.  FP8 decode (Phase E2) will gather from the
+        framework SWA_KV / CSA_KV / HCA_KV pools directly and quantize
+        into the FP8 pool; re-enable once that path lands."""
+        raise NotImplementedError(
+            "enable_fp8_kv_cache: BF16 kv_cache register_buffer retired in "
+            "Phase E5b.  Re-implement on top of paged BlockPool gather in "
+            "Phase E2."
         )
-
-        block_size = self.kv_cache_fp8.shape[1]  # win + max_seq_len // ratio
-        T = bsz * block_size
-        # Flat identity mapping: BF16 kv_cache[r, p, :] → FP8 kv_cache_fp8[r, p, :]
-        # Both have the same [max_B, block_size] layout, so slot index = r * block_size + p.
-        slot_map = torch.arange(T, device=self.kv_cache.device, dtype=torch.long)
-        kv_flat = self.kv_cache[:bsz].reshape(T, self.head_dim)
-        quantize_v4_kv_decode(kv_flat, slot_map, self.kv_cache_fp8)
-        self._fp8_kv_enabled = True
 
     def _forward_decode_fp8(
         self,
@@ -1837,33 +1884,11 @@ class Attention(nn.Module):
         )
 
         if is_prefill_attn:
-            if sp_int == 0:
-                # Fresh prefill: write all tokens into ring buffer
-                if seqlen_full <= win:
-                    self.kv_cache[:bsz, :seqlen_full] = kv_full
-                else:
-                    cutoff = seqlen_full % win
-                    self.kv_cache[:bsz, cutoff:win], self.kv_cache[:bsz, :cutoff] = (
-                        kv_full[:, -win:].split([win - cutoff, cutoff], dim=1)
-                    )
-            else:
-                # Continuation prefill: prefix KV already in kv_cache (gathered from BlockPool).
-                # Write new tokens into ring buffer starting at start_pos.
-                total_len = sp_int + seqlen
-                if total_len <= win:
-                    self.kv_cache[:bsz, sp_int:total_len] = kv_full
-                else:
-                    # Ring buffer wrap: place last `win` tokens of [prefix..prefix+seqlen]
-                    # But we only have the new tokens (kv_full). Prefix is already in cache.
-                    # Write new tokens at their ring positions.
-                    for t in range(seqlen):
-                        pos = (sp_int + t) % win
-                        self.kv_cache[:bsz, pos] = kv_full[:, t]
-            # Phase B: paged SWA dual-write. Mirror the ring-buffered slice
-            # [:, :win] that scatter_all_layers would otherwise copy out at
-            # _forward_impl tail — same data, written via typed pool view.
-            # Leaves scatter_all_layers in place (belt-and-suspenders).
-            self._prefill_paged_write_swa(bsz)
+            # Phase E5b: direct SWA pool write from kv_full (no register_buffer
+            # intermediary).  Ring-buffered addressing handled inside
+            # ``_prefill_write_swa_to_pool``; prefix KV for continuation prefill
+            # already lives in the pool from prior calls.
+            self._prefill_write_swa_to_pool(bsz, kv_full, sp_int)
             if self.compress_ratio:
                 # Phase E3: bind compressor state before forward (replaces
                 # DeepSeekV4Model._reset_compressor_state + _gather_all_layers
@@ -1887,37 +1912,30 @@ class Attention(nn.Module):
                     if sp_int == 0:
                         kv_cat = torch.cat([kv_full, kv_compress], dim=1)
                     else:
-                        # Phase E1: continuation prefill read — the ring
-                        # buffer view ``self.kv_cache[:bsz]`` is byte-equal
-                        # to a fresh gather from the SWA+compressed pools
-                        # because Phase B dual-write has just filled the
-                        # pool with the same bytes (writes happen a few
-                        # lines up via _prefill_paged_write_{swa,compressed}).
-                        # DSV4_READ_FROM_POOL=0 forces the register_buffer
-                        # path for regression bisection.
-                        kv_cat = None
-                        if _use_read_from_pool():
-                            kv_cat = self._gather_kv_cache_dense_from_pool(bsz)
-                        if kv_cat is None:
-                            kv_cat = self.kv_cache[:bsz]
+                        # Phase E5b: pool-only read.  Register_buffer is
+                        # gone; continuation prefill gathers SWA+compressed
+                        # from the framework pool.  Must have paged ctx.
+                        kv_cat = self._gather_kv_cache_dense_from_pool(bsz)
+                        assert kv_cat is not None, (
+                            "Phase E5b: continuation prefill requires paged "
+                            "ctx bound on Attention (call set_prefill_paged_ctx)."
+                        )
                 else:
                     if sp_int == 0:
                         kv_cat = kv_full
                     else:
-                        kv_cat = None
-                        if _use_read_from_pool():
-                            kv_cat = self._gather_kv_cache_dense_from_pool(bsz)
-                        if kv_cat is None:
-                            kv_cat = self.kv_cache[:bsz]
+                        kv_cat = self._gather_kv_cache_dense_from_pool(bsz)
+                        assert (
+                            kv_cat is not None
+                        ), "Phase E5b: continuation prefill requires paged ctx."
             else:
                 if sp_int == 0:
                     kv_cat = kv_full
                 else:
-                    kv_cat = None
-                    if _use_read_from_pool():
-                        kv_cat = self._gather_kv_cache_dense_from_pool(bsz)
-                    if kv_cat is None:
-                        kv_cat = self.kv_cache[:bsz]
+                    kv_cat = self._gather_kv_cache_dense_from_pool(bsz)
+                    assert (
+                        kv_cat is not None
+                    ), "Phase E5b: continuation prefill requires paged ctx."
             if _tl_kernels.tilelang_available():
                 o = _tl_kernels.sparse_attn(
                     q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
@@ -1927,36 +1945,15 @@ class Attention(nn.Module):
                     q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
                 )
         else:
-            # Decode: write each batch element to its own ring position
-            if is_batched_decode:
-                batch_idx = torch.arange(bsz, device=device)
-                pos = start_pos % win  # [B]
-                self.kv_cache[batch_idx, pos] = kv.squeeze(1)  # vectorized write
-                if self.compress_ratio:
-                    self.compressor(x, start_pos)  # compressor handles tensor start_pos
-            else:
-                sp = (
-                    int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
-                )
-                self.kv_cache[:bsz, sp % win] = kv.squeeze(1)
-                if self.compress_ratio:
-                    self.compressor(x, sp)
-            if _tl_kernels.tilelang_available():
-                o = _tl_kernels.sparse_attn(
-                    q,
-                    self.kv_cache[:bsz],
-                    self.attn_sink,
-                    topk_idxs,
-                    self.softmax_scale,
-                )
-            else:
-                o = _sparse_attn(
-                    q,
-                    self.kv_cache[:bsz],
-                    self.attn_sink,
-                    topk_idxs,
-                    self.softmax_scale,
-                )
+            # Phase E5b: eager decode via Attention.forward removed — the
+            # register_buffer kv_cache that this arm relied on is retired.
+            # Production decode must go through Attention.forward_decode with
+            # paged metadata; any caller here is stale test or warmup code.
+            raise NotImplementedError(
+                "Phase E5b: Attention.forward eager-decode path retired "
+                "(register_buffer kv_cache removed). Use forward_decode + "
+                "DSv4DecodeAttnMetadata with paged pool descriptors."
+            )
 
         # Inverse RoPE on output (cancels K's absolute position)
         apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
