@@ -104,13 +104,18 @@ class DSv4DecodeFmhaImpl:
         # CudaGraphRunner::initCapture BEFORE any prepare_cuda_graph) reads
         # valid values rather than the zero/-1 sentinels from allocation.
         # Mirrors flashmla_sparse_impl.py:386 (create_params → prepare in __init__).
+        # ``forbid_realloc=True`` here too — allocate_decode_metadata has
+        # already created every destination buffer; update_decode_metadata_in_place
+        # only ``.copy_`` into them, so any realloc on the first prepare is a
+        # bug (and would silently bake the new ptr into the captured graph).
         if attn_inputs is not None:
-            self.prepare(attn_inputs)
+            self.prepare(attn_inputs, forbid_realloc=True)
 
     def support_cuda_graph(self) -> bool:
-        """Mirrors ``MlaImplBase.support_cuda_graph`` — true iff
-        ``prepare_cuda_graph`` is callable on this instance."""
-        return callable(getattr(self, "prepare_cuda_graph", None))
+        # Always True for this impl class — the legacy ``callable(getattr(...))``
+        # check was a copy of MlaImplBase's pattern that never evaluated to
+        # False here (prepare_cuda_graph is hardcoded on the class).
+        return True
 
     def prepare(self, attn_inputs, forbid_realloc: bool = False) -> None:
         """Eager-path preparation: extract ``start_pos`` from
