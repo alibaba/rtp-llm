@@ -130,15 +130,18 @@ class DashScGrpcServer:
                         DASH_SC_GRPC_ACCESS_LOG_FILENAME, rank_id, server_id_int
                     ),
                 )
+            is_forward = PureForwardServicer.has_forward_config()
             interceptor = DashScGrpcAccessLogInterceptor(
-                rank_id=rank_id, server_id=server_id_int
+                rank_id=rank_id,
+                server_id=server_id_int,
+                raw_mode=is_forward,
             )
             server = grpc.server(
                 futures.ThreadPoolExecutor(max_workers=pool_size),
                 options=opts,
                 interceptors=[interceptor],
             )
-            if PureForwardServicer.has_forward_config():
+            if is_forward:
                 servicer = PureForwardServicer()
                 mode = "pure forward"
             else:
