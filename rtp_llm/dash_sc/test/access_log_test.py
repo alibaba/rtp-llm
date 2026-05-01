@@ -96,6 +96,7 @@ class FakeContext:
         self._peer = peer
         self._code = grpc.StatusCode.OK
         self._details = ""
+        self._active = True
 
     def peer(self) -> str:
         return self._peer
@@ -106,11 +107,17 @@ class FakeContext:
     def details(self) -> str:
         return self._details
 
+    def is_active(self) -> bool:
+        return self._active
+
     def set_code(self, code) -> None:
         self._code = code
 
     def set_details(self, details: str) -> None:
         self._details = details
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
 
 
 def _make_handler(*, request_streaming: bool, response_streaming: bool, inner):
@@ -229,6 +236,7 @@ class UnaryUnaryTest(InterceptorTestBase):
         rec = self.records[0]
         self.assertEqual(rec["method"], "/test.Service/TestMethod")
         self.assertEqual(rec["stream_type"], "unary")
+        self.assertEqual(rec["capture_mode"], "struct")
         self.assertEqual(rec["peer"], "ipv4:1.2.3.4:5678")
         self.assertEqual(rec["req_count"], 1)
         self.assertEqual(rec["resp_count"], 1)
@@ -402,7 +410,42 @@ class BidiStreamTest(InterceptorTestBase):
         rec = self.records[0]
         self.assertEqual(rec["status"], "UNKNOWN")
         self.assertIn("downstream died", rec["status_detail"])
+        self.assertEqual(rec["exc_type"], "RuntimeError")
         self.assertEqual(rec["generated_ids"], [10])
+
+    def test_bidi_grpc_rpc_error_populates_diagnostics(self) -> None:
+        """Empty-iterator ``grpc.RpcError`` path — reproduces the production log
+        entries where ``status_detail == 'RpcError()'`` lost both the concrete
+        subclass and the gRPC status code. The three diagnostic fields must
+        preserve enough signal to tell peer cancel apart from real errors."""
+
+        class _RendezvousLike(grpc.RpcError):
+            pass
+
+        def inner(request_iterator, context):
+            for _ in request_iterator:
+                pass
+            raise _RendezvousLike()
+            yield  # pragma: no cover (coerce to generator for stream_stream handler)
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+        ctx.set_code(grpc.StatusCode.CANCELLED)
+        ctx.set_active(False)
+
+        with self.assertRaises(_RendezvousLike):
+            list(behavior(iter([]), ctx))
+
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "UNKNOWN")
+        self.assertEqual(rec["exc_type"], "_RendezvousLike")
+        self.assertEqual(rec["context_code"], "CANCELLED")
+        self.assertFalse(rec["context_active"])
+        self.assertEqual(rec["req_count"], 0)
+        self.assertEqual(rec["resp_count"], 0)
 
 
 class ServerStreamTest(InterceptorTestBase):
@@ -606,6 +649,135 @@ class KMonitorReportTest(InterceptorTestBase):
         # OUTPUT size is always reported (len of empty list = 0).
         _, out_len, _ = self._calls_for(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC)[0]
         self.assertEqual(out_len, 0)
+
+
+class RawModeInterceptorTestBase(InterceptorTestBase):
+    """Mirror of InterceptorTestBase with ``raw_mode=True``.
+
+    Shares the kmonitor patching, logger capture, and record list, but flips the
+    servicer into raw-mode: every request message and every response message is
+    dumped into the record as a decoded proto dict instead of struct fields.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Rebuild the interceptor in raw mode and re-patch its logger.
+        self.logger_patch.stop()
+        self.interceptor = DashScGrpcAccessLogInterceptor(
+            rank_id=0, server_id=1, raw_mode=True
+        )
+
+        def capture(msg, *args, **_kw):
+            rendered = msg % args if args else msg
+            self.records.append(json.loads(rendered))
+
+        self.logger_patch = patch.object(
+            self.interceptor._logger, "info", side_effect=capture
+        )
+        self.logger_patch.start()
+
+
+class RawModeBidiTest(RawModeInterceptorTestBase):
+    """Forward-servicer path: dump every request/response proto verbatim."""
+
+    def test_bidi_raw_mode_captures_every_request_and_response(self) -> None:
+        def inner(request_iterator, context):
+            for _ in request_iterator:
+                pass
+            yield _make_stream_response(generated_ids=[10])
+            yield _make_stream_response(generated_ids=[20, 30], finish_reason=0)
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+        req1 = _make_infer_request(request_id="r1", input_ids=[1, 2, 3])
+        req2 = _make_infer_request(request_id="r2", input_ids=[4, 5])
+
+        list(behavior(iter([req1, req2]), ctx))
+        self.assertEqual(len(self.records), 1)
+        rec = self.records[0]
+
+        # Record shape flags raw capture.
+        self.assertEqual(rec["capture_mode"], "raw")
+        self.assertEqual(rec["req_count"], 2)
+        self.assertEqual(rec["resp_count"], 2)
+        # Every request captured into raw_requests.
+        self.assertEqual(len(rec["raw_requests"]), 2)
+        self.assertEqual(rec["raw_requests"][0]["id"], "r1")
+        self.assertEqual(rec["raw_requests"][1]["id"], "r2")
+        # Tensor base64 decoded to integer list.
+        self.assertEqual(
+            rec["raw_requests"][0]["inputs"][0]["decoded"], [1, 2, 3]
+        )
+        # Every response captured.
+        self.assertEqual(len(rec["raw_responses"]), 2)
+        gen_ids_0 = rec["raw_responses"][0]["infer_response"]["outputs"][0]
+        self.assertEqual(gen_ids_0["decoded"], [10])
+        # Truncation flags default False.
+        self.assertFalse(rec["raw_requests_truncated"])
+        self.assertFalse(rec["raw_responses_truncated"])
+        # Struct fields are absent in raw mode.
+        self.assertNotIn("input_ids", rec)
+        self.assertNotIn("generated_ids", rec)
+        self.assertNotIn("generate_config", rec)
+
+    def test_raw_mode_caps_chunks_and_sets_truncated_flag(self) -> None:
+        """Exceeding ``_RAW_MAX_CHUNKS`` drops extras and flips the truncated flag."""
+        original_cap = access_log_module._RAW_MAX_CHUNKS
+        access_log_module._RAW_MAX_CHUNKS = 3
+        try:
+            def inner(request_iterator, context):
+                for _ in request_iterator:
+                    pass
+                for i in range(5):
+                    yield _make_stream_response(generated_ids=[i])
+
+            handler = _make_handler(
+                request_streaming=True, response_streaming=True, inner=inner
+            )
+            behavior = _wrapped_behavior(self.interceptor, handler)
+            ctx = FakeContext()
+            list(behavior(iter([_make_infer_request(input_ids=[1])]), ctx))
+            rec = self.records[0]
+            self.assertEqual(len(rec["raw_responses"]), 3)
+            self.assertTrue(rec["raw_responses_truncated"])
+            # req_count still counts every message; only capture is capped.
+            self.assertEqual(rec["resp_count"], 5)
+        finally:
+            access_log_module._RAW_MAX_CHUNKS = original_cap
+
+    def test_raw_mode_caps_per_tensor_decoded_elements(self) -> None:
+        """Large tensors keep only the head and flag ``decoded_truncated``."""
+        original_cap = access_log_module._RAW_MAX_DECODED_ELEMENTS
+        access_log_module._RAW_MAX_DECODED_ELEMENTS = 4
+        try:
+            def inner(request_iterator, context):
+                for _ in request_iterator:
+                    pass
+                yield _make_stream_response(generated_ids=[1, 2, 3, 4, 5, 6, 7, 8])
+
+            handler = _make_handler(
+                request_streaming=True, response_streaming=True, inner=inner
+            )
+            behavior = _wrapped_behavior(self.interceptor, handler)
+            ctx = FakeContext()
+            big = list(range(10))
+            list(behavior(iter([_make_infer_request(input_ids=big)]), ctx))
+            rec = self.records[0]
+            # Input tensor truncated.
+            t_in = rec["raw_requests"][0]["inputs"][0]
+            self.assertEqual(t_in["decoded"], [0, 1, 2, 3])
+            self.assertTrue(t_in["decoded_truncated"])
+            self.assertEqual(t_in["decoded_total"], 10)
+            # Output tensor truncated.
+            t_out = rec["raw_responses"][0]["infer_response"]["outputs"][0]
+            self.assertEqual(t_out["decoded"], [1, 2, 3, 4])
+            self.assertTrue(t_out["decoded_truncated"])
+            self.assertEqual(t_out["decoded_total"], 8)
+        finally:
+            access_log_module._RAW_MAX_DECODED_ELEMENTS = original_cap
 
 
 if __name__ == "__main__":

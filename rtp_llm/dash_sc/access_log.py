@@ -2,8 +2,23 @@
 
 Hooks onto ``grpc.server(..., interceptors=[...])`` so both real and pure-forward
 servicers get uniform coverage. Schema is a flat JSON line; fields always present
-(null when N/A). Content (input_ids / generated_ids / generate_config) is always
-recorded in full — no env switches.
+(null when N/A).
+
+Two capture modes share the same interceptor + log file:
+
+- **Struct mode** (default, real servicer): pulls ``input_ids`` / ``generated_ids``
+  / ``generate_config`` etc. off the proto so the log is immediately human-readable.
+
+- **Raw mode** (forward servicer, ``raw_mode=True``): the forwarder is a
+  transparent proxy, so by the time we need to debug a weird downstream response
+  (``req_count=0`` from the real node, or mismatched generation) the only source
+  of truth about what actually hit the wire is the full proto. In raw mode we
+  dump each ``ModelInferRequest`` / ``ModelStreamInferResponse`` as a dict
+  (``MessageToDict``) with ``raw_input_contents`` / ``raw_output_contents``
+  decoded from base64 back to int/float/bool lists per Triton datatype — so
+  eyeballing a log line is enough, no protobuf decode step. Content is capped
+  per-tensor (``_RAW_MAX_DECODED_ELEMENTS``) and per-RPC (``_RAW_MAX_CHUNKS``)
+  because LLM streams easily run multi-MB per RPC.
 
 File: ``<log_path>/dash_sc_grpc_access_r{rank}_s{server}.log`` (per-process via
 ``get_process_log_filename``).
@@ -12,23 +27,26 @@ Performance notes (what stays on the RPC worker thread):
 - File I/O is async — ``AsyncRotatingFileHandler.emit`` just ``put_nowait`` on a
   bounded queue; a background worker thread does the real write. Queue full →
   drop, never block. So disk latency doesn't affect RPC latency.
-- Per chunk: one pass over ``infer.outputs`` (``_scan_response_outputs``) plus
-  ``struct.unpack(f"<{n}i", raw)`` for the generated-ids delta. O(chunks × outputs).
-- At RPC end: ``orjson.dumps`` of one flat dict (containing full input_ids and
-  accumulated generated_ids). For 5k-token payloads this is ~100 µs; logger.info
-  then enqueues to the async handler queue in microseconds.
-- No orjson default hook needed — all record values are plain int/str/list/dict/None.
+- Struct mode per chunk: one pass over ``infer.outputs`` (``_scan_response_outputs``)
+  plus ``struct.unpack(f"<{n}i", raw)`` for the generated-ids delta.
+- Raw mode per chunk: one ``MessageToDict`` + tensor base64→list rewrite. Heavier
+  than struct mode, which is why it's opt-in (only on forward servicers).
+- At RPC end: ``orjson.dumps`` of one flat dict; logger.info then enqueues to the
+  async handler queue in microseconds.
 """
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import logging
+import struct
 import time
 from typing import Any, Optional
 
 import grpc
 import orjson
+from google.protobuf.json_format import MessageToDict
 
 from rtp_llm.access_logger.log_utils import get_handler
 from rtp_llm.dash_sc.codec import (
@@ -52,6 +70,12 @@ _STREAM_TYPE = {
     (True, False): "client_stream",
     (True, True): "bidi_stream",
 }
+
+# Raw-mode caps. LLM streams can span hundreds of chunks and a single input_ids
+# tensor can be tens of thousands of tokens; without these we'd dump multi-MB
+# lines and defeat the "readable JSON" goal.
+_RAW_MAX_CHUNKS = 512
+_RAW_MAX_DECODED_ELEMENTS = 16384
 
 
 def init_dash_sc_grpc_access_logger(
@@ -139,56 +163,205 @@ def _sampling_to_dict(sampling) -> dict[str, Any]:
     return d
 
 
+def _decode_raw_tensor(datatype: str, raw: bytes) -> Optional[list]:
+    """Bulk-unpack a little-endian tensor buffer based on Triton ``datatype`` name.
+
+    Covers the datatype family actually observed in ``predict_v2.proto`` traffic
+    (integer / float / bool). Returns ``None`` for unsupported types or misaligned
+    buffers; the caller keeps the base64 blob plus a ``decoded_error`` note so
+    nothing gets silently dropped.
+    """
+    if not raw:
+        return []
+    try:
+        if datatype == "INT32":
+            if len(raw) & 3:
+                return None
+            n = len(raw) >> 2
+            return list(struct.unpack(f"<{n}i", raw))
+        if datatype == "INT64":
+            if len(raw) & 7:
+                return None
+            n = len(raw) >> 3
+            return [int(x) for x in struct.unpack(f"<{n}q", raw)]
+        if datatype == "UINT32":
+            if len(raw) & 3:
+                return None
+            n = len(raw) >> 2
+            return list(struct.unpack(f"<{n}I", raw))
+        if datatype == "UINT64":
+            if len(raw) & 7:
+                return None
+            n = len(raw) >> 3
+            return [int(x) for x in struct.unpack(f"<{n}Q", raw)]
+        if datatype == "FP32":
+            if len(raw) & 3:
+                return None
+            n = len(raw) >> 2
+            return list(struct.unpack(f"<{n}f", raw))
+        if datatype == "FP64":
+            if len(raw) & 7:
+                return None
+            n = len(raw) >> 3
+            return list(struct.unpack(f"<{n}d", raw))
+        if datatype == "INT8":
+            return list(struct.unpack(f"<{len(raw)}b", raw))
+        if datatype == "UINT8":
+            return list(struct.unpack(f"<{len(raw)}B", raw))
+        if datatype == "BOOL":
+            return [bool(b) for b in raw]
+    except struct.error:
+        return None
+    return None
+
+
+def _rewrite_raw_contents(msg_dict: dict, tensors_key: str, raw_key: str) -> None:
+    """Decode ``raw_*_contents`` (base64 after MessageToDict) onto the matching tensor entries.
+
+    Positional correspondence: ``raw_input_contents[i]`` belongs to ``inputs[i]``. We
+    attach ``decoded`` (or ``raw_b64`` + ``decoded_error``) to each tensor dict, then drop
+    the top-level ``raw_*_contents`` key so the JSON stays flat.
+    """
+    tensors = msg_dict.get(tensors_key) or []
+    raws_b64 = msg_dict.get(raw_key) or []
+    if not raws_b64:
+        return
+    for i, b64 in enumerate(raws_b64):
+        if i >= len(tensors):
+            continue
+        t = tensors[i]
+        if not isinstance(t, dict):
+            continue
+        try:
+            raw = base64.b64decode(b64) if isinstance(b64, str) else bytes(b64)
+        except Exception as e:
+            t["raw_b64"] = b64
+            t["decoded_error"] = f"base64_decode_failed: {e!r}"
+            continue
+        t["size_bytes"] = len(raw)
+        dt = t.get("datatype") or ""
+        decoded = _decode_raw_tensor(dt, raw)
+        if decoded is None:
+            t["raw_b64"] = b64
+            t["decoded_error"] = f"unsupported_or_misaligned_datatype={dt!r}"
+        elif len(decoded) > _RAW_MAX_DECODED_ELEMENTS:
+            t["decoded"] = decoded[:_RAW_MAX_DECODED_ELEMENTS]
+            t["decoded_truncated"] = True
+            t["decoded_total"] = len(decoded)
+        else:
+            t["decoded"] = decoded
+    msg_dict.pop(raw_key, None)
+
+
+def _proto_to_jsonable(msg: Any) -> dict:
+    """Convert a proto to a flat dict with tensor payloads decoded. Never raises.
+
+    On conversion failure returns ``{"_convert_error": repr(e)}`` so one malformed
+    message cannot drop an entire RPC's log line.
+    """
+    try:
+        d = MessageToDict(
+            msg,
+            preserving_proto_field_name=True,
+            including_default_value_fields=False,
+            use_integers_for_enums=False,
+        )
+    except Exception as e:
+        return {"_convert_error": repr(e)}
+    _rewrite_raw_contents(d, "inputs", "raw_input_contents")
+    infer = d.get("infer_response")
+    if isinstance(infer, dict):
+        _rewrite_raw_contents(infer, "outputs", "raw_output_contents")
+    return d
+
+
 @dataclasses.dataclass
 class _RpcAggregate:
     method: str
     stream_type: str
     peer: str
     start_ts: float
+    raw_mode: bool = False
     first_resp_ts: Optional[float] = None
     last_chunk_ts: Optional[float] = None
     req_count: int = 0
     resp_count: int = 0
     request_id: Optional[str] = None
     model_name: Optional[str] = None
+    # Struct-mode content (real frontend path).
     input_ids: Optional[list[int]] = None
     input_len: Optional[int] = None
     generate_config: Optional[dict[str, Any]] = None
     generated_ids: list[int] = dataclasses.field(default_factory=list)
     finish_reason: Optional[int] = None
     prompt_cached_token_num: Optional[int] = None
+    # Raw-mode content (forward path): full proto dumps of every request / response
+    # message, with ``raw_*_contents`` decoded back from base64. Kept capped so an
+    # extreme stream cannot blow up a single log line.
+    raw_requests: list[dict] = dataclasses.field(default_factory=list)
+    raw_responses: list[dict] = dataclasses.field(default_factory=list)
+    raw_requests_truncated: bool = False
+    raw_responses_truncated: bool = False
     status: str = "OK"
     status_detail: Optional[str] = None
+    # Exception-path diagnostics. ``repr(grpc.RpcError())`` collapses to the
+    # string "RpcError()" and drops the concrete subclass + grpc status code,
+    # which makes triage of peer-cancel vs real error impossible from the log
+    # alone. These three fields preserve what context and the interpreter know.
+    exc_type: Optional[str] = None
+    context_code: Optional[str] = None
+    context_active: Optional[bool] = None
 
     def capture_request(self, request) -> None:
-        """Pull request_id / model_name / input_ids / generate_config from the first request message."""
+        """Capture a request message.
+
+        Both modes cheaply extract ``id`` / ``model_name`` for correlation. Struct
+        mode additionally parses ``input_ids`` / sampling params; raw mode appends
+        the full proto dict up to the cap.
+        """
         if request is None:
             return
         request_id = getattr(request, "id", None)
-        if request_id:
+        if request_id and self.request_id is None:
             self.request_id = str(request_id)
         model_name = getattr(request, "model_name", None)
-        if model_name:
+        if model_name and self.model_name is None:
             self.model_name = str(model_name)
-        try:
-            ids = parse_input_ids_from_request(request)
-        except Exception:
-            ids = None
-        if ids is not None:
-            self.input_ids = ids
-            self.input_len = len(ids)
-        try:
-            sampling = parse_sampling_params(request)
-            self.generate_config = _sampling_to_dict(sampling)
-        except Exception:
-            self.generate_config = None
+        if self.raw_mode:
+            if len(self.raw_requests) < _RAW_MAX_CHUNKS:
+                self.raw_requests.append(_proto_to_jsonable(request))
+            else:
+                self.raw_requests_truncated = True
+            return
+        # Struct-mode parsed content — only on the first request message.
+        if self.input_ids is None:
+            try:
+                ids = parse_input_ids_from_request(request)
+            except Exception:
+                ids = None
+            if ids is not None:
+                self.input_ids = ids
+                self.input_len = len(ids)
+        if self.generate_config is None:
+            try:
+                sampling = parse_sampling_params(request)
+                self.generate_config = _sampling_to_dict(sampling)
+            except Exception:
+                self.generate_config = None
 
     def capture_response_chunk(self, resp) -> None:
-        """Extract generated_ids delta + optional aux fields from one streamed response message.
+        """Extract per-chunk content from one streamed response message.
 
-        Single-pass scan over ``infer.outputs`` — O(outputs) per chunk, not O(3·outputs).
+        Struct mode: single-pass scan over ``infer.outputs`` — O(outputs) per chunk.
+        Raw mode: one ``MessageToDict`` + tensor rewrite; capped by ``_RAW_MAX_CHUNKS``.
         """
         if resp is None:
+            return
+        if self.raw_mode:
+            if len(self.raw_responses) < _RAW_MAX_CHUNKS:
+                self.raw_responses.append(_proto_to_jsonable(resp))
+            else:
+                self.raw_responses_truncated = True
             return
         infer = getattr(resp, "infer_response", None)
         if infer is None:
@@ -208,7 +381,12 @@ class _RpcAggregate:
     def build_record(
         self, server_id: Optional[int], rank_id: Optional[int]
     ) -> dict[str, Any]:
-        """Build the final log dict in display order. Called once per RPC in ``_finalize``."""
+        """Build the final log dict. Called once per RPC in ``_finalize``.
+
+        The record carries both struct and raw fields — in practice only one set
+        is populated per RPC (the other is null / empty). One flat shape keeps the
+        downstream jq-grep workflow trivial regardless of which servicer emitted it.
+        """
         end_ts = time.time()
         total_ms = (end_ts - self.start_ts) * 1000.0
         ttfb_ms = None
@@ -224,13 +402,14 @@ class _RpcAggregate:
             + f".{int((end_ts % 1) * 1000):03d}"
             + tz_str
         )
-        return {
+        record: dict[str, Any] = {
             "ts": ts,
             "ts_epoch_ms": int(end_ts * 1000),
             "server_id": server_id,
             "rank_id": rank_id,
             "method": self.method,
             "stream_type": self.stream_type,
+            "capture_mode": "raw" if self.raw_mode else "struct",
             "peer": self.peer,
             "req_count": self.req_count,
             "resp_count": self.resp_count,
@@ -238,16 +417,26 @@ class _RpcAggregate:
             "latency_ttfb_ms": round(ttfb_ms, 3) if ttfb_ms is not None else None,
             "status": self.status,
             "status_detail": self.status_detail,
+            "exc_type": self.exc_type,
+            "context_code": self.context_code,
+            "context_active": self.context_active,
             "request_id": self.request_id,
             "model_name": self.model_name,
-            "input_len": self.input_len,
-            "input_ids": self.input_ids,
-            "generate_config": self.generate_config,
-            "output_len": len(self.generated_ids),
-            "generated_ids": self.generated_ids if self.generated_ids else None,
-            "finish_reason": self.finish_reason,
-            "prompt_cached_token_num": self.prompt_cached_token_num,
         }
+        if self.raw_mode:
+            record["raw_requests"] = self.raw_requests
+            record["raw_responses"] = self.raw_responses
+            record["raw_requests_truncated"] = self.raw_requests_truncated
+            record["raw_responses_truncated"] = self.raw_responses_truncated
+        else:
+            record["input_len"] = self.input_len
+            record["input_ids"] = self.input_ids
+            record["generate_config"] = self.generate_config
+            record["output_len"] = len(self.generated_ids)
+            record["generated_ids"] = self.generated_ids if self.generated_ids else None
+            record["finish_reason"] = self.finish_reason
+            record["prompt_cached_token_num"] = self.prompt_cached_token_num
+        return record
 
 
 class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
@@ -261,16 +450,23 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
     plus ``rank_id`` / ``server_id`` to mirror frontend tagging. Non-OK RPCs also emit
     ``error_code`` (the gRPC status code name, e.g. ``UNAVAILABLE``) so alert rules stay
     symmetric with the HTTP error path.
+
+    ``raw_mode`` flips the content capture strategy: struct (parsed fields) for the real
+    servicer, raw (full proto dumps with decoded tensors) for the forward servicer. Both
+    modes share this interceptor and the same log file — one line per RPC, one schema to
+    grep through, differentiated by the ``capture_mode`` field.
     """
 
     def __init__(
         self,
         rank_id: Optional[int] = None,
         server_id: Optional[int] = None,
+        raw_mode: bool = False,
     ) -> None:
         self._logger = logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME)
         self._rank_id = rank_id
         self._server_id = server_id
+        self._raw_mode = raw_mode
         self._base_tags: dict[str, str] = {
             "protocol": _PROTOCOL_TAG,
             "rank_id": str(rank_id) if rank_id is not None else "",
@@ -372,6 +568,7 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
             stream_type=stream_type,
             peer=peer,
             start_ts=time.time(),
+            raw_mode=self._raw_mode,
         )
 
     def _on_response_chunk(self, agg: _RpcAggregate, resp) -> None:
@@ -383,23 +580,33 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         self._report_chunk(agg, is_first=is_first)
 
     def _finalize(self, agg: _RpcAggregate, context, exc: Optional[BaseException]) -> None:
+        try:
+            code = context.code()
+        except Exception:
+            code = None
+        if code is not None:
+            try:
+                agg.context_code = code.name
+            except Exception:
+                agg.context_code = str(code)
+        try:
+            agg.context_active = bool(context.is_active())
+        except Exception:
+            agg.context_active = None
+
         if exc is not None:
+            agg.exc_type = type(exc).__name__
             agg.status = "UNKNOWN"
             agg.status_detail = repr(exc)
+        elif code is None or code == grpc.StatusCode.OK:
+            agg.status = "OK"
+            agg.status_detail = None
         else:
+            agg.status = code.name
             try:
-                code = context.code()
+                agg.status_detail = context.details() or code.name
             except Exception:
-                code = None
-            if code is None or code == grpc.StatusCode.OK:
-                agg.status = "OK"
-                agg.status_detail = None
-            else:
-                agg.status = code.name
-                try:
-                    agg.status_detail = context.details() or code.name
-                except Exception:
-                    agg.status_detail = code.name
+                agg.status_detail = code.name
 
         self._report_rpc_done(agg, status=agg.status, status_detail=agg.status_detail)
 
@@ -464,6 +671,11 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
                     if first:
                         self._capture_first_request(agg, req)
                         first = False
+                    else:
+                        # Raw mode needs every request message; struct mode already
+                        # captured everything it needs from the first request.
+                        if agg.raw_mode:
+                            agg.capture_request(req)
                     yield req
 
             try:
@@ -490,6 +702,9 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
                     if first:
                         self._capture_first_request(agg, req)
                         first = False
+                    else:
+                        if agg.raw_mode:
+                            agg.capture_request(req)
                     yield req
 
             try:
