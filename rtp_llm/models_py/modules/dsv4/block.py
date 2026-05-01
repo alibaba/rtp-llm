@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules.dsv4.moe import MoE
 # ``DSV4_SINKHORN_FUSED=0`` to disable.
 try:
     from rtp_llm.models_py.modules.dsv4._sinkhorn_triton import fused_hc_split_sinkhorn
+
     _SINKHORN_FUSED_OK = True
 except Exception:  # pragma: no cover
     fused_hc_split_sinkhorn = None
@@ -41,44 +42,13 @@ def _use_fused_sinkhorn(mixes: torch.Tensor, hc_mult: int) -> bool:
         return False
     return True
 
-# P1 (prefill_opt/plan_0427.md): TileKernels fused mHC.
-#
-# Pre/post layout:
-#   * mhc_post   — works on tilelang 0.1.9+cuda.git441c3b06.  ~35× faster than
-#     REF (0.18 ms/call vs 6.27 ms/call at B=1 S=16384 hc=4 d=4096) since it
-#     fuses the [B,T,hc,hc,d] broadcast+sum into a single TileLang kernel.
-#   * mhc_pre    — pre_big_fuse + pre_norm_fn JIT both fail under our
-#     tilelang revision with `Check failed: condition.dtype().is_bool()`
-#     in `tilelang.transform.decouple_type_cast`.  Stays disabled until
-#     tilelang gets a fix; we use a faster REF rewrite (bf16 GEMM with
-#     fp32 RMSNorm scalar) — see _hc_pre below.
-#
-# Falls back to the REF/BMM path when:
-#   * DSV4_USE_TILEKERNELS_MHC_POST=0 explicitly disables it, or
-#   * tile_kernels is not importable, or
-#   * residual dtype != bf16 / mhc_mult != 4 / autograd enabled / B*S == 0.
-try:
-    from tile_kernels.modeling.mhc.functional import mhc_post as _tk_mhc_post
-    _TK_MHC_POST_OK = True
-except Exception:  # pragma: no cover — keep V4 importable without tile_kernels
-    _tk_mhc_post = None
-    _TK_MHC_POST_OK = False
 
-
-def _use_tk_mhc_post(residual: torch.Tensor, hc_mult: int) -> bool:
-    if not _TK_MHC_POST_OK:
-        return False
-    if os.environ.get("DSV4_USE_TILEKERNELS_MHC_POST", "1") == "0":
-        return False
-    if torch.is_grad_enabled():
-        return False
-    if hc_mult != 4:
-        return False
-    if residual.dtype != torch.bfloat16:
-        return False
-    if residual.numel() == 0:
-        return False
-    return True
+# Vendored TileKernels (DeepSeek) fused mHC entry points.  See
+# rtp_llm/models_py/3rdparty/tile_kernels and the _mhc_tilelang adapter.
+# Each TK call returns None to signal "fall back to REF" (env-disabled,
+# wrong dtype/mult, autograd, or per-op JIT-fail sticky verdict).
+from rtp_llm.models_py.modules.dsv4._mhc_tilelang import tk_mhc_post as _tk_mhc_post
+from rtp_llm.models_py.modules.dsv4._mhc_tilelang import tk_mhc_pre as _tk_mhc_pre
 
 
 class _RMSNorm(nn.Module):
@@ -268,24 +238,49 @@ class Block(nn.Module):
         hc_base: torch.Tensor,
     ):
         """x: [B,S,hc,d] -> y: [B,S,d], post: [B,S,hc,1], comb: [B,S,hc,hc]."""
+        # Vendored TK fast path. Falls back to the REF rewrite below on
+        # JIT-fail / unsupported shape (sticky per-op).
+        tk_out = _tk_mhc_pre(
+            x,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            norm_eps=self.norm_eps,
+            pre_eps=self.hc_eps,
+            sinkhorn_eps=self.hc_eps,
+            sinkhorn_iters=self.hc_sinkhorn_iters,
+            hc_mult=self.hc_mult,
+        )
+        if tk_out is not None:
+            return tk_out
         shape, dtype = x.size(), x.dtype
         x_flat = x.flatten(2)  # [B, T, hc*d] bf16
         # FP32 squared mean → rsqrt, single cast.  Kept in fp32 because the
         # accumulation magnitude here is what determines numeric stability of
         # the layer norm; a bf16 reduction on hc*d=16384 would lose ~7 bits.
         x_flat_f32 = x_flat.float()
-        rsqrt = torch.rsqrt(x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps).to(dtype)
+        rsqrt = torch.rsqrt(
+            x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps
+        ).to(dtype)
         mixes = (F.linear(x_flat, self._hc_fn_bf16(hc_fn)) * rsqrt).float()
         mixes = mixes.contiguous()
         if _use_fused_sinkhorn(mixes, self.hc_mult):
             pre, post, comb = fused_hc_split_sinkhorn(
-                mixes, hc_scale.contiguous(), hc_base.contiguous(),
-                hc_mult=self.hc_mult, sinkhorn_iters=self.hc_sinkhorn_iters, eps=self.hc_eps,
+                mixes,
+                hc_scale.contiguous(),
+                hc_base.contiguous(),
+                hc_mult=self.hc_mult,
+                sinkhorn_iters=self.hc_sinkhorn_iters,
+                eps=self.hc_eps,
             )
         else:
             pre, post, comb = hc_split_sinkhorn(
-                mixes, hc_scale, hc_base,
-                hc_mult=self.hc_mult, sinkhorn_iters=self.hc_sinkhorn_iters, eps=self.hc_eps,
+                mixes,
+                hc_scale,
+                hc_base,
+                hc_mult=self.hc_mult,
+                sinkhorn_iters=self.hc_sinkhorn_iters,
+                eps=self.hc_eps,
             )
         y = torch.sum(pre.to(dtype).unsqueeze(-1) * x.view(*shape), dim=2)
         # post in the [..., hc, 1] convention so _hc_post can call TK mhc_post.
@@ -308,12 +303,10 @@ class Block(nn.Module):
         ``post`` arrives shaped ``[..., hc, 1]`` (``_hc_pre`` unsqueezes).
         Path 1 consumes that shape directly; paths 2/3 squeeze back to ``[..., hc]``.
         """
-        if (
-            _use_tk_mhc_post(residual, self.hc_mult)
-            and x.dtype == torch.bfloat16
-            and post.dim() == residual.dim()
-        ):
-            return _tk_mhc_post(x, residual, post, comb)
+        if post.dim() == residual.dim():
+            tk_out = _tk_mhc_post(x, residual, post, comb, hc_mult=self.hc_mult)
+            if tk_out is not None:
+                return tk_out
 
         if post.dim() == residual.dim():
             post_b = post.squeeze(-1)

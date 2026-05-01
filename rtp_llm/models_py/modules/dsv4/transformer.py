@@ -268,6 +268,21 @@ class V4Transformer(nn.Module):
 
     def _hc_head_reduce(self, x: torch.Tensor) -> torch.Tensor:
         """[B, S, hc, d] -> [B, S, d]"""
+        # Try vendored TileKernels mhc_head first (~1 fused kernel vs 5 ops);
+        # falls back to the REF rewrite below on JIT-fail / unsupported shape.
+        from rtp_llm.models_py.modules.dsv4._mhc_tilelang import tk_mhc_head
+
+        tk_y = tk_mhc_head(
+            x,
+            self.hc_head_fn,
+            self.hc_head_scale,
+            self.hc_head_base,
+            norm_eps=self.norm_eps,
+            pre_eps=self.hc_eps,
+            hc_mult=self.hc_mult,
+        )
+        if tk_y is not None:
+            return tk_y
         shape, dtype = x.size(), x.dtype
         x_flat = x.flatten(2).float()
         rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)

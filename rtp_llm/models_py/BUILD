@@ -28,6 +28,16 @@ filegroup(
 )
 
 py_library(
+    name = "tile_kernels_mhc",
+    srcs = glob([
+        "3rdparty/__init__.py",
+        "3rdparty/tile_kernels/*.py",
+        "3rdparty/tile_kernels/**/*.py",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
@@ -36,6 +46,7 @@ py_library(
     data = [":cutlass_moe_config"],
     deps = [
         ":utils",
+        ":tile_kernels_mhc",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",
