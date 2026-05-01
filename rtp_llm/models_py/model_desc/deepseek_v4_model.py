@@ -909,7 +909,13 @@ class DeepSeekV4Model(GptModelBase):
                         )
 
     def _scatter_all_layers(self, attn_inputs, B=1, batch_offset=0, state_only=False):
-        """Scatter updated KV from each layer's buffers back to BlockPool pages.
+        """Scatter STATE pools from each layer's buffers back to BlockPool.
+
+        Phase D (partial): KV pools (attn_types 1/2/3/7) are now sole-written
+        by Attention.forward's prefill paged dual-write — verified byte-equal
+        by test_phase_b_prefill_dual_write. This scatter iterates STATE pools
+        only (attn_types 4/5/6); ``state_only`` is vestigial and kept for API
+        stability. B.3 will view-ify the STATE buffers and retire this method.
 
         batch_offset: row offset into by_group block_ids (same as gather).
         """
@@ -922,15 +928,14 @@ class DeepSeekV4Model(GptModelBase):
         if by_group is None or len(by_group) == 0:
             return
 
-        attn_type_to_gid = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6}
+        attn_type_to_gid = {4: 3, 5: 4, 6: 5}  # STATE only: 4/5/6 → gid 3/4/5
 
         for i, layer in enumerate(self.v4.layers):
             attn_mod = layer.attn
-            win = attn_mod.window_size
             hd = attn_mod.head_dim
 
-            pools = self._layer_state_pools[i] if state_only else self._layer_pools[i]
-            for attn_type in pools:
+            # STATE-only loop — KV scatter retired.
+            for attn_type in self._layer_state_pools[i]:
                 gid = attn_type_to_gid.get(attn_type)
                 if gid is None or gid >= len(by_group):
                     continue
@@ -940,13 +945,6 @@ class DeepSeekV4Model(GptModelBase):
                 bid_slice = block_ids[batch_offset : batch_offset + B]
                 fw_t = self._get_pool_tensor(attn_type, i)
 
-                # Phase D (partial): KV pool scatter for attn_types 1/2/3/7
-                # removed — Attention.forward's prefill paged dual-write writes
-                # the same bytes via ``write_kv_to_pool`` (verified
-                # byte-equal by test_phase_b_prefill_dual_write). STATE
-                # scatter below still runs (B.3 view-ification pending).
-                if attn_type in (7, 1, 2, 3):
-                    continue
                 if attn_type == 4:  # INDEXER_STATE
                     if attn_mod.indexer is not None:
                         comp = attn_mod.indexer.compressor
