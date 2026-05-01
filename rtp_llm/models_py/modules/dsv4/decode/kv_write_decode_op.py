@@ -126,3 +126,80 @@ def write_compressed_k_decode(
     )
     # atomic add — well-defined for repeated indices (slot-0 collisions add 0).
     compressed_buffer.index_put_((b_idx, t_idx), delta, accumulate=True)
+
+
+# ---------------------------------------------------------------------------
+# Paged write: target framework BlockPool directly via a typed pool view.
+# Same arithmetic as the register_buffer ops above, but slot_mapping is a
+# global flat slot ``= block_id * entries_per_block + offset_in_block`` and
+# the destination is a [num_blocks * entries_per_block, vec_dim] view of the
+# raw uint8 pool tensor produced by ``PoolDescriptor.view()``.
+# ---------------------------------------------------------------------------
+
+
+def write_kv_to_pool(
+    k_state: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    pool_view: torch.Tensor,
+    *,
+    mask_negative: bool,
+) -> None:
+    """In-place paged K write.
+
+    For each token ``i`` with ``slot_mapping[i] >= 0``::
+
+        pool_view[slot_mapping[i]] = k_state[i]
+
+    Args:
+        k_state: ``[T, vec_dim]`` value tensor (bf16 for KV pools, fp32
+            for STATE pools). Source dtype is cast to ``pool_view.dtype``
+            on demand.
+        slot_mapping: ``[T]`` int (any int dtype). Global flat slot index
+            into ``pool_view``. ``-1`` = skip (only honored when
+            ``mask_negative=True``).
+        pool_view: ``[num_blocks * entries_per_block, vec_dim]`` typed
+            view of the framework BlockPool (from
+            ``PoolDescriptor.view()``). Modified in place.
+        mask_negative: when False (e.g. SWA which always emits a valid
+            slot), use unconditional ``index_copy_`` — the fast path.
+            When True (CSA/HCA boundary writes), use the safe-redirect
+            + delta-encode + atomic-add trick from
+            :func:`write_compressed_k_decode` to handle ``-1`` slots
+            without a CUDA-graph-hostile boolean mask / D2H sync.
+
+    CUDA-graph safety:
+      * No host scalar reads, no boolean indexing.
+      * `slot_mapping` may legally be -1 — the safe-redirect path turns
+        these into delta=0 writes against slot 0; multiple -1 redirects
+        sum to 0, so they're harmless.
+      * Empty inputs short-circuit to a no-op (matches ``write_*`` above).
+    """
+    if k_state.numel() == 0 or slot_mapping.numel() == 0:
+        return
+
+    if k_state.dtype != pool_view.dtype:
+        k_state = k_state.to(pool_view.dtype)
+
+    slot_long = (
+        slot_mapping.to(torch.long)
+        if slot_mapping.dtype != torch.long
+        else slot_mapping
+    )
+
+    if not mask_negative:
+        # SWA path: every slot is valid — single index_copy_, fastest.
+        pool_view.index_copy_(0, slot_long, k_state)
+        return
+
+    # Compressed-K / boundary write: -1 entries must be skipped, but we
+    # cannot use boolean masking (CUDA-graph hostile). Reuse the
+    # compressed-write trick: redirect -1 to slot 0, delta=0 there.
+    valid = slot_long >= 0
+    safe_slot = torch.where(valid, slot_long, torch.zeros_like(slot_long))
+    existing = pool_view.index_select(0, safe_slot)
+    delta = torch.where(
+        valid.unsqueeze(-1),
+        k_state - existing,
+        torch.zeros_like(k_state),
+    )
+    pool_view.index_put_((safe_slot,), delta, accumulate=True)
