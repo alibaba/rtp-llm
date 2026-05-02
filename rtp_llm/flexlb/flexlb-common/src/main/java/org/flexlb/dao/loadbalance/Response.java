@@ -28,6 +28,18 @@ public class Response {
     @JsonProperty("queue_length")
     private Integer queueLength;
 
+    /**
+     * V1-α DP batching: true means the request has been asynchronously enqueued at
+     * Prefill by Master via Enqueue. Frontend should switch to Decode.FetchResponse
+     * for token streaming and skip the legacy GenerateStreamCall to Prefill.
+     * <p>
+     * Default false keeps old frontends transparent: they will continue to open the
+     * stream against Prefill, which (per engine contract) should short-circuit-attach
+     * to the already-enqueued task by request_id.
+     */
+    @JsonProperty("enqueued_by_master")
+    private boolean enqueuedByMaster = false;
+
     public static Response error(StrategyErrorType strategyErrorType) {
         Response result = new Response();
         result.setSuccess(false);
