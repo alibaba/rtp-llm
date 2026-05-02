@@ -20,7 +20,10 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_all_gather_full,
     cp_should_gather,
 )
-from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, apply_rotary_emb_batched
+from rtp_llm.models_py.modules.dsv4.rope import (
+    apply_rotary_emb,
+    apply_rotary_emb_batched,
+)
 
 # P2 (prefill_opt/final_plan.md): fused softmax+weighted-sum Triton kernel.
 # Replaces the prefill `(kv * score.softmax(dim=2)).sum(dim=2)` chain
@@ -128,6 +131,9 @@ class Compressor(nn.Module):
         # CP context bound per-forward by V4Transformer.  None = no CP,
         # falls through to single-rank path unchanged.
         self._cp_ctx: Optional[CPContext] = None
+        # Optional per-forward debug prefix (e.g. "L01_attn_cmp"); when set,
+        # internal forward checkpoints are recorded via _record_tensor.
+        self._dbg_prefix: Optional[str] = None
 
     def _rmsnorm(self, x: torch.Tensor) -> torch.Tensor:
         dtype = x.dtype
@@ -396,6 +402,8 @@ class Compressor(nn.Module):
         return out
 
     def forward(self, x: torch.Tensor, start_pos) -> Optional[torch.Tensor]:
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
         assert self.kv_cache is not None, "Compressor.kv_cache must be bound by caller"
         assert (
             self.freqs_cis is not None
@@ -408,9 +416,14 @@ class Compressor(nn.Module):
             self.rope_head_dim,
         )
         dtype = x.dtype
+        _dbg = self._dbg_prefix
         x32 = x.float()
         kv = torch.nn.functional.linear(x32, self.wkv.weight)
         score = torch.nn.functional.linear(x32, self.wgate.weight)
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_x_in", x)
+            _rt.record_if_level(2, f"{_dbg}_kv_local", kv)
+            _rt.record_if_level(2, f"{_dbg}_score_local", score)
 
         is_batched_decode = (
             isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
@@ -429,6 +442,9 @@ class Compressor(nn.Module):
             # reflected the rank-local padded slice.  Rebind so
             # downstream pool/pooling-mask/RoPE math operates on full.
             bsz, seqlen = kv.size(0), kv.size(1)
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_kv_full", kv)
+            _rt.record_if_level(2, f"{_dbg}_score_full", score)
 
         if is_batched_decode:
             # ---- batched decode: each batch at different position ----
@@ -533,6 +549,9 @@ class Compressor(nn.Module):
                     kv[:bsz, 0, :ratio] = self.kv_state[:bsz, :ratio, :d]
                     score[:bsz, 0, :ratio] = self.score_state[:bsz, :ratio, :d]
 
+            if _dbg is not None:
+                _rt.record_if_level(2, f"{_dbg}_pool_in_kv", kv)
+                _rt.record_if_level(2, f"{_dbg}_pool_in_score", score)
             # Fast path: single Triton kernel fuses per-D softmax over G
             # + weighted sum.  REF chain materializes 3 fp32 intermediates
             # of size [B, NB, G, D] each (softmax exp/sum, masked mul,
@@ -543,6 +562,8 @@ class Compressor(nn.Module):
                 kv = v4_compressor_pool(kv_c, sc_c)
             else:
                 kv = (kv * score.softmax(dim=2)).sum(dim=2)
+            if _dbg is not None:
+                _rt.record_if_level(2, f"{_dbg}_pool_out", kv)
         else:
             should_compress = (start_pos + 1) % self.compress_ratio == 0
             score = score + self.ape[start_pos % ratio]
@@ -582,12 +603,18 @@ class Compressor(nn.Module):
             return None
 
         kv = self._rmsnorm(kv.to(dtype))
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_norm_out", kv)
         if seqlen > 1:
             # Prefill (fresh or continuation)
             freqs_cis = self.freqs_cis[sp_int : sp_int + cutoff : ratio]
         else:
             freqs_cis = self.freqs_cis[start_pos + 1 - self.compress_ratio].unsqueeze(0)
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_freqs_cis", freqs_cis)
         apply_rotary_emb(kv[..., -rd:], freqs_cis)
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_rope_out", kv)
         # NOTE: skip rotate_activation/fp4/fp8 quant for M2 (BF16-only path).
 
         if seqlen > 1:
