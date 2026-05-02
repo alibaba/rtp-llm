@@ -37,7 +37,12 @@ def _fused_rmsnorm_rope_kernel(
     HAS_WEIGHT: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    # Cast pid to int64 BEFORE the row-stride multiply: the prefill Q
+    # site flattens [B, S, H, D] to [B*S*H, D], so N can exceed 2^22 and
+    # ``pid * x_stride_n`` silently overflows int32 (e.g. S=65600 H=64
+    # D=512: max pid * stride = 4198399 * 512 = 2.15B > INT32_MAX →
+    # CUDA_ERROR_ILLEGAL_ADDRESS).  Same pitfall as v4_rmsnorm.
+    pid = tl.program_id(0).to(tl.int64)
     # Tokens per freq slot — decouples the kernel from decode/prefill layout:
     #   decode Q  [B, 1, H, D] + freqs [B, RD/2]     -> freq_stride_n = H
     #   decode KV [B, 1,    D] + freqs [B, RD/2]     -> freq_stride_n = 1
