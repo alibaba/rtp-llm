@@ -192,29 +192,36 @@ def _mega_moe_enabled() -> bool:
 
 
 def _has_fp8_fp4_grouped_kernel() -> bool:
-    """True iff the installed DeepGEMM exposes ``m_grouped_fp8_fp4_gemm_nt_*``.
+    """True iff the grouped FP4 routed-expert path should be used.
 
-    Currently HARD-WIRED to False — the ``_grouped_routed_experts`` path
-    below doesn't honor ``get_mk_alignment_for_contiguous_layout()``'s
-    per-group padding requirement (128-row default on SM100): the kernel
-    expects each group's rows padded up to alignment with ``-1`` entries
-    in ``grouped_layout`` and zeroed activation rows (see
-    ``deepgemm/tests/generators.py::generate_m_grouped_contiguous``).
+    Opt-in via ``DSV4_USE_GROUPED_FP4=1`` because the path historically
+    produced garbage output across V4-Flash's 60 layers when the kernel's
+    per-group row alignment (``get_mk_alignment_for_contiguous_layout()``,
+    default 128 on SM100) was not honored — single-pass synthetic tests
+    were inside 5% rel-diff but per-layer error compounded catastrophically.
+    The current ``_grouped_routed_experts`` zeros padding rows + tags
+    ``-1`` in ``grouped_layout`` per the kernel contract (mirrors
+    ``deepgemm/tests/generators.py::generate_m_grouped_contiguous``),
+    but smoke validation on every new SM100 variant is required before
+    flipping this default ON.
 
-    On synthetic test data the violation is absorbed by the 5% BF16
-    rel-diff tolerance (``grouped_moe_equivalence_test``), but in
-    real-model flow (V4-Flash, E=256, 60 layers) the per-layer error
-    compounds catastrophically and produces garbage output (verified on
-    the SM100_ARM smoke after bumping deep_gemm to 2.5.0).
-
-    V4-official ``inference/model.py`` itself uses a per-expert loop
-    (``torch.where(indices == i); expert(x[idx])``) — no grouped kernel.
-    The K4 perf win instead comes from replacing ``QuantizedLinear``'s
-    dequant-to-BF16 forward with ``deep_gemm.fp8_fp4_gemm_nt`` (single-
-    group, no alignment constraint) inside each expert's ``w1``/``w2``/
-    ``w3``. See ``qlinear.py:QuantizedLinear.forward``.
+    Requires deep_gemm ≥ 2.4 (ships ``m_grouped_fp8_fp4_gemm_nt_contiguous``)
+    and an SM100+ device.
     """
-    return False
+    if os.environ.get("DSV4_USE_GROUPED_FP4", "0") != "1":
+        return False
+    try:
+        import deep_gemm
+    except Exception:
+        return False
+    if not hasattr(deep_gemm, "m_grouped_fp8_fp4_gemm_nt_contiguous"):
+        return False
+    if not hasattr(deep_gemm, "get_mk_alignment_for_contiguous_layout"):
+        return False
+    if not torch.cuda.is_available():
+        return False
+    cap = torch.cuda.get_device_capability()
+    return cap[0] >= 10
 
 
 class Gate(nn.Module):
@@ -540,12 +547,27 @@ class MoE(nn.Module):
             self.experts = None
         elif self._use_grouped_fp4:
             # Grouped-GEMM path: stack routed expert weights into 3-D tensors
-            # along the expert dim and drop the per-expert ModuleList entirely.
-            # `_w13` holds w1 (gate) and w3 (up) concatenated along the N-dim so
-            # a single m_grouped_fp8_fp4_gemm_nt_contiguous produces both at
-            # once; SwiGLU then splits the output into halves.
+            # along the expert dim so a single
+            # ``m_grouped_fp8_fp4_gemm_nt_contiguous`` produces gate+up in one
+            # call (``_w13`` packs w1 over [:inter] + w3 over [inter:2*inter]).
+            # No per-expert ``self.experts`` ModuleList: the cuda-graph
+            # fallback in ``forward()`` would need it but grouped + cuda
+            # graph + ep_size==1 doesn't co-occur in real workloads (grouped
+            # is a prefill optimisation; decode under cuda graph leaves the
+            # eager ``ep_size==1`` branch via ``_use_grouped_fp4=False``).
+            # An assert in ``forward()`` blocks the unsupported combination.
+            #
+            # Memory: stacked tensors are alloc'd/copied via a per-expert
+            # mini-buffer pattern to avoid holding both the loader's dict
+            # entries AND the stacked layout simultaneously: ``weights.pop``
+            # detaches each tensor from the loader BEFORE the next expert's
+            # allocation runs, and ``torch.cuda.empty_cache()`` after the
+            # copy loop returns the freed FP4 blocks to the CUDA driver so
+            # they don't sit in the caching allocator while KV-pool sizing
+            # measures available HBM.
             E, D, inter = n_routed_experts, dim, moe_inter_dim
             device = weights[f"{prefix}.experts.0.w1.weight"].device
+
             self._w13 = torch.empty(
                 (E, 2 * inter, D // 2), dtype=torch.int8, device=device
             )
@@ -569,8 +591,13 @@ class MoE(nn.Module):
                 self._s13[i, inter:].copy_(weights.pop(f"{p}.w3.scale"))
                 self._w2[i].copy_(weights.pop(f"{p}.w2.weight"))
                 self._s2[i].copy_(weights.pop(f"{p}.w2.scale"))
-            # No per-expert submodule.
-            self.experts = None
+
+            # Return loader's freed FP4 blocks to CUDA so the KV-cache
+            # planner sees the real residual HBM rather than what's
+            # cached-but-unused inside PyTorch's allocator.
+            torch.cuda.empty_cache()
+
+            self.experts = None  # grouped path does not use per-expert dispatch
         else:
             # Legacy/per-expert path. EP sharding: only build the
             # ``n_local_experts`` Experts that live on this rank; slots
@@ -766,7 +793,7 @@ class MoE(nn.Module):
         )
         return y.float()
 
-    # --- Grouped FP4 (dormant; retained for future enabling) ---
+    # --- Grouped FP4 (single-rank ep_size==1 fast path) ---
 
     def _grouped_routed_experts(
         self,
@@ -786,33 +813,74 @@ class MoE(nn.Module):
              ``weight * expert[idx](x)``.
 
         Flow:
-          1. Expand each token into topk copies and permute so each expert's
-             tokens are contiguous.
-          2. Quantize the permuted activation to FP8-e4m3fn with per-token
-             group-128 UE8M0 scale.
-          3. Call ``m_grouped_fp8_fp4_gemm_nt_contiguous`` with the stacked
-             ``_w13`` (FP4) to produce gate || up in a single GEMM.
-          4. Apply clamped SwiGLU, multiply by the per-slot router weight.
-          5. Quantize again, call grouped FP4 GEMM with ``_w2`` for down.
-          6. Un-permute and reduce top-k slots back to token rows.
+          1. Expand each token into topk copies, sort by expert id.
+          2. Compute per-expert counts and pad each group to
+             ``get_mk_alignment_for_contiguous_layout()`` (128 on SM100).
+             The kernel REQUIRES this alignment — without it, internal
+             block scheduling produces wrong outputs even on the valid
+             rows; the error compounds catastrophically across the 60
+             V4-Flash layers.
+          3. Build a padded activation buffer (zero on padding rows) and
+             a per-row ``grouped_layout`` tensor (expert id on real rows,
+             ``-1`` on padding rows so the kernel skips them).
+          4. Quantize, run grouped FP8×FP4 GEMM for gate+up.
+          5. Clamped SwiGLU + per-slot router weight (zero on padding rows
+             ⇒ they contribute exactly zero to the down result).
+          6. Quantize, run grouped FP8×FP4 GEMM for down.
+          7. Single-gather un-permute back to token order, reduce top-k.
+
+        Layout reference: ``deepgemm/tests/generators.py::generate_m_grouped_contiguous``.
         """
+        import deep_gemm
+
         N, D = x.shape
         topk = indices.size(-1)
         E = self.n_routed_experts
         inter = self.moe_inter_dim
 
-        # (1) expand + permute
-        expanded_x = x.unsqueeze(1).expand(N, topk, D).reshape(N * topk, D)
-        flat_indices = indices.flatten()  # [N*topk] int64
-        flat_weights = weights.flatten()  # [N*topk] fp32
-        perm = torch.argsort(flat_indices, stable=True)
-        inv_perm = torch.empty_like(perm)
-        inv_perm[perm] = torch.arange(N * topk, device=perm.device)
-        perm_x = expanded_x.index_select(0, perm).contiguous()
-        perm_experts = flat_indices.index_select(0, perm).to(torch.int32)
-        perm_weights = flat_weights.index_select(0, perm)
+        if N == 0:
+            return torch.zeros(N, D, dtype=torch.float32, device=x.device)
 
-        # (2) act quant → FP8 e4m3fn + UE8M0 scale (column-major, TMA-aligned)
+        M_ALIGN = deep_gemm.get_mk_alignment_for_contiguous_layout()
+
+        # (1) flatten + sort by expert
+        expanded_x = x.unsqueeze(1).expand(N, topk, D).reshape(N * topk, D)
+        flat_indices = indices.flatten().contiguous()  # [NK] int64
+        flat_weights = weights.flatten().contiguous()  # [NK] fp32
+        perm = torch.argsort(flat_indices, stable=True)  # [NK]
+        inv_perm = torch.empty_like(perm)
+        inv_perm[perm] = torch.arange(N * topk, device=x.device, dtype=perm.dtype)
+        expert_per_slot = flat_indices.index_select(0, perm)  # [NK] sorted expert ids
+
+        # (2) per-expert counts → exclusive-scan offsets (real + aligned).
+        # NOTE the EXCLUSIVE scan: the first expert's slot starts at 0, so
+        # ``sorted_offsets[0] == 0``.  An inclusive ``cumsum`` would give the
+        # END offset and break ``within_expert`` for the first expert.
+        counts = torch.bincount(flat_indices.to(torch.int64), minlength=E)  # [E]
+        aligned_counts = ((counts + M_ALIGN - 1) // M_ALIGN) * M_ALIGN  # [E]
+        sorted_offsets = torch.cat([counts.new_zeros(1), counts.cumsum(0)[:-1]])  # [E]
+        aligned_offsets = torch.cat(
+            [aligned_counts.new_zeros(1), aligned_counts.cumsum(0)[:-1]]
+        )  # [E]
+        # CPU sync — required to allocate the padded tensor with a Python
+        # int shape.  Eager-only by construction; cuda-graph capture takes
+        # the legacy local path (see forward()).
+        M_padded = int(aligned_counts.sum().item())
+
+        # (3) destination row per slot: aligned_offsets[expert] + within_expert
+        slot_idx = torch.arange(N * topk, device=x.device, dtype=torch.int64)
+        within_expert = slot_idx - sorted_offsets[expert_per_slot]
+        dest = aligned_offsets[expert_per_slot] + within_expert  # [NK]
+
+        # (4) padded activation + grouped_layout (zero-init for padding rows)
+        perm_x = torch.zeros(M_padded, D, dtype=x.dtype, device=x.device)
+        perm_weights = torch.zeros(M_padded, dtype=flat_weights.dtype, device=x.device)
+        grouped_layout = torch.full((M_padded,), -1, dtype=torch.int32, device=x.device)
+        perm_x.index_copy_(0, dest, expanded_x.index_select(0, perm))
+        perm_weights.index_copy_(0, dest, flat_weights.index_select(0, perm))
+        grouped_layout.index_copy_(0, dest, expert_per_slot.to(torch.int32))
+
+        # (5) gate+up GEMM via grouped FP8×FP4
         a_fp8, a_scale = sgl_per_token_group_quant_fp8(
             perm_x,
             group_size=FP8_BLOCK,
@@ -821,23 +889,22 @@ class MoE(nn.Module):
             scale_tma_aligned=True,
             scale_ue8m0=True,
         )
-
-        # (3) grouped gate+up GEMM
         s13_fp32 = self._s13.float()
         gate_up = torch.empty(
-            N * topk, 2 * inter, device=x.device, dtype=torch.bfloat16
+            M_padded, 2 * inter, device=x.device, dtype=torch.bfloat16
         )
         m_grouped_fp8_fp4_gemm_nt_contiguous(
             (a_fp8, a_scale),
             (self._w13, s13_fp32),
             gate_up,
-            perm_experts,
+            grouped_layout,
             recipe_a=(1, FP8_BLOCK),
             recipe_b=(1, FP4_BLOCK),
         )
         del a_fp8, a_scale, s13_fp32
 
-        # (4) clamped SwiGLU + router weight multiplication
+        # (6) clamped SwiGLU + per-slot router weight (padding rows: weight=0
+        # so their contribution to down GEMM input is exactly 0)
         gate = gate_up[:, :inter].float()
         up = gate_up[:, inter:].float()
         if self.swiglu_limit > 0:
@@ -848,7 +915,7 @@ class MoE(nn.Module):
         hidden = hidden.to(torch.bfloat16)
         del gate, up, gate_up
 
-        # (5) down GEMM
+        # (7) down GEMM via grouped FP8×FP4
         h_fp8, h_scale = sgl_per_token_group_quant_fp8(
             hidden,
             group_size=FP8_BLOCK,
@@ -858,19 +925,23 @@ class MoE(nn.Module):
             scale_ue8m0=True,
         )
         s2_fp32 = self._s2.float()
-        down_out = torch.empty(N * topk, D, device=x.device, dtype=torch.bfloat16)
+        down_out = torch.empty(M_padded, D, device=x.device, dtype=torch.bfloat16)
         m_grouped_fp8_fp4_gemm_nt_contiguous(
             (h_fp8, h_scale),
             (self._w2, s2_fp32),
             down_out,
-            perm_experts,
+            grouped_layout,
             recipe_a=(1, FP8_BLOCK),
             recipe_b=(1, FP4_BLOCK),
         )
         del h_fp8, h_scale, s2_fp32
 
-        # (6) un-permute and reduce top-k
-        unperm = down_out.index_select(0, inv_perm).view(N, topk, D)
+        # (8) un-permute (single fused gather) + reduce top-k.
+        # ``dest[inv_perm[t]]`` = padded position holding token ``t``'s
+        # expert output.  ``inv_perm`` undoes the argsort; the ``dest``
+        # indirection then jumps to the right padded row.
+        gather_idx = dest.index_select(0, inv_perm)  # [NK]
+        unperm = down_out.index_select(0, gather_idx).view(N, topk, D)
         return unperm.float().sum(dim=1)  # [N, D] fp32
 
     def _routed_experts_local(
@@ -1081,6 +1152,13 @@ class MoE(nn.Module):
             assert (
                 self.ep_size == 1
             ), "grouped FP4 path + ep_size>1 not supported; gated off anyway"
+            assert not torch.cuda.is_current_stream_capturing(), (
+                "grouped FP4 path uses bincount/cumsum/argsort which abort "
+                "cuda-stream capture; do not enable cuda_graph + "
+                "DSV4_USE_GROUPED_FP4=1 together (grouped is a prefill "
+                "optimisation, decode-under-graph should keep the env off "
+                "to fall through to _routed_experts_local)."
+            )
             y = self._grouped_routed_experts(x, weights, indices)
         elif self.ep_size == 1:
             # Full 256 experts on this rank.  Under CUDA-graph capture

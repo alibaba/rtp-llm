@@ -21,11 +21,14 @@ _REPO = os.path.abspath(os.path.join(_THIS, "..", "..", "..", "..", ".."))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
+# Force grouped-FP4 opt-in BEFORE importing the moe module so the
+# ``_has_fp8_fp4_grouped_kernel`` probe (called at decorator-evaluation
+# time below) sees the env gate as enabled.  Without this the test would
+# always skip because the production default keeps the path opt-in.
+os.environ.setdefault("DSV4_USE_GROUPED_FP4", "1")
+
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
-from rtp_llm.models_py.modules.dsv4.moe import (
-    MoE,
-    _has_fp8_fp4_grouped_kernel,
-)
+from rtp_llm.models_py.modules.dsv4.moe import MoE, _has_fp8_fp4_grouped_kernel
 
 
 def _make_weights_dict(
@@ -45,38 +48,47 @@ def _make_weights_dict(
     # Use reasonable random values so the output isn't saturated.
     for i in range(E):
         w[f"{prefix}.experts.{i}.w1.weight"] = torch.randint(
-            -10, 10, (inter, D // 2), dtype=torch.int8, device=device,
+            -10,
+            10,
+            (inter, D // 2),
+            dtype=torch.int8,
+            device=device,
         )
-        w[f"{prefix}.experts.{i}.w1.scale"] = (
-            torch.randint(120, 132, (inter, D // 32), dtype=torch.uint8, device=device)
-            .view(torch.float8_e8m0fnu)
-        )
+        w[f"{prefix}.experts.{i}.w1.scale"] = torch.randint(
+            120, 132, (inter, D // 32), dtype=torch.uint8, device=device
+        ).view(torch.float8_e8m0fnu)
         w[f"{prefix}.experts.{i}.w2.weight"] = torch.randint(
-            -10, 10, (D, inter // 2), dtype=torch.int8, device=device,
+            -10,
+            10,
+            (D, inter // 2),
+            dtype=torch.int8,
+            device=device,
         )
-        w[f"{prefix}.experts.{i}.w2.scale"] = (
-            torch.randint(120, 132, (D, inter // 32), dtype=torch.uint8, device=device)
-            .view(torch.float8_e8m0fnu)
-        )
+        w[f"{prefix}.experts.{i}.w2.scale"] = torch.randint(
+            120, 132, (D, inter // 32), dtype=torch.uint8, device=device
+        ).view(torch.float8_e8m0fnu)
         w[f"{prefix}.experts.{i}.w3.weight"] = torch.randint(
-            -10, 10, (inter, D // 2), dtype=torch.int8, device=device,
+            -10,
+            10,
+            (inter, D // 2),
+            dtype=torch.int8,
+            device=device,
         )
-        w[f"{prefix}.experts.{i}.w3.scale"] = (
-            torch.randint(120, 132, (inter, D // 32), dtype=torch.uint8, device=device)
-            .view(torch.float8_e8m0fnu)
-        )
+        w[f"{prefix}.experts.{i}.w3.scale"] = torch.randint(
+            120, 132, (inter, D // 32), dtype=torch.uint8, device=device
+        ).view(torch.float8_e8m0fnu)
     # Shared expert (FP8 e4m3fn + UE8M0 block-128)
     for name, out_dim, in_dim in (("w1", inter, D), ("w2", D, inter), ("w3", inter, D)):
-        w[f"{prefix}.shared_experts.{name}.weight"] = (
-            torch.randn(out_dim, in_dim, device=device, dtype=torch.bfloat16)
-            .to(torch.float8_e4m3fn)
-        )
-        w[f"{prefix}.shared_experts.{name}.scale"] = (
-            torch.randint(
-                120, 135, (max(1, out_dim // 128), max(1, in_dim // 128)),
-                dtype=torch.uint8, device=device,
-            ).view(torch.float8_e8m0fnu)
-        )
+        w[f"{prefix}.shared_experts.{name}.weight"] = torch.randn(
+            out_dim, in_dim, device=device, dtype=torch.bfloat16
+        ).to(torch.float8_e4m3fn)
+        w[f"{prefix}.shared_experts.{name}.scale"] = torch.randint(
+            120,
+            135,
+            (max(1, out_dim // 128), max(1, in_dim // 128)),
+            dtype=torch.uint8,
+            device=device,
+        ).view(torch.float8_e8m0fnu)
     return w
 
 
@@ -107,30 +119,46 @@ class TestGroupedRoutedExperts(unittest.TestCase):
         # `_has_fp8_fp4_grouped_kernel` to return False for that instance.
         with torch.device("meta"):
             moe_grouped = MoE(
-                layer_id=3, dim=D, moe_inter_dim=inter,
-                n_routed_experts=E, n_activated_experts=topk,
-                n_shared_experts=1, score_func="sqrtsoftplus",
-                route_scale=1.0, swiglu_limit=10.0,
-                n_hash_layers=0, vocab_size=1,
-                weights=w_a, prefix="ffn",
+                layer_id=3,
+                dim=D,
+                moe_inter_dim=inter,
+                n_routed_experts=E,
+                n_activated_experts=topk,
+                n_shared_experts=1,
+                score_func="sqrtsoftplus",
+                route_scale=1.0,
+                swiglu_limit=10.0,
+                n_hash_layers=0,
+                vocab_size=1,
+                weights=w_a,
+                prefix="ffn",
             )
         # Both paths produce the same output deterministically given a
         # fixed input (gates use bf16 weights so topk selection is stable).
-        self.assertTrue(moe_grouped._use_grouped_fp4,
-                        "expected grouped FP4 path to activate")
+        self.assertTrue(
+            moe_grouped._use_grouped_fp4, "expected grouped FP4 path to activate"
+        )
         # Build MoE with legacy path: override the feature flag.
         import rtp_llm.models_py.modules.dsv4.moe as moe_mod
+
         _orig = moe_mod._has_fp8_fp4_grouped_kernel
         moe_mod._has_fp8_fp4_grouped_kernel = lambda: False
         try:
             with torch.device("meta"):
                 moe_legacy = MoE(
-                    layer_id=3, dim=D, moe_inter_dim=inter,
-                    n_routed_experts=E, n_activated_experts=topk,
-                    n_shared_experts=1, score_func="sqrtsoftplus",
-                    route_scale=1.0, swiglu_limit=10.0,
-                    n_hash_layers=0, vocab_size=1,
-                    weights=w_b, prefix="ffn",
+                    layer_id=3,
+                    dim=D,
+                    moe_inter_dim=inter,
+                    n_routed_experts=E,
+                    n_activated_experts=topk,
+                    n_shared_experts=1,
+                    score_func="sqrtsoftplus",
+                    route_scale=1.0,
+                    swiglu_limit=10.0,
+                    n_hash_layers=0,
+                    vocab_size=1,
+                    weights=w_b,
+                    prefix="ffn",
                 )
         finally:
             moe_mod._has_fp8_fp4_grouped_kernel = _orig
@@ -141,7 +169,9 @@ class TestGroupedRoutedExperts(unittest.TestCase):
             for name, buf in list(moe._buffers.items()):
                 if buf is not None and buf.device.type == "meta":
                     moe._buffers[name] = torch.zeros(
-                        buf.shape, dtype=buf.dtype, device=device,
+                        buf.shape,
+                        dtype=buf.dtype,
+                        device=device,
                     )
 
         x = torch.randn(N, D, device=device, dtype=torch.bfloat16)
@@ -160,14 +190,124 @@ class TestGroupedRoutedExperts(unittest.TestCase):
         diff = (y_grouped.float() - y_legacy.float()).abs()
         scale = y_legacy.float().abs().mean().item() + 1e-6
         rel = diff.mean().item() / scale
-        # Both paths use the same FP4 dequant LUT semantics; mismatches
-        # come only from the GEMM accumulation order and the FP8 activation
-        # quant step (grouped path goes through one global quant; legacy
-        # goes through a BF16 `F.linear`). Expect rel diff < 5%.
-        self.assertLess(rel, 0.05,
-                        f"grouped vs legacy diverged: rel diff={rel:.3e}\n"
-                        f"  max abs diff: {diff.max().item():.3e}\n"
-                        f"  legacy mean abs: {y_legacy.abs().mean().item():.3e}")
+        # Both paths share the same FP4 dequant LUT.  Differences come from
+        # GEMM accumulation order and the activation quant step (grouped
+        # path: one global per-token FP8 quant before grouped GEMM; legacy
+        # path: per-expert BF16 ``F.linear`` after dequant).  Tightened
+        # 0.05 → 0.02 — the prior loose tolerance was hiding the per-group
+        # alignment violation that compounded across V4-Flash's 60 layers
+        # (see ``moe.py::_has_fp8_fp4_grouped_kernel`` history).
+        self.assertLess(
+            rel,
+            0.02,
+            f"grouped vs legacy diverged: rel diff={rel:.3e}\n"
+            f"  max abs diff: {diff.max().item():.3e}\n"
+            f"  legacy mean abs: {y_legacy.abs().mean().item():.3e}",
+        )
+
+    @unittest.skipUnless(has_deep_gemm(), "deep_gemm not available")
+    @unittest.skipUnless(
+        _has_fp8_fp4_grouped_kernel(),
+        "deep_gemm < 2.4: fp8_fp4 grouped kernel absent; grouped path skipped",
+    )
+    def test_grouped_4_layer_chain_no_compounding(self):
+        """Detect systematic per-layer error compounding.
+
+        The original alignment bug was masked by the single-pass 5%
+        tolerance — random noise around zero — but in the real V4-Flash
+        60-layer stack the error had a systematic direction and produced
+        garbage output.  Stack four MoE layers (output-of-i fed into i+1)
+        for grouped vs legacy and check the cumulative rel diff stays
+        bounded.  Random per-step error grows ≈ sqrt(L); systematic error
+        grows ≈ L.  Threshold of 0.05 across 4 layers admits the former
+        and rejects the latter.
+        """
+        torch.manual_seed(0)
+        device = "cuda:0"
+        E, D, inter, topk = 16, 512, 256, 4
+        N = 8
+        L = 4
+
+        # Build L MoE pairs sharing weights, one path each.
+        import rtp_llm.models_py.modules.dsv4.moe as moe_mod
+
+        moes_grouped, moes_legacy = [], []
+        for layer in range(L):
+            torch.manual_seed(1000 + layer)
+            w = _make_weights_dict(E, D, inter, topk, device, prefix=f"l{layer}")
+            w_a = {k: v.clone() for k, v in w.items()}
+            w_b = {k: v.clone() for k, v in w.items()}
+            with torch.device("meta"):
+                mg = MoE(
+                    layer_id=layer,
+                    dim=D,
+                    moe_inter_dim=inter,
+                    n_routed_experts=E,
+                    n_activated_experts=topk,
+                    n_shared_experts=1,
+                    score_func="sqrtsoftplus",
+                    route_scale=1.0,
+                    swiglu_limit=10.0,
+                    n_hash_layers=0,
+                    vocab_size=1,
+                    weights=w_a,
+                    prefix=f"l{layer}",
+                )
+            self.assertTrue(mg._use_grouped_fp4)
+            _orig = moe_mod._has_fp8_fp4_grouped_kernel
+            moe_mod._has_fp8_fp4_grouped_kernel = lambda: False
+            try:
+                with torch.device("meta"):
+                    ml = MoE(
+                        layer_id=layer,
+                        dim=D,
+                        moe_inter_dim=inter,
+                        n_routed_experts=E,
+                        n_activated_experts=topk,
+                        n_shared_experts=1,
+                        score_func="sqrtsoftplus",
+                        route_scale=1.0,
+                        swiglu_limit=10.0,
+                        n_hash_layers=0,
+                        vocab_size=1,
+                        weights=w_b,
+                        prefix=f"l{layer}",
+                    )
+            finally:
+                moe_mod._has_fp8_fp4_grouped_kernel = _orig
+            self.assertFalse(ml._use_grouped_fp4)
+            for moe in (mg, ml):
+                for name, buf in list(moe._buffers.items()):
+                    if buf is not None and buf.device.type == "meta":
+                        moe._buffers[name] = torch.zeros(
+                            buf.shape,
+                            dtype=buf.dtype,
+                            device=device,
+                        )
+            moes_grouped.append(mg)
+            moes_legacy.append(ml)
+
+        x = torch.randn(N, D, device=device, dtype=torch.bfloat16)
+        input_ids = torch.randint(0, 1, (N,), dtype=torch.long, device=device)
+
+        with torch.inference_mode():
+            yg = x.clone()
+            yl = x.clone()
+            for layer in range(L):
+                yg = moes_grouped[layer](yg, input_ids).to(x.dtype)
+                yl = moes_legacy[layer](yl, input_ids).to(x.dtype)
+
+        diff = (yg.float() - yl.float()).abs()
+        scale = yl.float().abs().mean().item() + 1e-6
+        rel = diff.mean().item() / scale
+        self.assertLess(
+            rel,
+            0.05,
+            f"4-layer grouped vs legacy diverged — likely systematic\n"
+            f"compounding (alignment bug?): rel diff={rel:.3e}\n"
+            f"  max abs diff: {diff.max().item():.3e}\n"
+            f"  legacy mean abs: {yl.abs().mean().item():.3e}",
+        )
 
 
 if __name__ == "__main__":
