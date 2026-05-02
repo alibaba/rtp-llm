@@ -379,20 +379,30 @@ class V4Transformer(nn.Module):
             cp_ctx = build_cp_context(_cp_info, _cp_size, _cp_rank, S, device)
         self._propagate_cp_ctx(cp_ctx)
 
-        _rt.begin()
+        # Master switch: when MOEDBG=0 every record/begin/dump call site is
+        # skipped at the call site (no f-string formatting, no function-call
+        # overhead, no per-layer name allocation).  Read once per forward.
+        _rt_on = _rt.ENABLED
+        if _rt_on:
+            _rt.begin()
         h = self.embed(input_ids)  # [B, S, d]
-        _rt.record("embed_out", h)
+        if _rt_on:
+            _rt.record("embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, S, hc, d]
-        _rt.record("embed_hc_expanded", h)
+        if _rt_on:
+            _rt.record("embed_hc_expanded", h)
         for li, layer in enumerate(self.layers):
             h = layer(h, start_pos, input_ids)
-            _rt.record(f"layer{li:02d}_out", h)
+            if _rt_on:
+                _rt.record(f"layer{li:02d}_out", h)
         h = self._hc_head_reduce(h)  # [B, S, d]
-        _rt.record("hc_reduced", h)
+        if _rt_on:
+            _rt.record("hc_reduced", h)
         h = self.norm(h)
-        _rt.record("final_norm", h)
+        if _rt_on:
+            _rt.record("final_norm", h)
 
-        if _rt.ENABLED:
+        if _rt_on:
             extra: dict = {
                 "apply_lm_head": bool(apply_lm_head),
                 "input_ids_shape": tuple(input_ids.shape),
