@@ -21,6 +21,7 @@ Numerics: 20 iterations of normalize-by-sum is mathematically convergent
 to a doubly-stochastic matrix; small fp32 round-off in early iters gets
 washed out.  Microbench shows max abs diff vs eager < 5e-7.
 """
+
 import torch
 import triton
 import triton.language as tl
@@ -28,14 +29,14 @@ import triton.language as tl
 
 @triton.jit
 def _hc_split_sinkhorn_kernel(
-    mixes_ptr,       # [N, MIX_HC] fp32, where MIX_HC = (HC+2)*HC
-    scale_ptr,       # [3]        fp32
-    base_ptr,        # [MIX_HC]   fp32
-    pre_ptr,         # [N, HC]    fp32 (out)
-    post_ptr,        # [N, HC]    fp32 (out)
-    comb_ptr,        # [N, HC*HC] fp32 (out)
+    mixes_ptr,  # [N, MIX_HC] fp32, where MIX_HC = (HC+2)*HC
+    scale_ptr,  # [3]        fp32
+    base_ptr,  # [MIX_HC]   fp32
+    pre_ptr,  # [N, HC]    fp32 (out)
+    post_ptr,  # [N, HC]    fp32 (out)
+    comb_ptr,  # [N, HC*HC] fp32 (out)
     N,
-    HC: tl.constexpr,        # = 4 in V4
+    HC: tl.constexpr,  # = 4 in V4
     SINKHORN_ITERS: tl.constexpr,  # = 20 in V4
     EPS: tl.constexpr,
 ):
@@ -45,14 +46,18 @@ def _hc_split_sinkhorn_kernel(
       HC = 4           → mix_hc = 24, comb is [4, 4]
       SINKHORN_ITERS = 20
     """
-    pid = tl.program_id(0)
+    # Cast pid to int64 BEFORE the per-token stride multiplies: ``pid * MIX``
+    # / ``pid * HC`` / ``pid * HC2`` are int32 by default and silently
+    # overflow when N grows large.  Same pattern as v4_rmsnorm /
+    # _fused_rmsnorm_rope_kernel.  Zero-cost (single cast per program).
+    pid = tl.program_id(0).to(tl.int64)
     if pid >= N:
         return
 
     # tl.arange needs constexpr args, and constexpr×constexpr propagates only
     # via inlining — bind HC2 / MIX with tl.constexpr() to keep the type.
-    HC2: tl.constexpr = HC * HC          # 16
-    MIX: tl.constexpr = (HC + 2) * HC    # 24
+    HC2: tl.constexpr = HC * HC  # 16
+    MIX: tl.constexpr = (HC + 2) * HC  # 24
 
     # === pre ===
     pre_offs = tl.arange(0, HC)
@@ -74,19 +79,19 @@ def _hc_split_sinkhorn_kernel(
     comb_offs = tl.arange(0, HC2)
     b_comb = tl.load(base_ptr + 2 * HC + comb_offs)
     m_comb = tl.load(mixes_ptr + pid * MIX + 2 * HC + comb_offs)
-    comb = m_comb * s2 + b_comb         # [HC*HC] fp32, viewed as [HC, HC] row-major
+    comb = m_comb * s2 + b_comb  # [HC*HC] fp32, viewed as [HC, HC] row-major
 
     # ---- softmax along the LAST dim (= columns of [HC, HC]) ----
     # Row index of each element in the [HC, HC] view: i = idx // HC; j = idx % HC.
     # Use a 2-D layout for clarity.  HC and HC2 are tl.constexpr so reshape is fine.
     comb2 = tl.reshape(comb, [HC, HC])
-    row_max = tl.max(comb2, axis=1, keep_dims=True)        # [HC, 1]
+    row_max = tl.max(comb2, axis=1, keep_dims=True)  # [HC, 1]
     e = tl.exp(comb2 - row_max)
-    row_sum = tl.sum(e, axis=1, keep_dims=True)             # [HC, 1]
-    comb2 = e / row_sum + EPS                               # [HC, HC] post-softmax + eps
+    row_sum = tl.sum(e, axis=1, keep_dims=True)  # [HC, 1]
+    comb2 = e / row_sum + EPS  # [HC, HC] post-softmax + eps
 
     # ---- step B: column normalize ----
-    col_sum = tl.sum(comb2, axis=0, keep_dims=True) + EPS   # [1, HC]
+    col_sum = tl.sum(comb2, axis=0, keep_dims=True) + EPS  # [1, HC]
     comb2 = comb2 / col_sum
 
     # ---- (sinkhorn_iters - 1) more alternating row/col normalizations ----
@@ -137,21 +142,21 @@ def fused_hc_split_sinkhorn(
     post = torch.empty((N, HC), dtype=torch.float32, device=mixes.device)
     comb = torch.empty((N, HC * HC), dtype=torch.float32, device=mixes.device)
     if N == 0:
-        return (pre.view(*batch, HC),
-                post.view(*batch, HC),
-                comb.view(*batch, HC, HC))
+        return (pre.view(*batch, HC), post.view(*batch, HC), comb.view(*batch, HC, HC))
 
     grid = (N,)
     _hc_split_sinkhorn_kernel[grid](
-        mixes_flat, hc_scale, hc_base,
-        pre, post, comb,
+        mixes_flat,
+        hc_scale,
+        hc_base,
+        pre,
+        post,
+        comb,
         N=N,
         HC=HC,
         SINKHORN_ITERS=int(sinkhorn_iters),
         EPS=float(eps),
-        num_warps=1,    # tiny per-program work
+        num_warps=1,  # tiny per-program work
         num_stages=1,
     )
-    return (pre.view(*batch, HC),
-            post.view(*batch, HC),
-            comb.view(*batch, HC, HC))
+    return (pre.view(*batch, HC), post.view(*batch, HC), comb.view(*batch, HC, HC))
