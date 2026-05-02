@@ -1,14 +1,15 @@
-"""Runtime descriptor for the framework's 7 BlockPools.
+"""Canonical attn_type ids for DSV4's 7 BlockPools.
 
-The framework's HybridPoolKVCacheAllocator allocates each attn_type as a
-flat ``[num_blocks, stride_bytes] uint8`` tensor; ``stride_bytes`` is set
-internally and may NOT match the user-visible ``seq_size_per_block``
-config (in practice DSV4 uses 256 tokens/block regardless of that knob).
+Phase F: the ``PoolDescriptor`` + ``build_*`` helpers below are retained
+ONLY for byte-equal regression tests (``test_phase_b_prefill_dual_write``,
+``test_paged_kv_write``, etc.) which compare our paged write path against
+a reference scatter implementation.  Production ``Attention`` code no
+longer uses them — it resolves pool views inline via
+``self._kv_cache.get_layer_cache(layer_id, attn_type).kv_cache_base``.
 
-This module derives the actual per-pool geometry from the pool tensor
-itself, so all paged decode ops have a single source of truth.
-
-See ``POOL_LAYOUT.md`` for the empirical layout table this matches.
+The attn_type id constants are used as dict keys and cross-module
+identifiers (``Attention`` write/read paths, metadata slot mappings,
+decode metadata builders).
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from typing import Dict, Optional
 
 import torch
 
-# Canonical attn_type ids (mirror C++ side; used as keys throughout decode).
+# Canonical attn_type ids (mirror C++ KVCacheAttnType enum).
 SWA_KV = 7
 CSA_KV = 1
 HCA_KV = 2
@@ -28,18 +29,21 @@ CSA_STATE = 5
 HCA_STATE = 6
 
 
+# ---------------------------------------------------------------------------
+# Legacy PoolDescriptor — test-only (see module docstring).
+# Production code is expected to use ``Attention._pool_view(attn_type)``
+# instead, which resolves through the framework ``KVCache`` handle.
+# ---------------------------------------------------------------------------
+
+
 @dataclass(frozen=True)
 class PoolDescriptor:
-    """Geometry of one BlockPool, derived from its uint8 storage tensor.
+    """DEPRECATED (test-only, Phase F).  Geometry of one BlockPool.
 
-    For KV pools (multi-entry per block): ``entries_per_block`` is how many
-    K vectors fit in one page, ``vec_dim`` is the K head_dim, ``vec_dtype``
-    is bf16. Slot mapping is ``slot = block_id * entries_per_block + offset``.
-
-    For STATE pools: ``entries_per_block`` is how many compressor "slots"
-    (rows of ``compressor.kv_state``) fit in one page. ``vec_dim`` is the
-    PACKED ``2 * coff * inner_dim`` width (kv_state ‖ score_state, fp32).
-    Each row of the view holds one slot's kv-half + score-half concatenated.
+    For KV pools: ``entries_per_block`` = K vectors per page; ``vec_dim``
+    = K head_dim; ``vec_dtype`` = bf16.  Slot mapping = ``block_id * eb +
+    offset``.  For STATE pools: ``vec_dim`` is the PACKED ``2 * coff *
+    inner_dim`` width (kv_state ‖ score_state, fp32).
     """
 
     pool: torch.Tensor  # [num_blocks, stride_bytes] uint8
@@ -59,17 +63,10 @@ class PoolDescriptor:
 
     @property
     def total_slots(self) -> int:
-        """Flat slot capacity = num_blocks * entries_per_block."""
         return self.num_blocks * self.entries_per_block
 
     def view(self) -> torch.Tensor:
-        """Return a flat ``[total_slots, vec_dim]`` typed view of the pool.
-
-        Reuses the underlying storage; safe for ``index_copy_`` /
-        ``index_put_`` writes and ``index_select`` reads. Trailing
-        ``stride_bytes - entries_per_block * bytes_per_entry`` bytes
-        per page are ignored (alignment slack).
-        """
+        """Return a flat ``[total_slots, vec_dim]`` typed view of the pool."""
         useful = self.entries_per_block * self.bytes_per_entry
         return self.pool[:, :useful].view(self.vec_dtype).view(-1, self.vec_dim)
 
@@ -81,26 +78,12 @@ def build_pool_descriptor(
     indexer_head_dim: int,
     coff: int,
 ) -> Optional[PoolDescriptor]:
-    """Construct a ``PoolDescriptor`` for one pool tensor.
-
-    Returns None if the pool is empty/missing (some attn_types are absent
-    on layers whose ``compress_ratio`` doesn't use them — e.g. CSA pools
-    on a SWA-only layer).
-
-    Args:
-        pool: ``[num_blocks, stride_bytes]`` uint8 framework tensor.
-        attn_type: one of SWA_KV / CSA_KV / HCA_KV / INDEXER_KV /
-            INDEXER_STATE / CSA_STATE / HCA_STATE.
-        head_dim: attention head_dim (V4: 512).
-        indexer_head_dim: indexer's head_dim (V4: 128).
-        coff: compressor's overlap factor (1 for HCA, 2 for CSA/INDEXER).
-    """
+    """DEPRECATED (test-only, Phase F).  Construct a ``PoolDescriptor``
+    for one pool tensor.  Returns None if the pool is empty."""
     if pool is None or pool.numel() == 0:
         return None
     stride = int(pool.shape[1])
 
-    # Each attn_type's vec dtype + dim is FIXED by the model spec — entries
-    # per block is the only thing that depends on pool stride.
     if attn_type == SWA_KV:
         vec_dtype, vec_dim = torch.bfloat16, head_dim
     elif attn_type in (CSA_KV, HCA_KV):
@@ -110,7 +93,6 @@ def build_pool_descriptor(
     elif attn_type == CSA_STATE:
         vec_dtype, vec_dim = torch.float32, 2 * coff * head_dim
     elif attn_type == HCA_STATE:
-        # HCA compressor: coff=1 (overlap=False) → vec = 2 * 1 * head_dim.
         vec_dtype, vec_dim = torch.float32, 2 * head_dim
     elif attn_type == INDEXER_STATE:
         vec_dtype, vec_dim = torch.float32, 2 * coff * indexer_head_dim
@@ -139,22 +121,8 @@ def build_layer_pool_descriptors(
     compress_ratio: int,
     attn_type_count: int = 8,
 ) -> Dict[int, PoolDescriptor]:
-    """Build all present pools for one V4 layer.
-
-    Returns a dict ``{attn_type: PoolDescriptor}``; absent pools are
-    omitted (NOT mapped to None, so callers can use ``in`` checks).
-
-    Args:
-        flat_pools: ``self.kv_cache.kv_cache_base_by_layer_attn_flat``,
-            indexed as ``flat[layer*attn_type_count + attn_type]``.
-        layer_idx: V4 layer index.
-        head_dim: 512 for V4.
-        indexer_head_dim: 128 for V4.
-        compress_ratio: layer's compress_ratio (0/4/128).
-    """
-    # CSA layers carry overlap=True → coff=2; HCA layers carry overlap=False
-    # → coff=1; SWA-only layers don't have a compressor and never read the
-    # state-pool descriptor anyway, so coff is unused there.
+    """DEPRECATED (test-only, Phase F).  Build all present pools for one
+    V4 layer."""
     coff = 2 if compress_ratio == 4 else 1
     out: Dict[int, PoolDescriptor] = {}
     for at in (SWA_KV, CSA_KV, HCA_KV, INDEXER_KV, INDEXER_STATE, CSA_STATE, HCA_STATE):

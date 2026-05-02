@@ -136,12 +136,9 @@ class DSv4DecodeAttnMetadata:
     # populated only when paged-decode read is enabled.
     swa_abs_idx: torch.Tensor = field(default=None)  # type: ignore[assignment]
 
-    # Per-layer ``{attn_type: PoolDescriptor}``. Static reference (NOT a
-    # tensor) — the pool tensor inside each descriptor is the framework
-    # BlockPool handle, lifetime-managed by the C++ allocator. Attention
-    # layers grab their pool views via this map at call time. ``None``
-    # entries (or empty dict) mean "fall back to register_buffer".
-    layer_pool_descs: Optional[List[Dict[int, "PoolDescriptor"]]] = None
+    # Phase F: ``layer_pool_descs`` deleted — Attention resolves pool
+    # views via ``self._kv_cache.get_layer_cache(layer_id, attn_type)``
+    # at call time, no per-layer descriptor cache needed.
 
 
 def _build_swa_slot_mapping(

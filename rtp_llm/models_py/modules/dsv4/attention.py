@@ -14,7 +14,7 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 
 import math
 import os
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -567,11 +567,39 @@ class Attention(nn.Module):
         # CP context bound per-forward by V4Transformer.  None = no CP.
         self._cp_ctx: Optional[CPContext] = None
 
-        # Phase B (kvcache-native refactor): prefill paged dual-write ctx.
-        # When set, prefill arm of forward() mirrors the SWA ring buffer
-        # write into the framework BlockPool alongside the legacy
-        # register_buffer write. Additive — scatter_all_layers still runs.
-        self._prefill_paged_ctx: Optional[Dict[str, object]] = None
+        # Phase F: framework KVCache handle + per-request block tables.
+        # Bound by ``DeepSeekV4Model`` before each prefill forward; the pool
+        # view for any ``attn_type`` is resolved on demand via
+        # ``self._kv_cache.get_layer_cache(layer_id, attn_type).kv_cache_base``.
+        self._kv_cache: Optional[Any] = None
+        self._block_tables_by_type: Optional[Dict[int, torch.Tensor]] = None
+
+        # Precomputed pool specs per attn_type — (vec_dtype, vec_dim) used
+        # to reinterpret the raw ``[num_blocks, stride_elems]`` framework
+        # pool tensor as a typed ``[total_slots, vec_dim]`` flat view.
+        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
+            CSA_KV,
+            CSA_STATE,
+            HCA_KV,
+            HCA_STATE,
+            INDEXER_KV,
+            INDEXER_STATE,
+            SWA_KV,
+        )
+
+        idx_hd = index_head_dim
+        coff_csa = 2  # CSA overlap=True
+        coff_idx = 2  # Indexer's nested Compressor overlap=True
+        # HCA uses coff=1 (overlap=False) so HCA_STATE vec_dim = 2*head_dim.
+        self._pool_spec: Dict[int, tuple] = {
+            SWA_KV: (torch.bfloat16, head_dim),
+            CSA_KV: (torch.bfloat16, head_dim),
+            HCA_KV: (torch.bfloat16, head_dim),
+            INDEXER_KV: (torch.bfloat16, idx_hd),
+            CSA_STATE: (torch.float32, 2 * coff_csa * head_dim),
+            HCA_STATE: (torch.float32, 2 * head_dim),
+            INDEXER_STATE: (torch.float32, 2 * coff_idx * idx_hd),
+        }
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         """Bind CP context.  When active on a prefill call, ``forward``
@@ -586,25 +614,79 @@ class Attention(nn.Module):
 
     def set_prefill_paged_ctx(
         self,
-        layer_desc_dict: Optional[Dict[int, "PoolDescriptor"]] = None,  # type: ignore[name-defined]
+        kv_cache: Optional[Any] = None,
         block_tables_by_type: Optional[Dict[int, torch.Tensor]] = None,
     ) -> None:
-        """Bind prefill paged dual-write context (Phase B of kvcache-native refactor).
+        """Phase F: bind the framework KVCache handle + per-request block
+        tables for this prefill.  Pool views are resolved on demand via
+        ``self._pool_view(attn_type)`` — no per-layer descriptor cache.
 
-        ``layer_desc_dict``: this layer's ``attn_type -> PoolDescriptor`` (typed
-        pool view + entries_per_block).
-        ``block_tables_by_type``: ``attn_type -> [1, max_blocks_per_req]`` for the
-        request being prefilled this call.
-
-        Either arg None disables dual-write.
-        """
-        if layer_desc_dict is None or block_tables_by_type is None:
-            self._prefill_paged_ctx = None
+        Either arg None disables the paged ctx (both the write and read
+        helpers then early-return as before)."""
+        if kv_cache is None or block_tables_by_type is None:
+            self._kv_cache = None
+            self._block_tables_by_type = None
             return
-        self._prefill_paged_ctx = {
-            "layer_descs": layer_desc_dict,
-            "block_tables": block_tables_by_type,
-        }
+        self._kv_cache = kv_cache
+        self._block_tables_by_type = block_tables_by_type
+
+    def _pool_view(self, attn_type: int) -> Optional[torch.Tensor]:
+        """Return a flat ``[total_slots, vec_dim]`` typed view of the
+        framework BlockPool for this layer + attn_type, or ``None`` if
+        the pool isn't allocated (e.g. SWA-only layer has no CSA/HCA
+        pool).  Delegates to ``KVCache.get_layer_cache(layer_id,
+        attn_type)`` — no Python-side descriptor cache."""
+        if self._kv_cache is None:
+            return None
+        spec = self._pool_spec.get(attn_type)
+        if spec is None:
+            return None
+        try:
+            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
+        except Exception:
+            return None
+        base = layer_kv.kv_cache_base
+        if base is None or base.numel() == 0 or base.dim() != 2:
+            return None
+        vec_dtype, vec_dim = spec
+        # base: [num_blocks, stride_elems].  stride_bytes = stride_elems *
+        # element_size.  entries_per_block = stride_bytes // bytes_per_entry.
+        stride_bytes = int(base.shape[1]) * int(base.element_size())
+        bytes_per_entry = vec_dim * vec_dtype.itemsize
+        if bytes_per_entry <= 0 or stride_bytes < bytes_per_entry:
+            return None
+        eb = stride_bytes // bytes_per_entry
+        useful_bytes = eb * bytes_per_entry
+        # Reinterpret as uint8 [num_blocks, stride_bytes] so we can slice
+        # exact useful-byte span, then cast to vec_dtype + flatten to
+        # [total_slots, vec_dim].  Same layout as the retired
+        # ``PoolDescriptor.view()``.
+        raw_u8 = base.view(torch.uint8)
+        if raw_u8.shape[1] < useful_bytes:
+            return None
+        return raw_u8[:, :useful_bytes].view(vec_dtype).view(-1, vec_dim)
+
+    def _pool_entries_per_block(self, attn_type: int) -> int:
+        """Derive ``entries_per_block`` from the framework pool tensor for
+        this layer + attn_type.  Returns 0 if pool unavailable."""
+        if self._kv_cache is None:
+            return 0
+        spec = self._pool_spec.get(attn_type)
+        if spec is None:
+            return 0
+        try:
+            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
+        except Exception:
+            return 0
+        base = layer_kv.kv_cache_base
+        if base is None or base.numel() == 0 or base.dim() != 2:
+            return 0
+        vec_dtype, vec_dim = spec
+        stride_bytes = int(base.shape[1]) * int(base.element_size())
+        bytes_per_entry = vec_dim * vec_dtype.itemsize
+        if bytes_per_entry <= 0:
+            return 0
+        return stride_bytes // bytes_per_entry
 
     def _prefill_paged_write_kv(
         self,
@@ -612,38 +694,36 @@ class Attention(nn.Module):
         source_buf: torch.Tensor,  # [bsz, T, vec_dim]
         bsz: int,
     ) -> None:
-        """Phase B generic dual-write: mirror ``source_buf[:bsz, :T]`` into
-        the framework BlockPool of ``attn_type``. No-op when no ctx bound or
-        the pool isn't registered for this layer. Sentinel block_id ≤ 0
-        entries are skipped via ``mask_negative=True``."""
-        ctx = self._prefill_paged_ctx
-        if ctx is None:
+        """Phase F generic dual-write: mirror ``source_buf[:bsz, :T]`` into
+        the framework BlockPool of ``attn_type``. No-op when no KVCache
+        handle / block table bound, or the pool isn't allocated for this
+        layer. Sentinel block_id ≤ 0 entries are skipped via
+        ``mask_negative=True``."""
+        if self._kv_cache is None or self._block_tables_by_type is None:
             return
         # Ctx is bound per-request (bt is [1, max_blocks]); bsz>1 would need
         # per-row bts. Prefill loop today always calls v4(...) with bsz==1 —
         # assert rather than silently mis-write under batched prefill.
         assert bsz == 1, (
-            f"Phase B prefill paged dual-write assumes bsz==1 per v4() call "
+            f"Phase F prefill paged write assumes bsz==1 per v4() call "
             f"(got {bsz}). Batched prefill must bind multi-row block tables."
         )
         from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
             write_kv_to_pool,
         )
 
-        layer_descs = ctx["layer_descs"]
-        bt_by_type = ctx["block_tables"]
-        if attn_type not in layer_descs or attn_type not in bt_by_type:
-            return
-        desc = layer_descs[attn_type]
-        bt = bt_by_type[attn_type]  # [1, max_blocks_per_req] (per-request row)
+        bt = self._block_tables_by_type.get(attn_type)
         if bt is None or bt.numel() == 0:
+            return
+        pool_view = self._pool_view(attn_type)
+        eb = self._pool_entries_per_block(attn_type)
+        if pool_view is None or eb <= 0:
             return
         T = int(source_buf.shape[1])
         D = int(source_buf.shape[2])
         if T == 0:
             return
         device = source_buf.device
-        eb = desc.entries_per_block
         max_blocks = bt.shape[1]
         # Pool capacity = max_blocks * eb. When source_buf has more rows than
         # pool capacity (e.g. HCA compressor.kv_state has coff*ratio=128 rows
@@ -672,7 +752,7 @@ class Attention(nn.Module):
         )
         slot_mapping = slot_per.unsqueeze(0).expand(bsz, -1).reshape(-1)
         buf_flat = source_buf[:bsz].reshape(bsz * T, D)
-        write_kv_to_pool(buf_flat, slot_mapping, desc.view(), mask_negative=True)
+        write_kv_to_pool(buf_flat, slot_mapping, pool_view, mask_negative=True)
 
     def _prefill_write_swa_to_pool(
         self, bsz: int, kv_full: torch.Tensor, sp_int: int
@@ -701,19 +781,17 @@ class Attention(nn.Module):
         )
         from rtp_llm.models_py.modules.dsv4.decode.pool_layout import SWA_KV
 
-        ctx = self._prefill_paged_ctx
-        if ctx is None:
+        if self._kv_cache is None or self._block_tables_by_type is None:
             return
         assert bsz == 1, (
             f"Phase E5b SWA ring write assumes bsz==1 per v4() call " f"(got {bsz})"
         )
-        layer_descs = ctx["layer_descs"]
-        bt_by_type = ctx["block_tables"]
-        if SWA_KV not in layer_descs or SWA_KV not in bt_by_type:
-            return
-        desc = layer_descs[SWA_KV]
-        bt = bt_by_type[SWA_KV]
+        bt = self._block_tables_by_type.get(SWA_KV)
         if bt is None or bt.numel() == 0:
+            return
+        pool_view = self._pool_view(SWA_KV)
+        eb = self._pool_entries_per_block(SWA_KV)
+        if pool_view is None or eb <= 0:
             return
 
         win = self.window_size
@@ -721,7 +799,6 @@ class Attention(nn.Module):
         if seqlen == 0:
             return
         device = kv_full.device
-        eb = desc.entries_per_block
         max_blocks = bt.shape[1]
 
         if seqlen <= win:
@@ -756,7 +833,7 @@ class Attention(nn.Module):
             bsz * n_write, self.head_dim
         )
         slot_mapping = slot.unsqueeze(0).expand(bsz, -1).reshape(-1)
-        write_kv_to_pool(source, slot_mapping, desc.view(), mask_negative=True)
+        write_kv_to_pool(source, slot_mapping, pool_view, mask_negative=True)
 
     def _prefill_paged_write_compressed(self, bsz: int) -> None:
         """Phase B dual-write: mirror ``self.compressor.kv_cache[:bsz]`` into
@@ -845,27 +922,27 @@ class Attention(nn.Module):
         )
 
         device = self.freqs_cis.device
-        ctx = self._prefill_paged_ctx
+        bt_by_type = self._block_tables_by_type
+        handle_ok = self._kv_cache is not None and bt_by_type is not None
 
         def _bind_state(
             comp: "Compressor",  # type: ignore[name-defined]
             state_attn_type: int,
         ) -> None:
             comp.ensure_state_allocated(device)
-            if sp_int == 0 or ctx is None:
+            if sp_int == 0 or not handle_ok:
                 comp.reset_state_for_new_prefill(bsz)
                 return
-            layer_descs = ctx["layer_descs"]
-            bt_by_type = ctx["block_tables"]
-            if state_attn_type not in layer_descs or state_attn_type not in bt_by_type:
-                comp.reset_state_for_new_prefill(bsz)
-                return
-            desc = layer_descs[state_attn_type]
-            bt = bt_by_type[state_attn_type]
+            bt = bt_by_type.get(state_attn_type)
             if bt is None or bt.numel() == 0:
                 comp.reset_state_for_new_prefill(bsz)
                 return
-            comp.restore_state_from_pool(bsz, desc.view(), bt, desc.entries_per_block)
+            pool_view = self._pool_view(state_attn_type)
+            eb = self._pool_entries_per_block(state_attn_type)
+            if pool_view is None or eb <= 0:
+                comp.reset_state_for_new_prefill(bsz)
+                return
+            comp.restore_state_from_pool(bsz, pool_view, bt, eb)
             # CSA overlap=True: only [:ratio] carry is reused; zero the
             # partial-window tail — matches the old external re-zero in
             # ``_forward_impl``.
@@ -895,16 +972,13 @@ class Attention(nn.Module):
         if self.indexer is not None:
             self.indexer.ensure_kv_cache_allocated(device)
             do_restore = False
-            if sp_int > 0 and ctx is not None:
-                layer_descs = ctx["layer_descs"]
-                bt_by_type = ctx["block_tables"]
-                if INDEXER_KV in layer_descs and INDEXER_KV in bt_by_type:
-                    desc = layer_descs[INDEXER_KV]
-                    bt = bt_by_type[INDEXER_KV]
-                    if bt is not None and bt.numel() > 0:
-                        self.indexer.restore_kv_cache_from_pool(
-                            bsz, desc.view(), bt, desc.entries_per_block
-                        )
+            if sp_int > 0 and handle_ok:
+                bt = bt_by_type.get(INDEXER_KV)
+                if bt is not None and bt.numel() > 0:
+                    pool_view = self._pool_view(INDEXER_KV)
+                    eb = self._pool_entries_per_block(INDEXER_KV)
+                    if pool_view is not None and eb > 0:
+                        self.indexer.restore_kv_cache_from_pool(bsz, pool_view, bt, eb)
                         do_restore = True
             if not do_restore:
                 self.indexer.reset_kv_cache_for_new_prefill(bsz)
@@ -923,15 +997,14 @@ class Attention(nn.Module):
                 else (HCA_KV if self.compress_ratio == 128 else None)
             )
             do_restore_cmp = False
-            if sp_int > 0 and ctx is not None and cmp_at is not None:
-                layer_descs = ctx["layer_descs"]
-                bt_by_type = ctx["block_tables"]
-                if cmp_at in layer_descs and cmp_at in bt_by_type:
-                    desc = layer_descs[cmp_at]
-                    bt = bt_by_type[cmp_at]
-                    if bt is not None and bt.numel() > 0:
+            if sp_int > 0 and handle_ok and cmp_at is not None:
+                bt = bt_by_type.get(cmp_at)
+                if bt is not None and bt.numel() > 0:
+                    pool_view = self._pool_view(cmp_at)
+                    eb = self._pool_entries_per_block(cmp_at)
+                    if pool_view is not None and eb > 0:
                         self.compressor.restore_kv_cache_from_pool(
-                            bsz, desc.view(), bt, desc.entries_per_block
+                            bsz, pool_view, bt, eb
                         )
                         do_restore_cmp = True
             if not do_restore_cmp:
@@ -959,21 +1032,18 @@ class Attention(nn.Module):
         registered for this layer, so callers can fall back to the
         register_buffer read.
         """
-        ctx = self._prefill_paged_ctx
-        if ctx is None:
+        if self._kv_cache is None or self._block_tables_by_type is None:
             return None
         assert bsz == 1, (
             f"Phase E1 prefill paged read assumes bsz==1 per v4() call " f"(got {bsz})."
         )
-        layer_descs = ctx["layer_descs"]
-        bt_by_type = ctx["block_tables"]
-        if attn_type not in layer_descs or attn_type not in bt_by_type:
-            return None
-        desc = layer_descs[attn_type]
-        bt = bt_by_type[attn_type]
+        bt = self._block_tables_by_type.get(attn_type)
         if bt is None or bt.numel() == 0 or T == 0:
             return None
-        eb = desc.entries_per_block
+        pool_view = self._pool_view(attn_type)
+        eb = self._pool_entries_per_block(attn_type)
+        if pool_view is None or eb <= 0:
+            return None
         max_blocks = bt.shape[1]
         pool_capacity = max_blocks * eb
         pos = torch.arange(T, device=device, dtype=torch.long)
@@ -989,7 +1059,6 @@ class Attention(nn.Module):
             block_id * eb + in_block,
             torch.zeros_like(in_block),
         )
-        pool_view = desc.view()
         gathered = pool_view.index_select(0, safe_slot)  # [T, vec_dim]
         # Pool storage dtype matches source_buf dtype by construction (see
         # _prefill_paged_write_kv which writes via write_kv_to_pool →
@@ -1020,7 +1089,7 @@ class Attention(nn.Module):
             SWA_KV,
         )
 
-        if self._prefill_paged_ctx is None:
+        if self._kv_cache is None or self._block_tables_by_type is None:
             return None
         win = self.window_size
         hd = self.head_dim
@@ -1213,24 +1282,17 @@ class Attention(nn.Module):
         )
         from rtp_llm.models_py.modules.dsv4.decode.pool_layout import SWA_KV
 
-        layer_descs = (
-            attn_metadata.layer_pool_descs[self.layer_id]
-            if attn_metadata.layer_pool_descs is not None
-            and self.layer_id < len(attn_metadata.layer_pool_descs)
-            else None
-        )
         swa_pool_slots = attn_metadata.pool_write_slot_mappings.get(SWA_KV)
+        swa_view = self._pool_view(SWA_KV)
         if (
-            layer_descs is not None
-            and SWA_KV in layer_descs
+            swa_view is not None
             and swa_pool_slots is not None
             and swa_pool_slots.numel() > 0
         ):
-            swa_desc = layer_descs[SWA_KV]
             write_kv_to_pool(
                 kv_flat,
                 swa_pool_slots[: bsz * q_len],
-                swa_desc.view(),
+                swa_view,
                 mask_negative=False,
             )
 
@@ -1277,13 +1339,12 @@ class Attention(nn.Module):
                 from rtp_llm.models_py.modules.dsv4.decode.pool_layout import INDEXER_KV
 
                 idx_pool_slots = attn_metadata.pool_write_slot_mappings.get(INDEXER_KV)
+                idx_view = self._pool_view(INDEXER_KV)
                 if (
-                    layer_descs is not None
-                    and INDEXER_KV in layer_descs
+                    idx_view is not None
                     and idx_pool_slots is not None
                     and idx_pool_slots.numel() > 0
                 ):
-                    idx_desc = layer_descs[INDEXER_KV]
                     idx_d = self.indexer.head_dim
                     sp_l = start_pos.to(torch.long)
                     cache_slot = torch.clamp((sp_l + 1) // 4 - 1, min=0)
@@ -1299,7 +1360,7 @@ class Attention(nn.Module):
                     write_kv_to_pool(
                         new_idx_k,
                         idx_pool_slots[: bsz * q_len],
-                        idx_desc.view(),
+                        idx_view,
                         mask_negative=True,
                     )
 
@@ -1342,19 +1403,18 @@ class Attention(nn.Module):
                 from rtp_llm.models_py.modules.dsv4.decode.pool_layout import HCA_KV
 
                 hca_pool_slots = attn_metadata.pool_write_slot_mappings.get(HCA_KV)
+                hca_view = self._pool_view(HCA_KV)
                 if (
                     hca_kv_compressed is not None
-                    and layer_descs is not None
-                    and HCA_KV in layer_descs
+                    and hca_view is not None
                     and hca_pool_slots is not None
                     and hca_pool_slots.numel() > 0
                 ):
-                    hca_desc = layer_descs[HCA_KV]
                     hca_flat = hca_kv_compressed.reshape(-1, self.head_dim)
                     write_kv_to_pool(
                         hca_flat,
                         hca_pool_slots[: bsz * q_len],
-                        hca_desc.view(),
+                        hca_view,
                         mask_negative=True,
                     )
         else:
@@ -1414,12 +1474,12 @@ class Attention(nn.Module):
         )
 
         swa_pool_bt = attn_metadata.pool_block_tables.get(SWA_KV)
+        swa_view_cache = self._pool_view(SWA_KV)
 
         # Decide which paged read variant to use, if any.
         use_paged_swa_read = (
             not self.compress_ratio
-            and layer_descs is not None
-            and SWA_KV in layer_descs
+            and swa_view_cache is not None
             and attn_metadata.swa_abs_idx is not None
             and swa_pool_bt is not None
             and swa_pool_bt.numel() > 0
@@ -1435,11 +1495,13 @@ class Attention(nn.Module):
             if cmp_attn_type is not None
             else None
         )
+        cmp_view_cache = (
+            self._pool_view(cmp_attn_type) if cmp_attn_type is not None else None
+        )
         use_paged_dual_read = (
             self.compress_ratio in (4, 128)
-            and layer_descs is not None
-            and SWA_KV in layer_descs
-            and cmp_attn_type in (layer_descs or {})
+            and swa_view_cache is not None
+            and cmp_view_cache is not None
             and attn_metadata.swa_abs_idx is not None
             and swa_pool_bt is not None
             and swa_pool_bt.numel() > 0
@@ -1457,7 +1519,7 @@ class Attention(nn.Module):
 
             T = bsz * q_len
             req_id = build_req_id_per_token(bsz, q_len, swa_pool_bt.device)
-            swa_eb = layer_descs[SWA_KV].entries_per_block
+            swa_eb = self._pool_entries_per_block(SWA_KV)
             swa_local = attn_metadata.swa_abs_idx[:bsz].reshape(T, win)
             swa_global = translate_local_to_global_slots(
                 req_id,
@@ -1468,13 +1530,12 @@ class Attention(nn.Module):
 
             if use_paged_swa_read:
                 # Zero-copy: pool view fed straight to TileLang kernel.
-                pool_view = layer_descs[SWA_KV].view()
                 q_packed = (
                     q.transpose(0, 1).contiguous() if q_len > 1 else q.transpose(0, 1)
                 )
                 o_packed = sparse_op.forward(
                     q_packed,
-                    pool_view.unsqueeze(0),
+                    swa_view_cache.unsqueeze(0),
                     self.attn_sink,
                     swa_global.view(1, T, win).contiguous(),
                 )
@@ -1484,7 +1545,7 @@ class Attention(nn.Module):
                 # gather both into a packed scratch and call sparse_attn
                 # with identity topk = arange(win+K). Memory cost noted in
                 # paged_topk_translator.gather_dual_pool_kv_packed docstring.
-                cmp_eb = layer_descs[cmp_attn_type].entries_per_block
+                cmp_eb = self._pool_entries_per_block(cmp_attn_type)
                 K_cmp = cmp_local_raw.shape[-1]
                 cmp_local = cmp_local_raw.reshape(T, K_cmp)
                 cmp_global = translate_local_to_global_slots(
@@ -1498,8 +1559,8 @@ class Attention(nn.Module):
                     f"q_len=1 only (got {q_len})"
                 )
                 kv_packed_4d = gather_dual_pool_kv_packed(
-                    layer_descs[SWA_KV].view(),
-                    layer_descs[cmp_attn_type].view(),
+                    swa_view_cache,
+                    cmp_view_cache,
                     swa_global,
                     cmp_global,
                     self.head_dim,

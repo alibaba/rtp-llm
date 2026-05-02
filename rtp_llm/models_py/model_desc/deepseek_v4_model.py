@@ -400,307 +400,35 @@ class DeepSeekV4Model(GptModelBase):
         return
 
     def _wire_framework_kv_cache(self, device: str):
-        """Wire framework BlockPool for 7-pool gather/scatter.
-
-        DSV4 uses HybridPoolKVCacheAllocator with 7 independent BlockPools.
-        Each pool has its own [total_blocks, stride_bytes] uint8 tensor.
-        We use get_raw_pool_tensor(layer_id, attn_type) to get each pool's tensor.
+        """Phase F: bind the framework ``KVCache`` handle on every
+        ``Attention`` layer.  Pool views for any (layer, attn_type) are
+        resolved on demand via ``self._kv_cache.get_layer_cache(...)`` —
+        no Python-side per-layer descriptor cache, no parallel tensor
+        bookkeeping.
         """
         self._framework_kv_enabled = True
         if self.kv_cache is None:
             logging.warning("[DeepSeekV4Model] no framework kv_cache, skipping wiring")
             return
-
-        # Build per-layer per-pool tensor cache from flat field
-        flat = getattr(self.kv_cache, "kv_cache_base_by_layer_attn_flat", None)
-        attn_type_count = 8
-        self._fw_pool_tensors = []
-        # Fingerprint the underlying pool storage so we can detect when the
-        # framework rebuilds the KV cache (warmup→real transition: NormalEngine
-        # first allocates a stub allocator with block_num=1 to measure GPU
-        # memory, then tears it down and creates the real one with the
-        # measured block_num). Without re-wiring, _fw_pool_tensors keeps
-        # pointing at the freed warmup tensors and gather hits IndexError
-        # because the warmup CSA_KV/INDEXER_KV pools only had 1 block each.
+        # Fingerprint so warmup→real transitions re-wire (NormalEngine
+        # rebuilds KVCache after measuring GPU memory).
         self._wired_kv_cache_id = id(self.kv_cache)
-        self._wired_first_data_ptr = None
-        if flat is not None and len(flat) > 0:
-            num_layers = len(flat) // attn_type_count
-            for i in range(len(self.v4.layers)):
-                slots = [None] * attn_type_count
-                if i < num_layers:
-                    for a in range(attn_type_count):
-                        t = flat[i * attn_type_count + a]
-                        if t is not None and t.numel() > 0:
-                            slots[a] = t
-                            if self._wired_first_data_ptr is None:
-                                self._wired_first_data_ptr = t.data_ptr()
-                self._fw_pool_tensors.append(slots)
-        else:
-            logging.warning(
-                "[DeepSeekV4Model] kv_cache_base_by_layer_attn_flat empty, gather/scatter disabled"
-            )
-            return
-
-        # Build per-layer pool list from compress_ratio
-        # _layer_pools: all pools for scatter (write all 7 pools)
-        # _layer_gather_pools: only paged pools for gather (skip SWA/State which
-        #   get overwritten during decode, making cached data unreliable)
-        # _layer_reuse_gather_pools: paged + state pools for prefill reuse gather
-        #   (restores compressor overlap carry, but skips SWA ring buffer which
-        #   holds data at the wrong position)
-        self._layer_pools = []
-        self._layer_gather_pools = []
-        self._layer_reuse_gather_pools = []
-        # Phase 2B-3: STATE-only pool list per layer for the decode hot-path,
-        # used when paged read+write keep KV pools fresh and we only need to
-        # gather/scatter the compressor/indexer state pools (4/5/6).
-        self._layer_state_pools = []
-        for i, layer in enumerate(self.v4.layers):
-            ratio = layer.attn.compress_ratio
-            if ratio == 4:
-                self._layer_pools.append([7, 1, 3, 4, 5])
-                self._layer_gather_pools.append([1, 3])  # CSA_KV, INDEXER_KV only
-                self._layer_reuse_gather_pools.append([1, 3, 4, 5])  # + STATE pools
-                self._layer_state_pools.append([4, 5])  # INDEXER_STATE + CSA_STATE
-            elif ratio == 128:
-                self._layer_pools.append([7, 2, 6])
-                self._layer_gather_pools.append([2])  # HCA_KV only
-                self._layer_reuse_gather_pools.append([2, 6])  # + STATE pool
-                self._layer_state_pools.append([6])  # HCA_STATE only
-            else:
-                self._layer_pools.append([7])
-                self._layer_gather_pools.append([])  # SWA-only, nothing to gather
-                self._layer_reuse_gather_pools.append([])  # SWA-only
-                self._layer_state_pools.append([])  # SWA-only has no state
-
-        # Debug: log shapes for layer 0 and layer 2
-        for dbg in [0, 2]:
-            if dbg < len(self._fw_pool_tensors):
-                ne = {
-                    j: self._fw_pool_tensors[dbg][j].shape
-                    for j in range(attn_type_count)
-                    if self._fw_pool_tensors[dbg][j] is not None
-                }
-                logging.info("[DeepSeekV4Model] _fw_pool_tensors[%d]: %s", dbg, ne)
-
-        spb = (
-            self.kv_cache.seq_size_per_block
-            if self.kv_cache.seq_size_per_block > 0
-            else 256
-        )
-        logging.info(
-            "[DeepSeekV4Model] framework 7-pool KV wired: %d layers, seq_size_per_block=%d",
-            len(self.v4.layers),
-            spb,
-        )
-
-        # Phase 0 layout probe — print actual stride/blocks/entries for every
-        # pool of layer 0 and the first compress_ratio==4 / ==128 layers, so
-        # we can verify that "256 tokens/block, fixed 2 blocks/req for state
-        # & SWA, shared variable-length pool for CSA/HCA/INDEXER KV" holds
-        # against the actual framework allocator before writing paged ops.
-        self._dump_pool_layout(spb)
-
-        # Phase 2: build the per-layer PoolDescriptor cache for the paged
-        # decode path. ``self._layer_pool_descs[layer_idx][attn_type]``
-        # gives the typed view + entries_per_block at decode call time.
-        # Source-of-truth = framework pool stride (seen by build_pool_descriptor).
-        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
-            build_layer_pool_descriptors,
-        )
-
-        idx_hd = 0
         for layer in self.v4.layers:
-            if layer.attn.indexer is not None:
-                idx_hd = layer.attn.indexer.head_dim
-                break
-        self._layer_pool_descs = []
-        for li, layer in enumerate(self.v4.layers):
-            self._layer_pool_descs.append(
-                build_layer_pool_descriptors(
-                    flat_pools=flat,
-                    layer_idx=li,
-                    head_dim=layer.attn.head_dim,
-                    indexer_head_dim=idx_hd,
-                    compress_ratio=layer.attn.compress_ratio,
-                    attn_type_count=attn_type_count,
-                )
-            )
+            layer.attn._kv_cache = self.kv_cache
         logging.info(
-            "[DeepSeekV4Model] Phase 2: built per-layer PoolDescriptors for %d layers",
-            len(self._layer_pool_descs),
+            "[DeepSeekV4Model] framework KV wired via LayerKVCache: %d layers, spb=%d",
+            len(self.v4.layers),
+            (
+                self.kv_cache.seq_size_per_block
+                if self.kv_cache.seq_size_per_block > 0
+                else 0
+            ),
         )
 
-    def _dump_pool_layout(self, tokens_per_block: int) -> None:
-        """One-shot dump of per-attn_type pool layout for the new paged decode
-        path. Logs (total_blocks, stride_bytes, expected_entries_per_block,
-        bytes_per_entry, slack_bytes) for layer 0 and one CSA/HCA exemplar."""
-        # attn_type → (vector dtype, vector dim, expected entries per 256-token block)
-        # KV vectors:
-        #   1=CSA_KV     bf16, head_dim,    256 / 4   = 64
-        #   2=HCA_KV     bf16, head_dim,    256 / 128 = 2
-        #   3=INDEXER_KV bf16, idx_head,    256 / 4   = 64   (indexer has compress_ratio=4)
-        #   7=SWA_KV     bf16, head_dim,    256       (cyclic, fixed 2 blocks/req → 512 cap)
-        # State vectors (paired kv_state ‖ score_state, fp32):
-        #   4=INDEXER_STATE  fp32, 2*coff_idx*idx_head   slots = coff_idx*ratio_idx
-        #   5=CSA_STATE      fp32, 2*coff*head_dim       slots = coff*ratio (overlap=True coff=2)
-        #   6=HCA_STATE      fp32, 2*head_dim            slots = ratio (overlap=False coff=1)
-        attn_type_names = {
-            1: "CSA_KV",
-            2: "HCA_KV",
-            3: "INDEXER_KV",
-            4: "INDEXER_STATE",
-            5: "CSA_STATE",
-            6: "HCA_STATE",
-            7: "SWA_KV",
-        }
-
-        def _describe_layer(layer_idx: int) -> None:
-            attn = self.v4.layers[layer_idx].attn
-            ratio = attn.compress_ratio
-            hd = attn.head_dim
-            idx_hd = attn.indexer.head_dim if attn.indexer is not None else 0
-            for at in range(1, 8):
-                t = self._get_pool_tensor(at, layer_idx)
-                if t is None or t.numel() == 0:
-                    logging.info(
-                        "[layout] L%02d ratio=%-3d %-13s : <empty>",
-                        layer_idx,
-                        ratio,
-                        attn_type_names[at],
-                    )
-                    continue
-                num_blocks, stride_bytes = int(t.shape[0]), int(t.shape[1])
-                # Expected geometry per attn_type
-                if at == 1:  # CSA_KV
-                    bpe, exp_eb = hd * 2, max(1, tokens_per_block // 4)
-                elif at == 2:  # HCA_KV
-                    bpe, exp_eb = hd * 2, max(1, tokens_per_block // 128)
-                elif at == 3:  # INDEXER_KV
-                    bpe, exp_eb = idx_hd * 2, max(1, tokens_per_block // 4)
-                elif at == 7:  # SWA_KV
-                    bpe, exp_eb = hd * 2, tokens_per_block
-                elif at == 5:  # CSA_STATE  (overlap=True, coff=2)
-                    bpe, exp_eb = (
-                        2 * 2 * hd
-                    ) * 4, 4  # 4 state slots/block × 2 blocks/req = 8 slots
-                elif at == 6:  # HCA_STATE  (overlap=False, coff=1)
-                    bpe, exp_eb = (
-                        2 * hd
-                    ) * 4, 8  # 8 state slots/block × 2 blocks/req = 16 slots
-                elif at == 4:  # INDEXER_STATE (overlap=True for idx ratio=4, coff=2)
-                    bpe, exp_eb = (2 * 2 * idx_hd) * 4, 4
-                else:
-                    bpe, exp_eb = 0, 0
-                eb_from_stride = stride_bytes // bpe if bpe > 0 else -1
-                slack = stride_bytes - eb_from_stride * bpe if bpe > 0 else 0
-                logging.info(
-                    "[layout] L%02d ratio=%-3d %-13s blocks=%-7d stride=%-7dB "
-                    "bytes/entry=%-5d entries=%-5d (expected=%d) slack=%dB",
-                    layer_idx,
-                    ratio,
-                    attn_type_names[at],
-                    num_blocks,
-                    stride_bytes,
-                    bpe,
-                    eb_from_stride,
-                    exp_eb,
-                    slack,
-                )
-
-        # First layer of each ratio class for compactness
-        seen: set[int] = set()
-        for li, layer in enumerate(self.v4.layers):
-            r = layer.attn.compress_ratio
-            if r in seen:
-                continue
-            seen.add(r)
-            _describe_layer(li)
-            if len(seen) >= 3:
-                break
-
-    def _gather_kv_pool(
-        self, fw_tensor, block_ids_2d, python_buf, entries_per_block, head_dim, B
-    ):
-        """Gather paged KV from BlockPool into python_buf[B, T, head_dim] (bf16).
-
-        fw_tensor is [total_blocks, stride_elems] uint8. Each page has stride_elems bytes.
-        Vectorized: one index_select + reshape instead of per-block Python loops.
-        """
-        if fw_tensor is None or fw_tensor.numel() == 0:
-            return
-        bytes_per_entry = head_dim * 2  # bf16
-        page_bytes_avail = fw_tensor.size(1)
-        capacity = min(entries_per_block, page_bytes_avail // bytes_per_entry)
-        useful_bytes = capacity * bytes_per_entry
-
-        # Move block_ids to CPU once to avoid per-element GPU sync
-        bids_cpu = block_ids_2d[:B].cpu()
-        T = python_buf.size(1)
-
-        for b in range(B):
-            row = bids_cpu[b]
-            for k in range(row.size(0)):
-                bid = int(row[k].item())
-                if bid <= 0:
-                    continue
-                entry_start = k * capacity
-                entry_end = min(entry_start + capacity, T)
-                n = entry_end - entry_start
-                if n <= 0:
-                    break
-                page_bf16 = (
-                    fw_tensor[bid, : n * bytes_per_entry]
-                    .view(torch.bfloat16)
-                    .view(n, head_dim)
-                )
-                python_buf[b, entry_start:entry_end] = page_bf16
-
-    def _gather_state_pool(
-        self,
-        fw_tensor,
-        block_ids_2d,
-        kv_state,
-        score_state,
-        entries_per_block,
-        state_dim,
-        B,
-    ):
-        """Gather fixed-allocation state from BlockPool into kv_state + score_state (fp32)."""
-        if fw_tensor is None or fw_tensor.numel() == 0:
-            return
-        half_dim = state_dim // 2
-        bids_cpu = block_ids_2d[:B].cpu()
-        max_blks = min(2, bids_cpu.size(1))
-        state_rows = kv_state.size(1)
-        for b in range(B):
-            for blk_idx in range(max_blks):
-                bid = int(bids_cpu[b, blk_idx].item())
-                if bid <= 0:
-                    continue
-                page_fp32 = (
-                    fw_tensor[bid, : entries_per_block * state_dim * 4]
-                    .view(torch.float32)
-                    .view(entries_per_block, state_dim)
-                )
-                row_start = blk_idx * entries_per_block
-                n = min(entries_per_block, state_rows - row_start)
-                if n <= 0:
-                    break
-                kv_state[b, row_start : row_start + n] = page_fp32[:n, :half_dim]
-                score_state[b, row_start : row_start + n] = page_fp32[:n, half_dim:]
-
-    def _get_pool_tensor(self, attn_type: int, layer_idx: int):
-        """Look up per-pool BlockPool tensor."""
-        if not hasattr(self, "_fw_pool_tensors") or not self._fw_pool_tensors:
-            return None
-        if layer_idx >= len(self._fw_pool_tensors):
-            return None
-        slots = self._fw_pool_tensors[layer_idx]
-        if attn_type >= len(slots):
-            return None
-        return slots[attn_type]
+    # Phase F: `_dump_pool_layout`, `_gather_kv_pool`, `_gather_state_pool`,
+    # `_get_pool_tensor` deleted.  Pool metadata + tensor access now lives on
+    # ``Attention`` via ``_pool_view(attn_type)`` / ``_pool_entries_per_block``
+    # resolving through ``self._kv_cache.get_layer_cache(...)``.
 
     def _gather_all_layers(
         self,
@@ -719,18 +447,14 @@ class DeepSeekV4Model(GptModelBase):
         return
 
     def _bind_prefill_paged_ctx(self, attn_inputs, batch_offset: int = 0) -> bool:
-        """Phase B: bind per-layer paged dual-write ctx on every Attention.
+        """Phase F: bind framework KVCache handle + per-type block tables
+        on every Attention.  Pool views are resolved on demand via
+        ``self.kv_cache.get_layer_cache(layer_id, attn_type)`` — no
+        Python-side PoolDescriptor cache.
 
         Returns True if ctx was bound (caller must call
-        ``_clear_prefill_paged_ctx`` after the forward).
-
-        Mirror of ``_build_paged_pool_specs_for_phase2`` but for prefill:
-        we only need SWA_KV right now (CSA/HCA/INDEXER dual-write will be
-        layered on in Phase B.2).
-        """
-        if not getattr(self, "_layer_pool_descs", None):
-            return False
-        if attn_inputs is None:
+        ``_clear_prefill_paged_ctx`` after the forward)."""
+        if self.kv_cache is None or attn_inputs is None:
             return False
         by_group = getattr(
             attn_inputs, "kv_cache_kernel_block_id_device_by_group", None
@@ -770,11 +494,8 @@ class DeepSeekV4Model(GptModelBase):
             bt_by_type[at] = bt_all[batch_offset : batch_offset + 1]
         if not bt_by_type:
             return False
-        for li, layer in enumerate(self.v4.layers):
-            layer_desc = (
-                self._layer_pool_descs[li] if li < len(self._layer_pool_descs) else {}
-            )
-            layer.attn.set_prefill_paged_ctx(layer_desc, bt_by_type)
+        for layer in self.v4.layers:
+            layer.attn.set_prefill_paged_ctx(self.kv_cache, bt_by_type)
         return True
 
     def _clear_prefill_paged_ctx(self) -> None:
@@ -800,10 +521,18 @@ class DeepSeekV4Model(GptModelBase):
         by_group_host = getattr(attn, "kv_cache_kernel_block_id_host_by_group", None)
         if not by_group_host:
             return
-        if not getattr(self, "_layer_pools", None):
-            return
         if self.kv_cache is None:
             return
+
+        def _layer_pool_list(ratio: int) -> list:
+            # All pools scattered per layer, mirrors the retired
+            # _layer_pools table.  SWA_KV always present; ratio selects
+            # CSA (4) or HCA (128) plus their STATE + INDEXER pools.
+            if ratio == 4:
+                return [7, 1, 3, 4, 5]
+            if ratio == 128:
+                return [7, 2, 6]
+            return [7]
 
         # attn_type → group_id mirrors DSV4ConfigCreator.cc pool_attn_types
         # (CSA_KV=1→0, HCA_KV=2→1, INDEXER_KV=3→2, INDEXER_STATE=4→3,
@@ -823,10 +552,8 @@ class DeepSeekV4Model(GptModelBase):
             7: KVCacheAttnType.SWA_KV,
         }
 
-        for layer_idx in range(len(self.v4.layers)):
-            if layer_idx >= len(self._layer_pools):
-                continue
-            for attn_type_int in self._layer_pools[layer_idx]:
+        for layer_idx, layer in enumerate(self.v4.layers):
+            for attn_type_int in _layer_pool_list(layer.attn.compress_ratio):
                 gid = attn_type_to_gid.get(attn_type_int)
                 attn_type_enum = attn_type_enum_by_int.get(attn_type_int)
                 if gid is None or attn_type_enum is None or gid >= len(by_group_host):
@@ -919,22 +646,18 @@ class DeepSeekV4Model(GptModelBase):
             device=device,
             attn_inputs=attn,
         )
-        # Stash the per-layer pool descriptors on the metadata so
-        # ``Attention.forward_decode`` can find its pool view at the
-        # right layer index without going through the model.
-        if getattr(self, "_layer_pool_descs", None):
-            impl.metadata.layer_pool_descs = self._layer_pool_descs
+        # Phase F: pool views resolved on demand in Attention — no
+        # per-layer descriptor cache to stash on metadata.
         return impl
 
     def _build_paged_pool_specs_for_phase2(self):
         """Per-attn_type ``(entries_per_block, max_blocks_per_req)`` for the
         decode-FMHA impl's metadata pre-allocation.
 
-        Phase 2 only wires SWA writes. We over-allocate ``max_blocks_per_req``
-        slightly so prepare() never has to grow buffers (would void the
-        forbid_realloc guarantee). Entries-per-block is read from the
-        actual framework allocation via PoolDescriptor (single source of
-        truth — see POOL_LAYOUT.md).
+        Phase F: entries_per_block derived from the framework pool tensor's
+        stride on layer 0 (all layers share the same allocator geometry
+        per attn_type). Pools 3-6 get fixed 2 blocks/req; SWA gets 2
+        blocks (256 entries/block × 2 = 512-slot ring, plenty for win).
         """
         from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
             CSA_KV,
@@ -943,22 +666,14 @@ class DeepSeekV4Model(GptModelBase):
             SWA_KV,
         )
 
-        if not getattr(self, "_layer_pool_descs", None):
+        if self.kv_cache is None or not self.v4.layers:
             return {}
-        # Per "不动原则" pools 3-6 get fixed 2 blocks/req. SWA is a
-        # 128-entry ring → 2 blocks (256 entries/block) is plenty.
-        # HCA/INDEXER are intrinsically lossy under this allocation
-        # for long seqs — accepted by design.
+        attn0 = self.v4.layers[0].attn
         specs: Dict[int, Tuple[int, int]] = {}
-        first = self._layer_pool_descs[0] if self._layer_pool_descs else {}
-        # CSA_KV is read-only in decode (frozen prefill data) but needed
-        # for Phase 2B-2b dual-pool paged read path.
         for at in (SWA_KV, HCA_KV, INDEXER_KV, CSA_KV):
-            for descs in self._layer_pool_descs:
-                if at in descs:
-                    specs[at] = (descs[at].entries_per_block, 2)
-                    break
-            _ = first  # silence linter — kept for potential future use
+            eb = attn0._pool_entries_per_block(at)
+            if eb > 0:
+                specs[at] = (eb, 2)
         return specs
 
     def _forward_decode(
@@ -1051,9 +766,6 @@ class DeepSeekV4Model(GptModelBase):
                 paged_block_tables=paged_bts or None,
                 paged_pool_entries_per_block=paged_ebs or None,
             )
-            if getattr(self, "_layer_pool_descs", None):
-                meta.layer_pool_descs = self._layer_pool_descs
-
         hidden = self.v4.forward_decode(input_ids, meta)  # [B, dim] packed
         return PyModelOutputs(hidden)
 
