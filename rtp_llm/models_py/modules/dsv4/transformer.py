@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.block import Block, MTPBlock, _RMSNorm
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
 
@@ -239,6 +240,8 @@ class V4Transformer(nn.Module):
             )
             self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
+        self._dbg_step = 0
+
     def set_cp_info(self, cp_info, cp_size: int, cp_rank: int) -> None:
         """Bind / clear the framework's Context-Parallel metadata for the
         NEXT forward.  Only stashes the raw metadata; the derived
@@ -376,12 +379,50 @@ class V4Transformer(nn.Module):
             cp_ctx = build_cp_context(_cp_info, _cp_size, _cp_rank, S, device)
         self._propagate_cp_ctx(cp_ctx)
 
+        _rt.begin()
         h = self.embed(input_ids)  # [B, S, d]
+        _rt.record("embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, S, hc, d]
-        for layer in self.layers:
+        _rt.record("embed_hc_expanded", h)
+        for li, layer in enumerate(self.layers):
             h = layer(h, start_pos, input_ids)
+            _rt.record(f"layer{li:02d}_out", h)
         h = self._hc_head_reduce(h)  # [B, S, d]
+        _rt.record("hc_reduced", h)
         h = self.norm(h)
+        _rt.record("final_norm", h)
+
+        if _rt.ENABLED:
+            extra: dict = {
+                "apply_lm_head": bool(apply_lm_head),
+                "input_ids_shape": tuple(input_ids.shape),
+                "input_ids": input_ids.detach().cpu(),
+                "start_pos": int(start_pos) if isinstance(start_pos, int) else -1,
+            }
+            if cp_ctx is not None:
+                extra.update(
+                    {
+                        "cp_size": cp_ctx.cp_size,
+                        "cp_rank": cp_ctx.cp_rank,
+                        "chunk_length": cp_ctx.chunk_length,
+                        "padded_seq_len": cp_ctx.padded_seq_len,
+                        "seq_len_full": cp_ctx.seq_len_full,
+                        "global_positions": cp_ctx.global_positions.detach().cpu(),
+                        "unpad_restore": cp_ctx.unpad_restore.detach().cpu(),
+                        "local_is_real": cp_ctx.local_is_real.detach().cpu(),
+                    }
+                )
+            else:
+                extra.update(
+                    {
+                        "cp_size": 1,
+                        "cp_rank": 0,
+                        "seq_len_full": int(S),
+                    }
+                )
+            _rt.dump(step=self._dbg_step, extra=extra)
+            self._dbg_step += 1
+
         if apply_lm_head:
             return F.linear(h[:, -1].float(), self.head.weight)
         return h

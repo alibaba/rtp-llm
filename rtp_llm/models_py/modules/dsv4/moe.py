@@ -22,7 +22,10 @@ from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 # (softplus → sqrt → bias-add → topk → gather → sum → div → mul) with one
 # fused kernel.  ~4× per-call speedup, identical top-k indices vs eager.
 try:
-    from rtp_llm.models_py.modules.dsv4._gate_fused_triton import fused_sqrtsoftplus_gate
+    from rtp_llm.models_py.modules.dsv4._gate_fused_triton import (
+        fused_sqrtsoftplus_gate,
+    )
+
     _GATE_FUSED_OK = True
 except Exception:  # pragma: no cover
     fused_sqrtsoftplus_gate = None
@@ -52,6 +55,7 @@ def _use_fused_gate(score_func: str, x_size_0: int) -> bool:
     if x_size_0 == 0:
         return False
     return True
+
 
 FP4_BLOCK = 32
 FP8_BLOCK = 128
@@ -287,12 +291,18 @@ class Gate(nn.Module):
         if self.weight.dtype == torch.bfloat16:
             return self.weight
         cached = getattr(self, "_w_bf16", None)
-        if cached is None or cached.shape != self.weight.shape or cached.device != self.weight.device:
+        if (
+            cached is None
+            or cached.shape != self.weight.shape
+            or cached.device != self.weight.device
+        ):
             cached = self.weight.to(torch.bfloat16)
             self._w_bf16 = cached
         return cached
 
-    def forward(self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         # x: [N, dim] flat.  Empty-batch safe — some paths (DP rank with
         # zero local tokens; F.softplus on certain degenerate shapes)
         # blow up with "unknown parameter type" on empty ``scores``, so
@@ -317,8 +327,10 @@ class Gate(nn.Module):
             and _use_fused_gate(self.score_func, x.size(0))
         ):
             return fused_sqrtsoftplus_gate(
-                scores.contiguous(), self.bias.contiguous(),
-                topk=self.topk, route_scale=float(self.route_scale),
+                scores.contiguous(),
+                self.bias.contiguous(),
+                topk=self.topk,
+                route_scale=float(self.route_scale),
                 norm_eps=1e-12,
             )
 
@@ -1048,9 +1060,17 @@ class MoE(nn.Module):
         return y_combined.float()
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        _dbg = self.layer_id <= 2  # instrument layers 0..2; first CSA layer is L2
         shape = x.size()
         x = x.view(-1, self.dim)
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_x_in", x)
         weights, indices = self.gate(x, input_ids.flatten())
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_weights", weights)
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_indices", indices)
 
         if self._use_mega_moe:
             y = self._routed_experts_mega_moe(x, weights, indices)
@@ -1087,5 +1107,10 @@ class MoE(nn.Module):
         else:
             y = self._routed_experts_deepep(x, weights, indices)
 
-        y = y + self.shared_experts(x).float()
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_routed_y", y)
+        shared_y = self.shared_experts(x).float()
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_shared_y", shared_y)
+        y = y + shared_y
         return y.type_as(x).view(shape)

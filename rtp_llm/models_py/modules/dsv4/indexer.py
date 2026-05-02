@@ -91,6 +91,10 @@ class Indexer(nn.Module):
         self.freqs_cis: Optional[torch.Tensor] = None
         # CP context bound per-forward by V4Transformer; None = no CP.
         self._cp_ctx: Optional[CPContext] = None
+        # Optional per-forward debug prefix (e.g. "L01_attn_idx"); when set,
+        # internal forward checkpoints are recorded via _record_tensor.
+        # Also propagated to the nested compressor as f"{prefix}_cmp".
+        self._dbg_prefix: Optional[str] = None
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         """Bind CP context.  When active, rank-local Q applies RoPE at
@@ -274,6 +278,8 @@ class Indexer(nn.Module):
     def forward(
         self, x: torch.Tensor, qr: torch.Tensor, start_pos, offset: int
     ) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
         bsz, seqlen, _ = x.size()
         ratio = self.compress_ratio
         rd = self.rope_head_dim
@@ -285,6 +291,7 @@ class Indexer(nn.Module):
             and not is_batched
             and start_pos == 0
         )
+        _dbg = self._dbg_prefix
 
         if cp_on:
             freqs_cis = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
@@ -311,14 +318,32 @@ class Indexer(nn.Module):
         else:
             q = self.wq_b(qr)
         q = q.unflatten(-1, (self.n_heads, self.head_dim))
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_q_pre_rope", q)
+            _rt.record_if_level(2, f"{_dbg}_freqs_cis", freqs_cis)
         apply_rotary_emb(q[..., -rd:], freqs_cis)
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_q_post_rope", q)
         # Skip rotate_activation + fp4_act_quant in this BF16 path
 
         # Nested compressor: reads its own _cp_ctx set by V4Transformer,
         # all-gathers rank-local kv/score → writes full compressed KV
         # into our self.kv_cache (bound above).
+        if _dbg is not None:
+            self.compressor._dbg_prefix = f"{_dbg}_cmp"
         self.compressor(x, start_pos)
+        if _dbg is not None:
+            self.compressor._dbg_prefix = None
+            # Snapshot the bound kv_cache (== self.kv_cache) so we can
+            # diff what the indexer reads downstream.
+            _rt.record_if_level(
+                2,
+                f"{_dbg}_compressor_kv_cache",
+                self.kv_cache[:bsz, : end_pos // ratio],
+            )
         weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_weights", weights)
 
         # Per-token index score: for each Q token we score every key in
         # ``kv_cache[:, :end_pos//ratio]``, ReLU, weight-sum over heads.
@@ -366,6 +391,8 @@ class Indexer(nn.Module):
             or isinstance(start_pos, torch.Tensor)
             and start_pos.item() == 0
         )
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_score_pre_mask", index_score)
         if is_prefill:
             T_comp = index_score.size(-1)
             if cp_on:
@@ -379,8 +406,12 @@ class Indexer(nn.Module):
             kv_cols = torch.arange(T_comp, device=x.device)  # [T_comp]
             mask = kv_cols >= (q_pos_1b // ratio)  # [S_local, T_comp]
             index_score = index_score + torch.where(mask, float("-inf"), 0.0)
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_score_post_mask", index_score)
 
         topk_idxs = index_score.topk(min(self.index_topk, end_pos // ratio), dim=-1)[1]
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_topk_pre_offset", topk_idxs)
         if is_prefill:
             # topk_idxs are in compressed-KV space [0, T_comp).  Entries
             # past this Q token's allowed window become -1 (masked).  The
@@ -394,4 +425,6 @@ class Indexer(nn.Module):
             topk_idxs = torch.where(mask, -1, topk_idxs + offset)
         else:
             topk_idxs = topk_idxs + offset
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_topk_final", topk_idxs)
         return topk_idxs

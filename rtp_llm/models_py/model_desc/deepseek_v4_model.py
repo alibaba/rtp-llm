@@ -1464,7 +1464,21 @@ class DeepSeekV4Model(GptModelBase):
                 if getattr(self, "_framework_kv_enabled", False) and attn is not None:
                     self._scatter_all_layers(attn, B=1, batch_offset=b)
 
-                self._running_pos = prefix_len + inp_len
+                # Under CP, ``inp_len`` is the rank-local chunked length
+                # (=padded_seq_len/cp_size); ``self.v4`` has just populated
+                # the FULL KV cache via the all-gather inside attention,
+                # so ``_running_pos`` — which seeds the next decode step's
+                # ``start_pos`` when ``use_framework_kv`` is off — must
+                # advance by the GLOBAL sequence length, not the rank-local
+                # chunk.  Recover seq_len_full from the cp_info padding
+                # mask (sum of 1-marked real-token slots).
+                if cp_enabled:
+                    seq_len_full_b = int(
+                        attn.context_parallel_info.prefill_qkv_padding_mask.sum().item()
+                    )
+                    self._running_pos = prefix_len + seq_len_full_b
+                else:
+                    self._running_pos = prefix_len + inp_len
                 offset += inp_len
 
             # PD separation: register all (layer × pool) block_ids in
