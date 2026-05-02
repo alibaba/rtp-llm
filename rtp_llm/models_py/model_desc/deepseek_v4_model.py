@@ -290,6 +290,17 @@ class DeepSeekV4Model(GptModelBase):
         # otherwise leave the attribute unset).
         self._pre_final_swa_snapshot: Dict[int, torch.Tensor] = {}
 
+        # Per-layer pre-final compressor / indexer-compressor state snapshot
+        # captured at the same chunked-prefill boundary as the SWA snapshot.
+        # Used by _scatter_state_pool to write slot[-2] (= the cache_key the
+        # next reuse will match against) with the kv_state / score_state at
+        # the boundary, instead of the end-of-prefill values that scatter
+        # would otherwise pick up.  Layout per layer:
+        #   {"csa": (kv_state_clone, score_state_clone),
+        #    "indexer": (kv_state_clone, score_state_clone)}
+        # Either entry is None if the layer doesn't have that compressor.
+        self._pre_final_state_snapshot: Dict[int, Dict[str, Any]] = {}
+
         # Optional on-demand timeline capture. Set DSV4_PROFILE_TRACE=/path/trace.json
         # and touch /tmp/dsv4_profile_trigger to capture the NEXT forward only.
         self._profile_path = os.environ.get("DSV4_PROFILE_TRACE")
@@ -726,13 +737,26 @@ class DeepSeekV4Model(GptModelBase):
         entries_per_block,
         state_dim,
         B,
+        boundary_kv_state=None,
+        boundary_score_state=None,
     ):
-        """Scatter kv_state + score_state (fp32) back to BlockPool pages."""
+        """Scatter kv_state + score_state (fp32) back to BlockPool pages.
+
+        When ``boundary_kv_state`` / ``boundary_score_state`` are provided
+        (chunked-prefill snapshot taken at the pre-final boundary), the
+        second-to-last real block — i.e. ``slot[-2]``, the slot whose
+        cache_key the next reuse will match against — is written from the
+        boundary snapshot instead of the live (end-of-prefill) state.
+        ``slot[-1]`` always carries the live state so same-process decode
+        keeps reading the up-to-date second half."""
         if fw_tensor is None or fw_tensor.numel() == 0:
             return
         half_dim = state_dim // 2
         bids_cpu = block_ids_2d[:B].cpu()
         state_rows = kv_state.size(1)
+        use_boundary = (
+            boundary_kv_state is not None and boundary_score_state is not None
+        )
         for b in range(B):
             row = bids_cpu[b]
             real_bids = [
@@ -750,8 +774,21 @@ class DeepSeekV4Model(GptModelBase):
                 n = min(entries_per_block, state_rows - row_start)
                 if n <= 0:
                     break
-                page_fp32[:n, :half_dim] = kv_state[b, row_start : row_start + n]
-                page_fp32[:n, half_dim:] = score_state[b, row_start : row_start + n]
+                # slot[-2] (blk_idx==0 when there are 2 real blocks) writes
+                # the boundary snapshot if given; slot[-1] always live.
+                is_second_to_last = use_boundary and blk_idx == 0 and len(real_bids) == 2
+                if is_second_to_last:
+                    page_fp32[:n, :half_dim] = boundary_kv_state[
+                        b, row_start : row_start + n
+                    ]
+                    page_fp32[:n, half_dim:] = boundary_score_state[
+                        b, row_start : row_start + n
+                    ]
+                else:
+                    page_fp32[:n, :half_dim] = kv_state[b, row_start : row_start + n]
+                    page_fp32[:n, half_dim:] = score_state[
+                        b, row_start : row_start + n
+                    ]
 
     def _get_pool_tensor(self, attn_type: int, layer_idx: int):
         """Look up per-pool BlockPool tensor."""
@@ -1309,6 +1346,9 @@ class DeepSeekV4Model(GptModelBase):
                     if attn_mod.indexer is not None:
                         comp = attn_mod.indexer.compressor
                         idx_hd = attn_mod.indexer.head_dim
+                        snap = self._pre_final_state_snapshot.get(i, {}).get("indexer")
+                        b_kv = snap[0] if snap is not None else None
+                        b_sc = snap[1] if snap is not None else None
                         self._scatter_state_pool(
                             fw_t,
                             bid_slice,
@@ -1317,20 +1357,26 @@ class DeepSeekV4Model(GptModelBase):
                             4,
                             4 * idx_hd,
                             B,
+                            b_kv,
+                            b_sc,
                         )
                         if self._debug_reuse_log_layer(i):
                             logging.info(
                                 "DSV4_DEBUG_REUSE py scatter_state layer=%d gid=%d attn_type=%d batch=%d "
-                                "kv=%s score=%s",
+                                "boundary=%d kv=%s score=%s",
                                 i,
                                 gid,
                                 attn_type,
                                 batch_offset,
+                                int(snap is not None),
                                 _dsv4_tensor_digest(comp.kv_state[:B]),
                                 _dsv4_tensor_digest(comp.score_state[:B]),
                             )
                 elif attn_type == 5:  # CSA_STATE
                     if attn_mod.compressor is not None:
+                        snap = self._pre_final_state_snapshot.get(i, {}).get("csa")
+                        b_kv = snap[0] if snap is not None else None
+                        b_sc = snap[1] if snap is not None else None
                         self._scatter_state_pool(
                             fw_t,
                             bid_slice,
@@ -1339,20 +1385,26 @@ class DeepSeekV4Model(GptModelBase):
                             4,
                             4 * hd,
                             B,
+                            b_kv,
+                            b_sc,
                         )
                         if self._debug_reuse_log_layer(i):
                             logging.info(
                                 "DSV4_DEBUG_REUSE py scatter_state layer=%d gid=%d attn_type=%d batch=%d "
-                                "kv=%s score=%s",
+                                "boundary=%d kv=%s score=%s",
                                 i,
                                 gid,
                                 attn_type,
                                 batch_offset,
+                                int(snap is not None),
                                 _dsv4_tensor_digest(attn_mod.compressor.kv_state[:B]),
                                 _dsv4_tensor_digest(attn_mod.compressor.score_state[:B]),
                             )
                 elif attn_type == 6:  # HCA_STATE
                     if attn_mod.compressor is not None:
+                        snap = self._pre_final_state_snapshot.get(i, {}).get("csa")
+                        b_kv = snap[0] if snap is not None else None
+                        b_sc = snap[1] if snap is not None else None
                         self._scatter_state_pool(
                             fw_t,
                             bid_slice,
@@ -1361,6 +1413,8 @@ class DeepSeekV4Model(GptModelBase):
                             8,
                             2 * hd,
                             B,
+                            b_kv,
+                            b_sc,
                         )
                         if self._debug_reuse_log_layer(i):
                             logging.info(
@@ -1749,6 +1803,7 @@ class DeepSeekV4Model(GptModelBase):
                 # doesn't cross the pre-final boundary (short prompts /
                 # continuation reuse).
                 self._pre_final_swa_snapshot.clear()
+                self._pre_final_state_snapshot.clear()
                 total_seq = start_pos + inp_len
                 pre_final = (max(total_seq - 1, 0) // 256) * 256
                 # CP-on prefill builds its zigzag chunk-aware context inside
@@ -1782,11 +1837,32 @@ class DeepSeekV4Model(GptModelBase):
                     # boundary. clone() makes the tensor independent so
                     # chunk_b's forward (which mutates kv_cache in-place)
                     # doesn't overwrite what we just captured.
+                    # Same-time snapshot of compressor state buffers — the
+                    # chunk_a forward just wrote kv_state[:, :ratio] with
+                    # the wkv of the LAST `ratio` tokens before the boundary
+                    # (compressor.py's prefill save), which is exactly the
+                    # overlap a continuation prefill from this boundary
+                    # needs.  chunk_b will then overwrite kv_state with its
+                    # own tail, so we have to clone now.
                     for li, layer in enumerate(self.v4.layers):
-                        win_li = layer.attn.window_size
+                        attn_li = layer.attn
+                        win_li = attn_li.window_size
                         self._pre_final_swa_snapshot[li] = (
-                            layer.attn.kv_cache[:1, :win_li].detach().clone()
+                            attn_li.kv_cache[:1, :win_li].detach().clone()
                         )
+                        snap_entry: Dict[str, Any] = {"csa": None, "indexer": None}
+                        if attn_li.compressor is not None:
+                            snap_entry["csa"] = (
+                                attn_li.compressor.kv_state[:1].detach().clone(),
+                                attn_li.compressor.score_state[:1].detach().clone(),
+                            )
+                        if attn_li.indexer is not None and attn_li.indexer.compressor is not None:
+                            ic = attn_li.indexer.compressor
+                            snap_entry["indexer"] = (
+                                ic.kv_state[:1].detach().clone(),
+                                ic.score_state[:1].detach().clone(),
+                            )
+                        self._pre_final_state_snapshot[li] = snap_entry
                     h_b = self.v4(
                         chunk_b, start_pos=pre_final, apply_lm_head=False
                     )
@@ -1807,6 +1883,7 @@ class DeepSeekV4Model(GptModelBase):
                     self._scatter_all_layers(attn, B=1, batch_offset=b)
                     self._debug_reuse_block_row(attn, b, "after_prefill_scatter")
                 self._pre_final_swa_snapshot.clear()
+                self._pre_final_state_snapshot.clear()
 
                 self._running_pos = prefix_len + inp_len
                 offset += inp_len

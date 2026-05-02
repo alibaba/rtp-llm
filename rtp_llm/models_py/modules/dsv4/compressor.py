@@ -502,6 +502,17 @@ class Compressor(nn.Module):
             cutoff = seqlen - remainder
             offset = ratio if overlap else 0
 
+            # Continuation prefill needs the prefix-boundary overlap that was
+            # restored into kv_state[:, :ratio] BEFORE this forward (gather +
+            # post-gather zero leaves it intact).  The save below overwrites
+            # that slot with the CURRENT prefill's tail, so capture the
+            # restored value first and inject it after the overlap_transform.
+            saved_prev_overlap_kv = None
+            saved_prev_overlap_score = None
+            if overlap and sp_int > 0:
+                saved_prev_overlap_kv = self.kv_state[:bsz, :ratio, :d].clone()
+                saved_prev_overlap_score = self.score_state[:bsz, :ratio, :d].clone()
+
             if overlap and cutoff >= ratio:
                 self.kv_state[:bsz, :ratio] = kv[:, cutoff - ratio : cutoff]
                 self.score_state[:bsz, :ratio] = (
@@ -529,9 +540,9 @@ class Compressor(nn.Module):
                 # score_state[:, :ratio] holds the corresponding score+ape.
                 # Without this, window 0's overlap slots are zero/-inf, causing
                 # the first compressed entry to differ from full prefill.
-                if sp_int > 0:
-                    kv[:bsz, 0, :ratio] = self.kv_state[:bsz, :ratio, :d]
-                    score[:bsz, 0, :ratio] = self.score_state[:bsz, :ratio, :d]
+                if sp_int > 0 and saved_prev_overlap_kv is not None:
+                    kv[:bsz, 0, :ratio] = saved_prev_overlap_kv
+                    score[:bsz, 0, :ratio] = saved_prev_overlap_score
 
             # Fast path: single Triton kernel fuses per-D softmax over G
             # + weighted sum.  REF chain materializes 3 fp32 intermediates
