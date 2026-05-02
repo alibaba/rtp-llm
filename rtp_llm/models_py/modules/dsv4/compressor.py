@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
     apply_rotary_emb_batched,
 )
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 # P2 (prefill_opt/final_plan.md): fused softmax+weighted-sum Triton kernel.
 # Replaces the prefill `(kv * score.softmax(dim=2)).sum(dim=2)` chain
@@ -45,9 +46,12 @@ def _use_compressor_fast() -> bool:
 
 
 class _CompressorNorm(nn.Module):
+    """Weight holder for Compressor RMSNorm.  BF16 — ``rtp_llm_ops.rmsnorm``
+    requires bf16 weight (silent NaN on fp32), matching vLLM default."""
+
     def __init__(self, dim: int):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.bfloat16))
 
 
 class Compressor(nn.Module):
@@ -91,7 +95,7 @@ class Compressor(nn.Module):
                 )
             self.norm = _CompressorNorm(head_dim)
             self.norm.weight = nn.Parameter(
-                weights[f"{prefix}.norm.weight"].float(),
+                weights[f"{prefix}.norm.weight"].to(torch.bfloat16),
                 requires_grad=False,
             )
         else:
@@ -136,11 +140,18 @@ class Compressor(nn.Module):
         self._dbg_prefix: Optional[str] = None
 
     def _rmsnorm(self, x: torch.Tensor) -> torch.Tensor:
-        dtype = x.dtype
-        x32 = x.float()
-        var = x32.square().mean(-1, keepdim=True)
-        x32 = x32 * torch.rsqrt(var + self.norm_eps)
-        return (self.norm.weight * x32).to(dtype)
+        # Framework C++ ``rtp_llm_ops.rmsnorm`` (single launch, bf16 weight).
+        orig_shape = x.shape
+        x_2d = x.reshape(-1, orig_shape[-1])
+        out = torch.empty_like(x_2d)
+        rtp_llm_ops.rmsnorm(
+            out,
+            x_2d,
+            self.norm.weight,
+            self.norm_eps,
+            torch.cuda.current_stream().cuda_stream,
+        )
+        return out.view(orig_shape)
 
     def _overlap_transform(self, tensor: torch.Tensor, value=0):
         # tensor: [b,s,r,2d] -> [b,s,2r,d]; first ratio rows pull from previous window's tail
