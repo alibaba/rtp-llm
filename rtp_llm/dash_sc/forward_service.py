@@ -121,7 +121,17 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             except Exception:
                 pass
 
-        upstream_iter = stub.ModelStreamInfer(request_iterator)
+        # Propagate client-sent metadata to the downstream stub so that
+        # correlation headers (``x-dashscope-request-id`` / ``x-request-id``
+        # / ``traceparent`` / …) travel end-to-end. Without this the backend
+        # frontend's access log has no way to link a ``req_count=0`` RPC to
+        # the upstream dashscope-serving request that provoked it.
+        try:
+            md = context.invocation_metadata() or ()
+        except Exception:
+            md = ()
+
+        upstream_iter = stub.ModelStreamInfer(request_iterator, metadata=md)
         if agg is not None:
 
             def counting_response_iter():

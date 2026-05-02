@@ -77,15 +77,100 @@ _STREAM_TYPE = {
 # reclassified as a client fault.
 _CLIENT_REQ_ITER_DETAILS = "Exception iterating requests!"
 
+# Upstream correlation headers, by priority. Whichever header the client
+# actually set wins; the key name is recorded alongside the value so
+# operators can tell dashscope-serving-originated IDs apart from generic
+# ``x-request-id`` / W3C trace context. ``traceparent`` matches the
+# ``rtp_llm/flexlb`` Java convention (HttpHeaderNames.TRACE_PARENT) so
+# HTTP and gRPC paths share a fallback.
+_CORRELATION_METADATA_KEYS = (
+    "x-dashscope-request-id",
+    "x-request-id",
+    "dashscope-request-id",
+    "traceparent",
+)
 
-def _is_client_request_iter_failure(exc: BaseException) -> bool:
-    """True iff ``exc`` is grpcio's ``_MultiThreadedRendezvous`` for a failed request-iterator."""
-    if not isinstance(exc, grpc.RpcError):
-        return False
+
+def _extract_correlation_id(context) -> tuple[Optional[str], Optional[str]]:
+    """Pull an upstream correlation ID off ``context.invocation_metadata()``.
+
+    Returns ``(header_key, header_value)`` for the first ``_CORRELATION_METADATA_KEYS``
+    entry that is present and non-empty, or ``(None, None)``. Case-insensitive —
+    gRPC normalises metadata names to lower-case but clients don't always.
+    Called once per RPC before any body read, so it works even when
+    ``req_count=0`` (peer closed before sending a frame).
+    """
     try:
-        return exc.details() == _CLIENT_REQ_ITER_DETAILS
+        md = context.invocation_metadata() or ()
     except Exception:
-        return False
+        return None, None
+    lookup: dict[str, str] = {}
+    for entry in md:
+        try:
+            k, v = entry
+        except Exception:
+            continue
+        if k is None or v is None:
+            continue
+        lookup[str(k).lower()] = str(v)
+    for key in _CORRELATION_METADATA_KEYS:
+        v = lookup.get(key)
+        if v:
+            return key, v
+    return None, None
+
+
+def _rpc_code(exc: BaseException) -> Optional[Any]:
+    try:
+        return exc.code()
+    except Exception:
+        return None
+
+
+def _rpc_details(exc: BaseException) -> Optional[str]:
+    try:
+        return exc.details()
+    except Exception:
+        return None
+
+
+def _classify_rpc_exception(
+    exc: BaseException, agg: "_RpcAggregate"
+) -> tuple[str, Optional[str]]:
+    """Map a server-side RPC exception to ``(status, status_detail)``.
+
+    Precedence (narrowest first):
+    1. ``GeneratorExit`` — gRPC framework closed our wrapper because the
+       client handler terminated. Route to CANCELLED so benign disconnects
+       don't pollute the error bucket.
+    2. ``details == "Exception iterating requests!"`` — grpcio's fixed
+       marker for a failed client request iterator; code is UNKNOWN but
+       semantics are "client gone", so override to CANCELLED.
+    3. Bare ``RpcError()`` (no ``code()``, no ``details()``) on a
+       frame-less RPC — backend-frontend view of "peer closed before
+       sending a frame". CANCELLED.
+    4. ``RpcError`` with a real ``code()`` — use ``code.name`` directly
+       (CANCELLED / UNAVAILABLE / DEADLINE_EXCEEDED / …). This is the
+       forwarder's common path; before this existed, every
+       ``_MultiThreadedRendezvous`` dumped into UNKNOWN.
+    5. Everything else — UNKNOWN.
+    """
+    if isinstance(exc, GeneratorExit):
+        return "CANCELLED", "client closed generator"
+    if not isinstance(exc, grpc.RpcError):
+        return "UNKNOWN", repr(exc)
+
+    code = _rpc_code(exc)
+    details = _rpc_details(exc)
+
+    if details == _CLIENT_REQ_ITER_DETAILS:
+        return "CANCELLED", "client request iterator failed"
+    if code is None and not details and agg.req_count == 0:
+        return "CANCELLED", "peer closed before request arrived"
+    if code is not None and code != grpc.StatusCode.OK:
+        return code.name, details or code.name
+    return "UNKNOWN", repr(exc)
+
 
 # Raw-mode caps. LLM streams can span hundreds of chunks and a single input_ids
 # tensor can be tens of thousands of tokens; without these we'd dump multi-MB
@@ -304,6 +389,15 @@ class _RpcAggregate:
     resp_count: int = 0
     request_id: Optional[str] = None
     model_name: Optional[str] = None
+    # Upstream correlation ID captured from request metadata (see
+    # ``_extract_correlation_id``). Independent of the proto ``id`` field —
+    # the latter becomes ``request_id`` and may be ``None`` on a frame-less
+    # RPC. ``upstream_request_id`` is populated at ``_new_aggregate`` time
+    # from the headers the client sent, so three-layer log correlation
+    # (dashscope-serving ↔ forwarder ↔ backend frontend) works even when
+    # no body ever arrived.
+    upstream_request_id: Optional[str] = None
+    upstream_request_id_key: Optional[str] = None
     # Struct-mode content (real frontend path).
     input_ids: Optional[list[int]] = None
     input_len: Optional[int] = None
@@ -466,6 +560,8 @@ class _RpcAggregate:
             "buffered_stage": self.buffered_stage,
             "request_id": self.request_id,
             "model_name": self.model_name,
+            "upstream_request_id": self.upstream_request_id,
+            "upstream_request_id_key": self.upstream_request_id_key,
         }
         if self.raw_mode:
             record["raw_requests"] = self.raw_requests
@@ -609,12 +705,15 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
             peer = context.peer()
         except Exception:
             peer = ""
+        up_key, up_val = _extract_correlation_id(context)
         agg = _RpcAggregate(
             method=method,
             stream_type=stream_type,
             peer=peer,
             start_ts=time.time(),
             raw_mode=self._raw_mode,
+            upstream_request_id=up_val,
+            upstream_request_id_key=up_key,
         )
         # Make the aggregate reachable from downstream servicer code via the
         # gRPC context object. :class:`PureForwardServicer` reads this back to
@@ -654,35 +753,7 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
 
         if exc is not None:
             agg.exc_type = type(exc).__name__
-            if isinstance(exc, GeneratorExit):
-                # gRPC framework invoked ``gen.close()`` on our wrapper
-                # because the client handler terminated (peer disconnect,
-                # upstream cancel, server shutdown). This is benign — not a
-                # protocol-level failure — so route it to CANCEL_QPS instead
-                # of ERROR_QPS (otherwise every client hang-up pollutes the
-                # error dashboard). ``exc_type="GeneratorExit"`` on the log
-                # line still distinguishes it from a true gRPC CANCELLED,
-                # which carries ``context_code="CANCELLED"`` from the peer.
-                agg.status = "CANCELLED"
-                agg.status_detail = "client closed generator"
-            elif _is_client_request_iter_failure(exc):
-                # grpcio's per-call reader thread wraps request-iterator
-                # failures as ``_MultiThreadedRendezvous(code=UNKNOWN,
-                # details="Exception iterating requests!")``. On the forwarder
-                # path we hand the client's ``request_iterator`` straight to
-                # the downstream stub — the iteration runs inside grpcio and
-                # the error surfaces on the response side after ~sub-ms of
-                # wall time. Signature: ``latency_total_ms<1 / req_count=0 /
-                # resp_count=0``. It's virtually always the client
-                # disappearing before sending a single frame, not a backend
-                # fault, so route to CANCEL_QPS instead of polluting error
-                # dashboards with something that looks like a timeout but
-                # isn't.
-                agg.status = "CANCELLED"
-                agg.status_detail = "client request iterator failed"
-            else:
-                agg.status = "UNKNOWN"
-                agg.status_detail = repr(exc)
+            agg.status, agg.status_detail = _classify_rpc_exception(exc, agg)
         elif code is None or code == grpc.StatusCode.OK:
             agg.status = "OK"
             agg.status_detail = None

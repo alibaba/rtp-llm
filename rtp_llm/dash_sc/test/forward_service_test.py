@@ -415,5 +415,59 @@ class AccessLogDiagInjectionTest(TestCase):
         self.assertEqual(agg.buffered_stage, "dropped_buffered_on_exception")
 
 
+class MetadataPropagationTest(TestCase):
+    """Client-sent gRPC metadata must reach the downstream stub verbatim.
+
+    Without this, correlation headers (``x-dashscope-request-id`` etc.) die
+    at the forwarder and the backend frontend has no way to tie a
+    ``req_count=0`` access-log entry to the originating dashscope-serving
+    request.
+    """
+
+    def setUp(self) -> None:
+        self.channel_patcher = patch("grpc.insecure_channel", return_value=MagicMock())
+        self.channel_patcher.start()
+        self.servicer = PureForwardServicer(["127.0.0.1:1"])
+        self.mock_stub = MagicMock()
+        self.servicer._stubs = [self.mock_stub]
+
+    def tearDown(self) -> None:
+        self.servicer.close()
+        self.channel_patcher.stop()
+
+    def test_client_metadata_forwarded_to_downstream_stub(self) -> None:
+        md = [
+            ("x-dashscope-request-id", "corr-abc-42"),
+            ("x-request-id", "generic-7"),
+        ]
+        ctx = MagicMock()
+        ctx.invocation_metadata.return_value = md
+        self.mock_stub.ModelStreamInfer.return_value = iter([_make_response()])
+
+        def request_gen():
+            yield _make_request("req1")
+
+        list(self.servicer.ModelStreamInfer(request_gen(), ctx))
+        kwargs = self.mock_stub.ModelStreamInfer.call_args.kwargs
+        self.assertIn("metadata", kwargs)
+        forwarded = list(kwargs["metadata"])
+        self.assertEqual(forwarded, md)
+
+    def test_invocation_metadata_raising_does_not_break_forwarder(self) -> None:
+        """A context whose ``invocation_metadata()`` raises must fall back to
+        empty metadata, not propagate the error and drop the RPC."""
+        ctx = MagicMock()
+        ctx.invocation_metadata.side_effect = RuntimeError("context teardown race")
+        self.mock_stub.ModelStreamInfer.return_value = iter([_make_response()])
+
+        def request_gen():
+            yield _make_request("req1")
+
+        out = list(self.servicer.ModelStreamInfer(request_gen(), ctx))
+        self.assertEqual(len(out), 1)
+        kwargs = self.mock_stub.ModelStreamInfer.call_args.kwargs
+        self.assertEqual(tuple(kwargs["metadata"]), ())
+
+
 if __name__ == "__main__":
     main()
