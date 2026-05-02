@@ -33,6 +33,7 @@ from rtp_llm.dash_sc.codec import (
     build_stream_response_from_generate_outputs,
     iter_fake_model_stream_infer,
     parse_dash_sc_grpc_request,
+    prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.request_id_generator import generate_request_id
@@ -198,6 +199,7 @@ def iter_real_model_stream_infer(
     *,
     rtp_llm_request_id: int,
     run_enqueue_sync: Callable[[Any, GenerateInput], Iterable[GenerateOutputs]],
+    echo_prefix_ids: Optional[list[int]] = None,
 ) -> Iterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -208,6 +210,11 @@ def iter_real_model_stream_infer(
     ``run_enqueue_sync`` is invoked with ``(visitor, generate_input)`` — the servicer pre-binds
     the gRPC ``ServicerContext`` via ``functools.partial`` so cancellation reaches the pump
     without changing the callable's positional signature (keeps test injection simple).
+
+    ``echo_prefix_ids`` is the auto-derived "thinking prefill" token id sequence. When
+    non-empty and ``input_ids_list`` ends with it, the first non-empty ``generated_ids``
+    chunk gets ``echo_prefix_ids`` prepended so downstream consumers that rely on the
+    prefill-echo contract (dashllm-style) see the expected first token.
     """
     trace_str = str(request.id)
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
@@ -218,6 +225,12 @@ def iter_real_model_stream_infer(
         len(input_ids_list),
         sampling,
     )
+    prefix_ids = list(echo_prefix_ids) if echo_prefix_ids else []
+    n = len(prefix_ids)
+    should_echo = (
+        n > 0 and len(input_ids_list) >= n and list(input_ids_list[-n:]) == prefix_ids
+    )
+    echoed = False
     try:
         generate_config = sampling.to_generate_config(other=other)
         generate_config.trace_id = trace_str
@@ -235,7 +248,7 @@ def iter_real_model_stream_infer(
         for go in run_enqueue_sync(backend_visitor, generate_input):
             chunk_idx += 1
             logging.debug("[DashScGrpc] [%s] real infer chunk %s", tag, chunk_idx)
-            yield build_stream_response_from_generate_outputs(
+            response = build_stream_response_from_generate_outputs(
                 dash_sc_request_id=request.id,
                 model_name=request.model_name,
                 go=go,
@@ -245,6 +258,10 @@ def iter_real_model_stream_infer(
                 is_streaming=is_streaming,
                 _request_shape=request_shape,
             )
+            if should_echo and not echoed:
+                if prepend_to_generated_ids_tensor(response.infer_response, prefix_ids):
+                    echoed = True
+            yield response
         if chunk_idx:
             logging.debug(
                 "[DashScGrpc] [%s] real infer done: output_chunks=%s",
@@ -283,11 +300,13 @@ class DashScGrpcInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServic
         ip: str = "",
         port: int = 0,
         server_id: str = "",
+        echo_prefix_ids: Optional[list[int]] = None,
     ):
         self._backend_visitor = backend_visitor
         self._ip = ip
         self._port = port
         self._server_id = server_id
+        self._echo_prefix_ids = list(echo_prefix_ids) if echo_prefix_ids else []
         self._seq_counter = AtomicCounter()
 
     def close(self) -> None:
@@ -333,4 +352,5 @@ class DashScGrpcInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServic
                     self._backend_visitor,
                     rtp_llm_request_id=self._next_rtp_llm_request_id(),
                     run_enqueue_sync=run_enqueue_sync,
+                    echo_prefix_ids=self._echo_prefix_ids,
                 )

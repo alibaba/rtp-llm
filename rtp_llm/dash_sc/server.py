@@ -126,6 +126,7 @@ class DashScGrpcServer:
         log_path: str = "",
         backup_count: int = 0,
         rank_id: Optional[int] = None,
+        echo_prefix_ids: Optional[list[int]] = None,
     ) -> grpc.Server:
         """Bind + start the gRPC server synchronously. ``backend_visitor=None`` -> fake mode.
 
@@ -186,6 +187,7 @@ class DashScGrpcServer:
                     ip=ip,
                     port=port,
                     server_id=server_id,
+                    echo_prefix_ids=echo_prefix_ids,
                 )
                 mode = "real" if backend_visitor else "fake"
 
@@ -215,6 +217,7 @@ class DashScGrpcServer:
         backup_count: int = 0,
         rank_id: Optional[int] = None,
         startup_timeout_s: float = _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S,
+        echo_prefix_ids: Optional[list[int]] = None,
     ) -> None:
         """Start gRPC in a daemon thread and block until ``server.start()`` succeeds.
 
@@ -236,6 +239,7 @@ class DashScGrpcServer:
                     log_path=log_path,
                     backup_count=backup_count,
                     rank_id=rank_id,
+                    echo_prefix_ids=echo_prefix_ids,
                 )
             except BaseException as e:
                 start_error.append(e)

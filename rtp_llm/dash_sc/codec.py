@@ -352,6 +352,36 @@ def _append_generated_ids_output(
     infer.raw_output_contents.append(raw)
 
 
+def prepend_to_generated_ids_tensor(
+    infer: predict_v2_pb2.ModelInferResponse,
+    token_ids: list[int],
+) -> bool:
+    """Prepend ``token_ids`` to the already-appended ``generated_ids`` tensor on ``infer``.
+
+    Returns ``False`` and leaves ``infer`` untouched when ``token_ids`` is empty, when
+    ``generated_ids`` is absent, or when its declared shape is a zero-length / filler
+    payload (``shape[-1] <= 0``). On success, re-packs the raw bytes as
+    ``token_ids + existing_ids`` (INT32 little-endian) and updates ``shape`` to
+    ``[1, len(token_ids) + cur_len]``.
+    """
+    if not token_ids:
+        return False
+    for i, out in enumerate(infer.outputs):
+        if out.name != "generated_ids":
+            continue
+        if i >= len(infer.raw_output_contents):
+            return False
+        shape = list(out.shape)
+        cur_len = shape[-1] if shape else 0
+        if cur_len <= 0:
+            return False
+        prefix_raw = struct.pack("<%di" % len(token_ids), *token_ids)
+        infer.raw_output_contents[i] = prefix_raw + bytes(infer.raw_output_contents[i])
+        out.shape[:] = [1, cur_len + len(token_ids)]
+        return True
+    return False
+
+
 def _append_finish_reason_output(
     infer: predict_v2_pb2.ModelInferResponse,
     finished: bool,
