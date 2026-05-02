@@ -1062,7 +1062,10 @@ class MoE(nn.Module):
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
-        _dbg = self.layer_id <= 2  # instrument layers 0..2; first CSA layer is L2
+        # Master switch: when MOEDBG=0 the AND short-circuits so neither the
+        # layer_id compare nor any record_if_level call site below runs.
+        # Instruments layers 0..2 (first CSA layer is L2) when enabled.
+        _dbg = _rt.ENABLED and self.layer_id <= 2
         shape = x.size()
         x = x.view(-1, self.dim)
         if _dbg:

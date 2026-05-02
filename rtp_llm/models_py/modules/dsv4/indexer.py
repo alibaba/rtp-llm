@@ -291,7 +291,9 @@ class Indexer(nn.Module):
             and not is_batched
             and start_pos == 0
         )
-        _dbg = self._dbg_prefix
+        # Master switch: gated by both MOEDBG (process-wide) and per-instance
+        # _dbg_prefix (set externally; e.g. attention layer-0..2 wiring).
+        _dbg = self._dbg_prefix if _rt.ENABLED else None
 
         if cp_on:
             freqs_cis = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
