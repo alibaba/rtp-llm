@@ -416,7 +416,9 @@ class Compressor(nn.Module):
             self.rope_head_dim,
         )
         dtype = x.dtype
-        _dbg = self._dbg_prefix
+        # Master switch: gated by both MOEDBG (process-wide) and per-instance
+        # _dbg_prefix (set by parent indexer only when its own _dbg is on).
+        _dbg = self._dbg_prefix if _rt.ENABLED else None
         x32 = x.float()
         kv = torch.nn.functional.linear(x32, self.wkv.weight)
         score = torch.nn.functional.linear(x32, self.wgate.weight)

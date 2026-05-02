@@ -1281,7 +1281,9 @@ class Attention(nn.Module):
         """Forward pass. start_pos can be int (B=1) or tensor [B] for batched decode."""
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
-        _dbg = self.layer_id <= 2
+        # Master switch: when MOEDBG=0 the AND short-circuits so neither the
+        # layer_id compare nor any record_if_level call site below runs.
+        _dbg = _rt.ENABLED and self.layer_id <= 2
         bsz, seqlen, _ = x.size()
         win = self.window_size
         ratio = self.compress_ratio
