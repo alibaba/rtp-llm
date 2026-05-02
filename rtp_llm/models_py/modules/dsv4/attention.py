@@ -19,7 +19,6 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import os
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
@@ -169,35 +168,41 @@ def _get_window_topk_idxs_cp(
     indices [max(0, g-win+1), g+1) in the full uncompressed KV tensor
     ``kv[:, :seq_len_full]``.
 
-    Returns [bsz, S_local, min(window_size, seq_len_full)] int64.
-    Entries whose global position is out-of-range (padding local idxs
-    with g >= seq_len_full, or ``(g-win+1)+j > g`` for i/w edge rows)
-    are set to -1 so the sparse_attn kernel masks them out.
+    Returns [bsz, S_local, window_size] int64 with valid indices at the
+    START of each row (slots 0..k-1) and -1 padding at the END — matching
+    the non-CP ``_get_window_topk_idxs`` layout.  This slot ordering is
+    LOAD-BEARING for sparse-attn numerical equivalence: the TileLang
+    sparse_attn kernel's per-block fp32 reductions are not invariant to
+    the position of valid vs masked slots within a 64-wide block, so any
+    deviation from the non-CP layout leaks ~1 BF16 ULP per layer of
+    noise that compounds across 43 layers and shifts greedy decode onto
+    OOV vocab indices.  See `project_dsv4_cp_ep_wrong_output` memory.
+
+    Entries beyond each row's valid window are -1 so the sparse_attn
+    kernel masks them out.
     """
     device = global_positions.device
     S_local = int(global_positions.shape[0])
     W = min(window_size, max(seq_len_full, 1))
-    # base: [S_local, 1] the global KV "right edge" (= g for row i).
+    # Per-row window start, clamped to 0 for early Q positions whose
+    # left edge would be negative.  Matches `_get_window_topk_idxs`'s
+    # `(base - window_size + 1).clamp(0)` at start_pos == 0.
     base = global_positions.unsqueeze(1)  # [S_local, 1]
+    window_start = (base - W + 1).clamp_min(0)  # [S_local, 1]
     offs = torch.arange(W, device=device)  # [W]
-    # kv_pos[i, j] = (g_i - W + 1) + j
-    kv_pos = (base - W + 1) + offs  # [S_local, W]
-    # Mask-out:
-    #   - kv_pos < 0   (Q too early, window begins before seq start)
-    #   - kv_pos > g   (impossible given our window-length design, but
-    #                   included for defense)
-    #   - kv_pos >= seq_len_full (Q at a padding slot, or short seq)
-    valid = (kv_pos >= 0) & (kv_pos <= base) & (kv_pos < seq_len_full)
-    kv_pos = torch.where(valid, kv_pos, torch.full_like(kv_pos, -1))
+    matrix = window_start + offs  # [S_local, W] — valid kv indices left-aligned
+    # Mask out positions that are causally future (matrix > g) or land
+    # past the unpadded sequence end (matrix >= seq_len_full, which
+    # protects rank-local padding slots whose global_position == padded_len).
+    invalid = (matrix > base) | (matrix >= seq_len_full)
+    matrix = torch.where(invalid, torch.full_like(matrix, -1), matrix)
     if W < window_size:
-        # Pad trailing columns with -1 so concat with compressed topk is
-        # a fixed width across calls (sparse_attn_kernel takes symbolic
-        # topk but we keep layout consistent with the non-CP path).
+        # Tail-pad with -1 so the topk slot count matches the non-CP path.
         pad = torch.full(
-            (S_local, window_size - W), -1, dtype=kv_pos.dtype, device=device
+            (S_local, window_size - W), -1, dtype=matrix.dtype, device=device
         )
-        kv_pos = torch.cat([kv_pos, pad], dim=1)
-    return kv_pos.unsqueeze(0).expand(bsz, -1, -1).contiguous()
+        matrix = torch.cat([matrix, pad], dim=1)
+    return matrix.unsqueeze(0).expand(bsz, -1, -1).contiguous()
 
 
 def _get_compress_topk_idxs(
@@ -1274,6 +1279,9 @@ class Attention(nn.Module):
         self, x: torch.Tensor, start_pos, sequence_lengths=None
     ) -> torch.Tensor:
         """Forward pass. start_pos can be int (B=1) or tensor [B] for batched decode."""
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        _dbg = self.layer_id <= 2
         bsz, seqlen, _ = x.size()
         win = self.window_size
         ratio = self.compress_ratio
@@ -1316,7 +1324,11 @@ class Attention(nn.Module):
         qr = self._rmsnorm_weighted(
             self._lin(self.wq_a, x), self.q_norm.weight
         )  # [B, S, q_lora_rank]
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_qr_norm", qr)
         q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_q_pre_rmsnorm", q)
         # QK RMSNorm (no learnable scale here, per official code)
         if _use_qk_rmsnorm_fast() and q.is_cuda and q.numel() > 0:
             q = v4_rmsnorm(q, None, eps=self.eps)
@@ -1324,13 +1336,22 @@ class Attention(nn.Module):
             q = q * torch.rsqrt(
                 q.float().square().mean(-1, keepdim=True) + self.eps
             ).to(q.dtype)
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_q_pre_rope", q)
         apply_rotary_emb(q[..., -rd:], freqs_cis)
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_q_post_rope", q)
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_freqs_cis", freqs_cis)
 
         # KV path (single KV head) — rank-local under CP.
         kv = self._rmsnorm_weighted(
             self._lin(self.wkv, x), self.kv_norm.weight
         )  # [B, S_local, head_dim]
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_pre_rope", kv)
         apply_rotary_emb(kv[..., -rd:], freqs_cis)
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_post_rope_local", kv)
 
         # Under CP prefill, all-gather KV across the CP (== TP) group
         # and strip padding so every rank has the FULL uncompressed
@@ -1342,6 +1363,8 @@ class Attention(nn.Module):
         else:
             kv_full = kv
             seqlen_full = seqlen
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_full", kv_full)
 
         # Build topk_idxs — rows = rank-local Q; columns reference the
         # concatenated [sliding | compressed] KV tensor (under CP the
@@ -1375,11 +1398,20 @@ class Attention(nn.Module):
             else:
                 offset = win
             if self.indexer is not None:
+                if _dbg:
+                    self.indexer._dbg_prefix = f"L{self.layer_id:02d}_attn_idx"
                 if is_batched_decode:
                     # Indexer now supports tensor start_pos directly
                     compress_idxs = self.indexer(x, qr, start_pos, offset)
                 else:
                     compress_idxs = self.indexer(x, qr, start_pos, offset)
+                if _dbg:
+                    self.indexer._dbg_prefix = None
+                    _rt.record_if_level(
+                        2,
+                        f"L{self.layer_id:02d}_attn_compress_idxs",
+                        compress_idxs,
+                    )
             elif cp_on:
                 compress_idxs = _get_compress_topk_idxs_cp(
                     ratio,
@@ -1444,7 +1476,17 @@ class Attention(nn.Module):
                         pos = (sp_int + t) % win
                         self.kv_cache[:bsz, pos] = kv_full[:, t]
             if self.compress_ratio:
+                if _dbg:
+                    self.compressor._dbg_prefix = f"L{self.layer_id:02d}_attn_cmp"
                 kv_compress = self.compressor(x, sp_int)
+                if _dbg:
+                    self.compressor._dbg_prefix = None
+                    if kv_compress is not None:
+                        _rt.record_if_level(
+                            2,
+                            f"L{self.layer_id:02d}_attn_kv_compress",
+                            kv_compress,
+                        )
                 if kv_compress is not None:
                     if sp_int == 0:
                         kv_cat = torch.cat([kv_full, kv_compress], dim=1)
@@ -1461,6 +1503,8 @@ class Attention(nn.Module):
                     kv_cat = kv_full
                 else:
                     kv_cat = self.kv_cache[:bsz]
+            if _dbg:
+                _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_cat", kv_cat)
             if _tl_kernels.tilelang_available():
                 o = _tl_kernels.sparse_attn(
                     q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
@@ -1501,8 +1545,14 @@ class Attention(nn.Module):
                     self.softmax_scale,
                 )
 
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_sparse_out", o)
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_topk_idxs", topk_idxs)
+
         # Inverse RoPE on output (cancels K's absolute position)
         apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_o_post_inv_rope", o)
 
         # Grouped output projection: split heads into n_groups groups
         o = o.reshape(bsz, seqlen, self.n_groups, -1)
@@ -1510,11 +1560,19 @@ class Attention(nn.Module):
         wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
         wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
         o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_wo_a_out", o)
         out = self._lin(self.wo_b, o.flatten(2))
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_wo_b_out_pre_ar", out)
         if self.tp_size > 1:
             # wo_b is row-split along K — each rank produces a partial
             # sum; AR combines across the tp group.
             from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
             all_reduce(out, Group.TP)
+            if _dbg:
+                _rt.record_if_level(
+                    2, f"L{self.layer_id:02d}_attn_wo_b_out_post_ar", out
+                )
         return out
