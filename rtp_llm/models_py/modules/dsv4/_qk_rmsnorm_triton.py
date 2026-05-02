@@ -19,6 +19,7 @@ which is 512 / 1024 in practice.
 Numerical fidelity matches REF: fp32 reduction (square + mean), fp32
 rsqrt, fp32 weight multiply, cast back to input dtype at the end.
 """
+
 from __future__ import annotations
 
 from typing import Optional
@@ -30,17 +31,22 @@ import triton.language as tl
 
 @triton.jit
 def _v4_rmsnorm_fwd(
-    x_ptr,                  # [N, D] input
-    w_ptr,                  # [D] fp32 weight (or 0 if HAS_WEIGHT==False)
-    out_ptr,                # [N, D] output, same dtype as x
-    x_n: tl.constexpr,      # x stride along N; D-stride==1 assumed
+    x_ptr,  # [N, D] input
+    w_ptr,  # [D] fp32 weight (or 0 if HAS_WEIGHT==False)
+    out_ptr,  # [N, D] output, same dtype as x
+    x_n: tl.constexpr,  # x stride along N; D-stride==1 assumed
     out_n: tl.constexpr,
     D: tl.constexpr,
     BLOCK_D: tl.constexpr,
     EPS: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    # Cast pid to int64 BEFORE the row-stride multiply: at long context
+    # the q-rmsnorm site flattens [B, S, n_heads, head_dim] to
+    # [B*S*n_heads, head_dim], so N can exceed 2^22 and ``pid * x_n``
+    # silently overflows int32 (e.g. S=65600 n_heads=64 head_dim=512:
+    # max pid * x_n = 4198399 * 512 = 2.15B > INT32_MAX → ILLEGAL_ADDRESS).
+    pid = tl.program_id(0).to(tl.int64)
     d_off = tl.arange(0, BLOCK_D)
     d_mask = d_off < D
 
@@ -105,9 +111,14 @@ def v4_rmsnorm(
     assert BLOCK_D <= 4096, f"D={D} too large for single-row kernel"
 
     _v4_rmsnorm_fwd[(N,)](
-        x_2d, weight, out,
-        x_2d.stride(0), out.stride(0),
-        D=D, BLOCK_D=BLOCK_D, EPS=eps,
+        x_2d,
+        weight,
+        out,
+        x_2d.stride(0),
+        out.stride(0),
+        D=D,
+        BLOCK_D=BLOCK_D,
+        EPS=eps,
         HAS_WEIGHT=has_weight,
         num_warps=4 if BLOCK_D <= 512 else 8,
     )
