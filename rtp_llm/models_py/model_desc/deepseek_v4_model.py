@@ -570,13 +570,23 @@ class DeepSeekV4Model(GptModelBase):
             if t is not None:
                 out[ckpt_key] = _maybe_squeeze_hc(w_name, t)
 
+        # Routed-expert W keys are unstacked below; not in layer_map.
+        _routed_expert_keys = {
+            W.v4_routed_w1_w, W.v4_routed_w1_s,
+            W.v4_routed_w2_w, W.v4_routed_w2_s,
+            W.v4_routed_w3_w, W.v4_routed_w3_s,
+        }
+
         # Per-layer (excluding routed experts)
         layer_map = self._build_layer_w_to_ckpt()
+        unknown_keys: set = set()
         for layer_id, layer_w in enumerate(mw.weights):
             for w_name, t in layer_w.items():
                 tmpl = layer_map.get(w_name)
                 if tmpl is not None:
                     out[tmpl.format(i=layer_id)] = _maybe_squeeze_hc(w_name, t)
+                elif w_name not in _routed_expert_keys:
+                    unknown_keys.add(w_name)
 
             # Routed experts: stacked [E, ...] → per-expert dict entries.
             for stacked_w_name, sub in (
@@ -606,6 +616,14 @@ class DeepSeekV4Model(GptModelBase):
                     out[f"layers.{layer_id}.ffn.experts.{global_idx}.{sub}"] = stacked[
                         local_idx
                     ]
+        if unknown_keys:
+            # Warn loudly — silent skip would let descriptor typos / new
+            # W keys land in V4Transformer factory mode as KeyError later.
+            logging.warning(
+                "[DeepSeekV4Model] _flatten_framework_weights: unknown "
+                "per-layer W keys ignored: %s",
+                sorted(unknown_keys),
+            )
         return out
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
