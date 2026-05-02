@@ -42,20 +42,38 @@ class TestMTPBlockForward(unittest.TestCase):
         # covers the MTP layer at index layer_id=n_layers=1 (so len=2).
         mtp = MTPBlock(
             layer_id=1,
-            dim=dim, n_heads=4, q_lora_rank=64,
-            head_dim=32, rope_head_dim=16,
-            o_lora_rank=64, o_groups=2,
-            window_size=32, compress_ratio=0,
-            compress_rope_theta=160000.0, rope_theta=10000.0,
-            rope_factor=1.0, beta_fast=32, beta_slow=1,
+            dim=dim,
+            n_heads=4,
+            q_lora_rank=64,
+            head_dim=32,
+            rope_head_dim=16,
+            o_lora_rank=64,
+            o_groups=2,
+            window_size=32,
+            compress_ratio=0,
+            compress_rope_theta=160000.0,
+            rope_theta=10000.0,
+            rope_factor=1.0,
+            beta_fast=32,
+            beta_slow=1,
             original_seq_len=4096,
-            max_batch_size=B, max_seq_len=S,
-            index_n_heads=4, index_head_dim=16, index_topk=2,
-            moe_inter_dim=128, n_routed_experts=4,
-            n_activated_experts=2, n_shared_experts=1,
-            score_func="sqrtsoftplus", route_scale=1.0,
-            swiglu_limit=10.0, n_hash_layers=0, vocab_size=vocab,
-            hc_mult=hc, hc_sinkhorn_iters=4, hc_eps=1e-6,
+            max_batch_size=B,
+            max_seq_len=S,
+            index_n_heads=4,
+            index_head_dim=16,
+            index_topk=2,
+            moe_inter_dim=128,
+            n_routed_experts=4,
+            n_activated_experts=2,
+            n_shared_experts=1,
+            score_func="sqrtsoftplus",
+            route_scale=1.0,
+            swiglu_limit=10.0,
+            n_hash_layers=0,
+            vocab_size=vocab,
+            hc_mult=hc,
+            hc_sinkhorn_iters=4,
+            hc_eps=1e-6,
             norm_eps=1e-6,
         ).to(device=device, dtype=torch.bfloat16)
 
@@ -63,14 +81,26 @@ class TestMTPBlockForward(unittest.TestCase):
         # float32 Parameters for those, but `.to(bfloat16)` above cast
         # them.  Reset to match real-ckpt layout.
         for name in (
-            "hc_attn_fn", "hc_attn_base", "hc_attn_scale",
-            "hc_ffn_fn", "hc_ffn_base", "hc_ffn_scale",
-            "hc_head_fn", "hc_head_base", "hc_head_scale",
+            "hc_attn_fn",
+            "hc_attn_base",
+            "hc_attn_scale",
+            "hc_ffn_fn",
+            "hc_ffn_base",
+            "hc_ffn_scale",
+            "hc_head_fn",
+            "hc_head_base",
+            "hc_head_scale",
         ):
             p = getattr(mtp, name)
             setattr(mtp, name, nn.Parameter(p.float(), requires_grad=False))
-        for m in (mtp.attn_norm, mtp.ffn_norm, mtp.enorm, mtp.hnorm, mtp.norm):
-            m.weight = nn.Parameter(m.weight.float(), requires_grad=False)
+        # ``_RMSNorm`` uses the framework C++ ``rtp_llm_ops.rmsnorm`` which
+        # needs bf16 weight (vLLM-aligned); leave these as bf16 after the
+        # model-level ``.to(bfloat16)`` cast above.
+
+        # `.to(bfloat16)` above silently downcast the complex64 freqs_cis buffer
+        # to bf16 (dropping the imaginary part) — ``fused_rmsnorm_rope`` needs
+        # the complex tensor, so rebuild it here.
+        mtp.attn.reset_rope_cache(device=device)
 
         # Initialise with small random values so the forward doesn't
         # saturate.  Empty-weight construction leaves params as
@@ -79,17 +109,24 @@ class TestMTPBlockForward(unittest.TestCase):
             for p in mtp.parameters():
                 if p.dtype.is_floating_point:
                     if p.dtype == torch.bfloat16:
-                        p.copy_(torch.randn_like(p, dtype=torch.float32).to(torch.bfloat16) * 0.02)
+                        p.copy_(
+                            torch.randn_like(p, dtype=torch.float32).to(torch.bfloat16)
+                            * 0.02
+                        )
                     else:
                         p.copy_(torch.randn_like(p) * 0.02)
                 elif p.dtype == torch.int8:
-                    p.copy_(torch.randint(-3, 3, p.shape, dtype=torch.int8, device=p.device))
+                    p.copy_(
+                        torch.randint(-3, 3, p.shape, dtype=torch.int8, device=p.device)
+                    )
             # Stabilise the norm weights around 1.
             for m in (mtp.attn_norm, mtp.ffn_norm, mtp.enorm, mtp.hnorm, mtp.norm):
                 m.weight.copy_(torch.ones_like(m.weight))
 
         embed = nn.Embedding(vocab, dim).to(device=device, dtype=torch.bfloat16)
-        lm_head_weight = torch.randn(vocab, dim, device=device, dtype=torch.float32) * 0.02
+        lm_head_weight = (
+            torch.randn(vocab, dim, device=device, dtype=torch.float32) * 0.02
+        )
 
         x = torch.randn(B, S, hc, dim, device=device, dtype=torch.bfloat16)
         input_ids = torch.randint(0, vocab, (B, S), device=device, dtype=torch.long)
