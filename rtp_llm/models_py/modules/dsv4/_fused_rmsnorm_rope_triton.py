@@ -111,28 +111,32 @@ def fused_rmsnorm_rope(
     """
     assert x.is_cuda
     assert x.dtype in (torch.bfloat16, torch.float16, torch.float32)
+    assert x.is_contiguous()
+    assert freqs_cis.is_contiguous()
     orig_shape = x.shape
     D = orig_shape[-1]
     RD = rope_head_dim
     assert RD % 2 == 0 and RD <= D
-    x_flat = x.contiguous().reshape(-1, D)
+    x_flat = x.view(-1, D)
     out = torch.empty_like(x_flat)
     N = x_flat.shape[0]
     if N == 0:
         return out.view(*orig_shape)
 
     if weight is not None:
-        assert weight.shape == (D,)
-        w = weight.contiguous().to(torch.float32)
+        assert weight.shape == (D,) and weight.is_contiguous()
+        w = weight.to(torch.float32)
         has_weight = True
     else:
         w = torch.empty(1, dtype=torch.float32, device=x.device)
         has_weight = False
 
-    freqs_flat = freqs_cis.reshape(-1, freqs_cis.shape[-1])
+    freqs_flat = freqs_cis.view(-1, freqs_cis.shape[-1])
     N_freq = freqs_flat.shape[0]
     assert N % N_freq == 0, f"N_tokens={N} not divisible by N_freq={N_freq}"
     freq_stride_n = N // N_freq
+    # complex64 .real / .imag are stride-2 views; .contiguous() is a real
+    # layout copy. Kernel hardcodes cos/sin outer stride = RD/2.
     cos = freqs_flat.real.contiguous()
     sin = freqs_flat.imag.contiguous()
     assert cos.shape == (N_freq, RD // 2)

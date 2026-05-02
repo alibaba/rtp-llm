@@ -1,12 +1,12 @@
 """UT for fused Q/KV-RMSNorm + partial RoPE (single Triton kernel).
 
 Audit doc §7.4 P0 / row 1 of P0 priority list. The decode path on
-``attention.py`` now calls ``fused_rmsnorm_rope`` as a single Triton
-launch per Q and per KV, replacing the prior split pipeline (eager
+``attention.py`` calls ``fused_rmsnorm_rope`` as a single Triton launch
+per Q and per KV, replacing the prior split pipeline (eager
 ``apply_rotary_emb_batched`` after an RMSNorm).
 
-This UT vendors a candidate fused kernel inside the test file (no main
-code change), then verifies:
+This UT imports the production wrapper directly (so the contiguity
+contract and any wrapper-level changes are exercised here), then verifies:
   1) Numerical accuracy vs the eager torch reference within bf16 tolerance
   2) Wall-clock GPU time improvement vs the eager reference
 
@@ -21,150 +21,12 @@ from __future__ import annotations
 import time
 
 import torch
-import triton
-import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb_batched,
     precompute_freqs_cis,
 )
-
-
-# ---------------------------------------------------------------------------
-# Candidate fused kernel — RMSNorm over last D + partial RoPE on last RD dims.
-# ---------------------------------------------------------------------------
-@triton.jit
-def _fused_rmsnorm_rope_kernel(
-    x_ptr,
-    w_ptr,
-    cos_ptr,
-    sin_ptr,
-    out_ptr,
-    x_stride_n,
-    out_stride_n,
-    n_per_b: tl.constexpr,
-    D: tl.constexpr,
-    RD: tl.constexpr,
-    RD_HALF: tl.constexpr,
-    NOPE_OFFSET: tl.constexpr,
-    INVERSE: tl.constexpr,
-    EPS: tl.constexpr,
-    HAS_WEIGHT: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    b_idx = pid // n_per_b
-
-    d_off = tl.arange(0, BLOCK_D)
-    d_mask = d_off < D
-
-    x_row = x_ptr + pid * x_stride_n
-    x = tl.load(x_row + d_off, mask=d_mask, other=0.0).to(tl.float32)
-
-    var = tl.sum(x * x, axis=0) / D
-    inv = tl.rsqrt(var + EPS)
-    y = x * inv
-    if HAS_WEIGHT:
-        w = tl.load(w_ptr + d_off, mask=d_mask, other=0.0).to(tl.float32)
-        y = y * w
-
-    out_row = out_ptr + pid * out_stride_n
-    nope_mask = d_mask & (d_off < NOPE_OFFSET)
-    tl.store(out_row + d_off, y, mask=nope_mask)
-
-    pair_off = tl.arange(0, RD_HALF)
-    real_off = NOPE_OFFSET + 2 * pair_off
-    imag_off = real_off + 1
-
-    real = tl.load(x_row + real_off).to(tl.float32) * inv
-    imag = tl.load(x_row + imag_off).to(tl.float32) * inv
-    if HAS_WEIGHT:
-        w_real = tl.load(w_ptr + real_off).to(tl.float32)
-        w_imag = tl.load(w_ptr + imag_off).to(tl.float32)
-        real = real * w_real
-        imag = imag * w_imag
-
-    cos = tl.load(cos_ptr + b_idx * RD_HALF + pair_off)
-    sin = tl.load(sin_ptr + b_idx * RD_HALF + pair_off)
-    if INVERSE:
-        sin = -sin
-
-    new_real = real * cos - imag * sin
-    new_imag = real * sin + imag * cos
-
-    tl.store(out_row + real_off, new_real)
-    tl.store(out_row + imag_off, new_imag)
-
-
-def fused_rmsnorm_rope(
-    x: torch.Tensor,
-    weight: torch.Tensor | None,
-    freqs_cis_per_b: torch.Tensor,
-    rope_head_dim: int,
-    *,
-    eps: float = 1e-6,
-    inverse: bool = False,
-) -> torch.Tensor:
-    """Fused RMSNorm-over-last-dim + partial RoPE on the final ``rope_head_dim`` cols.
-
-    ``x`` may be ``[B, S, D]`` (single-head, e.g. KV) or ``[B, S, H, D]``
-    (multi-head, e.g. Q). Returns a new tensor of the same shape & dtype.
-    ``freqs_cis_per_b`` is complex64 ``[B, RD/2]``.
-    """
-    assert x.is_cuda
-    assert x.dtype in (torch.bfloat16, torch.float16, torch.float32)
-    orig_shape = x.shape
-    D = orig_shape[-1]
-    RD = rope_head_dim
-    assert RD % 2 == 0 and RD <= D
-    if x.dim() == 4:
-        B, S, H, _ = orig_shape
-        n_per_b = S * H
-    else:
-        assert x.dim() == 3
-        B, S, _ = orig_shape
-        n_per_b = S
-    x_flat = x.contiguous().reshape(-1, D)
-    out = torch.empty_like(x_flat)
-    N = x_flat.shape[0]
-    if N == 0:
-        return out.view(*orig_shape)
-
-    if weight is not None:
-        assert weight.shape == (D,)
-        w = weight.contiguous().to(torch.float32)
-        has_weight = True
-    else:
-        w = torch.empty(1, dtype=torch.float32, device=x.device)
-        has_weight = False
-
-    cos = freqs_cis_per_b.real.contiguous()
-    sin = freqs_cis_per_b.imag.contiguous()
-    assert cos.shape == (B, RD // 2)
-
-    BLOCK_D = triton.next_power_of_2(D)
-    assert BLOCK_D <= 4096
-
-    _fused_rmsnorm_rope_kernel[(N,)](
-        x_flat,
-        w,
-        cos,
-        sin,
-        out,
-        x_flat.stride(0),
-        out.stride(0),
-        n_per_b=n_per_b,
-        D=D,
-        RD=RD,
-        RD_HALF=RD // 2,
-        NOPE_OFFSET=D - RD,
-        INVERSE=inverse,
-        EPS=eps,
-        HAS_WEIGHT=has_weight,
-        BLOCK_D=BLOCK_D,
-        num_warps=4 if BLOCK_D <= 512 else 8,
-    )
-    return out.view(*orig_shape)
 
 
 # ---------------------------------------------------------------------------
