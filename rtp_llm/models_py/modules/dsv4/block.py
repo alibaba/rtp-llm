@@ -358,14 +358,23 @@ class Block(nn.Module):
     def forward(
         self, x: torch.Tensor, start_pos, input_ids: Optional[torch.Tensor]
     ) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        _dbg_layer = self.layer_id <= 2  # instrument layers 0..2; first CSA layer is L2
         # Attention path
         residual = x
         x_pre, post, comb = self._hc_pre(
             x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
         )
         x_pre = self.attn_norm(x_pre)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_in", x_pre)
         attn_out = self.attn(x_pre, start_pos)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_out", attn_out)
         x = self._hc_post(attn_out, residual, post, comb)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_residual", x)
 
         # FFN path
         residual = x
@@ -373,6 +382,8 @@ class Block(nn.Module):
             x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
         )
         x_pre = self.ffn_norm(x_pre)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_in", x_pre)
         ffn_out = self.ffn(
             x_pre,
             (
@@ -383,6 +394,8 @@ class Block(nn.Module):
                 )
             ),
         )
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_out", ffn_out)
         x = self._hc_post(ffn_out, residual, post, comb)
         return x
 
