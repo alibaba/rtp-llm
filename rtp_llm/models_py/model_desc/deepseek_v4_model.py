@@ -262,6 +262,37 @@ class DeepSeekV4Model(GptModelBase):
             self._fp8_kv_requested = False
         self._fp8_kv_armed = False  # set True after the first prefill enables FP8
 
+        # Python-side per-block input_ids stash for prefix-reuse replay.
+        # DSV4's SWA/HCA state pools use lossy fixed-cap storage that cannot
+        # restore the compressor/indexer state at an arbitrary prefix
+        # boundary bit-exact. Rather than attempt that, we stash the new-token
+        # slice of each prefill request keyed by framework block_id (variable-
+        # length CSA_KV group since it's written every prefill regardless of
+        # which compressor ratio the layer uses). On a reuse hit, we look up
+        # the prefix block_ids, rebuild the full input_ids, and run the
+        # prefill cold (start_pos=0). Framework-level cached_tokens remains
+        # >0 because ``attn.prefix_lengths`` is set by the scheduler; we just
+        # ignore it inside forward. Disabled via DSV4_REUSE_REPLAY=0.
+        self._input_id_stash: Dict[int, torch.Tensor] = {}
+        # DSV4 paged pools all use 256 tokens/block internally (SWA 256 entries
+        # × 1 token, CSA 64 entries × 4 tokens, HCA 2 entries × 128 tokens,
+        # INDEXER 64 entries × 4 tokens) — regardless of the smoke test's
+        # ``--seq_size_per_block`` arg. We key the stash by variable-length
+        # group block_ids so 256 is the right slice size.
+        self._stash_block_size = 256
+        self._reuse_replay_enabled = os.environ.get("DSV4_REUSE_REPLAY", "1") != "0"
+
+        # DSV4_DBG_AB=1: after each prefill forward, re-run with the same
+        # input + freshly reset state and compare fingerprints. Distinguishes
+        # kernel non-determinism (A/B within same request diverges) from state
+        # leakage (A/B matches but across-request Q0==Q2 still diverges).
+        # Logged per request; zero overhead when unset.
+        self._dbg_ab_enabled = os.environ.get("DSV4_DBG_AB", "0") == "1"
+        # First-request fingerprint stash for across-request comparison.
+        self._dbg_ab_first_fp: Optional[Tuple[int, float, float, float]] = None
+        # Rolling decode-step counter + input-id log (shared across Q0/Q1/Q2 in a run).
+        self._dbg_ab_decode_step = 0
+
         # Optional on-demand timeline capture. Set DSV4_PROFILE_TRACE=/path/trace.json
         # and touch /tmp/dsv4_profile_trigger to capture the NEXT forward only.
         self._profile_path = os.environ.get("DSV4_PROFILE_TRACE")
@@ -463,9 +494,13 @@ class DeepSeekV4Model(GptModelBase):
         # _layer_pools: all pools for scatter (write all 7 pools)
         # _layer_gather_pools: only paged pools for gather (skip SWA/State which
         #   get overwritten during decode, making cached data unreliable)
-        # _layer_reuse_gather_pools: paged + state pools for prefill reuse gather
-        #   (restores compressor overlap carry, but skips SWA ring buffer which
-        #   holds data at the wrong position)
+        # _layer_reuse_gather_pools: paged + state + SWA pools for prefill
+        #   reuse gather.  SWA MUST be gathered: continuation prefill's
+        #   attention reads ``attn.kv_cache[:, :win]`` which holds the ring
+        #   buffer of the last ``win`` tokens.  Without gathering SWA_KV the
+        #   ring positions that belong to the prefix stay zero, so attention
+        #   sees garbage for those positions and q2's output diverges from
+        #   q0's (identical prompt, greedy, but differs on reuse).
         self._layer_pools = []
         self._layer_gather_pools = []
         self._layer_reuse_gather_pools = []
@@ -478,17 +513,17 @@ class DeepSeekV4Model(GptModelBase):
             if ratio == 4:
                 self._layer_pools.append([7, 1, 3, 4, 5])
                 self._layer_gather_pools.append([1, 3])  # CSA_KV, INDEXER_KV only
-                self._layer_reuse_gather_pools.append([1, 3, 4, 5])  # + STATE pools
+                self._layer_reuse_gather_pools.append([7, 1, 3, 4, 5])  # +SWA +STATE
                 self._layer_state_pools.append([4, 5])  # INDEXER_STATE + CSA_STATE
             elif ratio == 128:
                 self._layer_pools.append([7, 2, 6])
                 self._layer_gather_pools.append([2])  # HCA_KV only
-                self._layer_reuse_gather_pools.append([2, 6])  # + STATE pool
+                self._layer_reuse_gather_pools.append([7, 2, 6])  # +SWA +STATE
                 self._layer_state_pools.append([6])  # HCA_STATE only
             else:
                 self._layer_pools.append([7])
                 self._layer_gather_pools.append([])  # SWA-only, nothing to gather
-                self._layer_reuse_gather_pools.append([])  # SWA-only
+                self._layer_reuse_gather_pools.append([7])  # SWA for prefix reuse
                 self._layer_state_pools.append([])  # SWA-only has no state
 
         # Debug: log shapes for layer 0 and layer 2
@@ -1096,6 +1131,157 @@ class DeepSeekV4Model(GptModelBase):
                     kv_block_stride_bytes=stride_bytes,
                 )
 
+    @staticmethod
+    def _fingerprint(h: torch.Tensor) -> Tuple[int, float, float, float]:
+        """Cheap fingerprint of a [1, T, D] hidden tensor's LAST row.
+        Returns (numel, sum, min, max) — if any of these differ between
+        two calls with identical input, the forward is not reproducible."""
+        last = h[:, -1].float().detach()
+        return (
+            int(last.numel()),
+            float(last.sum().item()),
+            float(last.min().item()),
+            float(last.max().item()),
+        )
+
+    def _dbg_ab_probe(self, label: str, ids: torch.Tensor, h_ref: torch.Tensor) -> None:
+        """Run ``self.v4(ids, start_pos=0)`` a SECOND time with fresh state
+        and compare against h_ref's fingerprint. Logs PASS/FAIL. Enabled via
+        DSV4_DBG_AB=1. Also records first fingerprint for cross-request
+        comparison."""
+        if not self._dbg_ab_enabled:
+            return
+        fp_ref = self._fingerprint(h_ref)
+        # Fresh state for the second call so kernel-level determinism is the
+        # only variable under test.
+        self._reset_compressor_state()
+        h2 = self.v4(ids, start_pos=0, apply_lm_head=False)
+        fp2 = self._fingerprint(h2)
+        same = fp_ref == fp2
+        logging.info(
+            "[DSV4_DBG_AB] %s ab_within=%s ref=%s repeat=%s",
+            label,
+            "SAME" if same else "DIFF",
+            fp_ref,
+            fp2,
+        )
+        # Cross-request comparison: first call stashes, later calls diff.
+        if self._dbg_ab_first_fp is None:
+            self._dbg_ab_first_fp = fp_ref
+            logging.info("[DSV4_DBG_AB] %s stored-first=%s", label, fp_ref)
+        else:
+            first = self._dbg_ab_first_fp
+            cross_same = first == fp_ref
+            logging.info(
+                "[DSV4_DBG_AB] %s cross-first=%s first=%s now=%s",
+                label,
+                "SAME" if cross_same else "DIFF",
+                first,
+                fp_ref,
+            )
+
+    def _stash_new_tokens(
+        self,
+        attn,
+        input_ids: torch.Tensor,
+        offset: int,
+        inp_len: int,
+        prefix_len: int,
+        b: int,
+    ) -> None:
+        """After a prefill, save the NEW-token slice indexed by the framework
+        block_ids it got written into (CSA_KV group). On a later reuse hit
+        these same block_ids land in the next request's prefix range,
+        letting us reconstruct the full prompt without the framework ever
+        passing it back."""
+        if not self._reuse_replay_enabled:
+            return
+        by_group_host = getattr(attn, "kv_cache_kernel_block_id_host_by_group", None)
+        if not by_group_host or len(by_group_host) == 0:
+            return
+        # Use the first non-empty variable-length (paged) group we can find.
+        # CSA_KV (gid=0) is populated for CSA layers, HCA_KV (gid=1) for
+        # HCA layers, INDEXER_KV (gid=2) for layers with an indexer. V4-Flash
+        # always has CSA/indexer layers so gid=0 or gid=2 is always non-empty
+        # — pick the first non-empty one for a stable key across queries.
+        bids_row = None
+        for gid_try in (0, 2, 1):
+            if gid_try >= len(by_group_host):
+                continue
+            bids = by_group_host[gid_try]
+            if bids is None or bids.numel() == 0 or bids.dim() < 2:
+                continue
+            if b >= bids.shape[0]:
+                continue
+            bids_row = bids[b].cpu().tolist()
+            break
+        if bids_row is None:
+            return
+        bsize = self._stash_block_size
+        total_len = prefix_len + inp_len
+        num_total_blocks = (total_len + bsize - 1) // bsize
+        new_tokens_cpu = input_ids[offset : offset + inp_len].detach().cpu()
+        # Iterate over blocks covered by the NEW tokens (positions
+        # ``[prefix_len, total_len)``). For each such block, slice the
+        # portion that belongs to it and store under the block id.
+        first_new_block = prefix_len // bsize
+        for bi in range(first_new_block, min(num_total_blocks, len(bids_row))):
+            block_id = int(bids_row[bi])
+            if block_id <= 0:
+                continue
+            pos_start = bi * bsize
+            pos_end = min(pos_start + bsize, total_len)
+            new_off_start = max(0, pos_start - prefix_len)
+            new_off_end = min(inp_len, pos_end - prefix_len)
+            if new_off_end <= new_off_start:
+                continue
+            self._input_id_stash[block_id] = new_tokens_cpu[new_off_start:new_off_end]
+
+    def _retrieve_prefix_tokens(
+        self, attn, b: int, prefix_len: int
+    ) -> Optional[torch.Tensor]:
+        """Fetch the stashed prefix input_ids for batch row b.
+        Returns None if any prefix block is missing from the stash (cold
+        miss — fall back to framework gather, accepting the known-lossy
+        output)."""
+        if not self._reuse_replay_enabled or prefix_len <= 0:
+            return None
+        by_group_host = getattr(attn, "kv_cache_kernel_block_id_host_by_group", None)
+        if not by_group_host or len(by_group_host) == 0:
+            return None
+        bids_row = None
+        for gid_try in (0, 2, 1):
+            if gid_try >= len(by_group_host):
+                continue
+            bids = by_group_host[gid_try]
+            if bids is None or bids.numel() == 0 or bids.dim() < 2:
+                continue
+            if b >= bids.shape[0]:
+                continue
+            bids_row = bids[b].cpu().tolist()
+            break
+        if bids_row is None:
+            return None
+        bsize = self._stash_block_size
+        num_prefix_blocks = (prefix_len + bsize - 1) // bsize
+        chunks = []
+        for bi in range(num_prefix_blocks):
+            if bi >= len(bids_row):
+                return None
+            block_id = int(bids_row[bi])
+            if block_id <= 0:
+                return None
+            chunk = self._input_id_stash.get(block_id)
+            if chunk is None:
+                return None  # incomplete stash — fall back
+            needed = min(int(chunk.numel()), prefix_len - bi * bsize)
+            if needed <= 0:
+                return None
+            chunks.append(chunk[:needed])
+        if not chunks:
+            return None
+        return torch.cat(chunks, dim=0)
+
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
@@ -1280,6 +1466,38 @@ class DeepSeekV4Model(GptModelBase):
                 meta.layer_pool_descs = self._layer_pool_descs
 
         hidden = self.v4.forward_decode(input_ids, meta)  # [B, dim] packed
+
+        if self._dbg_ab_enabled:
+            self._dbg_ab_decode_step += 1
+            if self._dbg_ab_decode_step <= 9:
+                try:
+                    sp0 = (
+                        int(meta.start_pos[0].item())
+                        if hasattr(meta, "start_pos")
+                        else -1
+                    )
+                    ii0 = int(
+                        input_ids[0].item()
+                        if input_ids.dim() == 1
+                        else input_ids[0, 0].item()
+                    )
+                except Exception:
+                    sp0 = ii0 = -1
+                last = hidden[:1].reshape(-1).float().detach()
+                fp = (
+                    int(last.numel()),
+                    float(last.sum().item()),
+                    float(last.min().item()),
+                    float(last.max().item()),
+                )
+                logging.info(
+                    "[DSV4_DBG_AB] fwd_decode step=%d sp=%d ii=%d B=%d fp=%s",
+                    self._dbg_ab_decode_step,
+                    sp0,
+                    ii0,
+                    input_ids.shape[0] if input_ids.dim() >= 1 else -1,
+                    fp,
+                )
         return PyModelOutputs(hidden)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
@@ -1300,24 +1518,15 @@ class DeepSeekV4Model(GptModelBase):
             )
             raise
 
-    def _forward_impl(
-        self, inputs: PyModelInputs, fmha_impl: Any = None
-    ) -> PyModelOutputs:
-        # Framework sends flat [total_tokens] input_ids with cu_seqlens packing.
-        # Use attention_inputs fields to properly handle batched requests:
-        #   Prefill: input_lengths[b], prefix_lengths[b], cu_seqlens
-        #   Decode:  sequence_lengths[b] (per-batch current position)
-        # Prefill and decode are NEVER mixed (framework guarantee).
-        input_ids: torch.Tensor = inputs.input_ids  # flat [total_tokens]
-        attn = inputs.attention_inputs
-        is_prefill = bool(attn.is_prefill) if attn is not None else True
-
+    def _ensure_framework_kv_wired(self, device_str: str) -> None:
+        """Wire/re-wire framework KV pool tensors. Called from both prefill
+        and decode arms so decode-first requests (PD decode role) pick up
+        the real pool after NormalEngine tears down the warmup stub."""
         # Deferred wiring: framework allocates kv_cache after initialize(),
         # so we wire on first forward() when kv_cache becomes available.
         # Must run BEFORE the decode dispatch — _forward_decode reads
         # _layer_pool_descs which is populated by _wire_framework_kv_cache.
         if getattr(self, "_framework_kv_pending", False) and self.kv_cache is not None:
-            device_str = str(input_ids.device)
             self._wire_framework_kv_cache(device_str)
             self._framework_kv_pending = False
             logging.info(
@@ -1357,7 +1566,24 @@ class DeepSeekV4Model(GptModelBase):
                     wired_ptr,
                     cur_first_ptr,
                 )
-                self._wire_framework_kv_cache(str(input_ids.device))
+                self._wire_framework_kv_cache(device_str)
+
+    def _forward_impl(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
+        # Framework sends flat [total_tokens] input_ids with cu_seqlens packing.
+        # Use attention_inputs fields to properly handle batched requests:
+        #   Prefill: input_lengths[b], prefix_lengths[b], cu_seqlens
+        #   Decode:  sequence_lengths[b] (per-batch current position)
+        # Prefill and decode are NEVER mixed (framework guarantee).
+        input_ids: torch.Tensor = inputs.input_ids  # flat [total_tokens]
+        attn = inputs.attention_inputs
+        is_prefill = bool(attn.is_prefill) if attn is not None else True
+
+        # Wire/re-wire framework KV BEFORE any decode/prefill branch so
+        # decode-first requests (e.g. PD decode role) rebind onto the
+        # real pool after warmup teardown.
+        self._ensure_framework_kv_wired(str(input_ids.device))
 
         # Decode arm.  Two paths share ``_forward_decode``:
         #   * fmha_impl is a DSv4DecodeFmhaImpl → CUDA-graph replay with
@@ -1413,6 +1639,9 @@ class DeepSeekV4Model(GptModelBase):
             for b in range(n_prefill):
                 # Reset compressor state before each prefill to prevent leakage
                 self._reset_compressor_state()
+                if self._dbg_ab_enabled:
+                    # Reset decode step counter so Q0 and Q2 step indices align.
+                    self._dbg_ab_decode_step = 0
                 if input_lengths_t is not None:
                     inp_len = int(input_lengths_t[b].item())
                     prefix_len = (
@@ -1429,40 +1658,93 @@ class DeepSeekV4Model(GptModelBase):
                 )  # [1, inp_len]
                 start_pos = prefix_len  # reuse offset
 
-                # Gather from BlockPool if reuse hit
+                # Reuse-replay fast path. DSV4's fixed-cap SWA/state pools
+                # can't restore the compressor/indexer state at an arbitrary
+                # prefix boundary bit-exact, so when we have the prefix's
+                # input_ids stashed from an earlier request, we discard the
+                # framework reuse and run cold on the full reconstructed
+                # prompt. Framework-reported ``cached_tokens`` is
+                # unaffected (lives in the scheduler, not the model).
+                replay_prefix_ids = None
                 if (
-                    getattr(self, "_framework_kv_enabled", False)
-                    and attn is not None
+                    self._reuse_replay_enabled
                     and prefix_len > 0
+                    and getattr(self, "_framework_kv_enabled", False)
+                    and attn is not None
                 ):
-                    self._gather_all_layers(
-                        attn, B=1, batch_offset=b, reuse_gather=True
+                    replay_prefix_ids = self._retrieve_prefix_tokens(
+                        attn, b, prefix_len
                     )
-                    # After gather, State pools restore kv_state/score_state.
-                    # For CSA (overlap=True), kv_state[:, :ratio] holds the
-                    # overlap carry from the prefix tail — keep it so the
-                    # compressor can inject it into window 0's overlap slots.
-                    # Only zero the partial-window portion (offset onwards).
-                    for layer in self.v4.layers:
-                        a = layer.attn
-                        if a.compressor is not None:
-                            r = a.compressor.compress_ratio
-                            off = r if a.compressor.overlap else 0
-                            a.compressor.kv_state[:1, off:].zero_()
-                            a.compressor.score_state[:1, off:].fill_(float("-inf"))
-                        if a.indexer is not None:
-                            ic = a.indexer.compressor
-                            ir = ic.compress_ratio
-                            ioff = ir if ic.overlap else 0
-                            ic.kv_state[:1, ioff:].zero_()
-                            ic.score_state[:1, ioff:].fill_(float("-inf"))
+                if replay_prefix_ids is not None:
+                    full_ids = torch.cat(
+                        [
+                            replay_prefix_ids.to(input_ids.device),
+                            batch_ids.squeeze(0),
+                        ],
+                        dim=0,
+                    ).unsqueeze(0)
+                    h_full = self.v4(full_ids, start_pos=0, apply_lm_head=False)
+                    h = h_full[:, -inp_len:]
+                    all_hidden.append(h)
+                    self._dbg_ab_probe(
+                        f"replay b={b} L={full_ids.size(1)}", full_ids, h_full
+                    )
+                    if (
+                        getattr(self, "_framework_kv_enabled", False)
+                        and attn is not None
+                    ):
+                        self._scatter_all_layers(attn, B=1, batch_offset=b)
+                    self._stash_new_tokens(
+                        attn, input_ids, offset, inp_len, prefix_len, b
+                    )
+                else:
+                    # Gather from BlockPool if reuse hit (lossy but best
+                    # we can do when the stash is cold).
+                    if (
+                        getattr(self, "_framework_kv_enabled", False)
+                        and attn is not None
+                        and prefix_len > 0
+                    ):
+                        self._gather_all_layers(
+                            attn, B=1, batch_offset=b, reuse_gather=True
+                        )
+                        # After gather, State pools restore kv_state/score_state.
+                        # For CSA (overlap=True), kv_state[:, :ratio] holds the
+                        # overlap carry from the prefix tail — keep it so the
+                        # compressor can inject it into window 0's overlap slots.
+                        # Only zero the partial-window portion (offset onwards).
+                        for layer in self.v4.layers:
+                            a = layer.attn
+                            if a.compressor is not None:
+                                r = a.compressor.compress_ratio
+                                off = r if a.compressor.overlap else 0
+                                a.compressor.kv_state[:1, off:].zero_()
+                                a.compressor.score_state[:1, off:].fill_(float("-inf"))
+                            if a.indexer is not None:
+                                ic = a.indexer.compressor
+                                ir = ic.compress_ratio
+                                ioff = ir if ic.overlap else 0
+                                ic.kv_state[:1, ioff:].zero_()
+                                ic.score_state[:1, ioff:].fill_(float("-inf"))
 
-                h = self.v4(batch_ids, start_pos=start_pos, apply_lm_head=False)
-                all_hidden.append(h)
+                    h = self.v4(batch_ids, start_pos=start_pos, apply_lm_head=False)
+                    all_hidden.append(h)
+                    if prefix_len == 0:
+                        # Only the FRESH path is a clean start_pos=0 forward we
+                        # can replay under A/B probing. Reuse-gather path has
+                        # framework-pool dependencies we don't reset.
+                        self._dbg_ab_probe(f"fresh b={b} L={inp_len}", batch_ids, h)
 
-                # Scatter to BlockPool after forward
-                if getattr(self, "_framework_kv_enabled", False) and attn is not None:
-                    self._scatter_all_layers(attn, B=1, batch_offset=b)
+                    # Scatter to BlockPool after forward
+                    if (
+                        getattr(self, "_framework_kv_enabled", False)
+                        and attn is not None
+                    ):
+                        self._scatter_all_layers(attn, B=1, batch_offset=b)
+                    # Stash the NEW tokens so the NEXT reuse hit can replay.
+                    self._stash_new_tokens(
+                        attn, input_ids, offset, inp_len, prefix_len, b
+                    )
 
                 # Under CP, ``inp_len`` is the rank-local chunked length
                 # (=padded_seq_len/cp_size); ``self.v4`` has just populated
@@ -1520,6 +1802,31 @@ class DeepSeekV4Model(GptModelBase):
             # ``compressor.kv_state`` across steps. The per-step gather/scatter
             # round-trip is therefore unnecessary on this path.
             hidden = self.v4(input_ids, start_pos=start_pos, apply_lm_head=False)
+
+            if self._dbg_ab_enabled:
+                # Log a fingerprint of the FIRST 3 decode steps per request so
+                # Q0 vs Q2 divergence origin becomes visible. Also log input_id
+                # and the seq_lens[0] so we can cross-correlate.
+                self._dbg_ab_decode_step += 1
+                if self._dbg_ab_decode_step <= 6:
+                    try:
+                        sp0 = (
+                            int(start_pos[0].item())
+                            if isinstance(start_pos, torch.Tensor)
+                            else int(start_pos)
+                        )
+                        ii0 = int(input_ids[0, 0].item())
+                    except Exception:
+                        sp0 = ii0 = -1
+                    fp = self._fingerprint(hidden)
+                    logging.info(
+                        "[DSV4_DBG_AB] decode step=%d sp=%d ii=%d B=%d fp=%s",
+                        self._dbg_ab_decode_step,
+                        sp0,
+                        ii0,
+                        B,
+                        fp,
+                    )
 
             self._running_pos += 1
             reuse_len = 0
