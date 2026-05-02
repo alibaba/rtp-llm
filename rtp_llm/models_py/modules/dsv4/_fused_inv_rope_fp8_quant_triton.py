@@ -190,20 +190,22 @@ def fused_inv_rope_fp8_quant(
     """
     assert o.is_cuda and o.dtype == torch.bfloat16
     assert freqs_cis_per_b.is_cuda and freqs_cis_per_b.dtype == torch.complex64
+    assert o.is_contiguous()
+    assert freqs_cis_per_b.is_contiguous()
 
     # Normalize input to [M, H, D]
     if o.dim() == 4:
         B, S, H, D = o.shape
         q_len_per_b = S
         M = B * S
-        o_flat = o.reshape(M, H, D).contiguous()
+        o_flat = o.view(M, H, D)
     else:
         assert o.dim() == 3
         M, H, D = o.shape
         B = freqs_cis_per_b.shape[0]
         assert M % B == 0, f"M={M} not divisible by B={B}"
         q_len_per_b = M // B
-        o_flat = o.contiguous()
+        o_flat = o
 
     assert H == n_groups * heads_per_group
     assert D == nope_dim + rope_head_dim
@@ -245,6 +247,8 @@ def fused_inv_rope_fp8_quant(
         (packed_sf_k * tma_M, 1, tma_M),
     )
 
+    # complex64 .real / .imag are stride-2 views; .contiguous() is a real
+    # layout copy.
     cos = freqs_cis_per_b.real.contiguous()
     sin = freqs_cis_per_b.imag.contiguous()
 
