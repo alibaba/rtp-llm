@@ -21,6 +21,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+
+# Audit §7.4 P0 (row 1) + §7.3.4: fused RMSNorm + partial RoPE, single
+# Triton launch.  Covers every Q/KV decode + prefill site.  Standalone
+# (no-RoPE) RMSNorm sites (``_rmsnorm_weighted``) use the framework C++
+# ``rtp_llm_ops.rmsnorm`` (matches vLLM — bf16 weight).
+# Validated by test_fused_rmsnorm_rope.py (bf16 <=1-ULP + 1.25-1.75x).
+from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
@@ -36,24 +43,7 @@ from rtp_llm.models_py.modules.dsv4.rope import (
 )
 from rtp_llm.models_py.modules.dsv4.weight_loader import _repack_v4_fp8_scale_to_int32
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
-
-# P4 (prefill_opt/final_plan.md, minimal C): fused RMSNorm Triton kernel.
-# Replaces the 6-launch ``.float().square().mean(-1).rsqrt().mul().to()``
-# chain at all 3 attention RMSNorm sites.  Set DSV4_QK_RMSNORM_FAST=0
-# to force REF (debug only).
-try:
-    from rtp_llm.models_py.modules.dsv4._qk_rmsnorm_triton import v4_rmsnorm
-
-    _QK_RMSNORM_FAST_OK = True
-except Exception:  # pragma: no cover
-    v4_rmsnorm = None
-    _QK_RMSNORM_FAST_OK = False
-
-
-def _use_qk_rmsnorm_fast() -> bool:
-    if not _QK_RMSNORM_FAST_OK:
-        return False
-    return os.environ.get("DSV4_QK_RMSNORM_FAST", "1") != "0"
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 # P3 (prefill_opt/final_plan.md): wo_a native FP8 fast path.  Replaces
@@ -103,11 +93,14 @@ def _v4_fp8_linear_from_dict(
 
 
 class _NormHolder(nn.Module):
-    """Wraps an FP32 norm-weight parameter so that ckpt key `.weight` matches."""
+    """Wraps a BF16 norm-weight parameter so that ckpt key `.weight` matches.
+
+    BF16 dtype is required by ``rtp_llm_ops.rmsnorm`` (silent NaN with fp32).
+    """
 
     def __init__(self, dim: int):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.bfloat16))
 
 
 def _get_window_topk_idxs(
@@ -446,11 +439,13 @@ class Attention(nn.Module):
             # Non-quantized params copy straight from the dict.
             self.q_norm = _NormHolder(q_lora_rank)
             self.q_norm.weight = nn.Parameter(
-                weights[f"{prefix}.q_norm.weight"].float(), requires_grad=False
+                weights[f"{prefix}.q_norm.weight"].to(torch.bfloat16),
+                requires_grad=False,
             )
             self.kv_norm = _NormHolder(head_dim)
             self.kv_norm.weight = nn.Parameter(
-                weights[f"{prefix}.kv_norm.weight"].float(), requires_grad=False
+                weights[f"{prefix}.kv_norm.weight"].to(torch.bfloat16),
+                requires_grad=False,
             )
             attn_sink_full = weights[f"{prefix}.attn_sink"].float()
             self.attn_sink = nn.Parameter(
@@ -595,10 +590,15 @@ class Attention(nn.Module):
                 self.indexer.compressor.freqs_cis = None
 
     def _rmsnorm_weighted(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        dtype = x.dtype
-        x32 = x.float()
-        x32 = x32 * torch.rsqrt(x32.square().mean(-1, keepdim=True) + self.eps)
-        return (weight * x32).to(dtype)
+        # Framework C++ ``rtp_llm_ops.rmsnorm`` (single launch, bf16 weight).
+        # Requires 2D input — reshape/restore keeps this a drop-in.
+        orig_shape = x.shape
+        x_2d = x.reshape(-1, orig_shape[-1])
+        out = torch.empty_like(x_2d)
+        rtp_llm_ops.rmsnorm(
+            out, x_2d, weight, self.eps, torch.cuda.current_stream().cuda_stream
+        )
+        return out.view(orig_shape)
 
     def _lin(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
         """Linear call that tolerates both the legacy QuantizedLinear
@@ -716,22 +716,19 @@ class Attention(nn.Module):
         q = self._lin(self.wq_b, qr).unflatten(
             -1, (self.n_heads, self.head_dim)
         )  # [B, 1, H, D]
-        if _use_qk_rmsnorm_fast() and q.is_cuda and q.numel() > 0:
-            q = v4_rmsnorm(q, None, eps=self.eps)
-        else:
-            q = q * torch.rsqrt(
-                q.float().square().mean(-1, keepdim=True) + self.eps
-            ).to(q.dtype)
         # Per-request RoPE on q_pe — each req has its own start_pos. Vectorized
         # via apply_rotary_emb_batched (mirrors vLLM's batched cos/sin lookup).
         freqs_cis_per_req = self.freqs_cis[start_pos.long()]  # [B, freqs_dim]
-        apply_rotary_emb_batched(q[..., -rd:], freqs_cis_per_req)
+        q = fused_rmsnorm_rope(q, None, freqs_cis_per_req, rd, eps=self.eps)
 
         # KV path (single MQA head)
-        kv = self._rmsnorm_weighted(
-            self._lin(self.wkv, x), self.kv_norm.weight
-        )  # [B, 1, head_dim]
-        apply_rotary_emb_batched(kv[..., -rd:], freqs_cis_per_req)
+        kv = fused_rmsnorm_rope(
+            self._lin(self.wkv, x),
+            self.kv_norm.weight,
+            freqs_cis_per_req,
+            rd,
+            eps=self.eps,
+        )
 
         # Write SWA K — flat slot mapping over [B*q_len].
         # Slice metadata to actual bsz (allocated for max_bs by graph impl;
@@ -1148,18 +1145,17 @@ class Attention(nn.Module):
         # Q path (identical to BF16 forward_decode).
         qr = self._rmsnorm_weighted(self._lin(self.wq_a, x), self.q_norm.weight)
         q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
-        if _use_qk_rmsnorm_fast() and q.is_cuda and q.numel() > 0:
-            q = v4_rmsnorm(q, None, eps=self.eps)
-        else:
-            q = q * torch.rsqrt(
-                q.float().square().mean(-1, keepdim=True) + self.eps
-            ).to(q.dtype)
         freqs_cis_per_req = self.freqs_cis[start_pos.long()]
-        apply_rotary_emb_batched(q[..., -rd:], freqs_cis_per_req)
+        q = fused_rmsnorm_rope(q, None, freqs_cis_per_req, rd, eps=self.eps)
 
         # KV path.
-        kv = self._rmsnorm_weighted(self._lin(self.wkv, x), self.kv_norm.weight)
-        apply_rotary_emb_batched(kv[..., -rd:], freqs_cis_per_req)
+        kv = fused_rmsnorm_rope(
+            self._lin(self.wkv, x),
+            self.kv_norm.weight,
+            freqs_cis_per_req,
+            rd,
+            eps=self.eps,
+        )
 
         # Write SWA K to FP8 cache.
         # BF16 slot_mapping_swa uses stride=win: slot = r * win + ring_pos.
@@ -1331,27 +1327,20 @@ class Attention(nn.Module):
         q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_q_pre_rmsnorm", q)
-        # QK RMSNorm (no learnable scale here, per official code)
-        if _use_qk_rmsnorm_fast() and q.is_cuda and q.numel() > 0:
-            q = v4_rmsnorm(q, None, eps=self.eps)
-        else:
-            q = q * torch.rsqrt(
-                q.float().square().mean(-1, keepdim=True) + self.eps
-            ).to(q.dtype)
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_q_pre_rope", q)
-        apply_rotary_emb(q[..., -rd:], freqs_cis)
+        # Per-head QK RMSNorm (no learnable scale, per official code) + partial
+        # RoPE, single Triton launch.  ``fused_rmsnorm_rope`` handles both
+        # prefill (``freqs_cis`` per-position ``[S, rd/2]``) and batched-
+        # decode-in-prefill (``[B, 1, rd/2]``) via the unified freq_stride.
+        q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=self.eps)
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_q_post_rope", q)
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_freqs_cis", freqs_cis)
 
         # KV path (single KV head) — rank-local under CP.
-        kv = self._rmsnorm_weighted(
-            self._lin(self.wkv, x), self.kv_norm.weight
-        )  # [B, S_local, head_dim]
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_pre_rope", kv)
-        apply_rotary_emb(kv[..., -rd:], freqs_cis)
+        kv_in = self._lin(self.wkv, x)
+        kv = fused_rmsnorm_rope(
+            kv_in, self.kv_norm.weight, freqs_cis, rd, eps=self.eps
+        )
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_post_rope_local", kv)
 
