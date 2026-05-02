@@ -50,7 +50,6 @@ flashattn = [
 ]
 
 xft_dep = select({
-    "@//:using_arm": [],
     "//:xft_use_icx": [
         # "xfastertransformer_devel_icx",
     ],
@@ -60,13 +59,11 @@ xft_dep = select({
 })
 
 arch_dep = select({
-    "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
     "//conditions:default": [":decord"],
 })
 
 arch_with_version_dep = select({
-    "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
     "//conditions:default": ["decord==0.6.0"],
 })
@@ -151,6 +148,7 @@ py_library(
         ":cpm_kernels",
         ":prettytable",
         ":psutil",
+        ":aiohttp",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + arch_dep + internal_deps()
 )
@@ -245,20 +243,16 @@ py_library(
     }) + select({
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
-        "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
         "@//:using_cuda12_9_x86": rtp_kernel,
         "@//:using_cuda12_arm": rtp_kernel,
-        "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
-        "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
-        "@//:using_arm": [],
         "@//:using_cuda12_arm": [],
         # "//:xft_use_icx": [
         #     "xfastertransformer_devel_icx",
@@ -267,9 +261,7 @@ py_library(
             "xfastertransformer_devel",
         ],
     }) + select({
-        "@//:using_arm": [],
-	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
-        "@//:using_cpu": [],
+        "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cuda12_arm": [],
         "//conditions:default": []
     }) + triton_deps(["triton"]) + internal_deps(),
