@@ -131,6 +131,92 @@ class IterRealModelStreamInferTest(TestCase):
         self.assertIn("backend down", chunks[0].error_message)
 
 
+class IterRealModelStreamInferEchoTest(TestCase):
+    """Echo-prefill integration for ``iter_real_model_stream_infer``."""
+
+    def _req(self, req_id: str = "echo-trace") -> predict_v2_pb2.ModelInferRequest:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.id = req_id
+        req.model_name = "default"
+        _add_input_tensor(req, "input_ids", "INT32", [2], struct.pack("<2i", 99, 100))
+        return req
+
+    def _run(self, *, input_ids, echo_prefix_ids, upstream_ids):
+        """Drive ``iter_real_model_stream_infer`` with given inputs and return the chunks."""
+
+        def fake_sync(_visitor, _gi):
+            chunks = []
+            for ids in upstream_ids:
+                out = GenerateOutput(
+                    output_ids=torch.tensor(ids, dtype=torch.int32) if ids else None,
+                    finished=False,
+                    aux_info=AuxInfo(input_len=len(input_ids), reuse_len=0),
+                )
+                chunks.append(GenerateOutputs(generate_outputs=[out]))
+            return chunks
+
+        return list(
+            iter_real_model_stream_infer(
+                self._req(),
+                input_ids,
+                SamplingParams(),
+                OtherParams(),
+                MagicMock(),
+                rtp_llm_request_id=1,
+                run_enqueue_sync=fake_sync,
+                echo_prefix_ids=echo_prefix_ids,
+            )
+        )
+
+    def _gen_ids(self, chunk) -> list[int]:
+        infer = chunk.infer_response
+        for i, out in enumerate(infer.outputs):
+            if out.name == "generated_ids":
+                raw = infer.raw_output_contents[i]
+                shape = list(out.shape)
+                declared_len = shape[-1] if shape else 0
+                if declared_len <= 0:
+                    return []
+                return _unpack_int32_le(raw)
+        return []
+
+    def test_echoes_prefix_when_input_tail_matches(self) -> None:
+        chunks = self._run(
+            input_ids=[1, 2, 99, 100],
+            echo_prefix_ids=[99, 100],
+            upstream_ids=[[3, 4], [5, 6]],
+        )
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(self._gen_ids(chunks[0]), [99, 100, 3, 4])
+        self.assertEqual(self._gen_ids(chunks[1]), [5, 6])
+
+    def test_no_echo_when_tail_mismatch(self) -> None:
+        chunks = self._run(
+            input_ids=[1, 2, 3],
+            echo_prefix_ids=[99, 100],
+            upstream_ids=[[3, 4]],
+        )
+        self.assertEqual(self._gen_ids(chunks[0]), [3, 4])
+
+    def test_no_echo_when_prefix_empty(self) -> None:
+        chunks = self._run(
+            input_ids=[1, 2, 99, 100],
+            echo_prefix_ids=[],
+            upstream_ids=[[3, 4]],
+        )
+        self.assertEqual(self._gen_ids(chunks[0]), [3, 4])
+
+    def test_echo_skips_empty_chunks_and_applies_to_first_non_empty(self) -> None:
+        chunks = self._run(
+            input_ids=[99, 100],
+            echo_prefix_ids=[99, 100],
+            upstream_ids=[[], [3, 4], [5]],
+        )
+        self.assertEqual(self._gen_ids(chunks[0]), [])
+        self.assertEqual(self._gen_ids(chunks[1]), [99, 100, 3, 4])
+        self.assertEqual(self._gen_ids(chunks[2]), [5])
+
+
 class DashScGrpcInferenceServicerTest(TestCase):
     def _valid_infer_request(self) -> predict_v2_pb2.ModelInferRequest:
         req = predict_v2_pb2.ModelInferRequest()
@@ -221,7 +307,11 @@ class DashScGrpcInferenceServicerTest(TestCase):
         with patch.object(rig.time, "time", return_value=1_700_000_000.0), patch.object(
             bg_svc, "_iter_enqueue_sync", side_effect=_capture
         ):
-            list(servicer.ModelStreamInfer(iter([self._valid_infer_request()]), MagicMock()))
+            list(
+                servicer.ModelStreamInfer(
+                    iter([self._valid_infer_request()]), MagicMock()
+                )
+            )
             expected = rig.generate_request_id("10.0.0.1", 12345, "srv-xyz", 1)
 
         self.assertEqual(len(captured), 1)

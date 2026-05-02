@@ -106,7 +106,9 @@ class DashScGrpcServer:
     def __init__(self, dash_sc_grpc_config=None):
         self._config = dash_sc_grpc_config
         self._server: Optional[grpc.Server] = None
-        self._servicer: Optional[predict_v2_pb2_grpc.GRPCInferenceServiceServicer] = None
+        self._servicer: Optional[predict_v2_pb2_grpc.GRPCInferenceServiceServicer] = (
+            None
+        )
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
 
@@ -124,6 +126,7 @@ class DashScGrpcServer:
         log_path: str = "",
         backup_count: int = 0,
         rank_id: Optional[int] = None,
+        echo_prefix_ids: Optional[list[int]] = None,
     ) -> grpc.Server:
         """Bind + start the gRPC server synchronously. ``backend_visitor=None`` -> fake mode.
 
@@ -184,10 +187,13 @@ class DashScGrpcServer:
                     ip=ip,
                     port=port,
                     server_id=server_id,
+                    echo_prefix_ids=echo_prefix_ids,
                 )
                 mode = "real" if backend_visitor else "fake"
 
-            predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(servicer, server)
+            predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(
+                servicer, server
+            )
             server.add_insecure_port(f"0.0.0.0:{port}")
             server.start()
             self._server = server
@@ -211,6 +217,7 @@ class DashScGrpcServer:
         backup_count: int = 0,
         rank_id: Optional[int] = None,
         startup_timeout_s: float = _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S,
+        echo_prefix_ids: Optional[list[int]] = None,
     ) -> None:
         """Start gRPC in a daemon thread and block until ``server.start()`` succeeds.
 
@@ -232,6 +239,7 @@ class DashScGrpcServer:
                     log_path=log_path,
                     backup_count=backup_count,
                     rank_id=rank_id,
+                    echo_prefix_ids=echo_prefix_ids,
                 )
             except BaseException as e:
                 start_error.append(e)
@@ -275,7 +283,9 @@ class DashScGrpcServer:
                 if self._servicer is not None:
                     self._servicer.close()
             except Exception as e:
-                logging.warning("[DashScGrpc] servicer.close failed: %s", e, exc_info=True)
+                logging.warning(
+                    "[DashScGrpc] servicer.close failed: %s", e, exc_info=True
+                )
             finally:
                 self._server = None
                 self._servicer = None
