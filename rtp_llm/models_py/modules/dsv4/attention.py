@@ -30,10 +30,6 @@ from deep_gemm.utils.layout import (  # noqa: E402
 )
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
-from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (  # noqa: E402
-    fp8_max as _FP8_MAX,
-)
-from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import fp8_min as _FP8_MIN
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -59,9 +55,6 @@ from rtp_llm.models_py.modules.dsv4.rope import (
 )
 from rtp_llm.models_py.modules.dsv4.weight_loader import _repack_v4_fp8_scale_to_int32
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
-from rtp_llm.ops.compute_ops import (  # noqa: E402
-    per_token_group_quant_fp8 as _raw_per_token_group_quant_fp8,
-)
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
@@ -662,67 +655,17 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         """One ``fp8_einsum`` call on pre-quantized activations.
 
-        Used by the decode fused path: ``fused_inv_rope_fp8_quant`` already
-        produced ``(o_fp8 [M, G, K], o_scale [M, G, K/512])`` in the exact
-        layout the einsum consumes, so we skip the per-group quant loop
-        that ``_wo_a_grouped_fp8`` does.  Saves ``G`` quant launches vs
-        bf16 entry."""
+        ``fused_inv_rope_fp8_quant`` emits ``(o_fp8 [M, G, K], o_scale
+        [M, G, K/512])`` in the exact layout ``deep_gemm.fp8_einsum``
+        consumes, so the wo_a projection is a single einsum launch.
+        Matches vLLM ``deepseek_v4_attention.py:325`` (same
+        ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0)."""
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
         out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
         deep_gemm.fp8_einsum(
             "bhr,hdr->bhd",
             (o_fp8, o_scale),
-            (self._wo_a_stk_w, self._wo_a_stk_s),
-            out,
-            recipe=(1, 1, 128),
-        )
-        return out.view(B, S, G, R)
-
-    def _wo_a_grouped_fp8(self, o: torch.Tensor) -> torch.Tensor:
-        """Batched wo_a output projection via single ``fp8_einsum`` call.
-
-        ``o``: ``[B, S, G, K]`` bf16 (sparse-attn output after inverse
-        RoPE).  Returns ``[B, S, G, R]`` bf16.  Matches vLLM's
-        ``deepseek_v4_attention.py:325`` (``"bhr,hdr->bhd"`` + recipe
-        ``(1, 1, 128)`` for SM100 UE8M0).  Per-group 2D FP8 quant writes
-        directly into 3D buffers laid out in the einsum-expected format
-        (``[G, M, K/512]`` stride ``(K/512*tma_M, 1, tma_M)``) so no
-        scale reshape is needed downstream."""
-        B, S, G, K = o.shape
-        R = self.o_lora_rank
-        M = B * S
-        tma_M = ((M + 3) // 4) * 4
-
-        # [B, S, G, K] → [G, M, K] contiguous bf16 (G-major for per-group quant).
-        x_gmk = o.reshape(M, G, K).permute(1, 0, 2).contiguous()
-
-        a_fp8_3d = torch.empty(G, M, K, dtype=torch.float8_e4m3fn, device=o.device)
-        scale_buf = torch.empty(
-            G * (K // 512) * tma_M, dtype=torch.int32, device=o.device
-        )
-        a_scale_3d = scale_buf.as_strided(
-            (G, M, K // 512), (K // 512 * tma_M, 1, tma_M)
-        )
-        for g in range(G):
-            _raw_per_token_group_quant_fp8(
-                x_gmk[g],
-                a_fp8_3d[g],
-                a_scale_3d[g],
-                128,
-                1e-4,
-                _FP8_MIN,
-                _FP8_MAX,
-                True,
-            )
-
-        a_fp8 = a_fp8_3d.permute(1, 0, 2).contiguous()  # [M, G, K]
-        a_scale = a_scale_3d.transpose(0, 1)  # [M, G, K/512] strided
-
-        out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o.device)
-        deep_gemm.fp8_einsum(
-            "bhr,hdr->bhd",
-            (a_fp8, a_scale),
             (self._wo_a_stk_w, self._wo_a_stk_s),
             out,
             recipe=(1, 1, 128),
@@ -1430,9 +1373,7 @@ class Attention(nn.Module):
 
         # KV path (single KV head) — rank-local under CP.
         kv_in = self._lin(self.wkv, x)
-        kv = fused_rmsnorm_rope(
-            kv_in, self.kv_norm.weight, freqs_cis, rd, eps=self.eps
-        )
+        kv = fused_rmsnorm_rope(kv_in, self.kv_norm.weight, freqs_cis, rd, eps=self.eps)
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_post_rope_local", kv)
 
