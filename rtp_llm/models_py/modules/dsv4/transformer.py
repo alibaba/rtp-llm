@@ -220,7 +220,7 @@ class V4Transformer(nn.Module):
                 weights["head.weight"].float(), requires_grad=False
             )
             self.norm.weight = nn.Parameter(
-                weights["norm.weight"].float(), requires_grad=False
+                weights["norm.weight"].to(torch.bfloat16), requires_grad=False
             )
             self.hc_head_fn = nn.Parameter(
                 weights["hc_head_fn"].float(), requires_grad=False

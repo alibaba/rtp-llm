@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from rtp_llm.models_py.modules.dsv4.attention import Attention
 from rtp_llm.models_py.modules.dsv4.mhc import hc_split_sinkhorn
 from rtp_llm.models_py.modules.dsv4.moe import MoE
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 # P-sinkhorn (plan_0427.md): single-Triton-kernel replacement for
 # mhc.py:hc_split_sinkhorn (~135 launches → 1).  32× per-call speedup
@@ -52,18 +53,34 @@ from rtp_llm.models_py.modules.dsv4._mhc_tilelang import tk_mhc_pre as _tk_mhc_p
 
 
 class _RMSNorm(nn.Module):
-    """Standalone RMSNorm with FP32 weight, matches `inference/model.py:RMSNorm`."""
+    """Single-launch RMSNorm, delegates to framework C++ ``rtp_llm_ops.rmsnorm``.
+
+    Weight is ``bf16`` (not fp32 as in DeepSeek's reference ``inference/model.py``
+    — the author's comment there is explicit: "checkpoint stores bf16, param
+    here is fp32 for convenient". vLLM/SGLang load the same checkpoint with
+    bf16 weight; we follow that. The C++ kernel requires bf16 weight (silent
+    NaN otherwise, verified in bench_rmsnorm_cpp_vs_triton.py).
+    """
 
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        self.dim = dim
+        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.bfloat16))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        dtype = x.dtype
-        x32 = x.float()
-        x32 = x32 * torch.rsqrt(x32.square().mean(-1, keepdim=True) + self.eps)
-        return (self.weight * x32).to(dtype)
+        # C++ op requires 2D input; reshape and restore.
+        orig_shape = x.shape
+        x_2d = x.reshape(-1, self.dim)
+        out = torch.empty_like(x_2d)
+        rtp_llm_ops.rmsnorm(
+            out,
+            x_2d,
+            self.weight.data,
+            self.eps,
+            torch.cuda.current_stream().cuda_stream,
+        )
+        return out.view(orig_shape)
 
 
 class Block(nn.Module):
@@ -169,11 +186,11 @@ class Block(nn.Module):
         self.ffn_norm = _RMSNorm(dim, norm_eps)
         if self._factory_mode:
             self.attn_norm.weight = nn.Parameter(
-                weights[f"{prefix}.attn_norm.weight"].float(),
+                weights[f"{prefix}.attn_norm.weight"].to(torch.bfloat16),
                 requires_grad=False,
             )
             self.ffn_norm.weight = nn.Parameter(
-                weights[f"{prefix}.ffn_norm.weight"].float(),
+                weights[f"{prefix}.ffn_norm.weight"].to(torch.bfloat16),
                 requires_grad=False,
             )
 
@@ -544,13 +561,16 @@ class MTPBlock(Block):
         hc_dim = hc_mult * dim
         if self._factory_mode:
             self.enorm.weight = nn.Parameter(
-                weights[f"{prefix}.enorm.weight"].float(), requires_grad=False
+                weights[f"{prefix}.enorm.weight"].to(torch.bfloat16),
+                requires_grad=False,
             )
             self.hnorm.weight = nn.Parameter(
-                weights[f"{prefix}.hnorm.weight"].float(), requires_grad=False
+                weights[f"{prefix}.hnorm.weight"].to(torch.bfloat16),
+                requires_grad=False,
             )
             self.norm.weight = nn.Parameter(
-                weights[f"{prefix}.norm.weight"].float(), requires_grad=False
+                weights[f"{prefix}.norm.weight"].to(torch.bfloat16),
+                requires_grad=False,
             )
             self.hc_head_fn = nn.Parameter(
                 weights[f"{prefix}.hc_head_fn"].float(), requires_grad=False
