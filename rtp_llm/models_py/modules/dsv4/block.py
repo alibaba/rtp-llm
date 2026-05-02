@@ -360,7 +360,10 @@ class Block(nn.Module):
     ) -> torch.Tensor:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
-        _dbg_layer = self.layer_id <= 2  # instrument layers 0..2; first CSA layer is L2
+        # Master switch: when MOEDBG=0 the AND short-circuits so neither the
+        # layer_id compare nor any record_if_level call site below runs.
+        # Instruments layers 0..2 (first CSA layer is L2) when enabled.
+        _dbg_layer = _rt.ENABLED and self.layer_id <= 2
         # Attention path
         residual = x
         x_pre, post, comb = self._hc_pre(
