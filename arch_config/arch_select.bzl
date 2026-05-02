@@ -1,7 +1,4 @@
 # to wrapper target relate with different system config
-load("@pip_cpu_torch//:requirements.bzl", requirement_cpu="requirement")
-load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
-load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
@@ -16,11 +13,12 @@ def requirement(names):
         native.py_library(
             name = name,
             deps = select({
-                "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
-                "@rtp_llm//:using_arm": [requirement_arm(name)],
-                "//conditions:default": [requirement_cpu(name)],
+                # Default falls through to cuda12_9 (the canonical x86 GPU build).
+                # CPU-only and ARM-CPU configs were removed; if you need them,
+                # restore the corresponding pip_parse + lockfile + select branch.
+                "//conditions:default": [requirement_gpu_cuda12_9(name)],
             }),
             visibility = ["//visibility:public"],
         )
@@ -57,17 +55,17 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
-        "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
-        "@rtp_llm//:using_rocm": ["pyrsmi==0.2.0", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.14rc1.dev41%2Bgc39217100.d20260519-cp310-cp310-linux_x86_64.whl"],
-        "//conditions:default": ["torch==2.1.2"],
+        "@rtp_llm//:using_rocm": ["pyrsmi==0.2.0", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.13.dev14%2Bgfa35072d0.d20260402-cp310-cp310-linux_x86_64.whl"],
+        # Default covers cuda12_9_x86, cuda12_9_arm (both use torch 2.8+cu129).
+        # CPU-only and ARM-CPU wheel targets were removed.
+        "//conditions:default": ["torch==2.8.0+cu129"],
     })
 
 def platform_deps():
     return select({
-        "@rtp_llm//:using_arm": [],
         "@rtp_llm//:using_cuda12_arm": [],
-        "@rtp_llm//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0", "av==16.1.0"],
-        "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
+        "@rtp_llm//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0"],
+        "//conditions:default": ["decord==0.6.0"],
     })
 
 def torch_deps():
@@ -77,26 +75,11 @@ def torch_deps():
             "@torch_rocm//:torch",
             "@torch_rocm//:torch_libs",
         ],
-        "@rtp_llm//:using_arm": [
-            "@torch_2.3_py310_cpu_aarch64//:torch_api",
-            "@torch_2.3_py310_cpu_aarch64//:torch",
-            "@torch_2.3_py310_cpu_aarch64//:torch_libs",
-        ],
-        "@rtp_llm//:cuda_pre_12_9": [
-            "@torch_2.6_py310_cuda//:torch_api",
-            "@torch_2.6_py310_cuda//:torch",
-            "@torch_2.6_py310_cuda//:torch_libs",
-        ],
-        "@rtp_llm//:using_cuda12_9_x86": [
+        "//conditions:default": [
             "@torch_2.8_py310_cuda//:torch_api",
             "@torch_2.8_py310_cuda//:torch",
             "@torch_2.8_py310_cuda//:torch_libs",
         ],
-        "//conditions:default": [
-            "@torch_2.1_py310_cpu//:torch_api",
-            "@torch_2.1_py310_cpu//:torch",
-            "@torch_2.1_py310_cpu//:torch_libs",
-        ]
     })
     return deps
 
