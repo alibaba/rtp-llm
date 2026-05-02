@@ -26,6 +26,7 @@ State writes (kv_state, score_state for incremental decode), the wkv /
 wgate FP32 GEMMs, and the post-pool RMSNorm + RoPE all live in
 `compressor.py` unchanged.
 """
+
 from __future__ import annotations
 
 import torch
@@ -35,15 +36,18 @@ import triton.language as tl
 
 @triton.jit
 def _v4_compressor_pool_fwd(
-    kv_ptr,         # [B, NB, G, D] fp32
-    score_ptr,      # [B, NB, G, D] fp32
-    out_ptr,        # [B, NB, D]    fp32
-
+    kv_ptr,  # [B, NB, G, D] fp32
+    score_ptr,  # [B, NB, G, D] fp32
+    out_ptr,  # [B, NB, D]    fp32
     # strides — D-stride==1 assumed (caller asserts contiguous)
-    kv_b: tl.constexpr, kv_n: tl.constexpr, kv_g: tl.constexpr,
-    score_b: tl.constexpr, score_n: tl.constexpr, score_g: tl.constexpr,
-    out_b: tl.constexpr, out_n: tl.constexpr,
-
+    kv_b: tl.constexpr,
+    kv_n: tl.constexpr,
+    kv_g: tl.constexpr,
+    score_b: tl.constexpr,
+    score_n: tl.constexpr,
+    score_g: tl.constexpr,
+    out_b: tl.constexpr,
+    out_n: tl.constexpr,
     # geometry
     G: tl.constexpr,
     D: tl.constexpr,
@@ -59,9 +63,16 @@ def _v4_compressor_pool_fwd(
     behaves correctly since at least one entry per (b, nb, d_pos) is
     finite (the kernel doesn't need a special path for them).
     """
-    pid_b = tl.program_id(0)
-    pid_n = tl.program_id(1)
-    pid_d = tl.program_id(2)
+    # Cast pids to int64 BEFORE the per-axis stride multiplies: at long
+    # context the (B, NB, *) grid combined with constexpr strides like
+    # score_b = NB*G*D can push ``pid * stride`` close to / past
+    # INT32_MAX.  Even when current shapes stay safely below 2^31, future
+    # B>1 or larger D would silently overflow — same pattern that bit
+    # v4_rmsnorm and _fused_rmsnorm_rope_kernel.  Int64 promotion is
+    # zero-cost (one cast per program).
+    pid_b = tl.program_id(0).to(tl.int64)
+    pid_n = tl.program_id(1).to(tl.int64)
+    pid_d = tl.program_id(2).to(tl.int64)
 
     g_off = tl.arange(0, G)
     d_off = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
@@ -83,31 +94,27 @@ def _v4_compressor_pool_fwd(
     ).to(tl.float32)
 
     # Per-D softmax over G axis.
-    score_max = tl.max(score, axis=0)                       # [BLOCK_D]
-    score = tl.exp(score - score_max[None, :])              # [G, BLOCK_D]
-    score_sum = tl.sum(score, axis=0)                       # [BLOCK_D]
+    score_max = tl.max(score, axis=0)  # [BLOCK_D]
+    score = tl.exp(score - score_max[None, :])  # [G, BLOCK_D]
+    score_sum = tl.sum(score, axis=0)  # [BLOCK_D]
     # Guard against all-(-inf) columns (would give 0/0); REF gets nan in
     # the same case so we let it propagate, but avoid crashing on div.
     score = score / score_sum[None, :]
 
     kv_ptrs = (
-        kv_ptr
-        + pid_b * kv_b
-        + pid_n * kv_n
-        + g_off[:, None] * kv_g
-        + d_off[None, :]
+        kv_ptr + pid_b * kv_b + pid_n * kv_n + g_off[:, None] * kv_g + d_off[None, :]
     )
     kv = tl.load(kv_ptrs, mask=d_mask[None, :], other=0.0).to(tl.float32)
 
-    out = tl.sum(kv * score, axis=0)                        # [BLOCK_D]
+    out = tl.sum(kv * score, axis=0)  # [BLOCK_D]
 
     out_ptrs = out_ptr + pid_b * out_b + pid_n * out_n + d_off
     tl.store(out_ptrs, out, mask=d_mask)
 
 
 def v4_compressor_pool(
-    kv: torch.Tensor,      # [B, NB, G, D] fp32
-    score: torch.Tensor,   # [B, NB, G, D] fp32
+    kv: torch.Tensor,  # [B, NB, G, D] fp32
+    score: torch.Tensor,  # [B, NB, G, D] fp32
 ) -> torch.Tensor:
     """Fused per-D softmax over G + weighted-sum.
 
@@ -120,15 +127,13 @@ def v4_compressor_pool(
     assert kv.dim() == 4 and score.dim() == 4
     assert kv.shape == score.shape
     B, NB, G, D = kv.shape
-    assert kv.dtype == torch.float32 and score.dtype == torch.float32, (
-        f"expected fp32 inputs, got kv={kv.dtype} score={score.dtype}"
-    )
-    assert kv.stride(-1) == 1 and score.stride(-1) == 1, (
-        "kv and score must be contiguous along D"
-    )
-    assert G & (G - 1) == 0 and G <= 256, (
-        f"G must be a power of 2, ≤ 256 (got {G})"
-    )
+    assert (
+        kv.dtype == torch.float32 and score.dtype == torch.float32
+    ), f"expected fp32 inputs, got kv={kv.dtype} score={score.dtype}"
+    assert (
+        kv.stride(-1) == 1 and score.stride(-1) == 1
+    ), "kv and score must be contiguous along D"
+    assert G & (G - 1) == 0 and G <= 256, f"G must be a power of 2, ≤ 256 (got {G})"
 
     out = torch.empty((B, NB, D), dtype=torch.float32, device=kv.device)
     if NB == 0:
@@ -145,10 +150,19 @@ def v4_compressor_pool(
     grid = (B, NB, triton.cdiv(D, BLOCK_D))
 
     _v4_compressor_pool_fwd[grid](
-        kv, score, out,
-        kv.stride(0), kv.stride(1), kv.stride(2),
-        score.stride(0), score.stride(1), score.stride(2),
-        out.stride(0), out.stride(1),
-        G=G, D=D, BLOCK_D=BLOCK_D,
+        kv,
+        score,
+        out,
+        kv.stride(0),
+        kv.stride(1),
+        kv.stride(2),
+        score.stride(0),
+        score.stride(1),
+        score.stride(2),
+        out.stride(0),
+        out.stride(1),
+        G=G,
+        D=D,
+        BLOCK_D=BLOCK_D,
     )
     return out
