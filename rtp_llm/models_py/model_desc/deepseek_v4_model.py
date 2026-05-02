@@ -1312,27 +1312,10 @@ class DeepSeekV4Model(GptModelBase):
         attn = inputs.attention_inputs
         is_prefill = bool(attn.is_prefill) if attn is not None else True
 
-        # Decode arm.  Two paths share ``_forward_decode``:
-        #   * fmha_impl is a DSv4DecodeFmhaImpl → CUDA-graph replay with
-        #     persistent decode metadata.
-        #   * fmha_impl is None (eager / --enable_cuda_graph 0) → build
-        #     decode metadata inline inside ``_forward_decode``.
-        # Eager mode previously fell through to the unified prefill
-        # ``forward()`` path with q_len=1, which silently bypassed
-        # ``Attention.forward_decode`` (and thus the FP8/FlashMLA decode
-        # ops).  Routing both paths through ``_forward_decode`` keeps
-        # graph and eager behavior in lock-step so capture-time and
-        # replay-time semantics match.
-        if (
-            not is_prefill
-            and attn is not None
-            and attn.sequence_lengths is not None
-            and attn.sequence_lengths.numel() > 0
-        ):
-            return self._forward_decode(inputs, fmha_impl)
-
         # Deferred wiring: framework allocates kv_cache after initialize(),
         # so we wire on first forward() when kv_cache becomes available.
+        # Must run BEFORE the decode dispatch — _forward_decode reads
+        # _layer_pool_descs which is populated by _wire_framework_kv_cache.
         if getattr(self, "_framework_kv_pending", False) and self.kv_cache is not None:
             device_str = str(input_ids.device)
             self._wire_framework_kv_cache(device_str)
@@ -1345,9 +1328,12 @@ class DeepSeekV4Model(GptModelBase):
         # Re-wire if the framework rebuilt the KV cache (warmup→real
         # transition). NormalEngine first allocates a stub allocator with
         # block_num=1 to measure GPU memory, then tears it down and creates
-        # the real allocator with the measured block_num. The stub's pool
-        # tensors get freed; without re-wiring, gather hits IndexError on
-        # the dead warmup tensors.
+        # the real allocator with the measured block_num. Stub pools have
+        # only 1 block per attn_type — without re-wiring, _layer_pool_descs
+        # carries num_blocks=1, and decode-time index_select / index_copy_
+        # hits OOB when framework's real block_id (>= 1) lands outside the
+        # stale 1-block view.
+        # Must run BEFORE the decode dispatch for the same reason as above.
         if self.kv_cache is not None and getattr(self, "_framework_kv_enabled", False):
             cur_id = id(self.kv_cache)
             cur_first_ptr = None
@@ -1372,6 +1358,25 @@ class DeepSeekV4Model(GptModelBase):
                     cur_first_ptr,
                 )
                 self._wire_framework_kv_cache(str(input_ids.device))
+
+        # Decode arm.  Two paths share ``_forward_decode``:
+        #   * fmha_impl is a DSv4DecodeFmhaImpl → CUDA-graph replay with
+        #     persistent decode metadata.
+        #   * fmha_impl is None (eager / --enable_cuda_graph 0) → build
+        #     decode metadata inline inside ``_forward_decode``.
+        # Eager mode previously fell through to the unified prefill
+        # ``forward()`` path with q_len=1, which silently bypassed
+        # ``Attention.forward_decode`` (and thus the FP8/FlashMLA decode
+        # ops).  Routing both paths through ``_forward_decode`` keeps
+        # graph and eager behavior in lock-step so capture-time and
+        # replay-time semantics match.
+        if (
+            not is_prefill
+            and attn is not None
+            and attn.sequence_lengths is not None
+            and attn.sequence_lengths.numel() > 0
+        ):
+            return self._forward_decode(inputs, fmha_impl)
 
         # --- Context Parallel setup (before forward loop) ---
         # Must be before self.v4(...) — the transformer reads self.v4._cp_info
