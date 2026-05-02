@@ -556,24 +556,36 @@ class Attention(nn.Module):
                 name: str, row_slice: slice = None, col_slice: slice = None
             ) -> "torch.nn.Module":
                 """Build a CudaFp8DeepGEMMLinear from a sliced view of the
-                ckpt FP8 weight + UE8M0 block-128 scale.  Slices the scale
-                along the *block-128* axis correspondingly: row_slice with
-                stride/start divisible by 128 maps to a row_slice on the
-                scale; same for col_slice."""
+                ckpt FP8 weight + scale.  Scale slicing depends on layout:
+                  * legacy raw UE8M0 [N//128, K//128]: row/col strides are
+                    block-128 → ``slice.start // 128``.
+                  * framework packed int32 [N, K//128//4]: N is fully
+                    expanded (slice by full N stride) and K is packed 4×
+                    (slice by ``slice.start // 512``)."""
                 wkey = f"{prefix}.{name}.weight"
                 skey = f"{prefix}.{name}.scale"
                 w = weights[wkey]
                 s = weights[skey]
+                scale_is_packed_int32 = s.dtype == torch.int32
                 if row_slice is not None:
-                    rs = row_slice.start // 128
-                    re = row_slice.stop // 128
                     w = w[row_slice]
-                    s = s[rs:re]
+                    if scale_is_packed_int32:
+                        s = s[row_slice]
+                    else:
+                        s = s[row_slice.start // 128 : row_slice.stop // 128]
                 if col_slice is not None:
-                    cs = col_slice.start // 128
-                    ce = col_slice.stop // 128
                     w = w[:, col_slice]
-                    s = s[:, cs:ce]
+                    if scale_is_packed_int32:
+                        assert (
+                            col_slice.start % 512 == 0 and col_slice.stop % 512 == 0
+                        ), (
+                            f"col_slice {col_slice} not aligned to 512 for "
+                            f"packed int32 scale; framework path requires "
+                            f"K-slices on 512-byte boundaries"
+                        )
+                        s = s[:, col_slice.start // 512 : col_slice.stop // 512]
+                    else:
+                        s = s[:, col_slice.start // 128 : col_slice.stop // 128]
                 # Local dict so the factory call sees the slice
                 local = dict(weights)
                 local[wkey] = w.contiguous()
@@ -602,9 +614,13 @@ class Attention(nn.Module):
                 wo_a_s = weights[f"{prefix}.wo_a.scale"]
                 if tp_size > 1:
                     wo_a_w = wo_a_w[wo_a_row_slice].contiguous()
-                    wo_a_s = wo_a_s[
-                        wo_a_row_slice.start // 128 : wo_a_row_slice.stop // 128
-                    ].contiguous()
+                    if wo_a_s.dtype == torch.int32:
+                        # framework path: scale is already (N, K//128//4) int32
+                        wo_a_s = wo_a_s[wo_a_row_slice].contiguous()
+                    else:
+                        wo_a_s = wo_a_s[
+                            wo_a_row_slice.start // 128 : wo_a_row_slice.stop // 128
+                        ].contiguous()
                 self.wo_a.weight = nn.Parameter(wo_a_w, requires_grad=False)
                 self.wo_a.scale = nn.Parameter(wo_a_s, requires_grad=False)
                 # Pre-stack into the ``fp8_einsum`` layout once.  Stored
@@ -1275,6 +1291,10 @@ class Attention(nn.Module):
         ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0)."""
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
+        # NOTE for framework load path: V4PerBlockFp8Weight keeps wo_a.scale
+        # in raw UE8M0 ``float8_e8m0fnu`` (same byte layout as legacy ckpt),
+        # so the eager ``_prepare_wo_a_stacked`` call at __init__ works
+        # on both legacy and framework loaders without branching.
         out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
         deep_gemm.fp8_einsum(
             "bhr,hdr->bhd",
@@ -1850,10 +1870,22 @@ class Attention(nn.Module):
             sp = int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
             topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, sp, device)
         if self.compress_ratio:
-            # The concatenated prefill KV is [sliding (seqlen_full), compressed tail].
-            # Compressed block start-index is seqlen_full in prefill,
-            # win in decode (ring-buffer layout).
-            if is_prefill_attn:
+            # Compressed block start-index depends on which KV layout the
+            # downstream sparse_attn will read:
+            #   * Fresh prefill (sp_int == 0): kv_cat = [kv_full(seqlen_full),
+            #     kv_compress(...)], so compressed slots start at seqlen_full.
+            #   * Continuation prefill (sp_int > 0): kv_cat = self.kv_cache[:bsz]
+            #     (ring buffer of size [win + max_seq_len/ratio]). Compressed
+            #     slots start at ``win``, NOT seqlen_full — using seqlen_full
+            #     points compress_idxs past kv_cache.size(1) and triggers a
+            #     CUDA assert in torch.gather (HCA layer where size=192).
+            #   * Decode: same ring-buffer layout, offset = win.
+            _sp_for_offset = (
+                int(start_pos)
+                if isinstance(start_pos, torch.Tensor) and start_pos.numel() == 1
+                else (start_pos if isinstance(start_pos, int) else None)
+            )
+            if is_prefill_attn and _sp_for_offset == 0:
                 offset = seqlen_full
             else:
                 offset = win

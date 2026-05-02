@@ -31,7 +31,7 @@ NOT go through ``V4Transformer.forward``.
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -48,6 +48,31 @@ from rtp_llm.models_py.modules.dsv4.weight_loader import (
     load_v4_safetensors,
     load_v4_weights_dict,
 )
+from rtp_llm.utils.model_weight import W
+
+
+def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
+    """Walk the module tree and replace any meta-device buffer with a
+    zeroed real-device tensor of the same shape/dtype. Factory-mode
+    construction builds V4Transformer under `torch.device("meta")` to
+    skip placeholder allocations; this pass re-materializes the
+    non-parameter buffers (kv_cache, kv_state, score_state, etc.) so
+    forward() can read and write them."""
+    count = 0
+    for mod in module.modules():
+        for name, buf in list(mod._buffers.items()):
+            if buf is None:
+                continue
+            if buf.device.type == "meta":
+                mod._buffers[name] = torch.zeros(
+                    buf.shape,
+                    dtype=buf.dtype,
+                    device=device,
+                )
+                count += 1
+    return count
+
+
 from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 
 
@@ -284,22 +309,88 @@ class DeepSeekV4Model(GptModelBase):
         )
         device_str = str(device)
 
-        logging.info(
-            "[DeepSeekV4Model] loading ckpt dict from %s to %s "
-            "(ep_size=%d ep_rank=%d) ...",
-            self._ckpt_path,
-            device_str,
-            self._v4_args.ep_size,
-            self._v4_args.ep_rank,
-        )
-        weights = load_v4_weights_dict(
-            self._ckpt_path,
-            device=device_str,
-            ep_size=self._v4_args.ep_size,
-            ep_rank=self._v4_args.ep_rank,
-            n_routed_experts=self._v4_args.n_routed_experts,
-        )
+        # Two paths to obtain a flat ckpt-style weights dict that the
+        # standalone V4Transformer factory mode consumes:
+        #   1) Default — read from ``self.weight`` (ModelWeights), which the
+        #      framework's fastsafetensors loader already populated via the
+        #      DeepSeekV4Weight descriptor (see ``rtp_llm/models/deepseek_v4.py``).
+        #      The W-prefixed names get inverted back to ckpt-style keys here.
+        #   2) Fallback — ``DSV4_USE_LEGACY_LOADER=1`` runs the bespoke
+        #      ``load_v4_weights_dict`` (direct safetensors → cuda) used while
+        #      the framework path was being built. Kept as an escape hatch.
+        if os.environ.get("DSV4_USE_LEGACY_LOADER") == "1":
+            # When dumping for byte-exact comparison we drop the load device
+            # to CPU — legacy loader places every safetensors tensor on
+            # ``device_str`` at once which OOMs the GPU on V4-Flash (~270 GiB
+            # peak before V4Transformer copies them again).  Dumped tensors
+            # land on CPU anyway so this is free.
+            legacy_device = (
+                "cpu" if os.environ.get("DSV4_DUMP_EXIT") == "1" else device_str
+            )
+            logging.info(
+                "[DeepSeekV4Model] DSV4_USE_LEGACY_LOADER=1 — loading ckpt "
+                "dict from %s via legacy load_v4_weights_dict on %s "
+                "(ep_size=%d ep_rank=%d)",
+                self._ckpt_path,
+                legacy_device,
+                self._v4_args.ep_size,
+                self._v4_args.ep_rank,
+            )
+            weights = load_v4_weights_dict(
+                self._ckpt_path,
+                device=legacy_device,
+                ep_size=self._v4_args.ep_size,
+                ep_rank=self._v4_args.ep_rank,
+                n_routed_experts=self._v4_args.n_routed_experts,
+            )
+        else:
+            logging.info(
+                "[DeepSeekV4Model] flattening framework weights for V4Transformer "
+                "factory (layers=%d, globals=%d) ...",
+                len(self.weight.weights),
+                len(self.weight.global_weights),
+            )
+            weights = self._flatten_framework_weights(self.weight)
         logging.info("[DeepSeekV4Model] loaded %d tensors from ckpt", len(weights))
+
+        # Optional pre-construction weight dump for legacy↔framework byte-exact
+        # comparison.  Captures the FLAT ckpt-style dict produced by either path
+        # (load_v4_weights_dict OR _flatten_framework_weights) BEFORE the
+        # V4Transformer factory consumes it.  This is the right comparison
+        # point because:
+        #   * We want to validate the load+postprocess pipeline, not the
+        #     downstream V4Transformer module wiring.
+        #   * V4Transformer factory does an extra param-copy that ~doubles
+        #     peak GPU memory and OOMs the legacy path on 1×B300; dumping
+        #     here skips that.
+        # Filter to only layers 0..DSV4_DUMP_LAYERS-1 (default 4) + globals.
+        # Set DSV4_DUMP_EXIT=1 to abort before V4Transformer construction.
+        dump_path = os.environ.get("DSV4_DUMP_WEIGHTS")
+        if dump_path:
+            n_dump_layers = int(os.environ.get("DSV4_DUMP_LAYERS", "4"))
+            keep_prefixes = tuple(
+                f"layers.{li}." for li in range(n_dump_layers)
+            )
+            state: Dict[str, torch.Tensor] = {}
+            for k, v in weights.items():
+                if k.startswith(keep_prefixes) or "." not in k or not k.startswith(
+                    "layers."
+                ):
+                    state[k] = v.detach().cpu().clone()
+            torch.save(state, dump_path)
+            logging.info(
+                "[DeepSeekV4Model] DSV4_DUMP_WEIGHTS: dumped %d tensors "
+                "(layers 0..%d + globals) -> %s",
+                len(state),
+                n_dump_layers - 1,
+                dump_path,
+            )
+            if os.environ.get("DSV4_DUMP_EXIT", "0") == "1":
+                logging.warning(
+                    "[DeepSeekV4Model] DSV4_DUMP_EXIT=1 — exiting before "
+                    "V4Transformer construction"
+                )
+                os._exit(0)
 
         logging.info("[DeepSeekV4Model] building V4Transformer via factory ...")
         # Construct under meta device so the nn.Embedding / nn.Linear /
@@ -351,6 +442,171 @@ class DeepSeekV4Model(GptModelBase):
 
         return True
 
+    # ------------------------------------------------------------------
+    # Framework ModelWeights → flat ckpt-style dict adapter.
+    # ------------------------------------------------------------------
+    #
+    # The framework's fastsafetensors path, driven by ``DeepSeekV4Weight``,
+    # stores tensors keyed by ``W.v4_*`` constants in
+    # ``self.weight.weights[layer_id]`` and global weights in
+    # ``self.weight.global_weights``.  V4Transformer's factory mode (defined in
+    # rtp_llm/models_py/modules/dsv4) instead expects ckpt-style flat keys
+    # (``layers.{i}.attn.wq_a.weight``, ``embed.weight``, ...).  This adapter
+    # bridges the two until V4Transformer is refactored to consume W-keys
+    # directly.
+
+    # W-key → ckpt-key template (per-layer).  Templates use ``{i}`` for the
+    # layer index, formatted with ``layer_id`` at flatten time.
+    _LAYER_W_TO_CKPT_TEMPLATE: Dict[str, str] = {}
+    _GLOBAL_W_TO_CKPT: Dict[str, str] = {}
+
+    @classmethod
+    def _build_layer_w_to_ckpt(cls) -> Dict[str, str]:
+        if cls._LAYER_W_TO_CKPT_TEMPLATE:
+            return cls._LAYER_W_TO_CKPT_TEMPLATE
+        m: Dict[str, str] = {
+            # attention norms + sink
+            W.v4_attn_norm: "layers.{i}.attn_norm.weight",
+            W.v4_attn_q_norm: "layers.{i}.attn.q_norm.weight",
+            W.v4_attn_kv_norm: "layers.{i}.attn.kv_norm.weight",
+            W.v4_attn_sink: "layers.{i}.attn.attn_sink",
+            # dense MQA FP8 (kernel + scale)
+            W.v4_attn_wq_a_w: "layers.{i}.attn.wq_a.weight",
+            W.v4_attn_wq_a_s: "layers.{i}.attn.wq_a.scale",
+            W.v4_attn_wq_b_w: "layers.{i}.attn.wq_b.weight",
+            W.v4_attn_wq_b_s: "layers.{i}.attn.wq_b.scale",
+            W.v4_attn_wkv_w: "layers.{i}.attn.wkv.weight",
+            W.v4_attn_wkv_s: "layers.{i}.attn.wkv.scale",
+            W.v4_attn_wo_a_w: "layers.{i}.attn.wo_a.weight",
+            W.v4_attn_wo_a_s: "layers.{i}.attn.wo_a.scale",
+            W.v4_attn_wo_b_w: "layers.{i}.attn.wo_b.weight",
+            W.v4_attn_wo_b_s: "layers.{i}.attn.wo_b.scale",
+            # outer compressor (CSA + HCA layers)
+            W.v4_compressor_wkv: "layers.{i}.attn.compressor.wkv.weight",
+            W.v4_compressor_wgate: "layers.{i}.attn.compressor.wgate.weight",
+            W.v4_compressor_norm: "layers.{i}.attn.compressor.norm.weight",
+            W.v4_compressor_ape: "layers.{i}.attn.compressor.ape",
+            # indexer (CSA layers only)
+            W.v4_indexer_wq_b_w: "layers.{i}.attn.indexer.wq_b.weight",
+            W.v4_indexer_wq_b_s: "layers.{i}.attn.indexer.wq_b.scale",
+            W.v4_indexer_weights_proj_w: "layers.{i}.attn.indexer.weights_proj.weight",
+            W.v4_indexer_compressor_wkv: "layers.{i}.attn.indexer.compressor.wkv.weight",
+            W.v4_indexer_compressor_wgate: "layers.{i}.attn.indexer.compressor.wgate.weight",
+            W.v4_indexer_compressor_norm: "layers.{i}.attn.indexer.compressor.norm.weight",
+            W.v4_indexer_compressor_ape: "layers.{i}.attn.indexer.compressor.ape",
+            # mHC residual (per-layer)
+            W.v4_hc_attn_base: "layers.{i}.hc_attn_base",
+            W.v4_hc_attn_fn: "layers.{i}.hc_attn_fn",
+            W.v4_hc_attn_scale: "layers.{i}.hc_attn_scale",
+            W.v4_hc_ffn_base: "layers.{i}.hc_ffn_base",
+            W.v4_hc_ffn_fn: "layers.{i}.hc_ffn_fn",
+            W.v4_hc_ffn_scale: "layers.{i}.hc_ffn_scale",
+            # FFN norm + router
+            W.v4_ffn_norm: "layers.{i}.ffn_norm.weight",
+            W.v4_router_w: "layers.{i}.ffn.gate.weight",
+            W.v4_router_bias: "layers.{i}.ffn.gate.bias",
+            W.v4_router_tid2eid: "layers.{i}.ffn.gate.tid2eid",
+            # shared expert (FP8) — kernel + scale
+            W.v4_shared_w1_w: "layers.{i}.ffn.shared_experts.w1.weight",
+            W.v4_shared_w1_s: "layers.{i}.ffn.shared_experts.w1.scale",
+            W.v4_shared_w2_w: "layers.{i}.ffn.shared_experts.w2.weight",
+            W.v4_shared_w2_s: "layers.{i}.ffn.shared_experts.w2.scale",
+            W.v4_shared_w3_w: "layers.{i}.ffn.shared_experts.w3.weight",
+            W.v4_shared_w3_s: "layers.{i}.ffn.shared_experts.w3.scale",
+            # routed experts (FP4) — stacked tensors expanded into per-expert keys below
+        }
+        cls._LAYER_W_TO_CKPT_TEMPLATE = m
+        return m
+
+    @classmethod
+    def _build_global_w_to_ckpt(cls) -> Dict[str, str]:
+        if cls._GLOBAL_W_TO_CKPT:
+            return cls._GLOBAL_W_TO_CKPT
+        m: Dict[str, str] = {
+            W.embedding: "embed.weight",
+            W.final_ln_gamma: "norm.weight",
+            W.lm_head: "head.weight",
+            W.v4_hc_head_base: "hc_head_base",
+            W.v4_hc_head_fn: "hc_head_fn",
+            W.v4_hc_head_scale: "hc_head_scale",
+        }
+        cls._GLOBAL_W_TO_CKPT = m
+        return m
+
+    # mHC residual scale W-keys whose ckpt name (`layers.{i}.hc_*_scale`,
+    # `hc_head_scale`) matches the framework's overzealous "any 1D scale →
+    # unsqueeze(-1)" heuristic at ``weight_module.py:357``.  That heuristic
+    # is meant for quant scales (per-row UE8M0/FP32 reciprocals) which need a
+    # trailing dim for broadcast; the V4 mHC scaling factors don't.  Squeeze
+    # them back to 1D here so the V4Transformer factory sees the same shape
+    # as the legacy load path.
+    _HC_SCALE_W_KEYS = frozenset(
+        {
+            W.v4_hc_attn_scale,
+            W.v4_hc_ffn_scale,
+            W.v4_hc_head_scale,
+        }
+    )
+
+    def _flatten_framework_weights(self, mw: ModelWeights) -> Dict[str, torch.Tensor]:
+        """Convert framework ``ModelWeights`` (W-key indexed) into the flat
+        ckpt-style dict expected by ``V4Transformer`` factory mode.
+
+        Routed expert tensors are stored as stacked ``[n_experts, ...]`` by
+        ``MoeAtomicWeight`` (process_fun=``stack_``); we slice them per expert
+        and emit ``layers.{i}.ffn.experts.{j}.{w1,w2,w3}.{weight,scale}``.
+        """
+        out: Dict[str, torch.Tensor] = {}
+
+        def _maybe_squeeze_hc(w_name, t):
+            if w_name in self._HC_SCALE_W_KEYS and t.dim() == 2 and t.shape[-1] == 1:
+                return t.squeeze(-1)
+            return t
+
+        # Globals
+        g_map = self._build_global_w_to_ckpt()
+        for w_name, ckpt_key in g_map.items():
+            t = mw.global_weights.get(w_name)
+            if t is not None:
+                out[ckpt_key] = _maybe_squeeze_hc(w_name, t)
+
+        # Per-layer (excluding routed experts)
+        layer_map = self._build_layer_w_to_ckpt()
+        for layer_id, layer_w in enumerate(mw.weights):
+            for w_name, t in layer_w.items():
+                tmpl = layer_map.get(w_name)
+                if tmpl is not None:
+                    out[tmpl.format(i=layer_id)] = _maybe_squeeze_hc(w_name, t)
+
+            # Routed experts: stacked [E, ...] → per-expert dict entries.
+            for stacked_w_name, sub in (
+                (W.v4_routed_w1_w, "w1.weight"),
+                (W.v4_routed_w1_s, "w1.scale"),
+                (W.v4_routed_w2_w, "w2.weight"),
+                (W.v4_routed_w2_s, "w2.scale"),
+                (W.v4_routed_w3_w, "w3.weight"),
+                (W.v4_routed_w3_s, "w3.scale"),
+            ):
+                stacked = layer_w.get(stacked_w_name)
+                if stacked is None:
+                    continue
+                # stacked: [E_local, *expert_shape]; under EP, the loader's
+                # per-rank ``get_selected_experts`` returns the local slice
+                # in global-id order. Use local-indexed unstack here — when
+                # EP > 1, the V4 MoE module reads ``experts.{global_idx}``
+                # so an additional ep_rank * n_local_experts offset is
+                # needed; today TP=EP=1 so the offset is 0.
+                ep_rank = int(self._v4_args.ep_rank)
+                ep_size = max(1, int(self._v4_args.ep_size))
+                n_total = int(self._v4_args.n_routed_experts)
+                n_local = n_total // ep_size
+                global_offset = ep_rank * n_local
+                for local_idx in range(stacked.shape[0]):
+                    global_idx = global_offset + local_idx
+                    out[f"layers.{layer_id}.ffn.experts.{global_idx}.{sub}"] = stacked[
+                        local_idx
+                    ]
+        return out
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:

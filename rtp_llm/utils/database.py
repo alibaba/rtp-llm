@@ -249,13 +249,20 @@ class CkptDatabase(BaseDatabase):
                 device = f"cuda:{pg.rank()}"
                 logging.debug(f"origin device is cuda, set to {device}")
 
+            # FASTSAFETENSORS_NOGDS=1 forces the 'nogds' copier (skips the
+            # fast_safetensors C++ extension), needed when the patched
+            # 0.1.20+ali wheel is installed without the underscore-named
+            # native helper (e.g. dev environments where torch ABI does not
+            # match the prebuilt fast_safetensors).
+            use_nogds = os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1"
             loader_kwargs: Dict[str, Any] = dict(
                 pg=pg,
                 hf_weights_files=hf_weights_files,
                 use_tqdm_on_load=use_tqdm_on_load,
                 device=device,
                 bbuf_size_kb=1024 * 1024 * 2,
-                use_shm=True,
+                use_shm=not use_nogds,
+                nogds=use_nogds,
             )
             if stacked_key_config:
                 loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)

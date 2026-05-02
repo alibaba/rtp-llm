@@ -29,11 +29,13 @@ import logging
 import os
 from typing import List
 
+import torch
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.model_loader.model_weight_info import (
-    ModelWeightInfo,
-)
+from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
+from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
+from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.deepseek_v2 import (
     DeepSeekV2,
@@ -45,10 +47,11 @@ from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
     identity,
+    stack_,
+    stack_moe_w1,
     yarn_get_mscale,
     zeros,
 )
-
 
 SCORING_FUNC_SOFTMAX = 0
 SCORING_FUNC_SIGMOID = 1
@@ -58,21 +61,361 @@ SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
 class DeepSeekV4Weight(DeepSeekV2Weight):
     """DeepSeek-V4 weight info.
 
-    Declares only the GLOBAL weights the engine needs for logit projection +
-    norm + embedding lookup. All per-layer weights (attention, MoE, mHC,
-    compressor, indexer) are loaded inside `DeepSeekV4Model.initialize()` via
-    a direct safetensors loader, bypassing the framework's AtomicWeight flow
-    (V4-Flash has 67k+ tensors spread across FP4/FP8 packed shards).
+    Declares the per-layer + global ``WeightModule`` graph the framework's
+    fastsafetensors loader needs to populate ``ModelWeights`` from a V4-Flash
+    safetensors checkpoint.  ``DeepSeekV4Model._initialize_impl`` consumes
+    those tensors via a flatten-back-to-ckpt-style step and feeds them into
+    the standalone ``V4Transformer`` factory mode.
 
-    Checkpoint key layout (V4 official):
-      embed.weight   -> W.embedding
-      norm.weight    -> W.final_ln_gamma
-      head.weight    -> W.lm_head
+    Compatibility envelope:
+      * V4 ckpt key naming is ``layers.{i}.…`` (no ``model.`` prefix); V4 W
+        constants live under the ``v4.…`` namespace so per-block FP8 / per-group
+        FP4 quant subclasses can scope ``support()`` to V4 only.
+      * Per-layer module set is heterogeneous — driven by the layer's
+        ``compress_ratio`` from ``config.attn_config.layer_compress_ratios`` and
+        whether the layer's router is hash (``layer_id < num_hash_layers``) or
+        noaux_tc (``layer_id >= num_hash_layers``).
+      * Setting ``DSV4_USE_LEGACY_LOADER=1`` causes ``DeepSeekV4Model._initialize_impl``
+        to fall back to ``load_v4_weights_dict`` (bypassing this descriptor); used
+        as an escape hatch while the framework path stabilizes.
     """
 
-    def _get_weight_info(self):
-        layer_weights: List[List[WeightModule]] = [[] for _ in range(self._num_layers)]
-        weights = [
+    def _process_meta(self, meta_dict, weight_keys):  # type: ignore[override]
+        # V4 has no LoRA q-projection split (we use ``wq_a`` / ``wq_b`` directly)
+        # and no e_score_correction_bias (uses noaux_tc gate.bias on layers ≥ num_hash_layers).
+        self.q_use_lora = False
+        self.has_e_score_correction_bias = False
+        # Per-layer attention type schedule + hash-router count, both attached to
+        # ``self`` so ``_get_hf_layer_weight_info`` can branch per layer.
+        self._compress_ratios = list(
+            self.model_config.attn_config.layer_compress_ratios
+        )
+        # Pad/truncate to num_layers for safety.
+        if len(self._compress_ratios) < self._num_layers:
+            self._compress_ratios = self._compress_ratios + [0] * (
+                self._num_layers - len(self._compress_ratios)
+            )
+        else:
+            self._compress_ratios = self._compress_ratios[: self._num_layers]
+        self._num_hash_layers = int(self.model_config.num_hash_layers)
+
+    def _compress_ratio(self, layer_id: int) -> int:
+        if layer_id < 0 or layer_id >= len(self._compress_ratios):
+            return 0
+        return int(self._compress_ratios[layer_id])
+
+    # ------------------------------------------------------------------
+    # Per-layer descriptor builders
+    # ------------------------------------------------------------------
+
+    def _build_attn_norms(self, layer_id: int) -> List[WeightModule]:
+        return [
+            AtomicWeight(
+                W.v4_attn_norm,
+                [CkptWeightInfo("layers.{i}.attn_norm.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.v4_attn_q_norm,
+                [CkptWeightInfo("layers.{i}.attn.q_norm.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.v4_attn_kv_norm,
+                [CkptWeightInfo("layers.{i}.attn.kv_norm.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.v4_attn_sink,
+                [CkptWeightInfo("layers.{i}.attn.attn_sink", identity)],
+                identity,
+                data_type=torch.float32,
+            ),
+        ]
+
+    def _v4_attn_cfg(self) -> AttnConfig:
+        return AttnConfig(
+            hidden_size=self._hidden_size,
+            size_per_head=self._size_per_head,
+            head_num=self._head_num,
+            head_num_kv=self._head_num_kv,
+        )
+
+    def _build_attn_dense_fp8(self, layer_id: int) -> List[WeightModule]:
+        cfg = self._v4_attn_cfg()
+        # Each AttnAtomicWeight here will be wrapped by V4PerBlockFp8Weight
+        # in to_quant_weight_info() — that subclass auto-derives the .scale
+        # ckpt key from the .weight ckpt key using V4's suffix convention.
+        return [
+            AttnAtomicWeight(
+                W.v4_attn_wq_a_w,
+                [CkptWeightInfo("layers.{i}.attn.wq_a.weight", identity)],
+                identity,
+                config=cfg,
+            ),
+            AttnAtomicWeight(
+                W.v4_attn_wq_b_w,
+                [CkptWeightInfo("layers.{i}.attn.wq_b.weight", identity)],
+                identity,
+                config=cfg,
+            ),
+            AttnAtomicWeight(
+                W.v4_attn_wkv_w,
+                [CkptWeightInfo("layers.{i}.attn.wkv.weight", identity)],
+                identity,
+                config=cfg,
+            ),
+            AttnAtomicWeight(
+                W.v4_attn_wo_a_w,
+                [CkptWeightInfo("layers.{i}.attn.wo_a.weight", identity)],
+                identity,
+                config=cfg,
+            ),
+            AttnAtomicWeight(
+                W.v4_attn_wo_b_w,
+                [CkptWeightInfo("layers.{i}.attn.wo_b.weight", identity)],
+                identity,
+                config=cfg,
+            ),
+        ]
+
+    def _build_compressor(
+        self, layer_id: int, ratio: int, ckpt_prefix: str, inner: bool = False
+    ) -> List[WeightModule]:
+        # ``ckpt_prefix`` excludes the ``layers.{i}.`` template piece.
+        # e.g. "attn.compressor" or "attn.indexer.compressor".
+        wkv_name = W.v4_indexer_compressor_wkv if inner else W.v4_compressor_wkv
+        wgate_name = W.v4_indexer_compressor_wgate if inner else W.v4_compressor_wgate
+        norm_name = W.v4_indexer_compressor_norm if inner else W.v4_compressor_norm
+        ape_name = W.v4_indexer_compressor_ape if inner else W.v4_compressor_ape
+        return [
+            AtomicWeight(
+                wkv_name,
+                [CkptWeightInfo(f"layers.{{i}}.{ckpt_prefix}.wkv.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                wgate_name,
+                [CkptWeightInfo(f"layers.{{i}}.{ckpt_prefix}.wgate.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                norm_name,
+                [CkptWeightInfo(f"layers.{{i}}.{ckpt_prefix}.norm.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                ape_name,
+                [CkptWeightInfo(f"layers.{{i}}.{ckpt_prefix}.ape", identity)],
+                identity,
+                data_type=torch.float32,
+            ),
+        ]
+
+    def _build_indexer(self, layer_id: int) -> List[WeightModule]:
+        cfg = self._v4_attn_cfg()
+        return [
+            AttnAtomicWeight(
+                W.v4_indexer_wq_b_w,
+                [CkptWeightInfo("layers.{i}.attn.indexer.wq_b.weight", identity)],
+                identity,
+                config=cfg,
+            ),
+            AtomicWeight(
+                W.v4_indexer_weights_proj_w,
+                [
+                    CkptWeightInfo(
+                        "layers.{i}.attn.indexer.weights_proj.weight", identity
+                    )
+                ],
+                identity,
+            ),
+        ]
+
+    def _build_hc_residual(self, layer_id: int) -> List[WeightModule]:
+        out: List[WeightModule] = []
+        for tag in ("attn", "ffn"):
+            for sub, w_name in [
+                ("base", getattr(W, f"v4_hc_{tag}_base")),
+                ("fn", getattr(W, f"v4_hc_{tag}_fn")),
+                ("scale", getattr(W, f"v4_hc_{tag}_scale")),
+            ]:
+                out.append(
+                    AtomicWeight(
+                        w_name,
+                        [CkptWeightInfo(f"layers.{{i}}.hc_{tag}_{sub}", identity)],
+                        identity,
+                        data_type=torch.float32,
+                    )
+                )
+        return out
+
+    def _build_router(self, layer_id: int) -> List[WeightModule]:
+        out: List[WeightModule] = [
+            AtomicWeight(
+                W.v4_router_w,
+                [CkptWeightInfo("layers.{i}.ffn.gate.weight", identity)],
+                identity,
+            ),
+        ]
+        if layer_id < self._num_hash_layers:
+            out.append(
+                AtomicWeight(
+                    W.v4_router_tid2eid,
+                    [CkptWeightInfo("layers.{i}.ffn.gate.tid2eid", identity)],
+                    identity,
+                    data_type=torch.int64,
+                )
+            )
+        else:
+            out.append(
+                AtomicWeight(
+                    W.v4_router_bias,
+                    [CkptWeightInfo("layers.{i}.ffn.gate.bias", identity)],
+                    identity,
+                    data_type=torch.float32,
+                )
+            )
+        return out
+
+    def _build_shared_expert(self, layer_id: int) -> List[WeightModule]:
+        cfg = self._v4_attn_cfg()
+        return [
+            AttnAtomicWeight(
+                W.v4_shared_w1_w,
+                [CkptWeightInfo("layers.{i}.ffn.shared_experts.w1.weight", identity)],
+                identity,
+                config=cfg,
+            ),
+            AttnAtomicWeight(
+                W.v4_shared_w2_w,
+                [CkptWeightInfo("layers.{i}.ffn.shared_experts.w2.weight", identity)],
+                identity,
+                config=cfg,
+            ),
+            AttnAtomicWeight(
+                W.v4_shared_w3_w,
+                [CkptWeightInfo("layers.{i}.ffn.shared_experts.w3.weight", identity)],
+                identity,
+                config=cfg,
+            ),
+        ]
+
+    def _build_routed_experts_fp4(self, layer_id: int) -> List[WeightModule]:
+        moe_cfg = MoeConfig(
+            expert_num=self.expert_num_,
+            align_size=self._moe_align_size,
+        )
+        # V4 routed experts ship as I8-packed FP4 (e2m1) + UE8M0 group-32
+        # scale, both consumed natively by DeepGEMM's fp8_fp4_gemm_nt.  The
+        # framework's quant_config (Fp8BlockWiseQuantConfig from ckpt's
+        # quantization_config.quant_method=fp8) doesn't describe this FP4
+        # routed-expert scheme — there's no ModelOptFp4Config to trigger
+        # V4PerGroupFp4Weight.support().  Instead we declare BOTH the .weight
+        # (int8 packed FP4) AND the .scale (UE8M0) as separate MoeAtomicWeight
+        # entries so the framework loader treats them as two ordinary stacked
+        # MoE tensors per expert.  No postprocess transform is needed — the
+        # ckpt layout is already DeepGEMM-consumable.  Note: data_type must
+        # match the safetensors I8 dtype (torch.int8); torch.uint8 also has
+        # 1 byte/element and the bytes are bit-identical, but downstream
+        # consumers (QuantizedLinear factory + DeepGEMM kPackedFP4 path)
+        # branch on dtype, and a uint8 cast will silently drop the FP4
+        # routed-expert linears into a slower BF16 dequant fallback.
+        out: List[WeightModule] = []
+        for sub_w_name, sub_s_name, sub in [
+            (W.v4_routed_w1_w, W.v4_routed_w1_s, "w1"),
+            (W.v4_routed_w2_w, W.v4_routed_w2_s, "w2"),
+            (W.v4_routed_w3_w, W.v4_routed_w3_s, "w3"),
+        ]:
+            out.append(
+                MoeAtomicWeight(
+                    sub_w_name,
+                    [
+                        CkptWeightInfo(
+                            f"layers.{{i}}.ffn.experts.{{expert_id}}.{sub}.weight",
+                            identity,
+                        )
+                    ],
+                    stack_,
+                    config=moe_cfg,
+                    data_type=torch.int8,
+                )
+            )
+            out.append(
+                MoeAtomicWeight(
+                    sub_s_name,
+                    [
+                        CkptWeightInfo(
+                            f"layers.{{i}}.ffn.experts.{{expert_id}}.{sub}.scale",
+                            identity,
+                        )
+                    ],
+                    stack_,
+                    config=moe_cfg,
+                    data_type=torch.float8_e8m0fnu,
+                )
+            )
+        return out
+
+    # ------------------------------------------------------------------
+    # Top-level entry points
+    # ------------------------------------------------------------------
+
+    def _get_hf_layer_weight_info(self, layer_id: int) -> List[WeightModule]:  # type: ignore[override]
+        weights: List[WeightModule] = []
+        # 1. Attention norms + sink (always present)
+        weights += self._build_attn_norms(layer_id)
+        # 2. Dense MQA attention FP8 weights (always present)
+        weights += self._build_attn_dense_fp8(layer_id)
+
+        # 3. Outer compressor (CSA + HCA, ratio in {4, 128})
+        ratio = self._compress_ratio(layer_id)
+        if ratio in (4, 128):
+            weights += self._build_compressor(
+                layer_id, ratio, ckpt_prefix="attn.compressor"
+            )
+
+        # 4. Indexer (CSA only — ratio == 4)
+        if ratio == 4:
+            weights += self._build_indexer(layer_id)
+            # indexer's inner compressor — separate W keys to avoid colliding
+            # with the outer compressor.
+            weights += self._build_compressor(
+                layer_id,
+                ratio=4,
+                ckpt_prefix="attn.indexer.compressor",
+                inner=True,
+            )
+
+        # 5. mHC residual (always)
+        weights += self._build_hc_residual(layer_id)
+
+        # 6. FFN norm (always)
+        weights.append(
+            AtomicWeight(
+                W.v4_ffn_norm,
+                [CkptWeightInfo("layers.{i}.ffn_norm.weight", identity)],
+                identity,
+            )
+        )
+
+        # 7. Router (hash on first num_hash_layers, noaux_tc otherwise)
+        weights += self._build_router(layer_id)
+
+        # 8. Shared expert (FP8)
+        weights += self._build_shared_expert(layer_id)
+
+        # 9. Routed experts (FP4 — per-expert via MoeAtomicWeight)
+        weights += self._build_routed_experts_fp4(layer_id)
+
+        return weights
+
+    def _get_weight_info(self) -> ModelWeightInfo:
+        layer_weights: List[List[WeightModule]] = [
+            self._get_hf_layer_weight_info(layer_id)
+            for layer_id in range(self._num_layers)
+        ]
+        weights: List[WeightModule] = [
             AtomicWeight(
                 W.embedding,
                 [CkptWeightInfo("embed.weight", identity)],
@@ -84,13 +427,37 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 identity,
             ),
             AtomicWeight(
-                W.final_ln_beta, [],
+                W.final_ln_beta,
+                [],
                 functools.partial(zeros, shape=[self._hidden_size]),
             ),
             AtomicWeight(
                 W.lm_head,
                 [CkptWeightInfo("head.weight", identity)],
                 identity,
+                # V4 ckpt stores head.weight in bf16; without explicit
+                # data_type the framework loader casts via load_config
+                # .compute_dtype (fp32 in the V4 config) which doubles RAM
+                # and diverges from the legacy load_v4_safetensors path.
+                data_type=torch.bfloat16,
+            ),
+            AtomicWeight(
+                W.v4_hc_head_base,
+                [CkptWeightInfo("hc_head_base", identity)],
+                identity,
+                data_type=torch.float32,
+            ),
+            AtomicWeight(
+                W.v4_hc_head_fn,
+                [CkptWeightInfo("hc_head_fn", identity)],
+                identity,
+                data_type=torch.float32,
+            ),
+            AtomicWeight(
+                W.v4_hc_head_scale,
+                [CkptWeightInfo("hc_head_scale", identity)],
+                identity,
+                data_type=torch.float32,
             ),
         ]
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
@@ -144,6 +511,22 @@ class DeepSeekV4(DeepSeekV2):
 
         # ---- basic geometry ----
         config.num_layers = config_json["num_hidden_layers"]
+        # DSV4_NUM_LAYERS_OVERRIDE — for fast debugging only.  Truncates the
+        # model to the first N layers (still must be >= 1, must include the
+        # first CSA ratio=4 layer to exercise indexer).  Only safe to use
+        # for crash repro; output is meaningless.
+        _override = os.environ.get("DSV4_NUM_LAYERS_OVERRIDE")
+        if _override:
+            _n = int(_override)
+            assert _n >= 1, f"DSV4_NUM_LAYERS_OVERRIDE must be >= 1, got {_n}"
+            import logging as _logging
+            _logging.warning(
+                "[DSV4] DSV4_NUM_LAYERS_OVERRIDE=%d truncating model from "
+                "%d layers — DEBUG ONLY, output is meaningless",
+                _n,
+                config.num_layers,
+            )
+            config.num_layers = _n
         config.hidden_size = config_json["hidden_size"]
         config.vocab_size = config_json["vocab_size"]
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
@@ -168,7 +551,9 @@ class DeepSeekV4(DeepSeekV2):
         # ---- RoPE: main base + separate compressed base ----
         config.attn_config.rope_config.base = int(config_json.get("rope_theta", 10000))
         config.attn_config.rope_config.dim = rope_dim
-        config.attn_config.rope_config.offset = head_dim - rope_dim  # partial RoPE on tail
+        config.attn_config.rope_config.offset = (
+            head_dim - rope_dim
+        )  # partial RoPE on tail
         config.attn_config.rope_config.style = 0  # interleaved by default per V4
         config.attn_config.compress_rope_theta = float(
             config_json.get("compress_rope_theta", 160000)
@@ -178,8 +563,12 @@ class DeepSeekV4(DeepSeekV2):
         if rope_scaling is not None:
             scaling_factor = rope_scaling["factor"]
             config.attn_config.rope_config.scale = scaling_factor
-            config.attn_config.rope_config.factor1 = float(rope_scaling.get("beta_slow", 1))
-            config.attn_config.rope_config.factor2 = float(rope_scaling.get("beta_fast", 32))
+            config.attn_config.rope_config.factor1 = float(
+                rope_scaling.get("beta_slow", 1)
+            )
+            config.attn_config.rope_config.factor2 = float(
+                rope_scaling.get("beta_fast", 32)
+            )
             config.attn_config.rope_config.max_pos = rope_scaling[
                 "original_max_position_embeddings"
             ]
@@ -251,6 +640,14 @@ class DeepSeekV4(DeepSeekV2):
         config.num_hash_layers = int(config_json.get("num_hash_layers", 0))
 
         config.config_dtype = config_json.get("torch_dtype", None)
+
+        # Keep lm_head in its checkpoint dtype (bf16).  The framework default
+        # ``enable_fp32_lm_head=True`` calls _fix_fp32_lm_head which overrides
+        # the AtomicWeight data_type to fp32 — useful for older models that
+        # need fp32 logits accumulation, but doubles RAM (1 GiB → 2 GiB) and
+        # diverges from the legacy ``load_v4_safetensors`` path that V4 was
+        # validated against.  V4 sampling runs on bf16 logits like V3.
+        config.enable_fp32_lm_head = False
 
         logging.info(
             "DeepSeek-V4 config loaded: layers=%d hidden=%d head_num=%d head_dim=%d "

@@ -58,12 +58,29 @@ def _fp4_unpack_to_fp32(weight_int8: torch.Tensor, scale_ue8m0: torch.Tensor) ->
 
 
 def _fp8_dequant_to_fp32(weight_fp8: torch.Tensor, scale_ue8m0: torch.Tensor) -> torch.Tensor:
-    """Dequantize FP8 e4m3fn [out, in] + UE8M0 scale [out/128, in/128] -> fp32 [out, in]."""
+    """Dequantize FP8 e4m3fn [out, in] + scale -> fp32 [out, in].
+
+    Accepts the scale in either of two layouts:
+      * raw UE8M0 ``float8_e8m0fnu`` shape ``[out/128, in/128]``
+      * DeepGEMM TMA-aligned packed ``int32`` shape ``[out_pad, in/128/4]`` where
+        each int32 holds 4 UE8M0 bytes along K and rows are replicated by 128
+        (this is what ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` produces;
+        ``rtp_llm/model_loader/per_block_fp8_quant_weight.py::_postprocess``
+        applies it via ``requant_weight_ue8m0`` on SM100+ devices).
+    """
     out_dim, in_dim = weight_fp8.shape
     w_f = weight_fp8.to(torch.float32)
-    scale_full = scale_ue8m0.to(torch.float32)
-    scale_full = scale_full.repeat_interleave(FP8_BLOCK, 0).repeat_interleave(FP8_BLOCK, 1)
-    scale_full = scale_full[:out_dim, :in_dim]
+    if scale_ue8m0.dtype == torch.int32:
+        n_pad, k_blk_div_4 = scale_ue8m0.shape
+        k_blk = k_blk_div_4 * 4
+        scale_bytes = scale_ue8m0.contiguous().view(torch.uint8).reshape(n_pad, k_blk)
+        scale_per_row = (scale_bytes.to(torch.int32) - 127).to(torch.float32).exp2()
+        scale_per_row = scale_per_row[:out_dim]
+        scale_full = scale_per_row.repeat_interleave(FP8_BLOCK, 1)[:, :in_dim]
+    else:
+        scale_full = scale_ue8m0.to(torch.float32)
+        scale_full = scale_full.repeat_interleave(FP8_BLOCK, 0).repeat_interleave(FP8_BLOCK, 1)
+        scale_full = scale_full[:out_dim, :in_dim]
     return w_f * scale_full
 
 
