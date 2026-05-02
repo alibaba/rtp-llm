@@ -146,6 +146,14 @@ message GenerateInputPB {
     int64 start_time = 6;
     int32 batch_group_size = 7;
     google.protobuf.Int64Value batch_group_id = 8;
+    // V1-α DP batching: assigned by Master at schedule time. Engine MUST pin the
+    // request to this DP slot and MUST NOT reshuffle. The DP barrier only kicks in
+    // on the pd_separation path (max_new_tokens > 1 && num_beams <= 1).
+    int64 dp_rank = 9;
+    // V1-α DP batching: prompt prefix block hashes precomputed by Master so prefill
+    // can skip re-hashing. Same source as Request.block_cache_keys on the
+    // Master HTTP /rtp_llm/schedule entry.
+    repeated int64 cache_hash_key = 10;
 }
 
 message AuxInfoPB {
@@ -599,10 +607,58 @@ message FunctionResponsePB {
     }
 }
 
+message BatchGenerateInputPB {
+    repeated GenerateInputPB inputs = 1;
+    // V1-α DP batching: per-batch unique ID assigned by Master, used for ack
+    // correlation, lookup, and cascade Cancel. Required for the async Enqueue path;
+    // the legacy synchronous BatchGenerateCall ignores it.
+    int64 batch_id = 2;
+}
+
+// V1-α DP batching: Master.Enqueue acknowledgement, returned immediately
+// (before prefill actually runs).
+message EnqueueAckPB {
+    int64 batch_id = 1;
+    bool accepted = 2;
+    string error_message = 3;
+}
+
+// V1-α DP batching: Frontend → Decode token-stream pull request.
+message FetchRequestPB {
+    int64 request_id = 1;
+}
+
+// V1-α DP batching: Master → P/D cancel request. Idempotent.
+message CancelRequestPB {
+    int64 request_id = 1;
+}
+
+message BatchGenerateResultPB {
+    GenerateOutputsPB final_output = 1;
+    RpcErrorPB error_info = 2;
+}
+
+message BatchGenerateOutputsPB {
+    repeated BatchGenerateResultPB results = 1;
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
+    rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
+    // V1-α DP batching: Master → Prefill async fire-and-forget batch submission.
+    // Engine MUST treat every input sharing the same batch_id as a DP-aligned atomic
+    // step: forward together in one step, never split, never interleaved with other
+    // queued requests, and slot-pinned by input.dp_rank.
+    rpc Enqueue(BatchGenerateInputPB) returns (EnqueueAckPB);
+    // V1-α DP batching: Frontend → Decode token stream pull by request_id, replacing
+    // the legacy GenerateStreamCall→Prefill path (KV is still pushed from Prefill to
+    // Decode by RemoteGenerate).
+    rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
+    // V1-α DP batching: Master → P/D cascade cancel. Idempotent — unknown or
+    // already-completed request_ids also return success.
+    rpc Cancel(CancelRequestPB) returns (EmptyPB);
     rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
     rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);

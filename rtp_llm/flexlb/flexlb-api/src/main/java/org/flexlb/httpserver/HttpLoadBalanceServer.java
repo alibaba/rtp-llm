@@ -88,7 +88,49 @@ public class HttpLoadBalanceServer {
                         this::updateTrafficPolicy)
                 .GET("/rtp_llm/queue_snapshot", accept(MediaType.APPLICATION_JSON),
                         this::queueSnapshot)
+                .POST("/rtp_llm/cancel", accept(MediaType.APPLICATION_JSON),
+                        this::cancelRequest)
                 .build();
+    }
+
+    /**
+     * Explicit cancel by request_id. Used by frontend after Master.Enqueue when the
+     * client disconnects or the request is otherwise abandoned. Idempotent: unknown
+     * request_ids return success silently (DpBatchScheduler.cancel is a no-op on miss).
+     *
+     * <p>Body: {@code {"request_id": <long>}} — reuses {@link Request} for cheap
+     * deserialization, only {@code requestId} is read.
+     */
+    public Mono<ServerResponse> cancelRequest(ServerRequest request) {
+        return request.bodyToMono(Request.class)
+                .flatMap(req -> {
+                    if (req.getRequestId() == 0) {
+                        Response err = new Response();
+                        err.setSuccess(false);
+                        err.setCode(400);
+                        err.setErrorMessage("request_id is required");
+                        return ServerResponse.status(400)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .body(Mono.just(err), Response.class);
+                    }
+                    routeService.cancelByRequestId(req.getRequestId());
+                    Response ok = new Response();
+                    ok.setSuccess(true);
+                    ok.setCode(200);
+                    return ServerResponse.ok()
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .body(Mono.just(ok), Response.class);
+                })
+                .onErrorResume(e -> {
+                    Logger.error("cancelRequest error", e);
+                    Response err = new Response();
+                    err.setSuccess(false);
+                    err.setCode(500);
+                    err.setErrorMessage(e.getMessage());
+                    return ServerResponse.status(500)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .body(Mono.just(err), Response.class);
+                });
     }
 
     /**

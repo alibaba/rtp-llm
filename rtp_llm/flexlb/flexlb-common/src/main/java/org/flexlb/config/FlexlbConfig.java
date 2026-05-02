@@ -141,6 +141,40 @@ public class FlexlbConfig {
      */
     private int nettyWorkerThreadMultiplier = 2;
 
+    // ========== V1-α DP Batching Configuration ==========
+
+    /**
+     * Master-side DP batching switch. When enabled, RouteService bypasses the global
+     * QueueManager for DP-capable models and routes through DpBatchScheduler instead.
+     * Default off — old code path preserved.
+     */
+    private boolean dpBalanceEnabled = false;
+
+    /**
+     * Max requests per Prefill.Enqueue batch. 0 = auto-pick worker.dpSize so one batch
+     * fills exactly one DP cycle. Only effective when dpBalanceEnabled=true.
+     */
+    private int dpBatchSizeMax = 0;
+
+    /**
+     * Batch window (ms). First request entering an empty PrefillQueue starts the timer;
+     * timeout flushes whatever has accumulated. Pick around one prefill step duration.
+     */
+    private long dpBatchWindowMs = 30;
+
+    /**
+     * Per-request max wait (ms). Any single request waiting longer than this triggers
+     * an immediate flush regardless of batch fill — protects low-QPS scenarios from
+     * being permanently stalled by the DP barrier.
+     */
+    private long dpBatchTimeoutMs = 100;
+
+    /**
+     * dp_rank assignment strategy. V1-α only supports "RR".
+     * V2 plans to add "LPT" / "CACHE_AWARE_LPT" for length-aware bin packing.
+     */
+    private String dpAssignStrategy = "RR";
+
     /**
      * Ordered traffic policy rules. A matched rule forces the whole request to a worker group.
      */
