@@ -531,6 +531,22 @@ class Compressor(nn.Module):
             cutoff = seqlen - remainder
             offset = ratio if overlap else 0
 
+            # Continuation prefill needs the PRIOR call's "save for next call"
+            # kv_state / score_state to fill window 0's overlap slots (see
+            # restore at line ~540 below). Snapshot them BEFORE the save-for-
+            # next-call writes below clobber them.  For sp_int == 0 the snapshot
+            # is unused.
+            prior_kv_state_ratio = (
+                self.kv_state[:bsz, :ratio, :d].clone()
+                if overlap and sp_int > 0
+                else None
+            )
+            prior_score_state_ratio = (
+                self.score_state[:bsz, :ratio, :d].clone()
+                if overlap and sp_int > 0
+                else None
+            )
+
             if overlap and cutoff >= ratio:
                 self.kv_state[:bsz, :ratio] = kv[:, cutoff - ratio : cutoff]
                 self.score_state[:bsz, :ratio] = (
@@ -553,14 +569,14 @@ class Compressor(nn.Module):
                 kv = self._overlap_transform(kv, 0)
                 score = self._overlap_transform(score, float("-inf"))
                 # Continuation prefill: inject saved overlap from prefix tail.
-                # kv_state[:, :ratio] holds the wkv projections of the last
-                # `ratio` tokens before the prefix boundary (saved at scatter).
-                # score_state[:, :ratio] holds the corresponding score+ape.
-                # Without this, window 0's overlap slots are zero/-inf, causing
-                # the first compressed entry to differ from full prefill.
+                # Use the PRIOR-call snapshot taken above — the save-for-next-
+                # call writes at lines ~520/527 have already overwritten
+                # kv_state[:, :ratio] / score_state[:, :ratio] with this
+                # call's own tail, which would feed wrong data into window 0's
+                # overlap slots.
                 if sp_int > 0:
-                    kv[:bsz, 0, :ratio] = self.kv_state[:bsz, :ratio, :d]
-                    score[:bsz, 0, :ratio] = self.score_state[:bsz, :ratio, :d]
+                    kv[:bsz, 0, :ratio] = prior_kv_state_ratio
+                    score[:bsz, 0, :ratio] = prior_score_state_ratio
 
             if _dbg is not None:
                 _rt.record_if_level(2, f"{_dbg}_pool_in_kv", kv)
