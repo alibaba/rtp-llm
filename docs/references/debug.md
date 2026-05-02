@@ -243,7 +243,7 @@ cc_test(
 Run the Test:
 Execute the following command in the project’s container:
 ```bash
-bazelisk test  rtp_llm/cpp/multimodal_processor/test:multimodal_processor_test   --jobs=48 --test_output=streamed --config=cuda12_6
+bazelisk test  rtp_llm/cpp/multimodal_processor/test:multimodal_processor_test   --jobs=48 --test_output=streamed --config=cuda12_9
 ```
 
 

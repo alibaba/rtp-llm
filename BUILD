@@ -28,14 +28,6 @@ config_setting(
 )
 
 config_setting(
-    name = "cuda_pre_12_9",
-    define_values = {
-        "using_cuda12_9_x86": "false",
-        "using_cuda12_arm": "false",
-    },
-)
-
-config_setting(
     name = "using_cuda12_arm",
     values = {"define": "using_cuda12_arm=true"},
 )
@@ -57,16 +49,6 @@ config_setting(
         "using_rocm": "true",
         "gfx950": "true",
     },
-)
-
-config_setting(
-    name = "using_arm",
-    values = {"define": "using_arm=true"},
-)
-
-config_setting(
-    name = "using_cpu",
-    values = {"define": "using_cpu=true"},
 )
 
 selects.config_setting_group(
@@ -155,6 +137,6 @@ py_runtime(
 refresh_compile_commands(
     name = "refresh_compdb",
     targets = {
-        "//rtp_llm/cpp/model_rpc:model_rpc_server": "--config=cuda12_6 --config=debug --sandbox_base=/mnt/ram/",
+        "//rtp_llm/cpp/model_rpc:model_rpc_server": "--config=cuda12_9 --config=debug --sandbox_base=/mnt/ram/",
     },
 )

@@ -110,7 +110,7 @@ build_config:
   # open_source_url: "git@github.com:alibaba/rtp-llm.git"
   open_source_ref: "origin/feature/yiyin_multi_benchmark"
   ft_sub_dir: "rtp_llm_perf_test"
-  bazel_build_args: '" --jobs 64 --verbose_failures --config=cuda12_6 "'
+  bazel_build_args: '" --jobs 64 --verbose_failures --config=cuda12_9 "'
 ```
 
 Fifth part is the common configuration shared across all benchmarks.

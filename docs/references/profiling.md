@@ -114,7 +114,7 @@ To enable nsight profiling with rtp-llm, you could add nsys binary and options b
 or use bazel `--run_under` option to run a bazel target with nsight profiling
 
 ``` bash
-bazelisk test //rtp_llm/cpp/normal_engine/test:engine_test  --config=cuda12_6  \
+bazelisk test //rtp_llm/cpp/normal_engine/test:engine_test  --config=cuda12_9  \
   --run_under="/usr/local/cuda/bin/nsys profile \
     --sampling-period 125000 \
     --trace='cuda,nvtx,osrt,cublas,cudnn' \
