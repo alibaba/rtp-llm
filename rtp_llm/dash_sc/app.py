@@ -12,15 +12,43 @@ import logging
 import signal
 import threading
 import traceback
-from typing import Optional
+from typing import Any, List, Optional
 
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.dash_sc.server import DashScGrpcServer
 from rtp_llm.dash_sc.service import set_dash_sc_grpc_enqueue_event_loop
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
+
+
+def _derive_echo_prefix_ids(model_config: Any, generate_env_config: Any) -> List[int]:
+    """Encode ``generate_env_config.think_start_tag`` once to produce the prefill token ids.
+
+    Disabled (returns ``[]``) when ``THINK_MODE`` env is off or ``think_start_tag`` is empty;
+    stays aligned with the engine's thinking switch so dash_sc and the engine turn on/off
+    together. Fail-open: any error returns ``[]`` and logs a warning.
+    """
+    if not bool(getattr(generate_env_config, "think_mode", 0)):
+        return []
+    tag = getattr(generate_env_config, "think_start_tag", "") or ""
+    if not tag:
+        return []
+    try:
+        base_tok = TokenizerFactory.create(
+            model_config.ckpt_path,
+            model_config.tokenizer_path,
+            model_config.model_type,
+        )
+        hf_tok = getattr(base_tok, "tokenizer", base_tok)
+        ids = list(hf_tok.encode(tag, add_special_tokens=False))
+    except Exception as e:
+        logging.warning("[DashScApp] echo_prefix derive failed: %s", e)
+        return []
+    logging.info("[DashScApp] echo_prefix_ids=%s (think_start_tag=%r)", ids, tag)
+    return ids
 
 
 class DashScApp:
@@ -45,7 +73,9 @@ class DashScApp:
         self._enqueue_loop: Optional[asyncio.AbstractEventLoop] = None
         self._enqueue_loop_thread: Optional[threading.Thread] = None
         self._shutdown_event = threading.Event()
-        self._grpc_server = DashScGrpcServer(dash_sc_grpc_config=self.dash_sc_grpc_config)
+        self._grpc_server = DashScGrpcServer(
+            dash_sc_grpc_config=self.dash_sc_grpc_config
+        )
 
     def _start_enqueue_loop(self) -> asyncio.AbstractEventLoop:
         loop = asyncio.new_event_loop()
@@ -56,9 +86,7 @@ class DashScApp:
             ready.set()
             loop.run_forever()
 
-        thread = threading.Thread(
-            target=_run, name="dash_sc_enqueue_loop", daemon=True
-        )
+        thread = threading.Thread(target=_run, name="dash_sc_enqueue_loop", daemon=True)
         thread.start()
         if not ready.wait(timeout=5.0):
             raise RuntimeError("dash_sc enqueue asyncio loop failed to start")
@@ -116,6 +144,10 @@ class DashScApp:
                 model_config=model_config,
             )
 
+            echo_prefix_ids = _derive_echo_prefix_ids(
+                model_config, self.py_env_configs.generate_env_config
+            )
+
             loop = self._start_enqueue_loop()
             set_dash_sc_grpc_enqueue_event_loop(loop)
 
@@ -140,13 +172,12 @@ class DashScApp:
                 log_path=get_log_path(),
                 backup_count=self.py_env_configs.profiling_debug_logging_config.log_file_backup_count,
                 rank_id=self.server_config.rank_id,
+                echo_prefix_ids=echo_prefix_ids,
             )
             logging.info("[DashScApp] gRPC server bound on port %s", port)
         except BaseException as e:
             error_trace = traceback.format_exc()
-            logging.error(
-                "[DashScApp] start failed: %s\n%s", e, error_trace
-            )
+            logging.error("[DashScApp] start failed: %s\n%s", e, error_trace)
             if ready_pipe_writer is not None:
                 try:
                     ready_pipe_writer.send(
@@ -179,9 +210,7 @@ class DashScApp:
                 )
                 ready_pipe_writer.close()
             except Exception as e:
-                logging.warning(
-                    "[DashScApp] failed to send success via pipe: %s", e
-                )
+                logging.warning("[DashScApp] failed to send success via pipe: %s", e)
 
         self._install_signal_handlers()
         logging.info("[DashScApp] entering service loop (SIGTERM/SIGINT to stop)")

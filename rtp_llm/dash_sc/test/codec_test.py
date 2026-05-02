@@ -15,6 +15,7 @@ from rtp_llm.dash_sc.codec import (
     parse_input_ids_from_request,
     parse_other_params,
     parse_sampling_params,
+    prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.service import stream_log_tag
@@ -310,6 +311,55 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         }
         self.assertEqual(by_name["generated_ids"], struct.pack("<i", 0))
         self.assertEqual(list(infer.outputs[0].shape), [1, 0])
+
+
+class PrependToGeneratedIdsTensorTest(TestCase):
+    def _build_infer_with_generated_ids(self, ids: list[int]):
+        out = GenerateOutput(
+            output_ids=torch.tensor(ids, dtype=torch.int32) if ids else None,
+            finished=True,
+            aux_info=AuxInfo(input_len=0, reuse_len=0),
+        )
+        go = GenerateOutputs(generate_outputs=[out])
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="r",
+            model_name="m",
+            go=go,
+            request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
+        )
+        return resp.infer_response
+
+    def test_prepend_list_success(self) -> None:
+        infer = self._build_infer_with_generated_ids([7, 8, 9])
+        self.assertTrue(prepend_to_generated_ids_tensor(infer, [100, 200]))
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(
+            _unpack_int32_le(by_name["generated_ids"]), [100, 200, 7, 8, 9]
+        )
+        gen_out = next(o for o in infer.outputs if o.name == "generated_ids")
+        self.assertEqual(list(gen_out.shape), [1, 5])
+
+    def test_prepend_empty_list_noop(self) -> None:
+        infer = self._build_infer_with_generated_ids([7, 8, 9])
+        self.assertFalse(prepend_to_generated_ids_tensor(infer, []))
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [7, 8, 9])
+
+    def test_prepend_to_empty_tensor_noop(self) -> None:
+        infer = self._build_infer_with_generated_ids([])
+        self.assertFalse(prepend_to_generated_ids_tensor(infer, [100]))
+        gen_out = next(o for o in infer.outputs if o.name == "generated_ids")
+        self.assertEqual(list(gen_out.shape), [1, 0])
+
+    def test_prepend_without_generated_ids_output_returns_false(self) -> None:
+        resp = predict_v2_pb2.ModelStreamInferResponse()
+        self.assertFalse(prepend_to_generated_ids_tensor(resp.infer_response, [100]))
 
 
 class StreamLogTagTest(TestCase):
