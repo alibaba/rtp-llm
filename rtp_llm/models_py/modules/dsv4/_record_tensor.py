@@ -28,6 +28,10 @@ _MOEDBG = int(os.environ.get("MOEDBG", "0"))
 _DBG_BASE = os.environ.get("MOEDBG_DIR", "/tmp/moedbg_runs")
 _DBG_CASE = os.environ.get("MOEDBG_CASE", "default")
 _FULL_THRESHOLD = 1_000_000
+# Skip recording for forward passes whose seqlen exceeds this (warmup
+# fires a single max_seq_len pass; recording it at MOEDBG=2 OOMs / hangs
+# health checks before the real query arrives).  0 disables the gate.
+_DBG_MAX_SEQ = int(os.environ.get("MOEDBG_MAX_SEQ", "0"))
 
 ENABLED = _MOEDBG > 0
 LEVEL = _MOEDBG  # 1 = top-level only, 2 = top + per-layer detail
@@ -39,10 +43,19 @@ def _get_buf() -> Optional[List[Tuple[str, torch.Tensor]]]:
     return getattr(_local, "buf", None)
 
 
-def begin() -> None:
-    """Start a new forward; clears any prior buffer."""
-    if ENABLED:
-        _local.buf = []
+def begin(seqlen: Optional[int] = None) -> None:
+    """Start a new forward; clears any prior buffer.
+
+    ``seqlen`` (optional) lets the caller suppress recording for a
+    specific forward when ``MOEDBG_MAX_SEQ`` is set — used to skip the
+    warmup query so MOEDBG=2 doesn't OOM under long sequences.
+    """
+    if not ENABLED:
+        return
+    if _DBG_MAX_SEQ > 0 and seqlen is not None and seqlen > _DBG_MAX_SEQ:
+        _local.buf = None
+        return
+    _local.buf = []
 
 
 def record(name: str, tensor: torch.Tensor) -> None:

@@ -384,7 +384,10 @@ class V4Transformer(nn.Module):
         # overhead, no per-layer name allocation).  Read once per forward.
         _rt_on = _rt.ENABLED
         if _rt_on:
-            _rt.begin()
+            _rt.begin(seqlen=int(input_ids.size(-1)))
+            # begin() may suppress this forward (MOEDBG_MAX_SEQ); honour it.
+            if _rt._get_buf() is None:
+                _rt_on = False
         h = self.embed(input_ids)  # [B, S, d]
         if _rt_on:
             _rt.record("embed_out", h)
