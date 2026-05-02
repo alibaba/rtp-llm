@@ -1,10 +1,32 @@
 #include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <sstream>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+namespace {
+
+bool dsv4DebugReuseEnabled() {
+    return std::getenv("DSV4_DEBUG_REUSE") != nullptr;
+}
+
+std::string blockIdsDebugString(const BlockIndicesType& blocks) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << blocks[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+}  // namespace
 
 void SWAKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
     out.clear();
@@ -60,6 +82,16 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
     (void)enable_reuse_cache;
     const int current_blocks_len = static_cast<int>(block_ids.blocksNum());
     const int new_blocks_len     = needBlocksNum(seq_len, current_blocks_len, reserve_step);
+    if (dsv4DebugReuseEnabled()) {
+        RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE swa malloc begin gid=%d seq_len=%d reserve_step=%d current=%d new=%d "
+                         "before=%s",
+                         group_id_,
+                         seq_len,
+                         reserve_step,
+                         current_blocks_len,
+                         new_blocks_len,
+                         blockIdsDebugString(block_ids.blocks()).c_str());
+    }
     if (new_blocks_len == 0) {
         return true;
     }
@@ -98,6 +130,16 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
         }
     }
     block_ids.add(new_ids);
+    if (dsv4DebugReuseEnabled()) {
+        RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE swa malloc end gid=%d total_slots=%d tail_begin=%d need_alloc=%d "
+                         "new_ids=%s after=%s",
+                         group_id_,
+                         total_slots,
+                         tail_begin,
+                         need_alloc_blocks,
+                         blockIdsDebugString(new_ids).c_str(),
+                         blockIdsDebugString(block_ids.blocks()).c_str());
+    }
     return true;
 }
 
@@ -108,6 +150,16 @@ void SWAKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         return;
     }
     const size_t n = std::min(cache_keys.size(), block_indices.size());
+    if (dsv4DebugReuseEnabled()) {
+        RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE swa insert begin gid=%d keys=%zu blocks=%zu n=%zu is_resident=%d "
+                         "block_indices=%s",
+                         group_id_,
+                         cache_keys.size(),
+                         block_indices.size(),
+                         n,
+                         is_resident,
+                         blockIdsDebugString(block_indices).c_str());
+    }
     for (size_t i = 0; i < n; ++i) {
         const auto b = block_indices[i];
         if (isNullBlockIdx(b)) {
@@ -118,6 +170,13 @@ void SWAKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         item.group_id    = group_id_;
         item.block_index = b;
         item.is_resident = is_resident;
+        if (dsv4DebugReuseEnabled()) {
+            RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE swa insert item gid=%d pos=%zu key=%ld block=%d",
+                             group_id_,
+                             i,
+                             cache_keys[i],
+                             b);
+        }
         if (block_cache_->put(item)) {
             block_pool_->blockCacheReference(b);
         }
@@ -128,6 +187,12 @@ void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
     (void)enable_reuse_cache;
     (void)reserve_step;
     const auto& block_indices = block_ids.blocks();
+    if (dsv4DebugReuseEnabled()) {
+        RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE swa removeSkipped begin gid=%d size=%zu blocks=%s",
+                         group_id_,
+                         block_indices.size(),
+                         blockIdsDebugString(block_indices).c_str());
+    }
     if (block_indices.size() <= 2) {
         return;
     }
@@ -143,8 +208,19 @@ void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
         pos_to_remove.push_back(i);
     }
     if (!blocks_to_free.empty()) {
+        if (dsv4DebugReuseEnabled()) {
+            RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE swa removeSkipped remove gid=%d keep_begin=%zu free=%s",
+                             group_id_,
+                             keep_begin,
+                             blockIdsDebugString(blocks_to_free).c_str());
+        }
         block_pool_->requestFree(blocks_to_free);
         block_ids.remove(pos_to_remove);
+    }
+    if (dsv4DebugReuseEnabled()) {
+        RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE swa removeSkipped end gid=%d blocks=%s",
+                         group_id_,
+                         blockIdsDebugString(block_ids.blocks()).c_str());
     }
 }
 

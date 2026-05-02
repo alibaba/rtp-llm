@@ -34,30 +34,6 @@ size_t validBlockCount(const BlockIndicesType& blocks) {
     return count;
 }
 
-BlockIndicesType tailAlignedBlocksForCache(const BlockIndicesType& blocks, size_t n, size_t tail_count) {
-    BlockIndicesType aligned(n, NULL_BLOCK_IDX);
-    if (n == 0 || tail_count == 0) {
-        return aligned;
-    }
-
-    BlockIndicesType valid_tail;
-    valid_tail.reserve(tail_count);
-    for (auto it = blocks.rbegin(); it != blocks.rend() && valid_tail.size() < tail_count; ++it) {
-        if (!isNullBlockIdx(*it)) {
-            valid_tail.push_back(*it);
-        }
-    }
-    std::reverse(valid_tail.begin(), valid_tail.end());
-
-    const size_t put_count = std::min(valid_tail.size(), n);
-    const size_t src_begin = valid_tail.size() - put_count;
-    const size_t dst_begin = n - put_count;
-    for (size_t i = 0; i < put_count; ++i) {
-        aligned[dst_begin + i] = valid_tail[src_begin + i];
-    }
-    return aligned;
-}
-
 BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) {
     BlockIndicesType valid;
     if (begin >= blocks.size()) {
@@ -140,21 +116,18 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVC
             const int gid       = swa_group_ids_[i];
             auto*     swa_group = dynamic_cast<SWAKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
             RTP_LLM_CHECK_WITH_INFO(swa_group != nullptr, "group %d is not SWAKVCacheGroup", gid);
-            const int tail_begin = std::max(0, pos - 1);
-            for (int tail_pos = tail_begin; tail_pos <= pos; ++tail_pos) {
-                auto result = swa_group->matchSingleKey(cache_keys[static_cast<size_t>(tail_pos)]);
-                if (result.block_indices.empty()) {
-                    if (debug_reuse) {
-                        RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE reuseCache swa tail miss gid=%d pos=%d key=%ld",
-                                         gid,
-                                         tail_pos,
-                                         cache_keys[static_cast<size_t>(tail_pos)]);
-                    }
-                    all_tail_groups_matched = false;
-                    break;
+            auto result = swa_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
+            if (result.block_indices.empty()) {
+                if (debug_reuse) {
+                    RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE reuseCache swa tail miss gid=%d pos=%d key=%ld",
+                                     gid,
+                                     pos,
+                                     cache_keys[static_cast<size_t>(pos)]);
                 }
-                candidate_swa_tail_blocks[i].push_back(result.block_indices[0]);
+                all_tail_groups_matched = false;
+                break;
             }
+            candidate_swa_tail_blocks[i].push_back(result.block_indices[0]);
             if (debug_reuse && all_tail_groups_matched) {
                 RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE reuseCache swa tail hit gid=%d pos=%d tail_blocks=%zu",
                                  gid,
@@ -203,7 +176,8 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVC
         const int gid = swa_group_ids_[i];
         kv_resource.mutableBlockIds(0, gid).assign(
             BlockIndicesType(static_cast<size_t>(reuse_blocks_len), NULL_BLOCK_IDX));
-        const size_t tail_begin = reuse_blocks_len > 1 ? static_cast<size_t>(reuse_blocks_len - 2) : 0;
+        const size_t tail_begin =
+            static_cast<size_t>(std::max(reuse_blocks_len - static_cast<int>(swa_tail_blocks[i].size()), 0));
         for (size_t j = 0; j < swa_tail_blocks[i].size(); ++j) {
             if (debug_reuse) {
                 RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE reuseCache restore swa gid=%d dst_pos=%zu block=%d",
@@ -294,6 +268,13 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
         }
     }
 
+    for (int b = 0; b < batch_size; ++b) {
+        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
+            kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
+                kv_resource->mutableBlockIds(b, gid), malloc_info.reuse_cache, reserve_step);
+        }
+    }
+
     bool all_success  = true;
     int  failed_batch = -1;
     int  failed_group = -1;
@@ -314,12 +295,6 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     }
 
     if (all_success) {
-        for (int b = 0; b < batch_size; ++b) {
-            for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-                kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
-                    kv_resource->mutableBlockIds(b, gid), malloc_info.reuse_cache, reserve_step);
-            }
-        }
         return {true, 0};
     }
 
@@ -391,15 +366,9 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + n);
             const auto&      blocks = kv_cache_resource->blocks(batch_id, gid);
             BlockIndicesType put_blocks;
-            const bool       is_swa_group = gid < static_cast<int>(config_.group_types.size())
-                                      && config_.group_types[static_cast<size_t>(gid)] == CacheGroupType::SWA;
-            if (is_swa_group) {
-                put_blocks = tailAlignedBlocksForCache(blocks, n, 2);
-            } else {
-                put_blocks.reserve(n);
-                for (size_t i = 0; i < n && i < blocks.size(); ++i) {
-                    put_blocks.push_back(blocks[i]);
-                }
+            put_blocks.reserve(n);
+            for (size_t i = 0; i < n && i < blocks.size(); ++i) {
+                put_blocks.push_back(blocks[i]);
             }
             if (debug_reuse) {
                 RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE insert group: batch=%d gid=%d group_seq=%d n=%zu blocks=%zu "
@@ -412,7 +381,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                                  validBlockCount(put_blocks),
                                  debugCacheKeyAt(put_cache_keys, 0),
                                  debugCacheKeyAt(put_cache_keys, put_cache_keys.empty() ? 0 : put_cache_keys.size() - 1),
-                                 is_swa_group);
+                                 0);
             }
             kv_cache_groups_[static_cast<size_t>(gid)]->insertIntoCache(
                 put_cache_keys, put_blocks, insert_info.is_resident);
