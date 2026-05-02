@@ -1055,11 +1055,12 @@ def get_base_dependencies() -> list:
         except Exception as e:
             print(f"Warning: Could not read base dependencies: {e}")
 
-    # Internal overlay can contribute additional base deps
-    # (skipped under RTP_LLM_OSS_BUILD=1 — see get_platform_dependencies)
+    # Internal overlay can contribute additional base deps. Driven purely by
+    # file presence — OSS build CI strips internal_source/ via oss_strip.sh
+    # so this short-circuits naturally when no overlay file exists.
     repo_root = project_root.parent
     internal_overlay = repo_root / "internal_source" / "pyproject_internal.toml"
-    if not os.environ.get("RTP_LLM_OSS_BUILD") and internal_overlay.exists():
+    if internal_overlay.exists():
         try:
             with open(internal_overlay, "rb") as f:
                 data = tomllib.load(f)
@@ -1133,11 +1134,6 @@ def get_merged_optional_dependencies() -> dict:
         root_extras = dict(_load_extras_from_toml(extras_file))
     else:
         root_extras = dict(_load_extras_from_toml(project_root / "pyproject.toml"))
-
-    oss_only = bool(os.environ.get("RTP_LLM_OSS_BUILD"))
-    if oss_only:
-        print("[overlay] RTP_LLM_OSS_BUILD=1 — skipping internal/PPU overlays")
-        return root_extras
 
     # Look up internal/PPU overlays at both monorepo layout (<repo_root>/internal_source/...)
     # and CAS-flat layout (<project_root>/internal_source/...). REAPI workers receive
