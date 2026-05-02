@@ -597,11 +597,13 @@ class DeepSeekV4Model(GptModelBase):
             return
         half_dim = state_dim // 2
         bids_cpu = block_ids_2d[:B].cpu()
-        max_blks = min(2, bids_cpu.size(1))
         state_rows = kv_state.size(1)
         for b in range(B):
-            for blk_idx in range(max_blks):
-                bid = int(bids_cpu[b, blk_idx].item())
+            row = bids_cpu[b]
+            real_bids = [
+                int(row[k].item()) for k in range(row.size(0)) if int(row[k].item()) > 0
+            ][-2:]
+            for blk_idx, bid in enumerate(real_bids):
                 if bid <= 0:
                     continue
                 page_fp32 = (
@@ -631,11 +633,13 @@ class DeepSeekV4Model(GptModelBase):
             return
         half_dim = state_dim // 2
         bids_cpu = block_ids_2d[:B].cpu()
-        max_blks = min(2, bids_cpu.size(1))
         state_rows = kv_state.size(1)
         for b in range(B):
-            for blk_idx in range(max_blks):
-                bid = int(bids_cpu[b, blk_idx].item())
+            row = bids_cpu[b]
+            real_bids = [
+                int(row[k].item()) for k in range(row.size(0)) if int(row[k].item()) > 0
+            ][-2:]
+            for blk_idx, bid in enumerate(real_bids):
                 if bid <= 0:
                     continue
                 page_fp32 = (
@@ -755,6 +759,12 @@ class DeepSeekV4Model(GptModelBase):
                 fw_t = self._get_pool_tensor(attn_type, i)
 
                 if attn_type == 7:  # SWA_KV
+                    def _real_slots(row):
+                        return [
+                            k for k in range(row.size(0))
+                            if int(row[k].item()) > 0
+                        ]
+
                     if reuse_gather:
                         # Approach B: SWA pool stores per-boundary snapshots
                         # of the win=128 circular buffer. The memory cache
@@ -768,10 +778,7 @@ class DeepSeekV4Model(GptModelBase):
                         # at the boundary it just resumed from.
                         for b_i in range(B):
                             row = bid_slice[b_i].cpu()
-                            real_slots = [
-                                k for k in range(row.size(0))
-                                if int(row[k].item()) > 0
-                            ]
+                            real_slots = _real_slots(row)
                             if len(real_slots) < 2:
                                 continue
                             snap_slot = real_slots[-2]
@@ -783,12 +790,23 @@ class DeepSeekV4Model(GptModelBase):
                                 hd,
                             )
                     else:
-                        # Decode / non-reuse gather: keep legacy slabbed read.
-                        # (Currently unreachable on the gather path because
-                        # SWA is excluded from _layer_gather_pools, but keep
-                        # the call shape for forward-compat.)
-                        swa_buf = attn_mod.kv_cache[:B, :win]
-                        self._gather_kv_pool(fw_t, bid_slice, swa_buf, 256, hd, B)
+                        # Decode / PD non-reuse gather: SWAKVCacheGroup keeps
+                        # only tail snapshot blocks at their logical tail
+                        # positions. A slabbed gather would skip them because
+                        # the SWA window is much smaller than logical_pos*256.
+                        # Restore the latest tail snapshot directly.
+                        for b_i in range(B):
+                            row = bid_slice[b_i].cpu()
+                            real_slots = _real_slots(row)
+                            if not real_slots:
+                                continue
+                            snap_bid = int(row[real_slots[-1]].item())
+                            self._gather_swa_snapshot(
+                                fw_t,
+                                snap_bid,
+                                attn_mod.kv_cache[b_i, :win],
+                                hd,
+                            )
                 elif attn_type == 1:  # CSA_KV
                     if (
                         attn_mod.compressor is not None
