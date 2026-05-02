@@ -13,14 +13,30 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
 import math
-import os
 from typing import Dict, Optional
 
+# P3 (audit §3.5 / §7.4 P0): wo_a batched output projection.
+# Replaces the per-group ``for g in range(G)`` loop (G launches of
+# ``fp8_gemm_nt``) with one ``deep_gemm.fp8_einsum("bhr,hdr->bhd", ...)``
+# call.  Matches vLLM's ``deepseek_v4_attention.py:325`` exactly (same
+# API, same recipe).  Validated by ``test/test_wo_a_batched_vs_loop.py``
+# — bit-identical output + 3.5-4.4× speedup at decode B∈{1..256}.
+import deep_gemm  # noqa: E402
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from deep_gemm.utils.layout import (  # noqa: E402
+    get_mn_major_tma_aligned_packed_ue8m0_tensor,
+)
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (  # noqa: E402
+    fp8_max as _FP8_MAX,
+)
+from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import fp8_min as _FP8_MIN
+from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
+    fused_inv_rope_fp8_quant,
+)
 
 # Audit §7.4 P0 (row 1) + §7.3.4: fused RMSNorm + partial RoPE, single
 # Triton launch.  Covers every Q/KV decode + prefill site.  Standalone
@@ -43,19 +59,41 @@ from rtp_llm.models_py.modules.dsv4.rope import (
 )
 from rtp_llm.models_py.modules.dsv4.weight_loader import _repack_v4_fp8_scale_to_int32
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
+from rtp_llm.ops.compute_ops import (  # noqa: E402
+    per_token_group_quant_fp8 as _raw_per_token_group_quant_fp8,
+)
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-
-# P3 (prefill_opt/final_plan.md): wo_a native FP8 fast path.  Replaces
-# ``dequant_weight()`` + bf16 ``einsum("bsgd,grd->bsgr")`` with per-group
-# DeepGEMM ``fp8_gemm_nt`` calls (no BF16 weight materialization).  wo_b
-# is already on the FP8 native path via ``_v4_fp8_linear_from_dict``.
-# Set DSV4_WO_FP8_FAST=0 to force the dequant REF (debug only).
-def _use_wo_fp8_fast() -> bool:
-    return os.environ.get("DSV4_WO_FP8_FAST", "1") != "0"
-
-
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
+
+
+def _prepare_wo_a_stacked(
+    weight_fp8: torch.Tensor,
+    scale_raw: torch.Tensor,
+    G: int,
+    R: int,
+    K: int,
+) -> tuple:
+    """Stack V4 wo_a ckpt (``[G*R, K]`` fp8 + ``[G*R/128, K/128]`` e8m0fnu)
+    into the ``fp8_einsum``-expected layout, computed once at init:
+
+    - weight: ``[G, R, K]`` fp8 contiguous (free view)
+    - scale : ``[G, R, K/512]`` int32 UE8M0 packed, MN-major TMA-aligned
+      (stride ``(K/512 * tma_R, 1, tma_R)``)
+
+    Cast e8m0fnu → fp32, row-repeat by 128 along R so
+    ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` (which operates on
+    fp32 ``[*, mn, k/128]``) sees the full [G, R, K/128] grid.  The helper
+    floor-log2 bitcasts each block scale and packs 4 UE8M0 bytes per
+    int32; output shape ``[G, R, K/512]`` matches
+    ``deep_gemm.fp8_einsum(..., recipe=(1, 1, 128))`` expectations."""
+    w_stk = weight_fp8.view(G, R, K).contiguous()
+    scale_fp32 = scale_raw.float().view(G, R // 128, K // 128)
+    idx = torch.arange(R, device=scale_raw.device) // 128
+    scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
+    s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
+    return w_stk, s_stk
+
 
 # V4 author's TileLang sparse_attn kernel — vendored from
 # /mnt/nas1/hf/DeepSeek-V4-Flash/inference/kernel.py:sparse_attn_kernel.
@@ -428,6 +466,16 @@ class Attention(nn.Module):
                     ].contiguous()
                 self.wo_a.weight = nn.Parameter(wo_a_w, requires_grad=False)
                 self.wo_a.scale = nn.Parameter(wo_a_s, requires_grad=False)
+                # Pre-stack into the ``fp8_einsum`` layout once.  Stored
+                # as plain buffers so they don't enter nn.Module state_dict
+                # (would confuse the ckpt loader — the raw wo_a.weight /
+                # wo_a.scale are the real params).
+                K_local = n_heads_local * head_dim // n_groups_local
+                _stk_w, _stk_s = _prepare_wo_a_stacked(
+                    wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+                )
+                self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
+                self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
 
             # wo_b row-split along K (cols), all_reduce after forward
             self.wo_b = (
@@ -609,52 +657,77 @@ class Attention(nn.Module):
             return y.view(*shape[:-1], y.shape[-1])
         return layer(x)
 
+    def _wo_a_einsum_from_fp8(
+        self, o_fp8: torch.Tensor, o_scale: torch.Tensor, B: int, S: int
+    ) -> torch.Tensor:
+        """One ``fp8_einsum`` call on pre-quantized activations.
+
+        Used by the decode fused path: ``fused_inv_rope_fp8_quant`` already
+        produced ``(o_fp8 [M, G, K], o_scale [M, G, K/512])`` in the exact
+        layout the einsum consumes, so we skip the per-group quant loop
+        that ``_wo_a_grouped_fp8`` does.  Saves ``G`` quant launches vs
+        bf16 entry."""
+        M, G, _K = o_fp8.shape
+        R = self.o_lora_rank
+        out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
+        deep_gemm.fp8_einsum(
+            "bhr,hdr->bhd",
+            (o_fp8, o_scale),
+            (self._wo_a_stk_w, self._wo_a_stk_s),
+            out,
+            recipe=(1, 1, 128),
+        )
+        return out.view(B, S, G, R)
+
     def _wo_a_grouped_fp8(self, o: torch.Tensor) -> torch.Tensor:
-        """Per-group native FP8 GEMM, replaces dequant + bf16 einsum.
+        """Batched wo_a output projection via single ``fp8_einsum`` call.
 
-        ``o`` is ``[B, S, G, K]`` BF16 from sparse-attn output (after
-        inv-RoPE).  ``self.wo_a.weight`` is the full ``[G*R, K]`` FP8
-        tensor with UE8M0 block-128 scale.  We slice per-group, build
-        ``CudaFp8DeepGEMMLinear`` lazily on first call (so the repack
-        runs on-device), then loop over groups calling DeepGEMM's
-        ``fp8_gemm_nt`` — no [G*R, K] BF16 dequant, no full transpose.
-
-        Returns ``[B, S, G, R]`` BF16, identical math (within block-FP8
-        quant noise) to the dequant + einsum REF path.
-        """
+        ``o``: ``[B, S, G, K]`` bf16 (sparse-attn output after inverse
+        RoPE).  Returns ``[B, S, G, R]`` bf16.  Matches vLLM's
+        ``deepseek_v4_attention.py:325`` (``"bhr,hdr->bhd"`` + recipe
+        ``(1, 1, 128)`` for SM100 UE8M0).  Per-group 2D FP8 quant writes
+        directly into 3D buffers laid out in the einsum-expected format
+        (``[G, M, K/512]`` stride ``(K/512*tma_M, 1, tma_M)``) so no
+        scale reshape is needed downstream."""
         B, S, G, K = o.shape
         R = self.o_lora_rank
-        if getattr(self, "_wo_a_groups_lazy", None) is None:
-            from rtp_llm.models_py.modules.dsv4.weight_loader import (
-                _repack_v4_fp8_scale_to_int32,
+        M = B * S
+        tma_M = ((M + 3) // 4) * 4
+
+        # [B, S, G, K] → [G, M, K] contiguous bf16 (G-major for per-group quant).
+        x_gmk = o.reshape(M, G, K).permute(1, 0, 2).contiguous()
+
+        a_fp8_3d = torch.empty(G, M, K, dtype=torch.float8_e4m3fn, device=o.device)
+        scale_buf = torch.empty(
+            G * (K // 512) * tma_M, dtype=torch.int32, device=o.device
+        )
+        a_scale_3d = scale_buf.as_strided(
+            (G, M, K // 512), (K // 512 * tma_M, 1, tma_M)
+        )
+        for g in range(G):
+            _raw_per_token_group_quant_fp8(
+                x_gmk[g],
+                a_fp8_3d[g],
+                a_scale_3d[g],
+                128,
+                1e-4,
+                _FP8_MIN,
+                _FP8_MAX,
+                True,
             )
 
-            groups = []
-            for g in range(G):
-                w_g = self.wo_a.weight[g * R : (g + 1) * R].contiguous()
-                s_g_raw = self.wo_a.scale[
-                    g * R // 128 : (g + 1) * R // 128
-                ].contiguous()
-                if s_g_raw.dtype == torch.float8_e8m0fnu:
-                    s_g = _repack_v4_fp8_scale_to_int32(s_g_raw)
-                else:
-                    s_g = s_g_raw
-                local = {f"_g.weight": w_g, f"_g.scale": s_g}
-                lin = LinearFactory.create_linear_from_weights(
-                    local,
-                    f"_g.weight",
-                    f"_g.scale",
-                    quant_config=_V4_FP8_BLOCK_CFG,
-                )
-                groups.append(lin)
-            self._wo_a_groups_lazy = groups
+        a_fp8 = a_fp8_3d.permute(1, 0, 2).contiguous()  # [M, G, K]
+        a_scale = a_scale_3d.transpose(0, 1)  # [M, G, K/512] strided
 
-        out_full = torch.empty(B, S, G, R, dtype=o.dtype, device=o.device)
-        for g in range(G):
-            x_g = o[:, :, g, :].contiguous().view(B * S, K)
-            out_g = self._wo_a_groups_lazy[g](x_g)
-            out_full[:, :, g, :].copy_(out_g.view(B, S, R))
-        return out_full
+        out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o.device)
+        deep_gemm.fp8_einsum(
+            "bhr,hdr->bhd",
+            (a_fp8, a_scale),
+            (self._wo_a_stk_w, self._wo_a_stk_s),
+            out,
+            recipe=(1, 1, 128),
+        )
+        return out.view(B, S, G, R)
 
     def forward_decode(
         self,
@@ -1061,14 +1134,24 @@ class Attention(nn.Module):
             kv_view = self.kv_cache[:bsz]  # [B, T, head_dim]
             o = sparse_op.forward(q, kv_view, self.attn_sink, topk_idxs)  # [B, 1, H, D]
 
-        # Inverse RoPE per request — vectorized.
-        apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
-
-        # Grouped output projection (same as prefill)
-        o = o.reshape(bsz, q_len, self.n_groups, -1)
-        if self._factory_mode and _use_wo_fp8_fast() and o.is_cuda and o.numel() > 0:
-            o = self._wo_a_grouped_fp8(o)
+        # Grouped output projection: inverse-RoPE + FP8 quant + wo_a einsum.
+        # Fused path collapses torch ``apply_rotary_emb_batched`` (5 launches)
+        # + per-group ``per_token_group_quant_fp8`` (G launches) into ONE
+        # Triton kernel emitting ``(fp8 [M,G,K], scale [M,G,K/512])`` in the
+        # einsum-expected UE8M0 layout.  Matches vLLM ``deepseek_v4_attention.py``.
+        if self._factory_mode and o.is_cuda and o.numel() > 0:
+            o_fp8, o_scale = fused_inv_rope_fp8_quant(
+                o,
+                freqs_cis_per_req,
+                n_groups=self.n_groups,
+                heads_per_group=self.n_heads // self.n_groups,
+                nope_dim=self.head_dim - self.rope_head_dim,
+                rope_head_dim=self.rope_head_dim,
+            )
+            o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len)
         else:
+            apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
+            o = o.reshape(bsz, q_len, self.n_groups, -1)
             wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
             wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
             o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
@@ -1253,14 +1336,23 @@ class Attention(nn.Module):
             block_table,
         )
 
-        # Inverse RoPE per request — vectorized.
-        apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
-
-        # Grouped output projection (identical to BF16 path).
-        o = o.reshape(bsz, q_len, self.n_groups, -1)
-        if self._factory_mode and _use_wo_fp8_fast() and o.is_cuda and o.numel() > 0:
-            o = self._wo_a_grouped_fp8(o)
+        # Grouped output projection: inverse-RoPE + FP8 quant + wo_a einsum.
+        # Fused path (see ``_fused_inv_rope_fp8_quant_triton``) collapses
+        # ``apply_rotary_emb_batched`` + per-group quant into one Triton
+        # launch producing einsum-ready (fp8, scale).
+        if self._factory_mode and o.is_cuda and o.numel() > 0:
+            o_fp8, o_scale = fused_inv_rope_fp8_quant(
+                o,
+                freqs_cis_per_req,
+                n_groups=self.n_groups,
+                heads_per_group=self.n_heads // self.n_groups,
+                nope_dim=self.head_dim - self.rope_head_dim,
+                rope_head_dim=self.rope_head_dim,
+            )
+            o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len)
         else:
+            apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
+            o = o.reshape(bsz, q_len, self.n_groups, -1)
             wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
             wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
             o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
