@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/cache/DSV4CacheConfig.h"
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/DSV4ConfigCreator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -659,9 +660,15 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     InsertInfo insert_info{batch_res, complete_token_ids, /*is_resident=*/false};
     allocator->insertIntoCache(insert_info);
 
-    // ALL 7 groups should have entries in block cache
-    for (int gid = 0; gid < 7; gid++) {
+    // FULL groups cache from the beginning. SWA/state groups only expose the
+    // last two reusable tail keys.
+    for (int gid = 0; gid < 3; gid++) {
         EXPECT_TRUE(block_cache->contains(200, gid)) << "group " << gid << " should be cached";
+    }
+    for (int gid = 3; gid < 7; gid++) {
+        EXPECT_FALSE(block_cache->contains(200, gid)) << "SWA group " << gid << " should not cache non-tail key";
+        EXPECT_TRUE(block_cache->contains(201, gid)) << "SWA group " << gid << " should cache tail key 201";
+        EXPECT_TRUE(block_cache->contains(202, gid)) << "SWA group " << gid << " should cache tail key 202";
     }
 
     // Free all blocks
@@ -707,9 +714,15 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     InsertInfo insert_info{batch_res, complete_token_ids, /*is_resident=*/false};
     allocator->insertIntoCache(insert_info);
 
-    // All groups cached
-    for (int gid = 0; gid < 7; gid++) {
+    // FULL groups cache from the beginning. SWA/state groups only expose the
+    // last two reusable tail keys.
+    for (int gid = 0; gid < 3; gid++) {
         EXPECT_TRUE(block_cache->contains(300, gid)) << "Flash group " << gid << " should be cached";
+    }
+    for (int gid = 3; gid < 7; gid++) {
+        EXPECT_FALSE(block_cache->contains(300, gid)) << "Flash SWA group " << gid << " should not cache non-tail key";
+        EXPECT_TRUE(block_cache->contains(301, gid)) << "Flash SWA group " << gid << " should cache tail key 301";
+        EXPECT_TRUE(block_cache->contains(302, gid)) << "Flash SWA group " << gid << " should cache tail key 302";
     }
 
     for (int gid = 0; gid < 7; gid++) {
@@ -718,7 +731,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
 }
 
 // ============================================================
-// Prefix cache: paged FULL groups reuse; SWA/state groups recompute their tail
+// Prefix cache: paged FULL groups reuse; SWA/state groups require two matched tail blocks.
 // ============================================================
 
 TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
@@ -778,12 +791,115 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
     }
     for (int gid = 3; gid < 7; gid++) {
         const auto& out_blocks = batch_res->blocks(0, gid);
-        ASSERT_GE(out_blocks.size(), 2u) << "group " << gid << " should have tail slots";
-        EXPECT_TRUE(isNullBlockIdx(out_blocks[0])) << "group " << gid << " should not prefix-reuse SWA/state block 0";
-        EXPECT_TRUE(isNullBlockIdx(out_blocks[1])) << "group " << gid << " should not prefix-reuse SWA/state block 1";
+        ASSERT_GE(out_blocks.size(), 3u) << "group " << gid << " should have tail slots";
+        EXPECT_TRUE(isNullBlockIdx(out_blocks[1]))
+            << "group " << gid << " previous matched tail is evicted after new tail allocation";
+        EXPECT_EQ(out_blocks[2], cached_blocks[gid][2]) << "group " << gid << " last matched tail block should remain";
     }
 
     // Clean up
+    FreeInfo free_info{batch_res};
+    allocator->free(free_info);
+}
+
+TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
+    auto config    = makeDSV4AllocatorConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool  = allocator->getBlockPool();
+    auto block_cache = block_pool->blockCache();
+
+    CacheKeysType                          cached_keys = {100, 101, 102};
+    std::vector<std::vector<BlockIdxType>> cached_blocks(3);
+    for (int gid = 0; gid < 3; gid++) {
+        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
+        ASSERT_EQ(blocks.size(), cached_keys.size());
+        for (size_t i = 0; i < cached_keys.size(); ++i) {
+            BlockCache::CacheItem item;
+            item.cache_key   = cached_keys[i];
+            item.group_id    = gid;
+            item.block_index = blocks[i];
+            item.is_resident = true;
+            EXPECT_TRUE(block_cache->put(item));
+            block_pool->blockCacheReference(blocks[i]);
+        }
+        cached_blocks[gid] = blocks;
+        block_pool->requestFree(blocks);
+    }
+
+    auto batch_res = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
+
+    int  seq_size_per_block         = allocator->seqSizePerBlock();
+    int  seq_len                    = 3 * seq_size_per_block + 1;
+    auto complete_token_ids         = std::make_shared<CompleteTokenIds>(1, 1, 4096, seq_size_per_block);
+    auto generate_input             = std::make_shared<GenerateInput>();
+    generate_input->input_ids       = torch::arange(seq_len, torch::kInt32);
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    complete_token_ids->init(generate_input);
+
+    MallocInfo info{batch_res, complete_token_ids};
+    info.enable_device_cache = true;
+    info.reuse_cache         = true;
+    auto result              = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+
+    EXPECT_EQ(result.reuse_len, 0) << "SWA tail miss should veto paged prefix reuse";
+
+    FreeInfo free_info{batch_res};
+    allocator->free(free_info);
+}
+
+TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresTwoSWATailHits) {
+    auto config    = makeDSV4AllocatorConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool  = allocator->getBlockPool();
+    auto block_cache = block_pool->blockCache();
+
+    CacheKeysType cached_keys = {100, 101, 102};
+    for (int gid = 0; gid < 7; gid++) {
+        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
+        ASSERT_EQ(blocks.size(), cached_keys.size());
+        for (size_t i = 0; i < cached_keys.size(); ++i) {
+            if (gid >= 3 && i + 1 < cached_keys.size()) {
+                continue;
+            }
+            BlockCache::CacheItem item;
+            item.cache_key   = cached_keys[i];
+            item.group_id    = gid;
+            item.block_index = blocks[i];
+            item.is_resident = true;
+            EXPECT_TRUE(block_cache->put(item));
+            block_pool->blockCacheReference(blocks[i]);
+        }
+        block_pool->requestFree(blocks);
+    }
+
+    auto batch_res = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
+
+    const int spb = allocator->seqSizePerBlock();
+    auto      cti = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
+    auto      gi  = std::make_shared<GenerateInput>();
+    gi->input_ids = torch::arange(3 * spb + 1, torch::kInt32);
+    gi->generate_config = std::make_shared<GenerateConfig>();
+    cti->init(gi);
+
+    MallocInfo info{batch_res, cti};
+    info.enable_device_cache = true;
+    info.reuse_cache         = true;
+    auto result              = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+
+    EXPECT_EQ(result.reuse_len, 0) << "SWA must hit both tail blocks before paged prefix reuse is accepted";
+
     FreeInfo free_info{batch_res};
     allocator->free(free_info);
 }
@@ -842,9 +958,42 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
     }
     for (int gid = 3; gid < 7; gid++) {
         const auto& out_blocks = batch_res->blocks(0, gid);
-        ASSERT_GE(out_blocks.size(), 1u) << "Flash group " << gid;
-        EXPECT_TRUE(isNullBlockIdx(out_blocks[0])) << "Flash group " << gid << " should not prefix-reuse SWA/state";
+        ASSERT_GE(out_blocks.size(), 3u) << "Flash group " << gid;
+        EXPECT_TRUE(isNullBlockIdx(out_blocks[1]))
+            << "Flash group " << gid << " previous matched tail is evicted after new tail allocation";
+        EXPECT_EQ(out_blocks[2], cached_blocks[gid][2])
+            << "Flash group " << gid << " last matched tail block should remain";
     }
+
+    FreeInfo free_info{batch_res};
+    allocator->free(free_info);
+}
+
+TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksAreDistributedAcrossGroups) {
+    auto config      = makeDSV4AllocatorConfig(/*use_flash=*/true);
+    config.block_num = 200;
+    auto allocator   = std::make_shared<HybridPoolKVCacheAllocator>(
+        config, AllocationType::DEVICE, nullptr, /*reserve_block_ratio=*/10);
+    ASSERT_TRUE(allocator->init());
+
+    auto batch_res = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{600, 601});
+
+    const int spb = allocator->seqSizePerBlock();
+    auto      cti = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
+    auto      gi  = std::make_shared<GenerateInput>();
+    gi->input_ids = torch::arange(spb, torch::kInt32);
+    gi->generate_config = std::make_shared<GenerateConfig>();
+    cti->init(gi);
+
+    MallocInfo info{batch_res, cti};
+    info.enable_device_cache = false;
+    info.reuse_cache         = false;
+    info.verbose             = true;
+    auto result              = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
 
     FreeInfo free_info{batch_res};
     allocator->free(free_info);
@@ -904,10 +1053,10 @@ TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
 }
 
 // ============================================================
-// SWA prefix cache: cache entries exist but direct prefix restore is vetoed
+// SWA prefix cache: cache entries exist and the matched tail window gates reuse.
 // ============================================================
 
-TEST_F(DSV4AllocatorTest, SWAPrefixCacheVetoesDirectReuse) {
+TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
     auto config    = makeDSV4AllocatorConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -950,11 +1099,10 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheVetoesDirectReuse) {
     ASSERT_TRUE(result.success);
     EXPECT_GT(result.reuse_len, 0);
 
-    // SWA group 6 stores only tail state. Prefix restore is intentionally vetoed
-    // to avoid restoring state at a stale sequence position.
     const auto& swa_out = batch_res->blocks(0, 6);
     ASSERT_GE(swa_out.size(), 2u);
-    EXPECT_TRUE(isNullBlockIdx(swa_out[0])) << "SWA block 0 should not be prefix-restored";
+    EXPECT_TRUE(isNullBlockIdx(swa_out[0])) << "SWA previous matched tail is evicted after new tail allocation";
+    EXPECT_EQ(swa_out[1], cached_blocks[6][1]) << "SWA last matched tail block should remain";
 
     FreeInfo free_info{batch_res};
     allocator->free(free_info);

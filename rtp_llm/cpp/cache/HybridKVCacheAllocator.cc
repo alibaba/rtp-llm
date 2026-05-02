@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/HybridKVCacheAllocator.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -11,6 +12,51 @@
 
 namespace rtp_llm {
 namespace {
+
+bool dsv4DebugReuseEnabled() {
+    return std::getenv("DSV4_DEBUG_REUSE") != nullptr;
+}
+
+int64_t debugCacheKeyAt(const CacheKeysType& cache_keys, size_t pos) {
+    if (cache_keys.empty() || pos >= cache_keys.size()) {
+        return 0;
+    }
+    return cache_keys[pos];
+}
+
+size_t validBlockCount(const BlockIndicesType& blocks) {
+    size_t count = 0;
+    for (const auto block : blocks) {
+        if (!isNullBlockIdx(block)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+BlockIndicesType tailAlignedBlocksForCache(const BlockIndicesType& blocks, size_t n, size_t tail_count) {
+    BlockIndicesType aligned(n, NULL_BLOCK_IDX);
+    if (n == 0 || tail_count == 0) {
+        return aligned;
+    }
+
+    BlockIndicesType valid_tail;
+    valid_tail.reserve(tail_count);
+    for (auto it = blocks.rbegin(); it != blocks.rend() && valid_tail.size() < tail_count; ++it) {
+        if (!isNullBlockIdx(*it)) {
+            valid_tail.push_back(*it);
+        }
+    }
+    std::reverse(valid_tail.begin(), valid_tail.end());
+
+    const size_t put_count = std::min(valid_tail.size(), n);
+    const size_t src_begin = valid_tail.size() - put_count;
+    const size_t dst_begin = n - put_count;
+    for (size_t i = 0; i < put_count; ++i) {
+        aligned[dst_begin + i] = valid_tail[src_begin + i];
+    }
+    return aligned;
+}
 
 BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) {
     BlockIndicesType valid;
@@ -37,28 +83,55 @@ HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&               
 int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource) {
     int                           min_full_reuse_blocks = static_cast<int>(cache_keys.size());
     std::vector<BlockIndicesType> full_matched_blocks(kv_cache_groups_.size());
+    const bool                    debug_reuse = dsv4DebugReuseEnabled();
+
+    if (debug_reuse) {
+        RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE reuseCache begin: keys=%zu first_key=%ld last_key=%ld full_groups=%zu "
+                         "linear_groups=%zu swa_groups=%zu",
+                         cache_keys.size(),
+                         debugCacheKeyAt(cache_keys, 0),
+                         debugCacheKeyAt(cache_keys, cache_keys.empty() ? 0 : cache_keys.size() - 1),
+                         full_group_ids_.size(),
+                         linear_group_ids_.size(),
+                         swa_group_ids_.size());
+    }
 
     for (int gid : full_group_ids_) {
         auto match_result     = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys);
         min_full_reuse_blocks = std::min(min_full_reuse_blocks, static_cast<int>(match_result.reuse_blocks));
         full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
+        if (debug_reuse) {
+            RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE reuseCache full gid=%d reuse_blocks=%zu matched_blocks=%zu",
+                             gid,
+                             match_result.reuse_blocks,
+                             full_matched_blocks[static_cast<size_t>(gid)].size());
+        }
     }
 
     int                       pos = min_full_reuse_blocks - 1;
-    std::vector<BlockIdxType> linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
-    std::vector<BlockIdxType> swa_tail_blocks(swa_group_ids_.size(), NULL_BLOCK_IDX);
-    for (; pos >= 0; --pos) {
-        bool all_tail_groups_matched = true;
+    std::vector<BlockIdxType>    linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
+    std::vector<BlockIndicesType> swa_tail_blocks(swa_group_ids_.size());
+    const bool                has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
+    for (; pos >= 0 && has_tail_groups; --pos) {
+        bool                     all_tail_groups_matched = true;
+        std::vector<BlockIdxType> candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
+        std::vector<BlockIndicesType> candidate_swa_tail_blocks(swa_group_ids_.size());
         for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
             const int gid      = linear_group_ids_[i];
             auto* linear_group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
             RTP_LLM_CHECK_WITH_INFO(linear_group != nullptr, "group %d is not LinearKVCacheGroup", gid);
             auto result = linear_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
             if (result.block_indices.empty()) {
+                if (debug_reuse) {
+                    RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE reuseCache linear tail miss gid=%d pos=%d key=%ld",
+                                     gid,
+                                     pos,
+                                     cache_keys[static_cast<size_t>(pos)]);
+                }
                 all_tail_groups_matched = false;
                 break;
             }
-            linear_tail_blocks[i] = result.block_indices[0];
+            candidate_linear_tail_blocks[i] = result.block_indices[0];
         }
         if (!all_tail_groups_matched) {
             continue;
@@ -67,26 +140,49 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVC
             const int gid       = swa_group_ids_[i];
             auto*     swa_group = dynamic_cast<SWAKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
             RTP_LLM_CHECK_WITH_INFO(swa_group != nullptr, "group %d is not SWAKVCacheGroup", gid);
-            auto result = swa_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
-            if (result.block_indices.empty()) {
-                all_tail_groups_matched = false;
+            const int tail_begin = std::max(0, pos - 1);
+            for (int tail_pos = tail_begin; tail_pos <= pos; ++tail_pos) {
+                auto result = swa_group->matchSingleKey(cache_keys[static_cast<size_t>(tail_pos)]);
+                if (result.block_indices.empty()) {
+                    if (debug_reuse) {
+                        RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE reuseCache swa tail miss gid=%d pos=%d key=%ld",
+                                         gid,
+                                         tail_pos,
+                                         cache_keys[static_cast<size_t>(tail_pos)]);
+                    }
+                    all_tail_groups_matched = false;
+                    break;
+                }
+                candidate_swa_tail_blocks[i].push_back(result.block_indices[0]);
+            }
+            if (debug_reuse && all_tail_groups_matched) {
+                RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE reuseCache swa tail hit gid=%d pos=%d tail_blocks=%zu",
+                                 gid,
+                                 pos,
+                                 candidate_swa_tail_blocks[i].size());
+            }
+            if (!all_tail_groups_matched) {
                 break;
             }
-            swa_tail_blocks[i] = result.block_indices[0];
         }
         if (all_tail_groups_matched) {
+            linear_tail_blocks = std::move(candidate_linear_tail_blocks);
+            swa_tail_blocks    = std::move(candidate_swa_tail_blocks);
             break;
         }
     }
 
-    const int reuse_blocks_len = std::max(pos + 1, 0);
+    const int reuse_blocks_len = has_tail_groups ? std::max(pos + 1, 0) : std::max(min_full_reuse_blocks, 0);
     if (reuse_blocks_len <= 0) {
+        if (debug_reuse) {
+            RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE reuseCache no hit: min_full_reuse_blocks=%d", min_full_reuse_blocks);
+        }
         return 0;
     }
-
-    for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        kv_resource.mutableBlockIds(0, gid).assign(
-            BlockIndicesType(static_cast<size_t>(reuse_blocks_len), NULL_BLOCK_IDX));
+    if (debug_reuse) {
+        RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE reuseCache hit: reuse_blocks=%d reuse_len=%d",
+                         reuse_blocks_len,
+                         reuse_blocks_len * seqSizePerBlock());
     }
 
     for (int gid : full_group_ids_) {
@@ -99,11 +195,24 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVC
 
     for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
         const int gid = linear_group_ids_[i];
+        kv_resource.mutableBlockIds(0, gid).assign(
+            BlockIndicesType(static_cast<size_t>(reuse_blocks_len), NULL_BLOCK_IDX));
         kv_resource.mutableBlockIds(0, gid).setAt(static_cast<size_t>(reuse_blocks_len - 1), linear_tail_blocks[i]);
     }
     for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
         const int gid = swa_group_ids_[i];
-        kv_resource.mutableBlockIds(0, gid).setAt(static_cast<size_t>(reuse_blocks_len - 1), swa_tail_blocks[i]);
+        kv_resource.mutableBlockIds(0, gid).assign(
+            BlockIndicesType(static_cast<size_t>(reuse_blocks_len), NULL_BLOCK_IDX));
+        const size_t tail_begin = reuse_blocks_len > 1 ? static_cast<size_t>(reuse_blocks_len - 2) : 0;
+        for (size_t j = 0; j < swa_tail_blocks[i].size(); ++j) {
+            if (debug_reuse) {
+                RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE reuseCache restore swa gid=%d dst_pos=%zu block=%d",
+                                 gid,
+                                 tail_begin + j,
+                                 swa_tail_blocks[i][j]);
+            }
+            kv_resource.mutableBlockIds(0, gid).setAt(tail_begin + j, swa_tail_blocks[i][j]);
+        }
     }
     return reuse_blocks_len;
 }
@@ -237,26 +346,73 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     RTP_LLM_CHECK(kv_cache_resource != nullptr);
 
     const int batch_size = kv_cache_resource->batchSize();
+    const bool debug_reuse = dsv4DebugReuseEnabled();
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
         const auto& cache_keys = kv_cache_resource->cacheKeys(batch_id);
         auto        token_ids  = insert_info.complete_token_ids->completeTokenIdsVec(batch_id);
         if (token_ids.size() <= 1 || cache_keys.empty()) {
+            if (debug_reuse) {
+                RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE insert skip batch=%d token_ids=%zu keys=%zu",
+                                 batch_id,
+                                 token_ids.size(),
+                                 cache_keys.size());
+            }
             continue;
         }
         const size_t token_len = token_ids.size() - 1;
+        if (debug_reuse) {
+            RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE insert begin: batch=%d token_len=%zu keys=%zu first_key=%ld "
+                             "last_key=%ld groups=%d is_resident=%d",
+                             batch_id,
+                             token_len,
+                             cache_keys.size(),
+                             debugCacheKeyAt(cache_keys, 0),
+                             debugCacheKeyAt(cache_keys, cache_keys.empty() ? 0 : cache_keys.size() - 1),
+                             kv_cache_resource->groupNums(),
+                             insert_info.is_resident);
+        }
         for (int gid = 0; gid < kv_cache_resource->groupNums(); ++gid) {
             const int    group_seq_size  = kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
             const size_t full_blocks_num = token_len / static_cast<size_t>(group_seq_size);
             const size_t n               = std::min(cache_keys.size(), full_blocks_num);
             if (n == 0) {
+                if (debug_reuse) {
+                    RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE insert skip group: batch=%d gid=%d group_seq=%d "
+                                     "full_blocks=%zu keys=%zu blocks=%zu",
+                                     batch_id,
+                                     gid,
+                                     group_seq_size,
+                                     full_blocks_num,
+                                     cache_keys.size(),
+                                     kv_cache_resource->blocks(batch_id, gid).size());
+                }
                 continue;
             }
             CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + n);
             const auto&      blocks = kv_cache_resource->blocks(batch_id, gid);
             BlockIndicesType put_blocks;
-            put_blocks.reserve(n);
-            for (size_t i = 0; i < n && i < blocks.size(); ++i) {
-                put_blocks.push_back(blocks[i]);
+            const bool       is_swa_group = gid < static_cast<int>(config_.group_types.size())
+                                      && config_.group_types[static_cast<size_t>(gid)] == CacheGroupType::SWA;
+            if (is_swa_group) {
+                put_blocks = tailAlignedBlocksForCache(blocks, n, 2);
+            } else {
+                put_blocks.reserve(n);
+                for (size_t i = 0; i < n && i < blocks.size(); ++i) {
+                    put_blocks.push_back(blocks[i]);
+                }
+            }
+            if (debug_reuse) {
+                RTP_LLM_LOG_INFO("DSV4_DEBUG_REUSE insert group: batch=%d gid=%d group_seq=%d n=%zu blocks=%zu "
+                                 "valid_blocks=%zu first_key=%ld last_key=%ld tail_aligned=%d",
+                                 batch_id,
+                                 gid,
+                                 group_seq_size,
+                                 n,
+                                 blocks.size(),
+                                 validBlockCount(put_blocks),
+                                 debugCacheKeyAt(put_cache_keys, 0),
+                                 debugCacheKeyAt(put_cache_keys, put_cache_keys.empty() ? 0 : put_cache_keys.size() - 1),
+                                 is_swa_group);
             }
             kv_cache_groups_[static_cast<size_t>(gid)]->insertIntoCache(
                 put_cache_keys, put_blocks, insert_info.is_resident);

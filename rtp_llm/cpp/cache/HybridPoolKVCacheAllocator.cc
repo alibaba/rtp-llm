@@ -419,6 +419,11 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
     const int  reserve_step   = malloc_info.complete_token_ids->getReserveStep();
     const bool reuse_enabled  = malloc_info.reuse_cache;
 
+    size_t total_available_blocks = 0;
+    for (const auto& pool : group_block_pools_) {
+        total_available_blocks += pool->availableBlocksNum();
+    }
+
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
         const int  group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
         const auto need                   = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
@@ -428,15 +433,18 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
             continue;
         }
         const size_t available_blocks = group_block_pools_[static_cast<size_t>(gid)]->availableBlocksNum();
-        if (available_blocks < static_cast<size_t>(need_blocks) + reserve_blocks) {
+        const size_t group_reserve_blocks =
+            total_available_blocks > 0 ? reserve_blocks * available_blocks / total_available_blocks : 0;
+        if (available_blocks < static_cast<size_t>(need_blocks) + group_reserve_blocks) {
             if (malloc_info.verbose) {
                 RTP_LLM_LOG_INFO("HybridPool initMalloc rejected by reserve blocks: request_id=%ld group=%d "
-                                 "need_blocks=%d available_blocks=%zu reserve_blocks=%zu",
+                                 "need_blocks=%d available_blocks=%zu reserve_blocks=%zu group_reserve_blocks=%zu",
                                  malloc_info.request_id,
                                  gid,
                                  need_blocks,
                                  available_blocks,
-                                 reserve_blocks);
+                                 reserve_blocks,
+                                 group_reserve_blocks);
             }
             return false;
         }

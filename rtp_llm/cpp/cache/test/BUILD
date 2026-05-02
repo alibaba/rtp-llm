@@ -32,6 +32,11 @@ cc_import(
     shared_library = "@pip_gpu_cuda12_9_torch_nvidia_cuda_cupti_cu12//:site-packages/nvidia/cuda_cupti/lib/libcupti.so.12",
 )
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
 cuda12_torch_link_deps = select({
     "@//:using_cuda13_x86": [
         ":cuda12_cublas",
@@ -39,6 +44,7 @@ cuda12_torch_link_deps = select({
         ":cuda12_cudart",
         ":cuda12_cufft",
         ":cuda12_cupti",
+        ":cuda13_torch_nvshmem",
     ],
     "//conditions:default": [],
 })
