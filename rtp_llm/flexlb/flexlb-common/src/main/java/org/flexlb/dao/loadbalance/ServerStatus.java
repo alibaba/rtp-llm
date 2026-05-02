@@ -32,6 +32,13 @@ public class ServerStatus {
     @JsonProperty("request_id")
     private long requestId;
 
+    /**
+     * V1-α DP batching: DP rank assigned to this request by Master.
+     * -1 means unassigned (DP disabled or non-DP path); >=0 is the actual rank index.
+     */
+    @JsonProperty("dp_rank")
+    private long dpRank = -1;
+
     @JsonProperty("success")
     private boolean success;
 
