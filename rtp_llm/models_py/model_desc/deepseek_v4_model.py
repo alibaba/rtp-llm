@@ -55,6 +55,25 @@ def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
 from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 
 
+def _dsv4_debug_reuse_enabled() -> bool:
+    return os.getenv("DSV4_DEBUG_REUSE") not in (None, "", "0", "false", "False")
+
+
+def _dsv4_tensor_digest(tensor: Optional[torch.Tensor]) -> str:
+    if tensor is None or tensor.numel() == 0:
+        return "empty"
+    sample = tensor.detach().reshape(-1)
+    # Keep the checksum cheap and deterministic enough for comparing paths.
+    sample = sample[: min(sample.numel(), 4096)].float()
+    return (
+        f"shape={tuple(tensor.shape)} sum={float(sample.sum().item()):.6e} "
+        f"abs={float(sample.abs().sum().item()):.6e}"
+    )
+
+
+DSV4_CACHE_KEY_TOKENS_PER_BLOCK = 256
+
+
 def _args_from_model_config(
     mc: ModelConfig, max_generate_batch_size: int = 4
 ) -> V4Args:
@@ -283,6 +302,77 @@ class DeepSeekV4Model(GptModelBase):
                 self._profile_trigger,
                 self._profile_path,
             )
+
+    def _debug_reuse_log_layer(self, layer_idx: int) -> bool:
+        if not _dsv4_debug_reuse_enabled():
+            return False
+        if self.v4 is None:
+            return layer_idx == 0
+        return layer_idx in (0, len(self.v4.layers) - 1)
+
+    def _debug_reuse_block_row(self, attn_inputs, batch_offset: int, label: str) -> None:
+        if not _dsv4_debug_reuse_enabled():
+            return
+        by_group = getattr(attn_inputs, "kv_cache_kernel_block_id_device_by_group", None)
+        if by_group is None:
+            return
+        parts = []
+        for gid, block_ids in enumerate(by_group):
+            if block_ids is None or block_ids.numel() == 0 or batch_offset >= block_ids.size(0):
+                continue
+            row = block_ids[batch_offset].detach().cpu()
+            focus_slots = []
+            for slot in (8, 9, 10):
+                if slot < row.size(0):
+                    focus_slots.append(f"{slot}:{int(row[slot].item())}")
+                else:
+                    focus_slots.append(f"{slot}:OOB")
+            real_slots = [i for i in range(row.size(0)) if int(row[i].item()) > 0]
+            real_blocks = [int(row[i].item()) for i in real_slots[-4:]]
+            parts.append(
+                f"gid={gid} len={row.size(0)} slots8_10=[{','.join(focus_slots)}] "
+                f"real_slots={real_slots[-4:]} real_blocks={real_blocks}"
+            )
+        logging.info("DSV4_DEBUG_REUSE py block_row %s batch=%d %s", label, batch_offset, "; ".join(parts))
+
+    def _debug_reuse_swa_pool_slots(
+        self,
+        fw_tensor,
+        row,
+        head_dim: int,
+        win: int,
+        layer_idx: int,
+        gid: int,
+        batch: int,
+        label: str,
+    ) -> None:
+        if not self._debug_reuse_log_layer(layer_idx):
+            return
+        if fw_tensor is None or fw_tensor.numel() == 0:
+            return
+        parts = []
+        n_bytes = win * head_dim * 2
+        for slot in (8, 9, 10):
+            if slot >= row.size(0):
+                parts.append(f"slot={slot} block=OOB")
+                continue
+            bid = int(row[slot].item())
+            if bid <= 0:
+                parts.append(f"slot={slot} block={bid}")
+                continue
+            if n_bytes > fw_tensor.size(1):
+                parts.append(f"slot={slot} block={bid} digest=OOB")
+                continue
+            page = fw_tensor[bid, :n_bytes].view(torch.bfloat16).view(win, head_dim)
+            parts.append(f"slot={slot} block={bid} digest={_dsv4_tensor_digest(page)}")
+        logging.info(
+            "DSV4_DEBUG_REUSE py swa_pool_slots %s layer=%d gid=%d batch=%d %s",
+            label,
+            layer_idx,
+            gid,
+            batch,
+            "; ".join(parts),
+        )
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:
@@ -515,7 +605,14 @@ class DeepSeekV4Model(GptModelBase):
         )
 
     def _gather_kv_pool(
-        self, fw_tensor, block_ids_2d, python_buf, entries_per_block, head_dim, B
+        self,
+        fw_tensor,
+        block_ids_2d,
+        python_buf,
+        entries_per_block,
+        head_dim,
+        B,
+        max_blocks=None,
     ):
         """Gather paged KV from BlockPool into python_buf[B, T, head_dim] (bf16).
 
@@ -536,6 +633,8 @@ class DeepSeekV4Model(GptModelBase):
         for b in range(B):
             row = bids_cpu[b]
             for k in range(row.size(0)):
+                if max_blocks is not None and k >= max_blocks:
+                    break
                 bid = int(row[k].item())
                 if bid <= 0:
                     continue
@@ -709,7 +808,13 @@ class DeepSeekV4Model(GptModelBase):
         swa_buf_dst.copy_(page_bf16)
 
     def _gather_all_layers(
-        self, attn_inputs, B=1, batch_offset=0, paged_only=False, reuse_gather=False
+        self,
+        attn_inputs,
+        B=1,
+        batch_offset=0,
+        paged_only=False,
+        reuse_gather=False,
+        reuse_seq_len=None,
     ):
         """Gather cached KV from BlockPool pages into each layer's buffers.
 
@@ -735,6 +840,9 @@ class DeepSeekV4Model(GptModelBase):
 
         # attn_type → group_id (0-indexed): CSA_KV=1→0, HCA_KV=2→1, ...SWA_KV=7→6
         attn_type_to_gid = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6}
+        max_reuse_blocks = None
+        if reuse_gather and reuse_seq_len is not None and self.kv_cache is not None:
+            max_reuse_blocks = int(reuse_seq_len) // DSV4_CACHE_KEY_TOKENS_PER_BLOCK
 
         for i, layer in enumerate(self.v4.layers):
             attn_mod = layer.attn
@@ -778,17 +886,55 @@ class DeepSeekV4Model(GptModelBase):
                         # at the boundary it just resumed from.
                         for b_i in range(B):
                             row = bid_slice[b_i].cpu()
+                            self._debug_reuse_swa_pool_slots(
+                                fw_t,
+                                row,
+                                hd,
+                                win,
+                                i,
+                                gid,
+                                batch_offset + b_i,
+                                "before_gather_reuse",
+                            )
                             real_slots = _real_slots(row)
                             if len(real_slots) < 2:
                                 continue
                             snap_slot = real_slots[-2]
                             snap_bid = int(row[snap_slot].item())
+                            before = (
+                                _dsv4_tensor_digest(attn_mod.kv_cache[b_i, :win])
+                                if self._debug_reuse_log_layer(i)
+                                else ""
+                            )
                             self._gather_swa_snapshot(
                                 fw_t,
                                 snap_bid,
                                 attn_mod.kv_cache[b_i, :win],
                                 hd,
                             )
+                            if self._debug_reuse_log_layer(i):
+                                logging.info(
+                                    "DSV4_DEBUG_REUSE py gather_swa layer=%d gid=%d batch=%d "
+                                    "reuse=1 real_slots=%s snap_slot=%d snap_bid=%d before=%s after=%s",
+                                    i,
+                                    gid,
+                                    batch_offset + b_i,
+                                    real_slots,
+                                    snap_slot,
+                                    snap_bid,
+                                    before,
+                                    _dsv4_tensor_digest(attn_mod.kv_cache[b_i, :win]),
+                                )
+                                self._debug_reuse_swa_pool_slots(
+                                    fw_t,
+                                    row,
+                                    hd,
+                                    win,
+                                    i,
+                                    gid,
+                                    batch_offset + b_i,
+                                    "after_gather_reuse",
+                                )
                     else:
                         # Decode / PD non-reuse gather: SWAKVCacheGroup keeps
                         # only tail snapshot blocks at their logical tail
@@ -797,35 +943,122 @@ class DeepSeekV4Model(GptModelBase):
                         # Restore the latest tail snapshot directly.
                         for b_i in range(B):
                             row = bid_slice[b_i].cpu()
+                            self._debug_reuse_swa_pool_slots(
+                                fw_t,
+                                row,
+                                hd,
+                                win,
+                                i,
+                                gid,
+                                batch_offset + b_i,
+                                "before_gather_nonreuse",
+                            )
                             real_slots = _real_slots(row)
                             if not real_slots:
                                 continue
                             snap_bid = int(row[real_slots[-1]].item())
+                            before = (
+                                _dsv4_tensor_digest(attn_mod.kv_cache[b_i, :win])
+                                if self._debug_reuse_log_layer(i)
+                                else ""
+                            )
                             self._gather_swa_snapshot(
                                 fw_t,
                                 snap_bid,
                                 attn_mod.kv_cache[b_i, :win],
                                 hd,
                             )
+                            if self._debug_reuse_log_layer(i):
+                                logging.info(
+                                    "DSV4_DEBUG_REUSE py gather_swa layer=%d gid=%d batch=%d "
+                                    "reuse=0 real_slots=%s snap_slot=%d snap_bid=%d before=%s after=%s",
+                                    i,
+                                    gid,
+                                    batch_offset + b_i,
+                                    real_slots,
+                                    real_slots[-1],
+                                    snap_bid,
+                                    before,
+                                    _dsv4_tensor_digest(attn_mod.kv_cache[b_i, :win]),
+                                )
+                                self._debug_reuse_swa_pool_slots(
+                                    fw_t,
+                                    row,
+                                    hd,
+                                    win,
+                                    i,
+                                    gid,
+                                    batch_offset + b_i,
+                                    "after_gather_nonreuse",
+                                )
                 elif attn_type == 1:  # CSA_KV
                     if (
                         attn_mod.compressor is not None
                         and attn_mod.compressor.kv_cache is not None
                     ):
-                        self._gather_kv_pool(
-                            fw_t, bid_slice, attn_mod.compressor.kv_cache[:B], 64, hd, B
+                        before = (
+                            _dsv4_tensor_digest(attn_mod.compressor.kv_cache[:B])
+                            if self._debug_reuse_log_layer(i)
+                            else ""
                         )
+                        self._gather_kv_pool(
+                            fw_t,
+                            bid_slice,
+                            attn_mod.compressor.kv_cache[:B],
+                            64,
+                            hd,
+                            B,
+                            max_reuse_blocks,
+                        )
+                        if self._debug_reuse_log_layer(i):
+                            logging.info(
+                                "DSV4_DEBUG_REUSE py gather_kv layer=%d gid=%d attn_type=%d batch=%d max_blocks=%s before=%s after=%s",
+                                i,
+                                gid,
+                                attn_type,
+                                batch_offset,
+                                max_reuse_blocks,
+                                before,
+                                _dsv4_tensor_digest(attn_mod.compressor.kv_cache[:B]),
+                            )
                 elif attn_type == 2:  # HCA_KV
                     if (
                         attn_mod.compressor is not None
                         and attn_mod.compressor.kv_cache is not None
                     ):
-                        self._gather_kv_pool(
-                            fw_t, bid_slice, attn_mod.compressor.kv_cache[:B], 2, hd, B
+                        before = (
+                            _dsv4_tensor_digest(attn_mod.compressor.kv_cache[:B])
+                            if self._debug_reuse_log_layer(i)
+                            else ""
                         )
+                        self._gather_kv_pool(
+                            fw_t,
+                            bid_slice,
+                            attn_mod.compressor.kv_cache[:B],
+                            2,
+                            hd,
+                            B,
+                            max_reuse_blocks,
+                        )
+                        if self._debug_reuse_log_layer(i):
+                            logging.info(
+                                "DSV4_DEBUG_REUSE py gather_kv layer=%d gid=%d attn_type=%d batch=%d max_blocks=%s before=%s after=%s",
+                                i,
+                                gid,
+                                attn_type,
+                                batch_offset,
+                                max_reuse_blocks,
+                                before,
+                                _dsv4_tensor_digest(attn_mod.compressor.kv_cache[:B]),
+                            )
                 elif attn_type == 3:  # INDEXER_KV
                     if attn_mod.indexer is not None:
                         idx_hd = attn_mod.indexer.head_dim
+                        before = (
+                            _dsv4_tensor_digest(attn_mod.indexer.kv_cache[:B])
+                            if self._debug_reuse_log_layer(i)
+                            else ""
+                        )
                         self._gather_kv_pool(
                             fw_t,
                             bid_slice,
@@ -833,11 +1066,25 @@ class DeepSeekV4Model(GptModelBase):
                             64,
                             idx_hd,
                             B,
+                            max_reuse_blocks,
                         )
+                        if self._debug_reuse_log_layer(i):
+                            logging.info(
+                                "DSV4_DEBUG_REUSE py gather_kv layer=%d gid=%d attn_type=%d batch=%d max_blocks=%s before=%s after=%s",
+                                i,
+                                gid,
+                                attn_type,
+                                batch_offset,
+                                max_reuse_blocks,
+                                before,
+                                _dsv4_tensor_digest(attn_mod.indexer.kv_cache[:B]),
+                            )
                 elif attn_type == 4:  # INDEXER_STATE
                     if attn_mod.indexer is not None:
                         comp = attn_mod.indexer.compressor
                         idx_hd = attn_mod.indexer.head_dim
+                        before_kv = _dsv4_tensor_digest(comp.kv_state[:B]) if self._debug_reuse_log_layer(i) else ""
+                        before_sc = _dsv4_tensor_digest(comp.score_state[:B]) if self._debug_reuse_log_layer(i) else ""
                         self._gather_state_pool(
                             fw_t,
                             bid_slice,
@@ -847,8 +1094,31 @@ class DeepSeekV4Model(GptModelBase):
                             4 * idx_hd,
                             B,
                         )
+                        if self._debug_reuse_log_layer(i):
+                            logging.info(
+                                "DSV4_DEBUG_REUSE py gather_state layer=%d gid=%d attn_type=%d batch=%d "
+                                "before_kv=%s after_kv=%s before_score=%s after_score=%s",
+                                i,
+                                gid,
+                                attn_type,
+                                batch_offset,
+                                before_kv,
+                                _dsv4_tensor_digest(comp.kv_state[:B]),
+                                before_sc,
+                                _dsv4_tensor_digest(comp.score_state[:B]),
+                            )
                 elif attn_type == 5:  # CSA_STATE
                     if attn_mod.compressor is not None:
+                        before_kv = (
+                            _dsv4_tensor_digest(attn_mod.compressor.kv_state[:B])
+                            if self._debug_reuse_log_layer(i)
+                            else ""
+                        )
+                        before_sc = (
+                            _dsv4_tensor_digest(attn_mod.compressor.score_state[:B])
+                            if self._debug_reuse_log_layer(i)
+                            else ""
+                        )
                         self._gather_state_pool(
                             fw_t,
                             bid_slice,
@@ -858,8 +1128,31 @@ class DeepSeekV4Model(GptModelBase):
                             4 * hd,
                             B,
                         )
+                        if self._debug_reuse_log_layer(i):
+                            logging.info(
+                                "DSV4_DEBUG_REUSE py gather_state layer=%d gid=%d attn_type=%d batch=%d "
+                                "before_kv=%s after_kv=%s before_score=%s after_score=%s",
+                                i,
+                                gid,
+                                attn_type,
+                                batch_offset,
+                                before_kv,
+                                _dsv4_tensor_digest(attn_mod.compressor.kv_state[:B]),
+                                before_sc,
+                                _dsv4_tensor_digest(attn_mod.compressor.score_state[:B]),
+                            )
                 elif attn_type == 6:  # HCA_STATE
                     if attn_mod.compressor is not None:
+                        before_kv = (
+                            _dsv4_tensor_digest(attn_mod.compressor.kv_state[:B])
+                            if self._debug_reuse_log_layer(i)
+                            else ""
+                        )
+                        before_sc = (
+                            _dsv4_tensor_digest(attn_mod.compressor.score_state[:B])
+                            if self._debug_reuse_log_layer(i)
+                            else ""
+                        )
                         self._gather_state_pool(
                             fw_t,
                             bid_slice,
@@ -869,6 +1162,19 @@ class DeepSeekV4Model(GptModelBase):
                             2 * hd,
                             B,
                         )
+                        if self._debug_reuse_log_layer(i):
+                            logging.info(
+                                "DSV4_DEBUG_REUSE py gather_state layer=%d gid=%d attn_type=%d batch=%d "
+                                "before_kv=%s after_kv=%s before_score=%s after_score=%s",
+                                i,
+                                gid,
+                                attn_type,
+                                batch_offset,
+                                before_kv,
+                                _dsv4_tensor_digest(attn_mod.compressor.kv_state[:B]),
+                                before_sc,
+                                _dsv4_tensor_digest(attn_mod.compressor.score_state[:B]),
+                            )
 
     def _scatter_all_layers(self, attn_inputs, B=1, batch_offset=0):
         """Scatter updated KV from each layer's buffers back to BlockPool pages.
@@ -912,6 +1218,16 @@ class DeepSeekV4Model(GptModelBase):
                     snap_pre = self._pre_final_swa_snapshot.get(i)
                     for b_i in range(B):
                         row = bid_slice[b_i].cpu()
+                        self._debug_reuse_swa_pool_slots(
+                            fw_t,
+                            row,
+                            hd,
+                            win,
+                            i,
+                            gid,
+                            batch_offset + b_i,
+                            "before_scatter",
+                        )
                         real_slots = [
                             k for k in range(row.size(0))
                             if int(row[k].item()) > 0
@@ -923,12 +1239,45 @@ class DeepSeekV4Model(GptModelBase):
                         self._scatter_swa_snapshot(
                             fw_t, last_bid, attn_mod.kv_cache[b_i, :win], hd
                         )
+                        if self._debug_reuse_log_layer(i):
+                            logging.info(
+                                "DSV4_DEBUG_REUSE py scatter_swa layer=%d gid=%d batch=%d "
+                                "real_slots=%s last_slot=%d last_bid=%d live=%s",
+                                i,
+                                gid,
+                                batch_offset + b_i,
+                                real_slots,
+                                last_slot,
+                                last_bid,
+                                _dsv4_tensor_digest(attn_mod.kv_cache[b_i, :win]),
+                            )
                         if len(real_slots) >= 2 and snap_pre is not None:
                             prev_slot = real_slots[-2]
                             prev_bid = int(row[prev_slot].item())
                             self._scatter_swa_snapshot(
                                 fw_t, prev_bid, snap_pre[b_i], hd
                             )
+                            if self._debug_reuse_log_layer(i):
+                                logging.info(
+                                    "DSV4_DEBUG_REUSE py scatter_swa_pre layer=%d gid=%d batch=%d "
+                                    "prev_slot=%d prev_bid=%d pre=%s",
+                                    i,
+                                    gid,
+                                    batch_offset + b_i,
+                                    prev_slot,
+                                    prev_bid,
+                                    _dsv4_tensor_digest(snap_pre[b_i]),
+                                )
+                        self._debug_reuse_swa_pool_slots(
+                            fw_t,
+                            row,
+                            hd,
+                            win,
+                            i,
+                            gid,
+                            batch_offset + b_i,
+                            "after_scatter",
+                        )
                 elif attn_type == 1:  # CSA_KV
                     if (
                         attn_mod.compressor is not None
@@ -969,6 +1318,17 @@ class DeepSeekV4Model(GptModelBase):
                             4 * idx_hd,
                             B,
                         )
+                        if self._debug_reuse_log_layer(i):
+                            logging.info(
+                                "DSV4_DEBUG_REUSE py scatter_state layer=%d gid=%d attn_type=%d batch=%d "
+                                "kv=%s score=%s",
+                                i,
+                                gid,
+                                attn_type,
+                                batch_offset,
+                                _dsv4_tensor_digest(comp.kv_state[:B]),
+                                _dsv4_tensor_digest(comp.score_state[:B]),
+                            )
                 elif attn_type == 5:  # CSA_STATE
                     if attn_mod.compressor is not None:
                         self._scatter_state_pool(
@@ -980,6 +1340,17 @@ class DeepSeekV4Model(GptModelBase):
                             4 * hd,
                             B,
                         )
+                        if self._debug_reuse_log_layer(i):
+                            logging.info(
+                                "DSV4_DEBUG_REUSE py scatter_state layer=%d gid=%d attn_type=%d batch=%d "
+                                "kv=%s score=%s",
+                                i,
+                                gid,
+                                attn_type,
+                                batch_offset,
+                                _dsv4_tensor_digest(attn_mod.compressor.kv_state[:B]),
+                                _dsv4_tensor_digest(attn_mod.compressor.score_state[:B]),
+                            )
                 elif attn_type == 6:  # HCA_STATE
                     if attn_mod.compressor is not None:
                         self._scatter_state_pool(
@@ -991,6 +1362,17 @@ class DeepSeekV4Model(GptModelBase):
                             2 * hd,
                             B,
                         )
+                        if self._debug_reuse_log_layer(i):
+                            logging.info(
+                                "DSV4_DEBUG_REUSE py scatter_state layer=%d gid=%d attn_type=%d batch=%d "
+                                "kv=%s score=%s",
+                                i,
+                                gid,
+                                attn_type,
+                                batch_offset,
+                                _dsv4_tensor_digest(attn_mod.compressor.kv_state[:B]),
+                                _dsv4_tensor_digest(attn_mod.compressor.score_state[:B]),
+                            )
 
     def _write_pd_cache_store(self, attn) -> None:
         """Register prefill-side KV blocks with cache_store for PD separation.
@@ -1321,9 +1703,23 @@ class DeepSeekV4Model(GptModelBase):
                     and attn is not None
                     and prefix_len > 0
                 ):
+                    if _dsv4_debug_reuse_enabled():
+                        logging.info(
+                            "DSV4_DEBUG_REUSE py prefill_reuse_begin batch=%d prefix_len=%d input_len=%d start_pos=%d",
+                            b,
+                            prefix_len,
+                            inp_len,
+                            start_pos,
+                        )
+                    self._debug_reuse_block_row(attn, b, "before_prefill_gather")
                     self._gather_all_layers(
-                        attn, B=1, batch_offset=b, reuse_gather=True
+                        attn,
+                        B=1,
+                        batch_offset=b,
+                        reuse_gather=True,
+                        reuse_seq_len=prefix_len,
                     )
+                    self._debug_reuse_block_row(attn, b, "after_prefill_gather")
                     # After gather, State pools restore kv_state/score_state.
                     # For CSA (overlap=True), kv_state[:, :ratio] holds the
                     # overlap carry from the prefix tail — keep it so the
@@ -1367,6 +1763,17 @@ class DeepSeekV4Model(GptModelBase):
                     and pre_final < total_seq
                 )
                 if chunk:
+                    if _dsv4_debug_reuse_enabled():
+                        logging.info(
+                            "DSV4_DEBUG_REUSE py prefill_chunk batch=%d start_pos=%d input_len=%d "
+                            "total_seq=%d pre_final=%d split=%d",
+                            b,
+                            start_pos,
+                            inp_len,
+                            total_seq,
+                            pre_final,
+                            pre_final - start_pos,
+                        )
                     split = pre_final - start_pos  # tokens in first chunk
                     chunk_a = batch_ids[:, :split]
                     chunk_b = batch_ids[:, split:]
@@ -1398,6 +1805,7 @@ class DeepSeekV4Model(GptModelBase):
                     and attn is not None
                 ):
                     self._scatter_all_layers(attn, B=1, batch_offset=b)
+                    self._debug_reuse_block_row(attn, b, "after_prefill_scatter")
                 self._pre_final_swa_snapshot.clear()
 
                 self._running_pos = prefix_len + inp_len
