@@ -97,6 +97,7 @@ class FakeContext:
         self._code = grpc.StatusCode.OK
         self._details = ""
         self._active = True
+        self._metadata: tuple[tuple[str, str], ...] = ()
 
     def peer(self) -> str:
         return self._peer
@@ -110,6 +111,9 @@ class FakeContext:
     def is_active(self) -> bool:
         return self._active
 
+    def invocation_metadata(self):
+        return self._metadata
+
     def set_code(self, code) -> None:
         self._code = code
 
@@ -118,6 +122,9 @@ class FakeContext:
 
     def set_active(self, active: bool) -> None:
         self._active = active
+
+    def set_metadata(self, metadata) -> None:
+        self._metadata = tuple((str(k), str(v)) for k, v in metadata)
 
 
 def _make_handler(*, request_streaming: bool, response_streaming: bool, inner):
@@ -440,7 +447,11 @@ class BidiStreamTest(InterceptorTestBase):
             list(behavior(iter([]), ctx))
 
         rec = self.records[0]
-        self.assertEqual(rec["status"], "UNKNOWN")
+        # Empty-iterator + bare ``grpc.RpcError`` subclass (no ``details()``,
+        # no ``code()``) → ``_is_bare_peer_closed`` claims it and routes to
+        # CANCELLED. The three diagnostic fields below still carry the signal
+        # needed to tell peer-cancel apart from a real backend error.
+        self.assertEqual(rec["status"], "CANCELLED")
         self.assertEqual(rec["exc_type"], "_RendezvousLike")
         self.assertEqual(rec["context_code"], "CANCELLED")
         self.assertFalse(rec["context_active"])
@@ -919,6 +930,232 @@ class RawModeBidiTest(RawModeInterceptorTestBase):
             self.assertEqual(t_out["decoded_total"], 8)
         finally:
             access_log_module._RAW_MAX_DECODED_ELEMENTS = original_cap
+
+
+class CorrelationHeaderTest(InterceptorTestBase):
+    """Upstream correlation ID (``x-dashscope-request-id`` etc.) must round-trip
+    onto the access-log line, populated from ``context.invocation_metadata()``
+    at RPC arrival so it's present even when ``req_count=0``.
+    """
+
+    def test_dashscope_request_id_lands_on_record(self) -> None:
+        def inner(request, context):
+            return _make_stream_response(generated_ids=[1])
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+        ctx.set_metadata([("x-dashscope-request-id", "corr-abc-42")])
+        behavior(_make_infer_request(input_ids=[1]), ctx)
+
+        rec = self.records[0]
+        self.assertEqual(rec["upstream_request_id"], "corr-abc-42")
+        self.assertEqual(rec["upstream_request_id_key"], "x-dashscope-request-id")
+
+    def test_no_metadata_leaves_upstream_fields_null(self) -> None:
+        def inner(request, context):
+            return _make_stream_response(generated_ids=[1])
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        behavior(_make_infer_request(input_ids=[1]), FakeContext())
+
+        rec = self.records[0]
+        self.assertIsNone(rec["upstream_request_id"])
+        self.assertIsNone(rec["upstream_request_id_key"])
+
+    def test_header_match_is_case_insensitive(self) -> None:
+        def inner(request, context):
+            return _make_stream_response(generated_ids=[1])
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+        ctx.set_metadata([("X-DashScope-Request-Id", "CaseMixed-7")])
+        behavior(_make_infer_request(input_ids=[1]), ctx)
+
+        rec = self.records[0]
+        self.assertEqual(rec["upstream_request_id"], "CaseMixed-7")
+        self.assertEqual(rec["upstream_request_id_key"], "x-dashscope-request-id")
+
+    def test_priority_dashscope_over_generic_request_id(self) -> None:
+        """When both headers present, dashscope-specific wins over generic
+        ``x-request-id`` — this is the operational ask: keep the dashscope
+        ID attached to the RPC when available so three-layer correlation
+        reaches its actual origin."""
+
+        def inner(request, context):
+            return _make_stream_response(generated_ids=[1])
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+        ctx.set_metadata(
+            [("x-request-id", "generic-1"), ("x-dashscope-request-id", "ds-2")]
+        )
+        behavior(_make_infer_request(input_ids=[1]), ctx)
+
+        rec = self.records[0]
+        self.assertEqual(rec["upstream_request_id"], "ds-2")
+        self.assertEqual(rec["upstream_request_id_key"], "x-dashscope-request-id")
+
+    def test_traceparent_used_as_fallback(self) -> None:
+        """When no dashscope/x-request-id, fall back to W3C ``traceparent`` so
+        gRPC shares a correlation convention with the HTTP path (flexlb's
+        ``HttpHeaderNames.TRACE_PARENT``)."""
+        tp = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
+        def inner(request, context):
+            return _make_stream_response(generated_ids=[1])
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+        ctx.set_metadata([("traceparent", tp)])
+        behavior(_make_infer_request(input_ids=[1]), ctx)
+
+        rec = self.records[0]
+        self.assertEqual(rec["upstream_request_id"], tp)
+        self.assertEqual(rec["upstream_request_id_key"], "traceparent")
+
+    def test_correlation_id_captured_when_no_request_frame_arrives(self) -> None:
+        """The key production scenario: peer closes before any body frame,
+        so the proto ``id``-derived ``request_id`` stays null — but the
+        metadata-sourced ``upstream_request_id`` must still make it to the
+        log line. Without this the ``req_count=0`` access-log entry has no
+        correlation handle to the upstream dashscope-serving request."""
+
+        class _BarePeerGone(grpc.RpcError):
+            pass
+
+        def inner(request_iterator, context):
+            for _ in request_iterator:
+                pass
+            raise _BarePeerGone()
+            yield  # pragma: no cover
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+        ctx.set_metadata([("x-dashscope-request-id", "prod-xyz")])
+
+        with self.assertRaises(_BarePeerGone):
+            list(behavior(iter([]), ctx))
+
+        rec = self.records[0]
+        self.assertEqual(rec["req_count"], 0)
+        self.assertIsNone(rec["request_id"])
+        self.assertEqual(rec["upstream_request_id"], "prod-xyz")
+        self.assertEqual(rec["upstream_request_id_key"], "x-dashscope-request-id")
+
+
+class BarePeerClosedTest(InterceptorTestBase):
+    """Content-less ``grpc.RpcError()`` on a frame-less RPC → CANCELLED, not
+    UNKNOWN. Backend-frontend view of the same peer-closed shape that the
+    forwarder sees as ``"Exception iterating requests!"``.
+    """
+
+    def test_bare_rpc_error_req_count_zero_routes_to_cancel(self) -> None:
+        def inner(request_iterator, context):
+            for _ in request_iterator:
+                pass
+            raise grpc.RpcError()
+            yield  # pragma: no cover
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+
+        with self.assertRaises(grpc.RpcError):
+            list(behavior(iter([]), ctx))
+
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "CANCELLED")
+        self.assertEqual(rec["status_detail"], "peer closed before request arrived")
+        self.assertEqual(rec["req_count"], 0)
+        self.assertEqual(rec["resp_count"], 0)
+
+        cancel_metric = [c for c in self.kmon_calls if c[0] == AccMetrics.CANCEL_QPS_METRIC]
+        error_metric = [c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC]
+        self.assertEqual(len(cancel_metric), 1)
+        self.assertEqual(len(error_metric), 0)
+
+    def test_bare_rpc_error_after_request_received_still_routes_to_error(self) -> None:
+        """Bare ``RpcError`` with ``req_count>=1`` is real server-side
+        failure — must stay in ERROR bucket. Keeps the CANCELLED branch
+        narrowly scoped to the frame-less peer-gone shape."""
+
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield _make_stream_response(generated_ids=[1])
+            raise grpc.RpcError()
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+
+        with self.assertRaises(grpc.RpcError):
+            list(behavior(iter([_make_infer_request(input_ids=[1])]), ctx))
+
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "UNKNOWN")
+        self.assertEqual(rec["req_count"], 1)
+
+        cancel_metric = [c for c in self.kmon_calls if c[0] == AccMetrics.CANCEL_QPS_METRIC]
+        error_metric = [c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC]
+        self.assertEqual(len(cancel_metric), 0)
+        self.assertEqual(len(error_metric), 1)
+
+
+class RpcErrorWithCodeTest(InterceptorTestBase):
+    """Before this fix every ``_MultiThreadedRendezvous`` on the forwarder
+    path dumped into ``error_code=UNKNOWN``. Now the real gRPC status code
+    surfaces on the log line and as the kmonitor ``error_code`` tag.
+    """
+
+    def test_rpc_error_code_surfaces_on_log_and_kmonitor(self) -> None:
+        class _Rendezvous(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.UNAVAILABLE
+
+            def details(self) -> str:
+                return "recvmsg:Connection reset by peer"
+
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield _make_stream_response(generated_ids=[10])
+            raise _Rendezvous()
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        with self.assertRaises(_Rendezvous):
+            list(behavior(iter([_make_infer_request(input_ids=[1])]), FakeContext()))
+
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "UNAVAILABLE")
+        self.assertEqual(rec["status_detail"], "recvmsg:Connection reset by peer")
+
+        error_calls = [c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC]
+        self.assertEqual(len(error_calls), 1)
+        self.assertEqual(error_calls[0][2]["error_code"], "UNAVAILABLE")
 
 
 if __name__ == "__main__":
