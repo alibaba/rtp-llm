@@ -75,9 +75,6 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         ``compress_ratio`` from ``config.attn_config.layer_compress_ratios`` and
         whether the layer's router is hash (``layer_id < num_hash_layers``) or
         noaux_tc (``layer_id >= num_hash_layers``).
-      * Setting ``DSV4_USE_LEGACY_LOADER=1`` causes ``DeepSeekV4Model._initialize_impl``
-        to fall back to ``load_v4_weights_dict`` (bypassing this descriptor); used
-        as an escape hatch while the framework path stabilizes.
     """
 
     def _process_meta(self, meta_dict, weight_keys):  # type: ignore[override]
@@ -437,8 +434,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 identity,
                 # V4 ckpt stores head.weight in bf16; without explicit
                 # data_type the framework loader casts via load_config
-                # .compute_dtype (fp32 in the V4 config) which doubles RAM
-                # and diverges from the legacy load_v4_safetensors path.
+                # .compute_dtype (fp32 in the V4 config) which doubles RAM.
                 data_type=torch.bfloat16,
             ),
             AtomicWeight(
@@ -511,22 +507,6 @@ class DeepSeekV4(DeepSeekV2):
 
         # ---- basic geometry ----
         config.num_layers = config_json["num_hidden_layers"]
-        # DSV4_NUM_LAYERS_OVERRIDE — for fast debugging only.  Truncates the
-        # model to the first N layers (still must be >= 1, must include the
-        # first CSA ratio=4 layer to exercise indexer).  Only safe to use
-        # for crash repro; output is meaningless.
-        _override = os.environ.get("DSV4_NUM_LAYERS_OVERRIDE")
-        if _override:
-            _n = int(_override)
-            assert _n >= 1, f"DSV4_NUM_LAYERS_OVERRIDE must be >= 1, got {_n}"
-            import logging as _logging
-            _logging.warning(
-                "[DSV4] DSV4_NUM_LAYERS_OVERRIDE=%d truncating model from "
-                "%d layers — DEBUG ONLY, output is meaningless",
-                _n,
-                config.num_layers,
-            )
-            config.num_layers = _n
         config.hidden_size = config_json["hidden_size"]
         config.vocab_size = config_json["vocab_size"]
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
@@ -644,9 +624,8 @@ class DeepSeekV4(DeepSeekV2):
         # Keep lm_head in its checkpoint dtype (bf16).  The framework default
         # ``enable_fp32_lm_head=True`` calls _fix_fp32_lm_head which overrides
         # the AtomicWeight data_type to fp32 — useful for older models that
-        # need fp32 logits accumulation, but doubles RAM (1 GiB → 2 GiB) and
-        # diverges from the legacy ``load_v4_safetensors`` path that V4 was
-        # validated against.  V4 sampling runs on bf16 logits like V3.
+        # need fp32 logits accumulation, but doubles RAM (1 GiB → 2 GiB).
+        # V4 sampling runs on bf16 logits like V3.
         config.enable_fp32_lm_head = False
 
         logging.info(

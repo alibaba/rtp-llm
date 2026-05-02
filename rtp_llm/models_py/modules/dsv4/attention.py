@@ -54,7 +54,6 @@ from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb_batched,
     precompute_freqs_cis,
 )
-from rtp_llm.models_py.modules.dsv4.weight_loader import _repack_v4_fp8_scale_to_int32
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.ops.compute_ops import KVCacheRegionName, rtp_llm_ops
 
@@ -104,6 +103,23 @@ def _use_read_from_pool() -> bool:
 
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
+
+
+def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
+    """V4 ckpt UE8M0 ``[N/128, K/128]`` → DeepGEMM ``[N, K/128]`` UE8M0
+    int32-packed TMA-aligned scale.  Row-repeats by 128 along N so each
+    weight row gets its own scale row, then hands off to DeepGEMM's
+    ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` (column-major,
+    int32-packed).  Must be called on-device (DeepGEMM helper is CUDA)."""
+    assert scale.dtype == torch.float8_e8m0fnu, f"unexpected scale dtype {scale.dtype}"
+    assert scale.dim() == 2, f"unexpected scale dim {scale.dim()}"
+    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
+    N_blk, _ = scale.shape
+    N = N_blk * 128
+    idx = torch.arange(N, device=scale.device) // 128
+    scale_rep = scale.float().index_select(-2, idx)
+    return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
 
 
 def _prepare_wo_a_stacked(
@@ -662,7 +678,8 @@ class Attention(nn.Module):
                 requires_grad=False,
             )
         else:
-            # Legacy meta-tensor + load_v4_safetensors path.
+            # Meta-tensor placeholder construction (used by single-layer
+            # microbench / unit-test contexts that bypass the factory mode).
             self.wq_a = QuantizedLinear(dim, q_lora_rank, storage="fp8")
             self.q_norm = _NormHolder(q_lora_rank)
             self.wq_b = QuantizedLinear(q_lora_rank, n_heads * head_dim, storage="fp8")

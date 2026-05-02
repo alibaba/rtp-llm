@@ -20,13 +20,11 @@ a free-function call into one of those two packages.
     request block tables come from ``attn_inputs.kv_cache_kernel_block_id_device_by_group``
     via ``kv_cache_utils.build_block_tables``.
 
-Weight loading happens in `initialize()`: we bypass the framework's AtomicWeight
-flow (V4-Flash has 67k+ tensors in ~250 packed FP4/FP8 shards) and directly call
-`load_v4_safetensors` against the checkpoint path stored in `model_config`.
-
-``V4Transformer`` is retained for standalone test callers
-(``rtp_llm/models_py/modules/dsv4/test/*``); production inference does
-NOT go through ``V4Transformer.forward``.
+Weight loading: `_initialize_impl` reads `self.weight` (a `ModelWeights`
+populated by the framework's fastsafetensors loader via
+`DeepSeekV4Weight._get_hf_layer_weight_info`), translates W.* tags back to
+ckpt-style flat keys via `_flatten_framework_weights`, then feeds the flat
+dict into `V4Transformer` factory mode.
 """
 
 import logging
@@ -44,10 +42,6 @@ from rtp_llm.models_py.modules.dsv4.decode.forward import (
 )
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
-from rtp_llm.models_py.modules.dsv4.weight_loader import (
-    load_v4_safetensors,
-    load_v4_weights_dict,
-)
 from rtp_llm.utils.model_weight import W
 
 
@@ -259,11 +253,10 @@ class DeepSeekV4Model(GptModelBase):
         )
         self._v4_args = args
 
-        # Factory-path flow (S2+): we defer construction to `initialize()`
-        # where the weights dict is loaded from the ckpt directly to the
-        # target device, then V4Transformer modules are built bound to
-        # real ckpt tensors via LinearFactory (see dsv4/weight_loader.py
-        # and attention.py).  `self.v4` is assigned in `initialize()`.
+        # Factory-path flow: defer construction to `initialize()` where the
+        # framework-loaded ModelWeights is flattened to a ckpt-style dict
+        # and V4Transformer modules are built bound to those tensors via
+        # LinearFactory (see dsv4/attention.py).
         self.v4: Optional[V4Transformer] = None
 
         self._materialized = False
@@ -311,86 +304,19 @@ class DeepSeekV4Model(GptModelBase):
 
         # Two paths to obtain a flat ckpt-style weights dict that the
         # standalone V4Transformer factory mode consumes:
-        #   1) Default — read from ``self.weight`` (ModelWeights), which the
-        #      framework's fastsafetensors loader already populated via the
-        #      DeepSeekV4Weight descriptor (see ``rtp_llm/models/deepseek_v4.py``).
-        #      The W-prefixed names get inverted back to ckpt-style keys here.
-        #   2) Fallback — ``DSV4_USE_LEGACY_LOADER=1`` runs the bespoke
-        #      ``load_v4_weights_dict`` (direct safetensors → cuda) used while
-        #      the framework path was being built. Kept as an escape hatch.
-        if os.environ.get("DSV4_USE_LEGACY_LOADER") == "1":
-            # When dumping for byte-exact comparison we drop the load device
-            # to CPU — legacy loader places every safetensors tensor on
-            # ``device_str`` at once which OOMs the GPU on V4-Flash (~270 GiB
-            # peak before V4Transformer copies them again).  Dumped tensors
-            # land on CPU anyway so this is free.
-            legacy_device = (
-                "cpu" if os.environ.get("DSV4_DUMP_EXIT") == "1" else device_str
-            )
-            logging.info(
-                "[DeepSeekV4Model] DSV4_USE_LEGACY_LOADER=1 — loading ckpt "
-                "dict from %s via legacy load_v4_weights_dict on %s "
-                "(ep_size=%d ep_rank=%d)",
-                self._ckpt_path,
-                legacy_device,
-                self._v4_args.ep_size,
-                self._v4_args.ep_rank,
-            )
-            weights = load_v4_weights_dict(
-                self._ckpt_path,
-                device=legacy_device,
-                ep_size=self._v4_args.ep_size,
-                ep_rank=self._v4_args.ep_rank,
-                n_routed_experts=self._v4_args.n_routed_experts,
-            )
-        else:
-            logging.info(
-                "[DeepSeekV4Model] flattening framework weights for V4Transformer "
-                "factory (layers=%d, globals=%d) ...",
-                len(self.weight.weights),
-                len(self.weight.global_weights),
-            )
-            weights = self._flatten_framework_weights(self.weight)
+        # Read from ``self.weight`` (ModelWeights), which the framework's
+        # fastsafetensors loader already populated via the DeepSeekV4Weight
+        # descriptor (see ``rtp_llm/models/deepseek_v4.py``).  The W-prefixed
+        # names get inverted back to ckpt-style keys here for the
+        # V4Transformer factory mode.
+        logging.info(
+            "[DeepSeekV4Model] flattening framework weights for V4Transformer "
+            "factory (layers=%d, globals=%d) ...",
+            len(self.weight.weights),
+            len(self.weight.global_weights),
+        )
+        weights = self._flatten_framework_weights(self.weight)
         logging.info("[DeepSeekV4Model] loaded %d tensors from ckpt", len(weights))
-
-        # Optional pre-construction weight dump for legacy↔framework byte-exact
-        # comparison.  Captures the FLAT ckpt-style dict produced by either path
-        # (load_v4_weights_dict OR _flatten_framework_weights) BEFORE the
-        # V4Transformer factory consumes it.  This is the right comparison
-        # point because:
-        #   * We want to validate the load+postprocess pipeline, not the
-        #     downstream V4Transformer module wiring.
-        #   * V4Transformer factory does an extra param-copy that ~doubles
-        #     peak GPU memory and OOMs the legacy path on 1×B300; dumping
-        #     here skips that.
-        # Filter to only layers 0..DSV4_DUMP_LAYERS-1 (default 4) + globals.
-        # Set DSV4_DUMP_EXIT=1 to abort before V4Transformer construction.
-        dump_path = os.environ.get("DSV4_DUMP_WEIGHTS")
-        if dump_path:
-            n_dump_layers = int(os.environ.get("DSV4_DUMP_LAYERS", "4"))
-            keep_prefixes = tuple(
-                f"layers.{li}." for li in range(n_dump_layers)
-            )
-            state: Dict[str, torch.Tensor] = {}
-            for k, v in weights.items():
-                if k.startswith(keep_prefixes) or "." not in k or not k.startswith(
-                    "layers."
-                ):
-                    state[k] = v.detach().cpu().clone()
-            torch.save(state, dump_path)
-            logging.info(
-                "[DeepSeekV4Model] DSV4_DUMP_WEIGHTS: dumped %d tensors "
-                "(layers 0..%d + globals) -> %s",
-                len(state),
-                n_dump_layers - 1,
-                dump_path,
-            )
-            if os.environ.get("DSV4_DUMP_EXIT", "0") == "1":
-                logging.warning(
-                    "[DeepSeekV4Model] DSV4_DUMP_EXIT=1 — exiting before "
-                    "V4Transformer construction"
-                )
-                os._exit(0)
 
         logging.info("[DeepSeekV4Model] building V4Transformer via factory ...")
         # Construct under meta device so the nn.Embedding / nn.Linear /

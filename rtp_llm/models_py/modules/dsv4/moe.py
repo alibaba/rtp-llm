@@ -1163,26 +1163,6 @@ class MoE(nn.Module):
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_weights", weights)
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_indices", indices)
 
-        # DSV4_DEBUG_INDICES=1 prints router output stats per layer per
-        # forward, used to diff legacy vs framework load paths to localize
-        # numerical drift to a specific layer/op.
-        import os as _os
-        if _os.environ.get("DSV4_DEBUG_INDICES", "0") == "1":
-            _imin = int(indices.min().item()) if indices.numel() else -1
-            _imax = int(indices.max().item()) if indices.numel() else -1
-            _wmin = float(weights.min().item()) if weights.numel() else 0.0
-            _wmax = float(weights.max().item()) if weights.numel() else 0.0
-            _wmean = float(weights.float().mean().item()) if weights.numel() else 0.0
-            _xmean = float(x.float().mean().item()) if x.numel() else 0.0
-            _xstd = float(x.float().std().item()) if x.numel() else 0.0
-            print(
-                f"[dsv4 indices] L{self.layer_id:02d} N={x.size(0)} "
-                f"x.mean={_xmean:+.4e} x.std={_xstd:.4e} "
-                f"idx[{_imin},{_imax}] (n_routed={self.n_routed_experts}) "
-                f"w[{_wmin:+.4e},{_wmax:+.4e}] w.mean={_wmean:+.4e}",
-                flush=True,
-            )
-
         if self._use_mega_moe:
             y = self._routed_experts_mega_moe(x, weights, indices)
         elif self._use_grouped_fp4:
