@@ -117,8 +117,9 @@ class DSv4DecodeAttnMetadata:
 
     # Per-attn_type framework block_table: [max_B, max_blocks_per_req] int32.
     # Source: ``attn_inputs.kv_cache_kernel_block_id_device_by_group[gid]``.
-    # Keys are PoolDescriptor attn_type ids (1=CSA_KV..7=SWA_KV); only
-    # pools that the model actually uses are present.
+    # Keys are attn_type ids (1=CSA_KV..7=SWA_KV) from
+    # :mod:`rtp_llm.models_py.modules.dsv4.attn_type`; only pools that the
+    # model actually uses are present.
     pool_block_tables: Dict[int, torch.Tensor] = field(default_factory=dict)
 
     # Per-attn_type new-token write slot mapping: [max_T_total] int64.
@@ -136,12 +137,9 @@ class DSv4DecodeAttnMetadata:
     # populated only when paged-decode read is enabled.
     swa_abs_idx: torch.Tensor = field(default=None)  # type: ignore[assignment]
 
-    # Per-layer ``{attn_type: PoolDescriptor}``. Static reference (NOT a
-    # tensor) — the pool tensor inside each descriptor is the framework
-    # BlockPool handle, lifetime-managed by the C++ allocator. Attention
-    # layers grab their pool views via this map at call time. ``None``
-    # entries (or empty dict) mean "fall back to register_buffer".
-    layer_pool_descs: Optional[List[Dict[int, "PoolDescriptor"]]] = None
+    # Phase F: ``layer_pool_descs`` deleted — Attention resolves pool
+    # views via ``self._kv_cache.get_layer_cache(layer_id, attn_type)``
+    # at call time, no per-layer descriptor cache needed.
 
 
 def _build_swa_slot_mapping(
@@ -537,7 +535,7 @@ def update_decode_metadata_in_place(
     # otherwise — the write op honors that via ``mask_negative=True``).
     # ------------------------------------------------------------------
     if paged_block_tables is not None and paged_pool_entries_per_block is not None:
-        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
+        from rtp_llm.models_py.modules.dsv4.attn_type import (
             CSA_KV,
             HCA_KV,
             INDEXER_KV,
@@ -782,7 +780,7 @@ def build_decode_metadata(
     pool_block_tables: Dict[int, torch.Tensor] = {}
     pool_write_slot_mappings: Dict[int, torch.Tensor] = {}
     if paged_block_tables and paged_pool_entries_per_block:
-        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import (
+        from rtp_llm.models_py.modules.dsv4.attn_type import (
             CSA_KV,
             HCA_KV,
             INDEXER_KV,

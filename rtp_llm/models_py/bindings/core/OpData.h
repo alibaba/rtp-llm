@@ -55,6 +55,11 @@ struct GptModelInputs {
     torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
 
     torch::Tensor kv_cache_layer_to_group;  // [layer_num], int32
+    // DSV4-only dense gid list per layer. Flat int32 of length
+    // [num_layers * 5] (5 = DSV4 CSA-layer upper bound). Reshape to
+    // [num_layers, 5] and read row l for up to 5 gids, padded with -1.
+    // undefined() for non-DSV4.
+    torch::Tensor kv_cache_layer_to_group_dpsk_v4;
     torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 2] kv cache update mapping
 

@@ -119,6 +119,9 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     if (inputs.kv_cache_layer_to_group.defined()) {
         py_attn_inputs.kv_cache_layer_to_group = inputs.kv_cache_layer_to_group;
     }
+    if (inputs.kv_cache_layer_to_group_dpsk_v4.defined()) {
+        py_attn_inputs.kv_cache_layer_to_group_dpsk_v4 = inputs.kv_cache_layer_to_group_dpsk_v4;
+    }
 
     // Calculate cu_seqlens
     int    batch_size               = py_attn_inputs.input_lengths.size(0);
@@ -522,8 +525,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // downstream Sampler::forward fail with a narrow OOB.  Detect
         // this by reusing the standard "has any context stream" test
         // already used by callForwardPostLayers.
-        const bool has_context_request =
-            inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         if (device_props_.enable_prefill_cp && has_context_request) {
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);

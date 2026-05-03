@@ -138,6 +138,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_cache_kernel_block_id_device_by_group",
                        &PyAttentionInputs::kv_cache_kernel_block_id_device_by_group)
         .def_readwrite("kv_cache_layer_to_group", &PyAttentionInputs::kv_cache_layer_to_group)
+        .def_readwrite("kv_cache_layer_to_group_dpsk_v4", &PyAttentionInputs::kv_cache_layer_to_group_dpsk_v4)
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
         .def_readwrite("cu_seqlens_host", &PyAttentionInputs::cu_seqlens_host)

@@ -254,11 +254,16 @@ class Block(nn.Module):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
     ):
-        """x: [B,S,hc,d] -> y: [B,S,d], post: [B,S,hc,1], comb: [B,S,hc,hc]."""
+        """Accepts ``[B, S, hc, d]`` or the flat ``[T, hc, d]`` layout.
+        Returns ``y``, ``post [..., hc, 1]``, ``comb [..., hc, hc]`` with
+        leading shape matching the input.  REF path uses ``dim=-2`` /
+        ``flatten(-2)`` so 3D and 4D share code; TK is 4D-only, so 3D
+        input is wrapped with unsqueeze/squeeze around the TK call."""
         # Vendored TK fast path. Falls back to the REF rewrite below on
         # JIT-fail / unsupported shape (sticky per-op).
+        tk_x = x.unsqueeze(0) if x.dim() == 3 else x
         tk_out = _tk_mhc_pre(
-            x,
+            tk_x,
             hc_fn,
             hc_scale,
             hc_base,
@@ -269,9 +274,12 @@ class Block(nn.Module):
             hc_mult=self.hc_mult,
         )
         if tk_out is not None:
+            if x.dim() == 3:
+                y_tk, post_tk, comb_tk = tk_out
+                return y_tk.squeeze(0), post_tk.squeeze(0), comb_tk.squeeze(0)
             return tk_out
         shape, dtype = x.size(), x.dtype
-        x_flat = x.flatten(2)  # [B, T, hc*d] bf16
+        x_flat = x.flatten(-2)  # [..., hc*d] bf16
         # FP32 squared mean → rsqrt, single cast.  Kept in fp32 because the
         # accumulation magnitude here is what determines numeric stability of
         # the layer norm; a bf16 reduction on hc*d=16384 would lose ~7 bits.
@@ -299,7 +307,7 @@ class Block(nn.Module):
                 sinkhorn_iters=self.hc_sinkhorn_iters,
                 eps=self.hc_eps,
             )
-        y = torch.sum(pre.to(dtype).unsqueeze(-1) * x.view(*shape), dim=2)
+        y = torch.sum(pre.to(dtype).unsqueeze(-1) * x.view(*shape), dim=-2)
         # post in the [..., hc, 1] convention so _hc_post can call TK mhc_post.
         return y.to(dtype), post.unsqueeze(-1), comb
 
@@ -319,11 +327,18 @@ class Block(nn.Module):
 
         ``post`` arrives shaped ``[..., hc, 1]`` (``_hc_pre`` unsqueezes).
         Path 1 consumes that shape directly; paths 2/3 squeeze back to ``[..., hc]``.
+        Accepts either ``[B, T, d]`` or flat ``[T, d]`` layout; TK is 4D-only
+        and wraps 3D inputs with unsqueeze/squeeze.  The slow fallback reduces
+        along ``dim=-3`` so both shapes share code.
         """
         if post.dim() == residual.dim():
-            tk_out = _tk_mhc_post(x, residual, post, comb, hc_mult=self.hc_mult)
+            tk_x = x.unsqueeze(0) if x.dim() == 2 else x
+            tk_res = residual.unsqueeze(0) if residual.dim() == 3 else residual
+            tk_post = post.unsqueeze(0) if post.dim() == 3 else post
+            tk_comb = comb.unsqueeze(0) if comb.dim() == 3 else comb
+            tk_out = _tk_mhc_post(tk_x, tk_res, tk_post, tk_comb, hc_mult=self.hc_mult)
             if tk_out is not None:
-                return tk_out
+                return tk_out.squeeze(0) if x.dim() == 2 else tk_out
 
         if post.dim() == residual.dim():
             post_b = post.squeeze(-1)
@@ -339,7 +354,7 @@ class Block(nn.Module):
             return (first + second).to(x.dtype)
 
         y = post_b.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
-            comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2
+            comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=-3
         )
         return y.type_as(x)
 
@@ -348,6 +363,7 @@ class Block(nn.Module):
         x: torch.Tensor,  # [B, 1, hc, dim]
         attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
         input_ids: torch.Tensor,  # [B, 1]
+        kv_cache=None,
     ) -> torch.Tensor:
         """Decode-only block forward — mirrors prefill ``forward`` but
         delegates attention to ``Attention.forward_decode``. Prefill
@@ -359,7 +375,7 @@ class Block(nn.Module):
             x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
         )
         x_pre = self.attn_norm(x_pre)
-        attn_out = self.attn.forward_decode(x_pre, attn_metadata)
+        attn_out = self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
         x = self._hc_post(attn_out, residual, post, comb)
 
         # FFN path — MoE has no per-step state, reuse existing forward
@@ -373,8 +389,27 @@ class Block(nn.Module):
         return x
 
     def forward(
-        self, x: torch.Tensor, start_pos, input_ids: Optional[torch.Tensor]
+        self,
+        x: torch.Tensor,  # [T, hc, dim]
+        input_ids: Optional[torch.Tensor],  # [T]
+        positions: torch.Tensor,  # [T] int64
+        cu_seqlens: torch.Tensor,  # [B+1] int64
+        kv_cache=None,
+        block_tables_by_type=None,
     ) -> torch.Tensor:
+        """Flat per-block forward — accepts ``[T, hc, dim]`` hidden and 1D
+        ``input_ids`` / ``positions`` / ``cu_seqlens``, matching the vLLM
+        DSV4 layer layout.  ``_hc_pre`` / ``_hc_post`` are flat-native;
+        ``self.ffn`` (MoE) reshapes to 2D internally so any shape flows.
+
+        Attention is called with a padded ``[B, max_S, dim]`` tensor and
+        per-row ``start_pos [B]`` / ``sequence_lengths [B]`` derived from
+        ``cu_seqlens`` + ``positions``.  For B==1 the scatter/gather
+        collapses to an identity copy and Attention's internal scalar
+        path kicks in (start_pos tensor with ``numel()==1`` falls through
+        to ``int(start_pos)``), so the single-request case is bit-equal
+        to the pre-batched behavior.
+        """
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
         # Master switch: when MOEDBG=0 the AND short-circuits so neither the
@@ -385,14 +420,43 @@ class Block(nn.Module):
         residual = x
         x_pre, post, comb = self._hc_pre(
             x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
-        )
-        x_pre = self.attn_norm(x_pre)
+        )  # [T, dim], [T, hc, 1], [T, hc, hc]
+        x_pre = self.attn_norm(x_pre)  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_in", x_pre)
-        attn_out = self.attn(x_pre, start_pos)
+
+        # Scatter flat [T, dim] into padded [B, max_S, dim] so that
+        # Attention._forward_body's [B, S, dim] body processes every
+        # request in a single layer call.
+        cu_long = cu_seqlens.to(torch.long)
+        batch_size = int(cu_long.numel() - 1)
+        seqlens = cu_long[1:] - cu_long[:-1]  # [B]
+        T = int(x_pre.size(0))
+        D = int(x_pre.size(-1))
+        device = x_pre.device
+        max_S = int(seqlens.max().item()) if batch_size > 0 else 0
+        t_idx = torch.arange(T, device=device, dtype=torch.long)
+        # right=True so tokens at cu_seqlens[b] land in request b
+        # (cu_long[1:] are exclusive ends).
+        b_idx = torch.searchsorted(cu_long[1:].contiguous(), t_idx, right=True)
+        s_idx = t_idx - cu_long[:-1][b_idx]
+        x_padded = torch.zeros(batch_size, max_S, D, dtype=x_pre.dtype, device=device)
+        x_padded[b_idx, s_idx] = x_pre
+        # Per-row start_pos = absolute position of each request's first
+        # token, pulled directly off the flat positions tensor.
+        start_pos_per_req = positions[cu_long[:-1]].to(torch.long)  # [B]
+
+        attn_out_padded = self.attn(
+            x_padded,  # [B, max_S, dim]
+            start_pos_per_req,
+            sequence_lengths=seqlens,
+            kv_cache=kv_cache,
+            block_tables_by_type=block_tables_by_type,
+        )  # [B, max_S, dim]
+        attn_out = attn_out_padded[b_idx, s_idx]  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_out", attn_out)
-        x = self._hc_post(attn_out, residual, post, comb)
+        x = self._hc_post(attn_out, residual, post, comb)  # [T, hc, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_residual", x)
 
@@ -400,24 +464,20 @@ class Block(nn.Module):
         residual = x
         x_pre, post, comb = self._hc_pre(
             x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
-        )
-        x_pre = self.ffn_norm(x_pre)
+        )  # [T, dim], ...
+        x_pre = self.ffn_norm(x_pre)  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_in", x_pre)
-        ffn_out = self.ffn(
-            x_pre,
-            (
-                input_ids
-                if input_ids is not None
-                else torch.zeros(
-                    x.size(0), x.size(1), dtype=torch.long, device=x.device
-                )
-            ),
+        ffn_in_ids = (
+            input_ids
+            if input_ids is not None
+            else torch.zeros(x.size(0), dtype=torch.long, device=x.device)
         )
+        ffn_out = self.ffn(x_pre, ffn_in_ids)  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_out", ffn_out)
-        x = self._hc_post(ffn_out, residual, post, comb)
-        return x
+        x = self._hc_post(ffn_out, residual, post, comb)  # [T, hc, dim]
+        return x  # [T, hc, dim]
 
 
 class MTPBlock(Block):
@@ -603,7 +663,13 @@ class MTPBlock(Block):
         embed: nn.Module,  # shared V4Transformer.embed
         lm_head_weight: torch.Tensor,  # shared [vocab, dim] FP32
     ) -> torch.Tensor:
-        """Draft-token logits. See class docstring."""
+        """Draft-token logits. See class docstring.
+
+        MTP draft is B==1-only today — the super().forward() call is bridged
+        to the flat Block.forward signature by squeezing the unit-B axis off
+        the fused tensor, synthesising positions/cu_seqlens, then restoring
+        the [B, S, hc, dim] shape for the mHC head reduce.
+        """
         e = embed(input_ids)  # [B, S, dim]
         e = self.enorm(e)
         x_norm = self.hnorm(x)  # [B, S, hc, dim] (norm over last dim)
@@ -611,8 +677,26 @@ class MTPBlock(Block):
         h_proj_out = self._apply_proj(self.h_proj, x_norm)  # [B, S, hc, dim]
         x_fused = e_proj_out + h_proj_out  # [B, S, hc, dim]
 
-        # Parent Block runs attn + FFN + mHC on [B, S, hc, dim]
-        x_after = super().forward(x_fused, start_pos, input_ids)  # [B, S, hc, dim]
+        # Bridge to flat Block.forward: drop the unit-B axis, synthesise
+        # per-token positions and cu_seqlens, then reconstruct [B, S, ...]
+        # for the hc_head_reduce that follows.
+        B, S, hc, dim = x_fused.shape
+        assert B == 1, f"MTPBlock.forward_draft expects B==1; got B={B}"
+        x_flat = x_fused.squeeze(0)  # [S, hc, dim]
+        input_ids_flat = input_ids.squeeze(0)  # [S]
+        positions = start_pos + torch.arange(
+            S, device=x_fused.device, dtype=torch.int64
+        )  # [S]
+        cu_seqlens = torch.tensor(
+            [0, S], dtype=torch.int64, device=x_fused.device
+        )  # [2]
+        x_after_flat = super().forward(
+            x_flat,
+            input_ids_flat,
+            positions,
+            cu_seqlens,
+        )  # [S, hc, dim]
+        x_after = x_after_flat.unsqueeze(0)  # [B=1, S, hc, dim]
 
         # hc_head_reduce (same math as V4Transformer._hc_head_reduce)
         shape, dtype = x_after.size(), x_after.dtype
