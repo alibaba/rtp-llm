@@ -1944,7 +1944,20 @@ class Attention(nn.Module):
             # intermediary).  Ring-buffered addressing handled inside
             # ``_prefill_write_swa_to_pool``; prefix KV for continuation prefill
             # already lives in the pool from prior calls.
-            self._prefill_write_swa_to_pool(bsz, kv_full, start_pos, sequence_lengths)
+            if cp_on:
+                # CP prefill has rank-local Q but kv_full is already all-gathered
+                # in logical order [0, seq_len_full).  Writing with the local
+                # chunk length would leave the decode SWA cache partially empty.
+                swa_write_start = 0
+                swa_write_lengths = torch.full(
+                    (bsz,), seqlen_full, device=device, dtype=torch.long
+                )
+            else:
+                swa_write_start = start_pos
+                swa_write_lengths = sequence_lengths
+            self._prefill_write_swa_to_pool(
+                bsz, kv_full, swa_write_start, swa_write_lengths
+            )
             if self.compress_ratio:
                 # #50: compressor self-binds kv_state / score_state /
                 # kv_cache from the framework pool at entry, runs body,
