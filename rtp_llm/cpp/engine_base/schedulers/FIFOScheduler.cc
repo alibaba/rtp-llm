@@ -26,11 +26,16 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_seq_len_(model_config.max_seq_len),
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
+    // for deepseek v4 temp: bind max_context_batch_size into the
+    // scheduler so it's actually honored when batching prefill requests
+    // (previously the field was set on RuntimeConfig but never read here).
+    max_context_batch_size_(runtime_config.fifo_scheduler_config.max_context_batch_size),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     metrics_reporter_(metrics_reporter) {
-    RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d]",
+    RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d], max_context_batch_size is [%d]",
                      max_generate_batch_size_,
-                     max_batch_tokens_size_);
+                     max_batch_tokens_size_,
+                     max_context_batch_size_);
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -133,6 +138,17 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
         return false;
     }
     if (running_streams_.size() + streams.size() + 1 > max_generate_batch_size_) {
+        return false;
+    }
+    // for deepseek v4 temp: cap concurrent prefill (context-phase) streams
+    // batched together in one scheduling round.  DSv4 prefill kernels
+    // (sparse attn / compressor / indexer) currently require bsz==1
+    // (cu_seqlens=[0, T_total]); ``Attention._forward_prefill`` asserts
+    // this on entry.  Default ``max_context_batch_size_=1`` therefore
+    // admits at most one new prefill per round, even if the token budget
+    // would allow more.  Lift the cap once cu_seqlens-aware prefill
+    // kernels land (and the assert in attention.py is removed).
+    if (streams.size() + 1 > 1) {
         return false;
     }
 

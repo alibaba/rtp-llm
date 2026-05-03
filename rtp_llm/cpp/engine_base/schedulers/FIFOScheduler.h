@@ -74,6 +74,7 @@ protected:
     size_t                          max_seq_len_             = 0;
     size_t                          max_batch_tokens_size_   = 0;
     size_t                          max_generate_batch_size_ = 1;
+    size_t                          max_context_batch_size_  = 1;
     const bool                      need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;
