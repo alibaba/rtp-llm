@@ -386,6 +386,58 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     }
 }
 
+void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {
+    RTP_LLM_PROFILE_SCOPE("cuda_graph.updateKVCacheKernelBlockId");
+    const size_t graph_idx =
+        is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+    auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
+    auto  attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
+
+    // Mirror only the kv_cache_kernel_block_id device buffers into the held
+    // capture-time tensors. Sibling fields (cu_seqlens, sequence_lengths, ...)
+    // were already mirrored by the prior prepareAttentionInputs and are
+    // unchanged between the propose-time gather and the verify-time re-gather.
+    FusedD2DCopyParams     d2d_copies;
+    FusedStridedCopyParams strided_d2d_copies;
+    auto tryAddStridedD2DCopy = [&strided_d2d_copies, &d2d_copies](const torch::Tensor& src, torch::Tensor& dst) {
+        if (!src.defined() || src.numel() <= 0) {
+            return;
+        }
+        if (src.dim() < 2) {
+            d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
+            return;
+        }
+        strided_d2d_copies.add(src.data_ptr(),
+                               dst.data_ptr(),
+                               src.size(0),
+                               src.size(1) * src.element_size(),
+                               src.stride(0) * src.element_size(),
+                               dst.stride(0) * dst.element_size());
+    };
+
+    tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_kernel_block_id_device,
+                         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
+
+    const bool has_hybrid_cache =
+        !inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()
+        && !py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty();
+    if (has_hybrid_cache) {
+        const size_t hybrid_cache_group =
+            std::min(inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size(),
+                     py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group.size());
+        for (size_t g = 0; g < hybrid_cache_group; ++g) {
+            tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group[g],
+                                 py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g]);
+        }
+    }
+
+    {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.updateKVCacheKernelBlockId(fused_d2d_copy)");
+        fusedCopy(d2d_copies);
+        fusedStridedCopy(strided_d2d_copies);
+    }
+}
+
 PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphState& state) {
     PyModelOutputs outputs;
 

@@ -401,6 +401,49 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     return absl::OkStatus();
 }
 
+absl::StatusOr<torch::Tensor>
+NormalModelInputGatherer::gatherKvCacheKernelBlockId(const StreamGroups& stream_groups) const {
+    const size_t total_batch_size = stream_groups.totalModelBatchSize();
+    const size_t max_blocks_num   = stream_groups.curBlocksNum();
+    if (max_blocks_num == 0 || total_batch_size == 0) {
+        return torch::Tensor{};
+    }
+
+    static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+    auto              host_tensor = torch::zeros({(int64_t)config_.kv_cache_group_nums,
+                                                  (int64_t)total_batch_size,
+                                                  (int64_t)(max_blocks_num * config_.kernel_blocks_per_kv_block)},
+                                    pinned_i32);
+
+    const size_t per_batch_stride = max_blocks_num * config_.kernel_blocks_per_kv_block;
+    int32_t*     dst_base         = host_tensor.data_ptr<int32_t>();
+
+    auto fill_one_stream = [&](const GenerateStreamPtr& stream, int& batch_idx) {
+        auto& kv_cache           = *stream->kvCachePtr();
+        auto  current_batch_size = stream->currentBatchSize();
+        for (int i = 0; i < current_batch_size; ++i) {
+            for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
+                const auto& kernel_blocks = kv_cache.kernelBlocks(i, gid);
+                int32_t*    dst =
+                    dst_base
+                    + (static_cast<size_t>(gid) * total_batch_size + static_cast<size_t>(batch_idx)) * per_batch_stride;
+                std::memcpy(dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
+            }
+            batch_idx += 1;
+        }
+    };
+
+    int batch_idx = 0;
+    for (const auto& stream : stream_groups.decodeStreams()) {
+        fill_one_stream(stream, batch_idx);
+    }
+    for (const auto& stream : stream_groups.contextStreams()) {
+        fill_one_stream(stream, batch_idx);
+    }
+
+    return publishInt32ToCuda(host_tensor);
+}
+
 absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",

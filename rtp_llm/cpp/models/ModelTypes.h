@@ -139,6 +139,11 @@ public:
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
 
+    // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
+    // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).
+    // No-op when no attention inputs have been prepared yet.
+    virtual void updateKVCacheKernelBlockId(const GptModelInputs& inputs) {}
+
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;
     size_t                      model_id_ = 0;

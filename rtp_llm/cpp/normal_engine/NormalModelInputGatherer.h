@@ -4,6 +4,7 @@
 #include <vector>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "torch/all.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -40,6 +41,14 @@ public:
     explicit NormalModelInputGatherer(const NormalModelInputGathererConfig& config);
 
     absl::StatusOr<GptModelInputs> gather(const StreamGroups& stream_groups) const;
+
+    // Build only the kv_cache_kernel_block_id tensor (CUDA int32, 3-D layout
+    // [groups, batch, max_blocks * kernel_blocks_per_kv_block]). Read-only over
+    // streams: does NOT mutate stream state (no step()), does NOT fill the
+    // sibling kv_cache_block_id tensor, and does NOT call any other gather
+    // sub-step. Returns an undefined tensor when there are no streams or no
+    // blocks to publish.
+    absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups) const;
 
 private:
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;

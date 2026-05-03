@@ -296,7 +296,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
 
     // when warmup, cache manager maybe nullptr
-    const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
+    const auto& cache_config   = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
+    is_linear_attention_model_ = cache_config.linear_group_num > 0;
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
                                                               params.pd_sep_config,
                                                               params.profiling_debug_logging_config,
@@ -863,6 +864,31 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             model_input.prefix_lengths.size(0),
             model_input.sequence_lengths.size(0));
         target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+
+        // Linear-attention only: page table advances every token. Standard
+        // paged attention (MHA/MLA) page table rarely changes within a
+        // propose+verify cycle, so the re-gather is skipped there.
+        if (is_linear_attention_model_) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_kv_cache_kernel_block_id)");
+            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+
+            if (tp_rank_ == 0) {
+                model_input.kv_cache_kernel_block_id =
+                    batch_stream_processor_->gatherKvCacheKernelBlockId(stream_groups).value();
+            }
+
+            if (parallelism_config_.tp_size > 1) {
+                execBroadcast({{model_input.kv_cache_kernel_block_id}, 0});
+            }
+
+            // Focused refresh: re-alias attention_inputs_._device(_by_group)
+            // and (if cuda-graph) re-mirror held buffers + re-fill FlashInfer
+            // Plan against the new tensor. Skips all the unrelated work that
+            // a full prepareAttentionInputs would redo (combo_tokens H2D,
+            // padding_offset, sequence_lengths copies, ...).
+            model_->updateKVCacheKernelBlockId(model_input);
+        }
+
         ensureMtpModelInputsOnCuda(model_input, "decode.target_verify_forward");
         model_output = std::move(model_->forward(model_input));
         RTP_LLM_LOG_DEBUG("[MTP decode] target model verify forward end");

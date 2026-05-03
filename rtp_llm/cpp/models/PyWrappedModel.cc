@@ -566,6 +566,41 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     }
 }
 
+void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
+    RTP_LLM_PROFILE_SCOPE("py_model.updateKVCacheKernelBlockId");
+    if (!inputs.kv_cache_kernel_block_id.defined()) {
+        return;
+    }
+    if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
+        // No pre-built attention_inputs_ to refresh — forward() will rebuild
+        // from the current `inputs` directly via prepareAttentionInputs().
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_kernel_block_id.dim() == 3,
+                            "kv_cache_kernel_block_id must be 3-D (group, batch, blocks)");
+    const size_t group = inputs.kv_cache_kernel_block_id.size(0);
+
+    // Re-alias _device_by_group / _device from the freshly-gathered tensor.
+    // Slices are zero-copy views, no new allocation. Same logic as
+    // setupKVCacheForAttentionInputs but applied in place to attention_inputs_.
+    attention_inputs_.kv_cache_kernel_block_id_device_by_group.clear();
+    attention_inputs_.kv_cache_kernel_block_id_device_by_group.reserve(group);
+    for (size_t g = 0; g < group; ++g) {
+        attention_inputs_.kv_cache_kernel_block_id_device_by_group.push_back(inputs.kv_cache_kernel_block_id[g]);
+    }
+    attention_inputs_.kv_cache_kernel_block_id_device = attention_inputs_.kv_cache_kernel_block_id_device_by_group[0];
+
+    // CUDA-graph case: refresh the captured held buffers + FlashInfer plan
+    // via the focused graph_runner hook (no replay of unrelated D2D copies).
+    if (enable_cuda_graph_) {
+        auto empty_tensor    = torch::Tensor();
+        auto py_model_inputs = PyModelInputs({empty_tensor, empty_tensor, attention_inputs_, empty_tensor});
+        if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
+            graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
+        }
+    }
+}
+
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");

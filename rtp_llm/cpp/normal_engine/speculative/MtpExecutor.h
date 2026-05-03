@@ -174,6 +174,11 @@ private:
     bool     warm_up_;
     RoleType role_type_;
 
+    // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
+    // hybrid linear+full). Per-step state advances every token, so the page
+    // table must be re-gathered between draft propose and target verify.
+    bool is_linear_attention_model_ = false;
+
     // group id tensors
     torch::Tensor target_kv_cache_layer_to_group;
     torch::Tensor draft_kv_cache_layer_to_group;
