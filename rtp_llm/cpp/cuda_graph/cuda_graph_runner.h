@@ -79,6 +79,7 @@ public:
     void           prepareAttentionInputs(const PyModelInputs& inputs,
                                           CudaGraphState&      state,
                                           bool                 skip_forward_event_sync = false) override;
+    void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
     bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           replayGraph(int key);
     void           replayDecode(int bs);

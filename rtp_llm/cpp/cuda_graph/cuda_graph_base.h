@@ -49,6 +49,14 @@ public:
     virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
                                                   CudaGraphState&      state,
                                                   bool                 skip_forward_event_sync = false) = 0;
-    py::object             py_instance_;
+
+    // Focused refresh of the captured graph's kv_cache_kernel_block_id state:
+    // re-mirrors only the per-group device buffers and re-invokes the python
+    // attn impl's prepare_cuda_graph so FlashInfer plan buffers re-fill from
+    // the new page table. Other captured fields (cu_seqlens, sequence_lengths,
+    // ...) are left untouched. Default no-op for backends without graphs.
+    virtual void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {}
+
+    py::object py_instance_;
 };
 }  // namespace rtp_llm
