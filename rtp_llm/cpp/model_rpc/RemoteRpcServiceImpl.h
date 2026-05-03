@@ -87,6 +87,48 @@ public:
         }
     }
 
+    // V1 FlexLB-controlled async path. FetchResponse/Cancel live on Prefill
+    // (Decode pushes tokens back through RemoteGenerate, Frontend pulls from
+    // Prefill's ResponseBuffer). Enqueue is a DP0 fan-out stub for later.
+    grpc::Status FetchResponse(grpc::ServerContext*                   context,
+                               const FetchRequestPB*                  request,
+                               grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        if (!prefill_server_) {
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "FetchResponse requires Prefill role");
+        }
+        return prefill_server_->FetchResponse(context, request, writer);
+    }
+
+    grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response) override {
+        if (!prefill_server_) {
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "Cancel requires Prefill role");
+        }
+        return prefill_server_->Cancel(context, request, response);
+    }
+
+    // V1 FlexLB → DP0 batch submit + DP0 → peer single-slot admission. Only Prefill role
+    // owns the queue/ResponseBuffer; Decode role sees UNIMPLEMENTED.
+    grpc::Status BatchEnqueue(grpc::ServerContext*         context,
+                              const BatchEnqueueRequestPB* request,
+                              BatchEnqueueResponsePB*      response) override {
+        if (!prefill_server_) {
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "BatchEnqueue requires Prefill role");
+        }
+        return prefill_server_->BatchEnqueue(context, request, response);
+    }
+
+    grpc::Status
+    Enqueue(grpc::ServerContext* context, const EnqueueRequestPB* request, EnqueueResponsePB* response) override {
+        if (!prefill_server_) {
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "Enqueue requires Prefill role");
+        }
+        return prefill_server_->Enqueue(context, request, response);
+    }
+
+    std::shared_ptr<PrefillRpcServer> prefillServer() const {
+        return prefill_server_;
+    }
+
 private:
     std::shared_ptr<PrefillRpcServer> prefill_server_;
     std::shared_ptr<DecodeRpcServer>  decode_server_;

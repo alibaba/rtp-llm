@@ -65,6 +65,8 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_tp_size: " << ffn_tp_size << "\n"
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
         << "enable_sp: " << enable_sp << "\n"
+        << "use_ub_comm: " << use_ub_comm << "\n"
+        << "dp_controller_managed: " << dp_controller_managed << "\n"
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}\n"
         << "prefill_cp_config: {\n"

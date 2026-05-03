@@ -23,6 +23,14 @@ public:
     virtual int64_t                                      lastScheduleTime()                            = 0;
     virtual int64_t                                      onflightStreams()                             = 0;
 
+    // Whether NormalEngine::step() should run the per-worker fake-stream padding
+    // after calling schedule(). Default false so specialised schedulers
+    // (e.g. BatchDecodeScheduler) are opt-out; FIFOScheduler overrides this
+    // to return need_fill_fake_stream_.
+    virtual bool needFakeStream() const {
+        return false;
+    }
+
     virtual std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() {
         return {};
     }

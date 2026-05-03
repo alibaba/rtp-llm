@@ -100,3 +100,12 @@ def init_parallel_group_args(
         default=False,
         help="启用 CUDA IPC user-buffer 通信器用于上下文并行。仅支持单机场景，需要 CP 已启用且非 ALL_GATHER 方法。",
     )
+    parallel_group.add_argument(
+        "--dp_controller_managed",
+        env_name="DP_CONTROLLER_MANAGED",
+        bind_to=(parallelism_config, "dp_controller_managed"),
+        type=str2bool,
+        default=False,
+        help="V1 DP-controller 模式: FlexLB Master 负责整批下发到 DP0 再 fan-out 到各 DP worker。"
+        "打开后 FIFOScheduler 关闭 needFakeStream，跳过 per-worker 的 fake stream 补齐。默认关闭走原链路。",
+    )

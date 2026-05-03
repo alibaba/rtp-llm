@@ -964,6 +964,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ffn_tp_rank", &ParallelismConfig::ffn_tp_rank)
         .def_readwrite("enable_sp", &ParallelismConfig::enable_sp)
         .def_readwrite("use_ub_comm", &ParallelismConfig::use_ub_comm)
+        .def_readwrite("dp_controller_managed", &ParallelismConfig::dp_controller_managed)
+        .def_readwrite("dp_peer_addrs", &ParallelismConfig::dp_peer_addrs)
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
         .def_readwrite("prefill_cp_config", &ParallelismConfig::prefill_cp_config)
         .def("to_string", &ParallelismConfig::to_string)
@@ -989,10 +991,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_sp,
                                       self.ffn_disaggregate_config,
                                       self.prefill_cp_config,
-                                      self.use_ub_comm);
+                                      self.use_ub_comm,
+                                      self.dp_controller_managed,
+                                      self.dp_peer_addrs);
             },
             [](py::tuple t) {
-                if (t.size() != 17)
+                if (t.size() != 19)
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
@@ -1013,6 +1017,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.ffn_disaggregate_config = t[14].cast<FfnDisAggregateConfig>();
                     c.prefill_cp_config       = t[15].cast<PrefillCPConfig>();
                     c.use_ub_comm             = t[16].cast<bool>();
+                    c.dp_controller_managed   = t[17].cast<bool>();
+                    c.dp_peer_addrs           = t[18].cast<std::vector<std::string>>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }

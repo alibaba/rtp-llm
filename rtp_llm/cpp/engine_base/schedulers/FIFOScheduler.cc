@@ -26,7 +26,11 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_seq_len_(model_config.max_seq_len),
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
-    need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
+    // V1 DP-controller: when dp_controller_managed is on, FlexLB pushes full
+    // DP-aligned batches and DP0 fans out via Enqueue — engines no longer pad
+    // the missing slots with fake streams. Keep legacy behavior otherwise.
+    need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0
+                           && !parallelism_config.dp_controller_managed),
     metrics_reporter_(metrics_reporter) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d]",
                      max_generate_batch_size_,
@@ -278,7 +282,7 @@ void FIFOScheduler::addStreamToNewState(const GenerateStreamPtr& stream, StreamS
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
-    if (need_fill_fake_stream_) {
+    if (needFakeStream()) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });
