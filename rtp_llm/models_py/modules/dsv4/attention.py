@@ -290,108 +290,6 @@ def _get_compress_topk_idxs(
     return matrix.unsqueeze(0).expand(bsz, -1, -1).contiguous()
 
 
-def _get_window_topk_idxs_batched(
-    window_size: int,
-    max_seqlen: int,
-    sp_tensor: torch.Tensor,  # [B] int64
-    row_seqlens: torch.Tensor,  # [B] int64 — valid new-token count per row
-    device,
-) -> torch.Tensor:
-    """Batched variant of :func:`_get_window_topk_idxs` for heterogeneous
-    (sp, seqlen) prefill.  Returns ``[B, max_seqlen, window_size]`` int64.
-
-    For each row ``b`` and local query position ``i < row_seqlens[b]``:
-      global pos ``g = sp_tensor[b] + i``
-      valid slot count ``min(g + 1, window_size)``
-      returns the last ``valid`` ring slots at ``[ring_pos, offsets)``;
-      remaining columns filled with ``-1``.
-
-    Rows with ``i >= row_seqlens[b]`` (padding) get an entire row of
-    ``-1``, so the sparse_attn kernel contributes nothing for them.
-    """
-    bsz = int(sp_tensor.shape[0])
-    if bsz == 0 or max_seqlen == 0 or window_size == 0:
-        return torch.full(
-            (bsz, max_seqlen, window_size), -1, dtype=torch.long, device=device
-        )
-    sp_t = sp_tensor.to(device=device, dtype=torch.long)
-    seq_t = row_seqlens.to(device=device, dtype=torch.long)
-    i = torch.arange(max_seqlen, device=device, dtype=torch.long)  # [S]
-    global_pos = sp_t.unsqueeze(1) + i.unsqueeze(0)  # [B, S]
-    sp_mod = global_pos % window_size  # [B, S]
-    offsets = torch.arange(window_size, device=device, dtype=torch.long)  # [W]
-    idxs = (
-        sp_mod.unsqueeze(-1) + 1 + offsets.view(1, 1, -1)
-    ) % window_size  # [B, S, W]
-    valid_count = torch.clamp(global_pos + 1, max=window_size)  # [B, S]
-    invalid = offsets.view(1, 1, -1) < (window_size - valid_count.unsqueeze(-1))
-    matrix = torch.where(invalid, -1, idxs)  # [B, S, W]
-    # Padding rows (i >= row_seqlens[b]) -> whole row -1.
-    row_mask = i.unsqueeze(0) < seq_t.unsqueeze(1)  # [B, S]
-    matrix = torch.where(row_mask.unsqueeze(-1), matrix, torch.full_like(matrix, -1))
-    return matrix.contiguous()
-
-
-def _get_compress_topk_idxs_batched(
-    ratio: int,
-    max_seqlen: int,
-    offset: int,
-    sp_tensor: torch.Tensor,  # [B] int64
-    row_seqlens: torch.Tensor,  # [B] int64
-    device,
-) -> torch.Tensor:
-    """Batched variant of :func:`_get_compress_topk_idxs`.
-
-    Returns ``[B, max_seqlen, K]`` where ``K`` is bounded by
-    ``max(sp + seqlen) // ratio`` across the batch.  For each row ``b``
-    with ``g = sp_tensor[b] + i`` where ``i < row_seqlens[b]``:
-      * ``sp_tensor[b] > 0``: row sees compressed blocks ``[0, (sp+1)//ratio)``
-        replicated across all positions in the row (continuation prefill).
-      * ``sp_tensor[b] == 0``: row sees compressed blocks ``[0, (i+1)//ratio)``
-        at query ``i`` (causal over compressed KV).
-
-    Rows with ``i >= row_seqlens[b]`` (padding) emit all ``-1``.
-    """
-    bsz = int(sp_tensor.shape[0])
-    if bsz == 0 or ratio == 0:
-        return torch.full((bsz, max_seqlen, 0), -1, dtype=torch.long, device=device)
-    sp_t = sp_tensor.to(device=device, dtype=torch.long)
-    seq_t = row_seqlens.to(device=device, dtype=torch.long)
-    # Per-row K: fresh (sp==0) rows need seqlen // ratio blocks; continuation
-    # rows need (sp + seqlen) // ratio blocks — but at the moment compression
-    # happens, a continuation row at query i reads exactly (sp + 1) // ratio
-    # blocks regardless of i (mirrors the scalar branch sp > 0 behavior).
-    end_per_row = torch.where(
-        sp_t > 0,
-        (sp_t + 1) // ratio,
-        (sp_t + seq_t) // ratio,
-    )  # [B]
-    K = int(end_per_row.max().item()) if bsz > 0 else 0
-    if K == 0:
-        return torch.full((bsz, max_seqlen, 0), -1, dtype=torch.long, device=device)
-    k = torch.arange(K, device=device, dtype=torch.long)  # [K]
-    i = torch.arange(max_seqlen, device=device, dtype=torch.long)  # [S]
-
-    # For sp==0 rows: query i can see up to (i + 1) // ratio blocks.
-    fresh_max_per_iq = (i.unsqueeze(0) + 1) // ratio  # [1, S]
-    # For sp>0 rows: every query sees (sp + 1) // ratio blocks.
-    cont_max_per_b = (sp_t + 1) // ratio  # [B]
-    # Combine: per-(b, i) allowed count.
-    is_cont = (sp_t > 0).unsqueeze(1)  # [B, 1]
-    max_allowed_bi = torch.where(
-        is_cont,
-        cont_max_per_b.unsqueeze(1).expand(-1, max_seqlen),
-        fresh_max_per_iq.expand(bsz, -1),
-    )  # [B, S]
-    k_b_i = k.view(1, 1, K).expand(bsz, max_seqlen, K)
-    valid_k = k_b_i < max_allowed_bi.unsqueeze(-1)  # [B, S, K]
-    matrix = torch.where(valid_k, k_b_i + offset, torch.full_like(k_b_i, -1))
-    # Padding rows -> all -1.
-    row_mask = i.unsqueeze(0) < seq_t.unsqueeze(1)  # [B, S]
-    matrix = torch.where(row_mask.unsqueeze(-1), matrix, torch.full_like(matrix, -1))
-    return matrix.contiguous()
-
-
 def _get_compress_topk_idxs_cp(
     ratio: int,
     bsz: int,
@@ -1394,16 +1292,10 @@ class Attention(nn.Module):
             )
 
         # CSA / HCA: build / fill compressed topk; write compressed-K.
-        # Stage 3B: when the metadata is from CUDA-graph capture, dispatch
-        # to the vectorized (Python-branch-free) variants so the captured
-        # forward holds no data-dependent control flow. Eager Phase 2 path
-        # keeps the loop variants for byte-equal regression safety.
-        # Always use the vectorized compressor/indexer decode variants.
-        # Originally gated on cuda-graph capture for byte-equal regression
-        # safety; the loop variants do per-request .item() D2H syncs which
-        # serialize the GPU stream. vectorized is math-equivalent and
-        # graph-capturable.
-        use_vec = True
+        # Always use the vectorized compressor/indexer decode variants —
+        # the loop variants did per-request ``.item()`` D2H syncs which
+        # serialize the GPU stream.  Vectorized is math-equivalent and
+        # CUDA-graph-capturable.
         if self.compress_ratio:
             # Slice topk_buffer_compressed to actual bsz so indexer writes
             # only the [:bsz] prefix (graph impl allocates [max_bs, ...]).
@@ -1414,20 +1306,12 @@ class Attention(nn.Module):
                 # its nested compressor's kv_cache + state back into the
                 # INDEXER_KV / INDEXER_STATE pool via the set_pool_context
                 # lifecycle (#50).
-                if use_vec:
-                    self.indexer.forward_decode_vectorized(
-                        x,
-                        qr,
-                        start_pos,
-                        topk_buf_cmp,
-                    )
-                else:
-                    self.indexer.forward_decode(
-                        x,
-                        qr,
-                        start_pos,
-                        topk_buf_cmp,
-                    )
+                self.indexer.forward_decode_vectorized(
+                    x,
+                    qr,
+                    start_pos,
+                    topk_buf_cmp,
+                )
                 # Stitch indexer output into the metadata's topk_total
                 # compressed half (with +win offset) — in-place on the view
                 # so downstream consumers (sparse_op, refill paths) see the
@@ -1447,10 +1331,7 @@ class Attention(nn.Module):
                 # side-effect — it self-binds/writes/scatters compressed-K
                 # into the HCA_KV + HCA_STATE pool via set_pool_context
                 # lifecycle.
-                if use_vec:
-                    self.compressor.forward_decode_vectorized(x, start_pos)
-                else:
-                    self.compressor.forward_decode(x, start_pos)
+                self.compressor.forward_decode_vectorized(x, start_pos)
 
         # Phase 2B-2b: capture raw (no +win offset) compressed local idx for
         # the optional paged dual-pool read below. For CSA the indexer's
@@ -1708,25 +1589,24 @@ class Attention(nn.Module):
         start_pos,
         seqlen: int,
         bsz: int,
-        sequence_lengths: Optional[torch.Tensor],
         device: torch.device,
         cp_ctx,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Per-token RoPE freqs + SWA-window topk indices for the current
-        prefill call.  Three modes share the same dispatch axis:
+        prefill call.  Two modes share the same dispatch axis:
 
         - CP enabled       : rank-local positions via ``cp_ctx``
-        - batched prefill  : per-row ``sp_t + arange(seqlen)``
         - scalar prefill   : contiguous ``[sp, sp+seqlen)``
 
         Both outputs depend only on positional metadata (start_pos,
-        cp_ctx.global_positions, sequence_lengths), so it's safe to
-        compute them at the top of the body before the Q/KV path."""
+        cp_ctx.global_positions), so it's safe to compute them at the
+        top of the body before the Q/KV path.
+
+        Caller guarantees ``bsz == 1`` (asserted in ``_forward_prefill``);
+        batched prefill is gated by ``max_context_batch_size = 1`` in
+        the FIFO scheduler — see ``_forward_prefill`` for details."""
         win = self.window_size
         cp_on = cp_ctx is not None and cp_ctx.cp_size > 1
-        is_batched_prefill = (
-            isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
-        )
         if cp_on:
             freqs_cis = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
             topk_idxs = _get_window_topk_idxs_cp(
@@ -1734,26 +1614,6 @@ class Attention(nn.Module):
                 bsz,
                 cp_ctx.seq_len_full,
                 cp_ctx.global_positions,
-            )
-        elif is_batched_prefill:
-            # Per-row sp + arange(seqlen).  freqs_cis: [B, S, rope_dim//2].
-            sp_t = start_pos.to(device=device, dtype=torch.long)  # [B]
-            positions = sp_t.unsqueeze(1) + torch.arange(
-                seqlen, device=device, dtype=torch.long
-            ).unsqueeze(
-                0
-            )  # [B, S]
-            pos_max = int(self.freqs_cis.shape[0])
-            positions = positions.clamp(max=pos_max - 1)
-            freqs_cis = self.freqs_cis[positions]
-            if sequence_lengths is not None:
-                row_seqlens = sequence_lengths.to(device=device, dtype=torch.long)
-            else:
-                row_seqlens = torch.full(
-                    (bsz,), seqlen, device=device, dtype=torch.long
-                )
-            topk_idxs = _get_window_topk_idxs_batched(
-                win, seqlen, sp_t, row_seqlens, device
             )
         else:
             sp = int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
@@ -1766,7 +1626,6 @@ class Attention(nn.Module):
         x: torch.Tensor,
         qr: torch.Tensor,
         start_pos,
-        sequence_lengths: Optional[torch.Tensor],
         seqlen: int,
         seqlen_full: int,
         bsz: int,
@@ -1779,13 +1638,12 @@ class Attention(nn.Module):
         compressed tail]``, so the compressed-block start-index is
         ``seqlen_full``.
 
+        Caller guarantees ``bsz == 1`` (asserted in ``_forward_prefill``).
+
         Branches by what's available:
 
-        - ``self.indexer is not None`` (HCA layer): defer to the indexer,
-          which handles cp / batched / scalar dispatch internally
+        - ``self.indexer is not None`` (HCA layer): defer to the indexer
         - ``cp_on`` and no indexer: ``_get_compress_topk_idxs_cp``
-        - ``is_batched_prefill`` and no indexer: per-row
-          ``_get_compress_topk_idxs_batched``
         - otherwise (scalar prefill, no indexer):
           ``_get_compress_topk_idxs``
         """
@@ -1793,26 +1651,12 @@ class Attention(nn.Module):
 
         ratio = self.compress_ratio
         cp_on = cp_ctx is not None and cp_ctx.cp_size > 1
-        is_batched_prefill = (
-            isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
-        )
         offset = seqlen_full
 
         if self.indexer is not None:
             if _dbg:
                 self.indexer._dbg_prefix = f"L{self.layer_id:02d}_attn_idx"
-            if is_batched_prefill:
-                # Indexer batched prefill passes through sp tensor;
-                # Indexer handles per-row seqlens internally.
-                compress_idxs = self.indexer(
-                    x,
-                    qr,
-                    start_pos,
-                    offset,
-                    sequence_lengths=sequence_lengths,
-                )
-            else:
-                compress_idxs = self.indexer(x, qr, start_pos, offset)
+            compress_idxs = self.indexer(x, qr, start_pos, offset)
             if _dbg:
                 self.indexer._dbg_prefix = None
                 _rt.record_if_level(
@@ -1828,17 +1672,6 @@ class Attention(nn.Module):
                 seqlen_full,
                 offset,
                 cp_ctx.global_positions,
-            )
-        if is_batched_prefill:
-            sp_t = start_pos.to(device=device, dtype=torch.long)
-            if sequence_lengths is not None:
-                row_seqlens = sequence_lengths.to(device=device, dtype=torch.long)
-            else:
-                row_seqlens = torch.full(
-                    (bsz,), seqlen, device=device, dtype=torch.long
-                )
-            return _get_compress_topk_idxs_batched(
-                ratio, seqlen, offset, sp_t, row_seqlens, device
             )
         sp_int = int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
         return _get_compress_topk_idxs(ratio, bsz, seqlen, sp_int, offset, device)
@@ -1879,8 +1712,16 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         """Prefill-only forward.  Decode goes through ``forward_decode`` /
         ``_forward_decode_body`` with paged metadata; this body is entered
-        only when ``seqlen > 1``.  ``start_pos`` is int (B=1) or tensor
-        ``[B]`` (batched prefill, ``numel() > 1``)."""
+        only when ``seqlen > 1``.  ``start_pos`` is int or 1-element tensor.
+
+        DSv4 TEMP — bsz==1 invariant: the FIFO scheduler is configured
+        with ``max_context_batch_size = 1`` (see
+        ``cpp/engine_base/schedulers/FIFOScheduler.cc::evaluateRunningMemory``)
+        so only one prefill request enters per scheduling round.  All
+        per-row "batched prefill" branches in the helpers were removed
+        on this premise — re-enabling B>1 prefill requires reinstating
+        them (and the per-row sequence_lengths threading) along with
+        cu_seqlens-aware compressor / indexer / SWA-pool kernels."""
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
         # Master switch: when MOEDBG=0 the AND short-circuits so neither the
@@ -1892,17 +1733,24 @@ class Attention(nn.Module):
                 _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_{tag}", t)
 
         bsz, seqlen, _ = x.size()
+        # DSv4 TEMP: see docstring — prefill kernels assume bsz==1.
+        assert bsz == 1, (
+            f"DSv4 prefill expects bsz==1; got {bsz}.  Set "
+            "MAX_CONTEXT_BATCH_SIZE=1 (default) so the scheduler does "
+            "not batch multiple prefill requests in one round."
+        )
         rd = self.rope_head_dim
+        device = x.device
         device = x.device
 
         cp_ctx = self._cp_ctx
         cp_on = cp_ctx is not None and cp_ctx.cp_size > 1
 
         # Positional metadata: per-token RoPE freqs + SWA-window topk.
-        # Both depend only on start_pos / cp_ctx / sequence_lengths so
-        # they're pre-computed here, before the Q/KV path.
+        # Both depend only on start_pos / cp_ctx, so pre-compute here
+        # before the Q/KV path.
         freqs_cis, topk_idxs = self._compute_prefill_indices(
-            start_pos, seqlen, bsz, sequence_lengths, device, cp_ctx
+            start_pos, seqlen, bsz, device, cp_ctx
         )
 
         # #50: Compressor / Indexer are fully pool-backed — no persistent
@@ -1954,7 +1802,6 @@ class Attention(nn.Module):
                 x,
                 qr,
                 start_pos,
-                sequence_lengths,
                 seqlen,
                 seqlen_full,
                 bsz,
@@ -1965,13 +1812,15 @@ class Attention(nn.Module):
             topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
         topk_idxs = topk_idxs.long()
 
-        # any_cont drives the kv_cat fork: fresh prefill (all rows sp==0)
-        # uses the just-computed kv_full; continuation prefill (any sp>0)
-        # gathers SWA + compressed back from the framework pool.
-        if isinstance(start_pos, torch.Tensor):
-            any_cont = bool((start_pos > 0).any().item())
-        else:
-            any_cont = int(start_pos) > 0
+        # any_cont drives the kv_cat fork: fresh prefill (sp==0) uses
+        # the just-computed kv_full; continuation prefill (sp>0) gathers
+        # SWA + compressed back from the framework pool.  bsz==1 is
+        # enforced above, so a 1-element tensor reduces to a scalar
+        # comparison.
+        sp_int = (
+            int(start_pos) if isinstance(start_pos, torch.Tensor) else int(start_pos)
+        )
+        any_cont = sp_int > 0
 
         # Phase E5b: direct SWA pool write from kv_full (no register_buffer
         # intermediary).  Ring-buffered addressing handled inside
