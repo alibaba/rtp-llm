@@ -141,6 +141,8 @@ void NormalEngine::initScheduler() {
             runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else {
+        // V1 DP-controller gating lives inside FIFOScheduler (needFakeStream() reflects
+        // ParallelismConfig.dp_controller_managed); no separate subclass needed.
         scheduler_.reset(new FIFOScheduler(runtime_config,
                                            model_config_,
                                            pd_sep_config,
@@ -441,7 +443,7 @@ absl::Status NormalEngine::step() {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         }
-        if (parallelism_config.dp_size > 1) {
+        if (parallelism_config.dp_size > 1 && scheduler_->needFakeStream()) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
         }

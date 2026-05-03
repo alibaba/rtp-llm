@@ -161,10 +161,11 @@ message GenerateInputPB {
     int64 start_time = 6;
     int32 batch_group_size = 7;
     google.protobuf.Int64Value batch_group_id = 8;
-    // V1-α DP batching: assigned by Master at schedule time. Engine MUST pin the
-    // request to this DP slot and MUST NOT reshuffle. The DP barrier only kicks in
-    // on the pd_separation path (max_new_tokens > 1 && num_beams <= 1).
-    int64 dp_rank = 9;
+    // V1 FlexLB-controlled DP batching: assigned by FlexLB at schedule time.
+    // Wrapped so "unset" vs "set to 0" are distinguishable — when absent, DP0
+    // treats the slot as its own (self) rank; when present, the Engine MUST pin
+    // the request to that DP slot and MUST NOT reshuffle.
+    google.protobuf.Int32Value dp_rank = 9;
     // V1-α DP batching: prompt prefix block hashes precomputed by Master so prefill
     // can skip re-hashing. Same source as Request.block_cache_keys on the
     // Master HTTP /rtp_llm/schedule entry.
@@ -654,15 +655,34 @@ message BatchGenerateInputPB {
     int64 batch_id = 2;
 }
 
-// V1-α DP batching: Master.Enqueue acknowledgement, returned immediately
-// (before prefill actually runs).
-message EnqueueAckPB {
-    int64 batch_id = 1;
-    bool accepted = 2;
-    string error_message = 3;
+// V1 FlexLB → DP0 batch submit entry. One call carries a DP-aligned batch;
+// DP0 fans out to peer DP slots via RpcService.Enqueue.
+message BatchEnqueueRequestPB {
+    repeated GenerateInputPB inputs = 1;
+    int64 batch_id = 2;
 }
 
-// V1-α DP batching: Frontend → Decode token-stream pull request.
+// V1 per-slot admission result. error_info empty (code=NONE_ERROR) means
+// accepted; otherwise the slot was rejected at admission time.
+message EnqueueResponsePB {
+    int64          request_id = 1;
+    ErrorDetailsPB error_info = 2;
+}
+
+message BatchEnqueueResponsePB {
+    repeated EnqueueResponsePB acks = 1;
+    int64                      batch_id = 2;
+}
+
+// V1 DP0 → each DP peer (including DP0 self) single-slot admission entry.
+// Currently only DP0 is expected to call this RPC during batch fan-out.
+message EnqueueRequestPB {
+    GenerateInputPB input = 1;
+}
+
+// V1 Frontend → DPx fetch-result pull request. Frontend MUST target the
+// gRPC endpoint of the DP rank that owns this request (assigned at submit
+// time via GenerateInputPB.dp_rank). Targeting the wrong DP returns NOT_FOUND.
 message FetchRequestPB {
     int64 request_id = 1;
 }
@@ -686,14 +706,18 @@ service RpcService {
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
     rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
-    // V1-α DP batching: Master → Prefill async fire-and-forget batch submission.
-    // Engine MUST treat every input sharing the same batch_id as a DP-aligned atomic
-    // step: forward together in one step, never split, never interleaved with other
-    // queued requests, and slot-pinned by input.dp_rank.
-    rpc Enqueue(BatchGenerateInputPB) returns (EnqueueAckPB);
-    // V1-α DP batching: Frontend → Decode token stream pull by request_id, replacing
-    // the legacy GenerateStreamCall→Prefill path (KV is still pushed from Prefill to
-    // Decode by RemoteGenerate).
+    // V1 FlexLB → DP0 batch submit. DP0 fans out to peer DP workers via
+    // RpcService.Enqueue (same service, peer endpoints from ParallelismConfig.
+    // dp_peer_addrs). Every input sharing the same batch_id forms a DP-aligned
+    // atomic step: forwarded together in one step, never split, never interleaved,
+    // slot-pinned by input.dp_rank.
+    rpc BatchEnqueue(BatchEnqueueRequestPB) returns (BatchEnqueueResponsePB);
+    // V1 DP0 → DP peer (or self) single-slot admission. Invoked during BatchEnqueue
+    // fan-out. Returns the per-slot admission outcome.
+    rpc Enqueue(EnqueueRequestPB) returns (EnqueueResponsePB);
+    // V1 Frontend → DPx fetch-result stream, replacing the legacy
+    // GenerateStreamCall→Prefill path; KV is still pushed from Prefill to Decode by
+    // RemoteGenerate. Frontend MUST target the DP rank assigned at submit time.
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
     // V1-α DP batching: Master → P/D cascade cancel. Idempotent — unknown or
     // already-completed request_ids also return success.

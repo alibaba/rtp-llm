@@ -68,6 +68,18 @@ struct ParallelismConfig {
     int64_t ffn_tp_rank      = 0;
     bool    enable_sp        = false;
     bool    use_ub_comm      = false;
+    // V1 DP-controller (FlexLB-driven batch arrival). When true, FIFOScheduler ctor
+    // disables needFakeStream() so engines stop padding missing DP slots with fake
+    // streams — FlexLB guarantees every step arrives as a DP-aligned batch and DP0
+    // fans out via RpcService.Enqueue. Default false keeps the legacy per-worker
+    // fake-stream alignment path.
+    bool dp_controller_managed = false;
+
+    // V1 DP-controller intra-pod fan-out. Only read on DP0 when
+    // dp_controller_managed && dp_size > 1. Index == dp_rank, value == "ip:grpc_port"
+    // of each peer's RpcService endpoint. Entry at index==self-dp_rank is ignored
+    // (DP0 handles its own slot via an inline Enqueue call, no gRPC hop).
+    std::vector<std::string> dp_peer_addrs;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
 
@@ -122,21 +134,21 @@ enum class FMHAType {
 };
 
 struct FMHAConfig {
-    bool        enable_fmha                   = true;
-    bool        enable_trt_fmha               = true;
-    bool        enable_paged_trt_fmha         = true;
-    bool        enable_open_source_fmha       = true;
-    bool        enable_paged_open_source_fmha = true;
-    bool        enable_trtv1_fmha             = true;
-    bool        disable_flash_infer           = false;
-    bool        enable_xqa                    = true;
-    bool        use_aiter_pa                  = true;
-    bool        use_asm_pa                    = true;
+    bool enable_fmha                   = true;
+    bool enable_trt_fmha               = true;
+    bool enable_paged_trt_fmha         = true;
+    bool enable_open_source_fmha       = true;
+    bool enable_paged_open_source_fmha = true;
+    bool enable_trtv1_fmha             = true;
+    bool disable_flash_infer           = false;
+    bool enable_xqa                    = true;
+    bool use_aiter_pa                  = true;
+    bool use_asm_pa                    = true;
     // Default off: Triton PA on ROCm regressed vs ASM PA after the rocm_impl
     // refactor; ASM/NonAsm now own the default decode path. Set to true to opt
     // back into the Triton kernel.
-    bool        use_triton_pa                 = false;
-    int64_t     absorb_opt_len                = 1024;
+    bool        use_triton_pa  = false;
+    int64_t     absorb_opt_len = 1024;
     std::string to_string() const;
 };
 

@@ -84,7 +84,7 @@ protected:
     }
 
 #define CHECK_REQUEST_CANCELLED(generate_context)                                                                      \
-    if (generate_context.server_context->IsCancelled()) {                                                              \
+    if (generate_context.server_context && generate_context.server_context->IsCancelled()) {                           \
         generate_context.error_info   = ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");                       \
         generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.error_info);  \
         return generate_context.error_status;                                                                          \
