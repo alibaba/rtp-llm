@@ -96,6 +96,7 @@ def _args_from_model_config(
         beta_fast=int(rope_config.factor2) if rope_config.factor2 else 32,
         beta_slow=int(rope_config.factor1) if rope_config.factor1 else 1,
         original_seq_len=int(rope_config.max_pos) if rope_config.max_pos else 0,
+        kv_cache_dtype=attn_config.kv_cache_dtype,
         index_n_heads=attn_config.indexer_head_num,
         index_head_dim=attn_config.indexer_head_dim,
         index_topk=attn_config.indexer_topk,

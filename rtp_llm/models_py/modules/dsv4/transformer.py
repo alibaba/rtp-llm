@@ -8,7 +8,7 @@ mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -68,6 +68,7 @@ class V4Args:
     # runtime
     max_batch_size: int = 4
     max_seq_len: int = 4096
+    kv_cache_dtype: Any = None
     # Peak per-rank token count that the routed-MoE path must budget
     # for (Mega MoE's symmetric-memory dispatch buffer is sized from
     # this at init).  Defaults to ``max_seq_len`` downstream when not
@@ -138,6 +139,7 @@ def _block_kwargs(
         ep_size=args.ep_size,
         ep_rank=args.ep_rank,
         max_tokens_per_rank=args.max_tokens_per_rank,
+        kv_cache_dtype=args.kv_cache_dtype,
     )
 
 

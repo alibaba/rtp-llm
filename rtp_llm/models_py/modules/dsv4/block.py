@@ -5,7 +5,7 @@ twice — once for Attention and once for MoE FFN.
 """
 
 import os
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -108,6 +108,7 @@ class Block(nn.Module):
         ep_size: int = 1,
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
+        kv_cache_dtype: Any = None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -146,6 +147,7 @@ class Block(nn.Module):
             layer_weights=layer_weights,
             tp_size=tp_size,
             tp_rank=tp_rank,
+            kv_cache_dtype=kv_cache_dtype,
         )
         self.ffn = MoE(
             layer_id=layer_id,
@@ -659,6 +661,7 @@ class MTPBlock(Block):
         ep_size: int = 1,
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
+        kv_cache_dtype: Any = None,
     ):
         super().__init__(
             layer_id=layer_id,
@@ -704,6 +707,7 @@ class MTPBlock(Block):
             ep_size=ep_size,
             ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
+            kv_cache_dtype=kv_cache_dtype,
         )
         from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 
