@@ -882,9 +882,21 @@ def generate_pyi_stubs(project_root: Path) -> None:
     bugs that would otherwise show up as runtime ImportError under
     heavy logs.
     """
+    import re as _re
+
     ops_dir = project_root / "rtp_llm" / "ops"
     modules = ["libth_transformer_config", "libth_transformer", "librtp_compute_ops"]
-    failures: list = []  # list of (module, exit_code, stderr)
+    failures: list = []  # list of (module, exit_code, stderr) — real .so bugs
+    skipped: list = []   # list of (module, stderr) — host can't dlopen target
+
+    # Host-environment shape: dynamic linker can't find a system shared lib
+    # the .so links against (libcuda.so.1 on a CPU-only frontend container,
+    # libtorch.so on a venv that hasn't installed torch yet, etc.). The .so
+    # itself is fine for the wheel — runtime hosts will load it normally.
+    # Skip stubgen for that target rather than failing the build.
+    HOST_LIB_MISSING = _re.compile(
+        r"cannot open shared object file: No such file or directory"
+    )
 
     # The .so files live in rtp_llm/libs/. pybind11_stubgen runs as a
     # fresh subprocess and would do a bare `importlib.import_module(
@@ -932,12 +944,26 @@ def generate_pyi_stubs(project_root: Path) -> None:
 
         if result.returncode == 0:
             print(f"  Generated .pyi for {module}")
+        elif HOST_LIB_MISSING.search(result.stderr or ""):
+            skipped.append((module, result.stderr))
+            print(
+                f"  SKIP: pybind11_stubgen for {module} — host missing shared "
+                "lib (.so itself OK, but this build host can't dlopen it)"
+            )
         else:
             failures.append((module, result.returncode, result.stderr))
             print(f"  ERROR: pybind11_stubgen failed for {module} (exit={result.returncode})")
             print("  --- stderr (full) ---")
             print(result.stderr or "<empty>")
             print("  --- end stderr ---")
+
+    if skipped and not failures:
+        names = ", ".join(m for m, _ in skipped)
+        print(
+            f"\nWARNING: pybind11_stubgen skipped for {len(skipped)} module(s): "
+            f"{names} (host shared-lib missing). Build proceeds; runtime hosts "
+            "with the right libs will load the .so normally."
+        )
 
     if failures:
         names = ", ".join(m for m, _, _ in failures)
