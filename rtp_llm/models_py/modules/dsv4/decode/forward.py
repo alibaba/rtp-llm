@@ -38,17 +38,42 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
 def build_paged_pool_specs(
     kv_cache: Optional[Any],
     v4: Any,
+    max_seq_len: Optional[int] = None,
 ) -> Dict[int, Tuple[int, int]]:
     """Per-attn_type ``(entries_per_block, max_blocks_per_req)`` for the
     decode-FMHA impl's metadata pre-allocation.
 
     ``entries_per_block`` is derived from the framework pool tensor's
     stride on layer 0 (all layers share the same allocator geometry per
-    attn_type). Pools 3-6 get fixed 2 blocks/req; SWA gets 2 blocks (256
-    entries/block × 2 = 512-slot ring, plenty for win).
+    attn_type).
+
+    ``max_blocks_per_req`` MUST match the framework's runtime block_table
+    width — the framework uniformly allocates
+    ``ceil(max_seq_len / kernel_seq_size_per_block) + 1`` columns for
+    every pool. Under-sizing here truncates the framework block_table
+    on copy in ``update_decode_metadata_in_place``, leaving zero block-
+    ids in the unfilled tail; the captured graph then reads block_id=0
+    for real decode positions, computes a slot in pool block 0, and
+    overruns ``pool_view`` → ``index_copy_`` OOB.
     """
     if kv_cache is None or not v4.layers:
         return {}
+    if max_seq_len is None:
+        max_seq_len = int(getattr(v4, "max_seq_len", 0)) or int(
+            getattr(getattr(v4, "args", None), "max_seq_len", 0)
+        )
+        if max_seq_len <= 0:
+            raise ValueError(
+                "build_paged_pool_specs: max_seq_len required to size paged "
+                "block tables to match the framework allocator."
+            )
+    # Framework's block_table width per pool. Add +1 slack for the same
+    # reason the C++ allocator does (last-token-of-prefill + first-decode
+    # may bridge a block boundary mid-step).
+    ksb = int(getattr(kv_cache, "kernel_seq_size_per_block", 0)) or int(
+        getattr(kv_cache, "seq_size_per_block", 64)
+    )
+    max_blocks_per_req = (max_seq_len + ksb - 1) // ksb + 1
     # ``_pool_entries_per_block`` reads ``self._kv_cache`` which is only
     # bound during ``Attention.forward_decode``'s try/finally. Caller
     # (decode/forward.forward_decode) invokes us BEFORE the layer forward
@@ -83,7 +108,7 @@ def build_paged_pool_specs(
                     attn._kv_cache = kv_cache
                 entries_per_block = attn._pool_entries_per_block(attn_type)
                 if entries_per_block > 0:
-                    specs[attn_type] = (entries_per_block, 2)
+                    specs[attn_type] = (entries_per_block, max_blocks_per_req)
                     break
         return specs
     finally:
@@ -244,7 +269,9 @@ def forward_decode(
     if isinstance(fmha_impl, DSv4DecodeFmhaImpl):
         meta = fmha_impl.metadata
     else:
-        paged_specs = build_paged_pool_specs(kv_cache, v4)
+        paged_specs = build_paged_pool_specs(
+            kv_cache, v4, max_seq_len=int(v4_args.max_seq_len)
+        )
         meta = build_metadata_eager(
             v4_args,
             attn,
