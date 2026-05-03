@@ -31,7 +31,7 @@ NOT go through ``V4Transformer.forward``.
 
 import logging
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 
@@ -243,26 +243,6 @@ class DeepSeekV4Model(GptModelBase):
 
         self._materialized = False
         self._ckpt_path: str = model_config.ckpt_path
-
-        # Python-side per-block input_ids stash for prefix-reuse replay.
-        # DSV4's SWA/HCA state pools use lossy fixed-cap storage that cannot
-        # restore the compressor/indexer state at an arbitrary prefix
-        # boundary bit-exact. Rather than attempt that, we stash the new-token
-        # slice of each prefill request keyed by framework block_id (variable-
-        # length CSA_KV group since it's written every prefill regardless of
-        # which compressor ratio the layer uses). On a reuse hit, we look up
-        # the prefix block_ids, rebuild the full input_ids, and run the
-        # prefill cold (start_pos=0). Framework-level cached_tokens remains
-        # >0 because ``attn.prefix_lengths`` is set by the scheduler; we just
-        # ignore it inside forward. Disabled via DSV4_REUSE_REPLAY=0.
-        self._input_id_stash: Dict[int, torch.Tensor] = {}
-        # DSV4 paged pools all use 256 tokens/block internally (SWA 256 entries
-        # × 1 token, CSA 64 entries × 4 tokens, HCA 2 entries × 128 tokens,
-        # INDEXER 64 entries × 4 tokens) — regardless of the smoke test's
-        # ``--seq_size_per_block`` arg. We key the stash by variable-length
-        # group block_ids so 256 is the right slice size.
-        self._stash_block_size = 256
-        self._reuse_replay_enabled = os.environ.get("DSV4_REUSE_REPLAY", "1") != "0"
 
         # Optional on-demand timeline capture. Set DSV4_PROFILE_TRACE=/path/trace.json
         # and touch /tmp/dsv4_profile_trigger to capture the NEXT forward only.
