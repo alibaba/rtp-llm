@@ -270,13 +270,17 @@ class V4Transformer(nn.Module):
                     ic.set_cp_ctx(cp_ctx)
 
     def _hc_head_reduce(self, x: torch.Tensor) -> torch.Tensor:
-        """[B, S, hc, d] -> [B, S, d]"""
-        # Try vendored TileKernels mhc_head first (~1 fused kernel vs 5 ops);
-        # falls back to the REF rewrite below on JIT-fail / unsupported shape.
+        """Reduce the hc axis.  Accepts ``[B, S, hc, d] -> [B, S, d]`` or
+        the flat ``[T, hc, d] -> [T, d]`` layout that vLLM uses.  Uses
+        ``dim=-2`` / ``flatten(-2)`` so both shapes go through the same
+        code path; TK is gated on 4D and wraps 3D via unsqueeze/squeeze
+        so the fast path stays available after the forward_layers shim
+        is removed."""
         from rtp_llm.models_py.modules.dsv4._mhc_tilelang import tk_mhc_head
 
+        tk_in = x.unsqueeze(0) if x.dim() == 3 else x
         tk_y = tk_mhc_head(
-            x,
+            tk_in,
             self.hc_head_fn,
             self.hc_head_scale,
             self.hc_head_base,
@@ -285,15 +289,15 @@ class V4Transformer(nn.Module):
             hc_mult=self.hc_mult,
         )
         if tk_y is not None:
-            return tk_y
+            return tk_y.squeeze(0) if x.dim() == 3 else tk_y
         shape, dtype = x.size(), x.dtype
-        x_flat = x.flatten(2).float()
+        x_flat = x.flatten(-2).float()  # [..., hc*d]
         rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
         mixes = F.linear(x_flat, self.hc_head_fn) * rsqrt
         pre = (
             torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
         )
-        y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=2)
+        y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=-2)
         return y.to(dtype)
 
     @torch.inference_mode()
@@ -301,6 +305,7 @@ class V4Transformer(nn.Module):
         self,
         input_ids: torch.Tensor,  # [T_total] int (== [B] for q_len=1)
         attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        kv_cache=None,
     ) -> torch.Tensor:
         """Decode-only forward.
 
@@ -316,7 +321,7 @@ class V4Transformer(nn.Module):
         h = self.embed(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
         for layer in self.layers:
-            h = layer.forward_decode(h, attn_metadata, input_ids_2d)
+            h = layer.forward_decode(h, attn_metadata, input_ids_2d, kv_cache=kv_cache)
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         h = self.norm(h)  # [B, q_len, dim]
         # Return packed [T_total, dim] for the framework.
@@ -324,7 +329,13 @@ class V4Transformer(nn.Module):
 
     @torch.inference_mode()
     def forward(
-        self, input_ids: torch.Tensor, start_pos=0, apply_lm_head: bool = True
+        self,
+        input_ids: torch.Tensor,
+        start_pos=0,
+        apply_lm_head: bool = True,
+        kv_cache=None,
+        block_tables_by_type=None,
+        sequence_lengths: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Standalone forward.
 
@@ -394,10 +405,41 @@ class V4Transformer(nn.Module):
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, S, hc, d]
         if _rt_on:
             _rt.record("embed_hc_expanded", h)
+
+        # Bridge to flat Block.forward(x:[T,hc,d], input_ids:[T], positions:[T],
+        # cu_seqlens:[B+1]). Standalone tests run with B==1; we flatten before
+        # the loop and restore at the end so the hc_head_reduce / norm / rt
+        # record paths below see the original [B, S, hc, d] shape.
+        assert B == 1, (
+            f"V4Transformer.forward standalone path expects B==1; got B={B}. "
+            "Production inference goes through prefill/forward.py::forward_layers, "
+            "which already handles multi-request via cu_seqlens."
+        )
+        h_flat = h.squeeze(0)  # [S, hc, d]
+        input_ids_flat = input_ids.squeeze(0)  # [S]
+        _start_pos_int = (
+            int(start_pos)
+            if isinstance(start_pos, int)
+            else int(start_pos.view(-1)[0].item())
+        )
+        positions = _start_pos_int + torch.arange(
+            S, device=input_ids.device, dtype=torch.int64
+        )  # [S]
+        cu_seqlens = torch.tensor(
+            [0, S], dtype=torch.int64, device=input_ids.device
+        )  # [2]
         for li, layer in enumerate(self.layers):
-            h = layer(h, start_pos, input_ids)
+            h_flat = layer(
+                h_flat,
+                input_ids_flat,
+                positions,
+                cu_seqlens,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )
             if _rt_on:
-                _rt.record(f"layer{li:02d}_out", h)
+                _rt.record(f"layer{li:02d}_out", h_flat)
+        h = h_flat.unsqueeze(0)  # [1, S, hc, d]
         h = self._hc_head_reduce(h)  # [B, S, d]
         if _rt_on:
             _rt.record("hc_reduced", h)

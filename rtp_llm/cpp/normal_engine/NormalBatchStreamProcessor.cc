@@ -25,6 +25,7 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     model_input_gatherer_config_.kv_cache_group_nums        = cache_config.groupNums();
     model_input_gatherer_config_.layer_to_kv_cache_group_id = cache_config.layer_to_group_id;
+    model_input_gatherer_config_.layer_to_group_ids_dpsk_v4 = cache_config.layer_to_group_ids;
     model_input_gatherer_config_.kv_cache_group_types       = cache_config.group_types;
     model_input_gatherer_config_.warm_up                    = warm_up;
     model_input_gatherer_config_.enable_detail_log          = profiling_debug_logging_config.enable_detail_log;

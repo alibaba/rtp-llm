@@ -132,8 +132,8 @@ def write_compressed_k_decode(
 # Paged write: target framework BlockPool directly via a typed pool view.
 # Same arithmetic as the register_buffer ops above, but slot_mapping is a
 # global flat slot ``= block_id * entries_per_block + offset_in_block`` and
-# the destination is a [num_blocks * entries_per_block, vec_dim] view of the
-# raw uint8 pool tensor produced by ``PoolDescriptor.view()``.
+# the destination is a [num_blocks * entries_per_block, vec_dim] typed view
+# of the raw uint8 pool tensor (built inline by ``Attention._pool_view``).
 # ---------------------------------------------------------------------------
 
 
@@ -158,8 +158,8 @@ def write_kv_to_pool(
             into ``pool_view``. ``-1`` = skip (only honored when
             ``mask_negative=True``).
         pool_view: ``[num_blocks * entries_per_block, vec_dim]`` typed
-            view of the framework BlockPool (from
-            ``PoolDescriptor.view()``). Modified in place.
+            view of the framework BlockPool (built inline by
+            ``Attention._pool_view``). Modified in place.
         mask_negative: when False (e.g. SWA which always emits a valid
             slot), use unconditional ``index_copy_`` — the fast path.
             When True (CSA/HCA boundary writes), use the safe-redirect

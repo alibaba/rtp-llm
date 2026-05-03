@@ -189,6 +189,12 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
         model_input.kv_cache_block_id = torch::zeros(
             {(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size, (int64_t)max_blocks_num}, pinned_i32);
         model_input.kv_cache_layer_to_group = torch::empty({(int64_t)config_.num_layers}, pinned_i32);
+        if (!config_.layer_to_group_ids_dpsk_v4.empty()) {
+            // DSV4: max 5 gids per layer (CSA-layer upper bound).
+            constexpr int64_t kDSV4MaxGroupsPerLayer = 5;
+            model_input.kv_cache_layer_to_group_dpsk_v4 =
+                torch::empty({(int64_t)config_.num_layers * kDSV4MaxGroupsPerLayer}, pinned_i32);
+        }
         model_input.kv_cache_group_types    = torch::empty({(int64_t)config_.kv_cache_group_nums}, pinned_i32);
         model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 2}, pinned_i32);
         model_input.cache_keys = torch::empty({(int64_t)total_context_batch_size, (int64_t)max_blocks_num}, pinned_i64);
@@ -221,6 +227,17 @@ void NormalModelInputGatherer::initializeKvCacheMetadata(GptModelInputs& model_i
         std::memcpy(model_input.kv_cache_layer_to_group.data_ptr(),
                     config_.layer_to_kv_cache_group_id.data(),
                     num_layers * sizeof(int32_t));
+    }
+    if (model_input.kv_cache_layer_to_group_dpsk_v4.defined()) {
+        constexpr size_t kDSV4MaxGroupsPerLayer = 5;
+        auto*            dst                    = model_input.kv_cache_layer_to_group_dpsk_v4.data_ptr<int32_t>();
+        const auto&      src                    = config_.layer_to_group_ids_dpsk_v4;
+        for (size_t l = 0; l < src.size(); ++l) {
+            const auto& row = src[l];
+            for (size_t s = 0; s < kDSV4MaxGroupsPerLayer; ++s) {
+                dst[l * kDSV4MaxGroupsPerLayer + s] = (s < row.size()) ? static_cast<int32_t>(row[s]) : -1;
+            }
+        }
     }
     if (model_input.kv_cache_group_types.defined()) {
         auto* dst = model_input.kv_cache_group_types.data_ptr<int32_t>();
