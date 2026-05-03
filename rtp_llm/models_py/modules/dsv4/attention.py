@@ -948,8 +948,14 @@ class Attention(nn.Module):
 
         For each of a row's valid new tokens at local index i:
             global_pos[b] = sp[b] + src_start[b] + i
-            ring_pos[b]   = global_pos[b] % win
-            slot[b]       = bt[b, ring_pos[b] // eb] * eb + (ring_pos[b] % eb)
+            block[b]      = global_pos[b] // eb
+            slot[b]       = bt[b, block[b]] * eb + (global_pos[b] % eb)
+
+        The attention-side dense tensor still exposes a ring indexed by
+        ``global_pos % win``.  The framework block table, however, is sparse
+        and aligned to absolute token blocks (old non-tail entries are -1),
+        so pool writes must address by absolute block position rather than
+        ``ring_pos // eb``.
 
         Two write shapes depending on per-row seqlen vs win:
           * seqlen <= win: write all seqlen tokens (each to a unique
@@ -1026,9 +1032,8 @@ class Attention(nn.Module):
         global_pos = (
             sp_t.unsqueeze(1) + src_start_per_row.unsqueeze(1) + j.unsqueeze(0)
         )  # [B, max_n_write]
-        ring_pos = global_pos % win
-        block_in_seq = ring_pos // eb
-        in_block = ring_pos % eb
+        block_in_seq = global_pos // eb
+        in_block = global_pos % eb
         bt_long = bt.to(torch.long)
         in_capacity = block_in_seq < max_blocks
         safe_in_seq = torch.where(
@@ -1051,6 +1056,85 @@ class Attention(nn.Module):
         source_flat = source.reshape(bsz * max_n_write, self.head_dim)
         slot_mapping = slot.reshape(-1)
         write_kv_to_pool(source_flat, slot_mapping, pool_view, mask_negative=True)
+
+    def _prefill_read_swa_from_pool(
+        self,
+        bsz: int,
+        sp: Union[int, torch.Tensor],
+        row_seqlens: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        """Reconstruct the dense SWA ring ``[B, window_size, head_dim]`` from
+        sparse absolute-token block tables.
+
+        ``topk_idxs`` indexes SWA by ring slot (``global_pos % window_size``),
+        while allocator block tables retain only the last absolute token
+        blocks.  For each ring slot we locate the latest global position that
+        maps to it and gather that absolute pool slot.
+        """
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+
+        if self._kv_cache is None or self._block_tables_by_type is None:
+            return None
+        bt = self._block_tables_by_type.get(SWA_KV)
+        if bt is None or bt.numel() == 0:
+            return None
+        pool_view = self._pool_view(SWA_KV)
+        eb = self._pool_entries_per_block(SWA_KV)
+        if pool_view is None or eb <= 0:
+            return None
+
+        win = self.window_size
+        if win <= 0:
+            return None
+        device = pool_view.device
+        dtype = torch.bfloat16
+        max_blocks = bt.shape[1]
+
+        if isinstance(sp, torch.Tensor):
+            sp_t = sp.to(device=device, dtype=torch.long)
+            if sp_t.dim() == 0:
+                sp_t = sp_t.unsqueeze(0)
+            if sp_t.numel() == 1 and bsz > 1:
+                sp_t = sp_t.expand(bsz)
+        else:
+            sp_t = torch.full((bsz,), int(sp), device=device, dtype=torch.long)
+
+        if row_seqlens is None:
+            seq_t = torch.full((bsz,), win, device=device, dtype=torch.long)
+        else:
+            seq_t = row_seqlens.to(device=device, dtype=torch.long)
+            if seq_t.dim() == 0:
+                seq_t = seq_t.unsqueeze(0)
+            if seq_t.numel() == 1 and bsz > 1:
+                seq_t = seq_t.expand(bsz)
+
+        last_global = sp_t + seq_t - 1  # [B]
+        window_start = torch.clamp(last_global - win + 1, min=0)
+        ring_pos = torch.arange(win, device=device, dtype=torch.long)  # [W]
+        delta = torch.remainder(last_global.unsqueeze(1) - ring_pos.unsqueeze(0), win)
+        global_pos = last_global.unsqueeze(1) - delta  # [B, W]
+        valid_pos = (seq_t.unsqueeze(1) > 0) & (global_pos >= window_start.unsqueeze(1))
+
+        block_in_seq = global_pos // eb
+        in_block = global_pos % eb
+        in_capacity = (block_in_seq >= 0) & (block_in_seq < max_blocks)
+        safe_block = torch.where(
+            in_capacity, block_in_seq, torch.zeros_like(block_in_seq)
+        )
+        bt_long = bt.to(torch.long)
+        b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
+        block_id = bt_long[:bsz][b_idx, safe_block]
+        valid = valid_pos & in_capacity & (block_id > 0)
+        safe_slot = torch.where(
+            valid, block_id * eb + in_block, torch.zeros_like(block_id)
+        )
+
+        gathered = pool_view.index_select(0, safe_slot.reshape(-1))
+        if gathered.dtype != dtype:
+            gathered = gathered.to(dtype)
+        zero_row = torch.zeros((), dtype=dtype, device=device)
+        out = torch.where(valid.reshape(-1).unsqueeze(-1), gathered, zero_row)
+        return out.view(bsz, win, self.head_dim).contiguous()
 
     def _set_compressor_pool_context(self) -> None:
         """#50: resolve CSA/HCA + INDEXER pool views + per-request block
@@ -1178,7 +1262,12 @@ class Attention(nn.Module):
         )  # [B*T, vec_dim]
         return out_flat.view(bsz, T, vec_dim).contiguous()
 
-    def _gather_kv_cache_dense_from_pool(self, bsz: int) -> Optional[torch.Tensor]:
+    def _gather_kv_cache_dense_from_pool(
+        self,
+        bsz: int,
+        sp: Union[int, torch.Tensor],
+        row_seqlens: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
         """Phase E1: reconstruct the ``[bsz, kv_cache_size, head_dim]``
         dense tensor that ``self.kv_cache[:bsz]`` presents, but sourced
         from the framework pools instead of the register_buffer mirror.
@@ -1205,7 +1294,7 @@ class Attention(nn.Module):
             else 0
         )
 
-        swa_dense = self._prefill_paged_read_kv(SWA_KV, bsz, win, hd, dtype, device)
+        swa_dense = self._prefill_read_swa_from_pool(bsz, sp, row_seqlens)
         if swa_dense is None:
             return None
         if T_cmp <= 0 or self.compress_ratio == 0:
@@ -1940,6 +2029,11 @@ class Attention(nn.Module):
             any_cont = sp_int > 0
 
         if is_prefill_attn:
+            row_seqlens_for_pool = (
+                sequence_lengths
+                if sequence_lengths is not None
+                else torch.full((bsz,), seqlen, device=device, dtype=torch.long)
+            )
             # Phase E5b: direct SWA pool write from kv_full (no register_buffer
             # intermediary).  Ring-buffered addressing handled inside
             # ``_prefill_write_swa_to_pool``; prefix KV for continuation prefill
@@ -1974,7 +2068,9 @@ class Attention(nn.Module):
                         # through pool read — sp==0 rows' KV was just
                         # written to the pool above, so round-trip is
                         # byte-equal.
-                        kv_cat = self._gather_kv_cache_dense_from_pool(bsz)
+                        kv_cat = self._gather_kv_cache_dense_from_pool(
+                            bsz, start_pos, row_seqlens_for_pool
+                        )
                         assert kv_cat is not None, (
                             "Phase E5b: continuation prefill requires paged "
                             "ctx (pass kv_cache=... + block_tables_by_type=... "
@@ -1984,7 +2080,9 @@ class Attention(nn.Module):
                     if not any_cont:
                         kv_cat = kv_full
                     else:
-                        kv_cat = self._gather_kv_cache_dense_from_pool(bsz)
+                        kv_cat = self._gather_kv_cache_dense_from_pool(
+                            bsz, start_pos, row_seqlens_for_pool
+                        )
                         assert (
                             kv_cat is not None
                         ), "Phase E5b: continuation prefill requires paged ctx."
@@ -1992,7 +2090,9 @@ class Attention(nn.Module):
                 if not any_cont:
                     kv_cat = kv_full
                 else:
-                    kv_cat = self._gather_kv_cache_dense_from_pool(bsz)
+                    kv_cat = self._gather_kv_cache_dense_from_pool(
+                        bsz, start_pos, row_seqlens_for_pool
+                    )
                     assert (
                         kv_cat is not None
                     ), "Phase E5b: continuation prefill requires paged ctx."
