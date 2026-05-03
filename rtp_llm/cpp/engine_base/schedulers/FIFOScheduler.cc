@@ -31,6 +31,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     // the missing slots with fake streams. Keep legacy behavior otherwise.
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0
                            && !parallelism_config.dp_controller_managed),
+    dp_controller_managed_(parallelism_config.dp_controller_managed),
     metrics_reporter_(metrics_reporter) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d]",
                      max_generate_batch_size_,
@@ -220,8 +221,10 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             // Check timeout: if expired, treat as normal stream
             if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
                 force_batch = false;
-            } else if (info.count < stream->batchGroupSize()) {
-                // Group incomplete, skip this stream
+            } else if (!dp_controller_managed_ && info.count < stream->batchGroupSize()) {
+                // Group incomplete, skip this stream.
+                // 在 dp_controller_managed 下,FlexLB 已做过跨 DP 切分,每个 DP 本地队列每
+                // 个 group 只会有 1 个 slot,本地 completeness 由 FlexLB 保证 — 不再等。
                 it++;
                 continue;
             }
@@ -254,6 +257,12 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             // Lock batch type based on first scheduled stream
             if (new_streams.size() == 1 && force_batch && stream->batchGroupId() != -1) {
                 force_batch_group_id = stream->batchGroupId();
+            }
+
+            // V1: normal(非 force_batch) 请求在 dp_controller_managed 下不得与其他请求
+            // 合进同一步 — FlexLB 不期望引擎自行凑批。
+            if (dp_controller_managed_ && !force_batch) {
+                break;
             }
         }
         it++;
