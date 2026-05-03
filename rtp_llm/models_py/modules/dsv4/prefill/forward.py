@@ -293,26 +293,13 @@ class DSv4WriteCacheStoreOp(nn.Module):
             block_ids_2d: torch.Tensor = self.by_group_host[gid]
             if block_ids_2d is None or block_ids_2d.numel() == 0:
                 continue
-            if attn_type in _LINEAR_ATTN_TYPES:
-                block_ids_2d = block_ids_2d[:, :2].contiguous()
             layer_kv: LayerKVCache = kv_cache.get_layer_cache(layer_idx, attn_type_enum)
-            pool_tensor: torch.Tensor = layer_kv.kv_cache_base
-            # pool_tensor.size(1) is in ELEMENTS (kv_block_stride_elems
-            # per MemoryLayoutStrategy::processKVTensor reshape). State
-            # pools use fp32 (element_size=4) so per-block bytes is 4×
-            # the element count; paged pools use uint8 (element_size=1)
-            # so the count is already in bytes. Either way, multiply by
-            # element_size() to get the per-block stride in bytes —
-            # which matches what convertIndexToBuffer reports on decode.
-            stride_bytes = int(pool_tensor.size(1)) * int(pool_tensor.element_size())
             compute_ops.write_cache_store(
                 self.input_lengths,
                 self.prefix_lengths,
                 block_ids_2d,
                 self.cache_store_inputs,
                 layer_kv,
-                group_id=gid,
-                kv_block_stride_bytes=stride_bytes,
             )
 
 
