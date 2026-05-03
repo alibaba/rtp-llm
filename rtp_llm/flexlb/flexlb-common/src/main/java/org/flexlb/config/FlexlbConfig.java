@@ -157,8 +157,9 @@ public class FlexlbConfig {
     private int dpBatchSizeMax = 0;
 
     /**
-     * Batch window (ms). First request entering an empty PrefillQueue starts the timer;
-     * timeout flushes whatever has accumulated. Pick around one prefill step duration.
+     * Batch window (ms). First request entering an empty global batcher starts the
+     * timer; timeout flushes whatever has accumulated. Pick around one prefill step
+     * duration.
      */
     private long dpBatchWindowMs = 30;
 
@@ -170,7 +171,10 @@ public class FlexlbConfig {
     private long dpBatchTimeoutMs = 100;
 
     /**
-     * dp_rank assignment strategy. V1-α only supports "RR".
+     * dp_rank assignment strategy within a single batch. V1 only supports "RR"
+     * (positional, the i-th request goes to slot {@code i % dpSize}). Cross-batch
+     * fairness lives one level up in {@link #dpGroupSelector}, since each batch
+     * is dispatched as a unit to one DP group.
      * V2 plans to add "LPT" / "CACHE_AWARE_LPT" for length-aware bin packing.
      */
     private String dpAssignStrategy = "RR";
@@ -179,6 +183,15 @@ public class FlexlbConfig {
      * Ordered traffic policy rules. A matched rule forces the whole request to a worker group.
      */
     private volatile TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
+
+    /**
+     * Plug-point name for the {@code GroupSelector} consulted by
+     * {@code DefaultDispatchPlanner} once per drained batch. V1 ships "RR"
+     * (round-robin across DP-enabled pods, cursor advances per batch).
+     * Future strategies (cache-affinity, per-rank load-aware) plug in by
+     * implementing {@code GroupSelector} and being looked up by this name.
+     */
+    private String dpGroupSelector = "RR";
 
     /**
      * Get load balancing strategy for a role type

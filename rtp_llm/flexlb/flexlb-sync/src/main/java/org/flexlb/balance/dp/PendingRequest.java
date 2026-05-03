@@ -7,11 +7,10 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Single request waiting in a {@link PrefillQueue} for batch flush.
- * <p>
- * Once the batch is built and Master.Enqueue returns Ack, the scheduler completes
- * {@link #future()} with the assembled {@link Response} so the upstream {@code Mono}
- * (created in {@link org.flexlb.service.RouteService}) resumes and the HTTP caller
+ * One placed request inside a {@link PrefillBatch} (prefill + decode workers
+ * already chosen by {@link DispatchPlanner}). Once Master.Enqueue is acked, the
+ * scheduler completes {@link #future()} so the upstream {@code Mono} created
+ * in {@link org.flexlb.service.RouteService} resumes and the HTTP caller
  * receives a routing decision.
  */
 public record PendingRequest(
@@ -28,7 +27,7 @@ public record PendingRequest(
         return new PendingRequest(ctx, prefill, decode, future, System.nanoTime() / 1000);
     }
 
-    /** Wall-clock wait so PrefillQueue can force-flush a single starving request. */
+    /** Wall-clock wait so the batcher can force-flush a single starving request. */
     public long waitMicros() {
         return System.nanoTime() / 1000 - enqueuedAtMicros;
     }

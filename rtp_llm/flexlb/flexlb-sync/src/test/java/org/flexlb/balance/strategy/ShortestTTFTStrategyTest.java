@@ -8,6 +8,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -80,6 +81,49 @@ class ShortestTTFTStrategyTest {
         }
         Assertions.assertTrue(result.isSuccess(), "Result should be successful but got: " + result.getMessage());
         Assertions.assertEquals("127.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void dp_enabled_worker_is_scored_alongside_single_rank_workers() {
+        // Backward-compat path: legacy single-shot requests (max_new_tokens=1,
+        // beam search, SP-disabled, or dpBalanceEnabled=false) bypass
+        // DpBatchScheduler and route via ShortestTTFT. DP-enabled workers must
+        // be scored, not filtered out — KvCacheManager.findMatchingEngines now
+        // returns MAX-per-rank for DP engines, so the score is honest.
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillStatusMap.clear();
+
+        WorkerStatus dpWorker = createWorkerStatus("10.99.0.1", 50,
+                new HashMap<>(), new HashMap<>(), new HashMap<>(), new ConcurrentHashMap<>());
+        dpWorker.setDpSize(4);
+        prefillStatusMap.put("10.99.0.1:8080", dpWorker);
+
+        Request req = new Request();
+        req.setSeqLen(1000);
+        req.setRequestId(424242L);
+        req.setBlockCacheKeys(new ArrayList<>());
+
+        EngineHealthReporter reporter = Mockito.mock(EngineHealthReporter.class);
+        CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
+        ResourceMeasureFactory rf = Mockito.mock(ResourceMeasureFactory.class);
+        org.flexlb.balance.resource.ResourceMeasure rm = Mockito.mock(org.flexlb.balance.resource.ResourceMeasure.class);
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        Mockito.when(rf.getMeasure(Mockito.any())).thenReturn(rm);
+        Mockito.when(rm.isResourceAvailable(Mockito.any())).thenReturn(true);
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any()))
+                .thenReturn(new HashMap<>());
+
+        ShortestTTFTStrategy strategy = new ShortestTTFTStrategy(engineWorkerStatus, reporter, cacheAwareService, rf);
+        BalanceContext bc = new BalanceContext();
+        bc.setConfig(new FlexlbConfig());
+        bc.setRequest(req);
+
+        ServerStatus result = strategy.select(bc, RoleType.PREFILL, null);
+        Assertions.assertTrue(result.isSuccess(),
+                "DP worker must be a valid candidate when it's the only one available");
+        Assertions.assertEquals("10.99.0.1", result.getServerIp());
     }
 
     WorkerStatus createWorkerStatus(String ip,

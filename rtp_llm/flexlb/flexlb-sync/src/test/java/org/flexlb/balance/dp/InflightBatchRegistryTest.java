@@ -92,7 +92,7 @@ class InflightBatchRegistryTest {
     }
 
     @Test
-    void evict_stale_drops_old_entries() throws Exception {
+    void evict_stale_drops_old_entries_and_increments_counter() throws Exception {
         // Inject a "long-ago" batch
         PrefillBatch batch = makeBatch(2, prefill, decode);
         reg.register(42L, batch);
@@ -101,10 +101,13 @@ class InflightBatchRegistryTest {
         long longAgoMs = System.currentTimeMillis() - InflightBatchRegistry.STALE_THRESHOLD_MS - 1000;
         forceCreatedAt(reg, 42L, longAgoMs);
 
+        long evictedBefore = reg.getEvictedCount();
         reg.evictStale();
 
         assertEquals(0, reg.sizeBatches(), "batch older than STALE_THRESHOLD_MS must be evicted");
         assertEquals(0, reg.sizeRequests());
+        assertEquals(evictedBefore + 1, reg.getEvictedCount(),
+                "metric counter must increment by the number of evicted batches");
     }
 
     @Test
@@ -114,6 +117,104 @@ class InflightBatchRegistryTest {
         reg.evictStale();
         assertEquals(1, reg.sizeBatches(), "fresh entries must not be evicted");
         assertEquals(2, reg.sizeRequests());
+        assertEquals(0, reg.getEvictedCount(), "metric counter must stay 0 when nothing was evicted");
+    }
+
+    @Test
+    void stale_threshold_is_well_above_typical_request_lifetime() {
+        // Guard against accidentally bumping the threshold back down to a value
+        // small enough to be mistaken for an "expected completion time". 10 minutes
+        // is the V1-α design floor — long enough that explicit cleanup (Cancel /
+        // completion notification) handles every healthy request.
+        assertTrue(InflightBatchRegistry.STALE_THRESHOLD_MS >= 10L * 60_000L,
+                "STALE_THRESHOLD_MS must remain a memory-leak safety net, not a normal cleanup mechanism");
+    }
+
+    // ============== Per-request state machine ==============
+
+    @Test
+    void newly_registered_request_is_PENDING_ACK() {
+        PrefillBatch batch = makeBatch(4, prefill, decode);
+        reg.register(1L, batch);
+        for (PendingRequest r : batch.requests()) {
+            assertEquals(InflightBatchRegistry.RequestState.PENDING_ACK, reg.getState(r.requestId()));
+        }
+    }
+
+    @Test
+    void markActive_succeeds_from_PENDING_ACK() {
+        PrefillBatch batch = makeBatch(2, prefill, decode);
+        reg.register(1L, batch);
+        long reqId = batch.requests().get(0).requestId();
+
+        assertTrue(reg.markActive(reqId));
+        assertEquals(InflightBatchRegistry.RequestState.ACTIVE, reg.getState(reqId));
+    }
+
+    @Test
+    void markActive_fails_after_cancel_tombstone() {
+        // The whole point of the tombstone: if Cancel beats the Enqueue ack,
+        // markActive (called from handleAck) must NOT undo the cancellation.
+        PrefillBatch batch = makeBatch(2, prefill, decode);
+        reg.register(1L, batch);
+        long reqId = batch.requests().get(0).requestId();
+
+        InflightBatchRegistry.RequestState prev = reg.markCancelled(reqId);
+        assertEquals(InflightBatchRegistry.RequestState.PENDING_ACK, prev);
+        assertEquals(InflightBatchRegistry.RequestState.CANCELLED, reg.getState(reqId));
+
+        assertFalse(reg.markActive(reqId),
+                "markActive must NOT silently overwrite a CANCELLED tombstone — "
+                + "this is what guarantees handleAck sees the cancel-before-ack race");
+        assertEquals(InflightBatchRegistry.RequestState.CANCELLED, reg.getState(reqId));
+    }
+
+    @Test
+    void markCancelled_returns_previous_state() {
+        PrefillBatch batch = makeBatch(2, prefill, decode);
+        reg.register(1L, batch);
+        long reqId = batch.requests().get(0).requestId();
+
+        // First cancel: was PENDING_ACK
+        assertEquals(InflightBatchRegistry.RequestState.PENDING_ACK, reg.markCancelled(reqId));
+        // Re-entrant cancel: was CANCELLED
+        assertEquals(InflightBatchRegistry.RequestState.CANCELLED, reg.markCancelled(reqId));
+    }
+
+    @Test
+    void markCancelled_after_active_returns_active() {
+        PrefillBatch batch = makeBatch(2, prefill, decode);
+        reg.register(1L, batch);
+        long reqId = batch.requests().get(0).requestId();
+
+        assertTrue(reg.markActive(reqId));
+        assertEquals(InflightBatchRegistry.RequestState.ACTIVE, reg.markCancelled(reqId),
+                "previous state was ACTIVE — caller knows to do the standard cascade Cancel");
+    }
+
+    @Test
+    void getState_unknown_request_returns_null() {
+        assertNull(reg.getState(999_999L));
+    }
+
+    @Test
+    void state_is_cleared_when_request_removed() {
+        PrefillBatch batch = makeBatch(2, prefill, decode);
+        reg.register(1L, batch);
+        long reqId = batch.requests().get(0).requestId();
+
+        reg.removeRequest(reqId);
+        assertNull(reg.getState(reqId), "state must be cleared so retired ids don't leak memory");
+    }
+
+    @Test
+    void state_is_cleared_when_batch_removed() {
+        PrefillBatch batch = makeBatch(3, prefill, decode);
+        reg.register(7L, batch);
+        reg.remove(7L);
+        for (PendingRequest r : batch.requests()) {
+            assertNull(reg.getState(r.requestId()));
+        }
     }
 
     @Test
