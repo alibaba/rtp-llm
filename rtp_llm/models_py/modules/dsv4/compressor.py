@@ -228,6 +228,65 @@ class Compressor(nn.Module):
         )
         return valid, safe_slot
 
+    def _compute_tail_pool_slots(
+        self,
+        bsz: int,
+        T: int,
+        block_table: torch.Tensor,
+        eb: int,
+        device: torch.device,
+    ) -> tuple:
+        """Slot math for fixed/tail STATE pools.
+
+        DSV4 STATE groups are allocated by the same tail-group allocator as
+        SWA_KV, so their block table is sparse in absolute token-block space.
+        The state tensor itself is dense and request-local.  Build that dense
+        view from the last valid physical blocks in each row instead of using
+        ``block_table[:, 0]``, ``block_table[:, 1]`` directly.
+        """
+        pos = torch.arange(T, device=device, dtype=torch.long)
+        block_in_state = pos // eb
+        in_block = pos % eb
+
+        bt_long = block_table[:bsz].to(device=device, dtype=torch.long)
+        tail_cap = int(block_in_state.max().item()) + 1 if T > 0 else 0
+        tail_cap = min(tail_cap, int(bt_long.shape[1]))
+        if tail_cap <= 0:
+            empty = torch.empty((bsz, 0), dtype=torch.bool, device=device)
+            empty_slot = torch.empty((bsz, 0), dtype=torch.long, device=device)
+            return empty, empty_slot
+
+        valid_bt = bt_long > 0
+        valid_count = valid_bt.sum(dim=1)  # [B]
+        tail_count = torch.clamp(valid_count, max=tail_cap)
+        start_rank = torch.clamp(valid_count - tail_cap, min=0)
+        tail_slot = torch.arange(tail_cap, device=device, dtype=torch.long).unsqueeze(0)
+        wanted_rank = start_rank.unsqueeze(1) + tail_slot
+        has_tail = tail_slot < tail_count.unsqueeze(1)
+
+        valid_rank = valid_bt.to(torch.long).cumsum(dim=1) - 1
+        match = valid_bt.unsqueeze(1) & (
+            valid_rank.unsqueeze(1) == wanted_rank.unsqueeze(-1)
+        )
+        tail_indices = match.to(torch.long).argmax(dim=2)
+        safe_tail_indices = torch.where(
+            has_tail, tail_indices, torch.zeros_like(tail_indices)
+        )
+        tail_block_ids = bt_long.gather(1, safe_tail_indices)
+
+        block_idx = block_in_state.unsqueeze(0).expand(bsz, -1)
+        in_tail_cap = block_idx < tail_cap
+        safe_block_idx = torch.where(
+            in_tail_cap, block_idx, torch.zeros_like(block_idx)
+        )
+        block_id = tail_block_ids.gather(1, safe_block_idx)
+        tail_valid = has_tail.gather(1, safe_block_idx)
+        valid = in_tail_cap & tail_valid & (block_id > 0)
+        safe_slot = torch.where(
+            valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
+        )
+        return valid, safe_slot
+
     def _bind_state_from_pool(
         self, bsz: int, is_fresh_prefill: bool, device: torch.device
     ) -> None:
@@ -256,7 +315,7 @@ class Compressor(nn.Module):
                 device=device,
             )
             return
-        valid, safe_slot = self._compute_pool_slots(
+        valid, safe_slot = self._compute_tail_pool_slots(
             bsz, T, self._state_block_table, self._state_eb, device
         )
         gathered = self._state_pool_view.index_select(
@@ -286,7 +345,7 @@ class Compressor(nn.Module):
             return
         device = self.kv_state.device
         T = self._state_rows
-        valid, safe_slot = self._compute_pool_slots(
+        valid, safe_slot = self._compute_tail_pool_slots(
             bsz, T, self._state_block_table, self._state_eb, device
         )
         merged = torch.cat(
