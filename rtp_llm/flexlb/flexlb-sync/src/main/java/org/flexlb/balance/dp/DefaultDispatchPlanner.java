@@ -2,8 +2,6 @@ package org.flexlb.balance.dp;
 
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
-import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -12,46 +10,32 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.Logger;
+import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
+import org.flexlb.balance.strategy.LoadBalancer;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
-/**
- * V1 planner: one drain → one batch → one DP group.
- *
- * <pre>
- * drained ──► filter DP-enabled candidates
- *          ──► GroupSelector.select       (pluggable; default RR)
- *          ──► for each request: decode = configured decode LoadBalancer
- *          ──► PrefillBatch(group, requests, dpSize)
- * </pre>
- *
- * <p>Failure modes:
- * <ul>
- *   <li>No DP-enabled candidate alive ⇒ every request fails {@link StrategyErrorType#NO_PREFILL_WORKER}.</li>
- *   <li>Decode selection fails for one request ⇒ that request fails
- *       {@link StrategyErrorType#NO_DECODE_WORKER}; the rest still ship.</li>
- *   <li>Decode fails for ALL requests ⇒ no batch is produced (the prefill side
- *       does no work it cannot pair to a decode).</li>
- * </ul>
- */
 @Component
 @DependsOn({"weightedCacheStrategy", "shortestTTFTStrategy", "randomStrategy"})
 public class DefaultDispatchPlanner implements DispatchPlanner {
 
     private final EngineWorkerStatus engineWorkerStatus;
     private final ResourceMeasureFactory resourceMeasureFactory;
-    private final GroupSelector groupSelector;
+    private final Map<String, GroupSelector> groupSelectors;
 
     public DefaultDispatchPlanner(EngineWorkerStatus engineWorkerStatus,
                                   ResourceMeasureFactory resourceMeasureFactory,
-                                  GroupSelector groupSelector) {
+                                  List<GroupSelector> allSelectors) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.resourceMeasureFactory = resourceMeasureFactory;
-        this.groupSelector = groupSelector;
+        this.groupSelectors = allSelectors.stream()
+                .collect(Collectors.toMap(GroupSelector::name, Function.identity()));
     }
 
     @Override
@@ -65,6 +49,13 @@ public class DefaultDispatchPlanner implements DispatchPlanner {
         if (candidates.isEmpty()) {
             return DispatchPlan.allFailed(drained, StrategyErrorType.NO_PREFILL_WORKER,
                     "no DP-enabled prefill worker available");
+        }
+
+        String selectorName = cfg.getDpGroupSelector();
+        GroupSelector groupSelector = groupSelectors.getOrDefault(selectorName,
+                groupSelectors.get(CacheAwareGroupSelector.NAME));
+        if (groupSelector == null) {
+            groupSelector = groupSelectors.values().iterator().next();
         }
 
         WorkerStatus group = groupSelector.select(candidates, context);
@@ -91,11 +82,11 @@ public class DefaultDispatchPlanner implements DispatchPlanner {
         }
 
         if (placed.isEmpty()) {
-            // Every request lost its decode pairing. No batch to ship.
             return new DispatchPlan(List.of(), failures);
         }
 
-        PrefillBatch batch = new PrefillBatch(prefill, placed, context.dpSize());
+        long blockSize = group.getCacheStatus() != null ? group.getCacheStatus().getBlockSize() : 1;
+        PrefillBatch batch = new PrefillBatch(prefill, placed, context.dpSize(), blockSize);
         Logger.debug("DefaultDispatchPlanner placed {}/{} requests on group {}:{} (drain={}, dpSize={})",
                 placed.size(), drained.size(), prefill.getServerIp(), prefill.getGrpcPort(),
                 drained.size(), context.dpSize());

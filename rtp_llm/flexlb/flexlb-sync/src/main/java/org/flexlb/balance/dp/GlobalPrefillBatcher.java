@@ -1,5 +1,6 @@
 package org.flexlb.balance.dp;
 
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -9,51 +10,41 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.Logger;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
- * Per-model global queue for DP batching.
+ * Per-model global queue for DP batching with SLO-aware deadline and
+ * compute-length bucketing.
  *
- * <h3>Why global instead of per-group</h3>
- * Per-group queues only fill efficiently at high QPS (each group needs
- * {@code ≥ dpSize} requests inside one window). At low/medium QPS, a per-group
- * queue partial-flushes at every window, sending many tiny batches. A single
- * global queue accumulates across all groups; once {@code dpSize} requests have
- * arrived (regardless of which group they will eventually land on), one full
- * batch is built and shipped to a {@link GroupSelector}-chosen group. The next
- * batch goes to the next group via the cursor.
+ * <h3>Bucket structure</h3>
+ * Requests are grouped by {@code computeTokenLength / dpBucketIntervalTokens}
+ * so that a single batch contains requests with similar effective compute,
+ * reducing padding waste at the DP barrier. When bucketing is disabled
+ * ({@code dpBucketIntervalTokens == 0}), all requests share bucket 0 and the
+ * behavior degenerates to the original FIFO global queue.
  *
  * <h3>Triggers</h3>
  * <ol>
- *   <li><b>Size:</b> {@code queue.size() >= dpSize} — flush immediately on the
- *       offer thread.</li>
- *   <li><b>Window:</b> if no size flush armed, schedule a one-shot timer to
- *       flush after {@code batchWindowMs}.</li>
- *   <li><b>Per-request timeout:</b> the head request having waited longer than
- *       {@code requestTimeoutMs} forces an immediate flush regardless of
- *       window — protects starvation under low QPS.</li>
+ *   <li><b>Bucket full:</b> a single bucket reaches {@code dpSize} — flush
+ *       that bucket immediately.</li>
+ *   <li><b>Per-request timeout:</b> the head request waited longer than
+ *       {@code dpBatchTimeoutMs} — force-flush with bucket merging.</li>
+ *   <li><b>SLO deadline:</b> the earliest deadline across all queued requests
+ *       is reached — flush with bucket merging.</li>
+ *   <li><b>Window timer:</b> fallback safety net using the configured
+ *       {@code dpBatchWindowMs}.</li>
  * </ol>
- *
- * <h3>Concurrency</h3>
- * {@code offer} / {@code flushOnTimeout} are serialized on {@code this}; the
- * drain loop is short and non-blocking. Assembly + dispatch run OUTSIDE the
- * lock so concurrent {@code offer} calls are not blocked by gRPC.
- *
- * <h3>Cancellation</h3>
- * {@link #cancelInQueue} is best-effort: requests still queued are removed in
- * O(N). A request that was already drained but not yet registered with
- * {@code InflightBatchRegistry} is in a small race window; {@code RouteService}
- * always completes the future exceptionally first, so a successful dispatch in
- * that window is wasted work but not a correctness bug.
  */
 public class GlobalPrefillBatcher {
 
@@ -63,11 +54,32 @@ public class GlobalPrefillBatcher {
     private final DispatchPlanner planner;
     private final Consumer<PrefillBatch> dispatchCallback;
     private final ScheduledExecutorService timerExecutor;
+    private final CacheAwareService cacheAwareService;
 
-    private final LinkedBlockingDeque<QueuedRequest> queue = new LinkedBlockingDeque<>();
-
-    /** One-shot window timer; null when none armed (queue empty or just flushed). */
+    // --- guarded by synchronized(this) ---
+    private final HashMap<Integer, ArrayDeque<QueuedRequest>> buckets = new HashMap<>();
+    private int totalSize = 0;
+    private long earliestDeadlineMicros = Long.MAX_VALUE;
+    private long avgQueueTimeMicros = 0;
     private volatile ScheduledFuture<?> windowTimer;
+
+    private static final double EWMA_ALPHA = 0.1;
+
+    public GlobalPrefillBatcher(String model,
+                                ConfigService configService,
+                                EngineWorkerStatus engineWorkerStatus,
+                                DispatchPlanner planner,
+                                Consumer<PrefillBatch> dispatchCallback,
+                                ScheduledExecutorService timerExecutor,
+                                CacheAwareService cacheAwareService) {
+        this.model = model;
+        this.configService = configService;
+        this.engineWorkerStatus = engineWorkerStatus;
+        this.planner = planner;
+        this.dispatchCallback = dispatchCallback;
+        this.timerExecutor = timerExecutor;
+        this.cacheAwareService = cacheAwareService;
+    }
 
     public GlobalPrefillBatcher(String model,
                                 ConfigService configService,
@@ -75,12 +87,7 @@ public class GlobalPrefillBatcher {
                                 DispatchPlanner planner,
                                 Consumer<PrefillBatch> dispatchCallback,
                                 ScheduledExecutorService timerExecutor) {
-        this.model = model;
-        this.configService = configService;
-        this.engineWorkerStatus = engineWorkerStatus;
-        this.planner = planner;
-        this.dispatchCallback = dispatchCallback;
-        this.timerExecutor = timerExecutor;
+        this(model, configService, engineWorkerStatus, planner, dispatchCallback, timerExecutor, null);
     }
 
     public void offer(QueuedRequest req) {
@@ -88,17 +95,27 @@ public class GlobalPrefillBatcher {
         int dpSize = currentDpSize(cfg);
         long batchWindowMs = cfg.getDpBatchWindowMs();
         long requestTimeoutMs = cfg.getDpBatchTimeoutMs();
+        int bucketInterval = cfg.getDpBucketIntervalTokens();
+
+        QueuedRequest enriched = enrichRequest(req, cfg, dpSize);
 
         List<QueuedRequest> drained = null;
         synchronized (this) {
-            queue.add(req);
-            if (headWaitedTooLong(requestTimeoutMs)) {
-                drained = drainLocked(dpSize, batchWindowMs);
-            } else if (queue.size() >= dpSize) {
-                drained = drainLocked(dpSize, batchWindowMs);
-            } else if (windowTimer == null) {
-                windowTimer = timerExecutor.schedule(
-                        this::flushOnTimeout, batchWindowMs, TimeUnit.MILLISECONDS);
+            int bIdx = enriched.bucketIndex();
+            buckets.computeIfAbsent(bIdx, k -> new ArrayDeque<>()).add(enriched);
+            totalSize++;
+            earliestDeadlineMicros = Math.min(earliestDeadlineMicros, enriched.sloDeadlineMicros());
+
+            long nowMicros = System.nanoTime() / 1000;
+
+            if (bucketSize(bIdx) >= dpSize) {
+                drained = drainBucketLocked(bIdx, dpSize, batchWindowMs);
+            } else if (headWaitedTooLong(requestTimeoutMs)) {
+                drained = drainWithMergeLocked(dpSize, batchWindowMs);
+            } else if (earliestDeadlineMicros <= nowMicros) {
+                drained = drainWithMergeLocked(dpSize, batchWindowMs);
+            } else {
+                armTimerLocked(batchWindowMs, nowMicros);
             }
         }
         if (drained != null) {
@@ -106,34 +123,70 @@ public class GlobalPrefillBatcher {
         }
     }
 
-    /**
-     * Best-effort removal of a queued request. Returns {@code true} if the entry
-     * was found and removed; {@code false} if the request had already been
-     * drained (it may be mid-planning or already enqueued).
-     *
-     * <p>On removal, the request's future is completed exceptionally with a
-     * {@link CancellationException} so the upstream {@code Mono} never hangs.
-     * Double-completion (when {@code RouteService.cancel} also fails the
-     * future) is harmless — {@code completeExceptionally} returns false on a
-     * future that is already done.
-     */
     public boolean cancelInQueue(long requestId) {
-        Iterator<QueuedRequest> it = queue.iterator();
-        while (it.hasNext()) {
-            QueuedRequest qr = it.next();
-            if (qr.requestId() == requestId) {
-                it.remove();
-                qr.future().completeExceptionally(
-                        new CancellationException("Cancelled while queued in DP batcher"));
-                return true;
+        synchronized (this) {
+            for (Map.Entry<Integer, ArrayDeque<QueuedRequest>> entry : buckets.entrySet()) {
+                Iterator<QueuedRequest> it = entry.getValue().iterator();
+                while (it.hasNext()) {
+                    QueuedRequest qr = it.next();
+                    if (qr.requestId() == requestId) {
+                        it.remove();
+                        totalSize--;
+                        qr.future().completeExceptionally(
+                                new CancellationException("Cancelled while queued in DP batcher"));
+                        recalcEarliestDeadlineLocked();
+                        return true;
+                    }
+                }
             }
         }
         return false;
     }
 
-    /** Test/observability hook. */
     public int queueSize() {
-        return queue.size();
+        synchronized (this) {
+            return totalSize;
+        }
+    }
+
+    // ============== internal ==============
+
+    private QueuedRequest enrichRequest(QueuedRequest raw, FlexlbConfig cfg, int dpSize) {
+        if (cacheAwareService == null) {
+            return raw;
+        }
+        if (raw.ctx() == null || raw.ctx().getRequest() == null) {
+            return raw;
+        }
+
+        long seqLen = raw.ctx().getRequest().getSeqLen();
+        List<Long> cacheKeys = raw.ctx().getRequest().getBlockCacheKeys();
+
+        long cacheMatchedTokens = 0;
+        if (cacheKeys != null && !cacheKeys.isEmpty()) {
+            long blockSize = guessBlockSize();
+            String bestPrefillIp = guessPrefillIpPort();
+            if (bestPrefillIp != null) {
+                int prefixBlocks = cacheAwareService.findMatchingPrefixLength(bestPrefillIp, cacheKeys);
+                cacheMatchedTokens = prefixBlocks * blockSize;
+            }
+        }
+
+        int computeTokenLength = (int) Math.max(0, seqLen - cacheMatchedTokens);
+        int bucketInterval = cfg.getDpBucketIntervalTokens();
+        int bucketIndex = bucketInterval > 0 ? computeTokenLength / bucketInterval : 0;
+
+        long avgQueueTimeMs;
+        synchronized (this) {
+            avgQueueTimeMs = avgQueueTimeMicros / 1000;
+        }
+        long sloDeadlineMicros = BatchDeadlineEstimator.computeDeadlineMicros(
+                System.nanoTime() / 1000, seqLen, cacheMatchedTokens,
+                avgQueueTimeMs,
+                cfg.getDpTtftSloMs(), cfg.getDpSafeMarginMs(),
+                cfg.getDpMinBatchIntervalMs(), cfg.getDpMaxBatchIntervalMs());
+
+        return QueuedRequest.of(raw.ctx(), raw.future(), computeTokenLength, sloDeadlineMicros, bucketIndex);
     }
 
     private void flushOnTimeout() {
@@ -144,8 +197,8 @@ public class GlobalPrefillBatcher {
         List<QueuedRequest> drained = null;
         synchronized (this) {
             windowTimer = null;
-            if (!queue.isEmpty()) {
-                drained = drainLocked(dpSize, batchWindowMs);
+            if (totalSize > 0) {
+                drained = drainWithMergeLocked(dpSize, batchWindowMs);
             }
         }
         if (drained != null) {
@@ -153,21 +206,95 @@ public class GlobalPrefillBatcher {
         }
     }
 
-    /** Caller MUST hold {@code synchronized (this)}. */
-    private List<QueuedRequest> drainLocked(int dpSize, long batchWindowMs) {
+    /** Drain up to dpSize from a single bucket. Caller MUST hold synchronized(this). */
+    private List<QueuedRequest> drainBucketLocked(int bucketIdx, int dpSize, long batchWindowMs) {
         cancelTimerLocked();
-        List<QueuedRequest> chunk = new ArrayList<>(dpSize);
-        queue.drainTo(chunk, dpSize);
-        if (chunk.isEmpty()) {
+        ArrayDeque<QueuedRequest> deque = buckets.get(bucketIdx);
+        if (deque == null || deque.isEmpty()) {
             return null;
         }
-        // Residual requests (when one drain doesn't empty the queue) re-arm the
-        // window timer for the next batch.
-        if (!queue.isEmpty()) {
-            windowTimer = timerExecutor.schedule(
-                    this::flushOnTimeout, batchWindowMs, TimeUnit.MILLISECONDS);
+
+        int count = Math.min(deque.size(), dpSize);
+        List<QueuedRequest> chunk = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            chunk.add(deque.poll());
         }
-        return chunk;
+        totalSize -= chunk.size();
+        if (deque.isEmpty()) {
+            buckets.remove(bucketIdx);
+        }
+
+        updateEwmaLocked(chunk);
+        recalcEarliestDeadlineLocked();
+        rearmIfNeededLocked(batchWindowMs);
+        return chunk.isEmpty() ? null : chunk;
+    }
+
+    /** Drain up to dpSize with greedy bucket merging. Caller MUST hold synchronized(this). */
+    private List<QueuedRequest> drainWithMergeLocked(int dpSize, long batchWindowMs) {
+        cancelTimerLocked();
+        if (totalSize == 0) {
+            return null;
+        }
+
+        int targetBucket = findMostUrgentBucket();
+        List<QueuedRequest> chunk = new ArrayList<>(dpSize);
+
+        // Phase 1: drain from target bucket
+        drainFromBucket(targetBucket, dpSize, chunk);
+
+        // Phase 2: expand to adjacent buckets by distance
+        if (chunk.size() < dpSize) {
+            TreeMap<Integer, ArrayDeque<QueuedRequest>> sorted = new TreeMap<>(buckets);
+            for (int distance = 1; chunk.size() < dpSize; distance++) {
+                boolean found = false;
+                int lo = targetBucket - distance;
+                int hi = targetBucket + distance;
+                if (sorted.containsKey(lo)) {
+                    drainFromBucket(lo, dpSize - chunk.size(), chunk);
+                    found = true;
+                }
+                if (chunk.size() < dpSize && sorted.containsKey(hi)) {
+                    drainFromBucket(hi, dpSize - chunk.size(), chunk);
+                    found = true;
+                }
+                if (!found && lo < sorted.firstKey() && hi > sorted.lastKey()) {
+                    break;
+                }
+            }
+        }
+
+        totalSize -= chunk.size();
+        updateEwmaLocked(chunk);
+        recalcEarliestDeadlineLocked();
+        cleanEmptyBucketsLocked();
+        rearmIfNeededLocked(batchWindowMs);
+        return chunk.isEmpty() ? null : chunk;
+    }
+
+    private void drainFromBucket(int bucketIdx, int maxCount, List<QueuedRequest> out) {
+        ArrayDeque<QueuedRequest> deque = buckets.get(bucketIdx);
+        if (deque == null) return;
+        int count = Math.min(deque.size(), maxCount);
+        for (int i = 0; i < count; i++) {
+            out.add(deque.poll());
+        }
+    }
+
+    private int findMostUrgentBucket() {
+        int urgentBucket = 0;
+        long urgentDeadline = Long.MAX_VALUE;
+        for (Map.Entry<Integer, ArrayDeque<QueuedRequest>> entry : buckets.entrySet()) {
+            ArrayDeque<QueuedRequest> deque = entry.getValue();
+            if (!deque.isEmpty()) {
+                QueuedRequest head = deque.peek();
+                if (head.sloDeadlineMicros() < urgentDeadline) {
+                    urgentDeadline = head.sloDeadlineMicros();
+                    urgentBucket = entry.getKey();
+                }
+            }
+        }
+        return urgentBucket;
     }
 
     private void cancelTimerLocked() {
@@ -178,9 +305,59 @@ public class GlobalPrefillBatcher {
         }
     }
 
+    private void armTimerLocked(long batchWindowMs, long nowMicros) {
+        if (windowTimer != null) return;
+        long deadlineDelayMs = earliestDeadlineMicros < Long.MAX_VALUE
+                ? Math.max(1, (earliestDeadlineMicros - nowMicros) / 1000)
+                : batchWindowMs;
+        long delayMs = Math.min(batchWindowMs, deadlineDelayMs);
+        windowTimer = timerExecutor.schedule(this::flushOnTimeout, delayMs, TimeUnit.MILLISECONDS);
+    }
+
+    private void rearmIfNeededLocked(long batchWindowMs) {
+        if (totalSize > 0 && windowTimer == null) {
+            long nowMicros = System.nanoTime() / 1000;
+            armTimerLocked(batchWindowMs, nowMicros);
+        }
+    }
+
+    private void recalcEarliestDeadlineLocked() {
+        long min = Long.MAX_VALUE;
+        for (ArrayDeque<QueuedRequest> deque : buckets.values()) {
+            for (QueuedRequest qr : deque) {
+                if (qr.sloDeadlineMicros() < min) {
+                    min = qr.sloDeadlineMicros();
+                }
+            }
+        }
+        earliestDeadlineMicros = min;
+    }
+
+    private void cleanEmptyBucketsLocked() {
+        buckets.entrySet().removeIf(e -> e.getValue().isEmpty());
+    }
+
+    private void updateEwmaLocked(List<QueuedRequest> drained) {
+        if (drained.isEmpty()) return;
+        long nowMicros = System.nanoTime() / 1000;
+        long totalWait = 0;
+        for (QueuedRequest qr : drained) {
+            totalWait += (nowMicros - qr.enqueuedAtMicros());
+        }
+        long avgWait = totalWait / drained.size();
+        avgQueueTimeMicros = (long) (EWMA_ALPHA * avgWait + (1 - EWMA_ALPHA) * avgQueueTimeMicros);
+    }
+
     private boolean headWaitedTooLong(long requestTimeoutMs) {
-        QueuedRequest head = queue.peek();
-        return head != null && head.waitMicros() > requestTimeoutMs * 1000L;
+        for (ArrayDeque<QueuedRequest> deque : buckets.values()) {
+            if (!deque.isEmpty()) {
+                QueuedRequest head = deque.peek();
+                if (head.waitMicros() > requestTimeoutMs * 1000L) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private void planAndDispatch(List<QueuedRequest> drained, int dpSize, FlexlbConfig cfg) {
@@ -238,5 +415,34 @@ public class GlobalPrefillBatcher {
             }
         }
         return 1;
+    }
+
+    private int bucketSize(int bucketIdx) {
+        ArrayDeque<QueuedRequest> deque = buckets.get(bucketIdx);
+        return deque == null ? 0 : deque.size();
+    }
+
+    private long guessBlockSize() {
+        Map<String, WorkerStatus> workers = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
+        if (workers != null) {
+            for (WorkerStatus w : workers.values()) {
+                if (w != null && w.getCacheStatus() != null && w.getCacheStatus().getBlockSize() > 0) {
+                    return w.getCacheStatus().getBlockSize();
+                }
+            }
+        }
+        return 1;
+    }
+
+    private String guessPrefillIpPort() {
+        Map<String, WorkerStatus> workers = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
+        if (workers != null) {
+            for (WorkerStatus w : workers.values()) {
+                if (w != null && w.isAlive() && w.getDpSize() > 1) {
+                    return w.getIpPort();
+                }
+            }
+        }
+        return null;
     }
 }
