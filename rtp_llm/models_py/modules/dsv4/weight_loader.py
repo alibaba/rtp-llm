@@ -22,7 +22,6 @@ from typing import Dict, Iterable, Optional, Set
 import torch
 from safetensors import safe_open
 
-
 FP8_BLOCK = 128
 FP4_BLOCK = 32
 
@@ -76,6 +75,8 @@ def load_v4_weights_dict(
     ep_size: int = 1,
     ep_rank: int = 0,
     n_routed_experts: int = 256,
+    max_layers: Optional[int] = None,
+    max_mtp_layers: Optional[int] = None,
 ) -> Dict[str, torch.Tensor]:
     """Load V4-Flash safetensors into a flat dict ready to feed into
     ``LinearFactory.create_linear_from_weights``.
@@ -98,6 +99,13 @@ def load_v4_weights_dict(
     (dense weights, norms, gate, shared experts) are replicated per
     rank — DP for dense, EP for routed.  ``keys_filter`` is AND'd with
     the EP filter.
+
+    Layer truncation: ``max_layers`` / ``max_mtp_layers`` drop ``layers.{i}.*``
+    (resp. ``mtp.{i}.*``) keys for ``i >= max``.  Each main layer lives in
+    exactly one shard in the V4-Flash ckpt layout, so dropping their keys
+    causes those shards to be skipped entirely — the actual I/O win.  Used
+    by ``HACK_LAYER_NUM`` (``profiling_debug_logging_config.hack_layer_num``)
+    so test runs only stream the few shards they actually need.
     """
     idx_path = os.path.join(ckpt_dir, "model.safetensors.index.json")
     with open(idx_path) as f:
@@ -116,14 +124,18 @@ def load_v4_weights_dict(
     # ``.../ffn.experts.{j}.*`` anywhere in the key path (main layers
     # and MTP layers both).  Shared-experts keys (`ffn.shared_experts.*`)
     # pass through unchanged.
-    assert n_routed_experts % max(ep_size, 1) == 0, (
-        f"n_routed_experts={n_routed_experts} must divide ep_size={ep_size}")
+    assert (
+        n_routed_experts % max(ep_size, 1) == 0
+    ), f"n_routed_experts={n_routed_experts} must divide ep_size={ep_size}"
     local_num = n_routed_experts // max(ep_size, 1)
     local_start = ep_rank * local_num
     local_end = local_start + local_num
 
     import re
+
     _expert_pat = re.compile(r"\.ffn\.experts\.(\d+)\.")
+    _layer_pat = re.compile(r"^layers\.(\d+)\.")
+    _mtp_pat = re.compile(r"^mtp\.(\d+)\.")
 
     def _is_local_expert(key: str) -> bool:
         if ep_size <= 1:
@@ -134,12 +146,25 @@ def load_v4_weights_dict(
         idx = int(m.group(1))
         return local_start <= idx < local_end
 
+    def _is_in_layer_window(key: str) -> bool:
+        if max_layers is not None:
+            m = _layer_pat.match(key)
+            if m and int(m.group(1)) >= max_layers:
+                return False
+        if max_mtp_layers is not None:
+            m = _mtp_pat.match(key)
+            if m and int(m.group(1)) >= max_mtp_layers:
+                return False
+        return True
+
     # Group keys by shard for sequential reads per file.
     by_shard: Dict[str, list] = {}
     for key, shard in weight_map.items():
         if not _matches(key):
             continue
         if not _is_local_expert(key):
+            continue
+        if not _is_in_layer_window(key):
             continue
         by_shard.setdefault(shard, []).append(key)
 
@@ -166,8 +191,11 @@ def load_v4_weights_dict(
     return out
 
 
-def _dequant_fp8_block128(weight_fp8: torch.Tensor, scale: torch.Tensor,
-                          out_dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+def _dequant_fp8_block128(
+    weight_fp8: torch.Tensor,
+    scale: torch.Tensor,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
     """Dequantize an FP8 e4m3fn weight matrix using a UE8M0 block-wise scale.
 
     Args:
@@ -187,14 +215,34 @@ def _dequant_fp8_block128(weight_fp8: torch.Tensor, scale: torch.Tensor,
 
 # FP4 e2m1 lookup table (16 values, indexed by 4-bit raw)
 # Layout: sign bit + 2 exponent bits + 1 mantissa bit, biased
-_FP4_LUT = torch.tensor([
-     0.0,  0.5,  1.0,  1.5,  2.0,  3.0,  4.0,  6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
-], dtype=torch.float32)
+_FP4_LUT = torch.tensor(
+    [
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        -0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,
+    ],
+    dtype=torch.float32,
+)
 
 
-def _dequant_fp4_block32(weight_int8: torch.Tensor, scale: torch.Tensor,
-                         out_dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+def _dequant_fp4_block32(
+    weight_int8: torch.Tensor,
+    scale: torch.Tensor,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
     """Dequantize FP4 e2m1 (packed 2-per-byte in int8) with UE8M0 32-block scale.
 
     Args:
@@ -211,12 +259,14 @@ def _dequant_fp4_block32(weight_int8: torch.Tensor, scale: torch.Tensor,
     low = w_uint & 0x0F
     high = (w_uint >> 4) & 0x0F
     # interleave: result[..., 2i] = low[..., i], result[..., 2i+1] = high[..., i]
-    interleaved = torch.empty(out_dim, in_dim, dtype=torch.int64, device=weight_int8.device)
+    interleaved = torch.empty(
+        out_dim, in_dim, dtype=torch.int64, device=weight_int8.device
+    )
     interleaved[:, 0::2] = low.long()
     interleaved[:, 1::2] = high.long()
 
     lut = _FP4_LUT.to(weight_int8.device)
-    w_f = lut[interleaved]                              # [out, in] fp32
+    w_f = lut[interleaved]  # [out, in] fp32
 
     scale_f = scale.to(torch.float32)
     scale_full = scale_f.repeat_interleave(FP4_BLOCK, 1)[:, :in_dim]
@@ -276,7 +326,9 @@ def load_v4_safetensors(
         if shard is None:
             return None
         if shard not in open_shards:
-            ctx = safe_open(os.path.join(ckpt_dir, shard), framework="pt", device=device)
+            ctx = safe_open(
+                os.path.join(ckpt_dir, shard), framework="pt", device=device
+            )
             open_shards[shard] = ctx.__enter__()
         return open_shards[shard].get_tensor(key)
 
@@ -285,7 +337,9 @@ def load_v4_safetensors(
     # is int8 (fp4) or float8_e4m3fn (fp8), and scale Parameter is float8_e8m0fnu.
     # Only when the model Parameter is BF16/FP32 and ckpt is FP4/FP8 do we dequant.
 
-    def _maybe_dequant(w: torch.Tensor, s: Optional[torch.Tensor], target_param: torch.Tensor):
+    def _maybe_dequant(
+        w: torch.Tensor, s: Optional[torch.Tensor], target_param: torch.Tensor
+    ):
         """Return a tensor matching target_param.dtype.
 
         - If ckpt already matches (e.g. ckpt int8 + model int8): pass through.
@@ -297,7 +351,7 @@ def load_v4_safetensors(
             return w
         # Scale present — ckpt is quantized.
         if w.dtype == target_param.dtype:
-            return w   # native preservation path (QuantizedLinear)
+            return w  # native preservation path (QuantizedLinear)
         # Fallback: dequant (used for the rare case where caller wants BF16 eagerly).
         if w.dtype == torch.int8:
             return _dequant_fp4_block32(w, s, out_dtype=dtype)
@@ -316,7 +370,9 @@ def load_v4_safetensors(
                 target = base
                 if target not in state:
                     if strict:
-                        raise KeyError(f"checkpoint key {target!r} has no model destination")
+                        raise KeyError(
+                            f"checkpoint key {target!r} has no model destination"
+                        )
                     continue
                 target_param = state[target]
                 w_final = _maybe_dequant(w, s, target_param)
@@ -336,7 +392,11 @@ def load_v4_safetensors(
                     scale_target = base_root + ".scale"
                     if scale_target in state:
                         scale_param = state[scale_target]
-                        s_cast = s if s.dtype == scale_param.dtype else s.to(scale_param.dtype)
+                        s_cast = (
+                            s
+                            if s.dtype == scale_param.dtype
+                            else s.to(scale_param.dtype)
+                        )
                         if s_cast.shape != scale_param.shape:
                             raise RuntimeError(
                                 f"scale shape mismatch {scale_target}: ckpt {tuple(s_cast.shape)} vs model {tuple(scale_param.shape)}"
@@ -345,9 +405,14 @@ def load_v4_safetensors(
                         loaded[scale_target] = scale_param
                         seen_state_keys.add(scale_target)
                 if verbose:
-                    tag = "quant-native" if (s is not None and w.dtype == target_param.dtype) else (
-                          "deq-to-bf16" if s is not None else "direct")
-                    print(f"  [{tag:13s}] {base} -> {tuple(target_param.shape)} {target_param.dtype}")
+                    tag = (
+                        "quant-native"
+                        if (s is not None and w.dtype == target_param.dtype)
+                        else ("deq-to-bf16" if s is not None else "direct")
+                    )
+                    print(
+                        f"  [{tag:13s}] {base} -> {tuple(target_param.shape)} {target_param.dtype}"
+                    )
     finally:
         for h in open_shards.values():
             h.__exit__(None, None, None)
@@ -355,12 +420,24 @@ def load_v4_safetensors(
     missing = set(state.keys()) - seen_state_keys
     # Filter out persistent=False buffers (kv_cache, kv_state, score_state, freqs_cis)
     # and the unloaded experts in MoE TP setups (we load all experts here, world_size=1)
-    benign_missing = {k for k in missing if any(s in k for s in [
-        "kv_cache", "kv_state", "score_state", "freqs_cis",
-    ])}
+    benign_missing = {
+        k
+        for k in missing
+        if any(
+            s in k
+            for s in [
+                "kv_cache",
+                "kv_state",
+                "score_state",
+                "freqs_cis",
+            ]
+        )
+    }
     real_missing = missing - benign_missing
     if real_missing and strict:
         raise KeyError(f"missing keys after load: {sorted(real_missing)[:20]} ...")
     if verbose and real_missing:
-        print(f"WARNING: {len(real_missing)} model keys not found in ckpt (e.g. {sorted(real_missing)[:5]})")
+        print(
+            f"WARNING: {len(real_missing)} model keys not found in ckpt (e.g. {sorted(real_missing)[:5]})"
+        )
     return loaded

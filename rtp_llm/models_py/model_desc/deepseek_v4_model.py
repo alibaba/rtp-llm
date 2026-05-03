@@ -313,12 +313,19 @@ class DeepSeekV4Model(GptModelBase):
             self._v4_args.ep_size,
             self._v4_args.ep_rank,
         )
+        # ``n_layers`` is already truncated to ``HACK_LAYER_NUM`` upstream
+        # (``init_model_config_with_args`` in config/model_config.py); pass
+        # the same bound to the loader so it skips ckpt shards holding
+        # higher-numbered layers — V4-Flash packs one main layer per shard
+        # so this is a direct ~10× I/O reduction at HACK_LAYER_NUM=4.
         weights = load_v4_weights_dict(
             self._ckpt_path,
             device=device_str,
             ep_size=self._v4_args.ep_size,
             ep_rank=self._v4_args.ep_rank,
             n_routed_experts=self._v4_args.n_routed_experts,
+            max_layers=self._v4_args.n_layers,
+            max_mtp_layers=self._v4_args.n_mtp_layers,
         )
         logging.info("[DeepSeekV4Model] loaded %d tensors from ckpt", len(weights))
 
@@ -431,11 +438,35 @@ class DeepSeekV4Model(GptModelBase):
         # per-layer descriptor cache to stash on metadata.
         return impl
 
+    def _assert_prefill_bsz1(self, inputs: PyModelInputs) -> None:
+        """DSV4 prefill is still scalar-request inside Attention.
+
+        Keep the production invariant at the model dispatcher boundary so
+        lower-level prefill code can assume B==1 while it is being refactored
+        into BF16/FP8 branches.
+        """
+        attn = inputs.attention_inputs
+        if attn is None or not bool(getattr(attn, "is_prefill", False)):
+            return
+        input_lengths = getattr(attn, "input_lengths", None)
+        bsz = (
+            int(input_lengths.size(0))
+            if input_lengths is not None and input_lengths.numel() > 0
+            else 1
+        )
+        if bsz != 1:
+            raise AssertionError(
+                f"DSv4 prefill expects bsz==1; got {bsz}. Set "
+                "MAX_CONTEXT_BATCH_SIZE=1 so the scheduler does not batch "
+                "multiple prefill requests in one round."
+            )
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         """qwen3-style dispatcher — per-arm orchestration lives in the
         prefill / decode runtime modules.
         """
         if inputs.attention_inputs.is_prefill:
+            self._assert_prefill_bsz1(inputs)
             return forward_prefill(
                 self.v4, self.kv_cache, self.parallelism_config, inputs
             )
