@@ -52,7 +52,7 @@ class WeightedCacheLoadBalancerTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory, Mockito.mock(org.flexlb.cache.service.CacheAwareService.class));
 
         Request req = new Request();
         req.setSeqLen(1000);
@@ -91,7 +91,7 @@ class WeightedCacheLoadBalancerTest {
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory, Mockito.mock(org.flexlb.cache.service.CacheAwareService.class));
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -132,7 +132,7 @@ class WeightedCacheLoadBalancerTest {
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory, Mockito.mock(org.flexlb.cache.service.CacheAwareService.class));
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -164,7 +164,7 @@ class WeightedCacheLoadBalancerTest {
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory, Mockito.mock(org.flexlb.cache.service.CacheAwareService.class));
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -199,7 +199,7 @@ class WeightedCacheLoadBalancerTest {
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory, Mockito.mock(org.flexlb.cache.service.CacheAwareService.class));
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);

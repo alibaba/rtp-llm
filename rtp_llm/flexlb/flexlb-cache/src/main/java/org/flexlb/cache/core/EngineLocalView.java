@@ -8,6 +8,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
@@ -28,6 +29,15 @@ public class EngineLocalView {
      * Core storage structure: EngineIpPort -> Set<Long>
      */
     private final ConcurrentHashMap<String, Set<Long>> engineViews = new ConcurrentHashMap<>();
+
+    /**
+     * Secondary per-rank view, keyed by group ip:port (DP0 endpoint), value
+     * indexed by dp_rank. Lazily populated only when the engine reports
+     * {@code dp_size > 1}; stays empty for non-DP pods. Routing does NOT
+     * consume this yet — it is exposed via {@link #getPerRankBlocks} for
+     * monitoring and future rank-aware strategies.
+     */
+    private final ConcurrentHashMap<String, List<Set<Long>>> perRankViews = new ConcurrentHashMap<>();
 
     /**
      * Custom ForkJoin thread pool for parallel computation
@@ -150,10 +160,50 @@ public class EngineLocalView {
         }
 
         Set<Long> removed = engineViews.remove(engineIPort);
+        perRankViews.remove(engineIPort);
         // Warn if removal fails
         if (removed == null) {
             log.warn("Remove failed, the engine: {} not exist.", engineIPort);
         }
+    }
+
+    /**
+     * Replace the per-rank cache view for a DP-enabled engine. Called by the
+     * cache-aware service when {@code CacheStatus.dpCaches} is non-empty.
+     * Snapshot semantics: the supplied list is stored as-is; callers must not
+     * mutate it after handing it over.
+     */
+    public void replacePerRankBlocks(String engineIpPort, List<Set<Long>> rankBlocks) {
+        if (engineIpPort == null || rankBlocks == null || rankBlocks.isEmpty()) {
+            return;
+        }
+        perRankViews.put(engineIpPort, rankBlocks);
+    }
+
+    /**
+     * Per-rank block set, or empty when the engine is not DP-enabled, the
+     * rank index is out of range, or the secondary view has not been
+     * populated yet.
+     */
+    public Set<Long> getPerRankBlocks(String engineIpPort, int dpRank) {
+        if (engineIpPort == null || dpRank < 0) {
+            return Collections.emptySet();
+        }
+        List<Set<Long>> ranks = perRankViews.get(engineIpPort);
+        if (ranks == null || dpRank >= ranks.size()) {
+            return Collections.emptySet();
+        }
+        Set<Long> blocks = ranks.get(dpRank);
+        return blocks == null ? Collections.emptySet() : blocks;
+    }
+
+    /** Number of DP ranks tracked for an engine, or 0 if no per-rank view. */
+    public int getPerRankCount(String engineIpPort) {
+        if (engineIpPort == null) {
+            return 0;
+        }
+        List<Set<Long>> ranks = perRankViews.get(engineIpPort);
+        return ranks == null ? 0 : ranks.size();
     }
 
     /**
@@ -176,6 +226,7 @@ public class EngineLocalView {
     public void clear() {
 
         engineViews.clear();
+        perRankViews.clear();
         log.info("Cleared engine local view");
 
     }
