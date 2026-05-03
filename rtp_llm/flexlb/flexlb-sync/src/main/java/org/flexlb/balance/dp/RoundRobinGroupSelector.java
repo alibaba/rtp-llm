@@ -24,7 +24,7 @@ public class RoundRobinGroupSelector implements GroupSelector {
     private final AtomicLong cursor = new AtomicLong(0);
 
     @Override
-    public WorkerStatus select(List<WorkerStatus> candidates, BatchHint hint) {
+    public WorkerStatus select(List<WorkerStatus> candidates, DispatchContext ctx) {
         if (candidates == null || candidates.isEmpty()) {
             return null;
         }

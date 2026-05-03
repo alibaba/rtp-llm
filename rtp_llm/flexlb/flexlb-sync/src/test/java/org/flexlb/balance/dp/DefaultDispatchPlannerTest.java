@@ -149,7 +149,7 @@ class DefaultDispatchPlannerTest {
     }
 
     private static DispatchContext context(int dpSize) {
-        return new DispatchContext("m1", dpSize, new FlexlbConfig());
+        return new DispatchContext("m1", dpSize, new FlexlbConfig(), List.of());
     }
 
     private static WorkerStatus workerStatus(String ip, long dpSize) {

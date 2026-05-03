@@ -19,6 +19,8 @@ import java.util.List;
  * <p>Contract:
  * <ul>
  *   <li>{@code candidates} is pre-filtered: alive, {@code dp_size > 1}, resource available.</li>
+ *   <li>{@code ctx.requests()} is the chunk being planned — selectors that look at
+ *       request content (cache keys, length) read it from there.</li>
  *   <li>Implementations MUST be thread-safe (one batcher thread + size-trigger callers).</li>
  *   <li>Returning {@code null} signals "no candidate suitable" — the planner will
  *       fail every request in the batch with {@code NO_PREFILL_WORKER}.</li>
@@ -26,7 +28,7 @@ import java.util.List;
  */
 public interface GroupSelector {
 
-    WorkerStatus select(List<WorkerStatus> candidates, BatchHint hint);
+    WorkerStatus select(List<WorkerStatus> candidates, DispatchContext ctx);
 
     /** Stable identifier used by config to pick a strategy. */
     String name();
