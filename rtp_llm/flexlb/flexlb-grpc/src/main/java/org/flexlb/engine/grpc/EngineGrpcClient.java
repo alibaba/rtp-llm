@@ -11,6 +11,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import lombok.Getter;
+import org.flexlb.cache.core.DpGroupTopology;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
@@ -40,8 +41,9 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
                             @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
                             EngineLocalView engineLocalView,
                             GlobalCacheIndex globalCacheIndex,
+                            DpGroupTopology dpGroupTopology,
                             GrpcReporter grpcReporter) {
-        super(engineLocalView, globalCacheIndex, grpcReporter);
+        super(engineLocalView, globalCacheIndex, dpGroupTopology, grpcReporter);
         this.executor = executor;
         this.eventLoopGroup = eventLoopGroup;
         nameResolver.start(this);

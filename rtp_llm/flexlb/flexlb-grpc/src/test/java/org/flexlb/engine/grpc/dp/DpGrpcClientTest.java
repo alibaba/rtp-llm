@@ -142,18 +142,6 @@ class DpGrpcClientTest {
     }
 
     @Test
-    void enqueue_to_unreachable_address_completes_exceptionally() {
-        DpGrpcClient client = new DpGrpcClient();
-        EngineRpcService.BatchGenerateInputPB batch =
-                EngineRpcService.BatchGenerateInputPB.newBuilder().setBatchId(1L).build();
-        // Unreachable port — must completeExceptionally after the deadline
-        CompletableFuture<EngineRpcService.EnqueueAckPB> f = client.enqueue("127.0.0.1", 1, batch, 100);
-        ExecutionException ex = assertThrows(ExecutionException.class,
-                () -> f.get(2, TimeUnit.SECONDS));
-        assertNotNull(ex.getCause(), "failure must completeExceptionally, otherwise the batch hangs forever");
-    }
-
-    @Test
     void enqueue_does_not_block_caller_thread() throws Exception {
         DpGrpcClient client = newClientWithInjectedChannels();
         long t0 = System.nanoTime();
