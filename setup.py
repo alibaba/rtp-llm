@@ -373,6 +373,20 @@ build --host_action_env=TORCH_ROOT=$(TORCH_ROOT)
     print(f"Updated {torch_bazelrc_path} with TORCH_ROOT={torch_root}")
 
 
+def _is_arm_bazel_config(bazel_args: list) -> bool:
+    """Detect ARM build from resolved --config flags.
+
+    cuda12_9_arm (GB200 Blackwell) has no remote executor pool — only the
+    REAPI cache is available. Match on the user-resolved --config tokens
+    rather than the auto-detected default so explicit RTP_BAZEL_CONFIG
+    overrides work too.
+    """
+    for arg in bazel_args:
+        if arg.startswith("--config=") and "arm" in arg.split("=", 1)[1].lower():
+            return True
+    return False
+
+
 def _get_bazel_cmd_prefix(build_config: str) -> tuple:
     """Get bazel command prefix and build args, shared by build and test.
 
@@ -381,8 +395,9 @@ def _get_bazel_cmd_prefix(build_config: str) -> tuple:
                and build_args are the config flags to append after the subcommand.
     """
     bazel_args = parse_bazel_config(default_config=build_config)
-    bazel_args.extend(_get_remote_bazel_args())
-    bazel_args.extend(_get_local_jobs_args())
+    arm_cache_only = _is_arm_bazel_config(bazel_args)
+    bazel_args.extend(_get_remote_bazel_args(arm_cache_only=arm_cache_only))
+    bazel_args.extend(_get_local_jobs_args(force_local=arm_cache_only))
     has_output_root = any("--output_user_root" in arg for arg in bazel_args)
 
     cmd = ["bazelisk"]
@@ -480,10 +495,14 @@ def _load_remote_config() -> dict:
     return cfg
 
 
-def _get_remote_bazel_args() -> list:
+def _get_remote_bazel_args(arm_cache_only: bool = False) -> list:
     """Build remote-execution bazel args from pyproject.toml config.
 
     Returns extra bazel args when RTP_REMOTE is enabled, empty list otherwise.
+
+    When ``arm_cache_only`` is True (cuda12_9_arm builds), only remote cache
+    is wired up — the ARM REAPI executor pool does not exist, so the build
+    runs locally but still pulls/pushes the cache.
     """
     if not is_remote_enabled():
         return []
@@ -503,28 +522,43 @@ def _get_remote_bazel_args() -> list:
         cfg.get("cas-daily", ""),
         int(cfg.get("cas-port", 50051)),
     )
+
+    args = [
+        "--config=cicd",
+        "--config=online_aone_bazel_cache",
+        f"--remote_cache={cas_ep}",
+    ]
+
+    if arm_cache_only:
+        print(
+            f"ARM build (cuda12_9_arm): remote cache only, no executor — {' '.join(args)}"
+        )
+        return args
+
     exec_ep = _resolve_reapi_endpoint(
         cfg.get("executor-online", ""),
         cfg.get("executor-daily", ""),
         int(cfg.get("executor-port", 50052)),
     )
     jobs = int(cfg.get("jobs", 320))
-
-    args = [
-        "--config=cicd",
-        "--config=online_aone_bazel_cache",
-        f"--remote_cache={cas_ep}",
-        "--config=online_aone_bazel_remote",
-        f"--remote_executor={exec_ep}",
-        f"--jobs={jobs}",
-    ]
+    args.extend(
+        [
+            "--config=online_aone_bazel_remote",
+            f"--remote_executor={exec_ep}",
+            f"--jobs={jobs}",
+        ]
+    )
     print(f"Remote build enabled: {' '.join(args)}")
     return args
 
 
-def _get_local_jobs_args() -> list:
-    """Get --jobs arg based on local CPU count (only when not remote)."""
-    if is_remote_enabled():
+def _get_local_jobs_args(force_local: bool = False) -> list:
+    """Get --jobs arg based on local CPU count.
+
+    Skipped when remote execution is on, *unless* ``force_local`` is True
+    (e.g. ARM cache-only builds, which still execute actions locally).
+    """
+    if is_remote_enabled() and not force_local:
         return []
     cpu = int(
         os.environ.get(
@@ -548,6 +582,39 @@ from _build.reapi_retry import REAPI_RETRYABLE_EXIT_CODES, reapi_max_retries
 _REAPI_RETRYABLE_EXIT_CODES = REAPI_RETRYABLE_EXIT_CODES
 _REAPI_MAX_RETRIES = reapi_max_retries()
 
+# Canonical PATH used when invoking bazelisk. Bazel includes PATH in the
+# action environment hash by default, so a transient PATH (uv build venv,
+# user shell tweaks, /tmp/build-env-…) busts the REAPI cache. Pinning to
+# the standard system PATH keeps cache hits stable across local dev,
+# CI, and the uv build-isolation env.
+_BAZEL_FIXED_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _bazel_subprocess_env() -> dict:
+    """Return os.environ with PATH pinned to ``_BAZEL_FIXED_PATH``."""
+    env = os.environ.copy()
+    env["PATH"] = _BAZEL_FIXED_PATH
+    return env
+
+
+def _resolve_bazel_cmd(cmd: list) -> list:
+    """Absolute-resolve ``cmd[0]`` if it's a bare bazelisk/bazel name.
+
+    The fixed PATH (_BAZEL_FIXED_PATH) does not include user-local install
+    locations like ``~/.nvm/.../bin`` where bazelisk often lives. Resolve
+    against the *current* PATH before swapping the child env, so the spawn
+    finds the binary while bazelisk's children still see the canonical PATH.
+    """
+    if not cmd:
+        return cmd
+    head = cmd[0]
+    if os.path.isabs(head) or "/" in head:
+        return cmd
+    resolved = shutil.which(head)
+    if resolved:
+        return [resolved] + cmd[1:]
+    return cmd
+
 
 def _run_bazel_with_retry(
     cmd: list,
@@ -555,6 +622,8 @@ def _run_bazel_with_retry(
     **kwargs,
 ) -> subprocess.CompletedProcess:
     """Run a bazel command, retrying on transient REAPI failures."""
+    kwargs.setdefault("env", _bazel_subprocess_env())
+    cmd = _resolve_bazel_cmd(cmd)
     for attempt in range(max_retries + 1):
         result = subprocess.run(cmd, **kwargs)
         if result.returncode not in _REAPI_RETRYABLE_EXIT_CODES:
@@ -629,13 +698,13 @@ def build_bazel_extensions(build_config: str) -> None:
     # Note: We don't add --jobs by default, let Bazel decide based on system resources.
     # Users can add --jobs=N via RTP_BAZEL_CONFIG if needed.
 
-    # Remove uv/build from PATH in build isolation env, make sure bazel cache reuse
-    # path_env = os.environ["PATH"].split(":")
-    # path_env = [path for path in path_env if 'uv/build' not in path]
-    # new_path = ":".join(path_env)
-    # os.environ['PATH'] = new_path
-
-    print(f"PATH: {os.environ['PATH']}")
+    # Pin PATH for the bazelisk subprocess so the action env hash stays stable
+    # across local/CI/uv-build-isolation invocations (see _BAZEL_FIXED_PATH).
+    # Absolute-resolve cmd[0] first — bazelisk may live off the canonical PATH
+    # (e.g. ~/.nvm/.../bin), in which case execvp would fail under fixed PATH.
+    bazel_env = _bazel_subprocess_env()
+    cmd = _resolve_bazel_cmd(cmd)
+    print(f"PATH (bazel subprocess): {bazel_env['PATH']}")
     print(f"Running: {' '.join(cmd)}")
     print(f"This may take a while... Check {log_file} for progress.")
 
@@ -662,6 +731,7 @@ def build_bazel_extensions(build_config: str) -> None:
                     stderr=subprocess.STDOUT,
                     text=True,
                     bufsize=1,
+                    env=bazel_env,
                 )
 
                 # Stream output to both file and stdout in real-time
