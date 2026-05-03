@@ -132,6 +132,28 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             md = ()
 
         upstream_iter = stub.ModelStreamInfer(request_iterator, metadata=md)
+
+        # Cancel propagation mirrors ``dash_sc/service.py::_register_cancel_callback``:
+        # grpc-python does NOT auto-cancel a streaming call when the consumer
+        # stops iterating, and the server thread is blocked inside ``next(it)``
+        # so it cannot observe the inbound cancel on its own. ``add_callback``
+        # fires on a grpcio-internal thread the moment the inbound RPC
+        # terminates (cancel / deadline / normal close) and cancels the
+        # downstream stub call there, so rtp-llm stops burning GPU on a
+        # client that is already gone. Without this the forward->rtp-llm RPC
+        # keeps running long after the chat side has cut (observed: 567s
+        # tail with 2 tokens).
+        def _cancel_downstream() -> None:
+            try:
+                upstream_iter.cancel()
+            except Exception:
+                pass
+
+        try:
+            context.add_callback(_cancel_downstream)
+        except Exception:
+            pass
+
         if agg is not None:
 
             def counting_response_iter():
