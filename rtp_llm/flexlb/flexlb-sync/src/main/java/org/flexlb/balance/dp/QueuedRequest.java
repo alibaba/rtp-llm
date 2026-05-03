@@ -17,17 +17,25 @@ import java.util.concurrent.CompletableFuture;
 public record QueuedRequest(
         BalanceContext ctx,
         CompletableFuture<Response> future,
-        long enqueuedAtMicros) {
+        long enqueuedAtMicros,
+        int computeTokenLength,
+        long sloDeadlineMicros,
+        int bucketIndex) {
 
     public static QueuedRequest of(BalanceContext ctx, CompletableFuture<Response> future) {
-        return new QueuedRequest(ctx, future, System.nanoTime() / 1000);
+        return new QueuedRequest(ctx, future, System.nanoTime() / 1000, 0, Long.MAX_VALUE, 0);
+    }
+
+    public static QueuedRequest of(BalanceContext ctx, CompletableFuture<Response> future,
+                                   int computeTokenLength, long sloDeadlineMicros, int bucketIndex) {
+        return new QueuedRequest(ctx, future, System.nanoTime() / 1000,
+                computeTokenLength, sloDeadlineMicros, bucketIndex);
     }
 
     public long requestId() {
         return ctx == null ? -1 : ctx.getRequestId();
     }
 
-    /** Wall-clock wait so the batcher can force-flush a starving head request. */
     public long waitMicros() {
         return System.nanoTime() / 1000 - enqueuedAtMicros;
     }
