@@ -323,8 +323,11 @@ class Gate(nn.Module):
         # FP32-everywhere path that previously emitted SIMT sgemm 128x128
         # (127× × 1.15 ms = 145 ms in the 64k+CP=4 trace).  Score numerics
         # then run in FP32 through softplus/sqrt/topk, same as before.
-        x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
-        scores = F.linear(x_bf16, self._weight_bf16()).float()
+        if os.environ.get("DSV4_GATE_FP32", "0") == "1":
+            scores = F.linear(x.float(), self.weight.float())
+        else:
+            x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
+            scores = F.linear(x_bf16, self._weight_bf16()).float()
 
         # P2 fast path: fuse softplus+sqrt+bias+topk+normalize for the
         # default V4 score_func='sqrtsoftplus' + non-hash routing.
