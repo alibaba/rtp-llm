@@ -257,6 +257,7 @@ class Gate(nn.Module):
         self.route_scale = route_scale
         self.hash = layer_id < n_hash_layers
         self._factory_mode = weights is not None
+        self._dbg_prefix: Optional[str] = None
 
         if self._factory_mode:
             self.weight = nn.Parameter(weights[f"{prefix}.weight"], requires_grad=False)
@@ -310,6 +311,9 @@ class Gate(nn.Module):
     def forward(
         self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        _dbg = self._dbg_prefix if _rt.ENABLED else None
         # x: [N, dim] flat.  Empty-batch safe — some paths (DP rank with
         # zero local tokens; F.softplus on certain degenerate shapes)
         # blow up with "unknown parameter type" on empty ``scores``, so
@@ -328,6 +332,8 @@ class Gate(nn.Module):
         else:
             x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
             scores = F.linear(x_bf16, self._weight_bf16()).float()
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_linear_scores", scores)
 
         # P2 fast path: fuse softplus+sqrt+bias+topk+normalize for the
         # default V4 score_func='sqrtsoftplus' + non-hash routing.
@@ -350,10 +356,14 @@ class Gate(nn.Module):
             scores = scores.sigmoid()
         else:  # "sqrtsoftplus"
             scores = F.softplus(scores).sqrt()
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_activated_scores", scores)
 
         original_scores = scores
         if self.bias is not None:
             scores = scores + self.bias
+        if _dbg is not None:
+            _rt.record_if_level(2, f"{_dbg}_biased_scores", scores)
 
         if self.hash:
             assert input_ids is not None
@@ -1138,13 +1148,17 @@ class MoE(nn.Module):
 
         # Master switch: when MOEDBG=0 the AND short-circuits so neither the
         # layer_id compare nor any record_if_level call site below runs.
-        # Instruments layers 0..2 (first CSA layer is L2) when enabled.
-        _dbg = _rt.ENABLED and self.layer_id <= 2
+        # Instruments layers 0..2 (first CSA layer is L2) and 17..20
+        # (cp2_ep1 vs tp1 first divergence window) when enabled.
+        _dbg = _rt.ENABLED and (self.layer_id <= 2 or 17 <= self.layer_id <= 20)
         shape = x.size()
         x = x.view(-1, self.dim)
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_x_in", x)
+            self.gate._dbg_prefix = f"L{self.layer_id:02d}_moe_gate"
         weights, indices = self.gate(x, input_ids.flatten())
+        if _dbg:
+            self.gate._dbg_prefix = None
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_weights", weights)
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_indices", indices)

@@ -253,6 +253,7 @@ class Block(nn.Module):
         hc_fn: torch.Tensor,
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
+        dbg_tag: Optional[str] = None,
     ):
         """Accepts ``[B, S, hc, d]`` or the flat ``[T, hc, d]`` layout.
         Returns ``y``, ``post [..., hc, 1]``, ``comb [..., hc, hc]`` with
@@ -274,6 +275,7 @@ class Block(nn.Module):
             hc_mult=self.hc_mult,
         )
         if tk_out is not None:
+            self._dbg_record_hc_pre_path(dbg_tag, x, "tk", use_fused=None)
             if x.dim() == 3:
                 y_tk, post_tk, comb_tk = tk_out
                 return y_tk.squeeze(0), post_tk.squeeze(0), comb_tk.squeeze(0)
@@ -289,7 +291,9 @@ class Block(nn.Module):
         ).to(dtype)
         mixes = (F.linear(x_flat, self._hc_fn_bf16(hc_fn)) * rsqrt).float()
         mixes = mixes.contiguous()
-        if _use_fused_sinkhorn(mixes, self.hc_mult):
+        use_fused = _use_fused_sinkhorn(mixes, self.hc_mult)
+        self._dbg_record_hc_pre_path(dbg_tag, x, "fallback", use_fused=use_fused)
+        if use_fused:
             pre, post, comb = fused_hc_split_sinkhorn(
                 mixes,
                 hc_scale.contiguous(),
@@ -310,6 +314,39 @@ class Block(nn.Module):
         y = torch.sum(pre.to(dtype).unsqueeze(-1) * x.view(*shape), dim=-2)
         # post in the [..., hc, 1] convention so _hc_post can call TK mhc_post.
         return y.to(dtype), post.unsqueeze(-1), comb
+
+    def _dbg_record_hc_pre_path(
+        self,
+        dbg_tag: Optional[str],
+        x: torch.Tensor,
+        path: str,
+        use_fused: Optional[bool],
+    ) -> None:
+        if dbg_tag is None:
+            return
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        if not _rt.ENABLED:
+            return
+        path_code = 1.0 if path == "tk" else 0.0
+        fused_code = -1.0 if use_fused is None else float(use_fused)
+        _rt.record_if_level(
+            2,
+            f"{dbg_tag}_path_codes",
+            torch.tensor([path_code, fused_code], device=x.device, dtype=torch.float32),
+        )
+        try:
+            import torch.distributed as dist
+
+            rank = dist.get_rank() if dist.is_initialized() else 0
+        except Exception:
+            rank = 0
+        print(
+            "MOEDBG_HC_PRE_PATH "
+            f"rank={rank} layer={self.layer_id} tag={dbg_tag} "
+            f"path={path} use_fused_sinkhorn={use_fused}",
+            flush=True,
+        )
 
     def _hc_post(
         self,
@@ -369,22 +406,43 @@ class Block(nn.Module):
         delegates attention to ``Attention.forward_decode``. Prefill
         ``forward`` is byte-identical for PD-disagg cleanliness.
         """
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        _dbg_layer = _rt.ENABLED and (self.layer_id <= 2 or 17 <= self.layer_id <= 20)
         # Attention path
         residual = x
         x_pre, post, comb = self._hc_pre(
-            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+            x,
+            self.hc_attn_fn,
+            self.hc_attn_scale,
+            self.hc_attn_base,
+            dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
         )
         x_pre = self.attn_norm(x_pre)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
         attn_out = self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
         x = self._hc_post(attn_out, residual, post, comb)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_residual", x)
 
         # FFN path — MoE has no per-step state, reuse existing forward
         residual = x
         x_pre, post, comb = self._hc_pre(
-            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+            x,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
         )
         x_pre = self.ffn_norm(x_pre)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
         ffn_out = self.ffn(x_pre, input_ids)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self._hc_post(ffn_out, residual, post, comb)
         return x
 
@@ -414,12 +472,17 @@ class Block(nn.Module):
 
         # Master switch: when MOEDBG=0 the AND short-circuits so neither the
         # layer_id compare nor any record_if_level call site below runs.
-        # Instruments layers 0..2 (first CSA layer is L2) when enabled.
-        _dbg_layer = _rt.ENABLED and self.layer_id <= 2
+        # Instruments layers 0..2 (first CSA layer is L2) and 17..20
+        # (cp2_ep1 vs tp1 first divergence window) when enabled.
+        _dbg_layer = _rt.ENABLED and (self.layer_id <= 2 or 17 <= self.layer_id <= 20)
         # Attention path
         residual = x
         x_pre, post, comb = self._hc_pre(
-            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+            x,
+            self.hc_attn_fn,
+            self.hc_attn_scale,
+            self.hc_attn_base,
+            dbg_tag=f"L{self.layer_id:02d}_attn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], [T, hc, 1], [T, hc, hc]
         x_pre = self.attn_norm(x_pre)  # [T, dim]
         if _dbg_layer:
@@ -463,7 +526,11 @@ class Block(nn.Module):
         # FFN path
         residual = x
         x_pre, post, comb = self._hc_pre(
-            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+            x,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            dbg_tag=f"L{self.layer_id:02d}_ffn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], ...
         x_pre = self.ffn_norm(x_pre)  # [T, dim]
         if _dbg_layer:

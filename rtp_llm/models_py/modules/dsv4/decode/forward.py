@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.attn_type import (
     CSA_KV,
     CSA_STATE,
@@ -181,12 +182,23 @@ def forward_layers(
     helper (:func:`rtp_llm.models_py.modules.dsv4.prefill.forward.forward_layers`)
     but dispatches to ``layer.forward_decode`` (FlashMLA / FP8 path)
     and threads the pre-built decode metadata."""
+    _rt_on = _rt.ENABLED and _rt._get_buf() is not None
     h = v4.embed(input_ids_2d)  # [B, q_len, dim]
+    if _rt_on:
+        _rt.record("decode_embed_out", h)
     h = h.unsqueeze(2).repeat(1, 1, v4.hc_mult, 1)  # [B, q_len, hc, dim]
-    for layer in v4.layers:
+    if _rt_on:
+        _rt.record("decode_embed_hc_expanded", h)
+    for layer_idx, layer in enumerate(v4.layers):
         h = layer.forward_decode(h, attn_metadata, input_ids_2d, kv_cache=kv_cache)
+        if _rt_on:
+            _rt.record(f"decode_layer{layer_idx:02d}_out", h)
     h = v4._hc_head_reduce(h)
+    if _rt_on:
+        _rt.record("decode_hc_reduced", h)
     h = v4.norm(h)
+    if _rt_on:
+        _rt.record("decode_final_norm", h)
     return h
 
 
@@ -253,6 +265,38 @@ def forward_decode(
     B = meta.batch_size
     q_len = meta.q_len_per_req
     input_ids_2d = input_ids.view(B, q_len) if input_ids.dim() == 1 else input_ids
+
+    _rt_on = _rt.ENABLED
+    if _rt_on:
+        _rt.begin(seqlen=int(input_ids_2d.numel()))
+        if _rt._get_buf() is None:
+            _rt_on = False
+        else:
+            _rt.record("decode_input_ids", input_ids_2d)
+
     h = forward_layers(v4, kv_cache, input_ids_2d, meta)  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
+    if _rt_on:
+        _rt.record("decode_hidden", hidden)
+        lm_logits = torch.mm(hidden.float(), v4.head.weight.t()).float()
+        _rt.record("decode_lm_logits", lm_logits)
+        top_k = min(16, lm_logits.size(-1))
+        lm_top_values, lm_top_indices = torch.topk(lm_logits, k=top_k, dim=-1)
+        _rt.record("decode_lm_top_values", lm_top_values)
+        _rt.record("decode_lm_top_indices", lm_top_indices)
+        extra = {
+            "is_decode": True,
+            "input_ids_shape": tuple(input_ids_2d.shape),
+            "input_ids": input_ids_2d.detach().cpu(),
+            "batch_size": int(B),
+            "q_len": int(q_len),
+        }
+        seq_lens = getattr(attn, "sequence_lengths", None)
+        if seq_lens is not None:
+            extra["sequence_lengths"] = seq_lens.detach().cpu()
+        start_pos = getattr(meta, "start_pos", None)
+        if start_pos is not None:
+            extra["start_pos"] = start_pos.detach().cpu()
+        _rt.dump(step=v4._dbg_step, extra=extra)
+        v4._dbg_step += 1
     return PyModelOutputs(hidden)
