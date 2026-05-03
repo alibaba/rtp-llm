@@ -13,7 +13,7 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
 import os
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
 # P3 (audit §3.5 / §7.4 P0): wo_a batched output projection.
 # Replaces the per-group ``for g in range(G)`` loop (G launches of
@@ -116,6 +116,29 @@ def _is_fp8_kv_cache_dtype(kv_cache_dtype: Any) -> bool:
         return name.upper() == "FP8"
     value = str(kv_cache_dtype).lower()
     return value == "fp8" or value.endswith(".fp8")
+
+
+class _PrefillCommon(NamedTuple):
+    bsz: int
+    seqlen: int
+    rd: int
+    device: torch.device
+    cp_ctx: Optional[CPContext]
+    cp_on: bool
+    freqs_cis: torch.Tensor
+    topk_idxs: torch.Tensor
+    sp_int: int
+    any_cont: bool
+    debug_enabled: bool
+    rec: Any
+
+
+class _PrefillQKV(NamedTuple):
+    qr: torch.Tensor
+    q: torch.Tensor
+    kv: torch.Tensor
+    kv_full: torch.Tensor
+    seqlen_full: int
 
 
 def _prepare_wo_a_stacked(
@@ -745,19 +768,99 @@ class Attention(nn.Module):
         vec_dtype, vec_dim = spec
         # base: [num_blocks, stride_elems].  stride_bytes = stride_elems *
         # element_size.  entries_per_block = stride_bytes // bytes_per_entry.
+        # NB: stride_bytes may be padded by the C++ side (e.g. SWA FP8
+        # 256*584=149504 → 149760 for FlashMLA TMA alignment), in which
+        # case ``base[:, :useful_bytes]`` is non-contiguous and a chained
+        # ``.view()`` would raise. Use ``as_strided`` to build the typed
+        # 2D view directly: dim-0 = padded byte stride, dim-1 = bytes per
+        # element of vec_dtype, dim-2 = 1 (then flatten to [num_blocks*eb,
+        # vec_dim] via a second as_strided so consumers can keep using
+        # flat slot indexing).
+        num_blocks = int(base.shape[0])
         stride_bytes = int(base.shape[1]) * int(base.element_size())
         bytes_per_entry = vec_dim * vec_dtype.itemsize
         if bytes_per_entry <= 0 or stride_bytes < bytes_per_entry:
             return None
         eb = stride_bytes // bytes_per_entry
         useful_bytes = eb * bytes_per_entry
-        # Reinterpret as uint8 [num_blocks, stride_bytes] so we can slice
-        # exact useful-byte span, then cast to vec_dtype + flatten to
-        # [total_slots, vec_dim].
         raw_u8 = base.view(torch.uint8)
         if raw_u8.shape[1] < useful_bytes:
             return None
-        return raw_u8[:, :useful_bytes].view(vec_dtype).view(-1, vec_dim)
+        item = vec_dtype.itemsize
+        # Outer 3D as_strided: [num_blocks, eb, vec_dim] in vec_dtype.
+        # Stride: dim-0 = padded bytes / item, dim-1 = vec_dim, dim-2 = 1.
+        # Trailing pad bytes per block (stride_bytes - useful_bytes) are skipped.
+        typed = raw_u8.view(vec_dtype)
+        per_block_elems = stride_bytes // item
+        view_3d = torch.as_strided(
+            typed,
+            size=(num_blocks, eb, vec_dim),
+            stride=(per_block_elems, vec_dim, 1),
+        )
+        # Flatten to [num_blocks*eb, vec_dim] matching the legacy contract.
+        # reshape() may copy if non-contiguous (padded case) — slot-write
+        # callers index_copy_ into this view, so a copy here would silently
+        # discard writes. Instead allow reshape to fall back to a contiguous
+        # round-trip ONLY when the buffer is actually contiguous (no pad).
+        if stride_bytes == useful_bytes:
+            return view_3d.reshape(num_blocks * eb, vec_dim)
+        # Padded case: a 2D row-flat view (single uniform dim-0 stride =
+        # vec_dim) cannot represent a buffer whose physical block stride
+        # exceeds the useful per-block bytes — index_copy_ via slot
+        # ``b*eb + i`` would address the wrong byte. Return None so the
+        # caller skips this gate; FP8 SWA writes don't actually consume
+        # ``pool_view`` (they go through ``_swa_pool_3d_uint8`` +
+        # ``quantize_v4_kv_decode`` which honors padded stride), and
+        # non-FP8 pools never get padded.
+        return None
+
+    def _swa_pool_3d_uint8(self) -> Optional[torch.Tensor]:
+        """Return the SWA_KV pool as ``[num_blocks, eb, 584]`` uint8.
+
+        Native FP8-DS-MLA layout (584B/token = 448 fp8 + 128 bf16 + 8 ue8m0
+        scale) — fed straight into ``quantize_v4_kv_decode`` /
+        ``dequantize_swa_window_to_bf16``. Returns ``None`` when the pool
+        is unallocated or the layer is BF16.
+
+        The C++ side pads each block's byte stride up to a multiple of 576
+        so FlashMLA's TMA assertion holds (e.g. SWA bs=256: natural
+        149504 → padded 149760, +256 trailing pad bytes per block). The
+        returned 3D tensor uses ``as_strided`` so dim-0 stride matches
+        the **padded** byte stride from ``base.shape[1]`` while each
+        block's 256 tokens stay 584-bytes contiguous; the trailing pad
+        bytes at the end of each block are skipped. The dequant Triton
+        kernel reads ``stride(0)`` to address blocks correctly.
+        """
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+
+        if not self._kv_cache_is_fp8 or self._kv_cache is None:
+            return None
+        attn_type_enum = _ATTN_TYPE_ENUM_BY_INT.get(SWA_KV)
+        if attn_type_enum is None:
+            return None
+        try:
+            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_enum)
+        except RuntimeError:
+            return None
+        base = layer_kv.kv_cache_base
+        if base is None or base.numel() == 0 or base.dim() != 2:
+            return None
+        num_blocks = int(base.shape[0])
+        elem_size = int(base.element_size())
+        padded_stride_bytes = int(base.shape[1]) * elem_size
+        eb = padded_stride_bytes // _DSV4_FP8_KV_ENTRY_BYTES
+        if eb <= 0 or eb * _DSV4_FP8_KV_ENTRY_BYTES > padded_stride_bytes:
+            return None
+        raw_u8 = base.view(torch.uint8)
+        # padded_stride_bytes is in bytes == uint8 elements. The dim-0
+        # stride must reflect the (potentially padded) physical block
+        # spacing; dim-1 = ENTRY_BYTES, dim-2 = 1 keeps each token
+        # contiguous and skips the trailing pad past eb * 584 bytes.
+        return torch.as_strided(
+            raw_u8,
+            size=(num_blocks, eb, _DSV4_FP8_KV_ENTRY_BYTES),
+            stride=(raw_u8.stride(0), _DSV4_FP8_KV_ENTRY_BYTES, 1),
+        )
 
     def _pool_entries_per_block(self, attn_type: int) -> int:
         """Derive ``entries_per_block`` from the framework pool tensor for
@@ -897,9 +1000,15 @@ class Attention(nn.Module):
         bt = self._block_tables_by_type.get(SWA_KV)
         if bt is None or bt.numel() == 0:
             return
-        pool_view = self._pool_view(SWA_KV)
         eb = self._pool_entries_per_block(SWA_KV)
-        if pool_view is None or eb <= 0:
+        if eb <= 0:
+            return
+        # pool_view is the 2D slot-flat write target for the BF16 path; the
+        # FP8 path writes via quantize_v4_kv_decode against _swa_pool_3d_uint8
+        # so it doesn't need the flat view (and can't get one when the
+        # underlying buffer is byte-padded for TMA alignment).
+        pool_view = None if self._kv_cache_is_fp8 else self._pool_view(SWA_KV)
+        if not self._kv_cache_is_fp8 and pool_view is None:
             return
 
         win = self.window_size
@@ -968,6 +1077,32 @@ class Attention(nn.Module):
         source = torch.gather(kv_full[:bsz], 1, gather_idx)  # [B, max_n_write, D]
         source_flat = source.reshape(bsz * max_n_write, self.head_dim)
         slot_mapping = slot.reshape(-1)
+
+        if self._kv_cache_is_fp8:
+            # FP8 SWA path: quantize-and-pack via the V4 decode-arm op
+            # (``concat_and_cache_mla(..., "fp8_model1_mla")``). Same
+            # 584B/token layout as vLLM's ``fp8_ds_mla`` (448 fp8 + 128
+            # bf16 + 8 ue8m0 scale). The CUDA kernel handles ``slot < 0``
+            # by early-return (see mla_quant_kernel.cu:94), so no extra
+            # filtering is needed.
+            from rtp_llm.models_py.modules.dsv4.decode.fp8_kv_quant_decode_op import (
+                quantize_v4_kv_decode,
+            )
+
+            packed_3d = self._swa_pool_3d_uint8()
+            if packed_3d is None:
+                return
+            quantize_v4_kv_decode(
+                (
+                    source_flat.to(torch.bfloat16)
+                    if source_flat.dtype != torch.bfloat16
+                    else source_flat
+                ),
+                slot_mapping,
+                packed_3d,
+            )
+            return
+
         write_kv_to_pool(source_flat, slot_mapping, pool_view, mask_negative=True)
 
     def _set_compressor_pool_context(self) -> None:
@@ -1608,6 +1743,8 @@ class Attention(nn.Module):
         finally:
             self._kv_cache = prev_kv
             self._block_tables_by_type = prev_bt
+        if out is NotImplemented:
+            return out
         return out.squeeze(0) if was_flat else out
 
     def _compute_prefill_indices(
@@ -1628,9 +1765,9 @@ class Attention(nn.Module):
         cp_ctx.global_positions), so it's safe to compute them at the
         top of the body before the Q/KV path.
 
-        Caller guarantees ``bsz == 1`` (asserted in ``_forward_prefill``);
-        batched prefill is gated by ``max_context_batch_size = 1`` in
-        the FIFO scheduler — see ``_forward_prefill`` for details."""
+        ``DeepSeekV4Model.forward`` enforces ``bsz == 1`` before prefill
+        dispatch; batched prefill is gated by ``max_context_batch_size = 1``
+        in the FIFO scheduler."""
         win = self.window_size
         cp_on = cp_ctx is not None and cp_ctx.cp_size > 1
         if cp_on:
@@ -1664,7 +1801,8 @@ class Attention(nn.Module):
         compressed tail]``, so the compressed-block start-index is
         ``seqlen_full``.
 
-        Caller guarantees ``bsz == 1`` (asserted in ``_forward_prefill``).
+        ``DeepSeekV4Model.forward`` enforces ``bsz == 1`` before prefill
+        dispatch.
 
         Branches by what's available:
 
@@ -1733,40 +1871,26 @@ class Attention(nn.Module):
             return torch.cat([kv_full, kv_compress], dim=1)
         return kv_full
 
-    def _forward_prefill(
-        self, x: torch.Tensor, start_pos, sequence_lengths=None
-    ) -> torch.Tensor:
-        """Prefill-only forward.  Decode goes through ``forward_decode`` /
-        ``_forward_decode_body`` with paged metadata; this body is entered
-        only when ``seqlen > 1``.  ``start_pos`` is int or 1-element tensor.
+    def _prefill_common_setup(self, x: torch.Tensor, start_pos) -> _PrefillCommon:
+        """Build metadata shared by BF16 and FP8 prefill implementations.
 
-        DSv4 TEMP — bsz==1 invariant: the FIFO scheduler is configured
-        with ``max_context_batch_size = 1`` (see
-        ``cpp/engine_base/schedulers/FIFOScheduler.cc::evaluateRunningMemory``)
-        so only one prefill request enters per scheduling round.  All
-        per-row "batched prefill" branches in the helpers were removed
-        on this premise — re-enabling B>1 prefill requires reinstating
-        them (and the per-row sequence_lengths threading) along with
-        cu_seqlens-aware compressor / indexer / SWA-pool kernels."""
+        ``DeepSeekV4Model.forward`` enforces the current B==1 production
+        invariant before dispatching into this layer; attention-level code
+        keeps using the scalar-request assumptions until batched prefill is
+        made cu_seqlens-aware end-to-end.
+        """
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
         # Master switch: when MOEDBG=0 the AND short-circuits so neither the
         # layer_id compare nor any record_if_level call site below runs.
-        _dbg = _rt.ENABLED and self.layer_id <= 2
+        debug_enabled = _rt.ENABLED and self.layer_id <= 2
 
         def _rec(tag: str, t):
-            if _dbg:
+            if debug_enabled:
                 _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_{tag}", t)
 
         bsz, seqlen, _ = x.size()
-        # DSv4 TEMP: see docstring — prefill kernels assume bsz==1.
-        assert bsz == 1, (
-            f"DSv4 prefill expects bsz==1; got {bsz}.  Set "
-            "MAX_CONTEXT_BATCH_SIZE=1 (default) so the scheduler does "
-            "not batch multiple prefill requests in one round."
-        )
         rd = self.rope_head_dim
-        device = x.device
         device = x.device
 
         cp_ctx = self._cp_ctx
@@ -1777,6 +1901,10 @@ class Attention(nn.Module):
         # before the Q/KV path.
         freqs_cis, topk_idxs = self._compute_prefill_indices(
             start_pos, seqlen, bsz, device, cp_ctx
+        )
+
+        sp_int = (
+            int(start_pos) if isinstance(start_pos, torch.Tensor) else int(start_pos)
         )
 
         # #50: Compressor / Indexer are fully pool-backed — no persistent
@@ -1790,115 +1918,321 @@ class Attention(nn.Module):
                 if self.indexer.compressor.freqs_cis is None:
                     self.indexer.compressor.freqs_cis = self.freqs_cis
 
+        return _PrefillCommon(
+            bsz=bsz,
+            seqlen=seqlen,
+            rd=rd,
+            device=device,
+            cp_ctx=cp_ctx,
+            cp_on=cp_on,
+            freqs_cis=freqs_cis,
+            topk_idxs=topk_idxs,
+            sp_int=sp_int,
+            any_cont=sp_int > 0,
+            debug_enabled=debug_enabled,
+            rec=_rec,
+        )
+
+    def _prefill_compute_qkv_common(
+        self, x: torch.Tensor, common: _PrefillCommon
+    ) -> _PrefillQKV:
+        """Common GEMM/RMSNorm/RoPE QKV path before BF16/FP8 cache split."""
         # Q path
         qr = self._rmsnorm_weighted(
             self._lin(self.wq_a, x), self.q_norm.weight
         )  # [B, S, q_lora_rank]
-        _rec("qr_norm", qr)
+        common.rec("qr_norm", qr)
         q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
-        _rec("q_pre_rmsnorm", q)
+        common.rec("q_pre_rmsnorm", q)
         # Per-head QK RMSNorm (no learnable scale, per official code) + partial
         # RoPE, single Triton launch.  ``fused_rmsnorm_rope`` handles both
         # prefill (``freqs_cis`` per-position ``[S, rd/2]``) and batched-
         # decode-in-prefill (``[B, 1, rd/2]``) via the unified freq_stride.
-        q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=self.eps)
-        _rec("q_post_rope", q)
-        _rec("freqs_cis", freqs_cis)
+        q = fused_rmsnorm_rope(q, None, common.freqs_cis, common.rd, eps=self.eps)
+        common.rec("q_post_rope", q)
+        common.rec("freqs_cis", common.freqs_cis)
 
         # KV path (single KV head) — rank-local under CP.
         kv_in = self._lin(self.wkv, x)
-        kv = fused_rmsnorm_rope(kv_in, self.kv_norm.weight, freqs_cis, rd, eps=self.eps)
-        _rec("kv_post_rope_local", kv)
+        kv = fused_rmsnorm_rope(
+            kv_in, self.kv_norm.weight, common.freqs_cis, common.rd, eps=self.eps
+        )
+        common.rec("kv_post_rope_local", kv)
 
         # Under CP prefill, all-gather KV across the CP (== TP) group
         # and strip padding so every rank has the FULL uncompressed
         # sliding KV in logical order; attention then runs with rank-
         # local Q × full-KV.
-        if cp_on:
-            kv_full = cp_all_gather_full(kv, cp_ctx)  # [1, seq_len_full, head_dim]
-            seqlen_full = cp_ctx.seq_len_full
+        if common.cp_on:
+            kv_full = cp_all_gather_full(
+                kv, common.cp_ctx
+            )  # [1, seq_len_full, head_dim]
+            seqlen_full = common.cp_ctx.seq_len_full
         else:
             kv_full = kv
-            seqlen_full = seqlen
-        _rec("kv_full", kv_full)
+            seqlen_full = common.seqlen
+        common.rec("kv_full", kv_full)
 
-        # HCA layers extend topk_idxs with the compressed-block tail.
-        if self.compress_ratio:
-            compress_idxs = self._compute_compress_idxs(
-                x,
-                qr,
-                start_pos,
-                seqlen,
-                seqlen_full,
-                bsz,
-                device,
-                cp_ctx,
-                _dbg,
-            )
-            topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
-        topk_idxs = topk_idxs.long()
-
-        # any_cont drives the kv_cat fork: fresh prefill (sp==0) uses
-        # the just-computed kv_full; continuation prefill (sp>0) gathers
-        # SWA + compressed back from the framework pool.  bsz==1 is
-        # enforced above, so a 1-element tensor reduces to a scalar
-        # comparison.
-        sp_int = (
-            int(start_pos) if isinstance(start_pos, torch.Tensor) else int(start_pos)
+        return _PrefillQKV(
+            qr=qr,
+            q=q,
+            kv=kv,
+            kv_full=kv_full,
+            seqlen_full=seqlen_full,
         )
-        any_cont = sp_int > 0
 
-        # Phase E5b: direct SWA pool write from kv_full (no register_buffer
-        # intermediary).  Ring-buffered addressing handled inside
-        # ``_prefill_write_swa_to_pool``; prefix KV for continuation prefill
-        # already lives in the pool from prior calls.
-        self._prefill_write_swa_to_pool(bsz, kv_full, start_pos, sequence_lengths)
-        if self.compress_ratio:
-            # #50: compressor self-binds kv_state / score_state /
-            # kv_cache from the framework pool at entry, runs body,
-            # scatters back at exit.  Pool context was set by the
-            # outer ``forward`` wrapper in its try/finally.
-            if _dbg:
-                self.compressor._dbg_prefix = f"L{self.layer_id:02d}_attn_cmp"
-            kv_compress = self.compressor(
-                x, start_pos, sequence_lengths=sequence_lengths
+    def _prefill_output_proj_common(
+        self, o: torch.Tensor, common: _PrefillCommon
+    ) -> torch.Tensor:
+        """Shared inverse-RoPE + wo_a + wo_b projection for prefill.
+
+        The fast path is independent of KV-cache dtype: it consumes the BF16
+        attention output, fuses inverse-RoPE with per-token-group FP8 quant,
+        and runs the same DeepGEMM ``wo_a`` einsum decode already uses.  The
+        fallback keeps the previous eager inverse-RoPE + BF16-einsum behavior.
+        """
+        use_fused_wo_a = (
+            self._factory_mode
+            and hasattr(self, "_wo_a_stk_w")
+            and o.is_cuda
+            and o.dtype == torch.bfloat16
+            and o.numel() > 0
+            and common.bsz == 1
+            and common.freqs_cis.is_cuda
+            and common.freqs_cis.dtype == torch.complex64
+            and not common.debug_enabled
+        )
+        if use_fused_wo_a:
+            # Prefill RoPE freqs are per token, not per request. Flatten the
+            # kernel input so ``q_len_per_b == 1`` and token i consumes freq i.
+            o_flat = o.reshape(
+                common.bsz * common.seqlen, self.n_heads, self.head_dim
+            ).contiguous()
+            freqs_flat = common.freqs_cis.reshape(
+                common.bsz * common.seqlen, -1
+            ).contiguous()
+            o_fp8, o_scale = fused_inv_rope_fp8_quant(
+                o_flat,
+                freqs_flat,
+                n_groups=self.n_groups,
+                heads_per_group=self.n_heads // self.n_groups,
+                nope_dim=self.head_dim - self.rope_head_dim,
+                rope_head_dim=self.rope_head_dim,
             )
-            if _dbg:
-                self.compressor._dbg_prefix = None
-            if kv_compress is not None:
-                _rec("kv_compress", kv_compress)
+            o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, common.bsz, common.seqlen)
         else:
-            kv_compress = None
-        kv_cat = self._build_kv_cat(kv_full, kv_compress, any_cont, bsz)
-        _rec("kv_cat", kv_cat)
+            # Inverse RoPE on output (cancels K's absolute position)
+            apply_rotary_emb(o[..., -common.rd :], common.freqs_cis, inverse=True)
+            common.rec("o_post_inv_rope", o)
 
-        if _tl_kernels.tilelang_available():
-            o = _tl_kernels.sparse_attn(
-                q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
-            )
-        else:
-            o = _sparse_attn(q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale)
-        _rec("sparse_out", o)
-        _rec("topk_idxs", topk_idxs)
-
-        # Inverse RoPE on output (cancels K's absolute position)
-        apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
-        _rec("o_post_inv_rope", o)
-
-        # Grouped output projection: split heads into n_groups groups
-        o = o.reshape(bsz, seqlen, self.n_groups, -1)
-        # wo_a storage is native FP8; dequant on-the-fly and view into group-wise form.
-        wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
-        wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
-        o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-        _rec("wo_a_out", o)
+            # Grouped output projection: split heads into n_groups groups.
+            o = o.reshape(common.bsz, common.seqlen, self.n_groups, -1)
+            # wo_a storage is native FP8; dequant on-the-fly and view into group-wise form.
+            wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
+            wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
+            o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+        common.rec("wo_a_out", o)
         out = self._lin(self.wo_b, o.flatten(2))
-        _rec("wo_b_out_pre_ar", out)
+        common.rec("wo_b_out_pre_ar", out)
         if self.tp_size > 1:
             # wo_b is row-split along K — each rank produces a partial
             # sum; AR combines across the tp group.
             from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
             all_reduce(out, Group.TP)
-            _rec("wo_b_out_post_ar", out)
+            common.rec("wo_b_out_post_ar", out)
         return out
+
+    def _forward_prefill_bf16(
+        self,
+        x: torch.Tensor,
+        start_pos,
+        sequence_lengths,
+        common: _PrefillCommon,
+        qkv: _PrefillQKV,
+    ) -> torch.Tensor:
+        """Existing BF16 KV-cache prefill path after the common QKV stage."""
+        topk_idxs = common.topk_idxs
+
+        # HCA layers extend topk_idxs with the compressed-block tail.
+        if self.compress_ratio:
+            compress_idxs = self._compute_compress_idxs(
+                x,
+                qkv.qr,
+                start_pos,
+                common.seqlen,
+                qkv.seqlen_full,
+                common.bsz,
+                common.device,
+                common.cp_ctx,
+                common.debug_enabled,
+            )
+            topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
+        topk_idxs = topk_idxs.long()
+
+        # common.any_cont drives the kv_cat fork: fresh prefill (sp==0) uses
+        # the just-computed kv_full; continuation prefill (sp>0) gathers
+        # SWA + compressed back from the framework pool.  B==1 is enforced
+        # by DeepSeekV4Model.forward before this layer is called.
+
+        # Phase E5b: direct SWA pool write from kv_full (no register_buffer
+        # intermediary).  Ring-buffered addressing handled inside
+        # ``_prefill_write_swa_to_pool``; prefix KV for continuation prefill
+        # already lives in the pool from prior calls.
+        self._prefill_write_swa_to_pool(
+            common.bsz, qkv.kv_full, start_pos, sequence_lengths
+        )
+        if self.compress_ratio:
+            # #50: compressor self-binds kv_state / score_state /
+            # kv_cache from the framework pool at entry, runs body,
+            # scatters back at exit.  Pool context was set by the
+            # outer ``forward`` wrapper in its try/finally.
+            if common.debug_enabled:
+                self.compressor._dbg_prefix = f"L{self.layer_id:02d}_attn_cmp"
+            kv_compress = self.compressor(
+                x, start_pos, sequence_lengths=sequence_lengths
+            )
+            if common.debug_enabled:
+                self.compressor._dbg_prefix = None
+            if kv_compress is not None:
+                common.rec("kv_compress", kv_compress)
+        else:
+            kv_compress = None
+        kv_cat = self._build_kv_cat(
+            qkv.kv_full, kv_compress, common.any_cont, common.bsz
+        )
+        common.rec("kv_cat", kv_cat)
+
+        if _tl_kernels.tilelang_available():
+            o = _tl_kernels.sparse_attn(
+                qkv.q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
+            )
+        else:
+            o = _sparse_attn(
+                qkv.q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
+            )
+        common.rec("sparse_out", o)
+        common.rec("topk_idxs", topk_idxs)
+        return self._prefill_output_proj_common(o, common)
+
+    def _forward_prefill_fp8(
+        self,
+        x: torch.Tensor,
+        start_pos,
+        sequence_lengths,
+        common: _PrefillCommon,
+        qkv: _PrefillQKV,
+    ):
+        """FP8 KV-cache prefill dispatcher.
+
+        Layer-0 / SWA-only is implemented; CSA / HCA (compress_ratio in
+        {4, 128}) still raise NotImplementedError so HACK_LAYER_NUM=2..4
+        with FP8 KV cache fail loudly at the right module rather than
+        silently returning the Python ``NotImplemented`` sentinel.
+        """
+        if self.compress_ratio == 0:
+            return self._forward_prefill_fp8_swa_only(
+                x, start_pos, sequence_lengths, common, qkv
+            )
+        raise NotImplementedError(
+            "DSv4 FP8 prefill for compress_ratio > 0 (CSA/HCA) is not yet "
+            f"implemented (layer_id={self.layer_id}, "
+            f"compress_ratio={self.compress_ratio}). Only SWA-only layers "
+            "(layer 0) are supported with FP8 KV cache so far. "
+            "Run with HACK_LAYER_NUM=1 + FP8_KV_CACHE=1 to exercise the "
+            "implemented path; full-stack FP8 prefill lands in a follow-up "
+            "patch (Compressor / Indexer FP8 cache wiring)."
+        )
+
+    def _forward_prefill_fp8_swa_only(
+        self,
+        x: torch.Tensor,
+        start_pos,
+        sequence_lengths,
+        common: _PrefillCommon,
+        qkv: _PrefillQKV,
+    ) -> torch.Tensor:
+        """SWA-only FP8 prefill via ``flash_mla_sparse_fwd`` over BF16 ``kv_full``.
+
+        Two responsibilities, decoupled:
+
+        1. Quant-write the fresh BF16 KV into the FP8 SWA pool so the
+           subsequent decode steps can read packed FP8 directly. Done via
+           the existing :meth:`_prefill_write_swa_to_pool` (subagent A
+           branched it on ``_kv_cache_is_fp8``).
+        2. Compute sparse attention for THIS prefill chunk against the BF16
+           ``qkv.kv_full`` already in registers — no need to round-trip
+           through FP8 quant + dequant. ``_get_window_topk_idxs`` returns
+           sequence-position-relative indices in ``[0, S)`` which match
+           ``kv_full``'s first axis 1:1; ``topk_length`` per query row
+           bounds the valid topk to ``min(pos+1, window_size)`` so the
+           kernel ignores the ``-1`` sentinels in early rows.
+
+        Continuation prefill (``sp > 0``) needs to dequant the prefix
+        from the FP8 ring buffer + concat with ``kv_full`` to rebuild the
+        full sequence view. Out of scope for HACK_LAYER_NUM=1
+        max_tokens=1; raises NotImplementedError so HACK=2.. fails loudly
+        at the right place.
+        """
+        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+
+        # 1) Write fresh KV to FP8 pool. No-op when ``self._kv_cache`` is
+        # None (warmup forward) — guarded inside _prefill_write_swa_to_pool.
+        self._prefill_write_swa_to_pool(
+            common.bsz, qkv.kv_full, start_pos, sequence_lengths
+        )
+
+        if int(common.sp_int) != 0:
+            raise NotImplementedError(
+                "DSv4 FP8 SWA prefill currently supports start_pos==0 only "
+                f"(got sp={int(common.sp_int)}); continuation prefill needs "
+                "FP8 ring-buffer dequant + concat with kv_full, deferred."
+            )
+
+        # 2) flash_mla_sparse_fwd over BF16 kv_full: q [s_q, h_q, d_qk],
+        # kv [s_kv, h_kv=1, d_qk], indices [s_q, h_kv=1, topk] int32.
+        # Prefill B==1 enforced upstream by DeepSeekV4Model.forward.
+        assert common.bsz == 1, "FP8 prefill assumes B==1 (model invariant)"
+        q_3d = qkv.q.squeeze(0).contiguous()  # [S, H, D]
+        kv_3d = qkv.kv_full.squeeze(0).unsqueeze(1).contiguous()  # [S_kv=S, h_kv=1, D]
+        indices_3d = (
+            common.topk_idxs.squeeze(0).unsqueeze(1).to(torch.int32).contiguous()
+        )  # [S, 1, win]
+
+        # topk_length[i] = min(i+1, window_size): the i-th query at
+        # sequence position i has min(i+1, win) valid SWA slots; the
+        # remaining indices are -1 sentinels.
+        S = q_3d.shape[0]
+        positions = torch.arange(S, device=q_3d.device, dtype=torch.int32)
+        topk_length = torch.clamp(positions + 1, max=self.window_size).contiguous()
+
+        o3, _, _ = flash_mla_sparse_fwd(
+            q=q_3d,
+            kv=kv_3d,
+            indices=indices_3d,
+            sm_scale=self.softmax_scale,
+            attn_sink=self.attn_sink,
+            topk_length=topk_length,
+        )
+        o = o3.unsqueeze(0)  # [1, S, H, D]
+        common.rec("sparse_out_fp8", o)
+        common.rec("topk_idxs", common.topk_idxs)
+
+        return self._prefill_output_proj_common(o, common)
+
+    def _forward_prefill(
+        self, x: torch.Tensor, start_pos, sequence_lengths=None
+    ) -> torch.Tensor:
+        """Prefill-only forward with shared setup and BF16/FP8 cache split.
+
+        Decode goes through ``forward_decode`` / ``_forward_decode_body`` with
+        paged metadata. The prefill B==1 invariant is enforced at
+        ``DeepSeekV4Model.forward`` before this layer is called.
+        """
+        common = self._prefill_common_setup(x, start_pos)
+        qkv = self._prefill_compute_qkv_common(x, common)
+        if self._kv_cache_is_fp8:
+            return self._forward_prefill_fp8(
+                x, start_pos, sequence_lengths, common, qkv
+            )
+        return self._forward_prefill_bf16(x, start_pos, sequence_lengths, common, qkv)
