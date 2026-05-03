@@ -104,6 +104,19 @@ def _use_read_from_pool() -> bool:
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
+_DSV4_FP8_KV_ENTRY_BYTES = 584
+_DSV4_FP8_INDEXER_ENTRY_BYTES = 132
+
+
+def _is_fp8_kv_cache_dtype(kv_cache_dtype: Any) -> bool:
+    if kv_cache_dtype is None:
+        return False
+    name = getattr(kv_cache_dtype, "name", None)
+    if isinstance(name, str):
+        return name.upper() == "FP8"
+    value = str(kv_cache_dtype).lower()
+    return value == "fp8" or value.endswith(".fp8")
+
 
 def _prepare_wo_a_stacked(
     weight_fp8: torch.Tensor,
@@ -395,6 +408,7 @@ class Attention(nn.Module):
         prefix: str = "",
         tp_size: int = 1,
         tp_rank: int = 0,
+        kv_cache_dtype: Any = None,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -410,6 +424,8 @@ class Attention(nn.Module):
         self._factory_mode = weights is not None
         self.tp_size = tp_size
         self.tp_rank = tp_rank
+        self._kv_cache_dtype = kv_cache_dtype
+        self._kv_cache_is_fp8 = _is_fp8_kv_cache_dtype(kv_cache_dtype)
         # Per-rank head + group counts (S7a). Sharding only kicks in when
         # tp_size > 1; tp_size==1 keeps everything bit-exact unchanged.
         assert (
@@ -670,11 +686,21 @@ class Attention(nn.Module):
         coff_csa = 2  # CSA overlap=True
         coff_idx = 2  # Indexer's nested Compressor overlap=True
         # HCA uses coff=1 (overlap=False) so HCA_STATE vec_dim = 2*head_dim.
+        kv_spec = (
+            (torch.uint8, _DSV4_FP8_KV_ENTRY_BYTES)
+            if self._kv_cache_is_fp8
+            else (torch.bfloat16, head_dim)
+        )
+        indexer_kv_spec = (
+            (torch.uint8, _DSV4_FP8_INDEXER_ENTRY_BYTES)
+            if self._kv_cache_is_fp8
+            else (torch.bfloat16, idx_hd)
+        )
         self._pool_spec: Dict[int, tuple] = {
-            SWA_KV: (torch.bfloat16, head_dim),
-            CSA_KV: (torch.bfloat16, head_dim),
-            HCA_KV: (torch.bfloat16, head_dim),
-            INDEXER_KV: (torch.bfloat16, idx_hd),
+            SWA_KV: kv_spec,
+            CSA_KV: kv_spec,
+            HCA_KV: kv_spec,
+            INDEXER_KV: indexer_kv_spec,
             CSA_STATE: (torch.float32, 2 * coff_csa * head_dim),
             HCA_STATE: (torch.float32, 2 * head_dim),
             INDEXER_STATE: (torch.float32, 2 * coff_idx * idx_hd),
