@@ -368,6 +368,13 @@ class DeepSeekV4Model(GptModelBase):
         if attn is None or bool(attn.is_prefill):
             return None
 
+        if self.kv_cache is None:
+            logging.warning(
+                "[DeepSeekV4Model] prepare_fmha_impl: kv_cache not yet allocated "
+                "(warmup phase); skipping CUDA-graph impl creation."
+            )
+            return None
+
         from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImpl,
             DSv4DecodeFmhaImplConfig,
@@ -414,11 +421,21 @@ class DeepSeekV4Model(GptModelBase):
         """qwen3-style dispatcher — per-arm orchestration lives in the
         prefill / decode runtime modules.
         """
+        if self.kv_cache is None:
+            # Warmup-only PyWrappedModel: NormalExecutor builds it with
+            # cache_manager==nullptr, so init_resources carries no kv_cache.
+            # Return zeros so CUDA-graph memory probe completes; a post-warmup
+            # occurrence means the captured graph is bogus — fail loudly.
+            logging.warning(
+                "[DeepSeekV4Model] forward() with kv_cache=None — warmup only"
+            )
+            T = max(inputs.input_ids.numel(), 1)
+            device = next(self.v4.parameters()).device
+            return PyModelOutputs(
+                torch.zeros(T, self._v4_args.dim, dtype=torch.bfloat16, device=device)
+            )
         if inputs.attention_inputs.is_prefill:
             return forward_prefill(
                 self.v4, self.kv_cache, self.parallelism_config, inputs
             )
-        else:
-            return forward_decode(
-                self.v4, self.kv_cache, self._v4_args, inputs, fmha_impl
-            )
+        return forward_decode(self.v4, self.kv_cache, self._v4_args, inputs, fmha_impl)
