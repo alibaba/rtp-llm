@@ -238,11 +238,20 @@ def run_ck(
 
 _PARTITION_SIZE = 512
 _PARTITION_SIZE_ROCM = 256
-_DEVICE_PROPERTIES = torch.cuda.get_device_properties("cuda")
-_ON_NAVI = (
-    hasattr(_DEVICE_PROPERTIES, "gcnArchName")
-    and "gfx1" in torch.cuda.get_device_properties("cuda").gcnArchName
-)
+# Module-level torch.cuda.get_device_properties() crashes pytest collection
+# on no-GPU hosts (collector container has CPU-only torch). Defer
+# evaluation: only `_use_rocm_custom_paged_attention` needs `_ON_NAVI`,
+# and that function only runs inside @pytest.mark.gpu(MI308X) tests, which
+# are skipped on no-GPU hosts before the body executes.
+try:
+    _DEVICE_PROPERTIES = torch.cuda.get_device_properties("cuda")
+    _ON_NAVI = (
+        hasattr(_DEVICE_PROPERTIES, "gcnArchName")
+        and "gfx1" in _DEVICE_PROPERTIES.gcnArchName
+    )
+except (RuntimeError, AssertionError):
+    _DEVICE_PROPERTIES = None
+    _ON_NAVI = False
 
 
 def _use_rocm_custom_paged_attention(
