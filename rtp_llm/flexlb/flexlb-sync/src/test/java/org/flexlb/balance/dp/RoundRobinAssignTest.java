@@ -40,15 +40,14 @@ class RoundRobinAssignTest {
     }
 
     @Test
-    void cursor_advances_across_batches() {
-        // batch1 (4, dp=4) → [0,1,2,3], cursor → 4
-        // batch2 (4, dp=4) → [0,1,2,3]  (4 mod 4 = 0)
-        // batch3 (2, dp=4) → [0,1],     cursor → 10
-        // batch4 (4, dp=4) → [2,3,0,1]  (10 mod 4 = 2)
+    void each_batch_starts_at_rank_zero() {
+        // Positional: every batch starts fresh at slot 0. Cross-batch fairness is
+        // enforced one level up by GroupSelector (inside DispatchPlanner) choosing
+        // the pod; within a chosen pod, slot positions are deterministic.
         assertEquals(List.of(0, 1, 2, 3), ranksOf(rr.assign(makeBatch(4, 4))));
         assertEquals(List.of(0, 1, 2, 3), ranksOf(rr.assign(makeBatch(4, 4))));
         assertEquals(List.of(0, 1), ranksOf(rr.assign(makeBatch(2, 4))));
-        assertEquals(List.of(2, 3, 0, 1), ranksOf(rr.assign(makeBatch(4, 4))));
+        assertEquals(List.of(0, 1, 2, 3), ranksOf(rr.assign(makeBatch(4, 4))));
     }
 
     @Test

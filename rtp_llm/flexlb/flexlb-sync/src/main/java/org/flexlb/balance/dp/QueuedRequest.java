@@ -1,0 +1,34 @@
+package org.flexlb.balance.dp;
+
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Response;
+
+import java.util.concurrent.CompletableFuture;
+
+/**
+ * One request waiting in {@link GlobalPrefillBatcher}'s queue.
+ * <p>
+ * At queue time the prefill / decode workers have NOT yet been picked — group
+ * selection is a per-batch decision deferred to {@link DispatchPlanner#plan}.
+ * The future is the same one returned to {@link org.flexlb.service.RouteService};
+ * completion happens either from the planner (per-request failure), the dispatcher
+ * (Master.Enqueue ack), or RouteService (cancel).
+ */
+public record QueuedRequest(
+        BalanceContext ctx,
+        CompletableFuture<Response> future,
+        long enqueuedAtMicros) {
+
+    public static QueuedRequest of(BalanceContext ctx, CompletableFuture<Response> future) {
+        return new QueuedRequest(ctx, future, System.nanoTime() / 1000);
+    }
+
+    public long requestId() {
+        return ctx == null ? -1 : ctx.getRequestId();
+    }
+
+    /** Wall-clock wait so the batcher can force-flush a starving head request. */
+    public long waitMicros() {
+        return System.nanoTime() / 1000 - enqueuedAtMicros;
+    }
+}

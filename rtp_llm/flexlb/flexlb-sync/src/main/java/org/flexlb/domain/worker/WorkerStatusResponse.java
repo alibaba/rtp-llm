@@ -4,8 +4,10 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.DpRankStatus;
 import org.flexlb.dao.master.TaskInfo;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -68,4 +70,9 @@ public class WorkerStatusResponse {
     @JsonProperty("message")
     private String message;
 
+    /**
+     * Per-DP-rank breakdown parsed from {@code WorkerStatusPB.dp_status[]}.
+     * Empty unless DP0 reports {@code dp_size > 1}.
+     */
+    private List<DpRankStatus> dpStatuses = List.of();
 }

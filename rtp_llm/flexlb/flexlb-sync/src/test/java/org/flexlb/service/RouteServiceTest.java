@@ -8,10 +8,15 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -37,6 +42,7 @@ class RouteServiceTest {
     private DefaultRouter defaultRouter;
     private QueueManager queueManager;
     private DpBatchScheduler dpBatchScheduler;
+    private EngineWorkerStatus engineWorkerStatus;
     private RouteService routeService;
 
     @BeforeEach
@@ -45,11 +51,25 @@ class RouteServiceTest {
         defaultRouter = mock(DefaultRouter.class);
         queueManager = mock(QueueManager.class);
         dpBatchScheduler = mock(DpBatchScheduler.class);
+        engineWorkerStatus = mock(EngineWorkerStatus.class);
 
         cfg = new FlexlbConfig();
         when(configService.loadBalanceConfig()).thenReturn(cfg);
+        when(engineWorkerStatus.selectModelWorkerStatus(any(RoleType.class), any()))
+                .thenReturn(workersWithDpSize(4));
 
-        routeService = new RouteService(configService, defaultRouter, queueManager, dpBatchScheduler);
+        routeService = new RouteService(configService, defaultRouter, queueManager,
+                engineWorkerStatus, dpBatchScheduler);
+    }
+
+    private static Map<String, WorkerStatus> workersWithDpSize(long dpSize) {
+        Map<String, WorkerStatus> m = new HashMap<>();
+        WorkerStatus w = new WorkerStatus();
+        w.setIp("10.0.0.1");
+        w.setPort(8080);
+        w.setDpSize(dpSize);
+        m.put("10.0.0.1:8080", w);
+        return m;
     }
 
     // ============== route dispatch ==============
@@ -147,7 +167,8 @@ class RouteServiceTest {
     @Test
     void dpBalanceScheduler_null_falls_through_safely() {
         // Defensive: if the bean isn't wired (early-stage build), we never NPE
-        RouteService rs = new RouteService(configService, defaultRouter, queueManager, null);
+        RouteService rs = new RouteService(configService, defaultRouter, queueManager,
+                engineWorkerStatus, null);
         cfg.setDpBalanceEnabled(true);
         when(defaultRouter.route(any())).thenReturn(okResponse());
 
@@ -156,6 +177,22 @@ class RouteServiceTest {
 
         assertTrue(r.isSuccess());
         verify(defaultRouter).route(any());
+    }
+
+    @Test
+    void dpBalance_on_but_no_dp_enabled_worker_falls_through_to_legacy() {
+        cfg.setDpBalanceEnabled(true);
+        cfg.setEnableQueueing(false);
+        // All workers report dp_size=1 → DP lane has no group to RR over.
+        when(engineWorkerStatus.selectModelWorkerStatus(any(RoleType.class), any()))
+                .thenReturn(workersWithDpSize(1));
+        when(defaultRouter.route(any())).thenReturn(okResponse());
+
+        BalanceContext ctx = ctxWith(maxNewTokens(128));
+        routeService.route(ctx).block();
+
+        verify(defaultRouter).route(any());
+        verify(dpBatchScheduler, never()).submit(any());
     }
 
     // ============== gate function direct ==============
@@ -206,7 +243,8 @@ class RouteServiceTest {
 
     @Test
     void cancel_with_no_dp_scheduler_does_not_NPE() {
-        RouteService rs = new RouteService(configService, defaultRouter, queueManager, null);
+        RouteService rs = new RouteService(configService, defaultRouter, queueManager,
+                engineWorkerStatus, null);
         cfg.setEnableQueueing(false);
         BalanceContext ctx = ctxWith(maxNewTokens(128));
         ctx.getRequest().setRequestId(7L);

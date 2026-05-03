@@ -1,5 +1,6 @@
 package org.flexlb.service;
 
+import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 
@@ -12,6 +13,9 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.sync.status.EngineWorkerStatus;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
@@ -40,14 +44,17 @@ public class RouteService {
     private final Router router;
     private final QueueManager queueManager;
     private final DpBatchScheduler dpBatchScheduler;
+    private final EngineWorkerStatus engineWorkerStatus;
 
     public RouteService(ConfigService configService,
                         DefaultRouter defaultScheduler,
                         QueueManager queueManager,
+                        EngineWorkerStatus engineWorkerStatus,
                         @Autowired(required = false) DpBatchScheduler dpBatchScheduler) {
         this.configService = configService;
         this.router = defaultScheduler;
         this.queueManager = queueManager;
+        this.engineWorkerStatus = engineWorkerStatus;
         this.dpBatchScheduler = dpBatchScheduler;
     }
 
@@ -114,15 +121,16 @@ public class RouteService {
     }
 
     /**
-     * V1-α gate: only route through DpBatchScheduler when:
+     * Gate for DpBatchScheduler lane. All five conditions must hold:
      * <ul>
-     *   <li>config flag is on,</li>
-     *   <li>scheduler bean is wired (defensive: optional injection above means
-     *       early-stage builds can omit it without crashing),</li>
+     *   <li>scheduler bean is wired (optional injection — early-stage builds may omit it),</li>
+     *   <li>{@code dpBalanceEnabled} config flag is on,</li>
      *   <li>request will produce more than one token AND not use beam search AND
      *       hasn't disabled SP — the same precondition under which pd_separation
-     *       activates in the engine. SP/beam paths still rely on the legacy
-     *       direct or queued router.</li>
+     *       activates in the engine; SP/beam paths still take the legacy router,</li>
+     *   <li>at least one Prefill worker reports {@code dp_size > 1}. When all
+     *       workers are single-rank, the DP batching path has no group to RR over
+     *       and the legacy ShortestTTFT/WeightedCache lane handles the request.</li>
      * </ul>
      */
     boolean shouldUseDpBatch(BalanceContext ctx, FlexlbConfig cfg) {
@@ -133,6 +141,20 @@ public class RouteService {
         if (req.getMaxNewTokens() <= 1) return false;     // pd_separation gating
         if (req.getNumBeams() > 1) return false;           // pd_separation gating
         if (req.isForceDisableSpRun()) return false;       // explicit SP opt-out
-        return true;
+        return hasDpEnabledPrefillWorker();
+    }
+
+    private boolean hasDpEnabledPrefillWorker() {
+        Map<String, WorkerStatus> prefillWorkers =
+                engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
+        if (prefillWorkers == null || prefillWorkers.isEmpty()) {
+            return false;
+        }
+        for (WorkerStatus w : prefillWorkers.values()) {
+            if (w != null && w.getDpSize() > 1) {
+                return true;
+            }
+        }
+        return false;
     }
 }
