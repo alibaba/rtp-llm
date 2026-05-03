@@ -9,6 +9,7 @@ import org.flexlb.balance.dp.PendingRequest;
 import org.flexlb.balance.dp.PrefillBatch;
 import org.flexlb.balance.dp.QueuedRequest;
 import org.flexlb.balance.dp.RoundRobinAssign;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -109,7 +110,8 @@ class DpBatchSchedulerTest {
                 .thenReturn(CompletableFuture.completedFuture(null));
 
         scheduler = new DpBatchScheduler(configService, engineWorkerStatus, planner,
-                new RoundRobinAssign(), grpcClient, registry);
+                List.of(new RoundRobinAssign()), grpcClient, registry,
+                mock(CacheAwareService.class));
     }
 
     @AfterEach

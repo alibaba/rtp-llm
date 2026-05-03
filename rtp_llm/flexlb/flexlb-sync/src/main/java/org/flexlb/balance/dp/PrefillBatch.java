@@ -12,7 +12,12 @@ import java.util.List;
 public record PrefillBatch(
         ServerStatus prefillTarget,
         List<PendingRequest> requests,
-        int dpSize) {
+        int dpSize,
+        long blockSize) {
+
+    public PrefillBatch(ServerStatus prefillTarget, List<PendingRequest> requests, int dpSize) {
+        this(prefillTarget, requests, dpSize, 1);
+    }
 
     public int size() {
         return requests.size();

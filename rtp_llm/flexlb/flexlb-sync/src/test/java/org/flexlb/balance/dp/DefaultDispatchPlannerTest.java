@@ -44,6 +44,7 @@ class DefaultDispatchPlannerTest {
         engineWorkerStatus = mock(EngineWorkerStatus.class);
         resourceMeasureFactory = mock(ResourceMeasureFactory.class);
         groupSelector = mock(GroupSelector.class);
+        when(groupSelector.name()).thenReturn("CACHE_AWARE");
         decodeSelector = mock(LoadBalancer.class);
 
         ResourceMeasure measure = mock(ResourceMeasure.class);
@@ -54,7 +55,7 @@ class DefaultDispatchPlannerTest {
         // FlexlbConfig.getStrategyForRoleType(DECODE) returns by default.
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, decodeSelector);
 
-        planner = new DefaultDispatchPlanner(engineWorkerStatus, resourceMeasureFactory, groupSelector);
+        planner = new DefaultDispatchPlanner(engineWorkerStatus, resourceMeasureFactory, List.of(groupSelector));
     }
 
     @Test
