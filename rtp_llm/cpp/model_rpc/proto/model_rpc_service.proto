@@ -148,6 +148,10 @@ message GenerateInputPB {
     // can skip re-hashing. Same source as Request.block_cache_keys on the
     // Master HTTP /rtp_llm/schedule entry.
     repeated int64 cache_hash_key = 10;
+    // V1 DP-controller: placeholder injected by DP0 into empty slots of a partial
+    // batch so every DP worker runs in lockstep. V1 always ships full batches, so
+    // this remains false; V1.x partial-batch handling will set it.
+    bool is_fake_query = 11;
 }
 
 message AuxInfoPB {
@@ -351,7 +355,23 @@ message CacheStatusPB {
     int64 total_kv_cache = 2;
     int64 block_size = 3;
     int64 version = 4;
+    // Aggregated view across the DP group when returned by DP0.
+    // Semantics: cache_keys = union of all DPx key sets (preserves legacy
+    // any-DP lookup by FlexLB); available/total = sum across DP. Per-DP
+    // breakdown is exposed via dp_cache for owner-aware routing.
     map<int64, bool> cache_keys = 5;
+    // V1 DP-controller: per-DP slot breakdown, filled only by DP0 when
+    // dp_size>1. Ordering matches dp_rank ascending. Each element is a
+    // per-DP local CacheStatusPB (its own dp_cache field stays empty — peers
+    // respond via DpInternalGetCacheStatus which never re-aggregates, so the
+    // self-referential definition terminates at depth 1).
+    repeated CacheStatusPB dp_cache = 6;
+    // V1 DP-controller: endpoint of the DP rank that produced this payload.
+    // Populated by DP0 on each dp_cache[] entry from ParallelismConfig.dp_peer_addrs
+    // (DP0 fills its own slot from local config). Left empty on the outer
+    // aggregated message since the outer one represents the whole pod.
+    string ip = 7;
+    int32 grpc_port = 8;
 }
 
 message UpdateSchedulerInfoRequestPB {
@@ -405,6 +425,11 @@ message UpdateWeightsRequestPB {
 
 message WorkerStatusPB {
     string role = 1;
+    // Aggregated across the DP group when returned by DP0. Semantics:
+    //   available_concurrency / waiting_query_len / running_query_len = sum
+    //   step_latency_ms = max, iterate_count = min (safe lower bound),
+    //   latest_finished_version = min, alive = AND, running/finished_task_list = union
+    //   (tasks already carry dp_rank). Legacy single-DP callers see identical values.
     int32 available_concurrency = 2;
     repeated TaskInfoPB running_task_info = 3;
     repeated TaskInfoPB finished_task_list = 4;
@@ -418,6 +443,18 @@ message WorkerStatusPB {
     bool alive = 13;
     string precision = 14;
     int64 latest_finished_version = 15;
+    // V1 DP-controller: per-DP slot breakdown, filled only by DP0 when
+    // dp_size>1. Empty otherwise. Ordering matches dp_rank ascending. Each
+    // element is a per-DP local WorkerStatusPB (its own dp_status field stays
+    // empty — peers respond via DpInternalGetWorkerStatus which never
+    // re-aggregates, so the self-referential definition terminates at depth 1).
+    repeated WorkerStatusPB dp_status = 16;
+    // V1 DP-controller: endpoint of the DP rank that produced this payload.
+    // Populated by DP0 on each dp_status[] entry from ParallelismConfig.dp_peer_addrs
+    // (DP0 fills its own slot from local config). Left empty on the outer
+    // aggregated message since the outer one represents the whole pod.
+    string ip = 17;
+    int32 grpc_port = 18;
 }
 
 message EmbeddingInputPB {
@@ -667,4 +704,27 @@ service MultimodalRpcService {
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
+}
+
+// V1 DP-controller internal: DP0 fan-out to peer DP workers (intra-pod).
+// External callers (FlexLB / Frontend) MUST NOT target this service.
+message DpInternalEnqueueRequestPB {
+    GenerateInputPB input = 1;
+}
+
+message DpInternalEnqueueResponsePB {
+    int64 request_id = 1;
+    ErrorDetailsPB error_info = 2;
+}
+
+service DpInternalService {
+    rpc DpInternalEnqueue(DpInternalEnqueueRequestPB) returns (DpInternalEnqueueResponsePB);
+    // V1 DP-controller intra-pod status probe. DP0 calls these on each peer to
+    // build WorkerStatusPB.dp_status / CacheStatusPB.dp_cache. Returns the
+    // caller-local status (never re-aggregates) to avoid recursion.
+    rpc DpInternalGetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
+    rpc DpInternalGetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
+    // V1 DP-controller intra-pod cancel, used for cascade rollback on partial
+    // Enqueue failure. Idempotent.
+    rpc DpInternalCancel(CancelRequestPB) returns (EmptyPB);
 }
