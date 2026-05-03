@@ -44,6 +44,20 @@ cc_library(
 )
 
 cc_library(
+    name = "dsv4_ieee_rmsnorm",
+    srcs = ["dsv4_ieee_rmsnorm.cu"],
+    hdrs = ["dsv4_ieee_rmsnorm.h"],
+    deps = cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_no_aux_tc",
     srcs = ["no_aux_tc_kernels.cu"],
     hdrs = ["no_aux_tc_kernels.h"],

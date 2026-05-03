@@ -57,7 +57,14 @@ def _fused_rmsnorm_rope_kernel(
     x = tl.load(x_row + d_off, mask=d_mask, other=0.0).to(tl.float32)
 
     var = tl.sum(x * x, axis=0) / D
-    inv = tl.rsqrt(var + EPS)
+    # IEEE rsqrt: tl.rsqrt lowers to PTX rsqrt.approx.f32 (~2 ULP error,
+    # measured in /tmp/test_rsqrt_variants.py on this triton/B300).
+    # `1/tl.sqrt` lowers to sqrt.rn + rcp.rn = IEEE 0.5 ULP.
+    # Same root cause as the C++ flashinfer math::rsqrt fix in
+    # bindings/cuda/kernels/dsv4_ieee_rmsnorm.cu — the per-head Q/K norm
+    # path goes through THIS triton kernel, not the C++ one, so both must
+    # be IEEE for the 60-layer accumulation at S=64K to stay coherent.
+    inv = 1.0 / tl.sqrt(var + EPS)
     y = x * inv
     if HAS_WEIGHT:
         w = tl.load(w_ptr + d_off, mask=d_mask, other=0.0).to(tl.float32)

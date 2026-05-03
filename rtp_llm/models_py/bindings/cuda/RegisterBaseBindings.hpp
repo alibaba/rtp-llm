@@ -21,6 +21,7 @@
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_ieee_rmsnorm.h"
 
 using namespace rtp_llm;
 
@@ -50,6 +51,19 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
     rtp_ops_m.def("rmsnorm",
                   &rmsnorm,
                   "RMSNorm kernel",
+                  py::arg("output"),
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("eps"),
+                  py::arg("cuda_stream") = 0);
+
+    // IEEE-precise RMSNorm (vendored from flashinfer norm.cuh, with the
+    // approx PTX rsqrt swapped for __frcp_rn(__fsqrt_rn(...))).  Same Python
+    // signature as `rmsnorm` above so it's a drop-in replacement on the
+    // DSv4 path where ~2 ULP per-layer error compounds at S=64K.
+    rtp_ops_m.def("dsv4_ieee_rmsnorm",
+                  &dsv4_ieee_rmsnorm,
+                  "DSv4 IEEE-precise RMSNorm kernel (patched flashinfer)",
                   py::arg("output"),
                   py::arg("input"),
                   py::arg("weight"),
