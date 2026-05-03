@@ -688,6 +688,17 @@ void GenerateStream::matchStopWordsList(int batch_id) {
 }
 
 void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
+    // This function is the worker-thread entry point for
+    // post-step bookkeeping in the MTP async path. It calls
+    // CompleteTokenIds::update (which clamps overshoot via maxTokenNum) and
+    // updateOutput -> needFinish -> matchStopWordsList, all on the worker
+    // thread. Stop / EOS / max-token termination therefore lands before the
+    // next dispatchDecodeAsync starts (under the broad
+    // spec_bookkeeping_runner_.sync() invariant). The
+    // RTP_LLM_MTP_ASYNC_STOP_EXTRA env gate is
+    // intentionally NOT consulted here — the speculative propose_step + 1
+    // window already provides the budget for MTP, and the optimistic
+    // accept-then-clip pipeline handles boundary correctness.
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());

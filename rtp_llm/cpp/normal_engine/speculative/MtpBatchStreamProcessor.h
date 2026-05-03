@@ -35,6 +35,16 @@ public:
 
     void prepareOneStepSpecDecodeModelInput(const StreamGroups& stream_groups, GptModelInputs& model_input);
 
+    // Named entry point for the device-state target-verify
+    // gather. Returns true and fully populates model_input if every stream
+    // in the group has a complete MTP async device state (accept_len /
+    // accept_tokens / next_seq_len / propose_tokens all CUDA-defined).
+    // Returns false without touching model_input if any stream is missing
+    // a piece, so the caller can fail closed to the legacy CPU/GPU mixed
+    // path. The body is the same fast path that previously lived inline
+    // in prepareOneStepSpecDecodeModelInput.
+    bool gatherMtpDecodeModelInputFromDeviceState(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
+
     void updateDecodeDraftModelInput(GptModelInputs&        model_input,
                                      const GptModelOutputs& model_output,
                                      const torch::Tensor&   draft_token_ids);

@@ -654,46 +654,21 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         buffer_holder_.release();
     }
 
-    // Stream-async: 1-step bookkeeping buffer. Cap outstanding
-    // worker tasks at 1 step by blocking CPU here on the previous step's
-    // worker (specUpdate + KV release + GPU swapLinearBlocks). Without this,
-    // step N+2 would launch while step N's bookkeeping is still in flight,
-    // leading to KV exhaustion (conservative reservation never released) and
-    // race-y reads of stream state.
-    //
-    // Ordering guarantee: this sync runs BEFORE wait_pending_linear_attn_swaps
-    // and gatherDecodeModelInput so:
-    //  - the swap-done event has been recorded by the worker (no race on
-    //    pending_swap_done_event_ shared_ptr read);
-    //  - gatherDecodeModelInput's host-side block-id read sees the post-swap
-    //    KV block mapping (target verify will then operate on the correct
-    //    blocks).
-    //
-    // No-op when stream-async is off (useStreamAsync() == false;
-    // AsyncRunner.sync
-    // is also a no-op on the very first decodeStep (task_done_ starts true).
-    if (useStreamAsync()) {
+    // Cap outstanding stream-async bookkeeping to one step unless
+    // RTP_LLM_MTP_DROP_BROAD_SYNC explicitly drops the front-loaded CPU
+    // sync. Device-state tensors cover stale host reads, per-stream swap
+    // events protect linear KV remapping, and AsyncRunner::launch still
+    // single-slots bookkeeping workers.
+    if (useStreamAsync() && !useDropBroadSync()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(wait_prev_bookkeeping,stream_count=%zu)",
                                       streams.size());
         spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
     }
 
-    // linear-attention KV swap synchronisation. On the
-    // fully async path, the previous step's specUpdate runs on the result
-    // thread and rewrites KV-block mappings via swapLinearBlocks. This step's
-    // target verify forward must wait on that swap to complete before
-    // reading KV. The producer side records a torch::Event on the worker
-    // stream after dispatchDecode (see MtpExecutor::dispatchDecodeAsync) and
-    // hands it to the stream via setPendingSwapDoneEvent. Consumers here
-    // make the main stream wait via cudaStreamWaitEvent (= torch::Event::block),
-    // then clear the handle. nullptr is the common path (no pending swap;
-    // e.g., stream-async is OFF) and incurs only a per-stream pointer load.
-    //
-    // After the wait_prev_bookkeeping above, the event is already
-    // signalled by the time we get here (worker has CPU-synced its stream),
-    // so this is effectively a no-op stream dependency. Kept as a separate
-    // step so future the fully async path (where wait_prev_bookkeeping moves
-    // off the hot path) keeps the verify-side correctness guarantee.
+    // Linear-attention KV swap synchronisation. The previous step may rewrite
+    // KV-block mappings via swapLinearBlocks while this step is preparing
+    // target verify; wait on the producer event before reading KV. This loop
+    // remains load-bearing when the broad bookkeeping sync is disabled.
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(wait_pending_linear_attn_swaps,stream_count=%zu)",
                                       streams.size());
@@ -967,6 +942,18 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_post_rejection)");
         // only broadcast combo_tokens, last_hidden_states, and lm_output_indexes
         // because these are the only fields updated by updateDecodePostDraftModelInput after rejection sampling
+        //
+        // All three tensors are device-resident at this point.
+        // - combo_tokens: produced on GPU by toCudaInt32(accept_tokens.reshape(...))
+        //   inside updateDecodePostDraftModelInput.
+        // - last_hidden_states: aliased from model_output.all_hidden_states
+        //   (target verify forward output, never round-trips to host).
+        // - lm_output_indexes: produced on GPU by torch::arange + accept_len_d
+        //   inside updateDecodePostDraftModelInput.
+        // The broadcast therefore stays NCCL-only with no implicit D2H/H2D.
+        // Non-root TP ranks fill last_hidden_states from their local target
+        // verify output above; this NCCL broadcast lets rank 0's
+        // rejection-sampled view replace it across ranks.
         if (parallelism_config_.tp_size > 1) {
             execBroadcast({{model_input.combo_tokens}, 0});
             execBroadcast({{model_input.last_hidden_states}, 0});
@@ -1349,10 +1336,80 @@ bool MtpExecutor::useStreamAsync() const {
     // needed since the flag is process-wide and the AsyncRunner objects (and
     // the underlying CUDA streams / worker threads) are eagerly constructed
     // in the MtpExecutor ctor whether or not the path is taken.
+    //
+    // TP-coordination contract: this gate (and its peers
+    // useAsyncDeviceState/useAsyncHostMirror/useAsyncStopExtra) all use the
+    // same `static const bool` lambda pattern reading process env. Every TP
+    // rank starts from the same `RTP_LLM_MTP_*` env (server launcher
+    // exports them before fork), so all ranks make the *identical*
+    // async/fallback decision without an extra cross-rank handshake. If a
+    // future fallback decision needs to depend on per-request state (e.g.
+    // structured-output presence), it MUST go through tpSyncModelInputs or
+    // an explicit broadcast — local short-circuiting on a single rank
+    // would deadlock the others.
     static const bool enabled = []() {
         const char* env = std::getenv("RTP_LLM_MTP_STREAM_ASYNC");
         bool        on  = (env != nullptr && std::string(env) == "1");
         RTP_LLM_LOG_INFO("[stream-async] RTP_LLM_MTP_STREAM_ASYNC=%s -> useStreamAsync=%d",
+                         env ? env : "(unset)",
+                         static_cast<int>(on));
+        return on;
+    }();
+    return enabled;
+}
+
+bool MtpExecutor::useAsyncDeviceState() const {
+    static const bool enabled = []() {
+        const char* env = std::getenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
+        bool        on  = (env != nullptr && std::string(env) == "1");
+        RTP_LLM_LOG_INFO("[async-device-state] RTP_LLM_MTP_ASYNC_DEVICE_STATE=%s -> enabled=%d",
+                         env ? env : "(unset)",
+                         static_cast<int>(on));
+        return on;
+    }();
+    return enabled;
+}
+
+bool MtpExecutor::useAsyncHostMirror() const {
+    static const bool enabled = []() {
+        const char* env = std::getenv("RTP_LLM_MTP_ASYNC_HOST_MIRROR");
+        bool        on  = (env != nullptr && std::string(env) == "1");
+        RTP_LLM_LOG_INFO("[async-host-mirror] RTP_LLM_MTP_ASYNC_HOST_MIRROR=%s -> enabled=%d",
+                         env ? env : "(unset)",
+                         static_cast<int>(on));
+        return on;
+    }();
+    return enabled;
+}
+
+bool MtpExecutor::useDropBroadSync() const {
+    static const bool enabled = []() {
+        const char* env = std::getenv("RTP_LLM_MTP_DROP_BROAD_SYNC");
+        bool        on  = (env != nullptr && std::string(env) == "1");
+        RTP_LLM_LOG_INFO("[drop-broad-sync] RTP_LLM_MTP_DROP_BROAD_SYNC=%s -> enabled=%d",
+                         env ? env : "(unset)",
+                         static_cast<int>(on));
+        return on;
+    }();
+    return enabled;
+}
+
+bool MtpExecutor::useAsyncStopExtra() const {
+    // This gate is intended for non-MTP async paths (propose_step
+    // == 0) where the host stop-word matcher could lag the launch by one
+    // token. The MTP decode path does NOT need this gate: rejection
+    // sampling already produces propose_step + 1 tokens per step, the
+    // bookkeeping worker calls GenerateStream::specUpdate (which invokes
+    // updateOutput -> needFinish -> matchStopWordsList) on the worker
+    // thread before the next decode step starts, and the optimistic
+    // accept-then-clip pipeline terminates the stream at the
+    // first stop/EOS hit within the speculative window. Leave this env
+    // off for MTP — it is plumbing for hypothetical future
+    // single-token async paths.
+    static const bool enabled = []() {
+        const char* env = std::getenv("RTP_LLM_MTP_ASYNC_STOP_EXTRA");
+        bool        on  = (env != nullptr && std::string(env) == "1");
+        RTP_LLM_LOG_INFO("[async-stop-extra] RTP_LLM_MTP_ASYNC_STOP_EXTRA=%s -> enabled=%d",
                          env ? env : "(unset)",
                          static_cast<int>(on));
         return on;
@@ -1375,30 +1432,43 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     // can build combo_tokens without waiting for the worker's specUpdate to
     // populate sp_output_buffer->propose_tokens_gpu.
     const auto& propose_tokens_gpu_all = draft_prefill_output.sampler_output.token_ids;
+    // Also publish per-stream draft hidden states (for next step's
+    // gatherHiddenStates, propose_step > 1 only) and per-stream draft
+    // all_probs (for next step's update*DraftSamplerOutput) here on the main
+    // thread. Without this, those readers race the worker's specUpdate writes
+    // to sp_output_buffer->hidden_states / all_probs and silently see the
+    // PREVIOUS-PREVIOUS step's values when DROP_BROAD_SYNC=1.
+    const auto& draft_all_hidden_full = draft_prefill_output.model_output.all_hidden_states;
+    const auto& draft_all_probs_full  = draft_prefill_output.sampler_output.all_probs;
 
     auto all_streams = stream_groups.allStreams();
-
-    // Snapshot host-side seqLength per stream BEFORE the conservative bump.
-    // The bookkeeping worker rolls back to this value before specUpdate so
-    // GenerateStream::specUpdate (which increments seqLength by num_new_tokens)
-    // lands on the correct base.
-    std::vector<int> old_seq_lens;
-    old_seq_lens.reserve(all_streams.size());
-    for (const auto& stream : all_streams) {
-        old_seq_lens.push_back(stream->seqLength());
-    }
 
     // (events are recorded by the caller in decodeStep — see the
     // rejection_event/draft_event recording sites above. Recording in the
     // caller lets us hit the earliest point each tensor becomes valid on
     // the main stream, instead of waiting for the queue tail at this point.)
 
-    // Compute per-stream device-resident state and attach via setter.
-    // accept_len has shape [batch_size]; accept_tokens has shape [batch_size,
-    // propose_step + 1]. next_seq_len_gpu is computed on GPU as
-    // (cur_seq_len_t + accept_len_slice) so the next decode step's prepare
-    // can build sequence_lengths without waiting on a CPU value.
-    int64_t idx = 0;
+    // Compute per-stream device-resident state and attach via the
+    // setMtpAsyncDeviceState API.
+    //
+    // Race fix: with DROP_BROAD_SYNC the previous step's worker may still
+    // be in flight (specUpdate hasn't advanced host seqLength yet). Reading
+    // stream->seqLength() here would give a stale base, producing a wrong
+    // next_seq_len_gpu that propagates as wrong sequence_lengths into the
+    // next step's model input — causing the model to "forget" recently
+    // accepted tokens and regenerate them (duplicate output).
+    //
+    // Fix: chain next_seq_len_gpu from the PREVIOUS step's device-resident
+    // value (getNextSeqLenGpu). That tensor was set by the previous
+    // dispatchDecodeAsync on the main thread and is always the correct
+    // post-step length regardless of worker progress. On the first decode
+    // step (no prior device state) we fall back to host seqLength, which
+    // is correct because no worker is running yet.
+    std::vector<uint64_t> mtp_async_epochs;
+    mtp_async_epochs.reserve(all_streams.size());
+    int64_t idx              = 0;
+    int64_t hidden_token_off = 0;  // offset into draft_all_hidden_full per stream
+    int64_t probs_batch_off  = 0;  // offset into draft_all_probs_full per stream
     for (auto& stream : all_streams) {
         torch::Tensor accept_len_slice =
             accept_len_gpu_all.defined() ? accept_len_gpu_all.narrow(0, idx, 1) : torch::Tensor();
@@ -1409,36 +1479,72 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 
         torch::Tensor next_seq_len_gpu;
         if (accept_len_slice.defined()) {
-            auto cur_seq_len_t = torch::full({1},
-                                             static_cast<int64_t>(old_seq_lens[idx]),
-                                             torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-            next_seq_len_gpu   = (cur_seq_len_t + accept_len_slice).to(torch::kInt32);
+            const auto&   prev_next_seq_len = stream->getNextSeqLenGpu();
+            torch::Tensor cur_seq_len_t;
+            if (prev_next_seq_len.defined() && prev_next_seq_len.is_cuda()) {
+                cur_seq_len_t = prev_next_seq_len;
+            } else {
+                cur_seq_len_t = torch::full({1},
+                                            static_cast<int64_t>(stream->seqLength()),
+                                            torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            }
+            next_seq_len_gpu = (cur_seq_len_t + accept_len_slice).to(torch::kInt32);
         }
-        stream->setSpecDecodeDeviceState(std::move(accept_len_slice),
-                                         std::move(accept_tokens_slice),
-                                         std::move(next_seq_len_gpu),
-                                         std::move(propose_tokens_slice));
+
+        // Per-stream draft hidden states (last accepted position) and
+        // draft all_probs slice. Both ops stay on the main stream — no D2H,
+        // no .item(), no synchronize. Ordered after speculative_sampler->
+        // forward via main-stream enqueue order (rejection_event records the
+        // same point on the main stream above).
+        torch::Tensor last_hidden_states_gpu;
+        torch::Tensor draft_all_probs_slice_gpu;
+        const auto    next_batch_size = stream->nextBatchSize();
+        if (propose_step_ > 1 && draft_all_hidden_full.defined() && accept_len_slice.defined()) {
+            // Per-stream rows [hidden_token_off, hidden_token_off + propose+1)
+            // contain the draft prefill hidden states. The last accepted
+            // position's hidden state is at offset (accept_len - 1).
+            auto stream_hidden     = draft_all_hidden_full.narrow(0, hidden_token_off, propose_step_ + 1);
+            auto idx_t             = (accept_len_slice - 1).to(torch::kLong);
+            last_hidden_states_gpu = stream_hidden.index_select(/*dim=*/0, idx_t);
+        }
+        if (draft_all_probs_full.defined() && next_batch_size > 0) {
+            // Clone to break the alias to draft_prefill_output's storage —
+            // that storage is held by the worker lambda's `draft_prefill_copy`
+            // and may be released before the next step reads via this view.
+            // Match the lifetime semantics of the legacy worker write at
+            // MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo:834.
+            draft_all_probs_slice_gpu = draft_all_probs_full.narrow(0, probs_batch_off, next_batch_size).clone();
+        }
+
+        GenerateStream::MtpAsyncDeviceState state;
+        state.accept_len_gpu         = std::move(accept_len_slice);
+        state.accept_tokens_gpu      = std::move(accept_tokens_slice);
+        state.next_seq_len_gpu       = std::move(next_seq_len_gpu);
+        state.propose_tokens_gpu     = std::move(propose_tokens_slice);
+        state.last_hidden_states_gpu = std::move(last_hidden_states_gpu);
+        state.draft_all_probs_gpu    = std::move(draft_all_probs_slice_gpu);
+        const uint64_t epoch         = stream->setMtpAsyncDeviceState(std::move(state));
+        mtp_async_epochs.push_back(epoch);
+
+        hidden_token_off += static_cast<int64_t>(propose_step_ + 1);
+        probs_batch_off += next_batch_size;
         ++idx;
     }
 
-    // Step 3: bump host seqLength to the conservative upper bound. The
-    // scheduler / KV manager reads seqLength to size the next step's KV
-    // reservation; reserve_step_ in NormalEngine.cc:104 already pre-reserves
-    // propose_step + 1 blocks, so this bump just makes the reservation
-    // visible. Worker rolls back to old_seq_lens[i] and lets specUpdate set
-    // the actual value (old + accept_len).
+    // no host seqLength bump. The previous "bump to
+    // base + propose_step + 1 then have the worker roll back" pattern was
+    // (a) racy with concurrent scheduler/finishCheck reads of seqLength
+    // before the worker's rollback fired, and (b) double-counted KV reserve
+    // because StreamCacheResource::incrKVBlock already passes
+    // reserve_step_ = propose_step + 1 to the allocator, and the allocator
+    // computes blocks needed as (seq_len + reserve_step + ...). Combining
+    // a bumped seq_len with a non-zero reserve_step over-reserved by an
+    // entire propose_step + 1 worth of blocks. Removing the bump leaves
+    // committed seqLength as the single source of truth on the host;
+    // reserve_step_ continues to provide the speculative KV budget; the
+    // device-resident next_seq_len_gpu provides the accurate post-step
+    // length for the next prepare without a host roundtrip.
     //
-    // TODO(phase32): the rollback in the worker is not atomic with respect
-    // to scheduler reads of seqLength; under the env switch (+) we
-    // need a per-stream lock or a separate "conservative seqLength" field
-    // that the scheduler reads. For  the path is dead so the race
-    // cannot fire.
-    idx = 0;
-    for (auto& stream : all_streams) {
-        stream->setSeqLength(old_seq_lens[idx] + static_cast<int>(propose_step_) + 1);
-        ++idx;
-    }
-
     // fork the bookkeeping worker. The worker's stream guard switches
     // the current torch stream to the worker stream, so .cpu() inside
     // prepareDecodeSpecUpdateInfo issues its D2H on the worker stream and
@@ -1453,7 +1559,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                      draft_prefill_copy = std::move(draft_prefill_copy),
                                      rejection_event,
                                      draft_event,
-                                     old_seq_lens = std::move(old_seq_lens)]() mutable {
+                                     mtp_async_epochs = std::move(mtp_async_epochs)]() mutable {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_bookkeeping_worker)");
 
         // Wait via cudaStreamWaitEvent (NOT cudaEventSynchronize) — the
@@ -1478,23 +1584,40 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             draft_event->block(cuda_graph::graphGetCurrentStream());
         }
 
-        // Roll back the conservative seqLength bump and clear device-resident
-        // handles. specUpdate (called from updateStreams below) will
-        // increment seqLength by the actual num_new_tokens (= accept_len).
-        auto worker_streams = stream_groups_copy.allStreams();
-        int  i              = 0;
-        for (auto& stream : worker_streams) {
-            stream->setSeqLength(old_seq_lens[i]);
-            stream->clearSpecDecodeDeviceState();
-            ++i;
-        }
-
         // Reuse the original synchronous dispatch logic. .cpu() inside
         // prepareDecodeSpecUpdateInfo lands on the worker stream (current
         // stream guard is set by AsyncRunner::workerLoop).
-        auto status = processor->dispatchDecode(stream_groups_copy, spec_decode_copy, draft_prefill_copy);
+        //
+        // Race fix: dispatchDecode (which calls specUpdate → advances host
+        // seqLength) MUST run BEFORE clearMtpAsyncDeviceState. The old
+        // order (clear first, then dispatchDecode) created a window where
+        // device state was already cleared but host seqLength hadn't been
+        // updated yet. If the main thread's next-step gather hit this
+        // window, it would fall back to the CPU path with stale host
+        // values, producing wrong model input (duplicate output).
+        auto worker_streams = stream_groups_copy.allStreams();
+        auto status         = processor->dispatchDecode(stream_groups_copy, spec_decode_copy, draft_prefill_copy);
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[stream-async] dispatchDecode (worker) failed: %s", status.ToString().c_str());
+        }
+
+        // Clear device-resident handles via the epoch-guarded API,
+        // now AFTER specUpdate has committed host seqLength. This ensures
+        // that whenever device state is cleared, the host fallback value
+        // is already correct. The epoch guard still prevents a slow worker
+        // from clobbering state that a newer dispatchDecodeAsync published.
+        size_t worker_idx = 0;
+        for (auto& stream : worker_streams) {
+            const uint64_t expected_epoch = (worker_idx < mtp_async_epochs.size()) ? mtp_async_epochs[worker_idx] : 0;
+            if (!stream->clearMtpAsyncDeviceState(expected_epoch)) {
+                RTP_LLM_LOG_WARNING(
+                    "[stream-async] stale clear epoch=%lu current_epoch=%lu stream=%ld - newer dispatchDecodeAsync "
+                    "published while this worker was in flight; skipping clear to avoid clobber",
+                    expected_epoch,
+                    stream->getMtpAsyncDeviceState().epoch,
+                    stream->streamId());
+            }
+            ++worker_idx;
         }
 
         // Record a swap-done event for each stream so the next verify can wait

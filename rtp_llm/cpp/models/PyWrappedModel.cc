@@ -489,6 +489,10 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     return callForwardPostLayers(hidden_states, inputs, false);
 }
 
+void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
+    prepareAttentionInputs(inputs, false);
+}
+
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
     d2d_copies_.clear();

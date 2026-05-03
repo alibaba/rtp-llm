@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include <atomic>
 #include <cstdlib>
 #include <numeric>
 #include <string>
@@ -12,6 +13,24 @@
 namespace rtp_llm {
 
 namespace {
+
+// Fallback-hit counters. Each counter is incremented when a hot-path
+// gather/prepare function falls through to the legacy CPU/GPU mixed path.
+// The counters are read by the rate-limited log emitter below; production
+// monitoring should prefer the kmonitor metric `executor.mtp.async_fallback.reason` once it is wired, but this in-process counter provides
+// immediate visibility today without requiring a metrics-schema change.
+std::atomic<uint64_t> g_mtp_device_state_fallback_count{0};
+std::atomic<uint64_t> g_mtp_device_state_success_count{0};
+
+// Rate-limited log emitter — first 5 fallbacks logged in full, then every
+// 1000th hit. Avoids drowning the log when a config keeps hitting the
+// fallback path. Returns true when the caller should emit the log line.
+bool shouldLogFallback(uint64_t count) {
+    if (count <= 5) {
+        return true;
+    }
+    return count % 1000 == 0;
+}
 
 bool useMtpDeviceInput() {
     static const bool enabled = []() {
@@ -347,6 +366,108 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
     model_input.lm_output_indexes = torch::arange(0, static_cast<int64_t>(batch_size), cudaInt32Options());
 }
 
+bool MtpBatchStreamProcessor::gatherMtpDecodeModelInputFromDeviceState(const StreamGroups& stream_groups,
+                                                                       GptModelInputs&     model_input) const {
+    // device-state target-verify gather. Builds the
+    // [target_last, propose] verify input entirely on GPU using the four
+    // tensors published by MtpExecutor::dispatchDecodeAsync:
+    //
+    //   accept_tokens_gpu  : [1, propose+1]   — accepted token ids per stream
+    //   accept_len_gpu     : [1]              — count of valid accepted tokens
+    //   propose_tokens_gpu : [1, token_stride]— next-step propose tokens
+    //   next_seq_len_gpu   : [1]              — committed seq len after step
+    //
+    // Returns true and fully populates model_input on success. Returns
+    // false (without touching model_input) if any stream is missing a
+    // piece, so the caller can fall through to the legacy CPU/GPU mixed
+    // path. Failing closed is the safe choice — a partial fast path
+    // would publish device tensors only for some streams and the
+    // downstream verify would mix CPU and GPU offsets per stream.
+    const size_t batch_size = stream_groups.size();
+    if (batch_size == 0) {
+        return false;
+    }
+    const auto all_streams = stream_groups.allStreams();
+    for (const auto& stream : all_streams) {
+        if (!stream->getAcceptTokensGpu().defined() || !stream->getAcceptLenGpu().defined()
+            || !stream->getProposeTokensGpu().defined() || !stream->getNextSeqLenGpu().defined()) {
+            // Fallback-hit accounting. Rate-limited so the log line
+            // surfaces a stuck config (every step taking the legacy path)
+            // without flooding when the fallback is correct (e.g. first
+            // step before any dispatchDecodeAsync has fired).
+            const uint64_t count = g_mtp_device_state_fallback_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (shouldLogFallback(count)) {
+                const char* reason = "device_state_missing";
+                if (!stream->getAcceptTokensGpu().defined()) {
+                    reason = "accept_tokens_gpu_missing";
+                } else if (!stream->getAcceptLenGpu().defined()) {
+                    reason = "accept_len_gpu_missing";
+                } else if (!stream->getProposeTokensGpu().defined()) {
+                    reason = "propose_tokens_gpu_missing";
+                } else if (!stream->getNextSeqLenGpu().defined()) {
+                    reason = "next_seq_len_gpu_missing";
+                }
+                RTP_LLM_LOG_INFO("[mtp-async-fallback] reason=%s stream=%ld fallback_count=%lu success_count=%lu",
+                                 reason,
+                                 stream->streamId(),
+                                 count,
+                                 g_mtp_device_state_success_count.load(std::memory_order_relaxed));
+            }
+            return false;
+        }
+    }
+    g_mtp_device_state_success_count.fetch_add(1, std::memory_order_relaxed);
+
+    std::vector<torch::Tensor> target_last_slices_gpu;
+    std::vector<torch::Tensor> propose_slices_gpu;
+    std::vector<torch::Tensor> next_seq_len_slices_gpu;
+    target_last_slices_gpu.reserve(batch_size);
+    propose_slices_gpu.reserve(batch_size);
+    next_seq_len_slices_gpu.reserve(batch_size);
+
+    for (const auto& stream : all_streams) {
+        const auto& accept_tokens  = stream->getAcceptTokensGpu();   // [1, propose+1]
+        const auto& accept_len     = stream->getAcceptLenGpu();      // [1]
+        const auto& propose_tokens = stream->getProposeTokensGpu();  // [1, token_stride]
+        const auto& next_seq_len   = stream->getNextSeqLenGpu();     // [1]
+
+        // target_last = accept_tokens[0, accept_len[0] - 1]. Use
+        // index_select on dim 0 of the squeezed [propose+1] view so the
+        // indexing stays on GPU without a host round-trip.
+        auto idx_t       = (accept_len - 1).to(torch::kLong);
+        auto target_last = accept_tokens.squeeze(0).index_select(/*dim=*/0, idx_t);
+
+        const int last_col = static_cast<int>(propose_tokens.size(-1)) - 1;
+        auto      propose  = propose_tokens.select(-1, last_col).reshape({-1});
+
+        target_last_slices_gpu.push_back(target_last);
+        propose_slices_gpu.push_back(propose);
+        next_seq_len_slices_gpu.push_back(next_seq_len);
+    }
+
+    auto target_last_gpu = torch::cat(target_last_slices_gpu, 0).to(torch::kInt32);
+    auto propose_gpu     = torch::cat(propose_slices_gpu, 0).to(torch::kInt32);
+    // Interleave [target_last, propose] per stream.
+    auto pair_gpu                = torch::stack({target_last_gpu, propose_gpu}, /*dim=*/1).reshape({-1});
+    auto next_seq_len_gpu_concat = torch::cat(next_seq_len_slices_gpu, 0);
+
+    model_input.combo_tokens = std::move(pair_gpu);
+    // prefix_lengths = next_seq_len - 1 (last committed position). Stays
+    // on GPU; downstream forward handles device-resident prefix_lengths
+    // via the existing useMtpDeviceInput() path.
+    model_input.prefix_lengths = (next_seq_len_gpu_concat - 1).to(torch::kInt32);
+    // sequence_lengths is intentionally empty for the verify pair: the
+    // forward derives per-token positions from prefix_lengths +
+    // intra-pair offset. for verify, prefix is
+    // the load-bearing length, not sequence_lengths.
+    model_input.sequence_lengths   = emptyInt32OnCuda({0});
+    model_input.last_hidden_states = torch::Tensor();
+    model_input.input_lengths      = fullInt32OnCuda({(int64_t)batch_size}, propose_step_ + 1);
+    model_input.lm_output_indexes =
+        torch::arange(0, static_cast<int64_t>(batch_size * (propose_step_ + 1)), cudaInt32Options());
+    return true;
+}
+
 void MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput(const StreamGroups& stream_groups,
                                                                  GptModelInputs&     model_input) {
     // GPU-resident assembly when every stream has a GPU mirror of
@@ -362,70 +483,12 @@ void MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput(const StreamGro
         return;
     }
 
-    // Stream-async: when dispatchDecodeAsync has attached
-    // device-resident state, build the [target_last, propose] verify input
-    // entirely on GPU. target_last comes from accept_tokens_gpu indexed by
-    // accept_len_gpu - 1; propose comes from propose_tokens_gpu's last column;
-    // prefix_lengths comes from next_seq_len_gpu - 1 (the seq position of the
-    // last committed token before this step's verify). Activated per-stream
-    // by getAcceptTokensGpu().defined() so the first decode step falls
-    // through to the existing path.
-    {
-        const auto all_streams           = stream_groups.allStreams();
-        bool       stream_async_eligible = !all_streams.empty();
-        for (const auto& stream : all_streams) {
-            if (!stream->getAcceptTokensGpu().defined() || !stream->getAcceptLenGpu().defined()
-                || !stream->getProposeTokensGpu().defined() || !stream->getNextSeqLenGpu().defined()) {
-                stream_async_eligible = false;
-                break;
-            }
-        }
-        if (stream_async_eligible) {
-            std::vector<torch::Tensor> target_last_slices_gpu;
-            std::vector<torch::Tensor> propose_slices_gpu;
-            std::vector<torch::Tensor> next_seq_len_slices_gpu;
-            target_last_slices_gpu.reserve(batch_size);
-            propose_slices_gpu.reserve(batch_size);
-            next_seq_len_slices_gpu.reserve(batch_size);
-
-            for (const auto& stream : all_streams) {
-                const auto& accept_tokens  = stream->getAcceptTokensGpu();   // [1, propose+1]
-                const auto& accept_len     = stream->getAcceptLenGpu();      // [1]
-                const auto& propose_tokens = stream->getProposeTokensGpu();  // [1, token_stride]
-                const auto& next_seq_len   = stream->getNextSeqLenGpu();     // [1]
-
-                // target_last = accept_tokens[0, accept_len[0] - 1]. Use
-                // index_select on dim 0 of the squeezed [propose+1] view so
-                // the indexing happens on GPU without a host round-trip.
-                auto idx_t       = (accept_len - 1).to(torch::kLong);
-                auto target_last = accept_tokens.squeeze(0).index_select(/*dim=*/0, idx_t);
-
-                const int last_col = static_cast<int>(propose_tokens.size(-1)) - 1;
-                auto      propose  = propose_tokens.select(-1, last_col).reshape({-1});
-
-                target_last_slices_gpu.push_back(target_last);
-                propose_slices_gpu.push_back(propose);
-                next_seq_len_slices_gpu.push_back(next_seq_len);
-            }
-
-            auto target_last_gpu = torch::cat(target_last_slices_gpu, 0).to(torch::kInt32);
-            auto propose_gpu     = torch::cat(propose_slices_gpu, 0).to(torch::kInt32);
-            // Interleave [target_last, propose] per stream.
-            auto pair_gpu                = torch::stack({target_last_gpu, propose_gpu}, /*dim=*/1).reshape({-1});
-            auto next_seq_len_gpu_concat = torch::cat(next_seq_len_slices_gpu, 0);
-
-            model_input.combo_tokens = std::move(pair_gpu);
-            // prefix_lengths = next_seq_len - 1 (last committed position).
-            // Kept on GPU; downstream forward must handle device-resident
-            // prefix_lengths or sync as needed (+ refines this).
-            model_input.prefix_lengths     = (next_seq_len_gpu_concat - 1).to(torch::kInt32);
-            model_input.sequence_lengths   = emptyInt32OnCuda({0});
-            model_input.last_hidden_states = torch::Tensor();
-            model_input.input_lengths      = fullInt32OnCuda({(int64_t)batch_size}, propose_step_ + 1);
-            model_input.lm_output_indexes =
-                torch::arange(0, static_cast<int64_t>(batch_size * (propose_step_ + 1)), cudaInt32Options());
-            return;
-        }
+    // Try the device-state fast path. The eligibility check + the
+    // tensor assembly are now factored into a named method so Falls through to the legacy paths below when
+    // any stream is missing a complete MtpAsyncDeviceState — failing
+    // closed to the CPU/GPU mixed code is the safe behaviour.
+    if (gatherMtpDecodeModelInputFromDeviceState(stream_groups, model_input)) {
+        return;
     }
 
     bool                       all_gpu = (static_cast<int64_t>(batch_size) >= kPhase31MinBatchForGpu);
@@ -512,8 +575,14 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
                                                                                 model_input.sequence_lengths.to(torch::kCUDA);
         model_input.sequence_lengths = (seq_lengths_d + 1).to(torch::kInt32);
     } else {
-        // TODO(async): legacy draft-decode update mutates sequence lengths on
-        // CPU. Republish to CUDA before the tensor reaches the model.
+        // Legacy CPU fallback. Reachable only when both
+        // RTP_LLM_MTP_DEVICE_INPUT=0 (the default off path is dead in the
+        // stream-async config we ship today) AND the upstream caller did
+        // not already publish sequence_lengths on CUDA. The MtpExecutor
+        // boot-time log makes the gate decision visible, so a regression
+        // landing here will be obvious in the log. When the device-input
+        // env gate is retired (after hardening), this branch should be
+        // deleted along with `useMtpDeviceInput()` itself.
         auto sequence_lengths_cpu = model_input.sequence_lengths.cpu().clone().pin_memory();
         for (int i = 0; i < batch_size; i++) {
             sequence_lengths_cpu.data_ptr<int>()[i]++;
@@ -572,6 +641,20 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     // input_lengths at propose_step_+1 for CUDA graph reuse; lm_output_indexes below selects
     // only the last accepted position per sequence, so padding positions are not surfaced as
     // next-step last_hidden_states.
+    //
+    // Device-resident contract for propose_step > 1: every output of
+    // this function is on CUDA and stays on CUDA across the next decode
+    // step's prepare/forward.
+    //   - combo_tokens   : toCudaInt32(...) on accept_tokens (already CUDA from sampler)
+    //   - lm_output_indexes : torch::arange + accept_len_d (both CUDA i32)
+    //   - last_hidden_states / hidden_states_d_t : alias of model_output.all_hidden_states,
+    //     which is the target verify forward output and never round-trips to host.
+    // This is load-bearing for the stream-async path: the worker thread's
+    // specUpdate uses CPU mirrors of these tensors via async D2H, but the
+    // main thread launches the next decode step from these device tensors
+    // alone. Do not introduce a `.cpu()` here without first auditing the
+    // next-step gather path (currently MtpBatchStreamProcessor::
+    // gatherMtpDecodeModelInputFromDeviceState).
     int total_tokens         = (propose_step_ + 1) * batch_size;
     model_input.combo_tokens = toCudaInt32(speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens}));
     auto accept_len_d        = toCudaInt32(speculative_sampler_output.accept_len);
@@ -607,7 +690,13 @@ void MtpBatchStreamProcessor::updateOneStepDraftSamplerOutput(const StreamGroups
         if (!draft_token_ids.is_cuda()) {
             draft_token_ids.data_ptr<int>()[batch_idx * propose_step_] = propose_tokens[1];
         }
-        draft_token_probs_list.push_back(sp_output_buffer->all_probs);
+        // Prefer device-state draft_all_probs published by main thread
+        // in dispatchDecodeAsync. Falls back to sp_output_buffer->all_probs
+        // (legacy worker-written field) when the device-state was already
+        // cleared by the worker — by which time the worker has finished
+        // writing sp_output_buffer->all_probs (clear runs after specUpdate).
+        const auto& dev_probs = stream->getDraftAllProbsGpu();
+        draft_token_probs_list.push_back(dev_probs.defined() ? dev_probs : sp_output_buffer->all_probs);
         batch_idx++;
     }
 
@@ -642,7 +731,10 @@ void MtpBatchStreamProcessor::updateMultiStepDraftSamplerOutput(const StreamGrou
     std::vector<torch::Tensor> prev_draft_token_probs_list;
     for (const auto& stream : stream_groups.allStreams()) {
         auto sp_output_buffer = stream->getSPOutputBuffer();
-        prev_draft_token_probs_list.push_back(sp_output_buffer->all_probs);
+        // Prefer device-state draft_all_probs (see comment in
+        // updateOneStepDraftSamplerOutput for the same fallback contract).
+        const auto& dev_probs = stream->getDraftAllProbsGpu();
+        prev_draft_token_probs_list.push_back(dev_probs.defined() ? dev_probs : sp_output_buffer->all_probs);
     }
 
     auto pre_draft_token_probs = torch::stack(prev_draft_token_probs_list, 0).contiguous();
@@ -747,6 +839,17 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         torch::Tensor propose_all_probs =
             draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
 
+        // This `.item<int>()` is the *only* host scalar read in
+        // MTP decode bookkeeping that is correct to keep. It runs on the
+        // bookkeeping worker thread (called from
+        // MtpExecutor::dispatchDecodeAsync's lambda), and `accept_len` is
+        // a CPU-pinned tensor whose H2D-mirroring D2H is already drained
+        // by spec_decode_output.transfer_done_event->synchronize() at the
+        // top of this function. There is no main-thread sync incurred
+        // here. Do NOT move this function into the main thread without
+        // first replacing the .item() with a device-side index — the
+        // intent of the worker fork is precisely to absorb cheap scalar
+        // host reads so the main thread can issue the next decode step.
         int cur_accept_len = accept_len[batch_idx_out].item<int>();
 
         torch::Tensor last_hidden_states;
@@ -771,9 +874,26 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
     c10::ScalarType dtype       = c10::ScalarType::Undefined;
     size_t          hidden_size = 0;
 
+    // Prefer the per-stream device-state hidden_states (published by
+    // MtpExecutor::dispatchDecodeAsync on the main thread, epoch-guarded).
+    // This bypasses the worker-thread write to sp_output_buffer->hidden_states
+    // which races the next step's main thread when DROP_BROAD_SYNC=1.
+    // Device-state may be cleared by the worker (epoch-guarded clear);
+    // when cleared, we fall back to sp_output_buffer->hidden_states which
+    // is guaranteed populated by then because the worker writes it BEFORE
+    // calling clearMtpAsyncDeviceState (see GenerateStream::specUpdate
+    // and the worker lambda in MtpExecutor::dispatchDecodeAsync).
+    auto pick_hidden_states = [](const GenerateStreamPtr& stream) -> const torch::Tensor& {
+        const auto& dev = stream->getLastHiddenStatesGpu();
+        if (dev.defined()) {
+            return dev;
+        }
+        return stream->getSPOutputBuffer()->hidden_states;
+    };
+
     size_t all_hidden_tokens_num = 0;
     for (auto& stream : all_streams) {
-        auto& hidden_states = stream->getSPOutputBuffer()->hidden_states;
+        const auto& hidden_states = pick_hidden_states(stream);
         RTP_LLM_CHECK(hidden_states.defined());
         RTP_LLM_CHECK(hidden_states.dim() == 2);
         if (dtype == c10::ScalarType::Undefined) {
@@ -795,15 +915,14 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
         model_input.last_hidden_states = torch::Tensor();
         return;
     } else if (all_streams.size() == 1) {
-        all_hidden_states = all_streams.front()->getSPOutputBuffer()->hidden_states;
+        all_hidden_states = pick_hidden_states(all_streams.front());
     } else if (all_streams.size() < 8) {
         all_hidden_states = torch::empty({(int64_t)all_hidden_tokens_num, (int64_t)hidden_size},
                                          torch::TensorOptions().dtype(dtype).device(torch::kCUDA));
         size_t index      = 0;
         for (auto& stream : all_streams) {
-            auto  sp_output_buffer = stream->getSPOutputBuffer();
-            auto& hidden_states    = sp_output_buffer->hidden_states;
-            auto  hidden_num       = hidden_states.size(0);
+            const auto& hidden_states = pick_hidden_states(stream);
+            auto        hidden_num    = hidden_states.size(0);
             all_hidden_states.narrow(0, index, hidden_num).copy_(hidden_states);
             index += hidden_num;
         }
@@ -815,9 +934,8 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
         params.dst_ptr         = all_hidden_states.data_ptr();
         size_t accu_dst_offset = 0;
         for (auto& stream : all_streams) {
-            auto   sp_output_buffer = stream->getSPOutputBuffer();
-            auto&  hidden_states    = sp_output_buffer->hidden_states;
-            size_t hidden_copy_size = hidden_states.nbytes();
+            const auto& hidden_states    = pick_hidden_states(stream);
+            size_t      hidden_copy_size = hidden_states.nbytes();
             params.src_ptrs.push_back(hidden_states.data_ptr());
             params.copy_size.push_back(hidden_copy_size);
             params.dst_offsets.push_back(accu_dst_offset);
