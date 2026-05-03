@@ -364,7 +364,18 @@ class QWenV2(QWen):
         config_path = os.path.join(ckpt_path, "config.json")
 
         if not os.path.exists(config_path):
-            return
+            # Surface the missing path explicitly. The previous silent
+            # return left _create_config() asserting on
+            # head_num=0/num_layers=0 with no hint about which path the
+            # server actually inspected (PR 537 smoke-light-ppu run
+            # 39149484: 16 cases all asserted, took 5 retries to root-
+            # cause as a missing/unmounted ckpt path on the PPU runner).
+            raise FileNotFoundError(
+                "QWenV2._from_hf: config.json not found at "
+                + config_path + " (ckpt_path=" + repr(ckpt_path) + "). "
+                "Verify CHECKPOINT_PATH env / model_path arg is correct "
+                "and the model dir is mounted on this host."
+            )
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)
