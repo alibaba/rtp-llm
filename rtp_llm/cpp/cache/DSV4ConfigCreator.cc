@@ -215,7 +215,10 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
         // Paged pools (0/1/2): FULL. Fixed/tail pools (3/4/5/6): SWA, keeping the last two blocks.
         config.group_types.push_back(pool.is_paged ? CacheGroupType::FULL : CacheGroupType::SWA);
 
-        const size_t per_layer_stride         = spec->block_size_bytes();
+        // Use the TMA-padded per-block stride for FP8 MLA KV pools so that
+        // FlashMLA's MODEL1 SM100 kernel sees `k_cache.stride(0) % 576 == 0`.
+        // BF16 KV / state / INDEXER pools fall through to natural size.
+        const size_t per_layer_stride         = pool.padded_block_size_bytes();
         config.group_kv_block_stride_bytes[i] = per_layer_stride;
         config.group_kv_scale_stride_bytes[i] = spec->scale_block_size_bytes();
         // Aggregate bytes per request-block across all layers in this pool.
