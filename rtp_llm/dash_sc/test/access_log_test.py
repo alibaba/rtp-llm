@@ -1098,8 +1098,12 @@ class BarePeerClosedTest(InterceptorTestBase):
         self.assertEqual(rec["req_count"], 0)
         self.assertEqual(rec["resp_count"], 0)
 
-        cancel_metric = [c for c in self.kmon_calls if c[0] == AccMetrics.CANCEL_QPS_METRIC]
-        error_metric = [c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC]
+        cancel_metric = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.CANCEL_QPS_METRIC
+        ]
+        error_metric = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC
+        ]
         self.assertEqual(len(cancel_metric), 1)
         self.assertEqual(len(error_metric), 0)
 
@@ -1126,8 +1130,12 @@ class BarePeerClosedTest(InterceptorTestBase):
         self.assertEqual(rec["status"], "UNKNOWN")
         self.assertEqual(rec["req_count"], 1)
 
-        cancel_metric = [c for c in self.kmon_calls if c[0] == AccMetrics.CANCEL_QPS_METRIC]
-        error_metric = [c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC]
+        cancel_metric = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.CANCEL_QPS_METRIC
+        ]
+        error_metric = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC
+        ]
         self.assertEqual(len(cancel_metric), 0)
         self.assertEqual(len(error_metric), 1)
 
@@ -1162,9 +1170,236 @@ class RpcErrorWithCodeTest(InterceptorTestBase):
         self.assertEqual(rec["status"], "UNAVAILABLE")
         self.assertEqual(rec["status_detail"], "recvmsg:Connection reset by peer")
 
-        error_calls = [c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC]
+        error_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC
+        ]
         self.assertEqual(len(error_calls), 1)
         self.assertEqual(error_calls[0][2]["error_code"], "UNAVAILABLE")
+
+
+class ProtocolErrorMessageTest(InterceptorTestBase):
+    """``ModelStreamInferResponse(error_message=...)`` is the ``predict_v2.proto``
+    wire-level error channel: gRPC status stays OK but the frame signals backend
+    failure. Before this branch existed, access_log never looked at
+    ``error_message`` and routed the RPC to ``SUCCESS_QPS`` — the "success_qps
+    混失败" half of the Grafana mismatch on ``whale_prod_GLM-5_0_H20_141_cp_reuse``.
+    """
+
+    @staticmethod
+    def _make_error_response(msg: str) -> predict_v2_pb2.ModelStreamInferResponse:
+        return predict_v2_pb2.ModelStreamInferResponse(error_message=msg)
+
+    def test_unary_error_message_frame_routes_to_error_qps(self) -> None:
+        def inner(request, context):
+            return self._make_error_response("empty outputs_list from backend")
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        behavior(_make_infer_request(input_ids=[1]), FakeContext())
+
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "INTERNAL")
+        self.assertEqual(rec["status_detail"], "empty outputs_list from backend")
+        self.assertEqual(rec["error_message"], "empty outputs_list from backend")
+        error_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC
+        ]
+        success_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.SUCCESS_QPS_METRIC
+        ]
+        self.assertEqual(len(error_calls), 1)
+        self.assertEqual(len(success_calls), 0)
+        self.assertEqual(error_calls[0][2]["error_code"], "INTERNAL")
+
+    def test_error_message_in_streaming_frame_routes_to_error_qps(self) -> None:
+        """Mid-stream ``error_message`` frame (e.g. backend hit exception after
+        a few tokens) still routes to ERROR_QPS; the first non-empty error
+        message wins so a later clean frame can't overwrite it."""
+
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield _make_stream_response(generated_ids=[1])
+            yield self._make_error_response("backend enqueue failed")
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        list(behavior(iter([_make_infer_request(input_ids=[1])]), FakeContext()))
+
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "INTERNAL")
+        self.assertEqual(rec["status_detail"], "backend enqueue failed")
+        self.assertEqual(rec["error_message"], "backend enqueue failed")
+        error_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC
+        ]
+        self.assertEqual(len(error_calls), 1)
+        self.assertEqual(error_calls[0][2]["error_code"], "INTERNAL")
+
+    def test_error_message_overrides_late_finish_reason(self) -> None:
+        """If the backend yields ``error_message`` AND a follow-up frame carries
+        ``finish_reason=0``, the error channel still wins — the inference did
+        not produce a valid result. Prevents success from masking an error."""
+
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield self._make_error_response("kv cache exhausted")
+            yield _make_stream_response(finish_reason=0)
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        list(behavior(iter([_make_infer_request(input_ids=[1])]), FakeContext()))
+
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "INTERNAL")
+        self.assertEqual(rec["error_message"], "kv cache exhausted")
+
+
+class CompletedInferenceTeardownTest(InterceptorTestBase):
+    """Inference completed (``finish_reason`` observed) and a teardown signal
+    showed up afterwards — client cancel / LBS drop / late ``grpc.RpcError`` /
+    server writing non-OK status at close. Before this branch, these RPCs were
+    classified by the tail signal and landed in ERROR_QPS / CANCEL_QPS — the
+    "error_qps 混成功" half of the Grafana mismatch. A completed inference
+    must stay in SUCCESS_QPS regardless of what the disconnect looks like.
+    """
+
+    def test_finish_reason_then_teardown_exception_stays_ok(self) -> None:
+        """Completed inference then ``grpc.RpcError`` at close (e.g. client
+        already gone) must still classify as OK — the work was delivered."""
+
+        class _LateRendezvous(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.UNAVAILABLE
+
+            def details(self) -> str:
+                return "recvmsg:Connection reset by peer"
+
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield _make_stream_response(generated_ids=[1, 2], finish_reason=0)
+            raise _LateRendezvous()
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        with self.assertRaises(_LateRendezvous):
+            list(behavior(iter([_make_infer_request(input_ids=[1])]), FakeContext()))
+
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "OK")
+        self.assertIsNone(rec["status_detail"])
+        # The teardown exception is still recorded for triage, just not used
+        # for classification.
+        self.assertEqual(rec["exc_type"], "_LateRendezvous")
+        self.assertEqual(rec["finish_reason"], 0)
+        success_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.SUCCESS_QPS_METRIC
+        ]
+        error_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC
+        ]
+        cancel_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.CANCEL_QPS_METRIC
+        ]
+        self.assertEqual(len(success_calls), 1)
+        self.assertEqual(len(error_calls), 0)
+        self.assertEqual(len(cancel_calls), 0)
+
+    def test_finish_reason_then_non_ok_context_code_stays_ok(self) -> None:
+        """Server wrote a late non-OK context code (e.g. CANCELLED at close
+        because the client was gone) after inference already completed —
+        still SUCCESS because the work was delivered."""
+
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield _make_stream_response(generated_ids=[1, 2], finish_reason=0)
+            context.set_code(grpc.StatusCode.CANCELLED)
+            context.set_details("client cancelled at close")
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        list(behavior(iter([_make_infer_request(input_ids=[1])]), FakeContext()))
+
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "OK")
+        self.assertIsNone(rec["status_detail"])
+        # context_code still recorded for triage, but not used for classification.
+        self.assertEqual(rec["context_code"], "CANCELLED")
+        success_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.SUCCESS_QPS_METRIC
+        ]
+        cancel_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.CANCEL_QPS_METRIC
+        ]
+        self.assertEqual(len(success_calls), 1)
+        self.assertEqual(len(cancel_calls), 0)
+
+    def test_no_finish_reason_and_cancel_still_routes_to_cancel(self) -> None:
+        """Narrow-scope guard: without ``finish_reason`` observed, a late
+        CANCELLED code must still go to CANCEL_QPS — the new override must
+        not swallow the pre-existing cancel path."""
+
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield _make_stream_response(generated_ids=[1])  # no finish_reason
+            context.set_code(grpc.StatusCode.CANCELLED)
+            context.set_details("client cancelled")
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        list(behavior(iter([_make_infer_request(input_ids=[1])]), FakeContext()))
+
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "CANCELLED")
+        self.assertEqual(rec["status_detail"], "client cancelled")
+        cancel_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.CANCEL_QPS_METRIC
+        ]
+        success_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.SUCCESS_QPS_METRIC
+        ]
+        self.assertEqual(len(cancel_calls), 1)
+        self.assertEqual(len(success_calls), 0)
+
+
+class RawModeErrorMessageTest(RawModeInterceptorTestBase):
+    """Raw mode (forward servicer) must honor the same protocol error channel
+    so forwarder-logged RPCs classify consistently with real-servicer RPCs.
+    Before the capture-side refactor this only worked in struct mode.
+    """
+
+    def test_raw_mode_error_message_frame_routes_to_error_qps(self) -> None:
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield predict_v2_pb2.ModelStreamInferResponse(
+                error_message="downstream backend returned error"
+            )
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        list(behavior(iter([_make_infer_request(input_ids=[1])]), FakeContext()))
+
+        rec = self.records[0]
+        self.assertEqual(rec["capture_mode"], "raw")
+        self.assertEqual(rec["status"], "INTERNAL")
+        self.assertEqual(rec["error_message"], "downstream backend returned error")
+        error_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC
+        ]
+        self.assertEqual(len(error_calls), 1)
 
 
 if __name__ == "__main__":

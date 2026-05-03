@@ -405,6 +405,14 @@ class _RpcAggregate:
     generated_ids: list[int] = dataclasses.field(default_factory=list)
     finish_reason: Optional[int] = None
     prompt_cached_token_num: Optional[int] = None
+    # Protocol-level backend error channel (predict_v2.proto: "The empty message
+    # indicates the inference was successful without errors"). The real servicer
+    # at ``dash_sc/service.py`` yields ``ModelStreamInferResponse(error_message=...)``
+    # for backend failures while keeping gRPC status OK — without capturing this
+    # signal the interceptor sees ``code==OK`` and misroutes to SUCCESS_QPS.
+    # Populated from the *first* non-empty frame so a late error beats a silent
+    # empty frame but can't get overwritten by a stale follow-up chunk.
+    error_message: Optional[str] = None
     # Raw-mode content (forward path): full proto dumps of every request / response
     # message, with ``raw_*_contents`` decoded back from base64. Kept capped so an
     # extreme stream cannot blow up a single log line.
@@ -487,27 +495,35 @@ class _RpcAggregate:
     def capture_response_chunk(self, resp) -> None:
         """Extract per-chunk content from one streamed response message.
 
-        Struct mode: single-pass scan over ``infer.outputs`` — O(outputs) per chunk.
-        Raw mode: one ``MessageToDict`` + tensor rewrite; capped by ``_RAW_MAX_CHUNKS``.
+        Both modes unconditionally harvest two classification-critical signals
+        from every frame — ``error_message`` (backend error channel, the
+        ``predict_v2.proto`` wire contract: empty = success, non-empty = error
+        while gRPC status stays OK) and ``finish_reason`` (inference actually
+        completed). These feed ``_finalize`` so success/error/cancel routing
+        stays faithful to the protocol regardless of capture mode. Raw mode
+        additionally dumps the full proto (up to ``_RAW_MAX_CHUNKS``); struct
+        mode additionally accumulates tokens / cached count.
         """
         if resp is None:
             return
+        err_msg = getattr(resp, "error_message", None)
+        if err_msg and not self.error_message:
+            self.error_message = str(err_msg)
+        infer = getattr(resp, "infer_response", None)
+        if infer is not None:
+            delta, fr, cached = _scan_response_outputs(infer)
+            if fr is not None:
+                self.finish_reason = fr
+            if not self.raw_mode:
+                if delta:
+                    self.generated_ids.extend(delta)
+                if cached is not None and self.prompt_cached_token_num is None:
+                    self.prompt_cached_token_num = cached
         if self.raw_mode:
             if len(self.raw_responses) < _RAW_MAX_CHUNKS:
                 self.raw_responses.append(_proto_to_jsonable(resp))
             else:
                 self.raw_responses_truncated = True
-            return
-        infer = getattr(resp, "infer_response", None)
-        if infer is None:
-            return
-        delta, fr, cached = _scan_response_outputs(infer)
-        if delta:
-            self.generated_ids.extend(delta)
-        if fr is not None:
-            self.finish_reason = fr
-        if cached is not None and self.prompt_cached_token_num is None:
-            self.prompt_cached_token_num = cached
 
     def mark_first_resp(self) -> None:
         if self.first_resp_ts is None:
@@ -552,6 +568,7 @@ class _RpcAggregate:
             "latency_ttfb_ms": round(ttfb_ms, 3) if ttfb_ms is not None else None,
             "status": self.status,
             "status_detail": self.status_detail,
+            "error_message": self.error_message,
             "exc_type": self.exc_type,
             "context_code": self.context_code,
             "context_active": self.context_active,
@@ -751,10 +768,33 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         except Exception:
             agg.context_active = None
 
+        # Classification precedence (narrowest signal wins):
+        # 1. Backend wrote a non-empty ``error_message`` frame — canonical
+        #    protocol-level failure channel (predict_v2.proto), gRPC status
+        #    stays OK. Before this branch existed these dropped into the
+        #    success bucket, explaining the "success_qps 混失败" half of the
+        #    Grafana mismatch.
+        # 2. Inference completed (``finish_reason`` observed) and a teardown
+        #    signal showed up afterwards (exception, or a non-OK status the
+        #    server wrote at stream close). These are post-success events —
+        #    client cancel / LBS drop / late ``grpc.RpcError`` — and must not
+        #    poison the success counter. Explains the "error_qps 混成功" half.
+        # 3. Falls through to the pre-existing exception / gRPC-code logic.
         if exc is not None:
             agg.exc_type = type(exc).__name__
-            agg.status, agg.status_detail = _classify_rpc_exception(exc, agg)
+        if agg.error_message:
+            agg.status = "INTERNAL"
+            agg.status_detail = agg.error_message
+        elif exc is not None:
+            if agg.finish_reason is not None:
+                agg.status = "OK"
+                agg.status_detail = None
+            else:
+                agg.status, agg.status_detail = _classify_rpc_exception(exc, agg)
         elif code is None or code == grpc.StatusCode.OK:
+            agg.status = "OK"
+            agg.status_detail = None
+        elif agg.finish_reason is not None:
             agg.status = "OK"
             agg.status_detail = None
         else:
