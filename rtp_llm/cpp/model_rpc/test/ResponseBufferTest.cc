@@ -3,6 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <thread>
+
 #include "rtp_llm/cpp/model_rpc/ResponseBuffer.h"
 
 namespace rtp_llm::test {

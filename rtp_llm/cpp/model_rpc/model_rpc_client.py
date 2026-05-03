@@ -1,5 +1,6 @@
 import functools
 import logging
+import os
 from typing import AsyncGenerator
 
 import grpc
@@ -9,7 +10,10 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
+    CancelRequestPB,
+    EnqueueRequestPB,
     ErrorDetailsPB,
+    FetchRequestPB,
     GenerateInputPB,
     GenerateOutputsPB,
     MultimodalInputPB,
@@ -366,6 +370,16 @@ class ModelRpcClient(object):
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
+        # V1 DP-controller gate: when enabled, enqueue() uses the two-step
+        # Enqueue+FetchResponse flow to hit the ResponseBuffer async queue
+        # instead of legacy GenerateStreamCall.
+        self._dp_controller_managed = os.environ.get(
+            "DP_CONTROLLER_MANAGED", ""
+        ).lower() in ("true", "1", "yes")
+        if self._dp_controller_managed:
+            logging.info(
+                "ModelRpcClient: DP_CONTROLLER_MANAGED=1, using V1 Enqueue+FetchResponse flow"
+            )
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))
@@ -441,6 +455,8 @@ class ModelRpcClient(object):
         logging.debug(
             f"request: [{input_pb.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
         )
+        stub = None
+        stream_done = False
         try:
             # Select target address
             target_address = address_list[input_py.request_id % len(address_list)]
@@ -449,12 +465,27 @@ class ModelRpcClient(object):
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
 
-            response_iterator = stub.GenerateStreamCall(
-                input_pb, timeout=grpc_timeout_seconds
-            )
+            if self._dp_controller_managed:
+                enqueue_req = EnqueueRequestPB()
+                enqueue_req.input.CopyFrom(input_pb)
+                ack = await stub.Enqueue(enqueue_req, timeout=grpc_timeout_seconds)
+                if ack.error_info.error_code != 0:
+                    raise FtRuntimeException(
+                        ExceptionType(ack.error_info.error_code),
+                        ack.error_info.error_message,
+                    )
+                response_iterator = stub.FetchResponse(
+                    FetchRequestPB(request_id=input_pb.request_id),
+                    timeout=grpc_timeout_seconds,
+                )
+            else:
+                response_iterator = stub.GenerateStreamCall(
+                    input_pb, timeout=grpc_timeout_seconds
+                )
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
                 yield trans_output(input_py, response, stream_state)
+            stream_done = True
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()
@@ -465,6 +496,17 @@ class ModelRpcClient(object):
         finally:
             if response_iterator:
                 response_iterator.cancel()
+            # V1: on early exit (exception or caller aclose()) notify the DP
+            # worker to drop its ResponseBuffer entry. Best-effort; success path
+            # already drains the stream so the server has erased the entry.
+            if self._dp_controller_managed and stub is not None and not stream_done:
+                try:
+                    await stub.Cancel(
+                        CancelRequestPB(request_id=input_pb.request_id),
+                        timeout=5.0,
+                    )
+                except Exception:
+                    pass
 
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         if not inputs:
