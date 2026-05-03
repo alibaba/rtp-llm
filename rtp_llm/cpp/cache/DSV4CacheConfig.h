@@ -39,12 +39,21 @@ struct DSV4PoolSpec {
         return static_cast<size_t>(entries_per_block) * entry_elems * getTypeSize(store_dtype);
     }
 
-    // Total bytes per layer per block
+    // FlashMLA TMA path (MODEL1, V4-Flash) requires the per-block byte stride
+    // for the FP8 KV pools (CSA_KV / HCA_KV / SWA_KV, entry_elems == 584) to
+    // be a multiple of TMA_K_STRIDE = D_NOPE + 2 * D_ROPE = 448 + 128 = 576;
+    // the SM100 sparse decode/prefill kernel asserts on
+    // `k_cache.stride(0) % TMA_K_STRIDE == 0`. Other pools (state pools,
+    // INDEXER_KV, BF16 KV) don't go through that path and stay at natural
+    // size.
+    size_t padded_block_size_bytes() const;
+
+    // Total bytes per layer per block (with TMA padding when applicable).
     size_t layer_block_bytes() const {
-        return block_size_bytes();
+        return padded_block_size_bytes();
     }
 
-    // Total bytes for all layers per block
+    // Total bytes for all layers per block (with TMA padding when applicable).
     size_t total_block_bytes() const {
         return layer_block_bytes() * layer_num;
     }
@@ -76,6 +85,10 @@ struct DSV4CacheConfig {
     //         by FlashMLA's ``flash_mla_with_kvcache(is_fp8_kvcache=True)``.
     static constexpr uint32_t KV_ENTRY_BYTES_BF16 = 1024;
     static constexpr uint32_t KV_ENTRY_BYTES_FP8  = 584;
+
+    // TMA_K_STRIDE for the FlashMLA MODEL1 (V4-Flash) FP8 path. The per-block
+    // byte stride of the FP8 KV pools must be a multiple of this value.
+    static constexpr uint32_t FP8_MLA_BLOCK_ALIGNMENT_BYTES = 576;
 
     // Indexer KV entry layout for INDEXER_KV pool - index_head_dim=128 per token.
     //   BF16: 128 * 2 = 256 bytes.
@@ -110,5 +123,17 @@ struct DSV4CacheConfig {
         return all_layer_ids.size();
     }
 };
+
+inline size_t DSV4PoolSpec::padded_block_size_bytes() const {
+    const size_t natural = block_size_bytes();
+    // Only the FP8 MLA KV pools (entry_elems == 584) feed FlashMLA's TMA path
+    // and need 576-byte stride alignment. Everything else (BF16 KV, INDEXER_KV
+    // FP8 132B, FP32 state pools) is left at natural size.
+    if (entry_elems == DSV4CacheConfig::KV_ENTRY_BYTES_FP8) {
+        constexpr size_t align = DSV4CacheConfig::FP8_MLA_BLOCK_ALIGNMENT_BYTES;
+        return ((natural + align - 1) / align) * align;
+    }
+    return natural;
+}
 
 }  // namespace rtp_llm

@@ -62,6 +62,17 @@ struct DSV4KVSpec: public KVCacheSpec {
         return static_cast<size_t>(entries_per_block) * entry_elems * getTypeSize(store_dtype);
     }
 
+    // Padded per-block byte size for FlashMLA TMA alignment (FP8 KV pools only).
+    // See DSV4PoolSpec::padded_block_size_bytes for the rationale.
+    size_t padded_block_size_bytes() const {
+        const size_t natural = block_size_bytes();
+        if (entry_elems == DSV4CacheConfig::KV_ENTRY_BYTES_FP8) {
+            constexpr size_t align = DSV4CacheConfig::FP8_MLA_BLOCK_ALIGNMENT_BYTES;
+            return ((natural + align - 1) / align) * align;
+        }
+        return natural;
+    }
+
     size_t k_block_size_bytes() const override {
         return block_size_bytes() / 2;
     }
