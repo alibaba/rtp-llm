@@ -4,6 +4,7 @@ import io.grpc.ManagedChannel;
 import io.grpc.stub.AbstractBlockingStub;
 import lombok.Getter;
 import org.apache.commons.collections4.CollectionUtils;
+import org.flexlb.cache.core.DpGroupTopology;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
@@ -36,13 +37,16 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
     protected final Map<String/*ip:port:serviceType*/, Invoker> channelPool = new ConcurrentHashMap<>();
     protected final EngineLocalView engineLocalView;
     protected final GlobalCacheIndex globalCacheIndex;
+    protected final DpGroupTopology dpGroupTopology;
     protected final GrpcReporter grpcReporter;
 
     protected AbstractGrpcClient(EngineLocalView engineLocalView,
                                  GlobalCacheIndex globalCacheIndex,
+                                 DpGroupTopology dpGroupTopology,
                                  GrpcReporter grpcReporter) {
         this.engineLocalView = engineLocalView;
         this.globalCacheIndex = globalCacheIndex;
+        this.dpGroupTopology = dpGroupTopology;
         this.grpcReporter = grpcReporter;
     }
 
@@ -153,6 +157,7 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
                 long startTime = System.nanoTime() / 1000;
                 engineLocalView.removeAllCacheBlockOfEngine(staleEngine);
                 globalCacheIndex.removeAllCacheBlockOfEngine(staleEngine);
+                dpGroupTopology.remove(staleEngine);
                 long elapsed = System.nanoTime() / 1000 - startTime;
                 Logger.warn("Removed stale engine cache: {} in {}μs", staleEngine, elapsed);
             }

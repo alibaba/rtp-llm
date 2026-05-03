@@ -9,6 +9,7 @@ import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,6 +42,14 @@ public class WorkerStatus {
     private long iterateCount;
     private long dpSize;
     private long tpSize;
+
+    /**
+     * Per-DP-rank breakdown, populated when {@code dpSize > 1} from
+     * {@code WorkerStatusPB.dp_status[]}. Empty for non-DP pods. The outer
+     * fields above remain the aggregate-of-pod view (sum/max/min/AND/union),
+     * so non-DP-aware code paths see identical numbers as before.
+     */
+    private List<DpRankStatus> dpStatuses = List.of();
 
     private AtomicLong statusLastUpdateTime = new AtomicLong(-1); // Last status update time (microseconds)
     private AtomicLong statusUpdateIntervalUs = new AtomicLong(0); // Actual interval between last two status updates (microseconds)

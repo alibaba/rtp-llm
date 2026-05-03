@@ -4,13 +4,13 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -25,7 +25,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -40,14 +39,17 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
     private final EngineWorkerStatus engineWorkerStatus;
     private final double decayFactor;
     private final ResourceMeasureFactory resourceMeasureFactory;
+    private final CacheAwareService cacheAwareService;
 
     public WeightedCacheLoadBalancer(ConfigService configService,
                                      EngineWorkerStatus engineWorkerStatus,
-                                     ResourceMeasureFactory resourceMeasureFactory) {
+                                     ResourceMeasureFactory resourceMeasureFactory,
+                                     CacheAwareService cacheAwareService) {
         this.engineWorkerStatus = engineWorkerStatus;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.decayFactor = config.getWeightedCacheDecayFactor();
         this.resourceMeasureFactory = resourceMeasureFactory;
+        this.cacheAwareService = cacheAwareService;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, this);
     }
 
@@ -70,6 +72,13 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             Logger.warn("No ResourceMeasure registered for indicator: {}, roleType: {}", indicator, roleType);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
+        // DP-enabled pods are scored too. The weighting metric
+        // (usedKvCacheTokens) is summed across ranks by DP0, which is a
+        // reasonable load proxy at group level. Per-rank cache-hit precision
+        // (calcPrefixMatchLength below) still uses the union view from the
+        // outer CacheStatus.cachedKeys — this slightly over-estimates DP
+        // hits, but the strategy is randomized weighted selection rather
+        // than a hard-comparison TTFT score, so the impact is bounded.
         List<WorkerStatus> workerStatusList = new ArrayList<>(workerStatusMap.values()).stream()
                 .filter(WorkerStatus::isAlive)
                 .filter(resourceMeasure::isResourceAvailable)
@@ -83,7 +92,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         WorkerStatus selectedWorker = weightedRandomSelection(workerStatusList);
 
         if (selectedWorker != null) {
-            long prefixLength = calcPrefixMatchLength(selectedWorker.getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
+            long prefixLength = calcPrefixMatchLength(selectedWorker, balanceContext.getRequest().getBlockCacheKeys());
             // Update local task state
             return buildServerStatus(selectedWorker, seqLen, prefixLength, roleType, balanceContext.getRequestId());
         }
@@ -112,28 +121,25 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         }
     }
 
-    private long calcPrefixMatchLength(CacheStatus cacheStatus, List<Long> promptCacheKeys) {
-
-        if (cacheStatus == null || promptCacheKeys == null) {
+    /**
+     * Token-level prefix match length for the chosen worker. Routes through
+     * {@link CacheAwareService#findMatchingPrefixLength} so DP engines get
+     * the per-rank MAX (not the misleading union of {@code cacheStatus.cachedKeys}).
+     * For non-DP engines, the result equals the legacy union-based number.
+     *
+     * <p>Result feeds {@link TaskInfo#setPrefixLength} which downstream
+     * accounting ({@code WorkerStatus.putLocalTask}) uses to estimate
+     * {@code needNewKvCacheLen} and prefill time. An honest prefix here
+     * prevents DP workers from looking artificially less loaded than they
+     * really are after a request lands on them.
+     */
+    private long calcPrefixMatchLength(WorkerStatus worker, List<Long> promptCacheKeys) {
+        if (worker == null || worker.getCacheStatus() == null || promptCacheKeys == null) {
             return 0;
         }
-        long blockSize = cacheStatus.getBlockSize();
-        Set<Long> cachePrefixHash = cacheStatus.getCachedKeys();
-        if (cachePrefixHash == null) {
-            return 0;
-        }
-
-        // Iterate from beginning to find first mismatch position
-        for (int index = 0; index < promptCacheKeys.size(); index++) {
-            long hash = promptCacheKeys.get(index);
-            if (!cachePrefixHash.contains(hash)) {
-                // Return matching prefix length (matched block count * block size)
-                return blockSize * index;
-            }
-        }
-
-        // Return total length if all match
-        return blockSize * promptCacheKeys.size();
+        long blockSize = worker.getCacheStatus().getBlockSize();
+        int prefixBlocks = cacheAwareService.findMatchingPrefixLength(worker.getIpPort(), promptCacheKeys);
+        return blockSize * prefixBlocks;
     }
 
     /**
