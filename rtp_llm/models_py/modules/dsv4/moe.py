@@ -22,11 +22,59 @@ from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 # (softplus → sqrt → bias-add → topk → gather → sum → div → mul) with one
 # fused kernel.  ~4× per-call speedup, identical top-k indices vs eager.
 try:
-    from rtp_llm.models_py.modules.dsv4._gate_fused_triton import fused_sqrtsoftplus_gate
+    from rtp_llm.models_py.modules.dsv4._gate_fused_triton import (
+        fused_sqrtsoftplus_gate,
+    )
+
     _GATE_FUSED_OK = True
 except Exception:  # pragma: no cover
     fused_sqrtsoftplus_gate = None
     _GATE_FUSED_OK = False
+
+# MoE Iter 1 (dsv4_prefill_64k_opt_plan.md): fused Triton kernel replacing
+# the 15-kernel eager ``_per_token_cast_to_fp8_packed_ue8m0`` in the
+# Mega-MoE pre-dispatch quantize path.  Bit-equivalent to the Python
+# reference (microbench: sf_eq=True, fp8_eq=True across all tested shapes;
+# 68× speedup at V4-Flash 64k CP=4 per-rank shape [16384, 7168]).  Only
+# used on the Mega-MoE (EP>1) path — single-card/non-EP skips this.
+try:
+    from rtp_llm.models_py.modules.dsv4._mega_moe_quant_triton import (
+        v4_mega_moe_per_token_cast_fp8_packed_ue8m0,
+    )
+
+    _MEGA_MOE_QUANT_FUSED_OK = True
+except Exception:  # pragma: no cover
+    v4_mega_moe_per_token_cast_fp8_packed_ue8m0 = None
+    _MEGA_MOE_QUANT_FUSED_OK = False
+
+
+# Iter 8 (dsv4_prefill_64k_opt_plan.md): fused SwiGLU+clamp+cast Triton
+# kernel replaces the eager clamp(up) / clamp(gate) / silu / mul chain in
+# ``Expert.forward`` (shared expert per MoE layer; 5 launches per call × 43
+# layers = 215 launches/forward on the 64k CP=4 prefill path). Drift is
+# 1-2 bf16 ULP due to tl.exp vs torch.exp lowering to different `__expf`
+# intrinsic variants — same tolerance as iter 2/4's v4_rmsnorm.
+try:
+    from rtp_llm.models_py.modules.dsv4._swiglu_clamp_triton import v4_swiglu_clamp
+
+    _SWIGLU_CLAMP_FUSED_OK = True
+except Exception:  # pragma: no cover
+    v4_swiglu_clamp = None
+    _SWIGLU_CLAMP_FUSED_OK = False
+
+
+def _use_swiglu_clamp_fused() -> bool:
+    if not _SWIGLU_CLAMP_FUSED_OK or v4_swiglu_clamp is None:
+        return False
+    return os.environ.get("DSV4_SWIGLU_CLAMP_FUSED", "1") != "0"
+
+
+def _use_fused_mega_moe_quant() -> bool:
+    """Default ON.  Set ``DSV4_MEGA_MOE_QUANT_FUSED=0`` to force the
+    Python per-token-cast fallback (for numeric regression A/B)."""
+    if not _MEGA_MOE_QUANT_FUSED_OK:
+        return False
+    return os.environ.get("DSV4_MEGA_MOE_QUANT_FUSED", "1") != "0"
 
 
 def _use_fused_gate(score_func: str, x_size_0: int) -> bool:
@@ -52,6 +100,7 @@ def _use_fused_gate(score_func: str, x_size_0: int) -> bool:
     if x_size_0 == 0:
         return False
     return True
+
 
 FP4_BLOCK = 32
 FP8_BLOCK = 128
@@ -287,12 +336,18 @@ class Gate(nn.Module):
         if self.weight.dtype == torch.bfloat16:
             return self.weight
         cached = getattr(self, "_w_bf16", None)
-        if cached is None or cached.shape != self.weight.shape or cached.device != self.weight.device:
+        if (
+            cached is None
+            or cached.shape != self.weight.shape
+            or cached.device != self.weight.device
+        ):
             cached = self.weight.to(torch.bfloat16)
             self._w_bf16 = cached
         return cached
 
-    def forward(self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         # x: [N, dim] flat.  Empty-batch safe — some paths (DP rank with
         # zero local tokens; F.softplus on certain degenerate shapes)
         # blow up with "unknown parameter type" on empty ``scores``, so
@@ -317,8 +372,10 @@ class Gate(nn.Module):
             and _use_fused_gate(self.score_func, x.size(0))
         ):
             return fused_sqrtsoftplus_gate(
-                scores.contiguous(), self.bias.contiguous(),
-                topk=self.topk, route_scale=float(self.route_scale),
+                scores.contiguous(),
+                self.bias.contiguous(),
+                topk=self.topk,
+                route_scale=float(self.route_scale),
                 norm_eps=1e-12,
             )
 
@@ -423,8 +480,32 @@ class Expert(nn.Module):
         self, x: torch.Tensor, weights: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         dtype = x.dtype
-        gate = self._apply_layer(self.w1, x).float()
-        up = self._apply_layer(self.w3, x).float()
+        # Iter 14: drop the ``.float()`` casts on gate/up when the fused
+        # SwiGLU path is active — v4_swiglu_clamp does ``.to(tl.float32)``
+        # internally, so the explicit cast just burned 2 bf16→fp32 copy
+        # kernels per expert call × 43 layers.  Non-fused eager fallback
+        # still keeps fp32 for numeric parity with the reference.
+        fused_ok = _use_swiglu_clamp_fused() and x.is_cuda and dtype == torch.bfloat16
+        if fused_ok:
+            gate = self._apply_layer(self.w1, x)
+            up = self._apply_layer(self.w3, x)
+        else:
+            gate = self._apply_layer(self.w1, x).float()
+            up = self._apply_layer(self.w3, x).float()
+        # Iter 8: fused clamp(up/gate) + silu(gate)*up [* weights] + bf16
+        # cast. Shapes: [T, moe_inter_dim] → [T, moe_inter_dim] bf16.
+        # The fused path needs 2D input; the factory FP8 Linear just did
+        # ``x.reshape(-1, D)`` before calling forward, so gate/up are
+        # already 2D in factory mode. In legacy ND mode (non-factory
+        # QuantizedLinear), fall back to eager to avoid shape surprises.
+        if fused_ok and gate.dim() == 2 and gate.numel() > 0:
+            fused = v4_swiglu_clamp(
+                gate,
+                up,
+                swiglu_limit=float(self.swiglu_limit) if self.swiglu_limit > 0 else 0.0,
+                weights=weights,
+            )
+            return self._apply_layer(self.w2, fused)
         if self.swiglu_limit > 0:
             up = torch.clamp(up, min=-self.swiglu_limit, max=self.swiglu_limit)
             gate = torch.clamp(gate, max=self.swiglu_limit)
@@ -711,8 +792,12 @@ class MoE(nn.Module):
         """Run the fused DeepGEMM Mega MoE kernel: dispatch + L1 GEMM +
         SwiGLU + L2 GEMM + combine — all fused, symm-mem backed.
 
-        Returns the combined routed-expert output in FP32 (to match the
-        contract of ``_routed_experts_deepep`` / ``_routed_experts_local``).
+        Returns BF16 (iter 9: dropped the `y.float()` tail cast that was
+        previously kept to match the fp32 contract of ``_routed_experts_deepep``
+        / ``_routed_experts_local``). The caller in ``MoE.forward`` now
+        dtype-matches ``shared_experts`` to whatever ``y`` is, so mega-moe
+        path keeps y and shared both in bf16 — saves 3 cast launches per
+        layer (y.float / shared.float / final type_as) × 43 layers.
         """
         import deep_gemm
 
@@ -725,19 +810,32 @@ class MoE(nn.Module):
                 f"max_tokens_per_rank). Raise the budget at startup."
             )
         if T == 0:
-            return torch.zeros_like(x, dtype=torch.float32)
+            # Iter 9: return bf16 to match the non-zero-T path (MoE.forward
+            # handles dtype normalization against shared_experts output).
+            return torch.zeros_like(x, dtype=x.dtype)
 
         # Per-token FP8 cast with packed UE8M0 group-32 scale — the
         # dispatch side of Mega MoE reads this layout directly.
         # Inline impl avoids deep_gemm's pack_ue8m0_to_int .all() assertion
         # which does a CUDA→CPU sync illegal during stream capture.
-        x_fp8, x_sf = _per_token_cast_to_fp8_packed_ue8m0(x.contiguous(), gran_k=32)
-        # Fill the symm-mem buffer slots.  Only the first T rows are
-        # meaningful; the remainder was zero-initialised at buffer
-        # alloc (0 is expert 0, but tokens past T aren't read because
-        # the kernel uses y.size(0) as the effective token count).
-        buf.x[:T].copy_(x_fp8)
-        buf.x_sf[:T].copy_(x_sf)
+        #
+        # Iter 1 fused Triton kernel writes **directly** into the symm-mem
+        # dispatch slots, eliminating two cross-device .copy_() kernels on
+        # top of collapsing the ~15 eager launches into 1.  Falls back to
+        # the Python reference + explicit copy when DSV4_MEGA_MOE_QUANT_FUSED=0
+        # or the kernel import fails.
+        x_contig = x.contiguous()
+        if _use_fused_mega_moe_quant():
+            v4_mega_moe_per_token_cast_fp8_packed_ue8m0(
+                x_contig,
+                gran_k=32,
+                x_fp8_out=buf.x[:T],
+                sf_packed_out=buf.x_sf[:T],
+            )
+        else:
+            x_fp8, x_sf = _per_token_cast_to_fp8_packed_ue8m0(x_contig, gran_k=32)
+            buf.x[:T].copy_(x_fp8)
+            buf.x_sf[:T].copy_(x_sf)
         buf.topk_idx[:T].copy_(indices.to(torch.int64).contiguous())
         buf.topk_weights[:T].copy_(weights.to(torch.float32).contiguous())
 
@@ -752,7 +850,9 @@ class MoE(nn.Module):
             activation_clamp=self.swiglu_limit if self.swiglu_limit > 0 else None,
             fast_math=True,
         )
-        return y.float()
+        # Iter 9: return bf16 (from _mega_y bf16 buffer). MoE.forward
+        # handles dtype matching with shared_experts output.
+        return y
 
     # --- Grouped FP4 (dormant; retained for future enabling) ---
 
@@ -1087,5 +1187,13 @@ class MoE(nn.Module):
         else:
             y = self._routed_experts_deepep(x, weights, indices)
 
-        y = y + self.shared_experts(x).float()
+        # Iter 9: avoid unconditional .float() on shared_experts output.
+        # When ``y`` is bf16 (mega-moe path after iter 9), keeping shared in
+        # bf16 lets the add stay bf16 → saves 3 cast kernels per layer.
+        # Non-mega paths (_routed_experts_local/deepep/grouped) still return
+        # fp32 y, so we cast shared up to fp32 to preserve those contracts.
+        shared = self.shared_experts(x)
+        if shared.dtype != y.dtype:
+            shared = shared.to(y.dtype)
+        y = y + shared
         return y.type_as(x).view(shape)
