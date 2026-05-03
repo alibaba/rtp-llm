@@ -198,6 +198,11 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input) {
     model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths);
     model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths);
     model_input.prefix_lengths   = publishInt32ToCuda(model_input.prefix_lengths);
+    // Migrate the 3-D KV kernel block id tensor to CUDA. Filled host-side above via
+    // copyKvCacheBlocksToModelInput; this is the single H2D that replaces the per-group
+    // tensorHoldHostAndToCuda copies that PyWrappedModel::setupKVCacheForAttentionInputs
+    // used to launch.
+    model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id);
 }
 
 }  // anonymous namespace

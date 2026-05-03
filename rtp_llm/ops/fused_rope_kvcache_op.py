@@ -41,8 +41,8 @@ class FusedRopeKVCachePrefillOpBase:
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> FusedRopeAttnParams:
         if (
-            attn_inputs.kv_cache_kernel_block_id_host is not None
-            and attn_inputs.kv_cache_kernel_block_id_host.numel() > 0
+            attn_inputs.kv_cache_kernel_block_id_device is not None
+            and attn_inputs.kv_cache_kernel_block_id_device.numel() > 0
         ):
             kv_cache_offset = convert_offset_to_block_array(
                 attn_inputs.kv_cache_kernel_block_id_device
@@ -218,8 +218,8 @@ class FusedRopeKVCacheDecodeOp:
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> FusedRopeAttnParams:
         assert (
-            attn_inputs.kv_cache_kernel_block_id_host is not None
-            and attn_inputs.kv_cache_kernel_block_id_host.numel() > 0
+            attn_inputs.kv_cache_kernel_block_id_device is not None
+            and attn_inputs.kv_cache_kernel_block_id_device.numel() > 0
         )
         kv_cache_offset = convert_offset_to_block_array(
             attn_inputs.kv_cache_kernel_block_id_device

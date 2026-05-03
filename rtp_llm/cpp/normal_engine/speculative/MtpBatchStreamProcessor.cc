@@ -280,29 +280,30 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
     // Activated per-stream by getProposeTokensGpu().defined(); first decode
     // step (no prior dispatchDecodeAsync) falls through to the existing path.
     {
-        const auto all_streams           = stream_groups.allStreams();
-        bool       stream_async_eligible = !all_streams.empty();
+        const auto                 all_streams = stream_groups.allStreams();
+        std::vector<torch::Tensor> propose_slices_gpu;
+        std::vector<torch::Tensor> sequence_lengths_gpu;
+        propose_slices_gpu.reserve(batch_size);
+        sequence_lengths_gpu.reserve(batch_size);
+        bool stream_async_eligible = !all_streams.empty();
         for (const auto& stream : all_streams) {
-            const auto& gpu_t = stream->getProposeTokensGpu();
+            // DROP_BROAD_SYNC race: the bookkeeping worker may call
+            // clearMtpAsyncDeviceState between a defined() check and a later
+            // select(). Snapshot by value (refcount bump) and validate inside
+            // the same iteration that consumes the tensor.
+            torch::Tensor gpu_t = stream->getProposeTokensGpu();
             if (!gpu_t.defined() || !gpu_t.is_cuda()) {
                 stream_async_eligible = false;
                 break;
             }
+            const int last_col = static_cast<int>(gpu_t.size(-1)) - 1;
+            propose_slices_gpu.push_back(gpu_t.select(-1, last_col).reshape({-1}));
+            torch::Tensor next_seq_len = stream->getNextSeqLenGpu();
+            if (next_seq_len.defined() && next_seq_len.is_cuda()) {
+                sequence_lengths_gpu.push_back(std::move(next_seq_len));
+            }
         }
         if (stream_async_eligible) {
-            std::vector<torch::Tensor> propose_slices_gpu;
-            std::vector<torch::Tensor> sequence_lengths_gpu;
-            propose_slices_gpu.reserve(batch_size);
-            sequence_lengths_gpu.reserve(batch_size);
-            for (const auto& stream : all_streams) {
-                const auto& gpu_t    = stream->getProposeTokensGpu();
-                const int   last_col = static_cast<int>(gpu_t.size(-1)) - 1;
-                propose_slices_gpu.push_back(gpu_t.select(-1, last_col).reshape({-1}));
-                const auto& next_seq_len = stream->getNextSeqLenGpu();
-                if (next_seq_len.defined() && next_seq_len.is_cuda()) {
-                    sequence_lengths_gpu.push_back(next_seq_len);
-                }
-            }
             auto combo_tokens_gpu = torch::cat(propose_slices_gpu, 0).to(torch::kInt32);
             auto lm_output_indexes_gpu =
                 torch::arange(0, static_cast<int64_t>(combo_tokens_gpu.numel()), cudaInt32Options());

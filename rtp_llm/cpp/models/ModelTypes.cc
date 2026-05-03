@@ -172,9 +172,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                            {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
         if (max_kernel_blocks != 0) {
+            // kv_cache_kernel_block_id is now device-resident on the producer (rank 0). Allocate
+            // the matching buffer on CUDA for non-root ranks so the gpu_packed branch below
+            // classifies it identically across ranks (otherwise pack/unpack drifts off-by-tensor).
             inputs.kv_cache_kernel_block_id = allocBuf(
                 rtp_llm::DataType::TYPE_INT32,
-                {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_kernel_blocks});
+                {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_kernel_blocks},
+                rtp_llm::AllocationType::DEVICE);
             inputs.kv_cache_update_mapping = allocBuf(
                 rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 2});
         }

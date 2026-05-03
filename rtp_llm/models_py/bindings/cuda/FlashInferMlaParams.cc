@@ -4,6 +4,7 @@
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/mha_paged_attn_plan.h"
 #include <cstdint>
 #include <algorithm>
 #include <numeric>
@@ -26,6 +27,25 @@ torch::Tensor toHostContiguousI32(const torch::Tensor& tensor) {
         host_tensor = host_tensor.to(torch::kInt32);
     }
     return host_tensor.is_contiguous() ? host_tensor : host_tensor.contiguous();
+}
+
+// CudaGraphRunner::initCaptureAttentionInputs allocates sequence_lengths /
+// prefix_lengths / input_lengths as CPU-pinned int32 for the warmup capture
+// (and the slice survives into replay). Real decode also runs through here, so
+// the planner has to accept either CPU-pinned or CUDA inputs and lift them to
+// device. The H2D is a few ints — non_blocking + a cudaMalloc-cached buffer.
+torch::Tensor toDeviceContiguousI32(const torch::Tensor& tensor) {
+    if (!tensor.defined() || tensor.numel() == 0) {
+        return tensor;
+    }
+    torch::Tensor t = tensor;
+    if (!t.is_cuda()) {
+        t = t.to(torch::kCUDA, /*non_blocking=*/true, /*copy=*/false);
+    }
+    if (t.scalar_type() != torch::kInt32) {
+        t = t.to(torch::kInt32);
+    }
+    return t.is_contiguous() ? t : t.contiguous();
 }
 
 }  // namespace
@@ -599,6 +619,84 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
     slot_mapping                 = torch::Tensor();
 }
 
+void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths,
+                                                  torch::Tensor t_sequence_lengths,
+                                                  torch::Tensor t_input_lengths,
+                                                  torch::Tensor t_kv_cache_block_id_device,
+                                                  int           seq_size_per_block,
+                                                  bool          forbid_realloc) {
+    RTP_LLM_CHECK_WITH_INFO(t_input_lengths.defined() && t_input_lengths.dim() == 1,
+                            "fillParamsMhaDevice: input_lengths must be a 1-D tensor");
+    const int batch_size = t_input_lengths.size(0);
+    if (batch_size == 0) {
+        decode_page_indptr     = decode_page_indptr_d;
+        page_indice            = page_indice_d;
+        paged_kv_last_page_len = paged_kv_last_page_len_d;
+        return;
+    }
+
+    // Lift CPU-pinned (warmup) inputs to device — see toDeviceContiguousI32.
+    auto t_input_lengths_dev    = toDeviceContiguousI32(t_input_lengths);
+    auto t_sequence_lengths_dev = toDeviceContiguousI32(t_sequence_lengths);
+    auto t_prefix_lengths_dev   = toDeviceContiguousI32(t_prefix_lengths);
+    auto t_block_id_dev         = toDeviceContiguousI32(t_kv_cache_block_id_device);
+
+    RTP_LLM_CHECK_WITH_INFO(t_block_id_dev.defined() && t_block_id_dev.dim() == 2
+                                && t_block_id_dev.size(0) >= batch_size,
+                            "fillParamsMhaDevice: kv_cache_block_id_device must be 2-D and cover the batch");
+    const int max_blocks_per_bs = t_block_id_dev.size(1);
+
+    // Conservative upper bounds — exact page_num / input_token_num are on the
+    // device (the planner kernel writes one element per nnz token into
+    // positions_d / batch_indice_d), so we size the buffers for the worst case
+    // (every batch fills its full row of the page table). MIN_CACHE_PAGE_NUM
+    // keeps this from churning the allocator.
+    const int page_num_upper = batch_size * max_blocks_per_bs;
+    const int input_token_num_upper =
+        std::max(MIN_CACHE_INPUT_TOKEN_NUM, batch_size * max_blocks_per_bs * seq_size_per_block);
+
+    // ensureTensorSize allocates the MLA-superset buffer; we only write to a
+    // subset, but reusing the same allocation keeps the FlashInfer wrapper's
+    // pre-baked _paged_kv_*_buf aliases stable across calls. Match the
+    // batch_reuse_info_size envelope that fillParams / fillDecodeCudaGraphParams
+    // use (batch_size * 4) so a later replay through either of those methods
+    // doesn't trip the forbid_realloc gate on a buffer we under-sized.
+    ensureTensorSize(batch_size,
+                     input_token_num_upper,
+                     page_num_upper,
+                     /*reuse_page_num=*/0,
+                     /*batch_reuse_info_size=*/batch_size * 4,
+                     forbid_realloc);
+
+    cudaStream_t stream = GET_CURRENT_STREAM();
+    invokeMhaPagedAttnPlan(t_input_lengths_dev,
+                           t_sequence_lengths_dev,
+                           t_prefix_lengths_dev,
+                           t_block_id_dev,
+                           seq_size_per_block,
+                           paged_kv_last_page_len_d,
+                           decode_page_indptr_d,
+                           page_indice_d,
+                           batch_indice_d,
+                           positions_d,
+                           stream);
+
+    // FlashInfer reads batch_size from paged_kv_last_page_len.size(0) and
+    // expects decode_page_indptr.size(0) == batch_size + 1; page_indice may
+    // be over-sized (wrapper indexes via indptr). batch_indice_d/positions_d
+    // sizes match nnz only via consumer-side narrow() (we don't know nnz
+    // host-side without a sync), so leave them at the buffer-allocation size.
+    paged_kv_last_page_len_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
+    decode_page_indptr_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size + 1});
+    page_indice_d.unsafeGetTensorImpl()->set_sizes_contiguous({page_num_upper});
+
+    decode_page_indptr     = decode_page_indptr_d;
+    page_indice            = page_indice_d;
+    paged_kv_last_page_len = paged_kv_last_page_len_d;
+    batch_indice           = batch_indice_d;
+    positions              = positions_d;
+}
+
 void registerPyFlashInferMlaParams(pybind11::module& m) {
     pybind11::class_<FlashInferMlaAttnParams, std::shared_ptr<FlashInferMlaAttnParams>, rtp_llm::ParamsBase>(
         m, "FlashInferMlaAttnParams")
@@ -632,6 +730,29 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
              pybind11::arg("kv_cache_block_id_device"),
              pybind11::arg("seq_size_per_block"),
              "Update FlashInfer decode metadata on device during CUDA graph replay")
+        .def(
+            "fill_params_mha_device",
+            [](rtp_llm::FlashInferMlaAttnParams& self,
+               torch::Tensor                     prefix_lengths,
+               torch::Tensor                     sequence_lengths,
+               torch::Tensor                     input_lengths,
+               torch::Tensor                     kv_cache_block_id_device,
+               int                               seq_size_per_block,
+               bool                              forbid_realloc) {
+                self.fillParamsMhaDevice(prefix_lengths,
+                                         sequence_lengths,
+                                         input_lengths,
+                                         kv_cache_block_id_device,
+                                         seq_size_per_block,
+                                         forbid_realloc);
+            },
+            pybind11::arg("prefix_lengths"),
+            pybind11::arg("sequence_lengths"),
+            pybind11::arg("input_lengths"),
+            pybind11::arg("kv_cache_block_id_device"),
+            pybind11::arg("seq_size_per_block"),
+            pybind11::arg("forbid_realloc") = false,
+            "MHA-only device-resident planner — fills decode_page_indptr_d / paged_kv_last_page_len_d / page_indice_d via a single CUDA kernel, leaving MLA-only fields untouched")
         // HOST tensors (_h suffix)
         .def_readonly("batch_indice_h", &FlashInferMlaAttnParams::batch_indice_h, "Batch indices on HOST")
         .def_readonly("page_indice_h", &FlashInferMlaAttnParams::page_indice_h, "Page indices on HOST")

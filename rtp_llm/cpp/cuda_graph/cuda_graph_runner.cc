@@ -196,10 +196,9 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         }
     };
 
-    const bool has_hybrid_cache = !inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()
-                                  && !inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.empty()
-                                  && !py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()
-                                  && !py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host_by_group.empty();
+    const bool has_hybrid_cache =
+        !inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()
+        && !py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty();
     size_t hybrid_cache_group = 0;
 
     if (has_hybrid_cache) {
@@ -208,11 +207,6 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                 == py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group.size(),
             "kv_cache_kernel_block_id_device_by_group size mismatch");
         hybrid_cache_group = inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
-        RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.size()
-                                        == hybrid_cache_group
-                                    && py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host_by_group.size()
-                                           == hybrid_cache_group,
-                                "kv_cache_kernel_block_id_host_by_group size mismatch");
     }
 
     // Clear stale device ranges before strided D2D copies. All device-side fills
@@ -309,10 +303,12 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         }
     }
 
-    // Hybrid cache: collect per-group D2D strided copies
+    // Hybrid cache: collect per-group D2D strided copies. Per-group host mirror is
+    // gone (kv_cache_kernel_block_id_host_by_group removed); the captured graph's
+    // device-side fill above already zeros the device-by-group buffers, so we only
+    // need to D2D-mirror the live group tables.
     if (has_hybrid_cache) {
         for (size_t g = 0; g < hybrid_cache_group; ++g) {
-            zeroHostInt32(py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host_by_group[g]);
             tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group[g],
                                  py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g]);
         }
@@ -358,13 +354,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             }
         }
 
-        // Hybrid cache: H2H strided copies for per-group block tables
-        if (has_hybrid_cache) {
-            for (size_t g = 0; g < hybrid_cache_group; ++g) {
-                stridedCopyHost(inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group[g],
-                                py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host_by_group[g]);
-            }
-        }
+        // Hybrid cache: per-group host mirror was removed together with
+        // PyAttentionInputs::kv_cache_kernel_block_id_host_by_group. The singular
+        // kv_cache_kernel_block_id_host above is mirrored for legacy CPU consumers;
+        // hybrid (group > 1) per-layer host re-aliasing in block_map.py is now
+        // a no-op (singular host stays at group-0). Per-layer host derivation
+        // for hybrid models has to be added back at the consumer side if/when
+        // group > 1 ships in production.
 
         // Reset unused host-side batch portions to prevent stale data (prefill only).
         // prefix_lengths/input_lengths are CUDA tensors and are reset by the fused
@@ -596,17 +592,13 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.kv_cache_layer_to_group = kv_cache_layer_to_group_capture_;
     }
 
-    // Hybrid cache: per-group block tables.
+    // Hybrid cache: per-group device block tables (host counterpart removed).
     inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.clear();
-    inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.clear();
     if (kv_cache_group_num_ > 1) {
         inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.reserve(kv_cache_group_num_);
-        inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.reserve(kv_cache_group_num_);
         for (int g = 0; g < kv_cache_group_num_; ++g) {
             inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.push_back(
                 torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_));
-            inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.push_back(
-                torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory());
         }
     }
 
@@ -895,17 +887,12 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
 
     const auto& cap_attn = capture_mem_hold_.py_model_inputs_.attention_inputs;
     inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.clear();
-    inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.clear();
-    if (!cap_attn.kv_cache_kernel_block_id_device_by_group.empty()
-        && !cap_attn.kv_cache_kernel_block_id_host_by_group.empty()) {
+    if (!cap_attn.kv_cache_kernel_block_id_device_by_group.empty()) {
         const size_t group = cap_attn.kv_cache_kernel_block_id_device_by_group.size();
         inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.reserve(group);
-        inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.reserve(group);
         for (size_t g = 0; g < group; ++g) {
             inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.push_back(
                 cap_attn.kv_cache_kernel_block_id_device_by_group[g].slice(0, 0, batch_size));
-            inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.push_back(
-                cap_attn.kv_cache_kernel_block_id_host_by_group[g].slice(0, 0, batch_size));
         }
     }
 
