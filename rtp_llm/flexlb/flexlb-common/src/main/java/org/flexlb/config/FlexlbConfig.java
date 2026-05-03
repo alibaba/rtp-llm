@@ -185,13 +185,44 @@ public class FlexlbConfig {
     private volatile TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
 
     /**
-     * Plug-point name for the {@code GroupSelector} consulted by
-     * {@code DefaultDispatchPlanner} once per drained batch. V1 ships "RR"
-     * (round-robin across DP-enabled pods, cursor advances per batch).
-     * Future strategies (cache-affinity, per-rank load-aware) plug in by
-     * implementing {@code GroupSelector} and being looked up by this name.
+     * TTFT SLO target (ms). Used by the SLO-aware batch flush trigger to compute
+     * how long a request can wait before its TTFT budget is consumed.
      */
-    private String dpGroupSelector = "RR";
+    private long dpTtftSloMs = 500;
+
+    /**
+     * Safety margin subtracted from the SLO slack when computing the batch
+     * deadline (ms). Guards against estimation inaccuracy.
+     */
+    private long dpSafeMarginMs = 50;
+
+    /**
+     * Minimum batch interval (ms). Even when estimated TTFT leaves plenty of
+     * slack, never batch faster than this to avoid thrashing.
+     */
+    private long dpMinBatchIntervalMs = 10;
+
+    /**
+     * Maximum batch interval (ms). Even when estimated TTFT is tight, never
+     * wait longer than this for a batch to fill.
+     */
+    private long dpMaxBatchIntervalMs = 100;
+
+    /**
+     * Bucket interval in tokens for grouping requests by compute_token_length.
+     * Requests with similar effective compute land in the same bucket, producing
+     * homogeneous batches that waste less time at the DP barrier.
+     * 0 = disable bucketing (all requests share one bucket).
+     */
+    private int dpBucketIntervalTokens = 0;
+
+    /**
+     * Plug-point name for the {@code GroupSelector} consulted by
+     * {@code DefaultDispatchPlanner} once per drained batch.
+     * Selects the best DP group via cache-aware scoring; falls back to
+     * round-robin when no cache keys are present.
+     */
+    private String dpGroupSelector = "CACHE_AWARE";
 
     /**
      * Get load balancing strategy for a role type

@@ -13,7 +13,7 @@ import java.util.List;
  * {@code WorkerStatus.dpStatuses}, prefix-cache match from
  * {@code WorkerStatus.cacheStatus.dpCaches}, length-aware bin packing, …).
  *
- * <p>V1 ships {@link RoundRobinGroupSelector}. Future strategies plug in by
+ * <p>V1 ships {@link CacheAwareGroupSelector}. Future strategies plug in by
  * implementing this interface — no changes needed in the planner or batcher.
  *
  * <p>Contract:
