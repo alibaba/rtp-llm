@@ -426,7 +426,7 @@ class Block(nn.Module):
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_in", x_pre)
 
         # Scatter flat [T, dim] into padded [B, max_S, dim] so that
-        # Attention._forward_body's [B, S, dim] body processes every
+        # Attention._forward_prefill's [B, S, dim] body processes every
         # request in a single layer call.
         cu_long = cu_seqlens.to(torch.long)
         batch_size = int(cu_long.numel() - 1)
