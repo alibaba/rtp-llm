@@ -827,31 +827,76 @@ def copy_kernel_so_files(bazel_bin: Path, target_dir: Path) -> int:
 def generate_pyi_stubs(project_root: Path) -> None:
     """Generate .pyi type stubs from compiled pybind11 .so modules.
 
-    Runs pybind11_stubgen in a subprocess to avoid CUDA context pollution.
-    Non-fatal: stubs are helpful for IDE autocomplete but not required at runtime.
+    Hard-fails if any module's stub generation fails: stubgen failure is
+    almost always the .so itself being broken (missing symbol, broken
+    pybind binding), so surfacing it at build time catches real binding
+    bugs that would otherwise show up as runtime ImportError under
+    heavy logs.
     """
     ops_dir = project_root / "rtp_llm" / "ops"
     modules = ["libth_transformer_config", "libth_transformer", "librtp_compute_ops"]
+    failures: list = []  # list of (module, exit_code, stderr)
 
-    print(f"\nGenerating .pyi stubs via pybind11_stubgen:")
+    # The .so files live in rtp_llm/libs/. pybind11_stubgen runs as a
+    # fresh subprocess and would do a bare `importlib.import_module(
+    # "libth_transformer_config")`, which fails because rtp_llm/ops/
+    # __init__.py is what normally:
+    #   1. adds libs/ to sys.path,
+    #   2. `import torch` → torch's _load_global_deps → CDLL of
+    #      libtorch_global_deps.so with RTLD_GLOBAL,
+    #   3. (ROCm only) cdll.LoadLibrary(libcaffe2_nvrtc.so) — the
+    #      explicit hack at rtp_llm/ops/__init__.py:77-88,
+    #   4. cdll.LoadLibrary(libpython3.10.so).
+    # Mirror production by routing through `python -c "import rtp_llm.ops"`
+    # before pybind11_stubgen — that runs the full init sequence in the
+    # subprocess, so any present and future preload hacks auto-apply.
+    # Project root on PYTHONPATH so `rtp_llm` is importable; libs dir
+    # too so pybind11_stubgen's own importlib.import_module resolves.
+    libs_path = project_root / "rtp_llm" / "libs"
+    stubgen_env = os.environ.copy()
+    stubgen_env["PYTHONPATH"] = (
+        f"{project_root}{os.pathsep}{libs_path}"
+        f"{os.pathsep}{stubgen_env.get('PYTHONPATH', '')}"
+    )
+
+    print("\nGenerating .pyi stubs via pybind11_stubgen:")
     for module in modules:
         try:
             result = subprocess.run(
-                [sys.executable, "-m", "pybind11_stubgen", module, "-o", str(ops_dir)],
+                [
+                    sys.executable,
+                    "-c",
+                    "import rtp_llm.ops, runpy, sys; "
+                    f"sys.argv = ['pybind11_stubgen', {module!r}, '-o', {str(ops_dir)!r}]; "
+                    "runpy.run_module('pybind11_stubgen', run_name='__main__')",
+                ],
                 cwd=str(project_root),
+                env=stubgen_env,
                 timeout=60,
                 capture_output=True,
                 text=True,
             )
-            if result.returncode == 0:
-                print(f"  Generated .pyi for {module}")
-            else:
-                print(
-                    f"  WARNING: pybind11_stubgen failed for {module} "
-                    f"(exit={result.returncode}): {result.stderr[:200]}"
-                )
         except Exception as e:
-            print(f"  WARNING: pybind11_stubgen skipped for {module}: {e}")
+            failures.append((module, -1, repr(e)))
+            print(f"  ERROR: pybind11_stubgen could not run for {module}: {e}")
+            continue
+
+        if result.returncode == 0:
+            print(f"  Generated .pyi for {module}")
+        else:
+            failures.append((module, result.returncode, result.stderr))
+            print(f"  ERROR: pybind11_stubgen failed for {module} (exit={result.returncode})")
+            print("  --- stderr (full) ---")
+            print(result.stderr or "<empty>")
+            print("  --- end stderr ---")
+
+    if failures:
+        names = ", ".join(m for m, _, _ in failures)
+        raise RuntimeError(
+            f"pybind11_stubgen failed for {len(failures)} module(s): {names}. "
+            "This usually indicates a broken pybind binding or missing symbol "
+            "in the compiled .so."
+        )
 
 
 def _wipe_rtp_llm_libs(project_root: Path) -> None:
