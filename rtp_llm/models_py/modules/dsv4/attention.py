@@ -1724,7 +1724,8 @@ class Attention(nn.Module):
 
         # Master switch: when MOEDBG=0 the AND short-circuits so neither the
         # layer_id compare nor any record_if_level call site below runs.
-        _dbg = _rt.ENABLED and self.layer_id <= 2
+        # Instruments layers 0..2 and 17..20 (cp2_ep1 vs tp1 divergence window).
+        _dbg = _rt.ENABLED and (self.layer_id <= 2 or 17 <= self.layer_id <= 20)
         bsz, seqlen, _ = x.size()
         win = self.window_size
         ratio = self.compress_ratio
