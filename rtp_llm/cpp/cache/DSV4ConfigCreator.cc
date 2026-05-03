@@ -44,45 +44,66 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
     uint32_t num_hca = dsv4_config.num_hca_layers();
     uint32_t num_all = dsv4_config.num_all_layers();
 
+    // FP8 KV cache opt-in flag: when --fp8_kv_cache=1 (or quant_method=fp8) the
+    // python config sets attn_config.kv_cache_dtype to FP8. We detect that here
+    // and switch the four KV pools (0/1/2/6) to their FP8 entry sizes. The three
+    // STATE pools (3/4/5) stay FP32 - they hold compressor accumulators
+    // (kv_state / score_state) that would lose accuracy under quantization and
+    // do not dominate memory.
+    const bool     is_fp8     = (attn.kv_cache_dtype == KvCacheDataType::FP8);
+    const uint32_t kv_entry   = DSV4CacheConfig::kvEntryBytes(is_fp8);
+    const uint32_t idx_entry  = DSV4CacheConfig::indexerEntryBytes(is_fp8);
+    const DataType kv_logical = is_fp8 ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_BF16;
+    // State pools stay FP32 regardless of FP8 KV flag.
+    const DataType state_logical = DataType::TYPE_FP32;
+
+    RTP_LLM_LOG_INFO(
+        "DSV4 KV pool entry layout: %s (KV=%u bytes, Indexer=%u bytes)", is_fp8 ? "FP8" : "BF16", kv_entry, idx_entry);
+
     // All groups use TOKENS_PER_BLOCK = 256
     // Pool 0/1/2: variable num_blocks (large), entries_per_block = 256/ratio
     // Pool 3/4/5/6: fixed 2 blocks per request
     //
-    // KV pools use TYPE_UINT8 as store_dtype because entry_elems (KV_ENTRY_BYTES /
-    // INDEXER_ENTRY_BYTES) is already in bytes. getTypeSize(TYPE_UINT8) = 1, so
-    // block_size_bytes = entries_per_block * entry_bytes * 1 = correct byte count.
+    // KV pools use TYPE_UINT8 as store_dtype because entry_elems is already in
+    // bytes (KV_ENTRY_BYTES_BF16=1024 / KV_ENTRY_BYTES_FP8=584 / INDEXER_ENTRY_BYTES_*).
+    // getTypeSize(TYPE_UINT8) = 1, so block_size_bytes = entries_per_block *
+    // entry_bytes * 1 = correct byte count. The logical (FP8 vs BF16) dtype is
+    // carried separately in `logical_dtype` for downstream kernel detection.
 
-    // Pool 0: CSA KV (ratio=4, 64 entries per block, bf16 head_dim=512 → 1024 bytes/entry)
+    // Pool 0: CSA KV (ratio=4, 64 entries per block) - 1024 B/entry BF16, 584 B/entry FP8
     dsv4_config.pool_specs[0] = {
         DSV4CacheType::CSA_KV,
         num_csa,
-        DSV4CacheConfig::KV_ENTRY_BYTES,
+        kv_entry,
         DSV4CacheConfig::TOKENS_PER_BLOCK / 4,
         DataType::TYPE_UINT8,
         true,
         0,
+        kv_logical,
     };
-    // Pool 1: HCA KV (ratio=128, 2 entries per block, bf16 head_dim=512 → 1024 bytes/entry)
+    // Pool 1: HCA KV (ratio=128, 2 entries per block) - same per-entry size as Pool 0
     dsv4_config.pool_specs[1] = {
         DSV4CacheType::HCA_KV,
         num_hca,
-        DSV4CacheConfig::KV_ENTRY_BYTES,
+        kv_entry,
         DSV4CacheConfig::TOKENS_PER_BLOCK / 128,
         DataType::TYPE_UINT8,
         true,
         0,
+        kv_logical,
     };
-    // Pool 2: Indexer KV (ratio=4, 64 entries per block, bf16 index_head_dim=128 → 256 bytes/entry)
+    // Pool 2: Indexer KV (ratio=4, 64 entries per block) - 256 B/entry BF16, 132 B/entry FP8
     dsv4_config.pool_specs[2] = {
         DSV4CacheType::INDEXER_KV,
         num_csa,
-        DSV4CacheConfig::INDEXER_ENTRY_BYTES,
+        idx_entry,
         DSV4CacheConfig::TOKENS_PER_BLOCK / 4,
         DataType::TYPE_UINT8,
         true,
         0,
+        kv_logical,
     };
-    // Pool 3: Indexer State — fixed 2 blocks per request
+    // Pool 3: Indexer State - fixed 2 blocks per request (FP32 always)
     uint32_t idx_coff         = 2;
     uint32_t idx_state_dim    = idx_coff * idx_head_dim;
     dsv4_config.pool_specs[3] = {
@@ -93,8 +114,9 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
         DataType::TYPE_FP32,
         false,
         2,
+        state_logical,
     };
-    // Pool 4: CSA State — fixed 2 blocks per request
+    // Pool 4: CSA State - fixed 2 blocks per request (FP32 always)
     uint32_t csa_coff         = 2;
     uint32_t csa_state_dim    = csa_coff * head_dim;
     dsv4_config.pool_specs[4] = {
@@ -105,8 +127,9 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
         DataType::TYPE_FP32,
         false,
         2,
+        state_logical,
     };
-    // Pool 5: HCA State — fixed 2 blocks per request
+    // Pool 5: HCA State - fixed 2 blocks per request (FP32 always)
     uint32_t hca_state_dim    = head_dim;
     dsv4_config.pool_specs[5] = {
         DSV4CacheType::HCA_STATE,
@@ -116,16 +139,18 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
         DataType::TYPE_FP32,
         false,
         2,
+        state_logical,
     };
-    // Pool 6: SWA KV — 256 tokens/block (same as other groups), fixed 2 blocks per request
+    // Pool 6: SWA KV - 256 tokens/block (same as other groups), fixed 2 blocks per request
     dsv4_config.pool_specs[6] = {
         DSV4CacheType::SWA_KV,
         num_all,
-        DSV4CacheConfig::KV_ENTRY_BYTES,
+        kv_entry,
         DSV4CacheConfig::TOKENS_PER_BLOCK,
         DataType::TYPE_UINT8,
         false,
         2,
+        kv_logical,
     };
 }
 
@@ -221,9 +246,9 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
         max_group_layers = std::max(max_group_layers, dsv4_config.pool_specs[i].layer_num);
     }
     config.group_layer_num             = static_cast<int>(max_group_layers);
-    config.full_group_num              = 3;     // Pool 0/1/2 (CSA_KV, HCA_KV, INDEXER_KV)
+    config.full_group_num              = 3;  // Pool 0/1/2 (CSA_KV, HCA_KV, INDEXER_KV)
     config.linear_group_num            = 0;
-    config.swa_group_num               = 4;     // Pool 3/4/5/6 (INDEXER_STATE, CSA_STATE, HCA_STATE, SWA_KV)
+    config.swa_group_num               = 4;  // Pool 3/4/5/6 (INDEXER_STATE, CSA_STATE, HCA_STATE, SWA_KV)
     config.linear_fixed_cap            = 0;
     config.use_independent_block_pools = true;  // DSV4: each group gets its own BlockPool
 
@@ -246,7 +271,7 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
     // Global block_size_bytes feeds CacheConfigCreator::createBasicConfig's
     //   block_num = kv_cache_mem_size / block_size_bytes
     // In DSV4 that divisor must match what ONE paged request-block actually
-    // costs across the FULL pools (0/1/2), NOT max_stride × all_layers.
+    // costs across the FULL pools (0/1/2), NOT max_stride x all_layers.
     // The fixed pools (3/4/5/6) have their own group_block_nums set above and
     // contribute a fixed memory reservation regardless of block_num.
     size_t paged_bytes_per_block = 0;

@@ -254,6 +254,147 @@ TEST(DSV4KVCacheSpecTest, HCAStateSpec) {
     EXPECT_EQ(spec.fixed_blocks_per_req, 2u);
     EXPECT_EQ(spec.cache_type, DSV4CacheType::HCA_STATE);
 }
+// ============================================================
+// FP8 KV cache mode: entry sizes shrink, logical dtype propagates.
+// ============================================================
+
+TEST(DSV4KVCacheSpecTest, KVSpecLogicalDtypeBf16Default) {
+    DSV4PoolSpec pool_spec = {
+        DSV4CacheType::CSA_KV,
+        30,
+        DSV4CacheConfig::KV_ENTRY_BYTES_BF16,
+        64,
+        DataType::TYPE_UINT8,
+        true,
+        0,
+    };
+    DSV4KVSpec spec(pool_spec, 256);
+    // Default logical_dtype == BF16, on-disk dtype mirrors store_dtype (UINT8)
+    // so MemoryLayoutStrategy reshapes the buffer in bytes (unchanged behavior).
+    EXPECT_EQ(spec.logical_dtype, DataType::TYPE_BF16);
+    EXPECT_EQ(spec.dtype, DataType::TYPE_UINT8);
+    EXPECT_EQ(spec.entry_elems, 1024u);
+    EXPECT_EQ(spec.block_size_bytes(), 64u * 1024u);
+}
+
+TEST(DSV4KVCacheSpecTest, KVSpecLogicalDtypeFp8) {
+    DSV4PoolSpec pool_spec = {
+        DSV4CacheType::CSA_KV,
+        30,
+        DSV4CacheConfig::KV_ENTRY_BYTES_FP8,
+        64,
+        DataType::TYPE_UINT8,
+        true,
+        0,
+        DataType::TYPE_FP8_E4M3,
+    };
+    DSV4KVSpec spec(pool_spec, 256);
+    EXPECT_EQ(spec.logical_dtype, DataType::TYPE_FP8_E4M3);
+    EXPECT_EQ(spec.dtype, DataType::TYPE_UINT8);  // storage view stays UINT8
+    EXPECT_EQ(spec.entry_elems, 584u);
+    EXPECT_EQ(spec.block_size_bytes(), 64u * 584u);
+}
+
+TEST(DSV4ConfigCreatorTest, BuildPoolSpecsBf16Default) {
+    auto mc = makeFlashModelConfig();
+    // No kv_cache_dtype set: defaults to BASE (BF16 path).
+    EXPECT_EQ(mc.attn_config.kv_cache_dtype, KvCacheDataType::BASE);
+    auto dsv4 = DSV4ConfigCreator::buildDSV4Config(mc);
+
+    // KV pools (0/1/6) all 1024 B/entry; INDEXER_KV (2) 256 B/entry.
+    EXPECT_EQ(dsv4.pool_specs[0].entry_elems, DSV4CacheConfig::KV_ENTRY_BYTES_BF16);
+    EXPECT_EQ(dsv4.pool_specs[1].entry_elems, DSV4CacheConfig::KV_ENTRY_BYTES_BF16);
+    EXPECT_EQ(dsv4.pool_specs[6].entry_elems, DSV4CacheConfig::KV_ENTRY_BYTES_BF16);
+    EXPECT_EQ(dsv4.pool_specs[2].entry_elems, DSV4CacheConfig::INDEXER_ENTRY_BYTES_BF16);
+
+    // Logical dtype propagates to KV pools; STATE pools always FP32.
+    EXPECT_EQ(dsv4.pool_specs[0].logical_dtype, DataType::TYPE_BF16);
+    EXPECT_EQ(dsv4.pool_specs[1].logical_dtype, DataType::TYPE_BF16);
+    EXPECT_EQ(dsv4.pool_specs[2].logical_dtype, DataType::TYPE_BF16);
+    EXPECT_EQ(dsv4.pool_specs[6].logical_dtype, DataType::TYPE_BF16);
+    EXPECT_EQ(dsv4.pool_specs[3].logical_dtype, DataType::TYPE_FP32);
+    EXPECT_EQ(dsv4.pool_specs[4].logical_dtype, DataType::TYPE_FP32);
+    EXPECT_EQ(dsv4.pool_specs[5].logical_dtype, DataType::TYPE_FP32);
+}
+
+TEST(DSV4ConfigCreatorTest, BuildPoolSpecsFp8) {
+    auto mc                       = makeFlashModelConfig();
+    mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    auto dsv4                     = DSV4ConfigCreator::buildDSV4Config(mc);
+
+    // KV pools shrink to FP8 entry sizes.
+    EXPECT_EQ(dsv4.pool_specs[0].entry_elems, DSV4CacheConfig::KV_ENTRY_BYTES_FP8);
+    EXPECT_EQ(dsv4.pool_specs[1].entry_elems, DSV4CacheConfig::KV_ENTRY_BYTES_FP8);
+    EXPECT_EQ(dsv4.pool_specs[6].entry_elems, DSV4CacheConfig::KV_ENTRY_BYTES_FP8);
+    EXPECT_EQ(dsv4.pool_specs[2].entry_elems, DSV4CacheConfig::INDEXER_ENTRY_BYTES_FP8);
+    EXPECT_EQ(dsv4.pool_specs[0].entry_elems, 584u);
+    EXPECT_EQ(dsv4.pool_specs[2].entry_elems, 132u);
+
+    // entries_per_block / store_dtype / is_paged are unchanged by FP8 mode.
+    EXPECT_EQ(dsv4.pool_specs[0].entries_per_block, 64u);
+    EXPECT_EQ(dsv4.pool_specs[1].entries_per_block, 2u);
+    EXPECT_EQ(dsv4.pool_specs[6].entries_per_block, 256u);
+    EXPECT_EQ(dsv4.pool_specs[0].store_dtype, DataType::TYPE_UINT8);
+    EXPECT_TRUE(dsv4.pool_specs[0].is_paged);
+
+    // KV pools advertise FP8 logical dtype; STATE pools stay FP32.
+    EXPECT_EQ(dsv4.pool_specs[0].logical_dtype, DataType::TYPE_FP8_E4M3);
+    EXPECT_EQ(dsv4.pool_specs[1].logical_dtype, DataType::TYPE_FP8_E4M3);
+    EXPECT_EQ(dsv4.pool_specs[2].logical_dtype, DataType::TYPE_FP8_E4M3);
+    EXPECT_EQ(dsv4.pool_specs[6].logical_dtype, DataType::TYPE_FP8_E4M3);
+    EXPECT_EQ(dsv4.pool_specs[3].logical_dtype, DataType::TYPE_FP32);
+    EXPECT_EQ(dsv4.pool_specs[4].logical_dtype, DataType::TYPE_FP32);
+    EXPECT_EQ(dsv4.pool_specs[5].logical_dtype, DataType::TYPE_FP32);
+
+    // STATE pools must stay byte-identical to the BF16 path.
+    auto bf16 = DSV4ConfigCreator::buildDSV4Config(makeFlashModelConfig());
+    for (int i = 3; i <= 5; ++i) {
+        EXPECT_EQ(dsv4.pool_specs[i].entry_elems, bf16.pool_specs[i].entry_elems);
+        EXPECT_EQ(dsv4.pool_specs[i].entries_per_block, bf16.pool_specs[i].entries_per_block);
+        EXPECT_EQ(dsv4.pool_specs[i].store_dtype, bf16.pool_specs[i].store_dtype);
+        EXPECT_EQ(dsv4.pool_specs[i].fixed_blocks_per_req, bf16.pool_specs[i].fixed_blocks_per_req);
+    }
+}
+
+TEST(DSV4ConfigCreatorTest, CreateConfigFp8PerGroupBytes) {
+    auto mc                       = makeFlashModelConfig();
+    mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    ParallelismConfig pc;
+    auto              config = DSV4ConfigCreator::createConfig(mc, pc);
+
+    auto mc_bf16     = makeFlashModelConfig();
+    auto config_bf16 = DSV4ConfigCreator::createConfig(mc_bf16, pc);
+
+    // FP8 per-pool block_size_bytes must match the FP8 entry math.
+    const size_t kv_per_layer_bf16  = 256u * DSV4CacheConfig::KV_ENTRY_BYTES_BF16;
+    const size_t kv_per_layer_fp8   = 256u * DSV4CacheConfig::KV_ENTRY_BYTES_FP8;
+    const size_t idx_per_layer_bf16 = 64u * DSV4CacheConfig::INDEXER_ENTRY_BYTES_BF16;
+    const size_t idx_per_layer_fp8  = 64u * DSV4CacheConfig::INDEXER_ENTRY_BYTES_FP8;
+
+    // Pool 6 SWA: full 256 entries/block.
+    EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kv_per_layer_fp8);
+    EXPECT_EQ(config_bf16.cache_specs[6]->block_size_bytes(), kv_per_layer_bf16);
+    // Pool 0 CSA: 64 entries/block.
+    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 64u * DSV4CacheConfig::KV_ENTRY_BYTES_FP8);
+    // Pool 1 HCA: 2 entries/block.
+    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 2u * DSV4CacheConfig::KV_ENTRY_BYTES_FP8);
+    // Pool 2 INDEXER_KV: 64 entries/block.
+    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 64u * DSV4CacheConfig::INDEXER_ENTRY_BYTES_FP8);
+
+    // STATE pools (3/4/5) byte-identical to BF16 path.
+    for (int i = 3; i <= 5; ++i) {
+        EXPECT_EQ(config.cache_specs[i]->block_size_bytes(), config_bf16.cache_specs[i]->block_size_bytes())
+            << "state pool " << i << " bytes drifted under FP8";
+    }
+
+    // Global per-block byte budget (paged pools only) must shrink.
+    EXPECT_LT(config.block_size_bytes, config_bf16.block_size_bytes);
+
+    (void)kv_per_layer_bf16;
+    (void)kv_per_layer_fp8;
+    (void)idx_per_layer_bf16;
+    (void)idx_per_layer_fp8;
+}
 
 // ============================================================
 // Pool 0/1/2 shared properties: same tokens_per_block, same num_blocks
@@ -266,7 +407,7 @@ TEST(DSV4ConfigCreatorTest, PagedPoolsShareTokensPerBlock) {
         auto dsv4 = DSV4ConfigCreator::buildDSV4Config(mc);
         // Pool 0 (CSA KV), Pool 1 (HCA KV), Pool 2 (Indexer KV) all use
         // VARIABLE_TOKENS_PER_BLOCK / compress_ratio as entries_per_block.
-        // But they all track the same token stream — their block boundaries align.
+        // But they all track the same token stream : their block boundaries align.
         // entries_per_block differs (64 vs 2) because compress_ratio differs,
         // but tokens_per_block is the same: 256 tokens per block for all.
         EXPECT_EQ(dsv4.pool_specs[0].entries_per_block, 256u / 4u);    // CSA: 64
@@ -333,9 +474,27 @@ static CacheConfig makeDSV4AllocatorConfig(bool use_flash = false) {
     auto              mc = use_flash ? makeFlashModelConfig() : makeProModelConfig();
     ParallelismConfig pc;
     auto              config = DSV4ConfigCreator::createConfig(mc, pc);
-    // Set enough blocks for tests (7 groups × N blocks each)
+    // Set enough blocks for tests (7 groups x N blocks each)
     config.block_num = 200;
     return config;
+}
+
+static BlockIndicesType validBlocksOnly(const BlockIndicesType& blocks) {
+    BlockIndicesType valid;
+    valid.reserve(blocks.size());
+    for (auto block : blocks) {
+        if (!isNullBlockIdx(block)) {
+            valid.push_back(block);
+        }
+    }
+    return valid;
+}
+
+static void requestFreeValidBlocks(const BlockPoolPtr& block_pool, const BlockIndicesType& blocks) {
+    auto valid = validBlocksOnly(blocks);
+    if (!valid.empty()) {
+        block_pool->requestFree(valid);
+    }
 }
 
 // ============================================================
@@ -355,7 +514,7 @@ TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    // 7 groups → HybridTypeKVCacheAllocator path
+    // 7 groups -> HybridTypeKVCacheAllocator path
     EXPECT_EQ(config.groupNums(), 7);
     EXPECT_EQ(allocator->seqSizePerBlock(), static_cast<int>(config.seq_size_per_block));
     EXPECT_EQ(allocator->totalBlocksNum(), config.block_num - 1);
@@ -445,19 +604,19 @@ TEST_F(DSV4AllocatorTest, SevenGroupLayerMapping) {
     const auto& dsv4 = config.dsv4_config.value();
 
     // Verify group layer assignments match DSV4 classification
-    // Group 0: CSA KV → csa_layer_ids (30 layers)
+    // Group 0: CSA KV -> csa_layer_ids (30 layers)
     EXPECT_EQ(config.global_layer_ids[0].size(), dsv4.num_csa_layers());
-    // Group 1: HCA KV → hca_layer_ids (31 layers)
+    // Group 1: HCA KV -> hca_layer_ids (31 layers)
     EXPECT_EQ(config.global_layer_ids[1].size(), dsv4.num_hca_layers());
-    // Group 2: Indexer KV → csa_layer_ids
+    // Group 2: Indexer KV -> csa_layer_ids
     EXPECT_EQ(config.global_layer_ids[2].size(), dsv4.num_csa_layers());
-    // Group 3: Indexer State → csa_layer_ids
+    // Group 3: Indexer State -> csa_layer_ids
     EXPECT_EQ(config.global_layer_ids[3].size(), dsv4.num_csa_layers());
-    // Group 4: CSA State → csa_layer_ids
+    // Group 4: CSA State -> csa_layer_ids
     EXPECT_EQ(config.global_layer_ids[4].size(), dsv4.num_csa_layers());
-    // Group 5: HCA State → hca_layer_ids
+    // Group 5: HCA State -> hca_layer_ids
     EXPECT_EQ(config.global_layer_ids[5].size(), dsv4.num_hca_layers());
-    // Group 6: SWA KV → all_layer_ids
+    // Group 6: SWA KV -> all_layer_ids
     EXPECT_EQ(config.global_layer_ids[6].size(), dsv4.num_all_layers());
 
     // Paged DSV4 pools are FULL; fixed/state and SWA pools keep a sliding-window tail.
@@ -641,11 +800,18 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     CacheKeysType keys = {200, 201, 202, 203};
     batch_res->setBatchCacheKeys(0, keys);
 
-    // Allocate 3 blocks per group (simulating 3 full blocks)
+    // Allocate 3 logical slots. FULL groups own all slots; SWA/state groups only
+    // own the reusable tail slots, so non-tail positions must be NULL.
     for (int gid = 0; gid < 7; gid++) {
-        auto blocks = block_pool->malloc(3);
-        ASSERT_EQ(blocks.size(), 3u);
-        batch_res->mutableBlockIds(0, gid).assign(BlockIndicesType(blocks.begin(), blocks.end()));
+        if (gid < 3) {
+            auto blocks = block_pool->malloc(3);
+            ASSERT_EQ(blocks.size(), 3u);
+            batch_res->mutableBlockIds(0, gid).assign(BlockIndicesType(blocks.begin(), blocks.end()));
+        } else {
+            auto blocks = block_pool->malloc(2);
+            ASSERT_EQ(blocks.size(), 2u);
+            batch_res->mutableBlockIds(0, gid).assign(BlockIndicesType{NULL_BLOCK_IDX, blocks[0], blocks[1]});
+        }
     }
 
     // Create CompleteTokenIds: 3 full blocks * seq_size_per_block tokens + partial
@@ -671,10 +837,8 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
         EXPECT_TRUE(block_cache->contains(202, gid)) << "SWA group " << gid << " should cache tail key 202";
     }
 
-    // Free all blocks
     for (int gid = 0; gid < 7; gid++) {
-        const auto& blocks = batch_res->blocks(0, gid);
-        block_pool->requestFree(blocks);
+        requestFreeValidBlocks(block_pool, batch_res->blocks(0, gid));
     }
 }
 
@@ -698,9 +862,15 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     batch_res->setBatchCacheKeys(0, keys);
 
     for (int gid = 0; gid < 7; gid++) {
-        auto blocks = block_pool->malloc(3);
-        ASSERT_EQ(blocks.size(), 3u);
-        batch_res->mutableBlockIds(0, gid).assign(BlockIndicesType(blocks.begin(), blocks.end()));
+        if (gid < 3) {
+            auto blocks = block_pool->malloc(3);
+            ASSERT_EQ(blocks.size(), 3u);
+            batch_res->mutableBlockIds(0, gid).assign(BlockIndicesType(blocks.begin(), blocks.end()));
+        } else {
+            auto blocks = block_pool->malloc(2);
+            ASSERT_EQ(blocks.size(), 2u);
+            batch_res->mutableBlockIds(0, gid).assign(BlockIndicesType{NULL_BLOCK_IDX, blocks[0], blocks[1]});
+        }
     }
 
     int  seq_size_per_block         = allocator->seqSizePerBlock();
@@ -726,12 +896,12 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     }
 
     for (int gid = 0; gid < 7; gid++) {
-        block_pool->requestFree(batch_res->blocks(0, gid));
+        requestFreeValidBlocks(block_pool, batch_res->blocks(0, gid));
     }
 }
 
 // ============================================================
-// Prefix cache: paged FULL groups reuse; SWA/state groups require two matched tail blocks.
+// Prefix cache: paged FULL groups reuse; SWA/state groups gate reuse on a matched tail.
 // ============================================================
 
 TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
@@ -761,7 +931,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
         block_pool->requestFree(blocks);
     }
 
-    // Now do a malloc with reuse enabled — keys {100,101,102,103}
+    // Now do a malloc with reuse enabled : keys {100,101,102,103}
     auto batch_res = std::make_shared<BatchKVCacheResource>();
     batch_res->resetBatchSize(1);
     batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
@@ -853,7 +1023,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
     allocator->free(free_info);
 }
 
-TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresTwoSWATailHits) {
+TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresAllSWAGroupsToHitTail) {
     auto config    = makeDSV4AllocatorConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -867,6 +1037,9 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresTwoSWATailHits) {
         ASSERT_EQ(blocks.size(), cached_keys.size());
         for (size_t i = 0; i < cached_keys.size(); ++i) {
             if (gid >= 3 && i + 1 < cached_keys.size()) {
+                continue;
+            }
+            if (gid == 6) {
                 continue;
             }
             BlockCache::CacheItem item;
@@ -885,10 +1058,10 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresTwoSWATailHits) {
     batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
     batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
 
-    const int spb = allocator->seqSizePerBlock();
-    auto      cti = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
-    auto      gi  = std::make_shared<GenerateInput>();
-    gi->input_ids = torch::arange(3 * spb + 1, torch::kInt32);
+    const int spb       = allocator->seqSizePerBlock();
+    auto      cti       = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
+    auto      gi        = std::make_shared<GenerateInput>();
+    gi->input_ids       = torch::arange(3 * spb + 1, torch::kInt32);
     gi->generate_config = std::make_shared<GenerateConfig>();
     cti->init(gi);
 
@@ -898,7 +1071,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresTwoSWATailHits) {
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
-    EXPECT_EQ(result.reuse_len, 0) << "SWA must hit both tail blocks before paged prefix reuse is accepted";
+    EXPECT_EQ(result.reuse_len, 0) << "all SWA/state groups must hit the same tail key";
 
     FreeInfo free_info{batch_res};
     allocator->free(free_info);
@@ -981,10 +1154,10 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksAreDistributedAcrossGroups) {
     batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
     batch_res->setBatchCacheKeys(0, CacheKeysType{600, 601});
 
-    const int spb = allocator->seqSizePerBlock();
-    auto      cti = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
-    auto      gi  = std::make_shared<GenerateInput>();
-    gi->input_ids = torch::arange(spb, torch::kInt32);
+    const int spb       = allocator->seqSizePerBlock();
+    auto      cti       = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
+    auto      gi        = std::make_shared<GenerateInput>();
+    gi->input_ids       = torch::arange(spb, torch::kInt32);
     gi->generate_config = std::make_shared<GenerateConfig>();
     cti->init(gi);
 
@@ -1045,7 +1218,7 @@ TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
     EXPECT_TRUE(block_cache->contains(701, 0));
     EXPECT_TRUE(block_cache->contains(701, 6));
 
-    // Groups 1,2,3,4,5 not populated — they will limit reuse to 0
+    // Groups 1,2,3,4,5 not populated : they will limit reuse to 0
     // But this verifies SWA group 6 IS in the reuse path
     EXPECT_FALSE(block_cache->contains(700, 3));
     EXPECT_FALSE(block_cache->contains(700, 4));
@@ -1078,7 +1251,7 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
         block_pool->requestFree(blocks);
     }
 
-    // Malloc with reuse — keys {800, 801, 802}
+    // Malloc with reuse : keys {800, 801, 802}
     auto batch_res = std::make_shared<BatchKVCacheResource>();
     batch_res->resetBatchSize(1);
     batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
