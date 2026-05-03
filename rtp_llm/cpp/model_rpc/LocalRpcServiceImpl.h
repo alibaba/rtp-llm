@@ -127,6 +127,43 @@ public:
         return local_server_->ExecuteFunction(context, request, response);
     }
 
+    // V1 FlexLB-controlled async path: only the Prefill role wires these in
+    // RemoteRpcServiceImpl. PDFUSION/DECODE/local-only builds return
+    // UNIMPLEMENTED so an accidental external call fails fast and Master can
+    // fall back to the legacy stream path during rolling upgrade.
+    grpc::Status BatchEnqueue(grpc::ServerContext*         context,
+                              const BatchEnqueueRequestPB* request,
+                              BatchEnqueueResponsePB*      response) override {
+        (void)context;
+        (void)request;
+        (void)response;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "BatchEnqueue not implemented on this role");
+    }
+
+    grpc::Status
+    Enqueue(grpc::ServerContext* context, const EnqueueRequestPB* request, EnqueueResponsePB* response) override {
+        (void)context;
+        (void)request;
+        (void)response;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "Enqueue not implemented on this role");
+    }
+
+    grpc::Status FetchResponse(grpc::ServerContext*                   context,
+                               const FetchRequestPB*                  request,
+                               grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        (void)context;
+        (void)request;
+        (void)writer;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "FetchResponse not implemented on this role");
+    }
+
+    grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response) override {
+        (void)context;
+        (void)request;
+        (void)response;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "Cancel not implemented on this role");
+    }
+
 protected:
     std::shared_ptr<LocalRpcServer> local_server_;
 };

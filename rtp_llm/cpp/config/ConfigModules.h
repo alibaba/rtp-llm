@@ -72,6 +72,18 @@ struct ParallelismConfig {
     int64_t ffn_tp_rank      = 0;
     bool    enable_sp        = false;
     bool    use_ub_comm      = false;
+    // V1 DP-controller (FlexLB-driven batch arrival). When true, FIFOScheduler ctor
+    // disables needFakeStream() so engines stop padding missing DP slots with fake
+    // streams — FlexLB guarantees every step arrives as a DP-aligned batch and DP0
+    // fans out via RpcService.Enqueue. Default false keeps the legacy per-worker
+    // fake-stream alignment path.
+    bool dp_controller_managed = false;
+
+    // V1 DP-controller intra-pod fan-out. Only read on DP0 when
+    // dp_controller_managed && dp_size > 1. Index == dp_rank, value == "ip:grpc_port"
+    // of each peer's RpcService endpoint. Entry at index==self-dp_rank is ignored
+    // (DP0 handles its own slot via an inline Enqueue call, no gRPC hop).
+    std::vector<std::string> dp_peer_addrs;
 
     // Mirror of py_env_configs.role_config.role_type, plumbed in
     // engine_config.setup_engine_config so model construction (e.g.

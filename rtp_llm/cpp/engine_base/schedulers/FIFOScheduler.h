@@ -26,6 +26,15 @@ public:
 
     ~FIFOScheduler() override;
 
+    // Whether this scheduler runs the per-worker fake-stream padding path. Legacy DP
+    // alignment sets this to true when dp_size>1 && tp_rank==0. V1 DP-controller
+    // (ParallelismConfig.dp_controller_managed) turns it off: FlexLB pushes full
+    // DP-aligned batches and DP0 fans out via Enqueue, so no per-worker padding is
+    // needed. Gated in the ctor; no subclassing.
+    bool needFakeStream() const override {
+        return need_fill_fake_stream_;
+    }
+
     // Enqueue a single stream. Returns OkStatus on success, InvalidArgumentError if checkInputLength fails.
     // On failure, the stream's error is reported via reportError() but the stream is NOT queued.
     // Caller must check the return status to know whether the stream was actually enqueued.

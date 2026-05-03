@@ -1071,6 +1071,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_sp", &ParallelismConfig::enable_sp)
         .def_readwrite("use_ub_comm", &ParallelismConfig::use_ub_comm)
         .def_readwrite("role_type", &ParallelismConfig::role_type)
+        .def_readwrite("dp_controller_managed", &ParallelismConfig::dp_controller_managed)
+        .def_readwrite("dp_peer_addrs", &ParallelismConfig::dp_peer_addrs)
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
         .def_readwrite("prefill_cp_config", &ParallelismConfig::prefill_cp_config)
         .def("to_string", &ParallelismConfig::to_string)
@@ -1097,10 +1099,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ffn_disaggregate_config,
                                       self.prefill_cp_config,
                                       self.use_ub_comm,
-                                      self.role_type);
+                                      self.role_type,
+                                      self.dp_controller_managed,
+                                      self.dp_peer_addrs);
             },
             [](py::tuple t) {
-                if (t.size() != 18)
+                if (t.size() != 20)
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
@@ -1122,6 +1126,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.prefill_cp_config       = t[15].cast<PrefillCPConfig>();
                     c.use_ub_comm             = t[16].cast<bool>();
                     c.role_type               = t[17].cast<RoleType>();
+                    c.dp_controller_managed   = t[18].cast<bool>();
+                    c.dp_peer_addrs           = t[19].cast<std::vector<std::string>>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }
