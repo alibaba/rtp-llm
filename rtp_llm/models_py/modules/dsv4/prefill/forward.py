@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 import torch
 from torch import nn
 
+from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.attn_type import (
     CSA_KV,
     CSA_STATE,
@@ -184,6 +185,15 @@ def forward_layers(
         cp_ctx = build_cp_context(cp_info, cp_size, cp_rank, T_local, input_ids.device)
     v4._propagate_cp_ctx(cp_ctx)
 
+    # MOEDBG hook (mirrors V4Transformer.forward standalone path so the
+    # smoke / production prefill path produces the same per-layer dump
+    # consumed by /tmp/moedbg_runs diff scripts).  Read once per forward.
+    _rt_on = _rt.ENABLED
+    if _rt_on:
+        _rt.begin(seqlen=int(input_ids.size(0)))
+        if _rt._get_buf() is None:
+            _rt_on = False
+
     # Build the per-layer cache_store writer once per forward. Active
     # only on prefill calls with cache_store_inputs bound; otherwise
     # ``write_cache_store_impl`` is None and the per-layer call site is
@@ -196,7 +206,11 @@ def forward_layers(
         )
 
     h = v4.embed(input_ids)  # [T_total, dim]
+    if _rt_on:
+        _rt.record("embed_out", h)
     h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
+    if _rt_on:
+        _rt.record("embed_hc_expanded", h)
 
     for layer_idx, layer in enumerate(v4.layers):
         h = layer(
@@ -209,11 +223,60 @@ def forward_layers(
         )  # [T, hc, dim]
         if write_cache_store_impl is not None:
             write_cache_store_impl(kv_cache, layer_idx)
+        if _rt_on:
+            _rt.record(f"layer{layer_idx:02d}_out", h)
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # _RMSNorm accepts any shape (reshapes to 2D internally), so [T, dim] flows through.
     h = v4._hc_head_reduce(h)  # [T, dim]
+    if _rt_on:
+        _rt.record("hc_reduced", h)
     h = v4.norm(h)  # [T, dim]
+    if _rt_on:
+        _rt.record("final_norm", h)
+        if cp_ctx is None:
+            last_h = h[-1:].contiguous()
+        else:
+            last_pos = cp_ctx.seq_len_full - 1
+            last_mask = (cp_ctx.global_positions == last_pos) & cp_ctx.local_is_real
+            last_h = h[last_mask].contiguous()
+        _rt.record("lm_last_hidden", last_h)
+        lm_logits = torch.mm(last_h.float(), v4.head.weight.t()).float()
+        _rt.record("lm_logits_last", lm_logits)
+        top_k = min(16, lm_logits.size(-1))
+        lm_top_values, lm_top_indices = torch.topk(lm_logits, k=top_k, dim=-1)
+        _rt.record("lm_top_values", lm_top_values)
+        _rt.record("lm_top_indices", lm_top_indices)
+
+    if _rt_on:
+        extra: dict = {
+            "input_ids_shape": tuple(input_ids.shape),
+            "input_ids": input_ids.detach().cpu(),
+        }
+        if cp_ctx is not None:
+            extra.update(
+                {
+                    "cp_size": cp_ctx.cp_size,
+                    "cp_rank": cp_ctx.cp_rank,
+                    "chunk_length": cp_ctx.chunk_length,
+                    "padded_seq_len": cp_ctx.padded_seq_len,
+                    "seq_len_full": cp_ctx.seq_len_full,
+                    "global_positions": cp_ctx.global_positions.detach().cpu(),
+                    "unpad_restore": cp_ctx.unpad_restore.detach().cpu(),
+                    "local_is_real": cp_ctx.local_is_real.detach().cpu(),
+                }
+            )
+        else:
+            extra.update(
+                {
+                    "cp_size": 1,
+                    "cp_rank": 0,
+                    "seq_len_full": int(input_ids.size(0)),
+                }
+            )
+        _rt.dump(step=v4._dbg_step, extra=extra)
+        v4._dbg_step += 1
+
     return h  # [T, dim]
 
 
