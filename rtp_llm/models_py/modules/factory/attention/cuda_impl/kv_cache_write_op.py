@@ -58,12 +58,20 @@ class KVCacheWriteOp:
                 :, 1, :, :, :
             ]  # [num_pages, num_kv_heads, page_size, head_dim]
 
+            # FlashInfer requires batch_indices/positions size == nnz (= key.size(0)).
+            # narrow() is a no-op when fillParams already shrank to nnz, and is
+            # the slice we need when fill_params_mha_device left the buffer at
+            # its alloc-time size (no host sync to know exact nnz).
+            nnz = key.size(0)
+            batch_indices = self.params.batch_indice_d.narrow(0, 0, nnz)
+            positions = self.params.positions_d.narrow(0, 0, nnz)
+
             # Append K and V to paged cache using HND layout
             page.append_paged_kv_cache(  # type: ignore
                 key,  # append_key: [total_tokens, num_kv_heads, head_dim]
                 value,  # append_value: [total_tokens, num_kv_heads, head_dim]
-                self.params.batch_indice_d,
-                self.params.positions_d,
+                batch_indices,
+                positions,
                 (k_cache, v_cache),  # paged_kv_cache: tuple of K and V caches
                 self.params.page_indice_d,
                 self.params.decode_page_indptr_d,

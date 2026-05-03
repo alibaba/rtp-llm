@@ -62,8 +62,7 @@ bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
 ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     XQAParamsPtr params     = std::make_shared<XQAParams>();
     int          batch_size = attn_inputs.sequence_lengths.size(0);
-    RTP_LLM_CHECK_WITH_INFO(attn_inputs.kv_cache_kernel_block_id_host.defined()
-                                && attn_inputs.kv_cache_kernel_block_id_device.defined(),
+    RTP_LLM_CHECK_WITH_INFO(attn_inputs.kv_cache_kernel_block_id_device.defined(),
                             "decode should have kv cache block id.");
 
     // 使用独立的工具函数准备 TRT attention 参数

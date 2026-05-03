@@ -264,26 +264,44 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
         return;
     }
     RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_kernel_block_id.dim() == 3, "kv_cache_kernel_block_id shape should be 3");
-    // New layout: [group, batch, kernel_blocks]
-    // build per-group contiguous 2-D tables on device.
+    // New layout: [group, batch, kernel_blocks].
+    // After the device-resident migration, inputs.kv_cache_kernel_block_id is a CUDA tensor
+    // produced by NormalModelInputGatherer (or by tpSyncModelInputs on non-root). Per-group
+    // device views are zero-copy slices; the legacy host counterpart (host_by_group) was
+    // removed.
     const size_t group = inputs.kv_cache_kernel_block_id.size(0);
 
-    py_attn_inputs.kv_cache_kernel_block_id_host_by_group.clear();
     py_attn_inputs.kv_cache_kernel_block_id_device_by_group.clear();
-    py_attn_inputs.kv_cache_kernel_block_id_host_by_group.reserve(group);
     py_attn_inputs.kv_cache_kernel_block_id_device_by_group.reserve(group);
 
     for (size_t g = 0; g < group; ++g) {
-        // Group view: [batch, kernel_blocks] on HOST
-        auto group_view = inputs.kv_cache_kernel_block_id[g];
-        py_attn_inputs.kv_cache_kernel_block_id_host_by_group.push_back(group_view);
-        py_attn_inputs.kv_cache_kernel_block_id_device_by_group.push_back(tensorHoldHostAndToCuda(group_view));
+        // Group view: [batch, kernel_blocks] on CUDA (no copy).
+        py_attn_inputs.kv_cache_kernel_block_id_device_by_group.push_back(inputs.kv_cache_kernel_block_id[g]);
     }
 
-    // Legacy 2-D fields default to group 0.
-    // NOTE: keep host/device 2-D fields consistent to avoid shape mismatch in CUDA graph replay path.
+    // Legacy 2-D device field defaults to group 0.
     py_attn_inputs.kv_cache_kernel_block_id_device = py_attn_inputs.kv_cache_kernel_block_id_device_by_group[0];
-    py_attn_inputs.kv_cache_kernel_block_id_host   = py_attn_inputs.kv_cache_kernel_block_id_host_by_group[0];
+
+    // Host materialisation is gated: the MHA path (device-only MHA planner:
+    // fill_params_mha_device / fill_decode_cuda_graph_params) reads only the
+    // _device fields above and never the singular _host below, so doing the
+    // D2H + pin_memory for it is wasted work that stalls the prepare thread.
+    // Legacy MLA prepare paths (FlashInferMlaWrapper / SparseMlaParams /
+    // ROCm aiter / CP prefill MHA via fill_mla_params) still consume _host;
+    // for those we keep the eager materialisation. Gate is use_mla so the
+    // pure-MHA test path drops the sync without disturbing MLA / SparseMLA.
+    if (description_.attention_conf.use_mla) {
+        torch::Tensor group0 = inputs.kv_cache_kernel_block_id[0];
+        if (group0.device().is_cuda()) {
+            group0 = group0.cpu();
+        }
+        if (group0.dtype() != torch::kInt32) {
+            group0 = group0.to(torch::kInt32);
+        }
+        group0 = group0.contiguous().pin_memory();
+        buffer_holder_.hold_host(group0);
+        py_attn_inputs.kv_cache_kernel_block_id_host = group0;
+    }
 }
 
 // Helper function to build BertEmbeddingInputs from GptModelInputs
@@ -384,12 +402,12 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
     // d2d_copies_ accumulates across ALL micro-batches before the single
     // fusedCopy() flush below. Per micro-batch this adds ~6 copies from
-    // buildPyAttentionInputs + padding_offset, plus group_count from
-    // setupKVCacheForAttentionInputs. With the planMicroBatches cap of 2
-    // micro-batches and hybrid group_count of 4 the worst case is ~20.
-    // If new tensorHoldHostAndToCuda call sites land below — or if
-    // planMicroBatches starts producing >2 micro-batches — re-check
-    // MAX_FUSED_D2D_COPIES.
+    // buildPyAttentionInputs + padding_offset. setupKVCacheForAttentionInputs
+    // no longer queues per-group H2D copies (the source is now device-resident
+    // and per-group device tensors are zero-copy slices). With the planMicroBatches
+    // cap of 2 micro-batches the worst case is ~12. If new tensorHoldHostAndToCuda
+    // call sites land below — or if planMicroBatches starts producing >2
+    // micro-batches — re-check MAX_FUSED_D2D_COPIES.
     d2d_copies_.clear();
     if (pinned_check_remaining_ > 0) {
         --pinned_check_remaining_;
