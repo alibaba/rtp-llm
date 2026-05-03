@@ -122,6 +122,18 @@ protected:
     // RTP_LLM_MTP_STREAM_ASYNC=1 is exported at server start.
     bool useStreamAsync() const;
 
+    // Device-state feature gates. Defaults stay off; each consumer keeps its
+    // own runtime guard before taking an async path.
+    bool useAsyncDeviceState() const;
+    bool useAsyncHostMirror() const;
+    bool useAsyncStopExtra() const;
+
+    // Opt-in gate to skip the broad spec_bookkeeping_runner_.sync() at the
+    // start of decodeStep. When enabled, worker bookkeeping overlaps the next
+    // step's main-thread work; epoch-guarded clears and device state preserve
+    // correctness until the next dispatchDecodeAsync single-slots the worker.
+    bool useDropBroadSync() const;
+
     // Stream-async dispatch. The caller records rejection_event after rejection
     // sampling and draft_event after draft_model_sample. This method attaches
     // device-resident next-step state to each stream, then forks a worker that

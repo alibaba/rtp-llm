@@ -495,32 +495,90 @@ public:
     //   accept_tokens_gpu  : [1, propose+1]     accepted token ids; first accept_len cols valid
     //   next_seq_len_gpu   : [1] int32          old_seq_len + accept_len (committed seq len)
     //   propose_tokens_gpu : [1, token_stride]  draft sampler output for next-step propose
+    //
+    // The tensors above are grouped into MtpAsyncDeviceState with an epoch counter:
+    //   setMtpAsyncDeviceState(state) -> epoch  // bumps counter, stores, returns epoch
+    //   getMtpAsyncDeviceState()                // borrow current state (may be empty)
+    //   clearMtpAsyncDeviceState(epoch)         // clears only when current epoch matches
+    // The old setSpecDecodeDeviceState / getAcceptLenGpu / ... helpers stay as
+    // thin wrappers on top so existing call sites compile unchanged. The
+    // epoch guard prevents stale workers from clearing state published by a
+    // newer step.
+    struct MtpAsyncDeviceState {
+        uint64_t      epoch = 0;
+        torch::Tensor accept_len_gpu;
+        torch::Tensor accept_tokens_gpu;
+        torch::Tensor next_seq_len_gpu;
+        torch::Tensor propose_tokens_gpu;
+        // DROP_BROAD_SYNC: main thread also publishes the per-stream draft
+        // hidden state (last accepted position, [1, hidden_size]) and the
+        // per-stream draft propose all_probs slice ([next_batch_size, vocab]
+        // for propose_step==1; [next_batch_size, token_stride, vocab] for
+        // propose_step>1). These were previously written by the worker via
+        // GenerateStream::specUpdate; with broad sync dropped, the next
+        // step's gatherHiddenStates / updateMultiStepDraftSamplerOutput would
+        // race the worker. Publishing them here under the epoch guard makes
+        // main thread the sole writer.
+        torch::Tensor last_hidden_states_gpu;
+        torch::Tensor draft_all_probs_gpu;
+    };
+
+    uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
+        state.epoch      = ++mtp_async_epoch_counter_;
+        mtp_async_state_ = std::move(state);
+        return mtp_async_state_.epoch;
+    }
+    const MtpAsyncDeviceState& getMtpAsyncDeviceState() const {
+        return mtp_async_state_;
+    }
+    bool clearMtpAsyncDeviceState(uint64_t epoch) {
+        // Stale-epoch reject: a slow worker from step N must not clear
+        // device tensors that step N+1 just published (which would race the
+        // next step's prepare reading getNextSeqLenGpu() / etc.). Returning
+        // false lets the caller log/metric the stale clear without
+        // mutating state.
+        if (mtp_async_state_.epoch != epoch) {
+            return false;
+        }
+        mtp_async_state_ = MtpAsyncDeviceState{};
+        return true;
+    }
+
+    // ---- Back-compat wrappers (callers added before) ----
     void setSpecDecodeDeviceState(torch::Tensor accept_len_gpu,
                                   torch::Tensor accept_tokens_gpu,
                                   torch::Tensor next_seq_len_gpu,
                                   torch::Tensor propose_tokens_gpu = torch::Tensor()) {
-        accept_len_gpu_     = std::move(accept_len_gpu);
-        accept_tokens_gpu_  = std::move(accept_tokens_gpu);
-        next_seq_len_gpu_   = std::move(next_seq_len_gpu);
-        propose_tokens_gpu_ = std::move(propose_tokens_gpu);
+        setMtpAsyncDeviceState(MtpAsyncDeviceState{0,
+                                                   std::move(accept_len_gpu),
+                                                   std::move(accept_tokens_gpu),
+                                                   std::move(next_seq_len_gpu),
+                                                   std::move(propose_tokens_gpu)});
     }
     const torch::Tensor& getAcceptLenGpu() const {
-        return accept_len_gpu_;
+        return mtp_async_state_.accept_len_gpu;
     }
     const torch::Tensor& getAcceptTokensGpu() const {
-        return accept_tokens_gpu_;
+        return mtp_async_state_.accept_tokens_gpu;
     }
     const torch::Tensor& getNextSeqLenGpu() const {
-        return next_seq_len_gpu_;
+        return mtp_async_state_.next_seq_len_gpu;
     }
     const torch::Tensor& getProposeTokensGpu() const {
-        return propose_tokens_gpu_;
+        return mtp_async_state_.propose_tokens_gpu;
+    }
+    const torch::Tensor& getLastHiddenStatesGpu() const {
+        return mtp_async_state_.last_hidden_states_gpu;
+    }
+    const torch::Tensor& getDraftAllProbsGpu() const {
+        return mtp_async_state_.draft_all_probs_gpu;
     }
     void clearSpecDecodeDeviceState() {
-        accept_len_gpu_     = torch::Tensor();
-        accept_tokens_gpu_  = torch::Tensor();
-        next_seq_len_gpu_   = torch::Tensor();
-        propose_tokens_gpu_ = torch::Tensor();
+        // Unconditional clear (no epoch check). Kept for the existing
+        // synchronous worker which always clears the latest state it just
+        // installed. Async paths added by later commits should prefer
+        // clearMtpAsyncDeviceState(epoch).
+        mtp_async_state_ = MtpAsyncDeviceState{};
     }
 
     GenerateStreamPtr getProposeStream() {
@@ -686,13 +744,12 @@ protected:
     std::shared_ptr<void> pending_swap_done_event_;
 
     // Stream-async device-resident state for the next decode step's prepare.
-    // See setSpecDecodeDeviceState() for the contract; fields stay default
-    // (undefined Tensor) on the synchronous path so existing callers see no
-    // behaviour change.
-    torch::Tensor accept_len_gpu_;
-    torch::Tensor accept_tokens_gpu_;
-    torch::Tensor next_seq_len_gpu_;
-    torch::Tensor propose_tokens_gpu_;
+    // See setMtpAsyncDeviceState() / setSpecDecodeDeviceState() for the
+    // contract; the struct stays default-constructed (epoch=0, undefined
+    // tensors) on the synchronous path so existing callers see no behaviour
+    // change. The epoch counter guards against stale worker clears.
+    MtpAsyncDeviceState mtp_async_state_;
+    uint64_t            mtp_async_epoch_counter_ = 0;
 
     bool return_all_hidden_states_ = false;
 
