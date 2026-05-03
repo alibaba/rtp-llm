@@ -27,6 +27,13 @@ struct DSV4PoolSpec {
     DataType      store_dtype;           // TYPE_UINT8 (KV) or TYPE_FP32 (State)
     bool          is_paged;              // true=variable-length paged, false=fixed per-request
     uint32_t      fixed_blocks_per_req;  // blocks per request when is_paged=false
+    // Logical dtype of the entry payload - independent of `store_dtype` (which
+    // is always TYPE_UINT8 for KV pools because `entry_elems` is in bytes).
+    // Set to TYPE_FP8_E4M3 when the model runs with kv_cache_dtype=FP8 so
+    // downstream kernels can detect the FP8 layout from the spec without
+    // re-reading the model config. Defaults to TYPE_BF16 (BF16 KV path).
+    // Always TYPE_FP32 for state pools.
+    DataType logical_dtype = DataType::TYPE_BF16;
 
     size_t block_size_bytes() const {
         return static_cast<size_t>(entries_per_block) * entry_elems * getTypeSize(store_dtype);
@@ -59,16 +66,36 @@ struct DSV4CacheConfig {
     static constexpr uint32_t TOKENS_PER_BLOCK = 256;
     static constexpr uint32_t SLIDING_WINDOW   = 128;
 
-    // KV entry layout — must match the model's actual storage format.
-    // Current model (BF16-only path): head_dim=512, bf16 → 512 * 2 = 1024 bytes.
-    // Future mixed-precision target: 448 FP8 NoPE + 128 BF16 RoPE + 7 UE8M0 scale + 1 pad = 584 bytes.
-    // Update this when the model switches to FP8/BF16 mixed KV storage.
-    static constexpr uint32_t KV_ENTRY_BYTES = 1024;
-    // Indexer entry — must match the model's actual storage format.
-    // Current model (BF16-only path): index_head_dim=128, bf16 → 128 * 2 = 256 bytes.
-    // Future mixed-precision target: 128 FP8 + 4 FP32 scale = 132 bytes.
-    // Update this when the model switches to FP8 indexer KV storage.
-    static constexpr uint32_t INDEXER_ENTRY_BYTES = 256;
+    // KV entry layout for SWA_KV / CSA_KV / HCA_KV pools. All three store
+    // a head_dim=512 K vector per entry, so they share the same per-entry
+    // byte size. The actual size depends on attn_config.kv_cache_dtype:
+    //   BF16: head_dim=512, bf16 -> 512 * 2 = 1024 bytes.
+    //   FP8 : 448 fp8_e4m3 NoPE + 64 bf16 RoPE (=128 bytes) + 7 UE8M0 scale
+    //         bytes + 1 pad = 584 bytes. Matches the ``fp8_model1_mla``
+    //         layout produced by mla_quant_kernel.cu MODEL1 and consumed
+    //         by FlashMLA's ``flash_mla_with_kvcache(is_fp8_kvcache=True)``.
+    static constexpr uint32_t KV_ENTRY_BYTES_BF16 = 1024;
+    static constexpr uint32_t KV_ENTRY_BYTES_FP8  = 584;
+
+    // Indexer KV entry layout for INDEXER_KV pool - index_head_dim=128 per token.
+    //   BF16: 128 * 2 = 256 bytes.
+    //   FP8 : 128 fp8_e4m3 + 1 int32-packed UE8M0 scale (= 4 bytes) = 132 bytes.
+    //         Matches sgl_per_token_group_quant_fp8(group=128, ue8m0=True) +
+    //         the packing used by deep_gemm.fp8_paged_mqa_logits' kv_cache.
+    static constexpr uint32_t INDEXER_ENTRY_BYTES_BF16 = 256;
+    static constexpr uint32_t INDEXER_ENTRY_BYTES_FP8  = 132;
+
+    // Back-compat aliases (= BF16 sizes). Prefer the helpers below in new
+    // code so the call site explicitly reflects the FP8 vs BF16 choice.
+    static constexpr uint32_t KV_ENTRY_BYTES      = KV_ENTRY_BYTES_BF16;
+    static constexpr uint32_t INDEXER_ENTRY_BYTES = INDEXER_ENTRY_BYTES_BF16;
+
+    static constexpr uint32_t kvEntryBytes(bool fp8) {
+        return fp8 ? KV_ENTRY_BYTES_FP8 : KV_ENTRY_BYTES_BF16;
+    }
+    static constexpr uint32_t indexerEntryBytes(bool fp8) {
+        return fp8 ? INDEXER_ENTRY_BYTES_FP8 : INDEXER_ENTRY_BYTES_BF16;
+    }
 
     uint32_t num_csa_layers() const {
         return csa_layer_ids.size();
