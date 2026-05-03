@@ -481,6 +481,15 @@ class DeepSeekV4Model(GptModelBase):
         Routed expert tensors are stored as stacked ``[n_experts, ...]`` by
         ``MoeAtomicWeight`` (process_fun=``stack_``); we slice them per expert
         and emit ``layers.{i}.ffn.experts.{j}.{w1,w2,w3}.{weight,scale}``.
+
+        Routed-expert stacked tensors are ``pop``-ed (not ``get``-ed) from
+        ``mw.weights[layer_id]`` so that ModelWeights drops its reference.
+        The per-expert views in ``out`` still keep the storage alive — but
+        once each view is consumed (popped + copied) by ``MoE._setup_mega_moe``
+        and goes out of scope, the storage is finally released.  Without
+        ``pop`` here, ModelWeights would hold the original stacked tensor
+        forever and the +3 GB/layer mega-MoE outputs would accumulate net
+        positive (causing OOM around layer 15 for V4-Pro under cp4).
         """
         out: Dict[str, torch.Tensor] = {}
 
@@ -515,6 +524,7 @@ class DeepSeekV4Model(GptModelBase):
                     unknown_keys.add(w_name)
 
             # Routed experts: stacked [E, ...] → per-expert dict entries.
+            # Use ``pop`` (not ``get``) — see class-level docstring above.
             for stacked_w_name, sub in (
                 (W.v4_routed_w1_w, "w1.weight"),
                 (W.v4_routed_w1_s, "w1.scale"),
@@ -523,7 +533,7 @@ class DeepSeekV4Model(GptModelBase):
                 (W.v4_routed_w3_w, "w3.weight"),
                 (W.v4_routed_w3_s, "w3.scale"),
             ):
-                stacked = layer_w.get(stacked_w_name)
+                stacked = layer_w.pop(stacked_w_name, None)
                 if stacked is None:
                     continue
                 # stacked: [E_local, *expert_shape]; under EP, the loader's
@@ -542,6 +552,10 @@ class DeepSeekV4Model(GptModelBase):
                     out[f"layers.{layer_id}.ffn.experts.{global_idx}.{sub}"] = stacked[
                         local_idx
                     ]
+                # Drop the local stacked binding — the per-expert views in
+                # ``out`` are now the sole reference path to the storage.
+                del stacked
+
         if unknown_keys:
             # Warn loudly — silent skip would let descriptor typos / new
             # W keys land in V4Transformer factory mode as KeyError later.
