@@ -403,11 +403,13 @@ def is_remote_enabled() -> bool:
     return os.environ.get("RTP_REMOTE", "").lower() in ("1", "true", "yes")
 
 
-def _resolve_reapi_endpoint(vipserver_host: str, daily_host: str, port: int) -> str:
-    """Resolve a REAPI endpoint: try vipserver DNS first, fall back to daily host."""
+def _resolve_reapi_endpoint(online_host: str, daily_host: str, port: int) -> str:
+    """Resolve a REAPI endpoint: try the production -online host first
+    (typically vipserver-backed), fall back to the -daily LVS host if DNS
+    doesn't resolve (e.g. dev workstation outside the prod VPC)."""
     try:
         results = socket.getaddrinfo(
-            vipserver_host, port, socket.AF_INET, socket.SOCK_STREAM
+            online_host, port, socket.AF_INET, socket.SOCK_STREAM
         )
         if results:
             ip = results[0][4][0]
@@ -417,21 +419,65 @@ def _resolve_reapi_endpoint(vipserver_host: str, daily_host: str, port: int) -> 
     return f"grpc://{daily_host}:{port}"
 
 
-def _load_remote_config() -> dict:
-    """Load [tool.rtp-llm.remote] from pyproject.toml."""
-    toml_path = get_project_root() / "pyproject.toml"
-    if not toml_path.exists():
+def _find_overlay(rel: "str") -> "Optional[Path]":
+    """Look up an overlay file under <repo_root>/<rel> then <project_root>/<rel>.
+
+    REAPI workers receive files relative to project_root, so
+    `internal_source/` ends up as a SIBLING of setup.py
+    (project_root/internal_source/). In local dev
+    `github-opensource/internal_source` is a symlink → ../internal_source,
+    so project_root/internal_source/ resolves to the same directory as
+    repo_root/internal_source/.
+
+    Shared by `_load_remote_config` and `get_merged_optional_dependencies`.
+    """
+    project_root = get_project_root()
+    repo_root = project_root.parent
+    for base in (repo_root, project_root):
+        cand = base / rel
+        if cand.exists():
+            return cand
+    return None
+
+
+def _read_toml_file(path: "Path") -> dict:
+    """Parse a TOML file; return {} if missing or unparseable."""
+    if not path.exists():
         return {}
     try:
         if sys.version_info >= (3, 11):
             import tomllib
         else:
-            import tomli as tomllib
-        with open(toml_path, "rb") as f:
-            data = tomllib.load(f)
-        return data.get("tool", {}).get("rtp-llm", {}).get("remote", {})
+            import tomli as tomllib  # type: ignore[no-redef]
+        with open(path, "rb") as f:
+            return tomllib.load(f)
     except Exception:
         return {}
+
+
+def _load_remote_config() -> dict:
+    """Load [tool.rtp-llm.remote] from gho pyproject.toml + internal overlay.
+
+    Overlay keys win on conflict. The overlay file
+    (`internal_source/pyproject_internal.toml`) is the canonical home for
+    REAPI endpoints — they reference internal infra (vipserver,
+    gitlab.alibaba-inc.com, ai-infra-cicd auth header) and must NOT leak
+    into the open-source `github-opensource/pyproject.toml`.
+    """
+    cfg: dict = {}
+    base = get_project_root() / "pyproject.toml"
+    if base.exists():
+        cfg.update(
+            _read_toml_file(base)
+            .get("tool", {}).get("rtp-llm", {}).get("remote", {})
+        )
+    overlay = _find_overlay("internal_source/pyproject_internal.toml")
+    if overlay:
+        cfg.update(
+            _read_toml_file(overlay)
+            .get("tool", {}).get("rtp-llm", {}).get("remote", {})
+        )
+    return cfg
 
 
 def _get_remote_bazel_args() -> list:
@@ -444,18 +490,21 @@ def _get_remote_bazel_args() -> list:
 
     cfg = _load_remote_config()
     if not cfg:
+        gho_pp = get_project_root() / "pyproject.toml"
         print(
-            "WARNING: RTP_REMOTE=1 but [tool.rtp-llm.remote] missing in pyproject.toml"
+            "WARNING: RTP_REMOTE=1 but [tool.rtp-llm.remote] missing.\n"
+            f"  searched: {gho_pp}\n"
+            "  searched: <repo_root|project_root>/internal_source/pyproject_internal.toml"
         )
         return []
 
     cas_ep = _resolve_reapi_endpoint(
-        cfg.get("cas-vipserver", ""),
+        cfg.get("cas-online", ""),
         cfg.get("cas-daily", ""),
         int(cfg.get("cas-port", 50051)),
     )
     exec_ep = _resolve_reapi_endpoint(
-        cfg.get("executor-vipserver", ""),
+        cfg.get("executor-online", ""),
         cfg.get("executor-daily", ""),
         int(cfg.get("executor-port", 50052)),
     )
@@ -1180,19 +1229,9 @@ def get_merged_optional_dependencies() -> dict:
     else:
         root_extras = dict(_load_extras_from_toml(project_root / "pyproject.toml"))
 
-    # Look up internal/PPU overlays at both monorepo layout (<repo_root>/internal_source/...)
-    # and CAS-flat layout (<project_root>/internal_source/...). REAPI workers receive
-    # files relative to rootdir=github-opensource, so internal_source/ ends up as a
-    # SIBLING of setup.py (i.e. project_root/internal_source/), not under repo_root.
-    # In local dev `github-opensource/internal_source` is a symlink → ../internal_source
-    # so project_root/internal_source/ resolves the same as repo_root/internal_source/.
-    def _find_overlay(rel):
-        for base in (repo_root, project_root):
-            cand = base / rel
-            if cand.exists():
-                return cand
-        return None
-
+    # Internal/PPU overlays live at <repo_root>/internal_source/... or
+    # <project_root>/internal_source/... — see module-level _find_overlay
+    # for the layout reasoning.
     internal_overlay = _find_overlay("internal_source/pyproject_internal.toml")
     if internal_overlay:
         meta = _load_overlay_meta(internal_overlay)
