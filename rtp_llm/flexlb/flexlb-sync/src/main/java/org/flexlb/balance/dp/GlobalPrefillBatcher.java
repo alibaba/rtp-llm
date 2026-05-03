@@ -186,7 +186,7 @@ public class GlobalPrefillBatcher {
     private void planAndDispatch(List<QueuedRequest> drained, int dpSize, FlexlbConfig cfg) {
         DispatchPlan result;
         try {
-            result = planner.plan(drained, new DispatchContext(model, dpSize, cfg));
+            result = planner.plan(drained, new DispatchContext(model, dpSize, cfg, drained));
         } catch (Throwable t) {
             Logger.error("DispatchPlanner threw on {} requests; failing all", drained.size(), t);
             failAll(drained, t);

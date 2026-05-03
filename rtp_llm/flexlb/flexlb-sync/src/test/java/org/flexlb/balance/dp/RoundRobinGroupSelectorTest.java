@@ -1,5 +1,6 @@
 package org.flexlb.balance.dp;
 
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.junit.jupiter.api.Test;
 
@@ -18,13 +19,13 @@ class RoundRobinGroupSelectorTest {
     @Test
     void cycles_through_candidates_per_batch() {
         List<WorkerStatus> candidates = workers("10.0.0.3", "10.0.0.1", "10.0.0.2");
-        BatchHint hint = new BatchHint(List.of(), "m", 4);
+        DispatchContext ctx = ctx();
 
         // Six picks → each candidate selected exactly twice (sorted by ipPort: .1, .2, .3)
         Map<String, Integer> counts = new HashMap<>();
         List<String> sequence = new ArrayList<>();
         for (int i = 0; i < 6; i++) {
-            WorkerStatus w = selector.select(candidates, hint);
+            WorkerStatus w = selector.select(candidates, ctx);
             counts.merge(w.getIpPort(), 1, Integer::sum);
             sequence.add(w.getIp());
         }
@@ -38,16 +39,20 @@ class RoundRobinGroupSelectorTest {
 
     @Test
     void empty_candidates_returns_null() {
-        assertNull(selector.select(List.of(), new BatchHint(List.of(), "m", 4)));
-        assertNull(selector.select(null, new BatchHint(List.of(), "m", 4)));
+        assertNull(selector.select(List.of(), ctx()));
+        assertNull(selector.select(null, ctx()));
     }
 
     @Test
     void single_candidate_always_selected() {
         List<WorkerStatus> candidates = workers("10.0.0.7");
         for (int i = 0; i < 3; i++) {
-            assertEquals("10.0.0.7", selector.select(candidates, new BatchHint(List.of(), "m", 4)).getIp());
+            assertEquals("10.0.0.7", selector.select(candidates, ctx()).getIp());
         }
+    }
+
+    private static DispatchContext ctx() {
+        return new DispatchContext("m", 4, new FlexlbConfig(), List.of());
     }
 
     @Test

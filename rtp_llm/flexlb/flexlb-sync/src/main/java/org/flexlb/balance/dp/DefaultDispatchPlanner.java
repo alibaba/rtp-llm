@@ -67,8 +67,7 @@ public class DefaultDispatchPlanner implements DispatchPlanner {
                     "no DP-enabled prefill worker available");
         }
 
-        BatchHint hint = new BatchHint(drained, context.model(), context.dpSize());
-        WorkerStatus group = groupSelector.select(candidates, hint);
+        WorkerStatus group = groupSelector.select(candidates, context);
         if (group == null) {
             return DispatchPlan.allFailed(drained, StrategyErrorType.NO_PREFILL_WORKER,
                     "GroupSelector(" + groupSelector.name() + ") returned no candidate");
