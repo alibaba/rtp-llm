@@ -1008,4 +1008,85 @@ TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
 }
 
+// V1 DP-controller: FlexLB 已预对齐跨 DP 批,引擎不得自行凑批。normal (非
+// force_batch) 请求每轮最多放 1 条。
+TEST_F(FIFOSchedulerTest, DpControllerManaged_NoOpportunisticMerge) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    parallelism_config.dp_size               = 4;
+    parallelism_config.tp_rank               = 0;
+    parallelism_config.dp_controller_managed = true;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    for (int i = 0; i < 3; ++i) {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = torch::tensor({1}, torch::kInt32);
+        query->generate_config               = make_shared<GenerateConfig>();
+        query->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.value().size(), 1u);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
+}
+
+// V1 DP-controller: FlexLB 已做跨 DP 切分,本地 group 永远不足 batchGroupSize,
+// Scheduler 不再等 — 只要是 force_batch slot 就立即放行,由 isolation 兜底。
+TEST_F(FIFOSchedulerTest, DpControllerManaged_GroupCompletenessBypassed) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    parallelism_config.dp_size               = 4;
+    parallelism_config.tp_rank               = 0;
+    parallelism_config.dp_controller_managed = true;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+    query->input_ids                            = torch::tensor({1}, torch::kInt32);
+    query->generate_config                      = make_shared<GenerateConfig>();
+    query->generate_config->force_batch         = true;
+    query->generate_config->batch_group_timeout = 10000;  // timeout 远大于 schedule 延迟,排除 timeout 分支干扰
+    query->batch_group_id                       = 77;
+    query->batch_group_size                     = 4;  // 本地只有 1/4,legacy 会等,V1 立即调度
+    query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+    shared_ptr<GenerateStream> stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.value().size(), 1u);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+}
+
 }  // namespace rtp_llm
