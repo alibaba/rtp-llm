@@ -21,6 +21,7 @@ Output: $MOEDBG_DIR/$MOEDBG_CASE/rank{R}_pid{P}_step{N}.pt with structure:
 
 import hashlib
 import os
+import re
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -36,6 +37,9 @@ _TAIL_TOKENS = int(os.environ.get("MOEDBG_TAIL_TOKENS", "0"))
 # fires a single max_seq_len pass; recording it at MOEDBG=2 OOMs / hangs
 # health checks before the real query arrives).  0 disables the gate.
 _DBG_MAX_SEQ = int(os.environ.get("MOEDBG_MAX_SEQ", "0"))
+_DBG_NAME_REGEX = os.environ.get("MOEDBG_NAME_REGEX", "")
+_DBG_NAME_RE = re.compile(_DBG_NAME_REGEX) if _DBG_NAME_REGEX else None
+_DBG_GLOBAL_POS = int(os.environ.get("MOEDBG_GLOBAL_POS", "-1"))
 
 ENABLED = _MOEDBG > 0
 LEVEL = _MOEDBG  # 1 = top-level only, 2 = top + per-layer detail
@@ -93,6 +97,8 @@ def begin(seqlen: Optional[int] = None) -> None:
 def record(name: str, tensor: torch.Tensor) -> None:
     """Snapshot a tensor for this forward. No-op if MOEDBG=0 or no active buf."""
     if not ENABLED:
+        return
+    if _DBG_NAME_RE is not None and _DBG_NAME_RE.search(name) is None:
         return
     buf = _get_buf()
     if buf is None:

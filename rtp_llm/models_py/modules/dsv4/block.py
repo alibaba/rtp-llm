@@ -499,9 +499,21 @@ class Block(nn.Module):
         self._hc_positions = positions
         # Master switch: when MOEDBG=0 the AND short-circuits so neither the
         # layer_id compare nor any record_if_level call site below runs.
-        # By default keep the historical narrow trace (layers 0..2, first CSA
-        # is L2). Set MOEDBG_ALL_LAYERS=1 for full bisection across the model.
+        # By default keep the narrow trace from _record_tensor; use
+        # MOEDBG_LAYER/MOEDBG_ALL_LAYERS for wider bisection.
         _dbg_layer = _rt.should_record_layer(self.layer_id)
+        dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
+        dbg_pos_mask = None
+        dbg_pos_name = None
+        dbg_positions = positions
+        cp_ctx = getattr(self.attn, "_cp_ctx", None)
+        if cp_ctx is not None and getattr(cp_ctx, "global_positions", None) is not None:
+            cp_positions = cp_ctx.global_positions
+            if cp_positions.numel() == positions.numel():
+                dbg_positions = cp_positions
+        if _dbg_layer and dbg_pos >= 0:
+            dbg_pos_mask = dbg_positions.to(torch.long) == int(dbg_pos)
+            dbg_pos_name = f"pos{dbg_pos}"
         # Attention path
         residual = x
         x_pre, post, comb = self._hc_pre(
@@ -514,6 +526,12 @@ class Block(nn.Module):
         x_pre = self.attn_norm(x_pre)  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_in", x_pre)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_in_{dbg_pos_name}",
+                    x_pre[dbg_pos_mask].contiguous(),
+                )
 
         # Scatter flat [T, dim] into padded [B, max_S, dim] so that
         # Attention._forward_body's [B, S, dim] body processes every
@@ -546,9 +564,21 @@ class Block(nn.Module):
         attn_out = attn_out_padded[b_idx, s_idx]  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_out", attn_out)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_out_{dbg_pos_name}",
+                    attn_out[dbg_pos_mask].contiguous(),
+                )
         x = self._hc_post(attn_out, residual, post, comb)  # [T, hc, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_residual", x)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_residual_{dbg_pos_name}",
+                    x[dbg_pos_mask].contiguous(),
+                )
 
         # FFN path
         residual = x
@@ -562,15 +592,39 @@ class Block(nn.Module):
         x_pre = self.ffn_norm(x_pre)  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_in", x_pre)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_ffn_in_{dbg_pos_name}",
+                    x_pre[dbg_pos_mask].contiguous(),
+                )
         ffn_in_ids = (
             input_ids
             if input_ids is not None
             else torch.zeros(x.size(0), dtype=torch.long, device=x.device)
         )
-        ffn_out = self.ffn(x_pre, ffn_in_ids)  # [T, dim]
+        if _dbg_layer and dbg_pos_mask is not None:
+            setattr(self.ffn, "_dbg_positions", dbg_positions)
+        try:
+            ffn_out = self.ffn(x_pre, ffn_in_ids)  # [T, dim]
+        finally:
+            if _dbg_layer and hasattr(self.ffn, "_dbg_positions"):
+                setattr(self.ffn, "_dbg_positions", None)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_out", ffn_out)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_ffn_out_{dbg_pos_name}",
+                    ffn_out[dbg_pos_mask].contiguous(),
+                )
         x = self._hc_post(ffn_out, residual, post, comb)  # [T, hc, dim]
+        if _dbg_layer and dbg_pos_mask is not None:
+            _rt.record_if_level(
+                2,
+                f"L{self.layer_id:02d}_ffn_residual_{dbg_pos_name}",
+                x[dbg_pos_mask].contiguous(),
+            )
         self._hc_positions = None
         return x  # [T, hc, dim]
 

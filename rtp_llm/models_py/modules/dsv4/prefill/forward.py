@@ -238,6 +238,32 @@ def forward_layers(
             write_cache_store_impl(kv_cache, layer_idx)
         if _rt_on:
             _rt.record(f"layer{layer_idx:02d}_out", h)
+            if cp_ctx is None:
+                layer_last = h[-1:].contiguous()
+            else:
+                layer_last_pos = cp_ctx.seq_len_total - 1
+                layer_last_mask = (
+                    cp_ctx.global_positions == layer_last_pos
+                ) & cp_ctx.local_is_real
+                layer_last = h[layer_last_mask].contiguous()
+                dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
+                if dbg_pos >= 0:
+                    layer_pos_mask = (
+                        cp_ctx.global_positions == dbg_pos
+                    ) & cp_ctx.local_is_real
+                    _rt.record(
+                        f"layer{layer_idx:02d}_pos{dbg_pos}",
+                        h[layer_pos_mask].contiguous(),
+                    )
+                layer_tail_mask = (
+                    (cp_ctx.global_positions >= max(cp_ctx.seq_len_total - 128, 0))
+                    & (cp_ctx.global_positions < cp_ctx.seq_len_total)
+                    & cp_ctx.local_is_real
+                )
+                _rt.record(
+                    f"layer{layer_idx:02d}_tail128", h[layer_tail_mask].contiguous()
+                )
+            _rt.record(f"layer{layer_idx:02d}_last", layer_last)
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # _RMSNorm accepts any shape (reshapes to 2D internally), so [T, dim] flows through.
@@ -279,6 +305,9 @@ def forward_layers(
                     "chunk_length": cp_ctx.chunk_length,
                     "padded_seq_len": cp_ctx.padded_seq_len,
                     "seq_len_full": cp_ctx.seq_len_full,
+                    "prefix_length": cp_ctx.prefix_length,
+                    "seq_len_total": cp_ctx.seq_len_total,
+                    "relative_positions": cp_ctx.relative_positions.detach().cpu(),
                     "global_positions": cp_ctx.global_positions.detach().cpu(),
                     "unpad_restore": cp_ctx.unpad_restore.detach().cpu(),
                     "local_is_real": cp_ctx.local_is_real.detach().cpu(),
@@ -290,8 +319,15 @@ def forward_layers(
                     "cp_size": 1,
                     "cp_rank": 0,
                     "seq_len_full": int(input_ids.size(0)),
+                    "prefix_length": 0,
+                    "seq_len_total": int(input_ids.size(0)),
                 }
             )
+        if attn_inputs is not None:
+            for name in ("input_lengths", "prefix_lengths", "sequence_lengths"):
+                value = getattr(attn_inputs, name, None)
+                if value is not None and value.numel() > 0:
+                    extra[name] = value.detach().cpu()
         step = getattr(v4, "_dbg_step", 0)
         _rt.dump(step=step, extra=extra)
         v4._dbg_step = step + 1
