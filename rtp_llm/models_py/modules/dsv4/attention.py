@@ -12,7 +12,6 @@ Sparse attention reference uses `gather`-based PyTorch implementation —
 slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
-import logging
 import os
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
@@ -1209,7 +1208,6 @@ class Attention(nn.Module):
         if packed_3d is None:
             return
 
-        # kv_full is [B, S, head_dim]; flatten to [num_tokens, head_dim].
         k_bf16 = kv_full.reshape(-1, self.head_dim)
         if k_bf16.dtype != torch.bfloat16:
             k_bf16 = k_bf16.to(torch.bfloat16)
@@ -2098,19 +2096,14 @@ class Attention(nn.Module):
         num_tokens = bsz * seqlen
         is_swa_only = self.compress_ratio == 0
 
-        # ── Group 2 (SWA-only): cold-prefill kv_full topk_length ──
-        # Per-query SWA window size = min(pos+1, win). Cache-independent;
-        # always set on SWA-only layers (incl. warmup forward).
         topk_length_kv_full: Optional[torch.Tensor] = None
         if is_swa_only:
             positions = torch.arange(num_tokens, device=device, dtype=torch.int32)
             topk_length_kv_full = torch.clamp(positions + 1, max=win)
 
-        # ── Group 1 (all FP8 layers): cache-write metadata ──
         slot_mapping: Optional[torch.Tensor] = None
         query_start_loc: Optional[torch.Tensor] = None
         combined_seq_lens: Optional[torch.Tensor] = None
-        # ── Group 2 (SWA-only): attention metadata ──
         combined_gather_lens: Optional[torch.Tensor] = None
         combined_gather_len_max = 0
         M = 0
@@ -2128,18 +2121,14 @@ class Attention(nn.Module):
         eb = self._pool_entries_per_block(SWA_KV)
         if self._kv_cache is not None and bt is not None and bt.numel() > 0 and eb > 0:
             seq_total = sp_int + seqlen
-            # B==1 invariant — single per-req entries. (See TODO above.)
             query_start_loc = torch.tensor(
                 [0, num_tokens], device=device, dtype=torch.int32
             )
-            # Total seq view (sp + S) — used by both the write-side
-            # slot_mapping kernel and (for SWA-only) the indices kernel.
             combined_seq_lens = torch.tensor(
                 [seq_total], device=device, dtype=torch.int32
             )
             bt_swa = bt[:bsz].to(device=device, dtype=torch.int32).contiguous()
 
-            # ── Group 1 fill: slot_mapping for FP8 SWA pool write ──
             slot_mapping = _swa_ops.compute_swa_slot_mapping(
                 block_table=bt_swa,
                 query_start_loc=query_start_loc,
@@ -2148,7 +2137,6 @@ class Attention(nn.Module):
                 num_tokens=num_tokens,
             )
 
-            # ── Group 2 fill: SWA-only attention metadata ──
             if is_swa_only:
                 combined_gather_lens = _swa_ops.compute_prefill_gather_lens(
                     seq_lens=combined_seq_lens,
@@ -2161,11 +2149,6 @@ class Attention(nn.Module):
                 M = max(combined_gather_len_max, 1)
 
                 if sp_int > 0:
-                    # Cache-read side: only the prefix tail [sp-P, sp). The
-                    # new K is concat'd in BF16 from kv_full directly, so
-                    # cache must only return P=min(sp,win-1) tokens.
-                    # B==1 invariant: scalar P/sp materialized as 1-elem
-                    # tensors.
                     prefix_len = min(sp_int, win - 1)
                     cache_seq_lens = torch.tensor(
                         [sp_int], device=device, dtype=torch.int32
@@ -2397,11 +2380,24 @@ class Attention(nn.Module):
     ):
         """FP8 KV-cache prefill dispatcher.
 
-        Layer-0 / SWA-only is implemented; CSA / HCA (compress_ratio in
-        {4, 128}) still raise NotImplementedError so HACK_LAYER_NUM=2..4
-        with FP8 KV cache fail loudly at the right module rather than
-        silently returning the Python ``NotImplemented`` sentinel.
+        Two-step contract shared across all compress_ratio:
+
+          1. ``_prefill_write_swa_fp8_paged`` writes the freshly computed
+             K to the FP8 SWA pool. Mirrors the unconditional BF16
+             ``_prefill_write_swa_to_pool`` call in ``_forward_prefill_bf16``.
+             Safe to do *before* attention because ``slot_mapping`` is
+             unique per absolute token position: new K (abs pos
+             ``[sp, sp+S)``) and the cont-prefill prefix tail (abs pos
+             ``[sp-P, sp)``) always land in distinct physical slots, so
+             writing here does not clobber the prefix tail that
+             ``_attn_fp8_swa_via_concat`` will dequant-gather. No-op
+             when ``swa_meta is None`` (warmup forward).
+          2. Per-attention-type sub-method computes attention. SWA-only
+             goes through ``_forward_prefill_fp8_swa_only``; CSA / HCA
+             will land in their own sub-methods.
         """
+        self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+
         if self.compress_ratio == 0:
             return self._forward_prefill_fp8_swa_only(
                 x, start_pos, sequence_lengths, common, qkv
@@ -2424,8 +2420,12 @@ class Attention(nn.Module):
         common: _PrefillCommon,
         qkv: _PrefillQKV,
     ) -> torch.Tensor:
-        """FP8 SWA-only prefill — route between cold (kv_full direct) and
-        continuation (prefix-from-cache + new-K-bf16 concat) paths.
+        """FP8 SWA-only prefill attention — route between cold (kv_full
+        direct) and continuation (prefix-from-cache + new-K-bf16 concat).
+
+        Cache write already happened in the dispatcher
+        (``_forward_prefill_fp8``) before this method runs;
+        **don't write here**.
 
         * **cold prefill (``sp == 0``) OR warmup (``self._kv_cache is None``)**
           → ``_attn_fp8_swa_via_kv_full``: BF16 kv_full direct sparse_fwd.
@@ -2433,20 +2433,14 @@ class Attention(nn.Module):
           The DSV4 SWA pool has ``fixed_blocks_per_req = 2`` (=
           ``2 * eb = 2 * 256 = 512`` token capacity per request, see
           ``cpp/cache/DSV4_CACHE_LAYOUT.md §6``). For cold prefill with
-          ``S > 512`` the pool evicts the early ``S - 512`` tokens during
-          write — there is no prefix to read either way, so attend over
-          the BF16 kv_full we just computed; cache write happens after
-          (decode-only consumer).
+          ``S > 512`` the pool would evict the early ``S - 512`` tokens
+          during write anyway, so we skip the round-trip and attend
+          directly over the BF16 kv_full we just computed.
 
         * **continuation prefill (``sp > 0``)** → ``_attn_fp8_swa_via_concat``:
           dequant only the **prefix tail** (size ``P = min(sp, win-1)``)
           from cache, BF16-copy the new K from ``kv_full`` into the same
           workspace, then ``flash_mla_sparse_fwd`` over the concat.
-
-          Avoids the SWA-pool capacity wall (``P + S <= 2*eb`` no longer
-          required) since new K never goes through cache for the
-          attention math; new K is only quantize-inserted *after* the
-          prefix read so future decode steps can use it.
         """
         assert self.compress_ratio == 0, (
             "FP8 SWA prefill currently only handles SWA-only layers; "
@@ -2454,16 +2448,8 @@ class Attention(nn.Module):
         )
         assert common.bsz == 1, "FP8 prefill assumes B==1 (model invariant)"
 
-        # Cold prefill or warmup: attend first (BF16 kv_full, cache-
-        # independent), then write for future decode. No-op write when
-        # swa_meta is None (warmup, no kv_cache yet).
         if common.sp_int == 0 or self._kv_cache is None:
-            out = self._attn_fp8_swa_via_kv_full(qkv, common)
-            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
-            return out
-        # Continuation prefill: read prefix tail BEFORE writing new K
-        # (otherwise paged-tail eviction would clobber the prefix tail).
-        # _attn_fp8_swa_via_concat orchestrates the strict ordering.
+            return self._attn_fp8_swa_via_kv_full(qkv, common)
         return self._attn_fp8_swa_via_concat(qkv, common)
 
     def _attn_fp8_swa_via_kv_full(
@@ -2513,17 +2499,16 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         """Continuation prefill (sp>0): prefix-from-cache + new-K-bf16 concat.
 
-        Pipeline (strict ordering — read MUST precede write):
+        Pipeline:
           1. ``dequantize_and_gather_k_cache`` reads only the trailing
-             ``P = min(sp, win-1)`` cached tokens (the SWA prefix tail)
-             into ``workspace[:, :P, :]``.
-          2. ``quantize_and_insert_k_cache`` writes the new K to the
-             FP8 SWA pool for future decode reads. (Paged-tail eviction
-             may clobber the just-read prefix tail; that's fine — we
-             already have it in ``workspace``.)
-          3. BF16-copy ``kv_full`` (the freshly computed new K) into
+             ``P = min(sp, win-1)`` cached tokens (the SWA prefix tail,
+             abs pos ``[sp - P, sp)``) into ``workspace[:, :P, :]``.
+             Unaffected by this round's pre-attention pool write because
+             that write targets abs pos ``[sp, sp + S)`` — distinct
+             slot_mapping, distinct physical slots.
+          2. BF16-copy ``kv_full`` (the freshly computed new K) into
              ``workspace[:, P:P+S, :]``.
-          4. ``flash_mla_sparse_fwd`` over the concat workspace using
+          3. ``flash_mla_sparse_fwd`` over the concat workspace using
              ``combined_indices`` from ``combine_topk_swa_indices``
              (TOP_K=0, N=0 ⇒ SWA-only rows; indices map abs positions
              ``[sp - P, sp + S)`` onto workspace ``[0, P+S)``).
@@ -2531,6 +2516,12 @@ class Attention(nn.Module):
         Removes the round-trip 2*eb capacity wall: cache only stores
         prefix tail (``P <= win-1``, fits comfortably in 2*eb=512), and
         new K is BF16 — no FP8 quant loss either.
+
+        TODO(B>1): step 2 currently uses host-side
+        ``workspace[:, P:P+S].copy_(kv_full)`` and assumes per-request
+        P_b/S_b collapse to scalars. For real B>1 we need a triton
+        kernel that fills ``[B, M, D]`` workspace from per-request
+        (prefix_tail, kv_full) using cu_seqlens-style offsets.
         """
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
@@ -2559,7 +2550,7 @@ class Attention(nn.Module):
 
         D = self.head_dim
         S = common.seqlen
-        P = meta.prefix_len_max  # B==1: scalar P; for B>1 this is the stride
+        P = meta.prefix_len_max
         workspace = torch.zeros(
             (common.bsz, meta.M, D),
             dtype=torch.bfloat16,
@@ -2567,7 +2558,6 @@ class Attention(nn.Module):
         )
         bt_swa = bt.to(dtype=torch.int32)
 
-        # 1) Read prefix tail (P tokens) from cache → workspace[:, :P, :].
         if P > 0:
             _swa_dq.dequantize_and_gather_k_cache(
                 out=workspace,
@@ -2579,17 +2569,8 @@ class Attention(nn.Module):
                 offset=0,
             )
 
-        # 2) Write new K to cache (for future decode reads).
-        self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
-
-        # 3) BF16 copy new K into workspace[:, P:P+S, :].
-        # B==1 invariant: kv_full is [1, S, D], workspace[0, P:P+S] = kv_full[0].
-        # TODO(B>1): replace with a triton kernel that fills per-request
-        # (prefix tail + new K) into [B, M, D] using cu_seqlens-style offsets,
-        # since per-request P_b/S_b vary and host-side python loop will be slow.
         workspace[:, P : P + S, :].copy_(qkv.kv_full.to(torch.bfloat16))
 
-        # 4) sparse_fwd over the concat workspace.
         o3, _, _ = flash_mla_sparse_fwd(
             q=qkv.q.squeeze(0),
             kv=workspace.view(-1, 1, D),
