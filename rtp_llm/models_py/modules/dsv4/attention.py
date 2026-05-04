@@ -2385,17 +2385,45 @@ class Attention(nn.Module):
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_sparse_out", o)
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_topk_idxs", topk_idxs)
 
-        # Inverse RoPE on output (cancels K's absolute position)
-        apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_o_post_inv_rope", o)
-
-        # Grouped output projection: split heads into n_groups groups
-        o = o.reshape(bsz, seqlen, self.n_groups, -1)
-        # wo_a storage is native FP8; dequant on-the-fly and view into group-wise form.
-        wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
-        wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
-        o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+        # Grouped output projection: inverse-RoPE + FP8 quant + wo_a einsum.
+        # Same fused path as forward_decode (line ~1648) — collapses
+        # apply_rotary_emb (1 launch) + per-group per_token_group_quant_fp8
+        # (G launches) into ONE Triton kernel emitting (fp8 [M,G,K], scale
+        # [M,G,K/512]) in the einsum-expected UE8M0 layout. Matches vLLM
+        # ``deepseek_v4_attention.py``.
+        if self._factory_mode and o.is_cuda and o.numel() > 0:
+            # The Triton kernel computes ``b_idx = pid_token // q_len_per_b``
+            # to index freqs. Decode uses [B, rd/2] freqs with q_len_per_b=1
+            # so b_idx == request index. In prefill we have per-position
+            # freqs [S, rd/2]; pass o as 3D [B*S, H, D] with freqs_cis_per_b
+            # = freqs.expand(B*S, ...) so q_len_per_b=1 and b_idx == token
+            # index → each token reads its own row.
+            o_3d = o.reshape(bsz * seqlen, self.n_heads, self.head_dim)
+            if freqs_cis.dim() == 2:
+                # Per-position freqs [S, rd/2] — broadcast to [B*S, rd/2].
+                freqs_per_token = (
+                    freqs_cis.unsqueeze(0)
+                    .expand(bsz, -1, -1)
+                    .reshape(bsz * seqlen, -1)
+                    .contiguous()
+                )
+            else:
+                freqs_per_token = freqs_cis.contiguous()
+            o_fp8, o_scale = fused_inv_rope_fp8_quant(
+                o_3d,
+                freqs_per_token,
+                n_groups=self.n_groups,
+                heads_per_group=self.n_heads // self.n_groups,
+                nope_dim=self.head_dim - self.rope_head_dim,
+                rope_head_dim=self.rope_head_dim,
+            )
+            o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, seqlen)
+        else:
+            apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
+            o = o.reshape(bsz, seqlen, self.n_groups, -1)
+            wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
+            wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
+            o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_wo_a_out", o)
         out = self._lin(self.wo_b, o.flatten(2))
