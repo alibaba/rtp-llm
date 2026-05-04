@@ -63,9 +63,10 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
 
     Declares the per-layer + global ``WeightModule`` graph the framework's
     fastsafetensors loader needs to populate ``ModelWeights`` from a V4-Flash
-    safetensors checkpoint.  ``DeepSeekV4Model._initialize_impl`` consumes
-    those tensors via a flatten-back-to-ckpt-style step and feeds them into
-    the standalone ``V4Transformer`` factory mode.
+    safetensors checkpoint.  ``DeepSeekV4Model._initialize_impl`` hands the
+    populated ``ModelWeights`` directly to ``V4Transformer``; each dsv4
+    sub-module reads its tensors from ``mw.global_weights[W.*]`` /
+    ``mw.weights[layer_id][W.v4_*]`` (W enum keys, no string lookups).
 
     Compatibility envelope:
       * V4 ckpt key naming is ``layers.{i}.…`` (no ``model.`` prefix); V4 W

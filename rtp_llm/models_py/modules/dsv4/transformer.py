@@ -14,9 +14,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
-from rtp_llm.models_py.modules.dsv4.block import Block, MTPBlock, _RMSNorm
+from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
 
 
@@ -87,13 +88,14 @@ class V4Args:
 
 
 def _block_kwargs(
-    layer_id: int, args: V4Args, weights: Optional[Dict[str, torch.Tensor]], prefix: str
+    layer_id: int,
+    args: V4Args,
+    layer_weights: Optional[Dict[str, torch.Tensor]],
 ) -> Dict:
-    """Kwargs common to Block and MTPBlock construction.
+    """Kwargs common to Block construction.
 
     ``compress_ratios`` is sized ``n_layers + n_mtp_layers`` (44 for
-    V4-Flash default) so ``compress_ratios[layer_id]`` works directly
-    for both main layers and MTP layers.
+    V4-Flash default) so ``compress_ratios[layer_id]`` works directly.
     """
     return dict(
         layer_id=layer_id,
@@ -130,8 +132,7 @@ def _block_kwargs(
         hc_sinkhorn_iters=args.hc_sinkhorn_iters,
         hc_eps=args.hc_eps,
         norm_eps=args.norm_eps,
-        weights=weights,
-        prefix=prefix,
+        layer_weights=layer_weights,
         tp_size=args.tp_size,
         tp_rank=args.tp_rank,
         ep_size=args.ep_size,
@@ -143,59 +144,39 @@ def _block_kwargs(
 def _build_block(
     layer_id: int,
     args: V4Args,
-    weights: Optional[Dict[str, torch.Tensor]] = None,
-    prefix: str = "",
+    layer_weights: Optional[Dict[str, torch.Tensor]] = None,
 ) -> Block:
-    return Block(**_block_kwargs(layer_id, args, weights, prefix))
-
-
-def _build_mtp_block(
-    layer_id: int,
-    args: V4Args,
-    weights: Optional[Dict[str, torch.Tensor]] = None,
-    prefix: str = "",
-) -> MTPBlock:
-    return MTPBlock(**_block_kwargs(layer_id, args, weights, prefix))
+    return Block(**_block_kwargs(layer_id, args, layer_weights))
 
 
 class V4Transformer(nn.Module):
     """Standalone V4 forward. No TP/EP/PP sharding (world_size=1)."""
 
-    def __init__(self, args: V4Args, weights: Optional[Dict[str, torch.Tensor]] = None):
+    def __init__(self, args: V4Args, mw):
+        """``mw`` is the framework's ``ModelWeights`` (with ``.global_weights``
+        ``Dict[str, Tensor]`` keyed by ``W.*`` enum and ``.weights[layer_id]``
+        per-layer dicts).  Required — every dsv4 sub-module reads its
+        weights from ``mw`` at construction; there is no unit-test path
+        that constructs the transformer with empty weights."""
         super().__init__()
         self.args = args
         self.max_seq_len = args.max_seq_len
         self.norm_eps = args.norm_eps
         self.hc_eps = args.hc_eps
         self.hc_mult = args.hc_mult
-        self._factory_mode = weights is not None
 
+        from rtp_llm.utils.model_weight import W
+        from rtp_llm.models_py.modules.dsv4.block import _maybe_squeeze_hc_1d
+
+        gw = mw.global_weights
         # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
-        # ``nn.Parameter``).  In factory mode the real weight comes from the
-        # framework dict; the unit-test path uses an empty placeholder that
-        # the caller is expected to replace.
-        self.embed = EmbeddingTorch(
-            weights["embed.weight"]
-            if weights is not None
-            else torch.empty(args.vocab_size, args.dim)
-        )
+        # ``nn.Parameter``); the framework dict supplies the real tensor.
+        self.embed = EmbeddingTorch(gw[W.embedding])
 
         self.layers = nn.ModuleList(
-            [
-                _build_block(
-                    i,
-                    args,
-                    weights=weights,
-                    prefix=f"layers.{i}" if self._factory_mode else "",
-                )
-                for i in range(args.n_layers)
-            ]
+            [_build_block(i, args, layer_weights=mw.weights[i]) for i in range(args.n_layers)]
         )
-        self.norm = _RMSNorm(
-            args.dim,
-            args.norm_eps,
-            weight=weights["norm.weight"] if self._factory_mode else None,
-        )
+        self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
 
         # MTP layers — draft heads for speculative decoding.  Full impl
         # in block.py::MTPBlock; each layer owns its own e_proj/h_proj +
@@ -203,30 +184,24 @@ class V4Transformer(nn.Module):
         # Block machinery (attn, ffn, mHC). The shared embedding and LM
         # head flow through ``forward_draft`` explicitly at inference
         # time rather than being stashed on the MTPBlock instance.
+        # NOTE: MTP weight tags (W.v4_mtp_*) are not yet declared in the
+        # descriptor; ``args.n_mtp_layers`` is hardcoded to 0 in
+        # ``deepseek_v4_model.py`` so this loop is a no-op in production.
         self.mtp = nn.ModuleList()
-        for i in range(args.n_mtp_layers):
-            prefix = f"mtp.{i}" if self._factory_mode else ""
-            blk = _build_mtp_block(
-                args.n_layers + i, args, weights=weights, prefix=prefix
-            )
-            self.mtp.append(blk)
+        assert args.n_mtp_layers == 0, (
+            "MTP factory not yet migrated to W.* tags; descriptor needs "
+            "W.v4_mtp_* declarations first"
+        )
 
         # LM head — plain fp32 weight matrix [vocab_size, dim], applied via
         # ``F.linear`` in forward.  head.weight ships as bf16 (descriptor
         # data_type=bf16, see ``rtp_llm/models/deepseek_v4.py`` for the
         # loader-RAM rationale); cast to fp32 ParallelHead here.
         hc_dim = args.hc_mult * args.dim
-        if self._factory_mode:
-            self.head_weight = weights["head.weight"].float()
-            self.hc_head_fn = weights["hc_head_fn"]
-            self.hc_head_base = weights["hc_head_base"]
-            self.hc_head_scale = weights["hc_head_scale"]
-        else:
-            # Unit-test path — caller binds tensors externally.
-            self.head_weight = None
-            self.hc_head_fn = None
-            self.hc_head_base = None
-            self.hc_head_scale = None
+        self.head_weight = gw[W.lm_head].float()
+        self.hc_head_fn = gw[W.v4_hc_head_fn]
+        self.hc_head_base = gw[W.v4_hc_head_base]
+        self.hc_head_scale = _maybe_squeeze_hc_1d(gw[W.v4_hc_head_scale])
 
         self._dbg_step = 0
 
@@ -335,9 +310,9 @@ class V4Transformer(nn.Module):
         for layer in self.layers:
             h = layer.forward_decode(h, attn_metadata, input_ids_2d, kv_cache=kv_cache)
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
-        h = self.norm(h)  # [B, q_len, dim]
-        # Return packed [T_total, dim] for the framework.
-        return h.reshape(B * q_len, self.args.dim)
+        # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
+        # return that directly (the next reshape would no-op anyway).
+        return self.norm(h.reshape(B * q_len, self.args.dim))
 
     @torch.inference_mode()
     def forward(
@@ -456,7 +431,9 @@ class V4Transformer(nn.Module):
         h = self._hc_head_reduce(h)  # [B, S, d]
         if _rt_on:
             _rt.record("hc_reduced", h)
-        h = self.norm(h)
+        # Framework RMSNorm wants 2D; collapse [B, S, d] → [B*S, d] and view back.
+        bsz, seq, dim_ = h.shape
+        h = self.norm(h.reshape(bsz * seq, dim_)).view(bsz, seq, dim_)
         if _rt_on:
             _rt.record("final_norm", h)
 

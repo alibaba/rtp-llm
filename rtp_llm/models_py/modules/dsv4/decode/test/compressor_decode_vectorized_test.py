@@ -46,8 +46,7 @@ def _make_compressor(
             max_batch_size=max_batch_size,
             norm_eps=1e-6,
             rotate=False,
-            weights=None,
-            prefix="",
+            compressor_weights=None,
         )
     finally:
         torch.set_default_dtype(prev_dtype)

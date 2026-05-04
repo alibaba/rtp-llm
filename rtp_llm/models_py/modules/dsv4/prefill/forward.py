@@ -266,7 +266,7 @@ def forward_layers(
             _rt.record(f"layer{layer_idx:02d}_last", layer_last)
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
-    # _RMSNorm accepts any shape (reshapes to 2D internally), so [T, dim] flows through.
+    # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.
     v4._hc_head_positions = positions
     h = v4._hc_head_reduce(h)  # [T, dim]
     v4._hc_head_positions = None
