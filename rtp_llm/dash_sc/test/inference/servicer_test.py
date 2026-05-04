@@ -1,4 +1,4 @@
-"""Unit tests for ``rtp_llm.dash_sc.inference_servicer`` (grpc.aio).
+"""Unit tests for ``rtp_llm.dash_sc.inference.servicer`` (grpc.aio).
 
 Covers:
 - ``iter_real_model_stream_infer``: success, empty-stream fallback, exception propagation.
@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from rtp_llm.dash_sc.codec import OtherParams, SamplingParams
-from rtp_llm.dash_sc.inference_servicer import (
+from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     iter_real_model_stream_infer,
 )
