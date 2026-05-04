@@ -251,6 +251,74 @@ class AiterPrefillAttnOp:
 
         return k_cache, v_cache
 
+    def _reshape_kv_cache_vectorized_compact(self, kv_cache_base, block_table):
+        """C3.d.4: gather only blocks referenced by block_table, then reshape.
+
+        Solves two problems for v1_kv_layout=True (BASE non-FP8) path:
+        1. Performance: avoids reshape/copy of full 14GB+ kv_cache_base when only
+           ~600 blocks are used per prefill (-99.86% data movement).
+        2. INT32 OOB: aiter mha_batch_prefill_func uses int32 for KV cache offset
+           (verified at fmha_batch_prefill_kernel.hpp:494/661); full path with
+           block_num*16384 > INT32_MAX silently corrupts output. compact path
+           keeps total well below INT32_MAX.
+
+        Args:
+            kv_cache_base: [block_num, 2, hk, ps, hd] (5D) or 2D flat buffer.
+            block_table:   [batch_size, num_blocks_per_seq] int. Block ids referenced
+                           by current prefill. Assumes no -1 padding and no duplicates
+                           (REUSE_CACHE=0 in production verified).
+
+        Returns:
+            (k_compact, v_compact, compact_block_table)
+        """
+        hk = self.head_num_kv
+        ps = self.tokens_per_block
+        hd = self.head_dim
+        vs = 16 // kv_cache_base.element_size()
+        is_fp8 = kv_cache_base.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
+        use_v1_linear_v = self.v1_kv_layout and not is_fp8
+
+        bt_flat = block_table.reshape(-1).to(torch.int64)
+        n = bt_flat.numel()
+
+        if kv_cache_base.ndim >= 4:
+            k_4d = kv_cache_base.select(1, 0)
+            v_4d = kv_cache_base.select(1, 1)
+            k_used = k_4d.index_select(0, bt_flat)
+            v_used = v_4d.index_select(0, bt_flat)
+            k_compact = k_used.view(n, hk, hd // vs, ps, vs)
+            if use_v1_linear_v:
+                v_compact = (
+                    v_used.reshape(n, hk, hd, ps // vs, vs)
+                    .permute(0, 1, 3, 2, 4)
+                    .contiguous()
+                )
+            else:
+                v_compact = v_used.view(n, hk, ps // vs, hd, vs)
+        else:
+            block_num = kv_cache_base.shape[0]
+            expected_elems = 2 * hk * ps * hd
+            flat = kv_cache_base[:, :expected_elems].reshape(block_num, 2, hk, ps * hd)
+            k_used = flat[:, 0, :, :].index_select(0, bt_flat)
+            v_used = flat[:, 1, :, :].index_select(0, bt_flat)
+            k_compact = k_used.view(n, hk, hd // vs, ps, vs).contiguous()
+            if use_v1_linear_v:
+                v_compact = (
+                    v_used.view(n, hk, hd, ps // vs, vs)
+                    .permute(0, 1, 3, 2, 4)
+                    .contiguous()
+                )
+            else:
+                v_compact = v_used.view(n, hk, ps // vs, hd, vs).contiguous()
+
+        cached = getattr(self, "_compact_block_table_arange", None)
+        if cached is None or cached.numel() < n or cached.device != block_table.device:
+            cached = torch.arange(0, max(n, 1024), dtype=torch.int32, device=block_table.device)
+            self._compact_block_table_arange = cached
+        compact_block_table = cached[:n].view_as(block_table)
+
+        return k_compact, v_compact, compact_block_table
+
     def _split_qkv_fp8(self, qkv_fp8):
         return split_qkv_fp8(qkv_fp8, self.head_num, self.head_num_kv, self.head_dim)
 
@@ -301,9 +369,18 @@ class AiterPrefillAttnOp:
         if q_tensor.dim() == 2:
             q_tensor = q_tensor.view(q_tensor.size(0), self.head_num, self.head_dim)
 
-        k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
-
+        # C3.d.4: dispatch to compact gather for v1_kv_layout=True path to avoid
+        # full-buffer reshape (~14GB at KV=48000) and INT32 OOB in mha_batch_prefill_func.
+        # Other paths (FP8 / non-v1) keep original full-buffer reshape (no copy).
         block_table = fmha_params.kv_cache_block_id_device
+        is_fp8 = kv_cache.kv_cache_base.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
+        use_compact = self.v1_kv_layout and not is_fp8 and block_table is not None and block_table.numel() > 0
+        if use_compact:
+            k_cache, v_cache, block_table = self._reshape_kv_cache_vectorized_compact(
+                kv_cache.kv_cache_base, block_table
+            )
+        else:
+            k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
         # cu_seqlens are already created on GPU in FMHAParams.__init__
         cu_seqlens_q = fmha_params.cu_seqlens_q
 
