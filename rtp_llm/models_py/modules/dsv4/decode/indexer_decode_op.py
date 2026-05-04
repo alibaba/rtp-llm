@@ -177,13 +177,20 @@ class IndexerDecodeV4Op:
         T_max = kv_indexer.shape[1]
         device = q_indexer.device
 
-        q_f = q_indexer.float()
-        kv_f = kv_indexer.float()
-        w_f = weights.float()
+        # Fused einsum + ReLU + weighted-sum via Triton kernel — never
+        # materializes [B, q_len, H, T] fp32. No causal mask in decode
+        # (the per-request compressed_len mask is applied below).
+        from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
+            v4_indexer_score,
+        )
 
-        # [B, q_len, H, T] -> ReLU -> weight-sum over heads -> [B, q_len, T] fp32.
-        score = torch.einsum("bshd,btd->bsht", q_f, kv_f)
-        score = score.relu_().mul_(w_f.unsqueeze(-1)).sum(dim=2)  # [B, q_len, T_max]
+        score = v4_indexer_score(
+            q_indexer.contiguous(),
+            kv_indexer.contiguous(),
+            weights,
+            q_pos=None,
+            compress_ratio=1,
+        )
 
         # Mask t >= compressed_len_per_req[b] to -inf.
         t_range = torch.arange(T_max, device=device, dtype=torch.int32)

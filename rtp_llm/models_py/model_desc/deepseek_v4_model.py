@@ -342,6 +342,48 @@ class DeepSeekV4Model(GptModelBase):
                 device_str,
             )
 
+            # Pre-warm the v4_indexer_score Triton kernel for the SAME
+            # constexpr config the live decode (and CSA prefill) call will
+            # use, so JIT compile never happens inside CUDA graph capture
+            # (which silently corrupts the captured graph and kills the
+            # rank). The kernel keys on (S, T, H, D, BLOCK_S, BLOCK_T,
+            # COMPRESS_RATIO, APPLY_MASK) — match every one of those.
+            #
+            # Decode call: q_len=S=1, T = max_seq_len // ratio, no mask.
+            # CSA prefill (also captured if cuda-graph prefill ever lands):
+            # same (H, D, ratio, T) but with mask. We compile both APPLY_MASK
+            # variants here.
+            import torch as _torch
+
+            from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
+                v4_indexer_score as _v4_idx,
+            )
+
+            _idx = self.v4.layers[2].attn.indexer  # first CSA layer (ratio=4)
+            _H = int(_idx.n_heads)
+            _D = int(_idx.head_dim)
+            _ratio = max(int(_idx.compress_ratio), 1)
+            _T_dec = int(self._v4_args.max_seq_len) // _ratio
+            _q_dec = _torch.zeros(
+                (1, 1, _H, _D), dtype=_torch.bfloat16, device=device_str
+            )
+            _kv_dec = _torch.zeros(
+                (1, _T_dec, _D), dtype=_torch.bfloat16, device=device_str
+            )
+            _w_dec = _torch.zeros((1, 1, _H), dtype=_torch.bfloat16, device=device_str)
+            # Decode shape (no mask).
+            _v4_idx(_q_dec, _kv_dec, _w_dec, q_pos=None, compress_ratio=1)
+            # Prefill mask variant — only matters if CSA prefill goes through
+            # graph capture. Cheap to prewarm regardless.
+            _v4_idx(
+                _q_dec,
+                _kv_dec,
+                _w_dec,
+                q_pos=_torch.zeros((1, 1), dtype=_torch.int32, device=device_str),
+                compress_ratio=_ratio,
+            )
+            _torch.cuda.synchronize()
+
         self._materialized = True
 
         # qwen3-style: no per-Attention KV wiring needed — ``self.kv_cache``
