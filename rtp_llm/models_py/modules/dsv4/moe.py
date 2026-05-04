@@ -1152,8 +1152,23 @@ class MoE(nn.Module):
         _dbg = _rt.should_record_layer(self.layer_id)
         shape = x.size()
         x = x.view(-1, self.dim)
+        dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
+        dbg_pos_mask = None
+        dbg_pos_name = None
+        dbg_positions = getattr(self, "_dbg_positions", None)
+        if _dbg and dbg_pos >= 0 and dbg_positions is not None:
+            dbg_positions = dbg_positions.to(device=x.device, dtype=torch.long).view(-1)
+            if dbg_positions.numel() == x.size(0):
+                dbg_pos_mask = dbg_positions == int(dbg_pos)
+                dbg_pos_name = f"pos{dbg_pos}"
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_x_in", x)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_moe_x_in_{dbg_pos_name}",
+                    x[dbg_pos_mask].contiguous(),
+                )
             self.gate._dbg_prefix = f"L{self.layer_id:02d}_moe_gate"
         weights, indices = self.gate(x, input_ids.flatten())
         if _dbg:
@@ -1161,6 +1176,17 @@ class MoE(nn.Module):
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_weights", weights)
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_indices", indices)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_moe_topk_weights_{dbg_pos_name}",
+                    weights[dbg_pos_mask].contiguous(),
+                )
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_moe_topk_indices_{dbg_pos_name}",
+                    indices[dbg_pos_mask].contiguous(),
+                )
 
         if self._use_mega_moe:
             y = self._routed_experts_mega_moe(x, weights, indices)
@@ -1206,8 +1232,26 @@ class MoE(nn.Module):
 
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_routed_y", y)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_moe_routed_y_{dbg_pos_name}",
+                    y[dbg_pos_mask].contiguous(),
+                )
         shared_y = self.shared_experts(x).float()
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_shared_y", shared_y)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_moe_shared_y_{dbg_pos_name}",
+                    shared_y[dbg_pos_mask].contiguous(),
+                )
         y = y + shared_y
+        if _dbg and dbg_pos_mask is not None:
+            _rt.record_if_level(
+                2,
+                f"L{self.layer_id:02d}_moe_y_{dbg_pos_name}",
+                y[dbg_pos_mask].contiguous(),
+            )
         return y.type_as(x).view(shape)
