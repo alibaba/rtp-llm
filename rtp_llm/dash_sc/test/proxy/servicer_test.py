@@ -1,4 +1,4 @@
-"""Unit tests for ``rtp_llm.dash_sc.proxy_servicer`` (grpc.aio).
+"""Unit tests for ``rtp_llm.dash_sc.proxy.servicer`` (grpc.aio).
 
 Tests verify the async request_iterator is passed correctly to the backend
 stub, first-chunk buffering behavior, access-log diagnostic injection, metadata
@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import grpc
 
 from rtp_llm.dash_sc.proto import predict_v2_pb2
-from rtp_llm.dash_sc.proxy_servicer import (
+from rtp_llm.dash_sc.proxy.servicer import (
     DashScProxyServicer,
     _parse_channels_per_addr,
     _parse_forward_addrs,
