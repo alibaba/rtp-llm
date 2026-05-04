@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 import torch
 from torch import nn
 
+from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.attn_type import (
     CSA_KV,
     CSA_STATE,
@@ -195,8 +196,18 @@ def forward_layers(
             [layer.attn.compress_ratio for layer in v4.layers],
         )
 
+    _rt_on = _rt.ENABLED
+    if _rt_on:
+        _rt.begin(seqlen=int(input_ids.numel()))
+        if _rt._get_buf() is None:
+            _rt_on = False
+
     h = v4.embed(input_ids)  # [T_total, dim]
+    if _rt_on:
+        _rt.record("prefill_embed_out", h)
     h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
+    if _rt_on:
+        _rt.record("prefill_embed_hc_expanded", h)
 
     for layer_idx, layer in enumerate(v4.layers):
         h = layer(
@@ -207,13 +218,40 @@ def forward_layers(
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
         )  # [T, hc, dim]
+        if _rt_on:
+            _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
         if write_cache_store_impl is not None:
             write_cache_store_impl(kv_cache, layer_idx)
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # _RMSNorm accepts any shape (reshapes to 2D internally), so [T, dim] flows through.
+    v4._hc_head_positions = positions
     h = v4._hc_head_reduce(h)  # [T, dim]
+    v4._hc_head_positions = None
+    if _rt_on:
+        _rt.record("prefill_hc_reduced", h)
     h = v4.norm(h)  # [T, dim]
+    if _rt_on:
+        _rt.record("prefill_final_norm", h)
+        step = getattr(v4, "_dbg_step", 0)
+        _rt.dump(
+            step=step,
+            extra={
+                "path": "prefill",
+                "input_ids_shape": tuple(input_ids.shape),
+                "input_ids": input_ids.detach().cpu(),
+                "positions": positions.detach().cpu(),
+                "cu_seqlens": cu_seqlens.detach().cpu(),
+                "cp_size": int(cp_size),
+                "cp_rank": int(cp_rank),
+                "seq_len_full": (
+                    int(cp_ctx.seq_len_full)
+                    if cp_ctx is not None
+                    else int(input_ids.numel())
+                ),
+            },
+        )
+        v4._dbg_step = step + 1
     return h  # [T, dim]
 
 
