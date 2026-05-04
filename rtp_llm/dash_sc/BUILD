@@ -20,8 +20,10 @@ py_library(
         "app.py",
         "client.py",
         "codec.py",
-        "inference_servicer.py",
-        "proxy_servicer.py",
+        "inference/__init__.py",
+        "inference/servicer.py",
+        "proxy/__init__.py",
+        "proxy/servicer.py",
         "server.py",
     ],
     data = [":grpc_client_scripts"],
@@ -45,7 +47,8 @@ py_test(
 
 py_test(
     name = "inference_servicer_test",
-    srcs = ["test/inference_servicer_test.py"],
+    srcs = ["test/inference/servicer_test.py"],
+    main = "test/inference/servicer_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},
@@ -53,7 +56,8 @@ py_test(
 
 py_test(
     name = "proxy_servicer_test",
-    srcs = ["test/proxy_servicer_test.py"],
+    srcs = ["test/proxy/servicer_test.py"],
+    main = "test/proxy/servicer_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},
