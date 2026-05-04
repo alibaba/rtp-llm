@@ -345,7 +345,15 @@ def _get_visible_devices_env(device_name: str) -> str:
 
 if __name__ == "__main__":
     device_info = get_device_info()
-    require_count = int(os.environ.get("GPU_COUNT", os.environ.get("WORLD_SIZE", "1")))
+    # Only treat the GPU requirement as hard when the caller explicitly asks
+    # for a non-zero count via GPU_COUNT/WORLD_SIZE. Without an explicit ask
+    # we default to "no GPU needed" — this lets CPU-only cc_tests (utils,
+    # api_server http_client, etc.) that bazel dispatches to the cpu sub-pool
+    # of the cuda12_9 worker pool succeed under `--run_under=gpu_lock`.
+    # Tests that genuinely need a GPU either declare it via env / args or
+    # fail clearly inside the binary when CUDA is missing.
+    gpu_count_env = os.environ.get("GPU_COUNT", os.environ.get("WORLD_SIZE"))
+    require_count = int(gpu_count_env) if gpu_count_env is not None else 0
 
     if not device_info:
         if require_count > 0:
@@ -356,6 +364,12 @@ if __name__ == "__main__":
         logging.warning(
             "[device_resource] no GPU detected, running without GPU isolation"
         )
+        result = subprocess.run(sys.argv[1:])
+        sys.exit(result.returncode)
+
+    if require_count == 0:
+        # Have GPU(s) but caller didn't ask for any — skip locking entirely.
+        logging.info("[device_resource] GPU present but GPU_COUNT not set; skipping lock")
         result = subprocess.run(sys.argv[1:])
         sys.exit(result.returncode)
 
