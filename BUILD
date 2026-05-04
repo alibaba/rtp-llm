@@ -50,6 +50,11 @@ config_setting(
     values = {"define": "using_rocm=true"},
 )
 
+config_setting(
+    name = "using_ascend",
+    values = {"define": "using_ascend=true"},
+)
+
 
 config_setting(
     name = "rocm_gfx950",

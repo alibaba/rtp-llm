@@ -52,6 +52,7 @@ cc_library(
         "ComputeInit.cc",
     ] + select({
         "@//:using_cuda12": ["//rtp_llm/models_py/bindings/core:exec_ops_srcs"],
+        "@//:using_ascend": ["//rtp_llm/models_py/bindings/core:exec_ops_srcs"],
         "//conditions:default": [],
     }),
     hdrs = [],
@@ -64,6 +65,7 @@ cc_library(
     ] + torch_deps() + select_py_bindings() + select({
         "@//:using_cuda12": ["//rtp_llm/models_py/bindings/cuda/ops:gpu_base"],
         "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],
+        "@//:using_ascend": [],
         "//conditions:default": [],
     }) + no_block_copy_link_deps(),
     copts = copts(),
@@ -104,6 +106,10 @@ cc_library(
             "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
             "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        ],
+        "@//:using_ascend": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
+            "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         ],
         "//conditions:default": [],
     }),

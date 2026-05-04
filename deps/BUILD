@@ -79,3 +79,12 @@ compile_pip_requirements(
     requirements_txt = "requirements_lock_rocm.txt",
     tags = ["manual"],
 )
+
+compile_pip_requirements(
+    name = "requirements_ascend",
+    src = "requirements_ascend.txt",
+    extra_args = PIP_EXTRA_ARGS,
+    extra_data = ["//:requirements_base.txt"],
+    requirements_txt = "requirements_lock_ascend.txt",
+    tags = ["manual"],
+)

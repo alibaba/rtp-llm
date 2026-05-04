@@ -14,6 +14,12 @@
 #if USING_ROCM
 #include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
+
+#if USING_ASCEND
+// Ascend: use PyTorch half/bfloat16 types via fake types
+// TODO: replace with torch_npu integration
+#endif
+
 #ifdef ENABLE_FP8
 #include <cuda_fp8.h>
 #endif
@@ -40,6 +46,16 @@ namespace rtp_llm {
     F(DataType::TYPE_FP16, half);                                                                                      \
     F(DataType::TYPE_BF16, __nv_bfloat16);
 
+#elif USING_ASCEND
+struct fake_half {
+    uint16_t x;
+};
+struct fake_bfloat16 {
+    uint16_t x;
+};
+#define FT_FOREACH_DEVICE_TYPE(F)                                                                                      \
+    F(DataType::TYPE_FP16, fake_half);                                                                                 \
+    F(DataType::TYPE_BF16, fake_bfloat16);
 #else
 struct fake_half {
     uint16_t x;

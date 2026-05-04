@@ -4,6 +4,7 @@ load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
+load("@pip_ascend_torch//:requirements.bzl", requirement_ascend="requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
 def copy_all_so():
@@ -20,6 +21,7 @@ def requirement(names):
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
                 "@rtp_llm//:using_arm": [requirement_arm(name)],
+                "@rtp_llm//:using_ascend": [requirement_ascend(name)],
                 "//conditions:default": [requirement_cpu(name)],
             }),
             visibility = ["//visibility:public"],
@@ -59,6 +61,7 @@ def whl_deps():
     return select({
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": ["pyrsmi==0.2.0", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.13.dev14%2Bgfa35072d0.d20260402-cp310-cp310-linux_x86_64.whl"],
+        "@rtp_llm//:using_ascend": ["torch==2.5.1", "torch_npu==2.5.1"],
         "//conditions:default": ["torch==2.1.2"],
     })
 
@@ -67,6 +70,7 @@ def platform_deps():
         "@rtp_llm//:using_arm": [],
         "@rtp_llm//:using_cuda12_arm": [],
         "@rtp_llm//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0"],
+        "@rtp_llm//:using_ascend": ["decord==0.6.0"],
         "//conditions:default": ["decord==0.6.0"],
     })
 
@@ -92,6 +96,11 @@ def torch_deps():
             "@torch_2.8_py310_cuda//:torch",
             "@torch_2.8_py310_cuda//:torch_libs",
         ],
+        "@rtp_llm//:using_ascend": [
+            "@torch_ascend//:torch_api",
+            "@torch_ascend//:torch",
+            "@torch_ascend//:torch_libs",
+        ],
         "//conditions:default": [
             "@torch_2.1_py310_cpu//:torch_api",
             "@torch_2.1_py310_cpu//:torch",
@@ -103,7 +112,10 @@ def torch_deps():
 def flashinfer_deps():
     native.alias(
         name = "flashinfer",
-        actual = "@flashinfer_cpp//:flashinfer"
+        actual = select({
+            "@rtp_llm//:using_ascend": "@rtp_llm//rtp_llm/models_py/bindings:dummy_register",
+            "//conditions:default": "@flashinfer_cpp//:flashinfer",
+        }),
     )
 
 def flashmla_deps():
@@ -146,6 +158,9 @@ def select_py_bindings():
         "@rtp_llm//:using_rocm": [
             "@rtp_llm//rtp_llm/models_py/bindings/rocm:rocm_bindings_register"
         ],
+        "@rtp_llm//:using_ascend": [
+            "@rtp_llm//rtp_llm/models_py/bindings:dummy_register",
+        ],
         "//conditions:default": [
             "@rtp_llm//rtp_llm/models_py/bindings:dummy_register",
         ],
@@ -158,6 +173,9 @@ def no_block_copy_link_deps():
             "@rtp_llm//rtp_llm/models_py/bindings/cuda:no_block_copy",
         ],
         "@rtp_llm//:using_rocm": [
+            "@rtp_llm//rtp_llm/models_py/bindings:no_block_copy_default",
+        ],
+        "@rtp_llm//:using_ascend": [
             "@rtp_llm//rtp_llm/models_py/bindings:no_block_copy_default",
         ],
         "//conditions:default": [

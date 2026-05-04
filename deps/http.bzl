@@ -69,6 +69,18 @@ def http_deps():
     )
 
     http_archive(
+        name = "torch_ascend",
+        sha256 = "",
+        urls = [
+            # torch_npu wheel URL - to be filled after wheel download
+            # Huawei official PyPI: https://pypi.org/project/torch-npu/
+            # or local wheel: "file:///path/to/torch_npu-2.5.1-cp310-cp310-linux_x86_64.whl"
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
         name = "aiter",
         sha256 = "6f0f49ab55490acbce7bb40d147fdeb14418b447d9dfc4b9212dc23ca82b4a88",
         urls = [

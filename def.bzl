@@ -10,8 +10,15 @@ load(
     _if_rocm = "if_rocm",
 )
 
+load(
+    "@local_config_ascend//ascend:build_defs.bzl",
+    "ascend_default_copts",
+    _if_ascend = "if_ascend",
+)
+
 if_rocm = _if_rocm
 if_cuda = _if_cuda
+if_ascend = _if_ascend
 
 def rpm_library(
         name,
@@ -142,6 +149,9 @@ def copts():
     ]) + if_rocm([
         "-x", "rocm",
         "-DUSE_C10D_NCCL",
+    ]) + if_ascend([
+        "-DUSING_ASCEND=1",
+        "-DUSE_C10D_HCCL",
     ])
 
 def cuda_copts():
@@ -150,6 +160,9 @@ def cuda_copts():
 
 def rocm_copts():
     return copts() + rocm_default_copts() + if_rocm(["-Wc++17-extensions"])
+
+def ascend_copts():
+    return copts() + ascend_default_copts()
 
 def any_cuda_copts():
     return copts() + cuda_default_copts() + if_cuda(["-nvcc_options=objdir-as-tempdir"]) + rocm_default_copts() + if_rocm(["-Wc++17-extensions"])

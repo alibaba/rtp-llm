@@ -25,6 +25,9 @@
 #include <cuda_runtime.h>
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
+#elif USING_ASCEND
+// Ascend host utils are in a separate header, not here
+// See rtp_llm/models_py/bindings/ascend/ascend_host_utils.h
 #endif
 
 namespace rtp_llm {

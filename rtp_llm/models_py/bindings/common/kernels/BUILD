@@ -19,6 +19,14 @@ any_cuda_deps = select({
     "//conditions:default": [],
 })
 
+ascend_deps = select({
+    "@//:using_ascend": [
+        "//rtp_llm/models_py/bindings/ascend:ascend_host_utils",
+        "@local_config_ascend//ascend:ascend_headers",
+    ],
+    "//conditions:default": [],
+})
+
 cc_library(
     name = "kernels_activation",
     srcs = ["activation_kernels.cu"],
@@ -260,6 +268,7 @@ cc_library(
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/rocm/kernels:rocm_cu",
         ],
+        "@//:using_ascend": [],
         "//conditions:default": [],
     }) + any_cuda_deps + torch_deps(),
     copts = any_cuda_copts(),
