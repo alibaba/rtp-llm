@@ -42,7 +42,7 @@ import dataclasses
 import logging
 import struct
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import grpc
 import orjson
@@ -58,6 +58,17 @@ from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 
 DASH_SC_GRPC_ACCESS_LOGGER_NAME = "dash_sc_grpc_access_logger"
 DASH_SC_GRPC_ACCESS_LOG_FILENAME = "dash_sc_grpc_access.log"
+
+# Separate query-log channel. The access log above is written at RPC completion
+# (``_finalize``), which on long streaming RPCs can be minutes after the request
+# actually arrived. For end-to-end link-latency debugging (forwarder arrival →
+# frontend arrival) we need the arrival timestamp to hit the wire immediately,
+# not after the response stream drains. Following the HTTP frontend convention
+# (``rtp_llm/access_logger/access_logger.py``: ``access.log`` vs
+# ``query_access.log``), the query log is a separate file so ``tail -f`` on
+# arrivals isn't drowned by the heavier per-RPC completion record.
+DASH_SC_GRPC_QUERY_LOGGER_NAME = "dash_sc_grpc_query_logger"
+DASH_SC_GRPC_QUERY_LOG_FILENAME = "dash_sc_grpc_query.log"
 
 # Protocol tag appended to every kmonitor report emitted from this interceptor, so
 # dashboards/alerts can split the gRPC path from the HTTP frontend path that shares
@@ -158,7 +169,7 @@ def _classify_rpc_exception(
     if isinstance(exc, GeneratorExit):
         return "CANCELLED", "client closed generator"
     if not isinstance(exc, grpc.RpcError):
-        return "UNKNOWN", repr(exc)
+        return f"UNKNOWN_{type(exc).__name__}", repr(exc)
 
     code = _rpc_code(exc)
     details = _rpc_details(exc)
@@ -169,7 +180,51 @@ def _classify_rpc_exception(
         return "CANCELLED", "peer closed before request arrived"
     if code is not None and code != grpc.StatusCode.OK:
         return code.name, details or code.name
-    return "UNKNOWN", repr(exc)
+    # Preserve the Python class name so ``error_code`` on Grafana is actionable
+    # (``UNKNOWN_RuntimeError`` / ``UNKNOWN_ValueError`` / …) instead of a
+    # single opaque ``UNKNOWN`` bucket — class names are bounded (few dozen at
+    # most) so tag cardinality stays tight.
+    return f"UNKNOWN_{type(exc).__name__}", repr(exc)
+
+
+# Short-form classifiers for free-form backend ``error_message`` strings.
+# Matched in order; first hit wins. Kept intentionally small — every entry
+# becomes a permanent Grafana ``error_code`` tag bucket, so new entries need
+# to correspond to a distinct operational signal.
+_ERROR_MESSAGE_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("BACKEND_EMPTY_OUTPUTS", "empty outputs_list"),
+)
+
+
+def _classify_error_message(msg: Optional[str]) -> str:
+    """Map a backend ``error_message`` to a bounded ``error_code`` token.
+
+    Primary path: the backend (``service.py`` ``iter_real_model_stream_infer``)
+    formats exceptions as ``f"{type(e).__name__}: {e}"`` so the leading class
+    name before ``":"`` is a stable, bounded categorizer — dozens of Python
+    exception classes at most, no free-form cardinality blow-up. We extract
+    that prefix and return ``BACKEND_<ClassName>``.
+
+    Fallback path: bare phrases emitted without a type prefix (e.g.
+    ``"empty outputs_list from backend"`` for the zero-chunk case) map through
+    ``_ERROR_MESSAGE_PATTERNS``.
+
+    Everything else collapses to ``BACKEND_INTERNAL`` — still more specific
+    than the old blanket ``INTERNAL`` because the status itself now signals
+    "backend error_message channel" vs "gRPC transport error".
+    """
+    if not msg:
+        return "BACKEND_INTERNAL"
+    head = msg.strip().split("\n", 1)[0]
+    colon = head.find(":")
+    if 0 < colon <= 48:
+        prefix = head[:colon].strip()
+        if prefix and all(c.isalnum() or c == "_" for c in prefix):
+            return f"BACKEND_{prefix}"
+    for code, needle in _ERROR_MESSAGE_PATTERNS:
+        if needle in msg:
+            return code
+    return "BACKEND_INTERNAL"
 
 
 # Raw-mode caps. LLM streams can span hundreds of chunks and a single input_ids
@@ -177,6 +232,24 @@ def _classify_rpc_exception(
 # lines and defeat the "readable JSON" goal.
 _RAW_MAX_CHUNKS = 512
 _RAW_MAX_DECODED_ELEMENTS = 16384
+
+
+def _format_local_ts(ts: float) -> str:
+    """Local ISO-8601 timestamp with millisecond precision and numeric TZ offset.
+
+    Shared by access + query logs so operators grepping the same epoch across
+    both files see byte-identical ``ts`` strings.
+    """
+    local = time.localtime(ts)
+    tz_off = -time.timezone if not local.tm_isdst else -time.altzone
+    sign = "+" if tz_off >= 0 else "-"
+    tz_off = abs(tz_off)
+    tz_str = f"{sign}{tz_off // 3600:02d}:{(tz_off % 3600) // 60:02d}"
+    return (
+        time.strftime("%Y-%m-%dT%H:%M:%S", local)
+        + f".{int((ts % 1) * 1000):03d}"
+        + tz_str
+    )
 
 
 def init_dash_sc_grpc_access_logger(
@@ -190,6 +263,31 @@ def init_dash_sc_grpc_access_logger(
     logger = logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME)
     handler = get_handler(
         DASH_SC_GRPC_ACCESS_LOG_FILENAME,
+        log_path,
+        backup_count,
+        rank_id,
+        server_id,
+        async_mode,
+    )
+    logger.handlers.clear()
+    logger.parent = None
+    logger.setLevel(logging.INFO)
+    if handler is not None:
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+
+
+def init_dash_sc_grpc_query_logger(
+    log_path: str,
+    backup_count: int,
+    rank_id: Optional[int] = None,
+    server_id: Optional[int] = None,
+    async_mode: bool = True,
+) -> None:
+    """Configure the dedicated gRPC query (arrival) logger. Safe to call multiple times."""
+    logger = logging.getLogger(DASH_SC_GRPC_QUERY_LOGGER_NAME)
+    handler = get_handler(
+        DASH_SC_GRPC_QUERY_LOG_FILENAME,
         log_path,
         backup_count,
         rank_id,
@@ -383,6 +481,13 @@ class _RpcAggregate:
     peer: str
     start_ts: float
     raw_mode: bool = False
+    # Moment the inbound request stream was fully consumed (``StopIteration``
+    # on the request iterator, or unary arg bound into the handler). ``start_ts``
+    # is handler-entry; the diff between the two is how long we spent pulling
+    # the request body off the wire — a large gap on the forwarder is the
+    # ``aquila → forward`` queueing / TCP-slow signal that a downstream-only
+    # metric would miss.
+    req_read_done_ts: Optional[float] = None
     first_resp_ts: Optional[float] = None
     last_chunk_ts: Optional[float] = None
     req_count: int = 0
@@ -543,18 +648,8 @@ class _RpcAggregate:
         ttfb_ms = None
         if self.first_resp_ts is not None:
             ttfb_ms = (self.first_resp_ts - self.start_ts) * 1000.0
-        local = time.localtime(end_ts)
-        tz_off = -time.timezone if not local.tm_isdst else -time.altzone
-        sign = "+" if tz_off >= 0 else "-"
-        tz_off = abs(tz_off)
-        tz_str = f"{sign}{tz_off // 3600:02d}:{(tz_off % 3600) // 60:02d}"
-        ts = (
-            time.strftime("%Y-%m-%dT%H:%M:%S", local)
-            + f".{int((end_ts % 1) * 1000):03d}"
-            + tz_str
-        )
         record: dict[str, Any] = {
-            "ts": ts,
+            "ts": _format_local_ts(end_ts),
             "ts_epoch_ms": int(end_ts * 1000),
             "server_id": server_id,
             "rank_id": rank_id,
@@ -619,11 +714,28 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         rank_id: Optional[int] = None,
         server_id: Optional[int] = None,
         raw_mode: bool = False,
+        pool_pending_depth_fn: Optional[Callable[[], int]] = None,
+        pool_size: Optional[int] = None,
     ) -> None:
         self._logger = logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME)
+        self._query_logger = logging.getLogger(DASH_SC_GRPC_QUERY_LOGGER_NAME)
         self._rank_id = rank_id
         self._server_id = server_id
         self._raw_mode = raw_mode
+        # Pool saturation observability. ``pool_pending_depth_fn`` returns the
+        # current pending-queue depth of the grpcio server's ThreadPoolExecutor;
+        # sampled on every handler entry so a sudden backlog is visible in
+        # kmonitor within one arrival, not at the next flush tick. ``pool_size``
+        # lets us threshold-warn ("pending > pool/2") without a second config.
+        # Both optional — older callers that don't pass them get the prior
+        # zero-overhead behavior.
+        self._pool_probe = pool_pending_depth_fn
+        self._pool_size = pool_size
+        # Warning throttle: one WARN per 5s max. ``float`` assignment is atomic
+        # in CPython, so no Lock — occasional near-simultaneous double-log is
+        # acceptable for a diagnostic message. Zero-init means the first
+        # backlog event always fires.
+        self._last_pool_warn_ts: float = 0.0
         self._base_tags: dict[str, str] = {
             "protocol": _PROTOCOL_TAG,
             "rank_id": str(rank_id) if rank_id is not None else "",
@@ -741,7 +853,53 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
             context._dash_sc_access_agg = agg
         except Exception:
             pass
+        # Emit arrival QPS at RPC entry — once per RPC, symmetric with
+        # ``_finalize``'s unconditional ``finally``. Previously this fired
+        # from ``_capture_first_request`` (i.e. only after the client's first
+        # request frame was read), so frame-less RPCs — peer closed before
+        # sending, client-side iterator failure, immediate cancel — still
+        # reached ``_finalize`` and reported success/error/cancel but were
+        # missing from ``py_rtp_framework_qps``. That asymmetry made
+        # ``success+error+cancel`` exceed ``framework_qps`` by the frame-less
+        # share (~30% on the forwarder path) and broke parity between the
+        # access log line count and the Grafana arrival curve.
+        self._report_request_arrived(agg)
+        self._probe_pool_depth(method)
         return agg
+
+    def _probe_pool_depth(self, method: str) -> None:
+        """Sample grpcio server ThreadPoolExecutor backlog, report gauge + warn.
+
+        Fires once per handler entry. When all pool workers are occupied
+        (typically by long streaming RPCs) further arrivals sit in the
+        executor's internal queue; ``_work_queue.qsize()`` surfaces that as a
+        positive depth before the cascade manifests as ``req_count=0`` client
+        disconnects. ``pending > pool_size/2`` is the chosen WARN threshold —
+        a pool at 50% backlog has lost most of its headroom and will saturate
+        on any burst.
+        """
+        if self._pool_probe is None:
+            return
+        try:
+            depth = int(self._pool_probe())
+        except Exception:
+            return
+        kmonitor.report(
+            GaugeMetrics.DASH_SC_GRPC_SERVER_POOL_PENDING,
+            depth,
+            self._tags(method),
+        )
+        if self._pool_size and depth * 2 > self._pool_size:
+            now = time.time()
+            if now - self._last_pool_warn_ts >= 5.0:
+                self._last_pool_warn_ts = now
+                logging.warning(
+                    "[DashScGrpc] server thread pool backlog: pending=%d pool_size=%d "
+                    "(RPCs are queueing — long-running streams may be starving new arrivals; "
+                    "raise DashScGrpcConfig.max_server_workers if sustained)",
+                    depth,
+                    self._pool_size,
+                )
 
     def _on_response_chunk(self, agg: _RpcAggregate, resp) -> None:
         """Unified per-chunk hook: count, capture content, emit first-token / iter metrics."""
@@ -783,7 +941,12 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         if exc is not None:
             agg.exc_type = type(exc).__name__
         if agg.error_message:
-            agg.status = "INTERNAL"
+            # Break backend errors out of the single ``INTERNAL`` bucket so
+            # Grafana's ``error_code`` breakdown names the actual failure
+            # (``BACKEND_RuntimeError`` / ``BACKEND_OutOfMemoryError`` /
+            # ``BACKEND_EMPTY_OUTPUTS`` / …). Transport-level outcomes still
+            # use their gRPC code names (``CANCELLED`` / ``UNAVAILABLE`` / …).
+            agg.status = _classify_error_message(agg.error_message)
             agg.status_detail = agg.error_message
         elif exc is not None:
             if agg.finish_reason is not None:
@@ -814,16 +977,74 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         except Exception as e:
             logging.warning("[DashScGrpc] access log emit failed: %s", e)
 
+    def _emit_query_log(self, agg: _RpcAggregate) -> None:
+        """Write one JSON line to the query log — fires when the inbound
+        request stream has been fully received.
+
+        Carries exactly two timestamps: ``arrival_ts_epoch_ms`` (handler entry,
+        i.e. ``_new_aggregate``) and ``req_read_done_ts_epoch_ms`` (all inbound
+        frames drained). Their diff is the cost of pulling the request off the
+        wire — the ``aquila → forward`` queueing / slow-send signal that the
+        end-of-RPC access log cannot isolate because that line bundles inbound
+        receive + backend processing + outbound streaming into one number.
+
+        No proto-derived fields (``request_id`` / ``model_name`` / ``input_len``
+        / raw dumps) — those stay in the completion access log. Query log is a
+        timing breadcrumb only, so ``tail -f`` stays readable and the line
+        shape does not depend on first-frame content.
+        """
+        arrival_ts = agg.start_ts
+        read_done_ts = agg.req_read_done_ts or arrival_ts
+        record = {
+            "ts": _format_local_ts(read_done_ts),
+            "arrival_ts_epoch_ms": int(arrival_ts * 1000),
+            "req_read_done_ts_epoch_ms": int(read_done_ts * 1000),
+            "server_id": self._server_id,
+            "rank_id": self._rank_id,
+            "method": agg.method,
+            "stream_type": agg.stream_type,
+            "peer": agg.peer,
+            "upstream_request_id": agg.upstream_request_id,
+            "upstream_request_id_key": agg.upstream_request_id_key,
+        }
+        try:
+            self._query_logger.info(orjson.dumps(record).decode("utf-8"))
+        except Exception as e:
+            logging.warning("[DashScGrpc] query log emit failed: %s", e)
+
+    def _mark_req_read_done(self, agg: _RpcAggregate) -> None:
+        """Record the inbound-request-drained timestamp and emit the query log.
+
+        Guarded against re-entry so multi-frame streaming requests still write
+        exactly one query log line (on the first ``StopIteration``). Called
+        from the four wrap paths at the moment the handler has consumed the
+        last inbound frame: unary paths call it right after binding ``request``
+        into the handler; stream paths call it at the natural exit of the
+        ``for req in request_iterator`` loop inside ``counted_reqs``.
+        """
+        if agg.req_read_done_ts is not None:
+            return
+        agg.req_read_done_ts = time.time()
+        self._emit_query_log(agg)
+
     def _capture_first_request(self, agg: _RpcAggregate, request) -> None:
-        """Capture request content and fire the arrival QPS metric (exactly once per RPC)."""
+        """Capture first request content for the end-of-RPC access log.
+
+        Query-log emission is decoupled: it lives in :meth:`_mark_req_read_done`
+        and fires on inbound-stream drain, not on first-frame arrival, so the
+        query log shape no longer depends on proto body fields.
+        """
         agg.capture_request(request)
-        self._report_request_arrived(agg)
 
     def _wrap_unary_unary(self, inner, method, stream_type):
         def behavior(request, context):
             agg = self._new_aggregate(method, stream_type, context)
             agg.req_count = 1
             self._capture_first_request(agg, request)
+            # Unary inbound is fully delivered the moment the handler is
+            # invoked — mark read-done immediately so the query log fires even
+            # if ``inner`` blocks/raises later.
+            self._mark_req_read_done(agg)
             exc: Optional[BaseException] = None
             try:
                 resp = inner(request, context)
@@ -842,6 +1063,7 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
             agg = self._new_aggregate(method, stream_type, context)
             agg.req_count = 1
             self._capture_first_request(agg, request)
+            self._mark_req_read_done(agg)
             exc: Optional[BaseException] = None
             try:
                 for resp in inner(request, context):
@@ -873,6 +1095,13 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
                         if agg.raw_mode:
                             agg.capture_request(req)
                     yield req
+                # Inbound stream drained. Fires at most once per RPC
+                # (``_mark_req_read_done`` is idempotent), and only on the
+                # natural ``StopIteration`` exit — if the consumer abandons
+                # ``counted_reqs`` early the generator is GC'd without reaching
+                # this line, which is the correct "inbound never finished"
+                # signal.
+                self._mark_req_read_done(agg)
 
             try:
                 resp = inner(counted_reqs(), context)
@@ -902,6 +1131,7 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
                         if agg.raw_mode:
                             agg.capture_request(req)
                     yield req
+                self._mark_req_read_done(agg)
 
             try:
                 for resp in inner(counted_reqs(), context):

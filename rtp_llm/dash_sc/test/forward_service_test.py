@@ -14,12 +14,15 @@ import grpc
 
 from rtp_llm.dash_sc.forward_service import (
     PureForwardServicer,
+    _parse_channels_per_addr,
     _parse_forward_addrs,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 
 
-def _make_request(model_name: str = "test_model", id: str = "test_id") -> predict_v2_pb2.ModelInferRequest:
+def _make_request(
+    model_name: str = "test_model", id: str = "test_id"
+) -> predict_v2_pb2.ModelInferRequest:
     """Create a minimal ModelInferRequest for testing."""
     req = predict_v2_pb2.ModelInferRequest()
     req.model_name = model_name
@@ -158,9 +161,7 @@ class BufferFirstTokenTest(TestCase):
 
         self.assertEqual([r.error_message for r in out], ["a", "b", "c"])
         # Before emitting "a", buffer pulled past "b"; confirms hold-then-flush.
-        self.assertEqual(
-            yielded_marker, ["yielded_a", "yielded_b", "yielded_c"]
-        )
+        self.assertEqual(yielded_marker, ["yielded_a", "yielded_b", "yielded_c"])
 
     def test_buffer_single_chunk_flushes_on_stream_end(self) -> None:
         """Downstream ends after 1 chunk (e.g., max_new_tokens=1): buffered chunk must flush."""
@@ -223,6 +224,7 @@ class BufferFirstTokenTest(TestCase):
             for r in self.servicer.ModelStreamInfer(request_gen(), MagicMock()):
                 collected.append(r)
         self.assertEqual(collected, [])
+
 
 class AccessLogDiagInjectionTest(TestCase):
     """Forwarder writes ``downstream_addr`` / ``downstream_resp_count`` /
@@ -469,6 +471,44 @@ class MetadataPropagationTest(TestCase):
         self.assertEqual(len(out), 1)
         kwargs = self.mock_stub.ModelStreamInfer.call_args.kwargs
         self.assertEqual(tuple(kwargs["metadata"]), ())
+
+
+class ChannelPoolTest(TestCase):
+    """Verify per-addr channel pool: N channels/addr, round-robin over all stubs.
+
+    Default N=1 preserves prior behavior; N>1 multiplies channels per addr and
+    ``_next_stub`` cycles through all of them while still returning the correct
+    index into ``_forward_addrs`` so ``ModelStreamInfer`` can name the addr.
+    """
+
+    def test_default_one_channel_per_addr(self) -> None:
+        with patch("grpc.insecure_channel", return_value=MagicMock()) as mock_ch:
+            servicer = PureForwardServicer(["10.0.0.1:8096", "10.0.0.2:8096"])
+        self.assertEqual(len(servicer._channels), 2)
+        self.assertEqual(len(servicer._stubs), 2)
+        self.assertEqual(mock_ch.call_count, 2)
+        servicer.close()
+
+    def test_pool_round_robin_over_addrs(self) -> None:
+        with patch("grpc.insecure_channel", return_value=MagicMock()):
+            servicer = PureForwardServicer(
+                ["10.0.0.1:8096", "10.0.0.2:8096"], channels_per_addr=3
+            )
+        # 2 addrs × 3 channels/addr = 6 stubs, addrs-index sequence [0,0,0,1,1,1].
+        self.assertEqual(len(servicer._stubs), 6)
+        self.assertEqual(servicer._stub_addr_idx, [0, 0, 0, 1, 1, 1])
+        # Round-robin cycles through all 6 stubs, returning the owning addr idx.
+        seq = [servicer._next_stub()[1] for _ in range(7)]
+        self.assertEqual(seq, [0, 0, 0, 1, 1, 1, 0])
+        servicer.close()
+
+    def test_parse_channels_per_addr_fallback(self) -> None:
+        # Bad input -> default, never raises.
+        self.assertEqual(_parse_channels_per_addr(""), 1)
+        self.assertEqual(_parse_channels_per_addr("abc"), 1)
+        self.assertEqual(_parse_channels_per_addr("0"), 1)
+        self.assertEqual(_parse_channels_per_addr("-4"), 1)
+        self.assertEqual(_parse_channels_per_addr("4"), 4)
 
 
 if __name__ == "__main__":
