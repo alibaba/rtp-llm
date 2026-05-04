@@ -247,35 +247,29 @@ class Gate(nn.Module):
         route_scale: float = 1.0,
         n_hash_layers: int = 0,
         vocab_size: int = 0,
-        weights: Optional[Dict[str, torch.Tensor]] = None,
-        prefix: str = "",
+        layer_weights: Optional[Dict[str, torch.Tensor]] = None,
     ):
+        """``layer_weights`` is the framework's per-layer dict
+        (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
+        Reads ``W.v4_router_w`` and either ``W.v4_router_tid2eid`` (hash
+        layers) or ``W.v4_router_bias`` (non-hash)."""
         super().__init__()
         self.dim = dim
         self.topk = n_activated_experts
         self.score_func = score_func
         self.route_scale = route_scale
         self.hash = layer_id < n_hash_layers
-        self._factory_mode = weights is not None
         self._dbg_prefix: Optional[str] = None
 
-        if self._factory_mode:
-            self.weight = weights[f"{prefix}.weight"]
-            if self.hash:
-                assert vocab_size > 0
-                self.tid2eid = weights[f"{prefix}.tid2eid"]
-                self.bias = None
-            else:
-                self.bias = weights[f"{prefix}.bias"]
+        from rtp_llm.utils.model_weight import W
+
+        self.weight = layer_weights[W.v4_router_w]
+        if self.hash:
+            assert vocab_size > 0
+            self.tid2eid = layer_weights[W.v4_router_tid2eid]
+            self.bias = None
         else:
-            # Unit-test path — caller binds tensors externally.
-            self.weight = None
-            if self.hash:
-                assert vocab_size > 0
-                self.tid2eid = None
-                self.bias = None
-            else:
-                self.bias = None
+            self.bias = layer_weights[W.v4_router_bias]
 
     def _weight_bf16(self) -> torch.Tensor:
         """Lazy-cached BF16 view of ``self.weight``.
@@ -391,49 +385,47 @@ class Expert(nn.Module):
         inter_dim: int,
         swiglu_limit: float = 0.0,
         storage: str = "fp8",
-        weights: Optional[Dict[str, torch.Tensor]] = None,
-        prefix: str = "",
+        expert_weights: Optional[Dict[str, torch.Tensor]] = None,
     ):
+        """``expert_weights`` is a 6-key dict ``{"w1_w","w1_s","w2_w","w2_s",
+        "w3_w","w3_s"}`` extracted by the caller from the layer's W tags
+        (shared: ``W.v4_shared_w{1,2,3}_{w,s}``; routed: per-expert slice
+        of ``W.v4_routed_w{1,2,3}_{w,s}``)."""
         super().__init__()
-        self._factory_mode_fp8 = weights is not None and storage == "fp8"
+        # storage="fp8" → CudaFp8DeepGEMMLinear (2D input only).
+        # storage="fp4" → QuantizedLinear with bound weight/scale (accepts N-D).
+        self._uses_fp8_linear = storage == "fp8"
 
-        if self._factory_mode_fp8:
-            from rtp_llm.models_py.modules.dsv4.attention import (
-                _v4_fp8_linear_from_dict,
-            )
+        if self._uses_fp8_linear:
+            from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear
 
-            self.w1 = _v4_fp8_linear_from_dict(
-                weights, f"{prefix}.w1.weight", f"{prefix}.w1.scale"
-            )
-            self.w2 = _v4_fp8_linear_from_dict(
-                weights, f"{prefix}.w2.weight", f"{prefix}.w2.scale"
-            )
-            self.w3 = _v4_fp8_linear_from_dict(
-                weights, f"{prefix}.w3.weight", f"{prefix}.w3.scale"
-            )
+            self.w1 = _v4_fp8_linear(expert_weights["w1_w"], expert_weights["w1_s"])
+            self.w2 = _v4_fp8_linear(expert_weights["w2_w"], expert_weights["w2_s"])
+            self.w3 = _v4_fp8_linear(expert_weights["w3_w"], expert_weights["w3_s"])
         else:
+            # Legacy storage="fp4" — bind weight + scale directly from
+            # the framework tensors; forward still dequants on the fly
+            # (until S4 swaps to grouped GEMM).
             self.w1 = QuantizedLinear(dim, inter_dim, storage=storage)  # gate
             self.w2 = QuantizedLinear(inter_dim, dim, storage=storage)  # down
             self.w3 = QuantizedLinear(dim, inter_dim, storage=storage)  # up
-            if weights is not None:
-                # Legacy storage="fp4" — bind weight + scale directly from
-                # the framework dict; forward still dequants on the fly
-                # (until S4 swaps to grouped GEMM).
-                for name in ("w1", "w2", "w3"):
-                    lin = getattr(self, name)
-                    lin.weight = weights[f"{prefix}.{name}.weight"]
-                    lin.scale = weights[f"{prefix}.{name}.scale"]
+            self.w1.weight = expert_weights["w1_w"]
+            self.w1.scale = expert_weights["w1_s"]
+            self.w2.weight = expert_weights["w2_w"]
+            self.w2.scale = expert_weights["w2_s"]
+            self.w3.weight = expert_weights["w3_w"]
+            self.w3.scale = expert_weights["w3_s"]
         self.swiglu_limit = swiglu_limit
 
     def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
-        """Route through a factory LinearBase (expects 2D input) or legacy
+        """Route through CudaFp8DeepGEMMLinear (expects 2D input) or
         QuantizedLinear (accepts N-D).
 
         NB: do **not** name this ``_apply`` — that shadows
         ``nn.Module._apply``, breaking ``.to(device, dtype)`` for anything
         containing an ``Expert``.
         """
-        if self._factory_mode_fp8 and x.dim() > 2:
+        if self._uses_fp8_linear and x.dim() > 2:
             shape = x.shape
             return layer(x.reshape(-1, shape[-1])).view(*shape[:-1], -1)
         return layer(x)
@@ -473,18 +465,22 @@ class MoE(nn.Module):
         swiglu_limit: float,
         n_hash_layers: int,
         vocab_size: int,
-        weights: Optional[Dict[str, torch.Tensor]] = None,
-        prefix: str = "",
+        layer_weights: Optional[Dict[str, torch.Tensor]] = None,
         ep_size: int = 1,
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
     ):
+        """``layer_weights`` is the framework's per-layer dict
+        (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
+        Forwards router/shared sub-dicts to ``Gate``/``Expert``; reads the
+        stacked routed tensors ``W.v4_routed_w{1,2,3}_{w,s}`` (shape
+        ``[E_local, ...]``) directly into mega-moe / grouped-fp4 / per-expert
+        paths."""
         super().__init__()
         self.layer_id = layer_id
         self.dim = dim
         self.n_routed_experts = n_routed_experts
         self.n_activated_experts = n_activated_experts
-        self._factory_mode = weights is not None
         self.moe_inter_dim = moe_inter_dim
         self.swiglu_limit = swiglu_limit
         self.max_tokens_per_rank = max_tokens_per_rank
@@ -498,6 +494,8 @@ class MoE(nn.Module):
         self.local_expert_start = ep_rank * self.n_local_experts
         self.local_expert_end = self.local_expert_start + self.n_local_experts
 
+        from rtp_llm.utils.model_weight import W
+
         self.gate = Gate(
             layer_id,
             dim,
@@ -507,32 +505,37 @@ class MoE(nn.Module):
             route_scale,
             n_hash_layers,
             vocab_size,
-            weights=weights,
-            prefix=f"{prefix}.gate" if self._factory_mode else "",
+            layer_weights=layer_weights,
         )
         assert n_shared_experts == 1, "V4 always has exactly 1 shared expert"
+        shared_w = {
+            "w1_w": layer_weights[W.v4_shared_w1_w],
+            "w1_s": layer_weights[W.v4_shared_w1_s],
+            "w2_w": layer_weights[W.v4_shared_w2_w],
+            "w2_s": layer_weights[W.v4_shared_w2_s],
+            "w3_w": layer_weights[W.v4_shared_w3_w],
+            "w3_s": layer_weights[W.v4_shared_w3_s],
+        }
         self.shared_experts = Expert(
             dim,
             moe_inter_dim,
             swiglu_limit=0.0,
             storage="fp8",
-            weights=weights,
-            prefix=f"{prefix}.shared_experts" if self._factory_mode else "",
+            expert_weights=shared_w,
         )
 
         # Pick routed-expert path: DeepGEMM grouped FP4 if kernel is
         # available (deep_gemm ≥ 2.4 ships fp8_fp4_* on SM100); otherwise
         # fall back to the Python per-expert loop with QuantizedLinear
         # (works on any DeepGEMM but keeps FP4 dequant-per-call).
-        self._use_grouped_fp4 = self._factory_mode and _has_fp8_fp4_grouped_kernel()
+        self._use_grouped_fp4 = _has_fp8_fp4_grouped_kernel()
 
         # Mega MoE: single DeepGEMM kernel fuses dispatch + L1 + SwiGLU +
         # L2 + combine, replacing the ACCL/DeepEP round-trip + per-expert
         # FP4 GEMM loop (``_routed_experts_deepep`` + ``_routed_experts_local``).
         # Applies only when EP > 1 and the kernel is available — env gated.
         self._use_mega_moe = (
-            self._factory_mode
-            and ep_size > 1
+            ep_size > 1
             and not self._use_grouped_fp4
             and _mega_moe_enabled()
         )
@@ -543,30 +546,27 @@ class MoE(nn.Module):
             # symmetric-memory dispatch/combine buffer.  Per-expert
             # ``ModuleList`` is dropped (Mega MoE owns the per-expert
             # compute internally).
-            self._setup_mega_moe(weights, prefix)
+            self._setup_mega_moe(layer_weights)
             self.experts = None
         elif self._use_grouped_fp4:
             # Grouped-GEMM path: stack routed expert weights into 3-D tensors
             # along the expert dim so a single
             # ``m_grouped_fp8_fp4_gemm_nt_contiguous`` produces gate+up in one
             # call (``_w13`` packs w1 over [:inter] + w3 over [inter:2*inter]).
-            # No per-expert ``self.experts`` ModuleList: the cuda-graph
-            # fallback in ``forward()`` would need it but grouped + cuda
-            # graph + ep_size==1 doesn't co-occur in real workloads (grouped
-            # is a prefill optimisation; decode under cuda graph leaves the
-            # eager ``ep_size==1`` branch via ``_use_grouped_fp4=False``).
-            # An assert in ``forward()`` blocks the unsupported combination.
             #
-            # Memory: stacked tensors are alloc'd/copied via a per-expert
-            # mini-buffer pattern to avoid holding both the loader's dict
-            # entries AND the stacked layout simultaneously: ``weights.pop``
-            # detaches each tensor from the loader BEFORE the next expert's
-            # allocation runs, and ``torch.cuda.empty_cache()`` after the
-            # copy loop returns the freed FP4 blocks to the CUDA driver so
-            # they don't sit in the caching allocator while KV-pool sizing
-            # measures available HBM.
+            # Memory: pop the framework's stacked routed tensors from
+            # ``layer_weights`` so the only references kept alive are the
+            # repacked grouped buffers below.  Each input stack
+            # ``[E_local, ...]`` is sliced per-expert and copied into the
+            # final layout, then dropped via ``del``.
             E, D, inter = n_routed_experts, dim, moe_inter_dim
-            device = weights[f"{prefix}.experts.0.w1.weight"].device
+            stacked_w1_w = layer_weights.pop(W.v4_routed_w1_w)
+            stacked_w1_s = layer_weights.pop(W.v4_routed_w1_s)
+            stacked_w2_w = layer_weights.pop(W.v4_routed_w2_w)
+            stacked_w2_s = layer_weights.pop(W.v4_routed_w2_s)
+            stacked_w3_w = layer_weights.pop(W.v4_routed_w3_w)
+            stacked_w3_s = layer_weights.pop(W.v4_routed_w3_s)
+            device = stacked_w1_w.device
 
             self._w13 = torch.empty(
                 (E, 2 * inter, D // 2), dtype=torch.int8, device=device
@@ -582,15 +582,16 @@ class MoE(nn.Module):
                 dtype=torch.float8_e8m0fnu,
                 device=device,
             )
-            for i in range(E):
-                p = f"{prefix}.experts.{i}"
-                # w1 → [:inter], w3 → [inter:2*inter]
-                self._w13[i, :inter].copy_(weights.pop(f"{p}.w1.weight"))
-                self._s13[i, :inter].copy_(weights.pop(f"{p}.w1.scale"))
-                self._w13[i, inter:].copy_(weights.pop(f"{p}.w3.weight"))
-                self._s13[i, inter:].copy_(weights.pop(f"{p}.w3.scale"))
-                self._w2[i].copy_(weights.pop(f"{p}.w2.weight"))
-                self._s2[i].copy_(weights.pop(f"{p}.w2.scale"))
+            # Bulk copy from stacked → repacked layout (E iterations of
+            # stacked[i, ...].copy(), no intermediate dict reads).
+            self._w13[:, :inter].copy_(stacked_w1_w)
+            self._s13[:, :inter].copy_(stacked_w1_s)
+            self._w13[:, inter:].copy_(stacked_w3_w)
+            self._s13[:, inter:].copy_(stacked_w3_s)
+            self._w2.copy_(stacked_w2_w)
+            self._s2.copy_(stacked_w2_s)
+            del stacked_w1_w, stacked_w1_s, stacked_w2_w, stacked_w2_s
+            del stacked_w3_w, stacked_w3_s
 
             # Return loader's freed FP4 blocks to CUDA so the KV-cache
             # planner sees the real residual HBM rather than what's
@@ -604,24 +605,37 @@ class MoE(nn.Module):
             # for non-local experts are None.  Preserves V4-official
             # indexing convention (``self.experts[global_idx]``) so
             # forward loops stay identical across ranks.
+            stacked_routed = {
+                "w1_w": layer_weights.pop(W.v4_routed_w1_w),
+                "w1_s": layer_weights.pop(W.v4_routed_w1_s),
+                "w2_w": layer_weights.pop(W.v4_routed_w2_w),
+                "w2_s": layer_weights.pop(W.v4_routed_w2_s),
+                "w3_w": layer_weights.pop(W.v4_routed_w3_w),
+                "w3_s": layer_weights.pop(W.v4_routed_w3_s),
+            }
+
+            def _expert_at(global_idx: int) -> Optional[Expert]:
+                if not (self.local_expert_start <= global_idx < self.local_expert_end):
+                    return None
+                local_idx = global_idx - self.local_expert_start
+                ew = {
+                    "w1_w": stacked_routed["w1_w"][local_idx],
+                    "w1_s": stacked_routed["w1_s"][local_idx],
+                    "w2_w": stacked_routed["w2_w"][local_idx],
+                    "w2_s": stacked_routed["w2_s"][local_idx],
+                    "w3_w": stacked_routed["w3_w"][local_idx],
+                    "w3_s": stacked_routed["w3_s"][local_idx],
+                }
+                return Expert(
+                    dim,
+                    moe_inter_dim,
+                    swiglu_limit=swiglu_limit,
+                    storage="fp4",
+                    expert_weights=ew,
+                )
+
             self.experts = nn.ModuleList(
-                [
-                    (
-                        Expert(
-                            dim,
-                            moe_inter_dim,
-                            swiglu_limit=swiglu_limit,
-                            storage="fp4",
-                            weights=weights,
-                            prefix=(
-                                f"{prefix}.experts.{i}" if self._factory_mode else ""
-                            ),
-                        )
-                        if self.local_expert_start <= i < self.local_expert_end
-                        else None
-                    )
-                    for i in range(n_routed_experts)
-                ]
+                [_expert_at(i) for i in range(n_routed_experts)]
             )
             self._w13 = self._s13 = self._w2 = self._s2 = None
 
@@ -629,18 +643,16 @@ class MoE(nn.Module):
 
     def _setup_mega_moe(
         self,
-        weights: Dict[str, torch.Tensor],
-        prefix: str,
+        layer_weights: Dict[str, torch.Tensor],
     ) -> None:
         """Stack EP-local routed expert weights, convert SFs to the
         int32 UTCCP-transposed layout required by ``fp8_fp4_mega_moe``,
         and register the symmetric-memory dispatch buffer.
 
-        V4 ckpt stores, per expert i:
-          w1.weight [inter, dim//2] int8  (FP4 gate)
-          w3.weight [inter, dim//2] int8  (FP4 up)
-          w2.weight [dim, inter//2] int8  (FP4 down)
-          ... .scale [inter, dim//FP4_BLOCK] / [dim, inter//FP4_BLOCK] UE8M0
+        Routed weights arrive as already-EP-sliced stacks (loader
+        handles the rank slicing): ``layer_weights[W.v4_routed_w{1,2,3}_{w,s}]``
+        each shaped ``[E_local, ...]``.  We pop them so the only references
+        kept alive are the kernel-consumable l1/l2 buffers below.
 
         Mega MoE expects, per expert:
           L1 w [2*inter, dim//2] int8 (gate | up rows concatenated)
@@ -657,11 +669,20 @@ class MoE(nn.Module):
         import deep_gemm
         import torch.distributed as dist
 
+        from rtp_llm.utils.model_weight import W
+
         E = self.n_local_experts
         D = self.dim
         inter = self.moe_inter_dim
-        start = self.local_expert_start
-        device = weights[f"{prefix}.experts.{start}.w1.weight"].device
+
+        # Pop stacked tensors from layer_weights so the framework's
+        # ModelWeights drops its references (without this, the per-tensor
+        # storage stays double-allocated across layer init).
+        st_w1_w = layer_weights.pop(W.v4_routed_w1_w)
+        st_w1_s = layer_weights.pop(W.v4_routed_w1_s)
+        st_w3_w = layer_weights.pop(W.v4_routed_w3_w)
+        st_w3_s = layer_weights.pop(W.v4_routed_w3_s)
+        device = st_w1_w.device
 
         # Serialise L1 then L2 to keep the per-layer transient peak bounded:
         # the previous code pre-allocated all four stacked buffers (w13 + s13
@@ -680,12 +701,11 @@ class MoE(nn.Module):
         s13 = torch.empty(
             (E, 2 * inter, D // FP4_BLOCK), dtype=torch.float32, device=device
         )
-        for local_i in range(E):
-            p = f"{prefix}.experts.{start + local_i}"
-            w13[local_i, :inter].copy_(weights.pop(f"{p}.w1.weight"))
-            s13[local_i, :inter].copy_(weights.pop(f"{p}.w1.scale").float())
-            w13[local_i, inter:].copy_(weights.pop(f"{p}.w3.weight"))
-            s13[local_i, inter:].copy_(weights.pop(f"{p}.w3.scale").float())
+        w13[:, :inter].copy_(st_w1_w)
+        s13[:, :inter].copy_(st_w1_s.float())
+        w13[:, inter:].copy_(st_w3_w)
+        s13[:, inter:].copy_(st_w3_s.float())
+        del st_w1_w, st_w1_s, st_w3_w, st_w3_s
         s13_int = deep_gemm.transform_sf_into_required_layout(
             s13, 2 * inter, D, (1, FP4_BLOCK), E
         )
@@ -694,12 +714,13 @@ class MoE(nn.Module):
 
         # --- L2 (down): same pattern, but only after L1's fp32 buffer
         # has been freed.
+        st_w2_w = layer_weights.pop(W.v4_routed_w2_w)
+        st_w2_s = layer_weights.pop(W.v4_routed_w2_s)
         w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
         s2 = torch.empty((E, D, inter // FP4_BLOCK), dtype=torch.float32, device=device)
-        for local_i in range(E):
-            p = f"{prefix}.experts.{start + local_i}"
-            w2[local_i].copy_(weights.pop(f"{p}.w2.weight"))
-            s2[local_i].copy_(weights.pop(f"{p}.w2.scale").float())
+        w2.copy_(st_w2_w)
+        s2.copy_(st_w2_s.float())
+        del st_w2_w, st_w2_s
         s2_int = deep_gemm.transform_sf_into_required_layout(
             s2, D, inter, (1, FP4_BLOCK), E
         )

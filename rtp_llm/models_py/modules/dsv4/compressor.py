@@ -51,10 +51,9 @@ class _CompressorNorm(nn.Module):
     """Weight holder for Compressor RMSNorm.  BF16 — ``rtp_llm_ops.rmsnorm``
     requires bf16 weight (silent NaN on fp32), matching vLLM default."""
 
-    def __init__(self, dim: int, weight: Optional[torch.Tensor] = None):
+    def __init__(self, dim: int, weight: torch.Tensor):
         super().__init__()
-        # Pass the framework loader's bf16 tensor at construction (factory
-        # mode) or ``None`` for unit-test paths that bind it later.
+        # Framework loader's bf16 tensor.
         self.weight = weight
 
 
@@ -68,9 +67,14 @@ class Compressor(nn.Module):
         max_batch_size: int,
         norm_eps: float = 1e-6,
         rotate: bool = False,
-        weights: Optional[Dict[str, torch.Tensor]] = None,
-        prefix: str = "",
+        compressor_weights: Dict[str, torch.Tensor] = None,
     ):
+        """``compressor_weights`` is a 4-key dict ``{"ape", "wkv", "wgate",
+        "norm"}`` — caller (Attention / Indexer) extracts these from
+        ``layer_weights[W.v4_compressor_*]`` (outer) or
+        ``layer_weights[W.v4_indexer_compressor_*]`` (inner) before
+        construction.  Required at instantiation; production never
+        passes empty weights."""
         super().__init__()
         self.dim = dim
         self.head_dim = head_dim
@@ -79,26 +83,16 @@ class Compressor(nn.Module):
         self.overlap = compress_ratio == 4
         self.rotate = rotate
         coff = 1 + self.overlap
-        self._factory_mode = weights is not None
 
-        if self._factory_mode:
-            # All four tensors come from the framework loader at their final
-            # dtype (ape/wkv/wgate fp32 via descriptor data_type, norm bf16
-            # via compute_dtype) — bind raw refs, no extra casts.  wkv/wgate
-            # forward calls ``F.linear(x, self.wkv)`` directly, no holder
-            # class needed.
-            self.ape = weights[f"{prefix}.ape"]
-            self.wkv = weights[f"{prefix}.wkv.weight"]
-            self.wgate = weights[f"{prefix}.wgate.weight"]
-            self.norm = _CompressorNorm(
-                head_dim, weight=weights[f"{prefix}.norm.weight"]
-            )
-        else:
-            # Unit-test / microbench path — caller binds tensors externally.
-            self.ape = None
-            self.wkv = None
-            self.wgate = None
-            self.norm = _CompressorNorm(head_dim)
+        # All four tensors come from the framework loader at their final
+        # dtype (ape/wkv/wgate fp32 via descriptor data_type, norm bf16
+        # via compute_dtype) — bind raw refs, no extra casts.  wkv/wgate
+        # forward calls ``F.linear(x, self.wkv)`` directly, no holder
+        # class needed.
+        self.ape = compressor_weights["ape"]
+        self.wkv = compressor_weights["wkv"]
+        self.wgate = compressor_weights["wgate"]
+        self.norm = _CompressorNorm(head_dim, weight=compressor_weights["norm"])
         self.norm_eps = norm_eps
 
         # Pool-only (#50): kv_state / score_state / kv_cache are NEVER

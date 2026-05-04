@@ -162,30 +162,34 @@ def _prepare_wo_a_stacked(
 from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
 
 
-def _v4_fp8_linear_from_dict(
-    weights: dict,
-    weight_key: str,
-    scale_key: str,
-):
-    """Build a CudaFp8DeepGEMMLinear from V4 ckpt tensors.
+def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
+    """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors.
 
-    Repacks the UE8M0 float8_e8m0fnu scale into DeepGEMM's int32 layout
-    in place in the weights dict so subsequent callers see the packed form.
-    """
+    Repacks the UE8M0 ``float8_e8m0fnu`` scale into DeepGEMM's int32
+    TMA-aligned packed layout when needed. Framework descriptor path may
+    deliver the scale already packed (dtype int32) — we no-op then."""
+    assert s is not None, "expected non-null FP8 scale"
+    if s.dtype == torch.float8_e8m0fnu:
+        s = _repack_v4_fp8_scale_to_int32(s)
+    # LinearFactory.create_linear_from_weights consumes a (weights_dict,
+    # weight_key, scale_key) triple — feed it a one-shot dict so the
+    # factory plumbing is unchanged.
+    local = {"_w": w, "_s": s}
+    return LinearFactory.create_linear_from_weights(
+        local, "_w", "_s", quant_config=_V4_FP8_BLOCK_CFG,
+    )
+
+
+def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
+    """Backwards-compat bridge over ``_v4_fp8_linear`` for callers that
+    still pass a flat dict + keys.  Mutates ``weights[scale_key]`` to the
+    packed form so subsequent callers don't repack."""
     w = weights[weight_key]
-    s = weights.get(scale_key)
-    assert s is not None, f"expected FP8 scale at {scale_key}"
+    s = weights[scale_key]
     if s.dtype == torch.float8_e8m0fnu:
         s = _repack_v4_fp8_scale_to_int32(s)
         weights[scale_key] = s
-    # Build via factory (CudaFp8DeepGEMMLinear matches FP8_PER_BLOCK +
-    # float8_e4m3fn weight + int32 scale).
-    return LinearFactory.create_linear_from_weights(
-        weights,
-        weight_key,
-        scale_key,
-        quant_config=_V4_FP8_BLOCK_CFG,
-    )
+    return _v4_fp8_linear(w, s)
 
 
 
@@ -488,11 +492,15 @@ class Attention(nn.Module):
         index_head_dim: int,
         index_topk: int,
         norm_eps: float = 1e-6,
-        weights: Optional[Dict[str, torch.Tensor]] = None,
-        prefix: str = "",
+        layer_weights: Optional[Dict[str, torch.Tensor]] = None,
         tp_size: int = 1,
         tp_rank: int = 0,
     ):
+        """``layer_weights`` is the framework's per-layer dict
+        (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
+        Reads ``W.v4_attn_*`` for dense attention weights, ``W.v4_compressor_*``
+        for the outer compressor, ``W.v4_indexer_*`` (forwarded) for the
+        indexer."""
         super().__init__()
         self.layer_id = layer_id
         self.dim = dim
@@ -504,7 +512,6 @@ class Attention(nn.Module):
         self.compress_ratio = compress_ratio
         self.eps = norm_eps
         self.softmax_scale = head_dim**-0.5
-        self._factory_mode = weights is not None
         self.tp_size = tp_size
         self.tp_rank = tp_rank
         # Per-rank head + group counts (S7a). Sharding only kicks in when
@@ -534,132 +541,114 @@ class Attention(nn.Module):
         )
         attn_sink_slice = slice(tp_rank * n_heads_local, (tp_rank + 1) * n_heads_local)
 
-        if self._factory_mode:
-            # Q / KV / O — FP8 linears go through LinearFactory →
-            # CudaFp8DeepGEMMLinear → DeepGEMM fp8_gemm_nt.
-            def _fp8(name: str):
-                return _v4_fp8_linear_from_dict(
-                    weights,
-                    f"{prefix}.{name}.weight",
-                    f"{prefix}.{name}.scale",
-                )
+        from rtp_llm.utils.model_weight import W
 
-            def _fp8_sliced(
-                name: str, row_slice: slice = None, col_slice: slice = None
-            ) -> "torch.nn.Module":
-                """Build a CudaFp8DeepGEMMLinear from a sliced view of the
-                ckpt FP8 weight + scale.  Scale slicing depends on layout:
-                  * legacy raw UE8M0 [N//128, K//128]: row/col strides are
-                    block-128 → ``slice.start // 128``.
-                  * framework packed int32 [N, K//128//4]: N is fully
-                    expanded (slice by full N stride) and K is packed 4×
-                    (slice by ``slice.start // 512``)."""
-                wkey = f"{prefix}.{name}.weight"
-                skey = f"{prefix}.{name}.scale"
-                w = weights[wkey]
-                s = weights[skey]
-                scale_is_packed_int32 = s.dtype == torch.int32
-                if row_slice is not None:
-                    w = w[row_slice]
-                    if scale_is_packed_int32:
-                        s = s[row_slice]
-                    else:
-                        s = s[row_slice.start // 128 : row_slice.stop // 128]
-                if col_slice is not None:
-                    w = w[:, col_slice]
-                    if scale_is_packed_int32:
-                        assert (
-                            col_slice.start % 512 == 0 and col_slice.stop % 512 == 0
-                        ), (
-                            f"col_slice {col_slice} not aligned to 512 for "
-                            f"packed int32 scale; framework path requires "
-                            f"K-slices on 512-byte boundaries"
-                        )
-                        s = s[:, col_slice.start // 512 : col_slice.stop // 512]
-                    else:
-                        s = s[:, col_slice.start // 128 : col_slice.stop // 128]
-                # Local dict so the factory call sees the slice
-                local = dict(weights)
-                local[wkey] = w.contiguous()
-                local[skey] = s.contiguous()
-                return _v4_fp8_linear_from_dict(local, wkey, skey)
+        # Q / KV / O — FP8 linears go through LinearFactory →
+        # CudaFp8DeepGEMMLinear → DeepGEMM fp8_gemm_nt.
+        def _fp8_w_s(w_tag, s_tag, row_slice=None, col_slice=None):
+            """Pull (weight, scale) by W tag with optional TP slicing,
+            then build a CudaFp8DeepGEMMLinear via ``_v4_fp8_linear``.
 
-            self.wq_a = _fp8("wq_a")  # [q_lora, dim] — replicate
-            # wq_b is row-split along N (n_heads * head_dim)
-            self.wq_b = (
-                _fp8_sliced("wq_b", row_slice=wq_b_row_slice)
-                if tp_size > 1
-                else _fp8("wq_b")
-            )
-            self.wkv = _fp8("wkv")  # MQA single KV head — replicate
-
-            # wo_a grouped projection: row-split along (n_groups*o_lora_rank).
-            # Stored as plain ``[N, K]`` fp8 weight + UE8M0 scale tensors;
-            # the ``fp8_einsum`` production path uses the pre-stacked
-            # ``_wo_a_stk_w`` / ``_wo_a_stk_s`` buffers below, the BF16
-            # fallback path inline-dequants from these via
-            # ``_fp8_dequant_to_fp32``.
-            assert (n_heads * head_dim) % o_groups == 0
-            wo_a_w = weights[f"{prefix}.wo_a.weight"]
-            wo_a_s = weights[f"{prefix}.wo_a.scale"]
-            if tp_size > 1:
-                wo_a_w = wo_a_w[wo_a_row_slice].contiguous()
-                if wo_a_s.dtype == torch.int32:
-                    # framework path: scale is already (N, K//128//4) int32
-                    wo_a_s = wo_a_s[wo_a_row_slice].contiguous()
+            Scale slicing depends on layout:
+              * legacy raw UE8M0 [N//128, K//128]: row/col strides are
+                block-128 → ``slice.start // 128``.
+              * framework packed int32 [N, K//128//4]: N is fully
+                expanded (slice by full N stride) and K is packed 4×
+                (slice by ``slice.start // 512``)."""
+            w = layer_weights[w_tag]
+            s = layer_weights[s_tag]
+            scale_is_packed_int32 = s.dtype == torch.int32
+            if row_slice is not None:
+                w = w[row_slice]
+                if scale_is_packed_int32:
+                    s = s[row_slice]
                 else:
-                    wo_a_s = wo_a_s[
-                        wo_a_row_slice.start // 128 : wo_a_row_slice.stop // 128
-                    ].contiguous()
-            self.wo_a_w = wo_a_w
-            self.wo_a_s = wo_a_s
-            K_local = n_heads_local * head_dim // n_groups_local
-            _stk_w, _stk_s = _prepare_wo_a_stacked(
-                wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
-            )
-            self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
-            self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
+                    s = s[row_slice.start // 128 : row_slice.stop // 128]
+            if col_slice is not None:
+                w = w[:, col_slice]
+                if scale_is_packed_int32:
+                    assert (
+                        col_slice.start % 512 == 0 and col_slice.stop % 512 == 0
+                    ), (
+                        f"col_slice {col_slice} not aligned to 512 for "
+                        f"packed int32 scale; framework path requires "
+                        f"K-slices on 512-byte boundaries"
+                    )
+                    s = s[:, col_slice.start // 512 : col_slice.stop // 512]
+                else:
+                    s = s[:, col_slice.start // 128 : col_slice.stop // 128]
+            if row_slice is not None or col_slice is not None:
+                w = w.contiguous()
+                s = s.contiguous()
+            return _v4_fp8_linear(w, s)
 
-            # wo_b row-split along K (cols), all_reduce after forward
-            self.wo_b = (
-                _fp8_sliced("wo_b", col_slice=wo_b_col_slice)
-                if tp_size > 1
-                else _fp8("wo_b")
-            )
+        self.wq_a = _fp8_w_s(W.v4_attn_wq_a_w, W.v4_attn_wq_a_s)
+        # wq_b is row-split along N (n_heads * head_dim)
+        self.wq_b = _fp8_w_s(
+            W.v4_attn_wq_b_w,
+            W.v4_attn_wq_b_s,
+            row_slice=wq_b_row_slice if tp_size > 1 else None,
+        )
+        # MQA single KV head — replicate.
+        self.wkv = _fp8_w_s(W.v4_attn_wkv_w, W.v4_attn_wkv_s)
 
-            # Non-quantized norm weights — plain BF16 tensors (loader cast
-            # via compute_dtype).  BF16 dtype is required by
-            # ``rtp_llm_ops.rmsnorm`` (silent NaN with fp32).  attn_sink loads
-            # as fp32 via descriptor data_type.
-            self.q_norm = weights[f"{prefix}.q_norm.weight"]
-            self.kv_norm = weights[f"{prefix}.kv_norm.weight"]
-            attn_sink_full = weights[f"{prefix}.attn_sink"]
-            self.attn_sink = (
-                attn_sink_full[attn_sink_slice].contiguous()
-                if tp_size > 1
-                else attn_sink_full
-            )
-        else:
-            # Meta-tensor placeholder construction (used by single-layer
-            # microbench / unit-test contexts that bypass the factory mode).
-            self.wq_a = QuantizedLinear(dim, q_lora_rank, storage="fp8")
-            self.q_norm = None
-            self.wq_b = QuantizedLinear(q_lora_rank, n_heads * head_dim, storage="fp8")
-            self.wkv = QuantizedLinear(dim, head_dim, storage="fp8")
-            self.kv_norm = None
-            assert (n_heads * head_dim) % o_groups == 0
-            # wo_a is now stored as plain ``self.wo_a_w`` / ``self.wo_a_s``;
-            # tests that need wo_a content set those attributes directly.
-            self.wo_a_w = None
-            self.wo_a_s = None
-            self.wo_b = QuantizedLinear(o_groups * o_lora_rank, dim, storage="fp8")
-            # Bound externally by tests — see QuantizedLinear note.
-            self.attn_sink = None
+        # wo_a grouped projection: row-split along (n_groups*o_lora_rank).
+        # Stored as plain ``[N, K]`` fp8 weight + UE8M0 scale tensors;
+        # the ``fp8_einsum`` production path uses the pre-stacked
+        # ``_wo_a_stk_w`` / ``_wo_a_stk_s`` buffers below, the BF16
+        # fallback path inline-dequants from these via
+        # ``_fp8_dequant_to_fp32``.
+        assert (n_heads * head_dim) % o_groups == 0
+        wo_a_w = layer_weights[W.v4_attn_wo_a_w]
+        wo_a_s = layer_weights[W.v4_attn_wo_a_s]
+        if tp_size > 1:
+            wo_a_w = wo_a_w[wo_a_row_slice].contiguous()
+            if wo_a_s.dtype == torch.int32:
+                # framework path: scale is already (N, K//128//4) int32
+                wo_a_s = wo_a_s[wo_a_row_slice].contiguous()
+            else:
+                wo_a_s = wo_a_s[
+                    wo_a_row_slice.start // 128 : wo_a_row_slice.stop // 128
+                ].contiguous()
+        self.wo_a_w = wo_a_w
+        self.wo_a_s = wo_a_s
+        K_local = n_heads_local * head_dim // n_groups_local
+        _stk_w, _stk_s = _prepare_wo_a_stacked(
+            wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+        )
+        self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
+        self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
+
+        # wo_b row-split along K (cols), all_reduce after forward
+        self.wo_b = _fp8_w_s(
+            W.v4_attn_wo_b_w,
+            W.v4_attn_wo_b_s,
+            col_slice=wo_b_col_slice if tp_size > 1 else None,
+        )
+
+        # Non-quantized norm weights — plain BF16 tensors (loader cast
+        # via compute_dtype).  BF16 dtype is required by
+        # ``rtp_llm_ops.rmsnorm`` (silent NaN with fp32).  attn_sink loads
+        # as fp32 via descriptor data_type.
+        self.q_norm = layer_weights[W.v4_attn_q_norm]
+        self.kv_norm = layer_weights[W.v4_attn_kv_norm]
+        attn_sink_full = layer_weights[W.v4_attn_sink]
+        self.attn_sink = (
+            attn_sink_full[attn_sink_slice].contiguous()
+            if tp_size > 1
+            else attn_sink_full
+        )
 
         assert (n_heads * head_dim) % o_groups == 0
 
         # Compressor + Indexer (only for compressed layers)
         if compress_ratio:
+            outer_cmp_weights = {
+                "ape": layer_weights[W.v4_compressor_ape],
+                "wkv": layer_weights[W.v4_compressor_wkv],
+                "wgate": layer_weights[W.v4_compressor_wgate],
+                "norm": layer_weights[W.v4_compressor_norm],
+            }
             self.compressor = Compressor(
                 dim=dim,
                 head_dim=head_dim,
@@ -667,8 +656,7 @@ class Attention(nn.Module):
                 compress_ratio=compress_ratio,
                 max_batch_size=max_batch_size,
                 norm_eps=norm_eps,
-                weights=weights,
-                prefix=f"{prefix}.compressor" if self._factory_mode else "",
+                compressor_weights=outer_cmp_weights,
             )
             # Phase E5: Compressor.kv_cache is self-managed (was an alias
             # into ``Attention.kv_cache[:, win:]``).  Configure shape here
@@ -690,8 +678,7 @@ class Attention(nn.Module):
                     max_batch_size=max_batch_size,
                     max_seq_len=max_seq_len,
                     norm_eps=norm_eps,
-                    weights=weights,
-                    prefix=f"{prefix}.indexer" if self._factory_mode else "",
+                    layer_weights=layer_weights,
                 )
                 # Configure nested indexer compressor shape hint so warmup
                 # (where pool context is absent) can still allocate an
@@ -1497,7 +1484,7 @@ class Attention(nn.Module):
     def _lin(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
         """Linear call that tolerates both the legacy QuantizedLinear
         (3-D input OK via F.linear) and factory LinearBase (expects 2-D)."""
-        if self._factory_mode and x.dim() > 2:
+        if x.dim() > 2:
             shape = x.shape
             y = layer(x.reshape(-1, shape[-1]))
             return y.view(*shape[:-1], y.shape[-1])
@@ -1940,7 +1927,7 @@ class Attention(nn.Module):
         # + per-group ``per_token_group_quant_fp8`` (G launches) into ONE
         # Triton kernel emitting ``(fp8 [M,G,K], scale [M,G,K/512])`` in the
         # einsum-expected UE8M0 layout.  Matches vLLM ``deepseek_v4_attention.py``.
-        if self._factory_mode and o.is_cuda and o.numel() > 0:
+        if o.is_cuda and o.numel() > 0:
             o_fp8, o_scale = fused_inv_rope_fp8_quant(
                 o,
                 freqs_cis_per_req,
@@ -2525,7 +2512,7 @@ class Attention(nn.Module):
         # (G launches) into ONE Triton kernel emitting (fp8 [M,G,K], scale
         # [M,G,K/512]) in the einsum-expected UE8M0 layout. Matches vLLM
         # ``deepseek_v4_attention.py``.
-        elif self._factory_mode and o.is_cuda and o.numel() > 0:
+        elif o.is_cuda and o.numel() > 0:
             # The Triton kernel computes ``b_idx = pid_token // q_len_per_b``
             # to index freqs. Decode uses [B, rd/2] freqs with q_len_per_b=1
             # so b_idx == request index. In prefill we have per-position
