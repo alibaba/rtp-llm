@@ -247,6 +247,33 @@ class Block(nn.Module):
             cache[key] = bf
         return bf
 
+    def _hc_linear_mixes(
+        self, x_flat: torch.Tensor, hc_fn_bf16: torch.Tensor, rsqrt: torch.Tensor
+    ) -> torch.Tensor:
+        positions = getattr(self, "_hc_positions", None)
+        if (
+            x_flat.dim() != 2
+            or positions is None
+            or positions.numel() != x_flat.shape[0]
+        ):
+            return (F.linear(x_flat, hc_fn_bf16) * rsqrt).float()
+
+        pos = positions.to(device=x_flat.device, dtype=torch.long)
+        block = pos // 256
+        T = int(x_flat.shape[0])
+        out = torch.empty(
+            T, hc_fn_bf16.shape[0], dtype=x_flat.dtype, device=x_flat.device
+        )
+        start = 0
+        while start < T:
+            cur = block[start]
+            end = start + 1
+            while end < T and bool((block[end] == cur).item()):
+                end += 1
+            out[start:end] = F.linear(x_flat[start:end], hc_fn_bf16)
+            start = end
+        return (out * rsqrt).float()
+
     def _hc_pre(
         self,
         x: torch.Tensor,
@@ -289,7 +316,7 @@ class Block(nn.Module):
         rsqrt = torch.rsqrt(
             x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps
         ).to(dtype)
-        mixes = (F.linear(x_flat, self._hc_fn_bf16(hc_fn)) * rsqrt).float()
+        mixes = self._hc_linear_mixes(x_flat, self._hc_fn_bf16(hc_fn), rsqrt)
         mixes = mixes.contiguous()
         use_fused = _use_fused_sinkhorn(mixes, self.hc_mult)
         self._dbg_record_hc_pre_path(dbg_tag, x, "fallback", use_fused=use_fused)
@@ -368,7 +395,7 @@ class Block(nn.Module):
         and wraps 3D inputs with unsqueeze/squeeze.  The slow fallback reduces
         along ``dim=-3`` so both shapes share code.
         """
-        if post.dim() == residual.dim():
+        if post.dim() == residual.dim() and x.dim() != 2:
             tk_x = x.unsqueeze(0) if x.dim() == 2 else x
             tk_res = residual.unsqueeze(0) if residual.dim() == 3 else residual
             tk_post = post.unsqueeze(0) if post.dim() == 3 else post
@@ -386,8 +413,7 @@ class Block(nn.Module):
             post_bf16 = post_b.to(x.dtype)
             first = post_bf16.unsqueeze(-1) * x.unsqueeze(-2)
             comb_bf16 = comb.to(x.dtype)
-            # REF reduces over the FIRST hc dim of comb (= comb.T @ residual).
-            second = torch.matmul(comb_bf16.transpose(-2, -1), residual)
+            second = torch.sum(comb_bf16.unsqueeze(-1) * residual.unsqueeze(-2), dim=-3)
             return (first + second).to(x.dtype)
 
         y = post_b.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
@@ -408,7 +434,7 @@ class Block(nn.Module):
         """
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
-        _dbg_layer = _rt.ENABLED and (self.layer_id <= 2 or 17 <= self.layer_id <= 20)
+        _dbg_layer = _rt.should_record_layer(self.layer_id)
         # Attention path
         residual = x
         x_pre, post, comb = self._hc_pre(
@@ -470,11 +496,12 @@ class Block(nn.Module):
         """
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
+        self._hc_positions = positions
         # Master switch: when MOEDBG=0 the AND short-circuits so neither the
         # layer_id compare nor any record_if_level call site below runs.
-        # Instruments layers 0..2 (first CSA layer is L2) and 17..20
-        # (cp2_ep1 vs tp1 first divergence window) when enabled.
-        _dbg_layer = _rt.ENABLED and (self.layer_id <= 2 or 17 <= self.layer_id <= 20)
+        # By default keep the historical narrow trace (layers 0..2, first CSA
+        # is L2). Set MOEDBG_ALL_LAYERS=1 for full bisection across the model.
+        _dbg_layer = _rt.should_record_layer(self.layer_id)
         # Attention path
         residual = x
         x_pre, post, comb = self._hc_pre(
@@ -544,6 +571,7 @@ class Block(nn.Module):
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_out", ffn_out)
         x = self._hc_post(ffn_out, residual, post, comb)  # [T, hc, dim]
+        self._hc_positions = None
         return x  # [T, hc, dim]
 
 

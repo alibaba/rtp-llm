@@ -12,7 +12,7 @@ Usage:
     ...
     _rt.dump(step=N, extra={...})      # call at end of forward
 
-Output: $MOEDBG_DIR/$MOEDBG_CASE/rank{R}_step{N}.pt with structure:
+Output: $MOEDBG_DIR/$MOEDBG_CASE/rank{R}_pid{P}_step{N}.pt with structure:
     {"tensors": {name: cpu_tensor (full, only if numel <= _FULL_THRESHOLD)},
      "hashes":  {name: md5},
      "stats":   {name: {shape, dtype, mean, std, abs_max, n_nan, n_inf, numel}},
@@ -30,7 +30,8 @@ _MOEDBG = int(os.environ.get("MOEDBG", "0"))
 _DBG_BASE = os.environ.get("MOEDBG_DIR", "/tmp/moedbg_runs")
 _DBG_CASE = os.environ.get("MOEDBG_CASE", "default")
 _STREAM = int(os.environ.get("MOEDBG_STREAM", "0")) > 0
-_FULL_THRESHOLD = 1_000_000
+_FULL_THRESHOLD = int(os.environ.get("MOEDBG_FULL_THRESHOLD", "1000000"))
+_TAIL_TOKENS = int(os.environ.get("MOEDBG_TAIL_TOKENS", "0"))
 # Skip recording for forward passes whose seqlen exceeds this (warmup
 # fires a single max_seq_len pass; recording it at MOEDBG=2 OOMs / hangs
 # health checks before the real query arrives).  0 disables the gate.
@@ -44,6 +45,34 @@ _local = threading.local()
 
 def _get_buf() -> Optional[List[Tuple[str, torch.Tensor]]]:
     return getattr(_local, "buf", None)
+
+
+def should_record_layer(layer_id: int) -> bool:
+    """Layer filter for detailed traces.
+
+    Default keeps the historical first-three-layer trace. Set
+    MOEDBG_ALL_LAYERS=1 for full model, or MOEDBG_LAYER=17 / MOEDBG_LAYER=17,18
+    to focus level-2 operator dumps after a level-1 bisection.
+    """
+    if not ENABLED:
+        return False
+    layer_filter = os.environ.get("MOEDBG_LAYER")
+    if layer_filter:
+        wanted = {int(x) for x in layer_filter.split(",") if x.strip()}
+        return layer_id in wanted
+    if os.environ.get("MOEDBG_ALL_LAYERS", "0") == "1":
+        return True
+    return layer_id <= 2
+
+
+def _trim_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    if _TAIL_TOKENS <= 0:
+        return tensor
+    if tensor.dim() >= 2 and tensor.shape[0] <= 8 and tensor.shape[1] > _TAIL_TOKENS:
+        return tensor[:, -_TAIL_TOKENS:].contiguous()
+    if tensor.dim() >= 1 and tensor.shape[0] > _TAIL_TOKENS:
+        return tensor[-_TAIL_TOKENS:].contiguous()
+    return tensor
 
 
 def begin(seqlen: Optional[int] = None) -> None:
@@ -68,10 +97,14 @@ def record(name: str, tensor: torch.Tensor) -> None:
     buf = _get_buf()
     if buf is None:
         return
+<<<<<<< HEAD
     if _STREAM:
         buf.append((name, _snapshot_cpu(tensor)))
     else:
         buf.append((name, tensor.detach().clone()))
+=======
+    buf.append((name, _trim_tensor(tensor).detach().clone()))
+>>>>>>> 17332e2e8 (Fix DSV4 reuse cache parity)
 
 
 def record_if_level(level: int, name: str, tensor: torch.Tensor) -> None:
@@ -117,8 +150,9 @@ def dump(*, step: int, extra: Optional[Dict[str, Any]] = None) -> None:
             save[name] = snap["tensor"]
 
     payload = {"tensors": save, "hashes": hashes, "stats": stats, "extra": extra or {}}
-    fpath = f"{out_dir}/rank{rank}_step{step:03d}.pt"
+    fpath = f"{out_dir}/rank{rank}_pid{os.getpid()}_step{step:03d}.pt"
     torch.save(payload, fpath)
+    print(f"[MOEDBG] dumped {fpath} tensors={len(buf)}", flush=True)
 
     _local.buf = []
 
