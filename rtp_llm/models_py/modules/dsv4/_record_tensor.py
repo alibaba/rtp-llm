@@ -2,6 +2,8 @@
 
 MOEDBG=0 (default): zero overhead, no allocations.
 MOEDBG=1: per-call buffer, dumped at end of forward via `dump`.
+MOEDBG_STREAM=1: compute hash/stats at record time instead of keeping
+    large GPU clones until dump. Useful for 64k+ prefill bisection.
 
 Usage:
     from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
@@ -27,6 +29,7 @@ import torch
 _MOEDBG = int(os.environ.get("MOEDBG", "0"))
 _DBG_BASE = os.environ.get("MOEDBG_DIR", "/tmp/moedbg_runs")
 _DBG_CASE = os.environ.get("MOEDBG_CASE", "default")
+_STREAM = int(os.environ.get("MOEDBG_STREAM", "0")) > 0
 _FULL_THRESHOLD = 1_000_000
 # Skip recording for forward passes whose seqlen exceeds this (warmup
 # fires a single max_seq_len pass; recording it at MOEDBG=2 OOMs / hangs
@@ -65,7 +68,10 @@ def record(name: str, tensor: torch.Tensor) -> None:
     buf = _get_buf()
     if buf is None:
         return
-    buf.append((name, tensor.detach().clone()))
+    if _STREAM:
+        buf.append((name, _snapshot_cpu(tensor)))
+    else:
+        buf.append((name, tensor.detach().clone()))
 
 
 def record_if_level(level: int, name: str, tensor: torch.Tensor) -> None:
@@ -97,24 +103,42 @@ def dump(*, step: int, extra: Optional[Dict[str, Any]] = None) -> None:
     hashes: Dict[str, str] = {}
     stats: Dict[str, Dict[str, Any]] = {}
     for name, t in buf:
-        cpu_t = t.detach().to(torch.float32).cpu()
-        n = cpu_t.numel()
-        hashes[name] = hashlib.md5(cpu_t.numpy().tobytes()).hexdigest()
-        stats[name] = {
-            "shape": tuple(cpu_t.shape),
-            "dtype": str(t.dtype),
-            "mean": cpu_t.mean().item() if n > 0 else 0.0,
-            "std": cpu_t.std().item() if n > 1 else 0.0,
-            "abs_max": cpu_t.abs().max().item() if n > 0 else 0.0,
-            "n_nan": int(torch.isnan(cpu_t).sum().item()),
-            "n_inf": int(torch.isinf(cpu_t).sum().item()),
-            "numel": n,
-        }
-        if n <= _FULL_THRESHOLD:
-            save[name] = cpu_t
+        if isinstance(t, dict):
+            hashes[name] = t["hash"]
+            stats[name] = t["stats"]
+            if t["tensor"] is not None:
+                save[name] = t["tensor"]
+            continue
+
+        snap = _snapshot_cpu(t)
+        hashes[name] = snap["hash"]
+        stats[name] = snap["stats"]
+        if snap["tensor"] is not None:
+            save[name] = snap["tensor"]
 
     payload = {"tensors": save, "hashes": hashes, "stats": stats, "extra": extra or {}}
     fpath = f"{out_dir}/rank{rank}_step{step:03d}.pt"
     torch.save(payload, fpath)
 
     _local.buf = []
+
+
+def _snapshot_cpu(t: torch.Tensor) -> Dict[str, Any]:
+    """Build the serialized representation for one tensor."""
+    cpu_t = t.detach().to(torch.float32).cpu()
+    n = cpu_t.numel()
+    stats = {
+        "shape": tuple(cpu_t.shape),
+        "dtype": str(t.dtype),
+        "mean": cpu_t.mean().item() if n > 0 else 0.0,
+        "std": cpu_t.std().item() if n > 1 else 0.0,
+        "abs_max": cpu_t.abs().max().item() if n > 0 else 0.0,
+        "n_nan": int(torch.isnan(cpu_t).sum().item()),
+        "n_inf": int(torch.isinf(cpu_t).sum().item()),
+        "numel": n,
+    }
+    return {
+        "hash": hashlib.md5(cpu_t.contiguous().numpy().tobytes()).hexdigest(),
+        "stats": stats,
+        "tensor": cpu_t if n <= _FULL_THRESHOLD else None,
+    }
