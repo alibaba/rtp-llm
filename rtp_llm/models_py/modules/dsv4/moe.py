@@ -10,6 +10,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Fused SiLU + (optional clamp) + element-wise mul replacement for the
+# Expert.forward chain.  Default ON via DSV4_EXPERT_SILU_FUSED=1.  See
+# _silu_mul_split_triton.py module docstring.
+try:
+    from rtp_llm.models_py.modules.dsv4._silu_mul_split_triton import silu_mul_split
+    _SILU_MUL_SPLIT_OK = True
+except Exception:  # pragma: no cover — keep V4 importable without Triton
+    silu_mul_split = None
+    _SILU_MUL_SPLIT_OK = False
+
+
+def _use_silu_mul_split() -> bool:
+    if not _SILU_MUL_SPLIT_OK:
+        return False
+    return os.environ.get("DSV4_EXPERT_SILU_FUSED", "1") != "0"
+
+
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     _m_grouped_fp8_fp4_gemm_nt_contiguous_impl,
     m_grouped_fp8_fp4_gemm_nt_contiguous,
@@ -437,10 +454,19 @@ class Expert(nn.Module):
         dtype = x.dtype
         gate = self._apply_layer(self.w1, x).float()
         up = self._apply_layer(self.w3, x).float()
-        if self.swiglu_limit > 0:
-            up = torch.clamp(up, min=-self.swiglu_limit, max=self.swiglu_limit)
-            gate = torch.clamp(gate, max=self.swiglu_limit)
-        x = F.silu(gate) * up
+        if _use_silu_mul_split():
+            # Fused SiLU + optional SwiGLU clamp + multiply (1 launch).
+            # Replaces 2 clamp launches (when swiglu_limit>0) + silu + mul.
+            x = silu_mul_split(
+                gate.contiguous(),
+                up.contiguous(),
+                clamp_limit=self.swiglu_limit,
+            )
+        else:
+            if self.swiglu_limit > 0:
+                up = torch.clamp(up, min=-self.swiglu_limit, max=self.swiglu_limit)
+                gate = torch.clamp(gate, max=self.swiglu_limit)
+            x = F.silu(gate) * up
         if weights is not None:
             x = weights * x
         return self._apply_layer(self.w2, x.to(dtype))
