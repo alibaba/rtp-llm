@@ -37,12 +37,6 @@ def flashinfer_deps():
         actual = "@flashinfer_cpp//:flashinfer"
     )
 
-def flashmla_deps():
-    native.alias(
-        name = "flashmla",
-        actual = "@flashmla//:flashmla"
-    )
-
 def cuda_register():
     native.alias(
         name = "cuda_register",

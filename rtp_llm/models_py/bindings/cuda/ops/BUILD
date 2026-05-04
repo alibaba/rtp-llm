@@ -1,10 +1,9 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("@arch_config//:arch_select.bzl", "cuda_register", "flashinfer_deps", "flashmla_deps")
+load("@arch_config//:arch_select.bzl", "cuda_register", "flashinfer_deps")
 load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 cuda_register()
 flashinfer_deps()
-flashmla_deps()
 
 config_setting(
     name = "use_accl_ep",
@@ -61,7 +60,6 @@ cc_library(
         "@local_config_cuda//cuda:cuda_headers",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:profiling_scope",
-        ":flashmla",
     ] + select({
         "@//:using_cuda12": [
             "//3rdparty/xqa:xqa"

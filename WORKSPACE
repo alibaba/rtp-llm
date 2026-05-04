@@ -32,14 +32,17 @@ rocm_configure(name = "local_config_rocm")
 
 python_configure(name = "local_config_python")
 
-# @rtp_deps — Starlark deps (http.bzl / git.bzl). In the internal monorepo, sources live in
-# internal_source/deps (sibling of github-opensource/). Use path="../internal_source/deps":
-# relying on a github-opensource/deps symlink out of the workspace can make Bazel resolve the
-# repo to github-opensource/internal_source/deps (missing) instead of following "..".
-# OSS-only clones without internal_source should vendor deps under github-opensource/deps locally.
+# @rtp_deps — OSS default resolves to github-opensource/deps/ (public URLs).
+# Internal monorepo overrides to ../internal_source/deps via
+#     common --override_repository=rtp_deps=../internal_source/deps
+# in internal_source/.internal_bazelrc. The two deps trees declare the same
+# http_deps() / git_deps() symbol surface; the override swaps in internal-
+# mirror URLs plus internal-only RDMA/EIC RPMs and PPU cutlass/flashinfer.
+# Keep the relative-path form: %workspace%/.. in try-imported rcs mis-resolves
+# on Bazel 6.x for --override_repository.
 local_repository(
     name = "rtp_deps",
-    path = "../internal_source/deps",
+    path = "deps",
 )
 
 local_repository(
