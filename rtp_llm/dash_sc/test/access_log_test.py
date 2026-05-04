@@ -759,7 +759,7 @@ class KMonitorReportTest(InterceptorTestBase):
 
 
 class DownstreamDiagnosticsTest(InterceptorTestBase):
-    """Forward-path diagnostics (``downstream_addr`` / ``downstream_resp_count`` /
+    """Forward-path diagnostics (``backend_addr`` / ``backend_resp_count`` /
     ``buffered_stage``) must round-trip onto the access-log line.
 
     These fields are populated by :class:`DashScProxyServicer` via the
@@ -784,8 +784,8 @@ class DownstreamDiagnosticsTest(InterceptorTestBase):
         behavior(_make_infer_request(input_ids=[1]), FakeContext())
         self.assertIsNotNone(captured["agg"])
         # The aggregate exposes the writable diagnostics attributes.
-        self.assertTrue(hasattr(captured["agg"], "downstream_addr"))
-        self.assertTrue(hasattr(captured["agg"], "downstream_resp_count"))
+        self.assertTrue(hasattr(captured["agg"], "backend_addr"))
+        self.assertTrue(hasattr(captured["agg"], "backend_resp_count"))
         self.assertTrue(hasattr(captured["agg"], "buffered_stage"))
 
     def test_defaults_emitted_when_no_forwarder_writes(self) -> None:
@@ -800,8 +800,8 @@ class DownstreamDiagnosticsTest(InterceptorTestBase):
         behavior = _wrapped_behavior(self.interceptor, handler)
         behavior(_make_infer_request(input_ids=[1]), FakeContext())
         rec = self.records[0]
-        self.assertIsNone(rec["downstream_addr"])
-        self.assertEqual(rec["downstream_resp_count"], 0)
+        self.assertIsNone(rec["backend_addr"])
+        self.assertEqual(rec["backend_resp_count"], 0)
         self.assertIsNone(rec["buffered_stage"])
 
     def test_forwarder_writes_round_trip_to_record(self) -> None:
@@ -809,8 +809,8 @@ class DownstreamDiagnosticsTest(InterceptorTestBase):
 
         def inner(request, context):
             agg = context._dash_sc_access_agg
-            agg.downstream_addr = "10.0.0.7:9000"
-            agg.downstream_resp_count = 42
+            agg.backend_addr = "10.0.0.7:9000"
+            agg.backend_resp_count = 42
             agg.buffered_stage = "dropped_buffered_on_exception"
             return _make_stream_response(generated_ids=[1])
 
@@ -820,8 +820,8 @@ class DownstreamDiagnosticsTest(InterceptorTestBase):
         behavior = _wrapped_behavior(self.interceptor, handler)
         behavior(_make_infer_request(input_ids=[1]), FakeContext())
         rec = self.records[0]
-        self.assertEqual(rec["downstream_addr"], "10.0.0.7:9000")
-        self.assertEqual(rec["downstream_resp_count"], 42)
+        self.assertEqual(rec["backend_addr"], "10.0.0.7:9000")
+        self.assertEqual(rec["backend_resp_count"], 42)
         self.assertEqual(rec["buffered_stage"], "dropped_buffered_on_exception")
 
 
