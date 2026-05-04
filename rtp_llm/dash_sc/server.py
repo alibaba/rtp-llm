@@ -17,8 +17,10 @@ import grpc
 
 from rtp_llm.dash_sc.access_log import (
     DASH_SC_GRPC_ACCESS_LOG_FILENAME,
+    DASH_SC_GRPC_QUERY_LOG_FILENAME,
     DashScGrpcAccessLogInterceptor,
     init_dash_sc_grpc_access_logger,
+    init_dash_sc_grpc_query_logger,
 )
 from rtp_llm.dash_sc.forward_service import PureForwardServicer
 from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
@@ -157,6 +159,12 @@ class DashScGrpcServer:
                 rank_id=rank_id,
                 server_id=server_id_int,
             )
+            init_dash_sc_grpc_query_logger(
+                log_path=log_path,
+                backup_count=backup_count,
+                rank_id=rank_id,
+                server_id=server_id_int,
+            )
             if log_path:
                 from rtp_llm.access_logger.log_utils import get_process_log_filename
 
@@ -167,14 +175,38 @@ class DashScGrpcServer:
                         DASH_SC_GRPC_ACCESS_LOG_FILENAME, rank_id, server_id_int
                     ),
                 )
+                logging.info(
+                    "[DashScGrpc] query log enabled: path=%s/%s",
+                    log_path,
+                    get_process_log_filename(
+                        DASH_SC_GRPC_QUERY_LOG_FILENAME, rank_id, server_id_int
+                    ),
+                )
             is_forward = PureForwardServicer.has_forward_config()
+            # Build the executor first so the interceptor can probe its
+            # ``_work_queue.qsize()`` per RPC. ``_work_queue`` is an internal
+            # attribute of ``concurrent.futures.thread.ThreadPoolExecutor``,
+            # but its name and ``qsize()`` shape have been stable from CPython
+            # 3.2 through 3.12; ``getattr`` with a safe fallback means a
+            # future rename is a silent metric loss rather than a server crash.
+            executor = futures.ThreadPoolExecutor(max_workers=pool_size)
+
+            def _pool_pending_depth() -> int:
+                q = getattr(executor, "_work_queue", None)
+                try:
+                    return int(q.qsize()) if q is not None else 0
+                except Exception:
+                    return 0
+
             interceptor = DashScGrpcAccessLogInterceptor(
                 rank_id=rank_id,
                 server_id=server_id_int,
                 raw_mode=is_forward,
+                pool_pending_depth_fn=_pool_pending_depth,
+                pool_size=pool_size,
             )
             server = grpc.server(
-                futures.ThreadPoolExecutor(max_workers=pool_size),
+                executor,
                 options=opts,
                 interceptors=[interceptor],
             )

@@ -1,6 +1,7 @@
 """Pure gRPC forward servicer for predict_v2.proto.
 
-Supports multiple downstream addresses with random selection.
+Supports multiple downstream addresses with round-robin selection across
+an optional per-addr HTTP/2 channel pool.
 """
 
 from __future__ import annotations
@@ -8,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
+import threading
 from typing import List, Optional
 
 import grpc
@@ -16,6 +17,25 @@ import grpc
 from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
+
+# Per-addr HTTP/2 connection pool size. The forwarder multiplexes every
+# outbound RPC over ``grpc.insecure_channel(addr)``, which is one HTTP/2
+# connection. When that one connection fails (keepalive timeout, LBS RST,
+# backend GC stall) *every* concurrent stream on it aborts simultaneously —
+# the 14:19 cascade (22 × 1ms ``Exception iterating requests!`` inside 100ms)
+# is the exact signature. Opening N independent channels per addr partitions
+# the failure domain: one connection going bad only blasts ~1/N of in-flight
+# RPCs. Round-robin picks a channel per RPC — HTTP/2 multiplexing still
+# handles in-channel concurrency, the pool is about fault isolation, not
+# bandwidth.
+#
+# Default 1 is backward-compatible: set
+# ``DASH_SC_GRPC_FORWARD_CHANNELS_PER_ADDR=N`` in deployment to enable. Pool
+# size is decoupled from ``DashScGrpcConfig.max_server_workers`` — that
+# controls inbound concurrency, this controls outbound failure domains. A
+# single server worker reuses the whole pool across the lifetime of its RPC.
+_CHANNELS_PER_ADDR_ENV_KEY = "DASH_SC_GRPC_FORWARD_CHANNELS_PER_ADDR"
+_DEFAULT_CHANNELS_PER_ADDR = 1
 
 # HTTP/2 keepalive for the forwarder -> real frontend channel. Production
 # topology places an LBS between the two with a 100s idle timeout; without
@@ -60,6 +80,19 @@ def _parse_forward_addrs(env_value: str) -> List[str]:
     return [a.strip() for a in env_value.split(",") if a.strip()]
 
 
+def _parse_channels_per_addr(env_value: str) -> int:
+    """Parse ``DASH_SC_GRPC_FORWARD_CHANNELS_PER_ADDR`` with safe defaults.
+
+    Non-integer / non-positive values fall back to ``_DEFAULT_CHANNELS_PER_ADDR``
+    rather than raising — misconfiguration should not prevent server startup.
+    """
+    try:
+        n = int(env_value.strip())
+    except (TypeError, ValueError, AttributeError):
+        return _DEFAULT_CHANNELS_PER_ADDR
+    return n if n >= 1 else _DEFAULT_CHANNELS_PER_ADDR
+
+
 class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
     """Pure transparent proxy with connection pool for multiple downstream addresses."""
 
@@ -68,7 +101,11 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         """Check if forward addresses are configured via environment variable."""
         return bool(os.environ.get(_FORWARD_ENV_KEY, "").strip())
 
-    def __init__(self, forward_addrs: Optional[List[str]] = None):
+    def __init__(
+        self,
+        forward_addrs: Optional[List[str]] = None,
+        channels_per_addr: Optional[int] = None,
+    ):
         if forward_addrs is None:
             env_value = os.environ.get(_FORWARD_ENV_KEY, "")
             forward_addrs = _parse_forward_addrs(env_value)
@@ -78,25 +115,59 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 f"No forward addresses provided. Set {_FORWARD_ENV_KEY} env or pass forward_addrs."
             )
 
+        if channels_per_addr is None:
+            channels_per_addr = _parse_channels_per_addr(
+                os.environ.get(_CHANNELS_PER_ADDR_ENV_KEY, "")
+            )
+        elif channels_per_addr < 1:
+            channels_per_addr = _DEFAULT_CHANNELS_PER_ADDR
+
         self._forward_addrs = forward_addrs
+        self._channels_per_addr = channels_per_addr
         self._channels: List[grpc.Channel] = []
         self._stubs: List[predict_v2_pb2_grpc.GRPCInferenceServiceStub] = []
+        # Parallel list: for stub i, ``_stub_addr_idx[i]`` is the index into
+        # ``_forward_addrs`` — lets ``_next_stub`` return the original addr
+        # index without divmod arithmetic, which means swapping pool layout
+        # (e.g. grouped vs interleaved) won't break caller assumptions.
+        self._stub_addr_idx: List[int] = []
 
-        for addr in forward_addrs:
-            channel = grpc.insecure_channel(addr, options=_FORWARD_CHANNEL_OPTS)
-            stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
-            self._channels.append(channel)
-            self._stubs.append(stub)
+        for addr_i, addr in enumerate(forward_addrs):
+            for _ in range(channels_per_addr):
+                channel = grpc.insecure_channel(addr, options=_FORWARD_CHANNEL_OPTS)
+                stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
+                self._channels.append(channel)
+                self._stubs.append(stub)
+                self._stub_addr_idx.append(addr_i)
+
+        # Round-robin cursor. A Lock makes concurrent ``_next_stub`` safe under
+        # the gRPC thread pool. Contention is negligible (one increment per
+        # RPC entry), but without it two workers racing ``__iadd__`` could
+        # skew distribution under extreme load. ``itertools.cycle`` would be
+        # simpler but is not thread-safe.
+        self._rr_idx = 0
+        self._rr_lock = threading.Lock()
 
         logging.info(
-            "[DashScGrpc] PureForwardServicer initialized with %d addresses: %s",
+            "[DashScGrpc] PureForwardServicer initialized: %d addresses × %d channels/addr = %d total stubs: %s",
             len(forward_addrs),
+            channels_per_addr,
+            len(self._stubs),
             forward_addrs,
         )
 
     def _next_stub(self) -> tuple[predict_v2_pb2_grpc.GRPCInferenceServiceStub, int]:
-        idx = random.randrange(len(self._stubs))
-        return self._stubs[idx], idx
+        """Pick the next (stub, addr_index_in_forward_addrs) via round-robin.
+
+        Returns the index into ``self._forward_addrs`` (not ``self._stubs``),
+        matching the pre-pool contract: callers use the second element to
+        look up the addr string. The stub itself may correspond to any of
+        the ``channels_per_addr`` connections pointed at that addr.
+        """
+        with self._rr_lock:
+            i = self._rr_idx
+            self._rr_idx = (self._rr_idx + 1) % len(self._stubs)
+        return self._stubs[i], self._stub_addr_idx[i]
 
     def close(self):
         for channel in self._channels:
