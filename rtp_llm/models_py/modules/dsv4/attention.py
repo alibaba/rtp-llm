@@ -2239,6 +2239,62 @@ class Attention(nn.Module):
             topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
         topk_idxs = topk_idxs.long()
 
+        dbg_last_idx = None
+        dbg_pos_idx = None
+        dbg_pos_name = None
+        if _dbg:
+            if cp_on:
+                last_pos = cp_ctx.seq_len_total - 1
+                last_mask = (cp_ctx.global_positions == last_pos) & cp_ctx.local_is_real
+                last_idx_t = torch.nonzero(last_mask, as_tuple=False).flatten()
+                if last_idx_t.numel() > 0:
+                    dbg_last_idx = int(last_idx_t[0].item())
+                dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
+                if dbg_pos >= 0:
+                    pos_mask = (
+                        cp_ctx.global_positions == dbg_pos
+                    ) & cp_ctx.local_is_real
+                    pos_idx_t = torch.nonzero(pos_mask, as_tuple=False).flatten()
+                    if pos_idx_t.numel() > 0:
+                        dbg_pos_idx = int(pos_idx_t[0].item())
+                        dbg_pos_name = f"pos{dbg_pos}"
+            elif bsz == 1:
+                if sequence_lengths is not None and sequence_lengths.numel() > 0:
+                    dbg_last_idx = int(sequence_lengths.reshape(-1)[0].item()) - 1
+                else:
+                    dbg_last_idx = seqlen - 1
+                if dbg_last_idx < 0 or dbg_last_idx >= seqlen:
+                    dbg_last_idx = None
+                dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
+                if dbg_pos >= 0:
+                    dbg_pos_idx = dbg_pos - sp_int
+                    if dbg_pos_idx < 0 or dbg_pos_idx >= seqlen:
+                        dbg_pos_idx = None
+                    else:
+                        dbg_pos_name = f"pos{dbg_pos}"
+            if dbg_last_idx is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_q_last",
+                    q[:, dbg_last_idx : dbg_last_idx + 1],
+                )
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_topk_last",
+                    topk_idxs[:, dbg_last_idx : dbg_last_idx + 1],
+                )
+            if dbg_pos_idx is not None and dbg_pos_name is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_q_{dbg_pos_name}",
+                    q[:, dbg_pos_idx : dbg_pos_idx + 1],
+                )
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_topk_{dbg_pos_name}",
+                    topk_idxs[:, dbg_pos_idx : dbg_pos_idx + 1],
+                )
+
         if is_prefill_attn:
             if cp_on:
                 pool_read_start = cp_ctx.prefix_length
@@ -2373,6 +2429,26 @@ class Attention(nn.Module):
                     ), "Phase E5b: continuation prefill requires paged ctx."
             if _dbg:
                 _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_cat", kv_cat)
+                if dbg_last_idx is not None and bsz == 1:
+                    idx = topk_idxs[0, dbg_last_idx]
+                    valid = idx >= 0
+                    if valid.any():
+                        safe_idx = idx[valid].to(torch.long)
+                        _rt.record_if_level(
+                            2,
+                            f"L{self.layer_id:02d}_attn_kv_selected_last",
+                            kv_cat[:, safe_idx],
+                        )
+                if dbg_pos_idx is not None and dbg_pos_name is not None and bsz == 1:
+                    idx = topk_idxs[0, dbg_pos_idx]
+                    valid = idx >= 0
+                    if valid.any():
+                        safe_idx = idx[valid].to(torch.long)
+                        _rt.record_if_level(
+                            2,
+                            f"L{self.layer_id:02d}_attn_kv_selected_{dbg_pos_name}",
+                            kv_cat[:, safe_idx],
+                        )
             if _tl_kernels.tilelang_available():
                 o = _tl_kernels.sparse_attn(
                     q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
@@ -2395,14 +2471,46 @@ class Attention(nn.Module):
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_sparse_out", o)
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_topk_idxs", topk_idxs)
+            if dbg_last_idx is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_sparse_out_last",
+                    o[:, dbg_last_idx : dbg_last_idx + 1],
+                )
+            if dbg_pos_idx is not None and dbg_pos_name is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_sparse_out_{dbg_pos_name}",
+                    o[:, dbg_pos_idx : dbg_pos_idx + 1],
+                )
 
+        if _dbg:
+            # Keep the debuggable explicit path when tensor probes are enabled.
+            apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_o_post_inv_rope", o)
+            if dbg_last_idx is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_o_post_inv_rope_last",
+                    o[:, dbg_last_idx : dbg_last_idx + 1],
+                )
+            if dbg_pos_idx is not None and dbg_pos_name is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_o_post_inv_rope_{dbg_pos_name}",
+                    o[:, dbg_pos_idx : dbg_pos_idx + 1],
+                )
+            o = o.reshape(bsz, seqlen, self.n_groups, -1)
+            wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
+            wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
+            o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
         # Grouped output projection: inverse-RoPE + FP8 quant + wo_a einsum.
         # Same fused path as forward_decode (line ~1648) — collapses
         # apply_rotary_emb (1 launch) + per-group per_token_group_quant_fp8
         # (G launches) into ONE Triton kernel emitting (fp8 [M,G,K], scale
         # [M,G,K/512]) in the einsum-expected UE8M0 layout. Matches vLLM
         # ``deepseek_v4_attention.py``.
-        if self._factory_mode and o.is_cuda and o.numel() > 0:
+        elif self._factory_mode and o.is_cuda and o.numel() > 0:
             # The Triton kernel computes ``b_idx = pid_token // q_len_per_b``
             # to index freqs. Decode uses [B, rd/2] freqs with q_len_per_b=1
             # so b_idx == request index. In prefill we have per-position
