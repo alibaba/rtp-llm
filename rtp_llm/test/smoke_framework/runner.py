@@ -137,11 +137,27 @@ def run_smoke_test(test_name: str, test_config: Mapping[str, Any]) -> None:
     runner_class = get_runner_type(smoke_args, envs)
     logging.info("runner_class: %s", str(runner_class))
 
+    # kvcm_config: legacy `entry.py` had a separate `--kvcm-envs` arg; under
+    # pytest dispatch, parse the same KVCM-control keys out of `envs` and
+    # forward to CaseRunner so RemoteKVCMServer.start_server() sees
+    # ENABLE_DEBUG_SERVICE / KVCM_LOG_LEVEL / STORAGE_CONFIG /
+    # INSTANCE_GROUP_CONFIG / TEST_*_FAILURE etc. Without this the kvcm spawns
+    # with enable_debug_service=false and fault-injection cases
+    # (remote_cache_match_fail / write_start_fail / write_finish_fail) can't
+    # trigger their failure paths → COMPARE_FAILED on PR 537 run 39175306.
+    kvcm_config: Dict[str, str] = {}
+    if isinstance(envs, list):
+        for env_str in envs:
+            if "=" in env_str:
+                k, v = env_str.split("=", 1)
+                kvcm_config[k] = v
+
     runner_params: Dict[str, Any] = {
         "task_info": task_info,
         "env_args": env_args,
         "gpu_card": gpu_card,
         "smoke_args": smoke_args,
+        "kvcm_config": kvcm_config,
     }
 
     for param in ("sleep_time_qr", "kill_remote", "concurrency_test"):
