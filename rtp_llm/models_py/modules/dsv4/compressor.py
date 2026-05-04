@@ -252,7 +252,7 @@ class Compressor(nn.Module):
         in_block = pos % eb
 
         bt_long = block_table[:bsz].to(device=device, dtype=torch.long)
-        tail_cap = int(block_in_state.max().item()) + 1 if T > 0 else 0
+        tail_cap = (int(T) + int(eb) - 1) // int(eb) if T > 0 else 0
         tail_cap = min(tail_cap, int(bt_long.shape[1]))
         if tail_cap <= 0:
             empty = torch.empty((bsz, 0), dtype=torch.bool, device=device)
@@ -566,7 +566,10 @@ class Compressor(nn.Module):
         valid = (pos >= 0) & (pos < self._kv_write_mask.shape[1])
         if valid.numel() == 0:
             return
-        self._kv_write_mask[b_idx[valid], pos[valid]] = True
+        safe_b = torch.clamp(b_idx, min=0, max=self._kv_write_mask.shape[0] - 1)
+        safe_pos = torch.clamp(pos, min=0, max=self._kv_write_mask.shape[1] - 1)
+        prev = self._kv_write_mask[safe_b, safe_pos]
+        self._kv_write_mask[safe_b, safe_pos] = prev | valid
 
     def _scatter_kv_cache_to_pool(
         self, bsz: int, block_mask: Optional[torch.Tensor] = None
@@ -722,9 +725,7 @@ class Compressor(nn.Module):
         dtype = x.dtype
         # #50: pool-only lifecycle.  Bind state + kv_cache from the
         # framework pools at entry; scatter back + clear at exit.
-        self._bind_state_from_pool(
-            bsz, is_fresh_prefill=False, device=x.device, start_pos=start_pos
-        )
+        self._bind_state_from_pool(bsz, is_fresh_prefill=False, device=x.device)
         self._bind_kv_cache_from_pool(
             bsz, is_fresh_prefill=False, device=x.device, dtype=dtype
         )
@@ -854,9 +855,7 @@ class Compressor(nn.Module):
         dtype = x.dtype
         device = x.device
         # #50: pool-only lifecycle.
-        self._bind_state_from_pool(
-            bsz, is_fresh_prefill=False, device=device, start_pos=start_pos
-        )
+        self._bind_state_from_pool(bsz, is_fresh_prefill=False, device=device)
         self._bind_kv_cache_from_pool(
             bsz, is_fresh_prefill=False, device=device, dtype=dtype
         )
@@ -929,7 +928,10 @@ class Compressor(nn.Module):
                 existing,
             )
             self.kv_cache[b_idx, cache_slot] = new_val
-            self._mark_kv_cache_written(b_idx[boundary], cache_slot[boundary])
+            marked_slot = torch.where(
+                boundary, cache_slot, torch.full_like(cache_slot, -1)
+            )
+            self._mark_kv_cache_written(b_idx, marked_slot)
 
             # Roll kv_state/score_state for overlap=True (boundary requests only).
             if overlap:

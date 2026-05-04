@@ -211,9 +211,5 @@ def write_kv_to_pool(
         return
 
     existing = pool_view.index_select(0, safe_slot)
-    delta = torch.where(
-        valid.unsqueeze(-1),
-        k_state - existing,
-        torch.zeros_like(k_state),
-    )
-    pool_view.index_put_((safe_slot,), delta, accumulate=True)
+    source = torch.where(valid.unsqueeze(-1), k_state, existing)
+    pool_view.index_copy_(0, safe_slot, source)
