@@ -762,7 +762,7 @@ class DownstreamDiagnosticsTest(InterceptorTestBase):
     """Forward-path diagnostics (``downstream_addr`` / ``downstream_resp_count`` /
     ``buffered_stage``) must round-trip onto the access-log line.
 
-    These fields are populated by :class:`PureForwardServicer` via the
+    These fields are populated by :class:`DashScProxyServicer` via the
     ``context._dash_sc_access_agg`` hook the interceptor installs; here we
     simulate that write-back and assert the record ends up with the right
     shape regardless of capture mode.

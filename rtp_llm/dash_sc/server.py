@@ -23,9 +23,9 @@ from rtp_llm.dash_sc.access_log import (
     init_dash_sc_grpc_access_logger,
     init_dash_sc_grpc_query_logger,
 )
-from rtp_llm.dash_sc.forward_service import PureForwardServicer
+from rtp_llm.dash_sc.forward_service import DashScProxyServicer
 from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
-from rtp_llm.dash_sc.service import DashScGrpcInferenceServicer
+from rtp_llm.dash_sc.service import DashScInferenceServicer
 
 
 def _resolve_dash_sc_grpc_config(dash_sc_grpc_config):
@@ -178,7 +178,7 @@ class DashScGrpcServer:
                     DASH_SC_GRPC_QUERY_LOG_FILENAME, rank_id, server_id_int
                 ),
             )
-        is_forward = PureForwardServicer.has_forward_config()
+        is_forward = DashScProxyServicer.has_forward_config()
         interceptor = DashScGrpcAccessLogAioInterceptor(
             rank_id=rank_id,
             server_id=server_id_int,
@@ -195,10 +195,10 @@ class DashScGrpcServer:
             interceptors=[interceptor],
         )
         if is_forward:
-            servicer = PureForwardServicer()
+            servicer = DashScProxyServicer()
             mode = "pure forward"
         else:
-            servicer = DashScGrpcInferenceServicer(
+            servicer = DashScInferenceServicer(
                 backend_visitor=backend_visitor,
                 ip=ip,
                 port=port,

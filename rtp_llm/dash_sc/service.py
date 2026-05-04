@@ -1,6 +1,6 @@
 """DashSc gRPC servicer (aio) + real-inference bridge.
 
-* :class:`DashScGrpcInferenceServicer` implements ``ModelStreamInfer`` (predict_v2.proto wire)
+* :class:`DashScInferenceServicer` implements ``ModelStreamInfer`` (predict_v2.proto wire)
   as a ``grpc.aio``-native async generator.
 * :func:`iter_real_model_stream_infer` awaits ``backend_visitor.enqueue`` and forwards the
   async stream chunk-by-chunk. No sync→async bridge — the whole path runs on one asyncio
@@ -140,7 +140,7 @@ async def iter_real_model_stream_infer(
 # ----------------------------------------------------------------------------
 
 
-class DashScGrpcInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
+class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
     """ModelStreamInfer: fake mode (mock) or real mode (``backend_visitor.enqueue``).
 
     ``ip`` / ``port`` / ``server_id`` derive the snowflake-style ``GenerateInput.request_id``

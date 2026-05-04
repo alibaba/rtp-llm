@@ -2,7 +2,7 @@
 
 Covers:
 - ``iter_real_model_stream_infer``: success, empty-stream fallback, exception propagation.
-- ``DashScGrpcInferenceServicer.ModelStreamInfer``: fake mode, real mode,
+- ``DashScInferenceServicer.ModelStreamInfer``: fake mode, real mode,
   missing input_ids, request_id snowflake scheme alignment with HTTP
   ``generate_request_id``.
 """
@@ -18,7 +18,7 @@ import torch
 from rtp_llm.dash_sc.codec import OtherParams, SamplingParams
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.service import (
-    DashScGrpcInferenceServicer,
+    DashScInferenceServicer,
     iter_real_model_stream_infer,
 )
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
@@ -259,7 +259,7 @@ async def _areq_iter(requests):
         yield r
 
 
-class DashScGrpcInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
+class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
     def _valid_infer_request(self) -> predict_v2_pb2.ModelInferRequest:
         req = predict_v2_pb2.ModelInferRequest()
         req.id = "srv-1"
@@ -268,7 +268,7 @@ class DashScGrpcInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         return req
 
     async def test_fake_mode_returns_incremented_ids(self) -> None:
-        servicer = DashScGrpcInferenceServicer(backend_visitor=None)
+        servicer = DashScInferenceServicer(backend_visitor=None)
         req = self._valid_infer_request()
         responses = await _drain(
             servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
@@ -282,7 +282,7 @@ class DashScGrpcInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [142])
 
     async def test_missing_input_ids_error(self) -> None:
-        servicer = DashScGrpcInferenceServicer(backend_visitor=None)
+        servicer = DashScInferenceServicer(backend_visitor=None)
         bad = predict_v2_pb2.ModelInferRequest()
         bad.id = "x"
         bad.model_name = "m"
@@ -302,7 +302,7 @@ class DashScGrpcInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
         )
 
-        servicer = DashScGrpcInferenceServicer(backend_visitor=visitor)
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
         responses = await _drain(
             servicer.ModelStreamInfer(
                 _areq_iter([self._valid_infer_request()]), MagicMock()
@@ -328,7 +328,7 @@ class DashScGrpcInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 captured.append(gi.request_id)
                 return _FakeAsyncStream([])
 
-        servicer = DashScGrpcInferenceServicer(
+        servicer = DashScInferenceServicer(
             backend_visitor=_CaptureVisitor(),
             ip="10.0.0.1",
             port=12345,

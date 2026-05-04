@@ -92,7 +92,7 @@ def _parse_channels_per_addr(env_value: str) -> int:
     return n if n >= 1 else _DEFAULT_CHANNELS_PER_ADDR
 
 
-class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
+class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
     """Pure transparent proxy (grpc.aio) with a channel pool across downstream addrs."""
 
     @staticmethod
@@ -146,7 +146,7 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._rr_lock = threading.Lock()
 
         logging.info(
-            "[DashScGrpc] PureForwardServicer initialized: %d addresses × %d channels/addr = %d total stubs: %s",
+            "[DashScGrpc] DashScProxyServicer initialized: %d addresses × %d channels/addr = %d total stubs: %s",
             len(forward_addrs),
             channels_per_addr,
             len(self._stubs),
