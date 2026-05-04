@@ -140,9 +140,7 @@ def rpm_library(
         )
 
 def copts():
-    return [
-        "-DTORCH_CUDA",
-    ] + if_cuda([
+    return if_ascend([], ["-DTORCH_CUDA"]) + if_cuda([
         "-DTHRUST_IGNORE_CUB_VERSION_CHECK",
         "-DUSE_C10D_NCCL",
         "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE",
