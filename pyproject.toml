@@ -35,6 +35,7 @@ rtp-llm-server = "rtp_llm.start_server:main"
 [project.entry-points."pytest11"]
 remote-gpu = "rtp_llm.test.remote_tests.plugin"
 rtp-ci-profile = "rtp_llm.test.ci_profile_plugin"
+smoke-runs-per-test = "rtp_llm.test.smoke_framework.runs_plugin"
 
 [project.entry-points."rtp_llm.models"]
 # Model plugins can be registered here
