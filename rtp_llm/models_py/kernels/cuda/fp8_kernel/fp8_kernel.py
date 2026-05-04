@@ -322,7 +322,7 @@ def block_quant_dequant(
     )
     x_scale_repeat = x_scale_repeat[..., :n, :k]
 
-    return (x_q_block.to(torch.float32) * x_scale_repeat).to(dtype)
+    return (x_q_block.to(torch.float32) * x_scale_repeat.to(torch.float32)).to(dtype)
 
 
 # COPIED FROM DeepGEMM

@@ -62,11 +62,18 @@ class _RMSNorm(nn.Module):
     NaN otherwise, verified in bench_rmsnorm_cpp_vs_triton.py).
     """
 
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(
+        self,
+        dim: int,
+        eps: float = 1e-6,
+        weight: Optional[torch.Tensor] = None,
+    ):
         super().__init__()
         self.eps = eps
         self.dim = dim
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.bfloat16))
+        # Pass the framework loader's bf16 tensor at construction (factory
+        # mode) or ``None`` for unit-test paths that bind it later.
+        self.weight = weight
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # C++ op requires 2D input; reshape and restore.
@@ -182,51 +189,37 @@ class Block(nn.Module):
             ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
         )
-        self.attn_norm = _RMSNorm(dim, norm_eps)
-        self.ffn_norm = _RMSNorm(dim, norm_eps)
-        if self._factory_mode:
-            self.attn_norm.weight = nn.Parameter(
-                weights[f"{prefix}.attn_norm.weight"].to(torch.bfloat16),
-                requires_grad=False,
-            )
-            self.ffn_norm.weight = nn.Parameter(
-                weights[f"{prefix}.ffn_norm.weight"].to(torch.bfloat16),
-                requires_grad=False,
-            )
+        # Framework loader already casts norms to bf16 (compute_dtype) and
+        # hc_* tensors to fp32 (descriptor data_type); pass refs straight
+        # into _RMSNorm at construction time.
+        self.attn_norm = _RMSNorm(
+            dim,
+            norm_eps,
+            weight=weights[f"{prefix}.attn_norm.weight"] if self._factory_mode else None,
+        )
+        self.ffn_norm = _RMSNorm(
+            dim,
+            norm_eps,
+            weight=weights[f"{prefix}.ffn_norm.weight"] if self._factory_mode else None,
+        )
 
         mix_hc = (2 + hc_mult) * hc_mult
         hc_dim = hc_mult * dim
         if self._factory_mode:
-            self.hc_attn_fn = nn.Parameter(
-                weights[f"{prefix}.hc_attn_fn"].float(), requires_grad=False
-            )
-            self.hc_ffn_fn = nn.Parameter(
-                weights[f"{prefix}.hc_ffn_fn"].float(), requires_grad=False
-            )
-            self.hc_attn_base = nn.Parameter(
-                weights[f"{prefix}.hc_attn_base"].float(), requires_grad=False
-            )
-            self.hc_ffn_base = nn.Parameter(
-                weights[f"{prefix}.hc_ffn_base"].float(), requires_grad=False
-            )
-            self.hc_attn_scale = nn.Parameter(
-                weights[f"{prefix}.hc_attn_scale"].float(), requires_grad=False
-            )
-            self.hc_ffn_scale = nn.Parameter(
-                weights[f"{prefix}.hc_ffn_scale"].float(), requires_grad=False
-            )
+            self.hc_attn_fn = weights[f"{prefix}.hc_attn_fn"]
+            self.hc_ffn_fn = weights[f"{prefix}.hc_ffn_fn"]
+            self.hc_attn_base = weights[f"{prefix}.hc_attn_base"]
+            self.hc_ffn_base = weights[f"{prefix}.hc_ffn_base"]
+            self.hc_attn_scale = weights[f"{prefix}.hc_attn_scale"]
+            self.hc_ffn_scale = weights[f"{prefix}.hc_ffn_scale"]
         else:
-            # Match official param naming for ckpt loading.
-            self.hc_attn_fn = nn.Parameter(
-                torch.empty(mix_hc, hc_dim, dtype=torch.float32)
-            )
-            self.hc_ffn_fn = nn.Parameter(
-                torch.empty(mix_hc, hc_dim, dtype=torch.float32)
-            )
-            self.hc_attn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
-            self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
-            self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
-            self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+            # Unit-test path — caller binds tensors externally.
+            self.hc_attn_fn = None
+            self.hc_ffn_fn = None
+            self.hc_attn_base = None
+            self.hc_ffn_base = None
+            self.hc_attn_scale = None
+            self.hc_ffn_scale = None
 
     def _hc_fn_bf16(self, hc_fn: torch.Tensor) -> torch.Tensor:
         """Lazy-cached bf16 view of an FP32 hc_fn parameter.
@@ -763,39 +756,32 @@ class MTPBlock(Block):
             self.h_proj = QuantizedLinear(dim, dim, storage="fp8")
             self._h_proj_is_factory = False
 
-        self.enorm = _RMSNorm(dim, norm_eps)
-        self.hnorm = _RMSNorm(dim, norm_eps)
-        self.norm = _RMSNorm(dim, norm_eps)
+        self.enorm = _RMSNorm(
+            dim,
+            norm_eps,
+            weight=weights[f"{prefix}.enorm.weight"] if self._factory_mode else None,
+        )
+        self.hnorm = _RMSNorm(
+            dim,
+            norm_eps,
+            weight=weights[f"{prefix}.hnorm.weight"] if self._factory_mode else None,
+        )
+        self.norm = _RMSNorm(
+            dim,
+            norm_eps,
+            weight=weights[f"{prefix}.norm.weight"] if self._factory_mode else None,
+        )
 
         hc_dim = hc_mult * dim
         if self._factory_mode:
-            self.enorm.weight = nn.Parameter(
-                weights[f"{prefix}.enorm.weight"].to(torch.bfloat16),
-                requires_grad=False,
-            )
-            self.hnorm.weight = nn.Parameter(
-                weights[f"{prefix}.hnorm.weight"].to(torch.bfloat16),
-                requires_grad=False,
-            )
-            self.norm.weight = nn.Parameter(
-                weights[f"{prefix}.norm.weight"].to(torch.bfloat16),
-                requires_grad=False,
-            )
-            self.hc_head_fn = nn.Parameter(
-                weights[f"{prefix}.hc_head_fn"].float(), requires_grad=False
-            )
-            self.hc_head_base = nn.Parameter(
-                weights[f"{prefix}.hc_head_base"].float(), requires_grad=False
-            )
-            self.hc_head_scale = nn.Parameter(
-                weights[f"{prefix}.hc_head_scale"].float(), requires_grad=False
-            )
+            self.hc_head_fn = weights[f"{prefix}.hc_head_fn"]
+            self.hc_head_base = weights[f"{prefix}.hc_head_base"]
+            self.hc_head_scale = weights[f"{prefix}.hc_head_scale"]
         else:
-            self.hc_head_fn = nn.Parameter(
-                torch.empty(hc_mult, hc_dim, dtype=torch.float32)
-            )
-            self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
-            self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
+            # Unit-test path — caller binds tensors externally.
+            self.hc_head_fn = None
+            self.hc_head_base = None
+            self.hc_head_scale = None
 
     def _apply_proj(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
         """Factory FP8 linears want 2D input; QuantizedLinear accepts N-D."""
