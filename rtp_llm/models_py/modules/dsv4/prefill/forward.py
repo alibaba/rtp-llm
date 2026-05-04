@@ -182,7 +182,18 @@ def forward_layers(
     cp_ctx = None
     if cp_info is not None and cp_size > 1:
         T_local = int(input_ids.size(0))
-        cp_ctx = build_cp_context(cp_info, cp_size, cp_rank, T_local, input_ids.device)
+        prefix_length = 0
+        prefix_lengths = getattr(attn_inputs, "prefix_lengths", None)
+        if prefix_lengths is not None and prefix_lengths.numel() > 0:
+            prefix_length = int(prefix_lengths.reshape(-1)[0].item())
+        cp_ctx = build_cp_context(
+            cp_info,
+            cp_size,
+            cp_rank,
+            T_local,
+            input_ids.device,
+            position_offset=prefix_length,
+        )
     v4._propagate_cp_ctx(cp_ctx)
 
     # MOEDBG hook (mirrors V4Transformer.forward standalone path so the
@@ -241,7 +252,7 @@ def forward_layers(
         if cp_ctx is None:
             last_h = h[-1:].contiguous()
         else:
-            last_pos = cp_ctx.seq_len_full - 1
+            last_pos = cp_ctx.seq_len_total - 1
             last_mask = (cp_ctx.global_positions == last_pos) & cp_ctx.local_is_real
             last_h = h[last_mask].contiguous()
         _rt.record("lm_last_hidden", last_h)
@@ -339,6 +350,11 @@ class DSv4WriteCacheStoreOp(nn.Module):
         # Invariant references — safe to capture once because they don't
         # change across the forward.
         self.input_lengths: torch.Tensor = attn_inputs.input_lengths
+        cp_info = getattr(attn_inputs, "context_parallel_info", None)
+        if cp_info is not None:
+            actual_lengths = getattr(cp_info, "prefill_actual_input_lengths_cpu", None)
+            if actual_lengths is not None and actual_lengths.numel() > 0:
+                self.input_lengths = actual_lengths
         self.prefix_lengths: torch.Tensor = attn_inputs.prefix_lengths
         self.cache_store_inputs = attn_inputs.cache_store_inputs
         self.by_group_host: List[torch.Tensor] = (

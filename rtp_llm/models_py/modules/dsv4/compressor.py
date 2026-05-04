@@ -676,11 +676,10 @@ class Compressor(nn.Module):
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         """Bind CP context for the next prefill forward.  When set and
-        ``cp_ctx.cp_size > 1`` and ``start_pos == 0``, the rank-local
-        wkv / wgate projections are all-gathered to the full sequence
-        before the S-dim pool step — so every rank's local ``kv_cache``
-        ends up holding the SAME full compressed KV, which lets
-        attention run with rank-local Q × full-KV downstream."""
+        ``cp_ctx.cp_size > 1``, the rank-local wkv / wgate projections
+        are all-gathered to the current full prefill input before the S-dim
+        pool step.  This is required for both fresh and continuation CP
+        prefill; decode runs with ``cp_ctx`` cleared."""
         self._cp_ctx = cp_ctx
 
     def forward_decode(
@@ -1129,10 +1128,10 @@ class Compressor(nn.Module):
             and seqlen == 1
         )
 
-        # CP prefill: all-gather rank-local kv / score to full sequence
-        # before the S-pool step so the pool sees all tokens in logical
-        # order.  Decode (start_pos > 0) runs rank-local as usual — the
-        # kv_cache was already populated with the full KV during prefill.
+        # CP prefill: all-gather rank-local kv / score to the current full
+        # input before the S-pool step so the pool sees all new tokens in
+        # logical order.  This also applies to continuation prefill; decode
+        # reaches this path only with ``cp_ctx`` cleared.
         cp_ctx = self._cp_ctx
         if not is_batched_decode and cp_should_gather(cp_ctx, start_pos):
             kv = cp_all_gather_full(kv, cp_ctx)
