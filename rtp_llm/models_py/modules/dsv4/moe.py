@@ -484,6 +484,14 @@ class MoE(nn.Module):
         self.moe_inter_dim = moe_inter_dim
         self.swiglu_limit = swiglu_limit
         self.max_tokens_per_rank = max_tokens_per_rank
+        # Lazy-allocated FP32 accumulator for the ep_size==1 routed-experts
+        # path; replaces a per-forward ``torch.zeros_like(x, fp32)`` in
+        # forward().  Sized to max_tokens_per_rank on first use; subsequent
+        # calls slice ``[:T]`` and zero only the live prefix.  Eliminates
+        # one ``FillFunctor<float>`` per MoE layer per forward (kernel #7
+        # cluster in V4 prefill timeline).  Also makes the ep_size==1 path
+        # safe under cuda-graph capture (no fresh allocation per replay).
+        self._local_y_buf: Optional[torch.Tensor] = None
 
         assert (
             n_routed_experts % max(ep_size, 1) == 0
@@ -1233,7 +1241,17 @@ class MoE(nn.Module):
             # illegal (data-dependent shape ⇒ CPU sync); switch to the
             # graph-safe fixed-shape mask variant.  Eager keeps the fast
             # path for prefill performance.
-            y = torch.zeros_like(x, dtype=torch.float32)
+            T = x.size(0)
+            buf = self._local_y_buf
+            if buf is None or buf.size(0) < T or buf.device != x.device:
+                self._local_y_buf = torch.empty(
+                    (max(T, self.max_tokens_per_rank), self.dim),
+                    dtype=torch.float32,
+                    device=x.device,
+                )
+                buf = self._local_y_buf
+            y = buf[:T]
+            y.zero_()
             if torch.cuda.is_current_stream_capturing():
                 self._routed_experts_local_graph_safe(
                     x,
