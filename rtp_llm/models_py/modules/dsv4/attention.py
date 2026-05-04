@@ -48,13 +48,15 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_freqs_cis_local,
 )
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
-from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
+from rtp_llm.models_py.modules.dsv4.qlinear import (
+    QuantizedLinear,
+    _fp8_dequant_to_fp32,
+)
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
     apply_rotary_emb_batched,
     precompute_freqs_cis,
 )
-from rtp_llm.models_py.modules.dsv4.weight_loader import _repack_v4_fp8_scale_to_int32
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.ops.compute_ops import KVCacheRegionName, rtp_llm_ops
 
@@ -104,6 +106,23 @@ def _use_read_from_pool() -> bool:
 
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
+
+
+def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
+    """V4 ckpt UE8M0 ``[N/128, K/128]`` → DeepGEMM ``[N, K/128]`` UE8M0
+    int32-packed TMA-aligned scale.  Row-repeats by 128 along N so each
+    weight row gets its own scale row, then hands off to DeepGEMM's
+    ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` (column-major,
+    int32-packed).  Must be called on-device (DeepGEMM helper is CUDA)."""
+    assert scale.dtype == torch.float8_e8m0fnu, f"unexpected scale dtype {scale.dtype}"
+    assert scale.dim() == 2, f"unexpected scale dim {scale.dim()}"
+    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
+    N_blk, _ = scale.shape
+    N = N_blk * 128
+    idx = torch.arange(N, device=scale.device) // 128
+    scale_rep = scale.float().index_select(-2, idx)
+    return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
 
 
 def _prepare_wo_a_stacked(
@@ -169,15 +188,6 @@ def _v4_fp8_linear_from_dict(
     )
 
 
-class _NormHolder(nn.Module):
-    """Wraps a BF16 norm-weight parameter so that ckpt key `.weight` matches.
-
-    BF16 dtype is required by ``rtp_llm_ops.rmsnorm`` (silent NaN with fp32).
-    """
-
-    def __init__(self, dim: int):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.bfloat16))
 
 
 def _get_window_topk_idxs(
@@ -538,24 +548,36 @@ class Attention(nn.Module):
                 name: str, row_slice: slice = None, col_slice: slice = None
             ) -> "torch.nn.Module":
                 """Build a CudaFp8DeepGEMMLinear from a sliced view of the
-                ckpt FP8 weight + UE8M0 block-128 scale.  Slices the scale
-                along the *block-128* axis correspondingly: row_slice with
-                stride/start divisible by 128 maps to a row_slice on the
-                scale; same for col_slice."""
+                ckpt FP8 weight + scale.  Scale slicing depends on layout:
+                  * legacy raw UE8M0 [N//128, K//128]: row/col strides are
+                    block-128 → ``slice.start // 128``.
+                  * framework packed int32 [N, K//128//4]: N is fully
+                    expanded (slice by full N stride) and K is packed 4×
+                    (slice by ``slice.start // 512``)."""
                 wkey = f"{prefix}.{name}.weight"
                 skey = f"{prefix}.{name}.scale"
                 w = weights[wkey]
                 s = weights[skey]
+                scale_is_packed_int32 = s.dtype == torch.int32
                 if row_slice is not None:
-                    rs = row_slice.start // 128
-                    re = row_slice.stop // 128
                     w = w[row_slice]
-                    s = s[rs:re]
+                    if scale_is_packed_int32:
+                        s = s[row_slice]
+                    else:
+                        s = s[row_slice.start // 128 : row_slice.stop // 128]
                 if col_slice is not None:
-                    cs = col_slice.start // 128
-                    ce = col_slice.stop // 128
                     w = w[:, col_slice]
-                    s = s[:, cs:ce]
+                    if scale_is_packed_int32:
+                        assert (
+                            col_slice.start % 512 == 0 and col_slice.stop % 512 == 0
+                        ), (
+                            f"col_slice {col_slice} not aligned to 512 for "
+                            f"packed int32 scale; framework path requires "
+                            f"K-slices on 512-byte boundaries"
+                        )
+                        s = s[:, col_slice.start // 512 : col_slice.stop // 512]
+                    else:
+                        s = s[:, col_slice.start // 128 : col_slice.stop // 128]
                 # Local dict so the factory call sees the slice
                 local = dict(weights)
                 local[wkey] = w.contiguous()
@@ -572,33 +594,31 @@ class Attention(nn.Module):
             self.wkv = _fp8("wkv")  # MQA single KV head — replicate
 
             # wo_a grouped projection: row-split along (n_groups*o_lora_rank).
-            # Stays on QuantizedLinear (grouped einsum, no factory equivalent yet).
+            # Stored as plain ``[N, K]`` fp8 weight + UE8M0 scale tensors;
+            # the ``fp8_einsum`` production path uses the pre-stacked
+            # ``_wo_a_stk_w`` / ``_wo_a_stk_s`` buffers below, the BF16
+            # fallback path inline-dequants from these via
+            # ``_fp8_dequant_to_fp32``.
             assert (n_heads * head_dim) % o_groups == 0
-            self.wo_a = QuantizedLinear(
-                n_heads_local * head_dim // n_groups_local,
-                n_groups_local * o_lora_rank,
-                storage="fp8",
-            )
-            with torch.no_grad():
-                wo_a_w = weights[f"{prefix}.wo_a.weight"]
-                wo_a_s = weights[f"{prefix}.wo_a.scale"]
-                if tp_size > 1:
-                    wo_a_w = wo_a_w[wo_a_row_slice].contiguous()
+            wo_a_w = weights[f"{prefix}.wo_a.weight"]
+            wo_a_s = weights[f"{prefix}.wo_a.scale"]
+            if tp_size > 1:
+                wo_a_w = wo_a_w[wo_a_row_slice].contiguous()
+                if wo_a_s.dtype == torch.int32:
+                    # framework path: scale is already (N, K//128//4) int32
+                    wo_a_s = wo_a_s[wo_a_row_slice].contiguous()
+                else:
                     wo_a_s = wo_a_s[
                         wo_a_row_slice.start // 128 : wo_a_row_slice.stop // 128
                     ].contiguous()
-                self.wo_a.weight = nn.Parameter(wo_a_w, requires_grad=False)
-                self.wo_a.scale = nn.Parameter(wo_a_s, requires_grad=False)
-                # Pre-stack into the ``fp8_einsum`` layout once.  Stored
-                # as plain buffers so they don't enter nn.Module state_dict
-                # (would confuse the ckpt loader — the raw wo_a.weight /
-                # wo_a.scale are the real params).
-                K_local = n_heads_local * head_dim // n_groups_local
-                _stk_w, _stk_s = _prepare_wo_a_stacked(
-                    wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
-                )
-                self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
-                self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
+            self.wo_a_w = wo_a_w
+            self.wo_a_s = wo_a_s
+            K_local = n_heads_local * head_dim // n_groups_local
+            _stk_w, _stk_s = _prepare_wo_a_stacked(
+                wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+            )
+            self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
+            self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
 
             # wo_b row-split along K (cols), all_reduce after forward
             self.wo_b = (
@@ -607,39 +627,34 @@ class Attention(nn.Module):
                 else _fp8("wo_b")
             )
 
-            # Non-quantized params copy straight from the dict.
-            self.q_norm = _NormHolder(q_lora_rank)
-            self.q_norm.weight = nn.Parameter(
-                weights[f"{prefix}.q_norm.weight"].to(torch.bfloat16),
-                requires_grad=False,
-            )
-            self.kv_norm = _NormHolder(head_dim)
-            self.kv_norm.weight = nn.Parameter(
-                weights[f"{prefix}.kv_norm.weight"].to(torch.bfloat16),
-                requires_grad=False,
-            )
-            attn_sink_full = weights[f"{prefix}.attn_sink"].float()
-            self.attn_sink = nn.Parameter(
-                (
-                    attn_sink_full[attn_sink_slice].contiguous()
-                    if tp_size > 1
-                    else attn_sink_full
-                ),
-                requires_grad=False,
+            # Non-quantized norm weights — plain BF16 tensors (loader cast
+            # via compute_dtype).  BF16 dtype is required by
+            # ``rtp_llm_ops.rmsnorm`` (silent NaN with fp32).  attn_sink loads
+            # as fp32 via descriptor data_type.
+            self.q_norm = weights[f"{prefix}.q_norm.weight"]
+            self.kv_norm = weights[f"{prefix}.kv_norm.weight"]
+            attn_sink_full = weights[f"{prefix}.attn_sink"]
+            self.attn_sink = (
+                attn_sink_full[attn_sink_slice].contiguous()
+                if tp_size > 1
+                else attn_sink_full
             )
         else:
-            # Legacy meta-tensor + load_v4_safetensors path.
+            # Meta-tensor placeholder construction (used by single-layer
+            # microbench / unit-test contexts that bypass the factory mode).
             self.wq_a = QuantizedLinear(dim, q_lora_rank, storage="fp8")
-            self.q_norm = _NormHolder(q_lora_rank)
+            self.q_norm = None
             self.wq_b = QuantizedLinear(q_lora_rank, n_heads * head_dim, storage="fp8")
             self.wkv = QuantizedLinear(dim, head_dim, storage="fp8")
-            self.kv_norm = _NormHolder(head_dim)
+            self.kv_norm = None
             assert (n_heads * head_dim) % o_groups == 0
-            self.wo_a = QuantizedLinear(
-                n_heads * head_dim // o_groups, o_groups * o_lora_rank, storage="fp8"
-            )
+            # wo_a is now stored as plain ``self.wo_a_w`` / ``self.wo_a_s``;
+            # tests that need wo_a content set those attributes directly.
+            self.wo_a_w = None
+            self.wo_a_s = None
             self.wo_b = QuantizedLinear(o_groups * o_lora_rank, dim, storage="fp8")
-            self.attn_sink = nn.Parameter(torch.empty(n_heads, dtype=torch.float32))
+            # Bound externally by tests — see QuantizedLinear note.
+            self.attn_sink = None
 
         assert (n_heads * head_dim) % o_groups == 0
 
@@ -1588,7 +1603,7 @@ class Attention(nn.Module):
 
         # Q path
         qr = self._rmsnorm_weighted(
-            self._lin(self.wq_a, x), self.q_norm.weight
+            self._lin(self.wq_a, x), self.q_norm
         )  # [B, 1, q_lora]
         q = self._lin(self.wq_b, qr).unflatten(
             -1, (self.n_heads, self.head_dim)
@@ -1603,7 +1618,7 @@ class Attention(nn.Module):
         # KV path (single MQA head)
         kv = fused_rmsnorm_rope(
             self._lin(self.wkv, x),
-            self.kv_norm.weight,
+            self.kv_norm,
             freqs_cis_per_req,
             rd,
             eps=self.eps,
@@ -1938,7 +1953,7 @@ class Attention(nn.Module):
         else:
             apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
             o = o.reshape(bsz, q_len, self.n_groups, -1)
-            wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
+            wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
             wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
             o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
         out = self._lin(self.wo_b, o.flatten(2))
@@ -2073,7 +2088,7 @@ class Attention(nn.Module):
 
         # Q path
         qr = self._rmsnorm_weighted(
-            self._lin(self.wq_a, x), self.q_norm.weight
+            self._lin(self.wq_a, x), self.q_norm
         )  # [B, S, q_lora_rank]
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_qr_norm", qr)
@@ -2091,7 +2106,7 @@ class Attention(nn.Module):
 
         # KV path (single KV head) — rank-local under CP.
         kv_in = self._lin(self.wkv, x)
-        kv = fused_rmsnorm_rope(kv_in, self.kv_norm.weight, freqs_cis, rd, eps=self.eps)
+        kv = fused_rmsnorm_rope(kv_in, self.kv_norm, freqs_cis, rd, eps=self.eps)
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_post_rope_local", kv)
 
@@ -2501,7 +2516,7 @@ class Attention(nn.Module):
                     o[:, dbg_pos_idx : dbg_pos_idx + 1],
                 )
             o = o.reshape(bsz, seqlen, self.n_groups, -1)
-            wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
+            wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
             wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
             o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
         # Grouped output projection: inverse-RoPE + FP8 quant + wo_a einsum.
@@ -2540,7 +2555,7 @@ class Attention(nn.Module):
         else:
             apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
             o = o.reshape(bsz, seqlen, self.n_groups, -1)
-            wo_a_bf16 = self.wo_a.dequant_weight(out_dtype=o.dtype)
+            wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
             wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
             o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
         if _dbg:
