@@ -201,12 +201,125 @@ class Indexer(nn.Module):
         safe_slot = torch.where(
             valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
         )
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        if self._dbg_prefix is not None and _rt.ENABLED:
+            _rt.record_if_level(2, f"{self._dbg_prefix}_kv_bind_slot", safe_slot)
+            _rt.record_if_level(
+                2, f"{self._dbg_prefix}_kv_bind_valid", valid.to(torch.int32)
+            )
         gathered = self._kv_pool_view.index_select(0, safe_slot.reshape(-1))
         if gathered.dtype != dtype:
             gathered = gathered.to(dtype)
         zero_row = torch.zeros((), dtype=dtype, device=device)
         out_flat = torch.where(valid.reshape(-1).unsqueeze(-1), gathered, zero_row)
         self.kv_cache = out_flat.view(bsz, T, D).contiguous()
+
+    def _weights_proj_abs_blocked(self, x: torch.Tensor, start_pos) -> torch.Tensor:
+        bsz, seqlen, _ = x.shape
+        if seqlen <= 1:
+            return self.weights_proj(x)
+        if isinstance(start_pos, torch.Tensor):
+            if start_pos.numel() != 1:
+                return self.weights_proj(x)
+            sp = int(start_pos.item())
+        else:
+            sp = int(start_pos)
+
+        out = torch.empty(
+            bsz,
+            seqlen,
+            self.n_heads,
+            dtype=x.dtype,
+            device=x.device,
+        )
+        block = 256
+        start = 0
+        while start < seqlen:
+            abs_pos = sp + start
+            end = min(seqlen, start + (block - (abs_pos % block)))
+            out[:, start:end] = self.weights_proj(x[:, start:end])
+            start = end
+        return out
+
+    def _write_current_compressed_to_pool(
+        self,
+        compressed: Optional[torch.Tensor],
+        start_pos,
+    ) -> None:
+        if (
+            compressed is None
+            or self._kv_pool_view is None
+            or self._kv_block_table is None
+            or self._kv_eb <= 0
+            or compressed.numel() == 0
+        ):
+            return
+        if isinstance(start_pos, torch.Tensor):
+            if start_pos.numel() != 1:
+                return
+            sp = int(start_pos.item())
+        else:
+            sp = int(start_pos)
+        bsz = int(compressed.shape[0])
+        n = int(compressed.shape[1])
+        if n <= 0:
+            return
+
+        device = compressed.device
+        eb = int(self._kv_eb)
+        write_start = sp // self.compress_ratio
+        pos = torch.arange(
+            write_start, write_start + n, device=device, dtype=torch.long
+        )
+        block_in_seq = pos // eb
+        in_block = pos % eb
+        in_capacity = block_in_seq < int(self._kv_block_table.shape[1])
+        safe_block = torch.where(
+            in_capacity, block_in_seq, torch.zeros_like(block_in_seq)
+        )
+        bt_long = self._kv_block_table[:bsz].to(device=device, dtype=torch.long)
+        b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
+        block_id = bt_long[b_idx, safe_block.unsqueeze(0).expand(bsz, -1)]
+        valid = in_capacity.unsqueeze(0) & (block_id > 0)
+        safe_slot = torch.where(
+            valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
+        )
+        slot_mapping = torch.where(
+            valid, safe_slot, torch.full_like(safe_slot, -1)
+        ).reshape(-1)
+        from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
+            write_kv_to_pool,
+        )
+
+        write_kv_to_pool(
+            compressed[:bsz].reshape(bsz * n, -1),
+            slot_mapping,
+            self._kv_pool_view,
+            mask_negative=True,
+        )
+
+    def _overlay_current_compressed(
+        self,
+        compressed: Optional[torch.Tensor],
+        start_pos,
+    ) -> None:
+        if compressed is None or self.kv_cache is None or compressed.numel() == 0:
+            return
+        if isinstance(start_pos, torch.Tensor):
+            if start_pos.numel() != 1:
+                return
+            sp = int(start_pos.item())
+        else:
+            sp = int(start_pos)
+        write_start = sp // self.compress_ratio
+        n = int(compressed.shape[1])
+        write_end = min(write_start + n, int(self.kv_cache.shape[1]))
+        if write_end <= write_start:
+            return
+        self.kv_cache[: compressed.shape[0], write_start:write_end] = compressed[
+            :, : write_end - write_start
+        ].to(self.kv_cache.dtype)
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         """Bind CP context.  When active, rank-local Q applies RoPE at
@@ -533,7 +646,8 @@ class Indexer(nn.Module):
             # into the INDEXER_KV pool via its own bind/scatter lifecycle.
             if _dbg is not None:
                 self.compressor._dbg_prefix = f"{_dbg}_cmp"
-            self.compressor(x, start_pos)
+            current_compressed = self.compressor(x, start_pos)
+            self._write_current_compressed_to_pool(current_compressed, start_pos)
             if _dbg is not None:
                 self.compressor._dbg_prefix = None
 
@@ -543,13 +657,16 @@ class Indexer(nn.Module):
             self._bind_kv_cache_from_pool(
                 bsz, is_fresh_prefill=False, device=x.device, dtype=torch.bfloat16
             )
+            self._overlay_current_compressed(current_compressed, start_pos)
             if _dbg is not None:
                 _rt.record_if_level(
                     2,
                     f"{_dbg}_compressor_kv_cache",
                     self.kv_cache[:bsz, : end_pos // ratio],
                 )
-            weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
+            weights = self._weights_proj_abs_blocked(x, start_pos) * (
+                self.softmax_scale * self.n_heads**-0.5
+            )
             if _dbg is not None:
                 _rt.record_if_level(2, f"{_dbg}_weights", weights)
 
@@ -588,12 +705,7 @@ class Indexer(nn.Module):
             # Causal mask: each Q token at GLOBAL position g can only read
             # compressed KV blocks [0, (g+1)//ratio).  Only needed for prefill
             # (start_pos == 0).  Decode always has start_pos > 0.
-            is_prefill = not is_batched and (
-                isinstance(start_pos, int)
-                and start_pos == 0
-                or isinstance(start_pos, torch.Tensor)
-                and start_pos.item() == 0
-            )
+            is_prefill = not is_batched and seqlen > 1
             if _dbg is not None:
                 _rt.record_if_level(2, f"{_dbg}_score_pre_mask", index_score)
             if is_prefill:
@@ -601,7 +713,14 @@ class Indexer(nn.Module):
                 if cp_on:
                     q_pos_1b = (cp_ctx.global_positions + 1).unsqueeze(1)
                 else:
-                    q_pos_1b = torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1)
+                    sp_scalar = (
+                        int(start_pos.item())
+                        if isinstance(start_pos, torch.Tensor)
+                        else int(start_pos)
+                    )
+                    q_pos_1b = (
+                        sp_scalar + torch.arange(1, seqlen + 1, device=x.device)
+                    ).unsqueeze(1)
                 kv_cols = torch.arange(T_comp, device=x.device)
                 mask = kv_cols >= (q_pos_1b // ratio)
                 index_score = index_score + torch.where(mask, float("-inf"), 0.0)
@@ -617,7 +736,14 @@ class Indexer(nn.Module):
                 if cp_on:
                     q_pos_1b = (cp_ctx.global_positions + 1).unsqueeze(1)
                 else:
-                    q_pos_1b = torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1)
+                    sp_scalar = (
+                        int(start_pos.item())
+                        if isinstance(start_pos, torch.Tensor)
+                        else int(start_pos)
+                    )
+                    q_pos_1b = (
+                        sp_scalar + torch.arange(1, seqlen + 1, device=x.device)
+                    ).unsqueeze(1)
                 mask = topk_idxs >= (q_pos_1b // ratio)
                 topk_idxs = torch.where(mask, -1, topk_idxs + offset)
             else:
