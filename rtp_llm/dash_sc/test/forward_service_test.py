@@ -244,7 +244,7 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
-    """Forwarder writes ``downstream_addr`` / ``downstream_resp_count`` /
+    """Forwarder writes ``backend_addr`` / ``backend_resp_count`` /
     ``buffered_stage`` onto the access-log aggregate attached at
     ``context._dash_sc_access_agg``."""
 
@@ -285,7 +285,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
     def _patch_addr(self, idx: int) -> None:
         self.servicer._next_stub = lambda: (self.mock_stub, idx)
 
-    async def test_downstream_addr_set_to_chosen_backend(self) -> None:
+    async def test_backend_addr_set_to_chosen_backend(self) -> None:
         self._patch_addr(1)
         self.mock_stub.ModelStreamInfer.return_value = _AsyncIter(
             [self._make_resp("a")]
@@ -295,9 +295,9 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         await _drain(
             self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
         )
-        self.assertEqual(agg.downstream_addr, "10.0.0.2:8096")
+        self.assertEqual(agg.backend_addr, "10.0.0.2:8096")
 
-    async def test_downstream_resp_count_tracks_upstream_frames(self) -> None:
+    async def test_backend_resp_count_tracks_upstream_frames(self) -> None:
         self._patch_addr(0)
         chunks = [self._make_resp("a"), self._make_resp("b"), self._make_resp("c")]
         self.mock_stub.ModelStreamInfer.return_value = _AsyncIter(chunks)
@@ -306,7 +306,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         await _drain(
             self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
         )
-        self.assertEqual(agg.downstream_resp_count, 3)
+        self.assertEqual(agg.backend_resp_count, 3)
 
     async def test_stage_waiting_first_on_immediate_downstream_error(self) -> None:
         self._patch_addr(0)
@@ -326,7 +326,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
                 self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
             )
         self.assertEqual(agg.buffered_stage, "waiting_first")
-        self.assertEqual(agg.downstream_resp_count, 0)
+        self.assertEqual(agg.backend_resp_count, 0)
 
     async def test_stage_flushed_first_on_single_chunk_clean_end(self) -> None:
         self._patch_addr(0)
@@ -340,7 +340,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(out), 1)
         self.assertEqual(agg.buffered_stage, "flushed_first")
-        self.assertEqual(agg.downstream_resp_count, 1)
+        self.assertEqual(agg.backend_resp_count, 1)
 
     async def test_stage_flushed_both_on_happy_path(self) -> None:
         self._patch_addr(0)
@@ -353,7 +353,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
             self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
         )
         self.assertEqual(agg.buffered_stage, "flushed_both")
-        self.assertEqual(agg.downstream_resp_count, 3)
+        self.assertEqual(agg.backend_resp_count, 3)
 
     async def test_stage_flushed_first_on_exception_when_client_consumes(
         self,
@@ -379,7 +379,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
                 got.append(r.error_message)
         self.assertEqual(got, ["a"])
         self.assertEqual(agg.buffered_stage, "flushed_first_on_exception")
-        self.assertEqual(agg.downstream_resp_count, 1)
+        self.assertEqual(agg.backend_resp_count, 1)
 
     async def test_stage_dropped_buffered_when_client_went_away(self) -> None:
         """Downstream errors after token 1, client-side drops mid-yield ->
