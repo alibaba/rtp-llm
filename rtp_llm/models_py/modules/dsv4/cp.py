@@ -48,24 +48,36 @@ class CPContext:
     padded_seq_len: int
     # Real un-padded global seqlen (= user's prefill input length).
     seq_len_full: int
-    # [chunk_length] int64 — local idx i -> global position in
-    # [0, padded_seq_len).  For padding local idxs, the global position
-    # is ≥ seq_len_full; their attention output is discarded by the
-    # framework's strip-pad gather.
+    # [chunk_length] int64 — local idx i -> position in the current CP
+    # prefill shard, before adding any reused prefix offset.
+    relative_positions: torch.Tensor
+    # Prefix length already resident in KV cache for continuation prefill.
+    prefix_length: int
+    # [chunk_length] int64 — local idx i -> absolute sequence position
+    # (prefix_length + relative_positions).  For padding local idxs, the
+    # position is ≥ seq_len_total; their attention output is discarded by
+    # the framework's strip-pad gather.
     global_positions: torch.Tensor
     # [chunk_length] bool — True if local idx maps to a real token
-    # (padding_mask[global_pos] == 1), False for padding slots.
+    # (padding_mask[relative_pos] == 1), False for padding slots.
     local_is_real: torch.Tensor
     # [seq_len_full] int64 — gathered-flat index for each real token in
     # GLOBAL order. ``gathered.index_select(0, unpad_restore)`` yields the
     # full un-padded sequence.
     unpad_restore: torch.Tensor
+    # Total sequence length after this prefill step (prefix + current input).
+    seq_len_total: int
     # Raw cp_info, kept for any caller needing extra fields.
     cp_info: object
 
 
 def build_cp_context(
-    cp_info, cp_size: int, cp_rank: int, chunk_length: int, device: torch.device,
+    cp_info,
+    cp_size: int,
+    cp_rank: int,
+    chunk_length: int,
+    device: torch.device,
+    position_offset: int = 0,
 ) -> CPContext:
     """Compute the per-forward derived CPContext from framework metadata."""
     padding_mask = cp_info.prefill_qkv_padding_mask
@@ -83,19 +95,22 @@ def build_cp_context(
         f"padded_seq_len({padded_seq_len}) — multi-stream CP not yet supported"
     )
     pair_size = chunk_length // 2
-    assert pair_size * 2 == chunk_length, (
-        f"chunk_length({chunk_length}) must be even for zigzag CP"
-    )
+    assert (
+        pair_size * 2 == chunk_length
+    ), f"chunk_length({chunk_length}) must be even for zigzag CP"
 
-    # Formula-based global positions (matches ZigZagProcessor::plan).
+    # Formula-based current-input positions (matches ZigZagProcessor::plan).
     arange_pair = torch.arange(pair_size, dtype=torch.long, device=device)
     even_positions = cp_rank * pair_size + arange_pair
     odd_positions = padded_seq_len - (cp_rank + 1) * pair_size + arange_pair
-    global_positions = torch.cat([even_positions, odd_positions])  # [chunk_length]
+    relative_positions = torch.cat([even_positions, odd_positions])  # [chunk_length]
 
-    local_is_real = padding_mask[global_positions] == 1            # [chunk_length] bool
+    local_is_real = padding_mask[relative_positions] == 1  # [chunk_length] bool
     unpad_restore = restore_indices[padding_mask == 1].to(torch.long)  # [seq_len_full]
     seq_len_full = int(unpad_restore.shape[0])
+    prefix_length = int(position_offset)
+    global_positions = relative_positions + prefix_length
+    seq_len_total = prefix_length + seq_len_full
 
     return CPContext(
         cp_size=int(cp_size),
@@ -103,15 +118,19 @@ def build_cp_context(
         chunk_length=int(chunk_length),
         padded_seq_len=padded_seq_len,
         seq_len_full=seq_len_full,
+        relative_positions=relative_positions,
+        prefix_length=prefix_length,
         global_positions=global_positions,
         local_is_real=local_is_real,
         unpad_restore=unpad_restore,
+        seq_len_total=seq_len_total,
         cp_info=cp_info,
     )
 
 
 def cp_all_gather_full(
-    local: torch.Tensor, cp_ctx: CPContext,
+    local: torch.Tensor,
+    cp_ctx: CPContext,
 ) -> torch.Tensor:
     """All-gather a rank-local ``[B, chunk_length, *F]`` tensor across the
     CP (== TP) group and strip padding → ``[B, seq_len_full, *F]`` in
@@ -119,9 +138,9 @@ def cp_all_gather_full(
     assert local.dim() >= 2
     B = local.size(0)
     assert B == 1
-    assert local.size(1) == cp_ctx.chunk_length, (
-        f"local.size(1)={local.size(1)} != chunk_length={cp_ctx.chunk_length}"
-    )
+    assert (
+        local.size(1) == cp_ctx.chunk_length
+    ), f"local.size(1)={local.size(1)} != chunk_length={cp_ctx.chunk_length}"
     trailing = local.shape[2:]
 
     # collective_torch.all_gather concatenates along dim 0 for 1-D/2-D
@@ -129,12 +148,13 @@ def cp_all_gather_full(
     local_flat = local.reshape(cp_ctx.chunk_length, -1).contiguous()
     gathered = all_gather(local_flat, group=Group.TP)
     # gathered: [cp_size * chunk_length, prod(F)]
-    full = gathered.index_select(0, cp_ctx.unpad_restore)   # [seq_len_full, prod(F)]
+    full = gathered.index_select(0, cp_ctx.unpad_restore)  # [seq_len_full, prod(F)]
     return full.view((1, cp_ctx.seq_len_full) + trailing)
 
 
 def cp_freqs_cis_local(
-    freqs_cis: torch.Tensor, cp_ctx: CPContext,
+    freqs_cis: torch.Tensor,
+    cp_ctx: CPContext,
 ) -> torch.Tensor:
     """Select ``freqs_cis`` rows at the GLOBAL positions of this rank's
     local tokens → ``[chunk_length, rope_dim/2]`` complex tensor suitable
@@ -172,6 +192,10 @@ def cp_all_gather_to_full(
 
 
 def cp_should_gather(cp_ctx: Optional[CPContext], start_pos: int) -> bool:
-    """Prefill-only gate: gather runs iff a CPContext is bound, cp_size > 1,
-    and we're at start_pos == 0 (prefill)."""
-    return cp_ctx is not None and cp_ctx.cp_size > 1 and start_pos == 0
+    """Prefill-only gate: gather runs iff a CPContext is bound.
+
+    ``start_pos`` is intentionally ignored: CP continuation prefill also
+    receives only the rank-local suffix, so compressor/indexer state must still
+    all-gather the current input before pooling.
+    """
+    return cp_ctx is not None and cp_ctx.cp_size > 1

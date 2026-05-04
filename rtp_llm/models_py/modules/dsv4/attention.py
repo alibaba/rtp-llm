@@ -183,20 +183,17 @@ class _NormHolder(nn.Module):
 def _get_window_topk_idxs(
     window_size: int, bsz: int, seqlen: int, start_pos: int, device
 ) -> torch.Tensor:
-    """Returns int64 [bsz, seqlen, window_size] giving the (cyclic) absolute slot indices
-    in the sliding-window KV ring buffer that each query position should read."""
+    """Returns int64 [bsz, seqlen, window_size] with linear absolute KV indices."""
     if start_pos > 0 and seqlen > 1:
         # Continuation prefill uses a dense absolute SWA view reconstructed
         # from the pool. Per-position topk therefore stays in absolute token
         # coordinates, not final ring slots; otherwise earlier suffix tokens
         # read ring entries overwritten by later suffix tokens.
-        global_pos = torch.arange(
-            start_pos, start_pos + seqlen, device=device
-        )  # [seqlen]
-        window_start = (global_pos - window_size + 1).clamp_min(0)
-        offsets = torch.arange(window_size, device=device)  # [win]
-        matrix = window_start.unsqueeze(1) + offsets.unsqueeze(0)
-        matrix = torch.where(matrix <= global_pos.unsqueeze(1), matrix, -1)
+        base = torch.arange(start_pos, start_pos + seqlen, device=device).unsqueeze(1)
+        offs = torch.arange(window_size, device=device)
+        window_start = (base - window_size + 1).clamp_min(0)
+        matrix = window_start + offs
+        matrix = torch.where(matrix > base, -1, matrix)
     elif start_pos >= window_size - 1:
         sp = start_pos % window_size
         matrix = torch.cat(
@@ -226,15 +223,17 @@ def _get_window_topk_idxs(
 def _get_window_topk_idxs_cp(
     window_size: int,
     bsz: int,
-    seq_len_full: int,
+    seq_len_total: int,
     global_positions: torch.Tensor,
+    use_ring_layout: bool = False,
 ) -> torch.Tensor:
     """CP-prefill variant: each rank-local Q token at local index i sits
     at GLOBAL position g = global_positions[i].  Its sliding window
-    reads KV at global positions [max(0, g-win+1), g+1), which — after
-    the attention-side all-gather has stripped padding — live at
-    indices [max(0, g-win+1), g+1) in the full uncompressed KV tensor
-    ``kv[:, :seq_len_full]``.
+    reads KV at global positions [max(0, g-win+1), g+1).
+
+    Fresh CP prefill uses the all-gathered linear ``kv_full`` layout.  CP
+    continuation prefill reconstructs the same linear absolute view from the
+    paged SWA pool; ``use_ring_layout`` is kept for legacy ring callers.
 
     Returns [bsz, S_local, window_size] int64 with valid indices at the
     START of each row (slots 0..k-1) and -1 padding at the END — matching
@@ -251,7 +250,16 @@ def _get_window_topk_idxs_cp(
     """
     device = global_positions.device
     S_local = int(global_positions.shape[0])
-    W = min(window_size, max(seq_len_full, 1))
+    if use_ring_layout:
+        offsets = torch.arange(window_size, device=device)  # [win]
+        base = global_positions.unsqueeze(1)  # [S_local, 1]
+        idxs = (base % window_size + 1 + offsets.unsqueeze(0)) % window_size
+        valid_count = torch.clamp(global_positions + 1, max=window_size)
+        invalid = offsets.unsqueeze(0) < (window_size - valid_count.unsqueeze(1))
+        matrix = torch.where(invalid, torch.full_like(idxs, -1), idxs)
+        return matrix.unsqueeze(0).expand(bsz, -1, -1).contiguous()
+
+    W = min(window_size, max(seq_len_total, 1))
     # Per-row window start, clamped to 0 for early Q positions whose
     # left edge would be negative.  Matches `_get_window_topk_idxs`'s
     # `(base - window_size + 1).clamp(0)` at start_pos == 0.
@@ -260,9 +268,9 @@ def _get_window_topk_idxs_cp(
     offs = torch.arange(W, device=device)  # [W]
     matrix = window_start + offs  # [S_local, W] — valid kv indices left-aligned
     # Mask out positions that are causally future (matrix > g) or land
-    # past the unpadded sequence end (matrix >= seq_len_full, which
-    # protects rank-local padding slots whose global_position == padded_len).
-    invalid = (matrix > base) | (matrix >= seq_len_full)
+    # past the unpadded sequence end (matrix >= seq_len_total, which
+    # protects rank-local padding slots whose global_position is beyond end).
+    invalid = (matrix > base) | (matrix >= seq_len_total)
     matrix = torch.where(invalid, torch.full_like(matrix, -1), matrix)
     if W < window_size:
         # Tail-pad with -1 so the topk slot count matches the non-CP path.
@@ -276,18 +284,14 @@ def _get_window_topk_idxs_cp(
 def _get_compress_topk_idxs(
     ratio: int, bsz: int, seqlen: int, start_pos: int, offset: int, device
 ) -> torch.Tensor:
-    if start_pos > 0:
-        n = (start_pos + seqlen) // ratio
-        matrix = torch.arange(n, device=device).repeat(seqlen, 1)
-        q_pos_1b = start_pos + torch.arange(1, seqlen + 1, device=device).unsqueeze(1)
-        mask = matrix >= (q_pos_1b // ratio)
-        matrix = torch.where(mask, -1, matrix + offset)
-    else:
-        matrix = torch.arange(seqlen // ratio, device=device).repeat(seqlen, 1)
-        mask = (
-            matrix >= torch.arange(1, seqlen + 1, device=device).unsqueeze(1) // ratio
-        )
-        matrix = torch.where(mask, -1, matrix + offset)
+    end_pos = start_pos + seqlen
+    T_comp = end_pos // ratio
+    if T_comp == 0:
+        return torch.full((bsz, seqlen, 0), -1, dtype=torch.long, device=device)
+    cols = torch.arange(T_comp, device=device)
+    global_pos = torch.arange(start_pos, end_pos, device=device).unsqueeze(1)
+    allowed = (global_pos + 1) // ratio
+    matrix = torch.where(cols.unsqueeze(0) < allowed, cols.unsqueeze(0) + offset, -1)
     return matrix.unsqueeze(0).expand(bsz, -1, -1).contiguous()
 
 
@@ -299,13 +303,13 @@ def _get_window_topk_idxs_batched(
     device,
 ) -> torch.Tensor:
     """Batched variant of :func:`_get_window_topk_idxs` for heterogeneous
-    (sp, seqlen) prefill.  Returns ``[B, max_seqlen, window_size]`` int64.
+    (sp, seqlen) prefill.  Returns ``[B, max_seqlen, window_size]`` int64
+    with linear absolute KV indices.
 
     For each row ``b`` and local query position ``i < row_seqlens[b]``:
       global pos ``g = sp_tensor[b] + i``
-      valid slot count ``min(g + 1, window_size)``
-      returns the last ``valid`` absolute token positions;
-      remaining columns filled with ``-1``.
+      returns ``[max(0, g-window_size+1), g]``; remaining columns filled
+      with ``-1``.
 
     Rows with ``i >= row_seqlens[b]`` (padding) get an entire row of
     ``-1``, so the sparse_attn kernel contributes nothing for them.
@@ -320,8 +324,8 @@ def _get_window_topk_idxs_batched(
     i = torch.arange(max_seqlen, device=device, dtype=torch.long)  # [S]
     global_pos = sp_t.unsqueeze(1) + i.unsqueeze(0)  # [B, S]
     offsets = torch.arange(window_size, device=device, dtype=torch.long)  # [W]
-    window_start = (global_pos - window_size + 1).clamp_min(0)  # [B, S]
-    idxs = window_start.unsqueeze(-1) + offsets.view(1, 1, -1)  # [B, S, W]
+    window_start = (global_pos - window_size + 1).clamp_min(0)
+    idxs = window_start.unsqueeze(-1) + offsets.view(1, 1, -1)
     matrix = torch.where(idxs <= global_pos.unsqueeze(-1), idxs, -1)
     # Padding rows (i >= row_seqlens[b]) -> whole row -1.
     row_mask = i.unsqueeze(0) < seq_t.unsqueeze(1)  # [B, S]
@@ -361,8 +365,8 @@ def _get_compress_topk_idxs_batched(
     k = torch.arange(K, device=device, dtype=torch.long)  # [K]
     i = torch.arange(max_seqlen, device=device, dtype=torch.long)  # [S]
 
-    global_pos_1b = sp_t.unsqueeze(1) + i.unsqueeze(0) + 1
-    max_allowed_bi = global_pos_1b // ratio  # [B, S]
+    global_pos = sp_t.unsqueeze(1) + i.unsqueeze(0)  # [B, S]
+    max_allowed_bi = (global_pos + 1) // ratio  # [B, S]
     k_b_i = k.view(1, 1, K).expand(bsz, max_seqlen, K)
     valid_k = k_b_i < max_allowed_bi.unsqueeze(-1)  # [B, S, K]
     matrix = torch.where(valid_k, k_b_i + offset, torch.full_like(k_b_i, -1))
@@ -375,7 +379,7 @@ def _get_compress_topk_idxs_batched(
 def _get_compress_topk_idxs_cp(
     ratio: int,
     bsz: int,
-    seq_len_full: int,
+    seq_len_total: int,
     offset: int,
     global_positions: torch.Tensor,
 ) -> torch.Tensor:
@@ -384,10 +388,10 @@ def _get_compress_topk_idxs_cp(
     Q at GLOBAL position g reads compressed KV blocks [0, (g+1)//ratio),
     which live at offsets [offset, offset + (g+1)//ratio) inside the
     attention-side concatenated [sliding | compressed] tensor.  Return
-    shape [bsz, S_local, seq_len_full // ratio]."""
+    shape [bsz, S_local, seq_len_total // ratio]."""
     device = global_positions.device
     S_local = int(global_positions.shape[0])
-    T_comp = max(seq_len_full // ratio, 0)
+    T_comp = max(seq_len_total // ratio, 0)
     if T_comp == 0:
         return torch.full((bsz, S_local, 0), -1, dtype=torch.long, device=device)
     cols = torch.arange(T_comp, device=device)  # [T_comp]
@@ -968,38 +972,25 @@ class Attention(nn.Module):
         sp: Union[int, torch.Tensor],
         row_seqlens: Optional[torch.Tensor] = None,
     ) -> None:
-        """Phase E5b: direct SWA ring write to the framework SWA_KV pool
+        """Phase E5b: direct SWA write to the framework SWA_KV pool
         (replaces the retired ``self.kv_cache[:bsz, :win]`` register
         _buffer ring-write + ``_prefill_paged_write_swa`` mirror pair).
 
         For each of a row's valid new tokens at local index i:
-            global_pos[b] = sp[b] + src_start[b] + i
-            block[b]      = global_pos[b] // eb
-            slot[b]       = bt[b, block[b]] * eb + (global_pos[b] % eb)
+            abs_pos[b] = sp[b] + i
+            slot[b]    = bt[b, abs_pos[b] // eb] * eb + (abs_pos[b] % eb)
 
-        The attention-side dense tensor still exposes a ring indexed by
-        ``global_pos % win``.  The framework block table, however, is sparse
-        and aligned to absolute token blocks (old non-tail entries are -1),
-        so pool writes must address by absolute block position rather than
-        ``ring_pos // eb``.
-
-        Two write shapes depending on per-row seqlen vs win:
-          * seqlen <= win: write all seqlen tokens (each to a unique
-            ring slot).
-          * seqlen  > win: the first ``seqlen - win`` tokens would have
-            been overwritten by the ring — skip them and only write the
-            last ``win`` tokens (each to a unique ring slot).  Matches
-            the retired ring-write's final state without relying on the
-            non-deterministic behavior of ``index_copy_`` under
-            duplicate slot_mapping entries.
+        The framework SWA_KV pool is addressed by absolute token position,
+        not by ``pos % window_size``.  Decode translates its sliding-window
+        absolute positions through the same block table; continuation prefill
+        does the same when reconstructing a dense linear KV view.
 
         Supports ``bsz >= 1``.  ``sp`` accepts scalar (legacy) or ``[B]``
         int64 tensor.  ``row_seqlens`` (optional ``[B]``) marks the valid
         new-token count per row; ``None`` means ``kv_full.shape[1]`` for
-        every row.  Per-row rows with ``n_write[b] < max_n_write`` emit
+        every row.  Per-row rows with ``seq_t[b] < max_n_write`` emit
         sentinel ``-1`` slots past their valid range so write_kv_to_pool
-        skips them.  bsz==1 + scalar ``sp`` + ``row_seqlens is None``
-        produces byte-equal slot_mapping to the historical scalar path.
+        skips them.
         """
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
         from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
@@ -1016,7 +1007,6 @@ class Attention(nn.Module):
         if pool_view is None or eb <= 0:
             return
 
-        win = self.window_size
         max_seqlen = int(kv_full.shape[1])
         if max_seqlen == 0:
             return
@@ -1050,7 +1040,6 @@ class Attention(nn.Module):
         # the full request tail physical blocks populated, not just the final
         # ``window_size`` rows.
         n_write_per_row = seq_t  # [B]
-        src_start_per_row = torch.zeros_like(seq_t)
         max_n_write = int(n_write_per_row.max().item()) if bsz > 0 else 0
         if max_n_write == 0:
             return
@@ -1058,10 +1047,8 @@ class Attention(nn.Module):
         j = torch.arange(max_n_write, device=device, dtype=torch.long)  # [max_n_write]
         # Row-local validity: j < n_write[b] -> valid position.
         row_valid = j.unsqueeze(0) < n_write_per_row.unsqueeze(1)  # [B, max_n_write]
-        # Global positions per (row, j): sp[b] + src_start[b] + j.
-        global_pos = (
-            sp_t.unsqueeze(1) + src_start_per_row.unsqueeze(1) + j.unsqueeze(0)
-        )  # [B, max_n_write]
+        # Global positions per (row, j): sp[b] + j.
+        global_pos = sp_t.unsqueeze(1) + j.unsqueeze(0)  # [B, max_n_write]
         block_in_seq = global_pos // eb
         in_block = global_pos % eb
         bt_long = bt.to(torch.long)
@@ -1076,8 +1063,8 @@ class Attention(nn.Module):
             valid, block_id * eb + in_block, torch.full_like(in_block, -1)
         )
 
-        # Gather source rows: src[b, j] = kv_full[b, src_start[b] + j].
-        src_pos = src_start_per_row.unsqueeze(1) + j.unsqueeze(0)  # [B, max_n_write]
+        # Gather source rows: src[b, j] = kv_full[b, j].
+        src_pos = j.unsqueeze(0).expand(bsz, -1)  # [B, max_n_write]
         # Clamp to [0, max_seqlen-1] for safe gather; invalid positions are
         # masked by slot == -1 so the gathered value doesn't matter.
         src_pos_safe = src_pos.clamp(min=0, max=max(max_seqlen - 1, 0))
@@ -1390,22 +1377,26 @@ class Attention(nn.Module):
     def _gather_kv_cache_dense_from_pool(
         self,
         bsz: int,
-        sp: Union[int, torch.Tensor],
+        sp: Optional[Union[int, torch.Tensor]] = None,
         row_seqlens: Optional[torch.Tensor] = None,
         swa_dense_len: Optional[int] = None,
         swa_dense_override: Optional[torch.Tensor] = None,
+        swa_T: Optional[int] = None,
+        cmp_T: Optional[int] = None,
     ) -> Optional[torch.Tensor]:
         """Phase E1: reconstruct the ``[bsz, kv_cache_size, head_dim]``
         dense tensor that ``self.kv_cache[:bsz]`` presents, but sourced
         from the framework pools instead of the register_buffer mirror.
 
         Layout (matches register_buffer):
-          ``[:, :win, :]``        -- SWA_KV pool (ring-buffered)
-          ``[:, win:win+T_cmp, :]`` -- CSA_KV or HCA_KV pool (compressed)
+          ``[:, :swa_T, :]``             -- SWA_KV absolute-position stream
+          ``[:, swa_T:swa_T+cmp_T, :]``  -- CSA_KV or HCA_KV compressed stream
 
         Returns ``None`` when ctx not bound — caller falls back to
-        register_buffer.  SWA-only layers (compress_ratio == 0) get a
-        bare ``[bsz, win, hd]`` read.
+        register_buffer.  SWA-only layers (compress_ratio == 0) get a bare
+        ``[bsz, swa_T, hd]`` read.  ``swa_T`` defaults to ``window_size`` for
+        decode-like ring callers; continuation prefill passes the absolute
+        sequence end so every query can use linear absolute topk indices.
         """
         from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, SWA_KV
 
@@ -1415,21 +1406,31 @@ class Attention(nn.Module):
         hd = self.head_dim
         dtype = torch.bfloat16
         device = self.freqs_cis.device
+        T_swa = int(swa_T) if swa_T is not None else win
         T_cmp = (
-            self.compressor._kv_cache_t
-            if (self.compressor is not None and self.compress_ratio)
-            else 0
+            int(cmp_T)
+            if cmp_T is not None
+            else (
+                self.compressor._kv_cache_t
+                if (self.compressor is not None and self.compress_ratio)
+                else 0
+            )
         )
 
         if swa_dense_override is not None:
             swa_dense = swa_dense_override
         elif swa_dense_len is not None:
+            assert sp is not None
             assert row_seqlens is not None
             swa_dense = self._prefill_read_swa_dense_abs_from_pool(
                 bsz, sp, row_seqlens, int(swa_dense_len)
             )
-        else:
+        elif sp is not None:
             swa_dense = self._prefill_read_swa_from_pool(bsz, sp, row_seqlens)
+        else:
+            swa_dense = self._prefill_paged_read_kv(
+                SWA_KV, bsz, T_swa, hd, dtype, device
+            )
         if swa_dense is None:
             return None
         if T_cmp <= 0 or self.compress_ratio == 0:
@@ -2013,6 +2014,24 @@ class Attention(nn.Module):
         is_prefill_attn = is_batched_prefill or (not is_batched and seqlen > 1)
         cp_on = cp_ctx is not None and cp_ctx.cp_size > 1 and is_prefill_attn
 
+        # ``any_cont`` decides whether prefill attention reads the temporary
+        # linear [current KV | current compressed KV] buffer (fresh prefill) or
+        # the framework paged pools (continuation / mixed prefill).  Compute it
+        # before topk construction because those two layouts use different
+        # index spaces.
+        if cp_on:
+            sp_int = int(cp_ctx.prefix_length)
+            any_cont = sp_int > 0
+        elif isinstance(start_pos, torch.Tensor):
+            if start_pos.numel() == 1:
+                sp_int = int(start_pos.item())
+            else:
+                sp_int = 0  # placeholder; batched paths use start_pos tensor directly
+            any_cont = bool((start_pos > 0).any().item())
+        else:
+            sp_int = int(start_pos)
+            any_cont = sp_int > 0
+
         # Per-token RoPE angles.  Non-CP uses the contiguous window
         # freqs_cis[start_pos:start_pos+seqlen]; CP selects at each
         # rank-local token's GLOBAL position; batched prefill picks
@@ -2086,42 +2105,36 @@ class Attention(nn.Module):
         else:
             kv_full = kv
             seqlen_full = seqlen
+        if cp_on:
+            prefill_kv_len = cp_ctx.seq_len_total
+        elif is_batched_prefill:
+            if sequence_lengths is not None:
+                row_seqlens_for_kv = sequence_lengths.to(
+                    device=device, dtype=torch.long
+                )
+            else:
+                row_seqlens_for_kv = torch.full(
+                    (bsz,), seqlen, device=device, dtype=torch.long
+                )
+            prefill_kv_len = int(
+                (start_pos.to(device=device, dtype=torch.long) + row_seqlens_for_kv)
+                .max()
+                .item()
+            )
+        else:
+            prefill_kv_len = sp_int + seqlen
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_full", kv_full)
 
-        prefill_swa_dense_len = seqlen_full
-        if is_prefill_attn and not cp_on:
-            if isinstance(start_pos, torch.Tensor):
-                sp_for_len = start_pos.to(device=device, dtype=torch.long)
-                if sp_for_len.dim() == 0:
-                    sp_for_len = sp_for_len.unsqueeze(0)
-                if sp_for_len.numel() == 1 and bsz > 1:
-                    sp_for_len = sp_for_len.expand(bsz)
-            else:
-                sp_for_len = torch.full(
-                    (bsz,), int(start_pos), device=device, dtype=torch.long
-                )
-            if sequence_lengths is None:
-                seq_for_len = torch.full(
-                    (bsz,), seqlen, device=device, dtype=torch.long
-                )
-            else:
-                seq_for_len = sequence_lengths.to(device=device, dtype=torch.long)
-                if seq_for_len.dim() == 0:
-                    seq_for_len = seq_for_len.unsqueeze(0)
-                if seq_for_len.numel() == 1 and bsz > 1:
-                    seq_for_len = seq_for_len.expand(bsz)
-            prefill_swa_dense_len = int((sp_for_len + seq_for_len).max().item())
-
-        # Build topk_idxs — rows = rank-local Q; columns reference the
-        # concatenated [sliding | compressed] KV tensor (under CP the
-        # sliding portion has ``seqlen_full`` entries, not
-        # ``chunk_length``).
+        prefill_swa_dense_len = prefill_kv_len
+        # Build topk_idxs — rows = rank-local Q; columns reference either the
+        # fresh-prefill [sliding | compressed] tensor or the continuation
+        # paged-pool [SWA absolute stream | compressed] tensor.
         if cp_on:
             topk_idxs = _get_window_topk_idxs_cp(
                 win,
                 bsz,
-                seqlen_full,
+                prefill_kv_len,
                 cp_ctx.global_positions,
             )
         elif is_batched_decode:
@@ -2148,9 +2161,9 @@ class Attention(nn.Module):
             sp = int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
             topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, sp, device)
         if self.compress_ratio:
-            # The concatenated prefill KV is [sliding (seqlen_full), compressed tail].
-            # Compressed block start-index is seqlen_full in prefill,
-            # win in decode (ring-buffer layout).
+            # Fresh prefill attends over [current sliding KV | current compressed KV].
+            # Continuation prefill uses a dense absolute SWA view; decode keeps
+            # the compact [SWA ring | compressed] layout.
             if is_prefill_attn:
                 offset = prefill_swa_dense_len
             else:
@@ -2184,7 +2197,7 @@ class Attention(nn.Module):
                 compress_idxs = _get_compress_topk_idxs_cp(
                     ratio,
                     bsz,
-                    seqlen_full,
+                    prefill_kv_len,
                     offset,
                     cp_ctx.global_positions,
                 )
@@ -2226,42 +2239,38 @@ class Attention(nn.Module):
             topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
         topk_idxs = topk_idxs.long()
 
-        # Write KV cache + sparse attn.  sp_int kept for the scalar/bsz==1
-        # bit-equal path; any_cont drives the kv_cat fork for mixed batches.
-        if isinstance(start_pos, torch.Tensor):
-            if start_pos.numel() == 1:
-                sp_int = int(start_pos)
-            else:
-                sp_int = 0  # placeholder; batched paths use start_pos tensor directly
-            any_cont = bool((start_pos > 0).any().item())
-        else:
-            sp_int = int(start_pos)
-            any_cont = sp_int > 0
-
         if is_prefill_attn:
-            row_seqlens_for_pool = (
-                sequence_lengths
-                if sequence_lengths is not None
-                else torch.full((bsz,), seqlen, device=device, dtype=torch.long)
-            )
+            if cp_on:
+                pool_read_start = cp_ctx.prefix_length
+                row_seqlens_for_pool = torch.full(
+                    (bsz,), seqlen_full, device=device, dtype=torch.long
+                )
+            else:
+                pool_read_start = start_pos
+                row_seqlens_for_pool = (
+                    sequence_lengths
+                    if sequence_lengths is not None
+                    else torch.full((bsz,), seqlen, device=device, dtype=torch.long)
+                )
             prefill_swa_dense_for_attn = None
             if any_cont:
                 prefill_swa_dense_for_attn = self._prefill_read_swa_dense_abs_from_pool(
                     bsz,
-                    start_pos,
+                    pool_read_start,
                     row_seqlens_for_pool,
                     prefill_swa_dense_len,
                     current_kv_full=kv_full,
                 )
             # Phase E5b: direct SWA pool write from kv_full (no register_buffer
-            # intermediary).  Ring-buffered addressing handled inside
-            # ``_prefill_write_swa_to_pool``; prefix KV for continuation prefill
-            # already lives in the pool from prior calls.
+            # intermediary).  The framework SWA pool is absolute-positioned;
+            # prefix KV for continuation prefill already lives in the pool from
+            # prior calls.
             if cp_on:
                 # CP prefill has rank-local Q but kv_full is already all-gathered
-                # in logical order [0, seq_len_full).  Writing with the local
-                # chunk length would leave the decode SWA cache partially empty.
-                swa_write_start = 0
+                # in logical order for the current input.  Continuation prefill
+                # must preserve the reused prefix offset when writing SWA slots;
+                # otherwise the suffix overwrites positions 0..N.
+                swa_write_start = cp_ctx.prefix_length
                 swa_write_lengths = torch.full(
                     (bsz,), seqlen_full, device=device, dtype=torch.long
                 )
@@ -2316,10 +2325,11 @@ class Attention(nn.Module):
                         # byte-equal.
                         kv_cat = self._gather_kv_cache_dense_from_pool(
                             bsz,
-                            start_pos,
+                            pool_read_start,
                             row_seqlens_for_pool,
                             swa_dense_len=prefill_swa_dense_len,
                             swa_dense_override=prefill_swa_dense_for_attn,
+                            cmp_T=prefill_kv_len // ratio,
                         )
                         assert kv_cat is not None, (
                             "Phase E5b: continuation prefill requires paged "
@@ -2338,10 +2348,11 @@ class Attention(nn.Module):
                     else:
                         kv_cat = self._gather_kv_cache_dense_from_pool(
                             bsz,
-                            start_pos,
+                            pool_read_start,
                             row_seqlens_for_pool,
                             swa_dense_len=prefill_swa_dense_len,
                             swa_dense_override=prefill_swa_dense_for_attn,
+                            cmp_T=prefill_kv_len // ratio,
                         )
                         assert (
                             kv_cat is not None
@@ -2352,7 +2363,7 @@ class Attention(nn.Module):
                 else:
                     kv_cat = self._gather_kv_cache_dense_from_pool(
                         bsz,
-                        start_pos,
+                        pool_read_start,
                         row_seqlens_for_pool,
                         swa_dense_len=prefill_swa_dense_len,
                         swa_dense_override=prefill_swa_dense_for_attn,
