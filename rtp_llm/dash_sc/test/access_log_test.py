@@ -19,8 +19,10 @@ import grpc
 from rtp_llm.dash_sc import access_log as access_log_module
 from rtp_llm.dash_sc.access_log import (
     DASH_SC_GRPC_ACCESS_LOGGER_NAME,
+    DASH_SC_GRPC_QUERY_LOGGER_NAME,
     DashScGrpcAccessLogInterceptor,
     init_dash_sc_grpc_access_logger,
+    init_dash_sc_grpc_query_logger,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
@@ -217,18 +219,28 @@ class InterceptorTestBase(TestCase):
 
         self.interceptor = DashScGrpcAccessLogInterceptor(rank_id=0, server_id=1)
         self.records: list[dict[str, Any]] = []
+        self.query_records: list[dict[str, Any]] = []
 
         def capture(msg, *args, **_kw):
             # Logger.info is called with a pre-formatted JSON string; parse it
             rendered = msg % args if args else msg
             self.records.append(json.loads(rendered))
 
+        def capture_query(msg, *args, **_kw):
+            rendered = msg % args if args else msg
+            self.query_records.append(json.loads(rendered))
+
         self.logger_patch = patch.object(
             self.interceptor._logger, "info", side_effect=capture
         )
         self.logger_patch.start()
+        self.query_logger_patch = patch.object(
+            self.interceptor._query_logger, "info", side_effect=capture_query
+        )
+        self.query_logger_patch.start()
 
     def tearDown(self) -> None:
+        self.query_logger_patch.stop()
         self.logger_patch.stop()
         self.kmon_patch.stop()
 
@@ -313,7 +325,7 @@ class UnaryUnaryTest(InterceptorTestBase):
             behavior(request, ctx)
         self.assertEqual(len(self.records), 1)
         rec = self.records[0]
-        self.assertEqual(rec["status"], "UNKNOWN")
+        self.assertEqual(rec["status"], "UNKNOWN_RuntimeError")
         self.assertIn("boom", rec["status_detail"])
 
 
@@ -428,7 +440,7 @@ class BidiStreamTest(InterceptorTestBase):
                 got.append(r)
         self.assertEqual(len(got), 1)
         rec = self.records[0]
-        self.assertEqual(rec["status"], "UNKNOWN")
+        self.assertEqual(rec["status"], "UNKNOWN_RuntimeError")
         self.assertIn("downstream died", rec["status_detail"])
         self.assertEqual(rec["exc_type"], "RuntimeError")
         self.assertEqual(rec["generated_ids"], [10])
@@ -648,9 +660,10 @@ class KMonitorReportTest(InterceptorTestBase):
         self.assertEqual(len(self._calls_for(AccMetrics.ERROR_QPS_METRIC)), 1)
         self.assertEqual(len(self._calls_for(AccMetrics.SUCCESS_QPS_METRIC)), 0)
         _, _, error_tags = self._calls_for(AccMetrics.ERROR_QPS_METRIC)[0]
-        # Exception with no grpc code -> status "UNKNOWN" lands in error_code tag so
-        # alert rules can split crash vs handled gRPC codes.
-        self.assertEqual(error_tags["error_code"], "UNKNOWN")
+        # Exception with no grpc code -> status "UNKNOWN_<ExcClass>" lands in
+        # error_code tag so alert rules can split crash-class categories
+        # (RuntimeError / ValueError / …) without re-reading log lines.
+        self.assertEqual(error_tags["error_code"], "UNKNOWN_RuntimeError")
         self.assertEqual(error_tags["protocol"], "grpc")
 
     def test_generator_exit_routes_to_cancel_qps_not_error(self) -> None:
@@ -1127,7 +1140,10 @@ class BarePeerClosedTest(InterceptorTestBase):
             list(behavior(iter([_make_infer_request(input_ids=[1])]), ctx))
 
         rec = self.records[0]
-        self.assertEqual(rec["status"], "UNKNOWN")
+        # Bare ``RpcError`` (no code, no details) with a frame already received
+        # carries the subclass name through so Grafana can tell RpcError from
+        # ValueError from RuntimeError without reading the log line.
+        self.assertEqual(rec["status"], "UNKNOWN_RpcError")
         self.assertEqual(rec["req_count"], 1)
 
         cancel_metric = [
@@ -1200,7 +1216,9 @@ class ProtocolErrorMessageTest(InterceptorTestBase):
         behavior(_make_infer_request(input_ids=[1]), FakeContext())
 
         rec = self.records[0]
-        self.assertEqual(rec["status"], "INTERNAL")
+        # Pattern-matched short form for the zero-output case so Grafana
+        # distinguishes it from the generic ``BACKEND_INTERNAL`` bucket.
+        self.assertEqual(rec["status"], "BACKEND_EMPTY_OUTPUTS")
         self.assertEqual(rec["status_detail"], "empty outputs_list from backend")
         self.assertEqual(rec["error_message"], "empty outputs_list from backend")
         error_calls = [
@@ -1211,7 +1229,7 @@ class ProtocolErrorMessageTest(InterceptorTestBase):
         ]
         self.assertEqual(len(error_calls), 1)
         self.assertEqual(len(success_calls), 0)
-        self.assertEqual(error_calls[0][2]["error_code"], "INTERNAL")
+        self.assertEqual(error_calls[0][2]["error_code"], "BACKEND_EMPTY_OUTPUTS")
 
     def test_error_message_in_streaming_frame_routes_to_error_qps(self) -> None:
         """Mid-stream ``error_message`` frame (e.g. backend hit exception after
@@ -1230,14 +1248,16 @@ class ProtocolErrorMessageTest(InterceptorTestBase):
         list(behavior(iter([_make_infer_request(input_ids=[1])]), FakeContext()))
 
         rec = self.records[0]
-        self.assertEqual(rec["status"], "INTERNAL")
+        # No typed ``ClassName:`` prefix and no short-form pattern match —
+        # falls through to the bounded ``BACKEND_INTERNAL`` catch-all.
+        self.assertEqual(rec["status"], "BACKEND_INTERNAL")
         self.assertEqual(rec["status_detail"], "backend enqueue failed")
         self.assertEqual(rec["error_message"], "backend enqueue failed")
         error_calls = [
             c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC
         ]
         self.assertEqual(len(error_calls), 1)
-        self.assertEqual(error_calls[0][2]["error_code"], "INTERNAL")
+        self.assertEqual(error_calls[0][2]["error_code"], "BACKEND_INTERNAL")
 
     def test_error_message_overrides_late_finish_reason(self) -> None:
         """If the backend yields ``error_message`` AND a follow-up frame carries
@@ -1256,8 +1276,30 @@ class ProtocolErrorMessageTest(InterceptorTestBase):
         list(behavior(iter([_make_infer_request(input_ids=[1])]), FakeContext()))
 
         rec = self.records[0]
-        self.assertEqual(rec["status"], "INTERNAL")
+        self.assertEqual(rec["status"], "BACKEND_INTERNAL")
         self.assertEqual(rec["error_message"], "kv cache exhausted")
+
+    def test_typed_class_prefix_routes_to_named_bucket(self) -> None:
+        """Primary path: ``service.py`` formats backend exceptions as
+        ``f"{type(e).__name__}: {e}"``. The leading class name before the
+        first ``":"`` becomes the Grafana ``error_code`` tag, bounded by the
+        finite Python exception class space."""
+
+        def inner(request, context):
+            return self._make_error_response("RuntimeError: kv cache oom")
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        behavior(_make_infer_request(input_ids=[1]), FakeContext())
+
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "BACKEND_RuntimeError")
+        error_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC
+        ]
+        self.assertEqual(error_calls[0][2]["error_code"], "BACKEND_RuntimeError")
 
 
 class CompletedInferenceTeardownTest(InterceptorTestBase):
@@ -1394,12 +1436,79 @@ class RawModeErrorMessageTest(RawModeInterceptorTestBase):
 
         rec = self.records[0]
         self.assertEqual(rec["capture_mode"], "raw")
-        self.assertEqual(rec["status"], "INTERNAL")
+        self.assertEqual(rec["status"], "BACKEND_INTERNAL")
         self.assertEqual(rec["error_message"], "downstream backend returned error")
         error_calls = [
             c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC
         ]
         self.assertEqual(len(error_calls), 1)
+
+
+class QueryLogTest(InterceptorTestBase):
+    """Query log records two timestamps — handler entry (``arrival``) and
+    inbound-stream drain (``req_read_done``). Their diff isolates the
+    ``aquila → forward`` inbound-receive latency from everything the
+    end-of-RPC access log bundles together.
+    """
+
+    def test_query_log_records_arrival_and_req_read_done_timestamps(self) -> None:
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield _make_stream_response(generated_ids=[1], finish_reason=0)
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+        ctx.set_metadata([("x-dashscope-request-id", "corr-xyz")])
+        list(behavior(iter([_make_infer_request(input_ids=[10, 20, 30])]), ctx))
+
+        # One line per RPC, strictly two timestamps + correlate keys.
+        self.assertEqual(len(self.query_records), 1)
+        q = self.query_records[0]
+        self.assertIsInstance(q["arrival_ts_epoch_ms"], int)
+        self.assertIsInstance(q["req_read_done_ts_epoch_ms"], int)
+        self.assertGreaterEqual(
+            q["req_read_done_ts_epoch_ms"], q["arrival_ts_epoch_ms"]
+        )
+        self.assertEqual(q["upstream_request_id"], "corr-xyz")
+        # Proto-body fields belong in the completion log, not here.
+        for removed in (
+            "request_id",
+            "model_name",
+            "input_len",
+            "capture_mode",
+            "input_ids",
+            "generated_ids",
+            "raw_requests",
+        ):
+            self.assertNotIn(removed, q)
+
+    def test_query_log_emitted_on_empty_inbound_stream(self) -> None:
+        """Even a frame-less RPC writes one query log line as soon as the
+        inbound iterator yields ``StopIteration`` — the two timestamps still
+        bound ``aquila → forward`` receive cost, and the line's presence lets
+        operators tell "forward never saw the RPC" (no line) apart from
+        "forward saw it, handler returned error" (line present, completion log
+        carries the error)."""
+
+        def inner(request_iterator, context):
+            for _ in request_iterator:
+                pass
+            raise grpc.RpcError()
+            yield  # pragma: no cover
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        with self.assertRaises(grpc.RpcError):
+            list(behavior(iter([]), FakeContext()))
+
+        self.assertEqual(len(self.query_records), 1)
+        # Completion log still fires.
+        self.assertEqual(len(self.records), 1)
 
 
 if __name__ == "__main__":
