@@ -156,15 +156,27 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             forward_addrs,
         )
 
-    def _next_stub(self) -> tuple[predict_v2_pb2_grpc.GRPCInferenceServiceStub, int]:
+    def _next_stub(
+        self,
+    ) -> tuple[Optional[predict_v2_pb2_grpc.GRPCInferenceServiceStub], int]:
         """Pick the next (stub, addr_index_in_forward_addrs) via round-robin.
 
-        Returns the index into ``self._forward_addrs`` (not ``self._stubs``),
-        matching the pre-pool contract: callers use the second element to
-        look up the addr string. The stub itself may correspond to any of
-        the ``channels_per_addr`` connections pointed at that addr.
+        Returns ``(None, -1)`` when the pool is empty — this happens during
+        the ``server.stop(grace)`` → ``servicer.close()`` shutdown window,
+        when a stray RPC already dispatched by grpcio reaches the handler
+        after ``close()`` has cleared ``_stubs``. Without this guard the
+        empty-pool modulo raises ``ZeroDivisionError`` and the access log
+        shows ``UNKNOWN_ZeroDivisionError``; the caller translates the
+        ``None`` return into ``UNAVAILABLE`` instead — correct gRPC
+        semantics and a bounded ``error_code`` bucket on Grafana.
+
+        Otherwise returns the index into ``self._forward_addrs`` (not
+        ``self._stubs``); the stub may correspond to any of the
+        ``channels_per_addr`` connections pointed at that addr.
         """
         with self._rr_lock:
+            if not self._stubs:
+                return None, -1
             i = self._rr_idx
             self._rr_idx = (self._rr_idx + 1) % len(self._stubs)
         return self._stubs[i], self._stub_addr_idx[i]
@@ -178,6 +190,15 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
 
     def ModelStreamInfer(self, request_iterator, context):
         stub, idx = self._next_stub()
+        if stub is None:
+            # Shutdown race: ``close()`` cleared ``_stubs`` after grpcio had
+            # already dispatched this RPC. ``context.abort`` sends the client
+            # a proper UNAVAILABLE + message, raises ``grpc.RpcError`` here
+            # so the handler unwinds cleanly, and the interceptor's
+            # ``_classify_rpc_exception`` picks the code up as
+            # ``UNAVAILABLE`` (bounded ``error_code`` bucket) instead of
+            # ``UNKNOWN_ZeroDivisionError``.
+            context.abort(grpc.StatusCode.UNAVAILABLE, "forwarder shutting down")
         addr = self._forward_addrs[idx]
 
         # Grab the access-log aggregate (installed by the access-log
