@@ -527,7 +527,7 @@ class _RpcAggregate:
     exc_type: Optional[str] = None
     context_code: Optional[str] = None
     context_active: Optional[bool] = None
-    # Forward-path diagnostics (populated by :class:`PureForwardServicer` via
+    # Forward-path diagnostics (populated by :class:`DashScProxyServicer` via
     # ``context._dash_sc_access_agg``). Consolidates signal that otherwise lives
     # in the forwarder's separate debug log — specifically the ones needed to
     # distinguish "downstream never produced anything" from "downstream produced
@@ -822,7 +822,7 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
             upstream_request_id_key=up_key,
         )
         # Make the aggregate reachable from downstream servicer code via the
-        # gRPC context object. :class:`PureForwardServicer` reads this back to
+        # gRPC context object. :class:`DashScProxyServicer` reads this back to
         # write ``downstream_addr`` / ``downstream_resp_count`` / ``buffered_stage``
         # directly, so one access-log line is self-contained — no side log to
         # cross-reference when debugging a ``resp_count=0`` event.
@@ -928,7 +928,7 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         body read or backend work. That matches the HTTP frontend's
         ``query_access.log`` contract (``tail -f`` = see arrivals) and keeps
         the two tiers of this forwarder symmetric — without this, the inner
-        ``DashScGrpcInferenceServicer`` (whose ``for req: yield from ...``
+        ``DashScInferenceServicer`` (whose ``for req: yield from ...``
         pattern defers inbound-drain to after generation completes) would
         emit query lines only at RPC end, not at arrival.
 

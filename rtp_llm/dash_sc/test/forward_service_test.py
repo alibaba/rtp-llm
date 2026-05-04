@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import grpc
 
 from rtp_llm.dash_sc.forward_service import (
-    PureForwardServicer,
+    DashScProxyServicer,
     _parse_channels_per_addr,
     _parse_forward_addrs,
 )
@@ -110,7 +110,7 @@ class IteratorBehaviorTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel_patcher.start()
 
-        self.servicer = PureForwardServicer(["127.0.0.1:1"])
+        self.servicer = DashScProxyServicer(["127.0.0.1:1"])
         self.mock_stub = MagicMock()
         self.servicer._stubs = [self.mock_stub]
 
@@ -149,7 +149,7 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel_patcher.start()
 
-        self.servicer = PureForwardServicer(["127.0.0.1:1"])
+        self.servicer = DashScProxyServicer(["127.0.0.1:1"])
         self.mock_stub = MagicMock()
         self.servicer._stubs = [self.mock_stub]
 
@@ -254,7 +254,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel_patcher.start()
 
-        self.servicer = PureForwardServicer(["10.0.0.1:8096", "10.0.0.2:8096"])
+        self.servicer = DashScProxyServicer(["10.0.0.1:8096", "10.0.0.2:8096"])
         self.mock_stub = MagicMock()
         self.servicer._stubs = [self.mock_stub, self.mock_stub]
 
@@ -415,7 +415,7 @@ class MetadataPropagationTest(unittest.IsolatedAsyncioTestCase):
             "grpc.aio.insecure_channel", return_value=MagicMock()
         )
         self.channel_patcher.start()
-        self.servicer = PureForwardServicer(["127.0.0.1:1"])
+        self.servicer = DashScProxyServicer(["127.0.0.1:1"])
         self.mock_stub = MagicMock()
         self.servicer._stubs = [self.mock_stub]
 
@@ -461,7 +461,7 @@ class ChannelPoolTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_default_one_channel_per_addr(self) -> None:
         with patch("grpc.aio.insecure_channel", return_value=MagicMock()) as mock_ch:
-            servicer = PureForwardServicer(["10.0.0.1:8096", "10.0.0.2:8096"])
+            servicer = DashScProxyServicer(["10.0.0.1:8096", "10.0.0.2:8096"])
         self.assertEqual(len(servicer._channels), 2)
         self.assertEqual(len(servicer._stubs), 2)
         self.assertEqual(mock_ch.call_count, 2)
@@ -469,7 +469,7 @@ class ChannelPoolTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_pool_round_robin_over_addrs(self) -> None:
         with patch("grpc.aio.insecure_channel", return_value=MagicMock()):
-            servicer = PureForwardServicer(
+            servicer = DashScProxyServicer(
                 ["10.0.0.1:8096", "10.0.0.2:8096"], channels_per_addr=3
             )
         self.assertEqual(len(servicer._stubs), 6)
@@ -491,7 +491,7 @@ class ChannelPoolTest(unittest.IsolatedAsyncioTestCase):
         that into a proper UNAVAILABLE abort.
         """
         with patch("grpc.aio.insecure_channel", return_value=MagicMock()):
-            servicer = PureForwardServicer(["10.0.0.1:8096"])
+            servicer = DashScProxyServicer(["10.0.0.1:8096"])
         await servicer.close()
         self.assertEqual(servicer._next_stub(), (None, -1))
 
