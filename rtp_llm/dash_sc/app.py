@@ -17,7 +17,6 @@ from typing import Any, List, Optional
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.dash_sc.server import DashScGrpcServer
-from rtp_llm.dash_sc.service import set_dash_sc_grpc_enqueue_event_loop
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
@@ -57,10 +56,11 @@ class DashScApp:
     Startup order (``start``):
       1. Build ``ModelConfig`` (no weight loading — just architecture/ports metadata).
       2. Build ``BackendRPCServerVisitor`` via the shared factory.
-      3. Spin up a dedicated asyncio loop in a background thread and register it
-         as the enqueue loop so servicer coroutines have somewhere to run.
-      4. Call ``self._grpc_server.start_in_thread`` (blocks until bind succeeds
-         or raises on bind/start error).
+      3. Spin up a dedicated asyncio loop in a background thread — same loop
+         hosts the aio gRPC server AND backend ``enqueue`` coroutines, so the
+         request path never leaves this loop.
+      4. Call ``self._grpc_server.start_on_loop`` (schedules start on the
+         loop and blocks the main thread until bind succeeds or raises).
       5. Notify the parent via the pipe, then block the main thread waiting on
          SIGTERM/SIGINT.
     """
@@ -149,7 +149,6 @@ class DashScApp:
             )
 
             loop = self._start_enqueue_loop()
-            set_dash_sc_grpc_enqueue_event_loop(loop)
 
             # Register py_rtp_* metrics so the access-log interceptor's kmonitor.report
             # calls find their metric objects. Idempotent — matches FrontendServer.__init__
@@ -164,8 +163,9 @@ class DashScApp:
                 self.server_config.frontend_server_id,
                 port,
             )
-            self._grpc_server.start_in_thread(
-                port,
+            self._grpc_server.start_on_loop(
+                loop,
+                port=port,
                 backend_visitor=backend_visitor,
                 ip=self.server_config.ip,
                 server_id=self.server_config.frontend_server_id,
