@@ -9,28 +9,6 @@ import pytest
 from rtp_llm.test.smoke_framework.manifest import build_smoke_params
 from rtp_llm.test.smoke_framework.runner import run_smoke_test
 
-# All Qwen2.5-0.5B-based cases below (head_dim=64) crash the server with
-#     `BatchPrefillWithPagedKVCache failed with error
-#      no kernel image is available for execution on the device`
-# on L20 (sm_89) because the OSS-pinned flashinfer wheel
-# `flashinfer-jit-cache==0.6.0+mla384`
-# (_build/oss_optional_extras.toml:50) is the pruned MLA-only fork —
-# its precompiled head_dim_qk_64 batch_prefill kernels target SM 90/100
-# only, no SM 89. main-internal uses vanilla flashinfer 0.6.6 from the
-# rtp-maga internal mirror which has full SM coverage.
-#
-# The fix is a wheel rebuild + re-upload to the rtp-opensource bucket;
-# tracked separately from PR 537 (pip-unify code changes are independent
-# of the wheel content). embedding_qwen_gte_7b_cudagraph passes because
-# Qwen-7B has head_dim=128, which IS in the pruned wheel.
-#
-# Unblock the cascade for cpp-ut / smoke-amd / smoke-gb200 / smoke-sm9x
-# until the flashinfer wheel is rebuilt.
-pytestmark = pytest.mark.skip(
-    reason="Blocked on flashinfer-jit-cache OSS wheel rebuild "
-    "(0.6.0+mla384 lacks SM89 head_dim=64 prefill kernels)"
-)
-
 SMOKE_CASES = {   'softmax_probs': {   'task_info': 'data/model/qwen25/q_r_softmax_probs.json',
                          'smoke_args': '--act_type FP16 --warm_up 0',
                          'gpu_type': 'L20',

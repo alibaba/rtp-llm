@@ -261,15 +261,24 @@ class CaseRunner(object):
             )
 
     def _start_remote_kvcm_server(self) -> Optional[RemoteKVCMServer]:
-        # TEST_SRCDIR / TEST_WORKSPACE are Bazel-runfile env vars; under
-        # pytest+REAPI (--remote dispatch) they're unset. Fall back to cwd
-        # which holds the same flattened tree on the worker.
-        srcdir = os.environ.get("TEST_SRCDIR", os.getcwd())
-        workspace = os.environ.get("TEST_WORKSPACE", "rtp_llm")
-        server_path = os.path.join(
-            srcdir, workspace, "external/remote_kv_cache_manager_server"
-        )
-        kvcm_src_logs_path = os.path.join(srcdir, "rtp_llm/logs")
+        if "TEST_SRCDIR" in os.environ:
+            # bazel test path — main-internal still runs this branch.
+            # Runfiles tree has the http_archive contents under
+            # external/remote_kv_cache_manager_server/.
+            srcdir = os.environ["TEST_SRCDIR"]
+            workspace = os.environ.get("TEST_WORKSPACE", "rtp_llm")
+            server_path = os.path.join(
+                srcdir, workspace, "external/remote_kv_cache_manager_server"
+            )
+            kvcm_src_logs_path = os.path.join(srcdir, "rtp_llm/logs")
+        else:
+            # pytest+REAPI path — `kv_cache_manager_bin` is staged by
+            # setup.py:stage_kvcm_binary into rtp_llm/libs/kv_cache_manager_server/bin/.
+            # Resolve via package introspection so it works regardless of cwd.
+            import rtp_llm
+            libs_dir = os.path.join(os.path.dirname(rtp_llm.__file__), "libs")
+            server_path = os.path.join(libs_dir, "kv_cache_manager_server")
+            kvcm_src_logs_path = os.path.join(os.getcwd(), "rtp_llm/logs")
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         kvcm_dst_logs_path = os.path.join(bazel_outputs_dir, "kvcm_logs")
         remote_kvcm_server = RemoteKVCMServer(

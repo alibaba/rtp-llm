@@ -1098,6 +1098,76 @@ def copy_extensions(project_root: Path, build_config: str) -> None:
     # Auto-generate .pyi type stubs from the freshly compiled .so files
     generate_pyi_stubs(project_root)
 
+    # Stage `kv_cache_manager_bin` (from @remote_kv_cache_manager_server bazel
+    # http_archive) into the source tree so smoke tests using
+    # remote_kv_cache_manager (cuda_remote_cache, eagle_remote_cache_tp2,
+    # next_long_reuse_remote, …) can find it under pytest+REAPI dispatch where
+    # bazel `external/` runfiles aren't available. See `stage_kvcm_binary`.
+    stage_kvcm_binary(project_root, build_config)
+
+
+def stage_kvcm_binary(project_root: Path, build_config: str) -> None:
+    """Copy `kv_cache_manager_bin` from bazel external/ into rtp_llm/libs/.
+
+    Background — main-internal smoke tests run via `bazel test`, where the
+    binary is on the runfiles tree at
+    `<TEST_SRCDIR>/<TEST_WORKSPACE>/external/remote_kv_cache_manager_server/bin/kv_cache_manager_bin`.
+    PR 537's pytest+REAPI path doesn't reproduce that tree on the worker.
+
+    Strategy: `bazelisk fetch` triggers extraction of the http_archive into
+    `$(bazelisk info output_base)/external/remote_kv_cache_manager_server/bin/`,
+    then we cp the binary into `rtp_llm/libs/kv_cache_manager_server/bin/` so
+    it's both discoverable via the standard package-relative path AND included
+    in the pytest+REAPI CAS upload (extended glob in
+    `rtp_llm/test/remote_tests/remote_exec_rtp.py:_collect_repo_runtime_files`).
+
+    Skip on platforms that genuinely don't need it (PPU has no remote KVCM
+    smoke), and let `RTP_SKIP_KVCM_STAGE=1` opt out for emergency CI rollback.
+    """
+    if os.environ.get("RTP_SKIP_KVCM_STAGE", "0") == "1":
+        print("[kvcm] RTP_SKIP_KVCM_STAGE=1 — skipping kv_cache_manager_bin staging")
+        return
+    if build_config == "ppu":
+        # PPU smoke doesn't exercise remote_kvcm; keep PPU build lean.
+        return
+
+    target_dir = project_root / "rtp_llm" / "libs" / "kv_cache_manager_server" / "bin"
+    target_bin = target_dir / "kv_cache_manager_bin"
+
+    bazelisk = shutil.which("bazelisk") or "bazelisk"
+    env = _bazel_subprocess_env()
+    try:
+        subprocess.run(
+            [bazelisk, "fetch", "@remote_kv_cache_manager_server//..."],
+            cwd=str(project_root),
+            env=env,
+            check=True,
+        )
+        info = subprocess.run(
+            [bazelisk, "info", "output_base"],
+            cwd=str(project_root),
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"[kvcm] WARNING: bazelisk fetch failed (exit {e.returncode}); skipping kvcm staging")
+        return
+
+    output_base = Path(info.stdout.strip())
+    src_bin = output_base / "external" / "remote_kv_cache_manager_server" / "bin" / "kv_cache_manager_bin"
+    if not src_bin.exists():
+        print(f"[kvcm] WARNING: source not found at {src_bin}; skipping")
+        return
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if target_bin.exists():
+        target_bin.chmod(0o755)
+    shutil.copy2(src_bin, target_bin)
+    target_bin.chmod(0o755)
+    print(f"[kvcm] staged {src_bin} → {target_bin}")
+
 
 def build_all():
     project_root = get_project_root()

@@ -46,9 +46,14 @@ cuda12_9 = [
     "fastsafetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fastsafetensors-0.1.19rc5%2Bali-cp310-cp310-linux_x86_64.whl",
     "deep-ep @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_ep-1.2.1.10%2Bd7d7b48-cp310-cp310-linux_x86_64.whl",
     "deep_gemm @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_gemm-2.1.1%2Blocal-cp310-cp310-linux_x86_64.whl",
-    "flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_python-0.6.0%2Bmla384-py3-none-any.whl",
-    "flashinfer-jit-cache @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_jit_cache-0.6.0%2Bmla384-cp39-abi3-manylinux_2_28_x86_64.whl",
-    "flashinfer-cubin @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_cubin-0.6.0%2Bmla384-py3-none-any.whl",
+    # flashinfer 0.6.6 vanilla — aligned with OSS main `deps/requirements_lock_torch_gpu_cuda12_9.txt`.
+    # Previously 0.6.0+mla384 (DeepSeek-MLA pruned fork) lacked SM89 head_dim=64
+    # AOT kernels and had different kernel impls than vanilla 0.6.6 — caused
+    # PR 537 sm8x_basic SIGABRT and h20 smoke COMPARE_FAILED on next_pd /
+    # mla_cp_pd / moe_w4a8_int4 etc. (run 39159691).
+    "flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260319/flashinfer_python-0.6.6-py3-none-any.whl",
+    "flashinfer-jit-cache @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260319/flashinfer_jit_cache-0.6.6-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "flashinfer-cubin @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260319/flashinfer_cubin-0.6.6-py3-none-any.whl",
     "flash_mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2Bca58fed-cp310-cp310-linux_x86_64.whl",
     "fast_hadamard_transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_x86_64.whl",
     "rtp_kernel @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/rtp_kernel_260317/rtp_kernel-0.1.0-cp310-cp310-linux_x86_64.whl",
@@ -62,7 +67,9 @@ cuda12_9 = [
     "mysql-connector-python",
     "sqlglot @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/sqlglot-19.8.4.dev4-py3-none-any.whl",
     "tabulate==0.9.0",
-    "tilelang>=0.1.8",
+    # tilelang ==0.1.6 — aligned with OSS main lock; >=0.1.8 was resolving to
+    # 0.1.9 (PyPI) which differs from main.
+    "tilelang==0.1.6",
 ]
 
 # dev and docs extras moved to pyproject.toml [project.optional-dependencies] —

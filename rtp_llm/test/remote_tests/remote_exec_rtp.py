@@ -305,6 +305,15 @@ def _collect_repo_runtime_files(rootdir: Path) -> List[str]:
         files.extend(
             str(p.relative_to(rootdir)) for p in rootdir.glob(pattern) if p.is_file()
         )
+    # kv_cache_manager_bin (staged by setup.py:stage_kvcm_binary from
+    # @remote_kv_cache_manager_server bazel http_archive). Required by smoke
+    # tests using remote_kv_cache (cuda_remote_cache, eagle_remote_cache_tp2,
+    # next_long_reuse_remote, …) under pytest+REAPI dispatch.
+    files.extend(
+        str(p.relative_to(rootdir))
+        for p in rootdir.glob("rtp_llm/libs/kv_cache_manager_server/bin/*")
+        if p.is_file()
+    )
     for pattern in ("rtp_llm/tokenizer_data/*", "rtp_llm/config/*.json"):
         files.extend(
             str(p.relative_to(rootdir)) for p in rootdir.glob(pattern) if p.is_file()
