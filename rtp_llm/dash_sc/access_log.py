@@ -505,7 +505,7 @@ class _RpcAggregate:
     prompt_cached_token_num: Optional[int] = None
     # Protocol-level backend error channel (predict_v2.proto: "The empty message
     # indicates the inference was successful without errors"). The real servicer
-    # at ``dash_sc/service.py`` yields ``ModelStreamInferResponse(error_message=...)``
+    # at ``dash_sc/inference_servicer.py`` yields ``ModelStreamInferResponse(error_message=...)``
     # for backend failures while keeping gRPC status OK — without capturing this
     # signal the interceptor sees ``code==OK`` and misroutes to SUCCESS_QPS.
     # Populated from the *first* non-empty frame so a late error beats a silent
