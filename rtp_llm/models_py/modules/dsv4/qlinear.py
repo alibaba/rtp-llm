@@ -58,12 +58,29 @@ def _fp4_unpack_to_fp32(weight_int8: torch.Tensor, scale_ue8m0: torch.Tensor) ->
 
 
 def _fp8_dequant_to_fp32(weight_fp8: torch.Tensor, scale_ue8m0: torch.Tensor) -> torch.Tensor:
-    """Dequantize FP8 e4m3fn [out, in] + UE8M0 scale [out/128, in/128] -> fp32 [out, in]."""
+    """Dequantize FP8 e4m3fn [out, in] + scale -> fp32 [out, in].
+
+    Accepts the scale in either of two layouts:
+      * raw UE8M0 ``float8_e8m0fnu`` shape ``[out/128, in/128]``
+      * DeepGEMM TMA-aligned packed ``int32`` shape ``[out_pad, in/128/4]`` where
+        each int32 holds 4 UE8M0 bytes along K and rows are replicated by 128
+        (this is what ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` produces;
+        ``rtp_llm/model_loader/per_block_fp8_quant_weight.py::_postprocess``
+        applies it via ``requant_weight_ue8m0`` on SM100+ devices).
+    """
     out_dim, in_dim = weight_fp8.shape
     w_f = weight_fp8.to(torch.float32)
-    scale_full = scale_ue8m0.to(torch.float32)
-    scale_full = scale_full.repeat_interleave(FP8_BLOCK, 0).repeat_interleave(FP8_BLOCK, 1)
-    scale_full = scale_full[:out_dim, :in_dim]
+    if scale_ue8m0.dtype == torch.int32:
+        n_pad, k_blk_div_4 = scale_ue8m0.shape
+        k_blk = k_blk_div_4 * 4
+        scale_bytes = scale_ue8m0.contiguous().view(torch.uint8).reshape(n_pad, k_blk)
+        scale_per_row = (scale_bytes.to(torch.int32) - 127).to(torch.float32).exp2()
+        scale_per_row = scale_per_row[:out_dim]
+        scale_full = scale_per_row.repeat_interleave(FP8_BLOCK, 1)[:, :in_dim]
+    else:
+        scale_full = scale_ue8m0.to(torch.float32)
+        scale_full = scale_full.repeat_interleave(FP8_BLOCK, 0).repeat_interleave(FP8_BLOCK, 1)
+        scale_full = scale_full[:out_dim, :in_dim]
     return w_f * scale_full
 
 
@@ -86,33 +103,15 @@ class QuantizedLinear(nn.Module):
         self.out_features = out_features
         self.storage = storage
         assert bias is False, "V4 linears have no bias"
-        if storage == "fp4":
-            self.weight = nn.Parameter(
-                torch.empty(out_features, in_features // 2, dtype=torch.int8),
-                requires_grad=False,
-            )
-            self.scale = nn.Parameter(
-                torch.empty(out_features, in_features // FP4_BLOCK, dtype=torch.float8_e8m0fnu),
-                requires_grad=False,
-            )
-        elif storage == "fp8":
-            self.weight = nn.Parameter(
-                torch.empty(out_features, in_features, dtype=torch.float8_e4m3fn),
-                requires_grad=False,
-            )
-            self.scale = nn.Parameter(
-                torch.empty(
-                    (out_features + FP8_BLOCK - 1) // FP8_BLOCK,
-                    (in_features + FP8_BLOCK - 1) // FP8_BLOCK,
-                    dtype=torch.float8_e8m0fnu,
-                ),
-                requires_grad=False,
-            )
-        elif storage == "bf16":
-            self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=torch.bfloat16))
-            self.register_parameter("scale", None)
-        else:
+        if storage not in {"fp4", "fp8", "bf16"}:
             raise ValueError(f"unknown storage {storage!r}")
+        # weight / scale are bound externally by V4Transformer factory mode
+        # directly from the framework's ``ModelWeights`` tensors — no
+        # ``nn.Parameter`` wrapping, no ``torch.empty`` placeholder.  Plain
+        # attributes avoid double-holding the storage in ``module._parameters``
+        # on top of the tensor that already lives in the loader's hands.
+        self.weight = None
+        self.scale = None
 
     def dequant_weight(self, out_dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
         """Return dequantized [out, in] weight in `out_dtype`.

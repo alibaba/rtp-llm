@@ -14,17 +14,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.block import Block, MTPBlock, _RMSNorm
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
-
-
-class _LMHead(nn.Module):
-    """LM head — single weight matrix [vocab_size, dim] in FP32."""
-
-    def __init__(self, vocab_size: int, dim: int):
-        super().__init__()
-        self.weight = nn.Parameter(torch.empty(vocab_size, dim, dtype=torch.float32))
 
 
 @dataclass
@@ -177,7 +170,15 @@ class V4Transformer(nn.Module):
         self.hc_mult = args.hc_mult
         self._factory_mode = weights is not None
 
-        self.embed = nn.Embedding(args.vocab_size, args.dim)
+        # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
+        # ``nn.Parameter``).  In factory mode the real weight comes from the
+        # framework dict; the unit-test path uses an empty placeholder that
+        # the caller is expected to replace.
+        self.embed = EmbeddingTorch(
+            weights["embed.weight"]
+            if weights is not None
+            else torch.empty(args.vocab_size, args.dim)
+        )
 
         self.layers = nn.ModuleList(
             [
@@ -190,7 +191,11 @@ class V4Transformer(nn.Module):
                 for i in range(args.n_layers)
             ]
         )
-        self.norm = _RMSNorm(args.dim, args.norm_eps)
+        self.norm = _RMSNorm(
+            args.dim,
+            args.norm_eps,
+            weight=weights["norm.weight"] if self._factory_mode else None,
+        )
 
         # MTP layers — draft heads for speculative decoding.  Full impl
         # in block.py::MTPBlock; each layer owns its own e_proj/h_proj +
@@ -206,39 +211,22 @@ class V4Transformer(nn.Module):
             )
             self.mtp.append(blk)
 
-        # Final LM head + hc_head reduce
-        # head.weight FP32 per official ParallelHead.
-        self.head = _LMHead(args.vocab_size, args.dim)
+        # LM head — plain fp32 weight matrix [vocab_size, dim], applied via
+        # ``F.linear`` in forward.  head.weight ships as bf16 (descriptor
+        # data_type=bf16, see ``rtp_llm/models/deepseek_v4.py`` for the
+        # loader-RAM rationale); cast to fp32 ParallelHead here.
         hc_dim = args.hc_mult * args.dim
         if self._factory_mode:
-            # Embedding + LM head are BF16 in ckpt; cast to FP32 head (match
-            # official ParallelHead.weight.dtype) but keep embed in BF16.
-            self.embed.weight = nn.Parameter(
-                weights["embed.weight"], requires_grad=False
-            )
-            self.head.weight = nn.Parameter(
-                weights["head.weight"].float(), requires_grad=False
-            )
-            self.norm.weight = nn.Parameter(
-                weights["norm.weight"].to(torch.bfloat16), requires_grad=False
-            )
-            self.hc_head_fn = nn.Parameter(
-                weights["hc_head_fn"].float(), requires_grad=False
-            )
-            self.hc_head_base = nn.Parameter(
-                weights["hc_head_base"].float(), requires_grad=False
-            )
-            self.hc_head_scale = nn.Parameter(
-                weights["hc_head_scale"].float(), requires_grad=False
-            )
+            self.head_weight = weights["head.weight"].float()
+            self.hc_head_fn = weights["hc_head_fn"]
+            self.hc_head_base = weights["hc_head_base"]
+            self.hc_head_scale = weights["hc_head_scale"]
         else:
-            self.hc_head_fn = nn.Parameter(
-                torch.empty(args.hc_mult, hc_dim, dtype=torch.float32)
-            )
-            self.hc_head_base = nn.Parameter(
-                torch.empty(args.hc_mult, dtype=torch.float32)
-            )
-            self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
+            # Unit-test path — caller binds tensors externally.
+            self.head_weight = None
+            self.hc_head_fn = None
+            self.hc_head_base = None
+            self.hc_head_scale = None
 
         self._dbg_step = 0
 
@@ -389,10 +377,11 @@ class V4Transformer(nn.Module):
         # empty-batch-safe (``apply_rotary_emb`` and the sparse-attn
         # path both short-circuit on zero-element inputs).
         if S == 0 and self.args.ep_size <= 1:
-            device = next(self.parameters()).device
+            # No nn.Parameter anymore — pull device from a known-bound tensor.
+            device = self.embed.weight.device
             if apply_lm_head:
                 return torch.zeros(
-                    (B, self.head.weight.size(0)), dtype=torch.float32, device=device
+                    (B, self.head_weight.size(0)), dtype=torch.float32, device=device
                 )
             return torch.zeros(
                 (B, 0, self.args.dim), dtype=torch.bfloat16, device=device
@@ -503,5 +492,5 @@ class V4Transformer(nn.Module):
             self._dbg_step += 1
 
         if apply_lm_head:
-            return F.linear(h[:, -1].float(), self.head.weight)
+            return F.linear(h[:, -1].float(), self.head_weight)
         return h

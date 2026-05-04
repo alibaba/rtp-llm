@@ -278,7 +278,8 @@ def forward_decode(
     from rtp_llm.ops.compute_ops import PyModelOutputs
 
     attn = inputs.attention_inputs
-    param_dev = next(v4.parameters()).device
+    # No nn.Parameter on V4Transformer anymore — pull device from a known-bound tensor.
+    param_dev = v4.embed.weight.device
 
     input_ids = inputs.input_ids
     if input_ids.dim() == 0:

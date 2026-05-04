@@ -25,6 +25,7 @@ from rtp_llm.utils.model_weight import (
     W,
     concat_0,
     identity,
+    is_v4_weight,
     merge_block_scale,
     merge_te_qkv,
     mla_pad,
@@ -159,6 +160,25 @@ def gemm_block_fp8_gpt_style_tp_strategy():
         W.mla_indexer_qb_s: sp_id,
         W.mla_indexer_k_w: sp_id,
         W.mla_indexer_k_s: sp_id,
+        # ---- DSv4 (TP=1 placeholders) ----
+        W.v4_attn_wq_a_w: sp_id,
+        W.v4_attn_wq_a_s: sp_id,
+        W.v4_attn_wq_b_w: sp_id,
+        W.v4_attn_wq_b_s: sp_id,
+        W.v4_attn_wkv_w: sp_id,
+        W.v4_attn_wkv_s: sp_id,
+        W.v4_attn_wo_a_w: sp_id,
+        W.v4_attn_wo_a_s: sp_id,
+        W.v4_attn_wo_b_w: sp_id,
+        W.v4_attn_wo_b_s: sp_id,
+        W.v4_indexer_wq_b_w: sp_id,
+        W.v4_indexer_wq_b_s: sp_id,
+        W.v4_shared_w1_w: sp_id,
+        W.v4_shared_w1_s: sp_id,
+        W.v4_shared_w2_w: sp_id,
+        W.v4_shared_w2_s: sp_id,
+        W.v4_shared_w3_w: sp_id,
+        W.v4_shared_w3_s: sp_id,
     }
     tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
     tp_strategy.update(gemm_block_fp8_weight_tp_strategy)
@@ -246,7 +266,14 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         ):
             return False
         name = src_weight_info.name
-        return name in cls.w8a8_weight_list
+        if name not in cls.w8a8_weight_list:
+            return False
+        # V4 names are dispatched to the V4-specific subclass
+        # (V4PerBlockFp8Weight) — keep the base class out of contention so the
+        # registry's "must be exactly one match" check passes.
+        if is_v4_weight(src_weight_info):
+            return False
+        return True
 
     def __init__(
         self,
@@ -868,3 +895,160 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:
         return self.kernel.get_tensor_names(layer_id, load_config)
+
+
+# ---------------------------------------------------------------------------
+# DSv4 specialization
+# ---------------------------------------------------------------------------
+#
+# V4 ckpt stores FP8 weights with ``.weight`` (e4m3fn) + ``.scale``
+# (UE8M0) — not ``.weight_scale_inv`` like DSv2/V3.  Rather than overload the
+# base class's brittle if/elif chain we provide a thin subclass that builds a
+# kernel + scale pair using V4's suffix convention and restricts ``support()``
+# to V4 weight names so DSv2/V3 paths are untouched.
+
+# Mapping: V4 kernel-weight name → V4 scale name (both registered in W).
+_V4_FP8_WEIGHT_LIST: Dict[str, str] = {
+    # dense MQA self-attn
+    W.v4_attn_wq_a_w: W.v4_attn_wq_a_s,
+    W.v4_attn_wq_b_w: W.v4_attn_wq_b_s,
+    W.v4_attn_wkv_w: W.v4_attn_wkv_s,
+    W.v4_attn_wo_a_w: W.v4_attn_wo_a_s,
+    W.v4_attn_wo_b_w: W.v4_attn_wo_b_s,
+    # indexer (CSA only) — outer wq_b
+    W.v4_indexer_wq_b_w: W.v4_indexer_wq_b_s,
+    # shared expert (FP8)
+    W.v4_shared_w1_w: W.v4_shared_w1_s,
+    W.v4_shared_w2_w: W.v4_shared_w2_s,
+    W.v4_shared_w3_w: W.v4_shared_w3_s,
+}
+
+# Register V4 names into the base class whitelist so support() and the
+# `LoadQuantPerBlockFp8Weight` sibling that consumes ``w8a8_weight_list``
+# both see them; ``support()`` overrides further restrict to V4 only.
+PerBlockFp8Weight.w8a8_weight_list.update(_V4_FP8_WEIGHT_LIST)
+
+
+class V4PerBlockFp8Weight(PerBlockFp8Weight):
+    """V4 FP8 per-block (128x128 e4m3) weight.
+
+    Differences vs. base ``PerBlockFp8Weight``:
+      - ckpt scale suffix is ``.scale`` (V4) instead of ``.weight_scale_inv``
+        (DSv2/V3 / vLLM convention).
+      - ``_postprocess`` is overridden to skip the base class's
+        ``requant_weight_ue8m0(w, s)`` round-trip.  That helper does
+        ``dequant(FP8, UE8M0) -> BF16 -> requant(BF16) -> (FP8', UE8M0')``
+        which re-derives a NEW UE8M0 scale via ``ceil_to_ue8m0(amax/448)``
+        of the dequantised data.  When the new power-of-2 scale picks a
+        different exponent than the original ckpt scale (which happens
+        whenever ``amax`` of the dequantised block doesn't land exactly on
+        ``original_scale * 448``), the requantised FP8 weight bits diverge
+        from the ckpt — load is no longer byte-exact and forward output
+        drifts.  Instead we keep the original UE8M0 scale and only
+        re-layout it into DeepGEMM's TMA-aligned packed int32 format
+        (``_transform_scale_ue8m0``).
+      - ``support()`` is restricted to V4 namespace so DSv2/V3 dispatch is unaffected.
+    """
+
+    V4_W_SUFFIX = ".weight"
+    V4_S_SUFFIX = ".scale"
+
+    @classmethod
+    def support(
+        cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
+    ) -> bool:
+        if not quant_config.is_quanted() or not isinstance(
+            quant_config, Fp8BlockWiseQuantConfig
+        ):
+            return False
+        if not is_v4_weight(src_weight_info):
+            return False
+        return src_weight_info.name in _V4_FP8_WEIGHT_LIST
+
+    def __init__(
+        self,
+        src_weight_info: WeightModule,
+        quant_config: QuantizationConfig,
+        *args: Any,
+        **kwargs: Any,
+    ):
+        # Bypass the base class's name-based dispatch entirely — V4 has its
+        # own set of W keys which the base's if/elif chain does not know
+        # about.  We construct kernel + scale directly.
+        self.group_size = quant_config.group_size()
+        scale_name = _V4_FP8_WEIGHT_LIST[src_weight_info.name]
+
+        kernel, scale = self._v4_build_pair(
+            src_weight_info, src_weight_info.name, scale_name
+        )
+
+        sub_weights = {kernel.name: kernel, scale.name: scale}
+        # Skip PerBlockFp8Weight.__init__ — call CompositeWeight.__init__
+        # directly, then set kernel/scale attrs the way the base does.
+        CompositeWeight.__init__(
+            self, sub_weights, quant_config=quant_config, *args, **kwargs
+        )
+        self.kernel = sub_weights[kernel.name]
+        self.scale = sub_weights[scale.name]
+
+    def _v4_build_pair(
+        self,
+        src_weight_info: WeightModule,
+        weight_key: str,
+        scale_key: str,
+    ):
+        """Build kernel + scale ``W8A8Fp8PerBlock*AtomicWeight`` pair from a
+        V4 ``.weight`` / ``.scale`` ckpt suffix convention.  Mirrors the base
+        ``_get_quant_weight_default`` but uses ``self.V4_S_SUFFIX``."""
+        # Strip the ".weight" suffix from the underlying ckpt key, then
+        # append ".weight" / ".scale" respectively.  This lets V4 descriptors
+        # declare the *kernel* CkptWeightInfo with name "...weight" and have
+        # the scale auto-derived.
+        base_ckpt = src_weight_info.weights[0].name
+        assert base_ckpt.endswith(self.V4_W_SUFFIX), (
+            f"expected V4 FP8 weight ckpt key to end with '{self.V4_W_SUFFIX}', "
+            f"got {base_ckpt}"
+        )
+        stem = base_ckpt[: -len(self.V4_W_SUFFIX)]
+        merge = src_weight_info.weights[0].merge_fun
+
+        kernel = create_w8a8_fp8_per_block_weight(
+            src_weight_info,
+            weight_key,
+            [CkptWeightInfo(stem + self.V4_W_SUFFIX, merge)],
+            identity,
+            data_type=torch.float8_e4m3fn,
+            config=getattr(src_weight_info, "config", None),
+        )
+        scale = create_w8a8_fp8_per_block_weight(
+            src_weight_info,
+            scale_key,
+            [CkptWeightInfo(stem + self.V4_S_SUFFIX, merge)],
+            identity,
+            data_type=torch.float8_e8m0fnu,
+            config=getattr(src_weight_info, "config", None),
+        )
+        return [kernel, scale]
+
+    def _postprocess(
+        self,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        # Skip the base class's dequant→requant round-trip (which mutates
+        # FP8 weight bits whenever quant_weight_ue8m0 picks a new power-of-2
+        # exponent for the recomputed amax).  We keep both:
+        #   * kernel weight (FP8 e4m3fn) byte-exact from ckpt
+        #   * scale (UE8M0 ``float8_e8m0fnu``) byte-exact and in raw
+        #     ``[N//128, K//128]`` layout
+        # The DeepGEMM-required ``[N, K//128//4]`` int32 TMA-aligned packed
+        # layout is built lazily per-linear in
+        # ``rtp_llm.models_py.modules.dsv4.attention._v4_fp8_linear_from_dict``
+        # via ``_repack_v4_fp8_scale_to_int32``.  Repacking eagerly here
+        # would balloon scale memory by O(N/32) (each 1-byte UE8M0 entry
+        # becomes 4 bytes and gets row-replicated 128×) and OOM the GPU
+        # before forward gets a chance to run — see the v4-flash 1×B300
+        # OOM at KV-cache alloc (256 MiB short on a 267 GiB device with
+        # 157 GiB held by the model).
+        return CompositeWeight._postprocess(self, tensor, device, load_config)
