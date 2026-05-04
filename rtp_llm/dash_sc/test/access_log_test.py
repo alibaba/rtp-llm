@@ -1445,13 +1445,12 @@ class RawModeErrorMessageTest(RawModeInterceptorTestBase):
 
 
 class QueryLogTest(InterceptorTestBase):
-    """Query log records two timestamps — handler entry (``arrival``) and
-    inbound-stream drain (``req_read_done``). Their diff isolates the
-    ``aquila → forward`` inbound-receive latency from everything the
-    end-of-RPC access log bundles together.
+    """Query log fires at handler entry — one arrival breadcrumb per RPC,
+    symmetric across the forwarder's two tiers. See ``_emit_query_log`` for
+    why arrival-time (not inbound-drain) is the correct trigger.
     """
 
-    def test_query_log_records_arrival_and_req_read_done_timestamps(self) -> None:
+    def test_query_log_records_arrival_timestamp(self) -> None:
         def inner(request_iterator, context):
             list(request_iterator)
             yield _make_stream_response(generated_ids=[1], finish_reason=0)
@@ -1464,14 +1463,10 @@ class QueryLogTest(InterceptorTestBase):
         ctx.set_metadata([("x-dashscope-request-id", "corr-xyz")])
         list(behavior(iter([_make_infer_request(input_ids=[10, 20, 30])]), ctx))
 
-        # One line per RPC, strictly two timestamps + correlate keys.
+        # One line per RPC carrying the arrival timestamp + correlate keys.
         self.assertEqual(len(self.query_records), 1)
         q = self.query_records[0]
         self.assertIsInstance(q["arrival_ts_epoch_ms"], int)
-        self.assertIsInstance(q["req_read_done_ts_epoch_ms"], int)
-        self.assertGreaterEqual(
-            q["req_read_done_ts_epoch_ms"], q["arrival_ts_epoch_ms"]
-        )
         self.assertEqual(q["upstream_request_id"], "corr-xyz")
         # Proto-body fields belong in the completion log, not here.
         for removed in (
@@ -1482,16 +1477,15 @@ class QueryLogTest(InterceptorTestBase):
             "input_ids",
             "generated_ids",
             "raw_requests",
+            "req_read_done_ts_epoch_ms",
         ):
             self.assertNotIn(removed, q)
 
     def test_query_log_emitted_on_empty_inbound_stream(self) -> None:
-        """Even a frame-less RPC writes one query log line as soon as the
-        inbound iterator yields ``StopIteration`` — the two timestamps still
-        bound ``aquila → forward`` receive cost, and the line's presence lets
-        operators tell "forward never saw the RPC" (no line) apart from
-        "forward saw it, handler returned error" (line present, completion log
-        carries the error)."""
+        """Even a frame-less RPC writes one query log line — handler entry
+        always fires, and the line's presence lets operators tell "forward
+        never saw the RPC" (no line) apart from "forward saw it, handler
+        returned error" (line present, completion log carries the error)."""
 
         def inner(request_iterator, context):
             for _ in request_iterator:

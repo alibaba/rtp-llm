@@ -481,13 +481,6 @@ class _RpcAggregate:
     peer: str
     start_ts: float
     raw_mode: bool = False
-    # Moment the inbound request stream was fully consumed (``StopIteration``
-    # on the request iterator, or unary arg bound into the handler). ``start_ts``
-    # is handler-entry; the diff between the two is how long we spent pulling
-    # the request body off the wire — a large gap on the forwarder is the
-    # ``aquila → forward`` queueing / TCP-slow signal that a downstream-only
-    # metric would miss.
-    req_read_done_ts: Optional[float] = None
     first_resp_ts: Optional[float] = None
     last_chunk_ts: Optional[float] = None
     req_count: int = 0
@@ -864,6 +857,24 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         # share (~30% on the forwarder path) and broke parity between the
         # access log line count and the Grafana arrival curve.
         self._report_request_arrived(agg)
+        # Emit the query log at handler entry (arrival), not at inbound-stream
+        # drain. Originally we tagged the log on drain so an ``arrival_ts`` +
+        # ``req_read_done_ts`` diff could surface ``aquila → forward`` queueing
+        # latency. But the drain signal is asymmetric across the two tiers of
+        # this forwarder: the outer ``PureForwardServicer`` hands the inbound
+        # iterator straight to a client stub whose sender thread eagerly drains
+        # it (drain fires fast, ~ms after arrival), while the inner
+        # ``DashScGrpcInferenceServicer`` uses a ``for req in request_iterator:
+        # yield from iter_real_model_stream_infer(...)`` pattern where the
+        # ``yield from`` blocks the entire inference; the ``for`` loop only
+        # retries — and hits ``StopIteration`` — after generation finishes,
+        # which on long streams is minutes later. In production (commit
+        # 6410b2af1) this asymmetry showed up as 1046 outer query lines vs
+        # ~10 inner ones for the same RPCs — the inner tier's query log was
+        # effectively a second access log, useless as an arrival signal. Firing
+        # on handler entry makes the two tiers symmetric and restores the
+        # "tail -f query log = see new requests land" contract.
+        self._emit_query_log(agg)
         self._probe_pool_depth(method)
         return agg
 
@@ -978,27 +989,25 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
             logging.warning("[DashScGrpc] access log emit failed: %s", e)
 
     def _emit_query_log(self, agg: _RpcAggregate) -> None:
-        """Write one JSON line to the query log — fires when the inbound
-        request stream has been fully received.
+        """Write one JSON line to the query log — fires at handler entry.
 
-        Carries exactly two timestamps: ``arrival_ts_epoch_ms`` (handler entry,
-        i.e. ``_new_aggregate``) and ``req_read_done_ts_epoch_ms`` (all inbound
-        frames drained). Their diff is the cost of pulling the request off the
-        wire — the ``aquila → forward`` queueing / slow-send signal that the
-        end-of-RPC access log cannot isolate because that line bundles inbound
-        receive + backend processing + outbound streaming into one number.
+        Called exactly once per RPC from :meth:`_new_aggregate`, so the line
+        hits disk as soon as gRPC dispatches the handler, before any inbound
+        body read or backend work. That matches the HTTP frontend's
+        ``query_access.log`` contract (``tail -f`` = see arrivals) and keeps
+        the two tiers of this forwarder symmetric — without this, the inner
+        ``DashScGrpcInferenceServicer`` (whose ``for req: yield from ...``
+        pattern defers inbound-drain to after generation completes) would
+        emit query lines only at RPC end, not at arrival.
 
-        No proto-derived fields (``request_id`` / ``model_name`` / ``input_len``
-        / raw dumps) — those stay in the completion access log. Query log is a
-        timing breadcrumb only, so ``tail -f`` stays readable and the line
-        shape does not depend on first-frame content.
+        No proto-derived fields (``request_id`` / ``model_name`` /
+        ``input_len`` / raw dumps) — those stay in the completion access log.
+        Query log is an arrival breadcrumb only, so ``tail -f`` stays
+        readable and the line shape does not depend on first-frame content.
         """
-        arrival_ts = agg.start_ts
-        read_done_ts = agg.req_read_done_ts or arrival_ts
         record = {
-            "ts": _format_local_ts(read_done_ts),
-            "arrival_ts_epoch_ms": int(arrival_ts * 1000),
-            "req_read_done_ts_epoch_ms": int(read_done_ts * 1000),
+            "ts": _format_local_ts(agg.start_ts),
+            "arrival_ts_epoch_ms": int(agg.start_ts * 1000),
             "server_id": self._server_id,
             "rank_id": self._rank_id,
             "method": agg.method,
@@ -1012,28 +1021,8 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         except Exception as e:
             logging.warning("[DashScGrpc] query log emit failed: %s", e)
 
-    def _mark_req_read_done(self, agg: _RpcAggregate) -> None:
-        """Record the inbound-request-drained timestamp and emit the query log.
-
-        Guarded against re-entry so multi-frame streaming requests still write
-        exactly one query log line (on the first ``StopIteration``). Called
-        from the four wrap paths at the moment the handler has consumed the
-        last inbound frame: unary paths call it right after binding ``request``
-        into the handler; stream paths call it at the natural exit of the
-        ``for req in request_iterator`` loop inside ``counted_reqs``.
-        """
-        if agg.req_read_done_ts is not None:
-            return
-        agg.req_read_done_ts = time.time()
-        self._emit_query_log(agg)
-
     def _capture_first_request(self, agg: _RpcAggregate, request) -> None:
-        """Capture first request content for the end-of-RPC access log.
-
-        Query-log emission is decoupled: it lives in :meth:`_mark_req_read_done`
-        and fires on inbound-stream drain, not on first-frame arrival, so the
-        query log shape no longer depends on proto body fields.
-        """
+        """Capture first request content for the end-of-RPC access log."""
         agg.capture_request(request)
 
     def _wrap_unary_unary(self, inner, method, stream_type):
@@ -1041,10 +1030,6 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
             agg = self._new_aggregate(method, stream_type, context)
             agg.req_count = 1
             self._capture_first_request(agg, request)
-            # Unary inbound is fully delivered the moment the handler is
-            # invoked — mark read-done immediately so the query log fires even
-            # if ``inner`` blocks/raises later.
-            self._mark_req_read_done(agg)
             exc: Optional[BaseException] = None
             try:
                 resp = inner(request, context)
@@ -1063,7 +1048,6 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
             agg = self._new_aggregate(method, stream_type, context)
             agg.req_count = 1
             self._capture_first_request(agg, request)
-            self._mark_req_read_done(agg)
             exc: Optional[BaseException] = None
             try:
                 for resp in inner(request, context):
@@ -1095,13 +1079,6 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
                         if agg.raw_mode:
                             agg.capture_request(req)
                     yield req
-                # Inbound stream drained. Fires at most once per RPC
-                # (``_mark_req_read_done`` is idempotent), and only on the
-                # natural ``StopIteration`` exit — if the consumer abandons
-                # ``counted_reqs`` early the generator is GC'd without reaching
-                # this line, which is the correct "inbound never finished"
-                # signal.
-                self._mark_req_read_done(agg)
 
             try:
                 resp = inner(counted_reqs(), context)
@@ -1131,7 +1108,6 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
                         if agg.raw_mode:
                             agg.capture_request(req)
                     yield req
-                self._mark_req_read_done(agg)
 
             try:
                 for resp in inner(counted_reqs(), context):
