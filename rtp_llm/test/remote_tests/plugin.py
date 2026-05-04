@@ -512,7 +512,12 @@ class RemoteREAPIPlugin:
     def _build_command(self, item, runtime: RemoteRuntimeConfig) -> List[str]:
         from .remote_exec_rtp import _safe_rel_to_rootdir
 
-        test_id = item.name
+        # `--runs-per-test=N` (smoke runs_plugin) clones items under
+        # `<orig_name>[run##/N]`. The remote-side pytest only knows the
+        # original parametrize ids — fall back to `_original_name` when
+        # the runs_plugin tagged it (else the remote `-k` matches 0
+        # items and exits 5 = REAPI infra-failure).
+        test_id = getattr(item, "_original_name", None) or item.name
         # Use _safe_rel_to_rootdir so internal_source/.../suites/ paths (sibling
         # of rootdir after PR12 split) produce "../internal_source/..." form
         # instead of raising ValueError.

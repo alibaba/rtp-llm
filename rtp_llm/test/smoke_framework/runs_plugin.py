@@ -47,9 +47,13 @@ def _clone_item(item, new_name: str):
     `Function.from_parent` invokes the pytest constructor protocol so
     funcargs/fixtureinfo are reinitialized — `copy.copy` shares these
     and breaks setup (funcargs=None on the clone).
+
+    `_original_name` records the un-suffixed name so the REAPI plugin
+    can build the remote `-k` arg without the `[run##/N]` decoration
+    (the remote pytest only knows the parametrize id, not our suffix).
     """
     cls = type(item)
-    return cls.from_parent(
+    rep = cls.from_parent(
         parent=item.parent,
         name=new_name,
         callspec=getattr(item, "callspec", None),
@@ -57,6 +61,8 @@ def _clone_item(item, new_name: str):
         keywords=item.keywords,
         originalname=getattr(item, "originalname", None),
     )
+    rep._original_name = item.name
+    return rep
 
 
 def pytest_collection_modifyitems(session, config, items: List):
