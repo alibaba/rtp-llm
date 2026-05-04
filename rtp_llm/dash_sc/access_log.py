@@ -527,18 +527,24 @@ class _RpcAggregate:
     exc_type: Optional[str] = None
     context_code: Optional[str] = None
     context_active: Optional[bool] = None
-    # Forward-path diagnostics (populated by :class:`DashScProxyServicer` via
+    # Proxy-path diagnostics (populated by :class:`DashScProxyServicer` via
     # ``context._dash_sc_access_agg``). Consolidates signal that otherwise lives
-    # in the forwarder's separate debug log — specifically the ones needed to
-    # distinguish "downstream never produced anything" from "downstream produced
-    # a token but the buffer swallowed it" on a ``resp_count=0`` line without
+    # in the proxy's separate debug log — specifically the ones needed to
+    # distinguish "backend never produced anything" from "backend produced a
+    # token but the buffer swallowed it" on a ``resp_count=0`` line without
     # cross-grepping a second file.
     #
-    # ``downstream_addr``: which backend this RPC was routed to (random pick
+    # Named ``backend_*`` rather than ``upstream_*`` / ``downstream_*`` to stay
+    # unambiguous: RFC 7230 proxy terminology and distributed-tracing
+    # convention point in opposite directions, and ``upstream_request_id``
+    # (client correlation header) already lives on this struct under the
+    # tracing convention. Role-based names sidestep the conflict.
+    #
+    # ``backend_addr``: which backend this RPC was routed to (round-robin
     #     across ``DASH_SC_GRPC_FORWARD_ADDR``). Without this an operator has
     #     no way to correlate ``resp_count=0`` clusters with a sick backend.
-    # ``downstream_resp_count``: how many frames the forwarder's stub actually
-    #     read back from the backend. On ``resp_count=0`` lines the gap between
+    # ``backend_resp_count``: how many frames the proxy's stub actually read
+    #     back from the backend. On ``resp_count=0`` lines the gap between
     #     this (>0) and ``resp_count`` (0) localises the fault to the local
     #     ``_buffered_iter`` / stream-wrap path; matching zeros localise it to
     #     the backend or the LBS below it.
@@ -549,8 +555,8 @@ class _RpcAggregate:
     #     ``flushed_first_on_exception`` (exception after buffering, buffered
     #     frame still made it to the wire), ``dropped_buffered_on_exception``
     #     (client gone too — buffered frame was lost).
-    downstream_addr: Optional[str] = None
-    downstream_resp_count: int = 0
+    backend_addr: Optional[str] = None
+    backend_resp_count: int = 0
     buffered_stage: Optional[str] = None
 
     def capture_request(self, request) -> None:
@@ -660,8 +666,8 @@ class _RpcAggregate:
             "exc_type": self.exc_type,
             "context_code": self.context_code,
             "context_active": self.context_active,
-            "downstream_addr": self.downstream_addr,
-            "downstream_resp_count": self.downstream_resp_count,
+            "backend_addr": self.backend_addr,
+            "backend_resp_count": self.backend_resp_count,
             "buffered_stage": self.buffered_stage,
             "request_id": self.request_id,
             "model_name": self.model_name,
@@ -823,7 +829,7 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         )
         # Make the aggregate reachable from downstream servicer code via the
         # gRPC context object. :class:`DashScProxyServicer` reads this back to
-        # write ``downstream_addr`` / ``downstream_resp_count`` / ``buffered_stage``
+        # write ``backend_addr`` / ``backend_resp_count`` / ``buffered_stage``
         # directly, so one access-log line is self-contained — no side log to
         # cross-reference when debugging a ``resp_count=0`` event.
         try:

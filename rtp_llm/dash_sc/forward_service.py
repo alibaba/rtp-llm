@@ -204,14 +204,14 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         addr = self._forward_addrs[idx]
 
         # Grab the access-log aggregate (installed by the access-log
-        # interceptor) so forward-path diagnostics land inline on the access
-        # log line — ``downstream_addr`` / ``downstream_resp_count`` /
+        # interceptor) so proxy-path diagnostics land inline on the access
+        # log line — ``backend_addr`` / ``backend_resp_count`` /
         # ``buffered_stage`` are what lets an operator triage a
-        # ``resp_count=0`` RPC without cross-grepping the forwarder debug log.
+        # ``resp_count=0`` RPC without cross-grepping the proxy debug log.
         agg = getattr(context, "_dash_sc_access_agg", None)
         if agg is not None:
             try:
-                agg.downstream_addr = addr
+                agg.backend_addr = addr
             except Exception:
                 pass
 
@@ -238,7 +238,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             async def counting_response_iter():
                 async for resp in upstream_iter:
                     try:
-                        agg.downstream_resp_count += 1
+                        agg.backend_resp_count += 1
                     except Exception:
                         pass
                     yield resp
