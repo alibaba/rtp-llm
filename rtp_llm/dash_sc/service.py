@@ -275,7 +275,15 @@ def iter_real_model_stream_infer(
             )
     except Exception as e:
         logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
-        yield predict_v2_pb2.ModelStreamInferResponse(error_message=str(e))
+        # Prefix with the exception class name so the access-log interceptor's
+        # ``_classify_error_message`` can map it to a bounded ``error_code``
+        # tag (e.g. ``BACKEND_RuntimeError``). Without the prefix every
+        # backend failure collapses into a single ``BACKEND_INTERNAL`` bucket
+        # on Grafana and operators can't tell OOM from concurrency-limit from
+        # shape-mismatch without reading individual log lines.
+        yield predict_v2_pb2.ModelStreamInferResponse(
+            error_message=f"{type(e).__name__}: {e}"
+        )
 
 
 # ----------------------------------------------------------------------------

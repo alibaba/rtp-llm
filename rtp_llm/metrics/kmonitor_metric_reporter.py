@@ -62,6 +62,14 @@ class GaugeMetrics(Enum):
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
 
+    # dash_sc gRPC server thread pool pending queue depth. Sync grpcio holds a
+    # worker thread for each RPC's whole lifetime; a handful of long streaming
+    # RPCs can exhaust ``DashScGrpcConfig.max_server_workers`` and queue new
+    # arrivals in grpcio's internal backlog. Sampled on every handler entry —
+    # when pending rises, RPCs are being dispatched late relative to their
+    # client deadlines, which shows up downstream as ``req_count=0`` cascades.
+    DASH_SC_GRPC_SERVER_POOL_PENDING = "py_rtp_dash_sc_grpc_server_pool_pending"
+
 
 class MetricReporter(object):
     def __init__(self, kmonitor: Any):
