@@ -82,14 +82,17 @@ class Compressor(nn.Module):
         self.rotate = rotate
         coff = 1 + self.overlap
 
-        # All four tensors come from the framework loader at their final
-        # dtype (ape/wkv/wgate fp32 via descriptor data_type, norm bf16
-        # via compute_dtype) — bind raw refs, no extra casts.  wkv/wgate
-        # forward calls ``F.linear(x, self.wkv)`` directly, no holder
-        # class needed.
+        # ape stays FP32 (descriptor data_type=float32, used additively).
+        # wkv/wgate cast BF16 at load so the forward matmul dispatches to
+        # BF16 tensor cores (~2.5 PFLOPS on B200) instead of the FP32 SIMT
+        # SGEMM path (~80 TFLOPS) that previously dominated V4 prefill
+        # timelines.  FP32 accumulator preserved via cuBLAS's bf16xbf16
+        # → fp32 path; forward sites cast result back to fp32 to match
+        # the downstream pool dtype.  Weight on disk stays FP32; this is
+        # a runtime-side dtype conversion.
         self.ape = compressor_weights["ape"]
-        self.wkv = compressor_weights["wkv"]
-        self.wgate = compressor_weights["wgate"]
+        self.wkv = compressor_weights["wkv"].to(torch.bfloat16)
+        self.wgate = compressor_weights["wgate"].to(torch.bfloat16)
         self.norm = _CompressorNorm(head_dim, weight=compressor_weights["norm"])
         self.norm_eps = norm_eps
 
@@ -770,11 +773,14 @@ class Compressor(nn.Module):
             bsz, is_fresh_prefill=False, device=x.device, dtype=dtype
         )
         try:
-            x32 = x.float()  # [B, 1, dim]
-            kv_all = torch.nn.functional.linear(x32, self.wkv)  # [B, 1, coff*head_dim]
+            # BF16 input × BF16 weight → FP32 output (cuBLAS tensor-core mma).
+            x_bf = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
+            kv_all = torch.nn.functional.linear(
+                x_bf, self.wkv
+            ).float()  # [B, 1, coff*head_dim]
             score_all = torch.nn.functional.linear(
-                x32, self.wgate
-            )  # [B, 1, coff*head_dim]
+                x_bf, self.wgate
+            ).float()  # [B, 1, coff*head_dim]
 
             # Output buffer — populated only for boundary requests; the rest
             # carry zeros (caller skips them via the boundary mask).
@@ -900,9 +906,13 @@ class Compressor(nn.Module):
             bsz, is_fresh_prefill=False, device=device, dtype=dtype
         )
         try:
-            x32 = x.float()
-            kv_all = torch.nn.functional.linear(x32, self.wkv)  # [B, 1, coff*d]
-            score_all = torch.nn.functional.linear(x32, self.wgate)  # [B, 1, coff*d]
+            x_bf = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
+            kv_all = torch.nn.functional.linear(
+                x_bf, self.wkv
+            ).float()  # [B, 1, coff*d]
+            score_all = torch.nn.functional.linear(
+                x_bf, self.wgate
+            ).float()  # [B, 1, coff*d]
 
             sp = start_pos.to(torch.long)
             sp_mod = sp % ratio  # [B]
@@ -1174,9 +1184,12 @@ class Compressor(nn.Module):
         # _dbg_prefix (set by parent indexer only when its own _dbg is on).
         _dbg = self._dbg_prefix if _rt.ENABLED else None
 
-        x32 = x.float()
-        kv = self._linear_abs_blocked(x32, self.wkv, start_pos)
-        score = self._linear_abs_blocked(x32, self.wgate, start_pos)
+        # BF16 input × BF16 weight → FP32 output (cuBLAS tensor-core mma).
+        # Chunked by absolute position via _linear_abs_blocked so reuse-cache
+        # prefill (Q0 tail vs Q2 suffix) sees the same per-block M dimension.
+        x_bf = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
+        kv = self._linear_abs_blocked(x_bf, self.wkv, start_pos).float()
+        score = self._linear_abs_blocked(x_bf, self.wgate, start_pos).float()
         if _dbg is not None:
             _rt.record_if_level(2, f"{_dbg}_x_in", x)
             _rt.record_if_level(2, f"{_dbg}_kv_local", kv)
