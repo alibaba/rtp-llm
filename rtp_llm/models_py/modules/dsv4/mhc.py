@@ -92,10 +92,11 @@ class HyperConnection(nn.Module):
         self.norm_eps = norm_eps
         self.hc_eps = hc_eps
         mix_hc = (2 + hc_mult) * hc_mult
-        # Match official param naming for ckpt-loader convenience.
-        self.hc_fn = nn.Parameter(torch.empty(mix_hc, hc_mult * dim, dtype=torch.float32))
-        self.hc_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
-        self.hc_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+        # Bound externally by V4Transformer factory mode (Block.__init__) —
+        # see QuantizedLinear note.
+        self.hc_fn = None
+        self.hc_base = None
+        self.hc_scale = None
 
     def hc_pre(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Read out one mixed residual stream from the hc_mult copies.
@@ -155,9 +156,10 @@ class HyperConnectionHead(nn.Module):
         self.dim = dim
         self.norm_eps = norm_eps
         self.hc_eps = hc_eps
-        self.hc_head_fn = nn.Parameter(torch.empty(hc_mult, hc_mult * dim, dtype=torch.float32))
-        self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
-        self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
+        # Bound externally — see QuantizedLinear note.
+        self.hc_head_fn = None
+        self.hc_head_base = None
+        self.hc_head_scale = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: [B, T, hc, d]  ->  y: [B, T, d]"""

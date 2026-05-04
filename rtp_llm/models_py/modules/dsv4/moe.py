@@ -260,32 +260,22 @@ class Gate(nn.Module):
         self._dbg_prefix: Optional[str] = None
 
         if self._factory_mode:
-            self.weight = nn.Parameter(weights[f"{prefix}.weight"], requires_grad=False)
+            self.weight = weights[f"{prefix}.weight"]
             if self.hash:
                 assert vocab_size > 0
-                self.tid2eid = nn.Parameter(
-                    weights[f"{prefix}.tid2eid"].to(torch.int32),
-                    requires_grad=False,
-                )
+                self.tid2eid = weights[f"{prefix}.tid2eid"]
                 self.bias = None
             else:
-                self.bias = nn.Parameter(
-                    weights[f"{prefix}.bias"].float(),
-                    requires_grad=False,
-                )
+                self.bias = weights[f"{prefix}.bias"]
         else:
-            self.weight = nn.Parameter(torch.empty(n_routed_experts, dim))
+            # Unit-test path — caller binds tensors externally.
+            self.weight = None
             if self.hash:
                 assert vocab_size > 0
-                self.tid2eid = nn.Parameter(
-                    torch.empty(vocab_size, n_activated_experts, dtype=torch.int32),
-                    requires_grad=False,
-                )
+                self.tid2eid = None
                 self.bias = None
             else:
-                self.bias = nn.Parameter(
-                    torch.empty(n_routed_experts, dtype=torch.float32)
-                )
+                self.bias = None
 
     def _weight_bf16(self) -> torch.Tensor:
         """Lazy-cached BF16 view of ``self.weight``.
@@ -426,16 +416,13 @@ class Expert(nn.Module):
             self.w2 = QuantizedLinear(inter_dim, dim, storage=storage)  # down
             self.w3 = QuantizedLinear(dim, inter_dim, storage=storage)  # up
             if weights is not None:
-                # Legacy storage="fp4" — copy weight + scale into Parameters;
-                # forward still dequants on the fly (until S4 swaps to grouped GEMM).
+                # Legacy storage="fp4" — bind weight + scale directly from
+                # the framework dict; forward still dequants on the fly
+                # (until S4 swaps to grouped GEMM).
                 for name in ("w1", "w2", "w3"):
                     lin = getattr(self, name)
-                    lin.weight = nn.Parameter(
-                        weights[f"{prefix}.{name}.weight"], requires_grad=False
-                    )
-                    lin.scale = nn.Parameter(
-                        weights[f"{prefix}.{name}.scale"], requires_grad=False
-                    )
+                    lin.weight = weights[f"{prefix}.{name}.weight"]
+                    lin.scale = weights[f"{prefix}.{name}.scale"]
         self.swiglu_limit = swiglu_limit
 
     def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -676,45 +663,62 @@ class MoE(nn.Module):
         start = self.local_expert_start
         device = weights[f"{prefix}.experts.{start}.w1.weight"].device
 
-        # (1) Stack EP-local experts into [E_local, ...] tensors.  SF is
-        # kept as fp32 initially — ``transform_sf_into_required_layout``
-        # is the only entry point that produces the int32 layout the
-        # kernel consumes.
+        # Serialise L1 then L2 to keep the per-layer transient peak bounded:
+        # the previous code pre-allocated all four stacked buffers (w13 + s13
+        # fp32 + w2 + s2 fp32), ran transform_sf for both layers with both
+        # fp32 stacks live, then handed the full tuple to
+        # transform_weights_for_mega_moe whose internal interleave allocates
+        # another ~size(w13)+size(w2) transient.  On V4-Pro cp4 the combined
+        # peak OOMs L20D's 268GB.  Splitting into L1 → drop s13 fp32 → L2 →
+        # drop s2 fp32 → mega transform → drop (w13/w2/sfs), with
+        # empty_cache() between stages, keeps the live set ≤ one stack at a
+        # time so subsequent layers see the actual residual HBM.
+
+        # --- L1 (gate + up): stack, then immediately transform SF and
+        # drop the fp32 stack.
         w13 = torch.empty((E, 2 * inter, D // 2), dtype=torch.int8, device=device)
         s13 = torch.empty(
             (E, 2 * inter, D // FP4_BLOCK), dtype=torch.float32, device=device
         )
-        w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
-        s2 = torch.empty((E, D, inter // FP4_BLOCK), dtype=torch.float32, device=device)
         for local_i in range(E):
             p = f"{prefix}.experts.{start + local_i}"
             w13[local_i, :inter].copy_(weights.pop(f"{p}.w1.weight"))
             s13[local_i, :inter].copy_(weights.pop(f"{p}.w1.scale").float())
             w13[local_i, inter:].copy_(weights.pop(f"{p}.w3.weight"))
             s13[local_i, inter:].copy_(weights.pop(f"{p}.w3.scale").float())
-            w2[local_i].copy_(weights.pop(f"{p}.w2.weight"))
-            s2[local_i].copy_(weights.pop(f"{p}.w2.scale").float())
-
-        # (2) Repack SFs to the kernel's required int32 layout (MN-major,
-        # TMA-aligned, packed 4-UE8M0-per-int32).
         s13_int = deep_gemm.transform_sf_into_required_layout(
             s13, 2 * inter, D, (1, FP4_BLOCK), E
         )
+        del s13
+        torch.cuda.empty_cache()
+
+        # --- L2 (down): same pattern, but only after L1's fp32 buffer
+        # has been freed.
+        w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
+        s2 = torch.empty((E, D, inter // FP4_BLOCK), dtype=torch.float32, device=device)
+        for local_i in range(E):
+            p = f"{prefix}.experts.{start + local_i}"
+            w2[local_i].copy_(weights.pop(f"{p}.w2.weight"))
+            s2[local_i].copy_(weights.pop(f"{p}.w2.scale").float())
         s2_int = deep_gemm.transform_sf_into_required_layout(
             s2, D, inter, (1, FP4_BLOCK), E
         )
+        del s2
+        torch.cuda.empty_cache()
 
-        # (3) Apply Mega MoE-specific transforms: L1 gate/up interleave
-        # (gran=8 along N) + both SFs UTCCP-transposed.  Returns the
-        # final weights that the kernel reads directly each forward.
+        # --- Mega MoE transform: interleave + UTCCP transpose.  Inputs
+        # are dropped immediately after to free the stacked
+        # int8 weights / int32 SFs; only the kernel-consumable
+        # l1/l2 outputs survive into the next layer.
         (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
             (w13, s13_int),
             (w2, s2_int),
         )
+        del w13, s13_int, w2, s2_int
+        torch.cuda.empty_cache()
 
         # Stash as plain attributes (not Parameters — the kernel reads
-        # raw int8/int32 buffers with no autograd).  Original stacked
-        # fp32 SFs are dropped now that the int layout has been derived.
+        # raw int8/int32 buffers with no autograd).
         self._mega_l1_w = l1_w
         self._mega_l1_sf = l1_sf
         self._mega_l2_w = l2_w

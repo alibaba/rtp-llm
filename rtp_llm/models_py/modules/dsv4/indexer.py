@@ -11,6 +11,7 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_freqs_cis_local
@@ -58,19 +59,14 @@ class Indexer(nn.Module):
                 f"{prefix}.wq_b.weight",
                 f"{prefix}.wq_b.scale",
             )
-            self.weights_proj = nn.Linear(dim, index_n_heads, bias=False)
-            # weights_proj stays in the ckpt dtype (BF16); the legacy path
-            # used `nn.Linear(...)` under `torch.set_default_dtype(bf16)`
-            # context in DeepSeekV4Model, so BF16 matches behavior.
-            self.weights_proj.weight = nn.Parameter(
-                weights[f"{prefix}.weights_proj.weight"],
-                requires_grad=False,
-            )
+            # weights_proj is a plain BF16 weight tensor; forward calls
+            # ``F.linear(x, self.weights_proj)`` directly.
+            self.weights_proj = weights[f"{prefix}.weights_proj.weight"]
         else:
             self.wq_b = QuantizedLinear(
                 q_lora_rank, index_n_heads * index_head_dim, storage="fp8"
             )
-            self.weights_proj = nn.Linear(dim, index_n_heads, bias=False)
+            self.weights_proj = None
 
         self.compressor = Compressor(
             dim=dim,
@@ -218,10 +214,10 @@ class Indexer(nn.Module):
     def _weights_proj_abs_blocked(self, x: torch.Tensor, start_pos) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
         if seqlen <= 1:
-            return self.weights_proj(x)
+            return F.linear(x, self.weights_proj)
         if isinstance(start_pos, torch.Tensor):
             if start_pos.numel() != 1:
-                return self.weights_proj(x)
+                return F.linear(x, self.weights_proj)
             sp = int(start_pos.item())
         else:
             sp = int(start_pos)
@@ -238,7 +234,7 @@ class Indexer(nn.Module):
         while start < seqlen:
             abs_pos = sp + start
             end = min(seqlen, start + (block - (abs_pos % block)))
-            out[:, start:end] = self.weights_proj(x[:, start:end])
+            out[:, start:end] = F.linear(x[:, start:end], self.weights_proj)
             start = end
         return out
 
@@ -386,7 +382,7 @@ class Indexer(nn.Module):
             apply_rotary_emb_batched(q[..., -rd:], freqs_cis_per_req)
 
             # weights = weights_proj(x) * scale
-            weights = self.weights_proj(x) * (
+            weights = F.linear(x, self.weights_proj) * (
                 self.softmax_scale * self.n_heads**-0.5
             )  # [B, 1, H_idx]
 
@@ -472,7 +468,7 @@ class Indexer(nn.Module):
             freqs_per_b = self.freqs_cis[start_pos.long()]  # [B, freqs_dim]
             apply_rotary_emb_batched(q[..., -rd:], freqs_per_b)
 
-            weights = self.weights_proj(x) * (
+            weights = F.linear(x, self.weights_proj) * (
                 self.softmax_scale * self.n_heads**-0.5
             )  # [B, 1, H_idx]
 

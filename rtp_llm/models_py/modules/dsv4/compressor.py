@@ -51,9 +51,11 @@ class _CompressorNorm(nn.Module):
     """Weight holder for Compressor RMSNorm.  BF16 — ``rtp_llm_ops.rmsnorm``
     requires bf16 weight (silent NaN on fp32), matching vLLM default."""
 
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, weight: Optional[torch.Tensor] = None):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.bfloat16))
+        # Pass the framework loader's bf16 tensor at construction (factory
+        # mode) or ``None`` for unit-test paths that bind it later.
+        self.weight = weight
 
 
 class Compressor(nn.Module):
@@ -80,35 +82,22 @@ class Compressor(nn.Module):
         self._factory_mode = weights is not None
 
         if self._factory_mode:
-            self.ape = nn.Parameter(
-                weights[f"{prefix}.ape"].float(),
-                requires_grad=False,
-            )
-            self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
-            self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
-            with torch.no_grad():
-                self.wkv.weight = nn.Parameter(
-                    weights[f"{prefix}.wkv.weight"].float(),
-                    requires_grad=False,
-                )
-                self.wgate.weight = nn.Parameter(
-                    weights[f"{prefix}.wgate.weight"].float(),
-                    requires_grad=False,
-                )
-            self.norm = _CompressorNorm(head_dim)
-            self.norm.weight = nn.Parameter(
-                weights[f"{prefix}.norm.weight"].to(torch.bfloat16),
-                requires_grad=False,
+            # All four tensors come from the framework loader at their final
+            # dtype (ape/wkv/wgate fp32 via descriptor data_type, norm bf16
+            # via compute_dtype) — bind raw refs, no extra casts.  wkv/wgate
+            # forward calls ``F.linear(x, self.wkv)`` directly, no holder
+            # class needed.
+            self.ape = weights[f"{prefix}.ape"]
+            self.wkv = weights[f"{prefix}.wkv.weight"]
+            self.wgate = weights[f"{prefix}.wgate.weight"]
+            self.norm = _CompressorNorm(
+                head_dim, weight=weights[f"{prefix}.norm.weight"]
             )
         else:
-            self.ape = nn.Parameter(
-                torch.empty(compress_ratio, coff * head_dim, dtype=torch.float32)
-            )
-            self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
-            self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
-            with torch.no_grad():
-                self.wkv.weight = nn.Parameter(self.wkv.weight.float())
-                self.wgate.weight = nn.Parameter(self.wgate.weight.float())
+            # Unit-test / microbench path — caller binds tensors externally.
+            self.ape = None
+            self.wkv = None
+            self.wgate = None
             self.norm = _CompressorNorm(head_dim)
         self.norm_eps = norm_eps
 
@@ -731,10 +720,10 @@ class Compressor(nn.Module):
         try:
             x32 = x.float()  # [B, 1, dim]
             kv_all = torch.nn.functional.linear(
-                x32, self.wkv.weight
+                x32, self.wkv
             )  # [B, 1, coff*head_dim]
             score_all = torch.nn.functional.linear(
-                x32, self.wgate.weight
+                x32, self.wgate
             )  # [B, 1, coff*head_dim]
 
             # Output buffer — populated only for boundary requests; the rest
@@ -860,9 +849,9 @@ class Compressor(nn.Module):
         )
         try:
             x32 = x.float()
-            kv_all = torch.nn.functional.linear(x32, self.wkv.weight)  # [B, 1, coff*d]
+            kv_all = torch.nn.functional.linear(x32, self.wkv)  # [B, 1, coff*d]
             score_all = torch.nn.functional.linear(
-                x32, self.wgate.weight
+                x32, self.wgate
             )  # [B, 1, coff*d]
 
             sp = start_pos.to(torch.long)
@@ -1115,8 +1104,8 @@ class Compressor(nn.Module):
         _dbg = self._dbg_prefix if _rt.ENABLED else None
 
         x32 = x.float()
-        kv = self._linear_abs_blocked(x32, self.wkv.weight, start_pos)
-        score = self._linear_abs_blocked(x32, self.wgate.weight, start_pos)
+        kv = self._linear_abs_blocked(x32, self.wkv, start_pos)
+        score = self._linear_abs_blocked(x32, self.wgate, start_pos)
         if _dbg is not None:
             _rt.record_if_level(2, f"{_dbg}_x_in", x)
             _rt.record_if_level(2, f"{_dbg}_kv_local", kv)
