@@ -85,9 +85,16 @@ class RocmFp8PTPCLinear(LinearBase):
         w_scales = self.weight_scales
 
         K = input_fp8.shape[-1]
-        # 192 is aiter's empirical threshold: small-K uses bpreshuffle_cktile
-        # (caller-allocated output); large-K uses gemm_a8w8_bpreshuffle (returns new).
-        if K < 192:
+        # Dispatch rules (validated on MI308X / Qwen3-0.6B FP8 PTPC):
+        # - K < 192            : aiter cktile (small-K kernel; caller-allocated output)
+        # - K >= 192, M >= 1024: aiter cktile FlatmmKernel (prefill path; -12.4% vs default
+        #                       on 4 prefill shapes M=9715; LDS bank conflict 16x->0.53x/inst)
+        # - K >= 192, M < 1024 : aiter default (decode; cktile regresses +40~+97% at
+        #                       M<=256 due to large 128x128x128 tile + VGPR=96)
+        # Threshold M=1024 chosen to: (a) safely cover prefill (M=9715), (b) protect all
+        # decode shapes up to M=256, (c) leave 256<M<1024 on default as the safe choice.
+        # Sweep evidence: kernel_opt_qwen3_fp8_gemm/v1_lds_swizzle/v1_decode_sweep_result.json
+        if K < 192 or M >= 1024:
             output = torch.empty(
                 (M, N), dtype=input_bf16.dtype, device=input_bf16.device
             )
