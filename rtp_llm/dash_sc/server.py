@@ -43,23 +43,23 @@ def dash_sc_grpc_server_channel_options(dash_sc_grpc_config) -> list[tuple[str, 
 
 
 def dash_sc_grpc_server_max_concurrent_rpcs(dash_sc_grpc_config) -> Optional[int]:
-    """Map ``DashScGrpcConfig.max_server_workers`` to aio's concurrency cap.
+    """Always ``None`` (unlimited) under grpc.aio.
 
-    grpc.aio has no thread pool; concurrent RPCs are cheap coroutines on the
-    single event loop. ``max_server_workers`` therefore loses its original
-    meaning ("how many RPCs can run at once") and instead becomes an advisory
-    soft cap. Returning ``None`` uses grpcio's unlimited default — the right
-    behaviour for 99% of deployments, since back-pressure now comes from the
-    backend visitor's own concurrency, not a server-side thread pool. The
-    field is preserved on the C++ Config struct for backward compatibility;
-    we deliberately ignore non-positive values instead of asserting.
+    ``DashScGrpcConfig.max_server_workers`` was sized for the sync grpcio
+    thread pool — one worker per concurrent RPC, so values like 64 made
+    sense when each long stream occupied a whole thread. Passing the same
+    number to ``grpc.aio.server(maximum_concurrent_rpcs=N)`` is a category
+    error: under aio, concurrent RPCs are coroutines on a single loop, not
+    threads, so ``N`` becomes a hard RPC admission cap — once ``N`` long
+    streams are in flight every new RPC is aborted with
+    ``RESOURCE_EXHAUSTED / Concurrent RPC limit exceeded!`` (observed
+    post-migration on the forwarder access log). Backpressure under aio
+    comes from the backend visitor's own concurrency, not from an RPC
+    admission cap. The C++ Config struct keeps the field for wire
+    compatibility, but this function deliberately ignores its value.
     """
-    cfg = _resolve_dash_sc_grpc_config(dash_sc_grpc_config)
-    try:
-        n = int(cfg.max_server_workers)
-    except (TypeError, ValueError):
-        return None
-    return n if n > 0 else None
+    _ = _resolve_dash_sc_grpc_config(dash_sc_grpc_config)
+    return None
 
 
 # Max time for grpc.aio.Server.start() + bind before start_on_loop returns.
