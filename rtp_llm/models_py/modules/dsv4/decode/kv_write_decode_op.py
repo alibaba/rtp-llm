@@ -196,6 +196,20 @@ def write_kv_to_pool(
     # compressed-write trick: redirect -1 to slot 0, delta=0 there.
     valid = slot_long >= 0
     safe_slot = torch.where(valid, slot_long, torch.zeros_like(slot_long))
+    if not (
+        pool_view.is_cuda
+        and torch.cuda.is_available()
+        and torch.cuda.is_current_stream_capturing()
+    ):
+        valid_idx = valid.nonzero(as_tuple=False).flatten()
+        if valid_idx.numel() > 0:
+            pool_view.index_copy_(
+                0,
+                slot_long.index_select(0, valid_idx),
+                k_state.index_select(0, valid_idx),
+            )
+        return
+
     existing = pool_view.index_select(0, safe_slot)
     delta = torch.where(
         valid.unsqueeze(-1),

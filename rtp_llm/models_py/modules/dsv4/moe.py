@@ -1148,9 +1148,8 @@ class MoE(nn.Module):
 
         # Master switch: when MOEDBG=0 the AND short-circuits so neither the
         # layer_id compare nor any record_if_level call site below runs.
-        # Instruments layers 0..2 (first CSA layer is L2) and 17..20
-        # (cp2_ep1 vs tp1 first divergence window) when enabled.
-        _dbg = _rt.ENABLED and (self.layer_id <= 2 or 17 <= self.layer_id <= 20)
+        # Instruments layers 0..2 (first CSA layer is L2) when enabled.
+        _dbg = _rt.should_record_layer(self.layer_id)
         shape = x.size()
         x = x.view(-1, self.dim)
         if _dbg:

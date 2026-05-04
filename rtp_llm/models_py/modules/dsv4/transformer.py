@@ -278,22 +278,46 @@ class V4Transformer(nn.Module):
         is removed."""
         from rtp_llm.models_py.modules.dsv4._mhc_tilelang import tk_mhc_head
 
-        tk_in = x.unsqueeze(0) if x.dim() == 3 else x
-        tk_y = tk_mhc_head(
-            tk_in,
-            self.hc_head_fn,
-            self.hc_head_scale,
-            self.hc_head_base,
-            norm_eps=self.norm_eps,
-            pre_eps=self.hc_eps,
-            hc_mult=self.hc_mult,
-        )
-        if tk_y is not None:
-            return tk_y.squeeze(0) if x.dim() == 3 else tk_y
+        if x.dim() != 3:
+            tk_y = tk_mhc_head(
+                x,
+                self.hc_head_fn,
+                self.hc_head_scale,
+                self.hc_head_base,
+                norm_eps=self.norm_eps,
+                pre_eps=self.hc_eps,
+                hc_mult=self.hc_mult,
+            )
+            if tk_y is not None:
+                return tk_y
         shape, dtype = x.size(), x.dtype
         x_flat = x.flatten(-2).float()  # [..., hc*d]
         rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x_flat, self.hc_head_fn) * rsqrt
+        positions = getattr(self, "_hc_head_positions", None)
+        if (
+            x.dim() == 3
+            and positions is not None
+            and positions.numel() == x_flat.shape[0]
+        ):
+            pos = positions.to(device=x_flat.device, dtype=torch.long)
+            block = pos // 256
+            mixes_linear = torch.empty(
+                x_flat.shape[0],
+                self.hc_head_fn.shape[0],
+                dtype=x_flat.dtype,
+                device=x_flat.device,
+            )
+            start = 0
+            while start < x_flat.shape[0]:
+                cur = block[start]
+                end = start + 1
+                while end < x_flat.shape[0] and bool((block[end] == cur).item()):
+                    end += 1
+                mixes_linear[start:end] = F.linear(x_flat[start:end], self.hc_head_fn)
+                start = end
+        else:
+            mixes_linear = F.linear(x_flat, self.hc_head_fn)
+        mixes = mixes_linear * rsqrt
         pre = (
             torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
         )
