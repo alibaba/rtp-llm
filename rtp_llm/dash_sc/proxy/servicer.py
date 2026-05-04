@@ -95,11 +95,6 @@ def _parse_channels_per_addr(env_value: str) -> int:
 class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
     """Pure transparent proxy (grpc.aio) with a channel pool across downstream addrs."""
 
-    @staticmethod
-    def has_forward_config() -> bool:
-        """Check if forward addresses are configured via environment variable."""
-        return bool(os.environ.get(_FORWARD_ENV_KEY, "").strip())
-
     def __init__(
         self,
         forward_addrs: Optional[List[str]] = None,

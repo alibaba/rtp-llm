@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import threading
 import traceback
@@ -16,11 +17,18 @@ from typing import Any, List, Optional
 
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.dash_sc.inference.servicer import DashScInferenceServicer
+from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
 from rtp_llm.dash_sc.server import DashScGrpcServer
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
+
+# Env key that flips the process into reverse-proxy mode. Read once at
+# ``start()`` entry so mode is decided at the process boundary — not re-probed
+# inside the gRPC server or servicer. Empty / unset -> inference mode.
+_FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 
 
 def _derive_echo_prefix_ids(model_config: Any, generate_env_config: Any) -> List[int]:
@@ -54,8 +62,12 @@ class DashScApp:
     """Self-contained lifecycle for a per-rank DashSc gRPC server.
 
     Startup order (``start``):
-      1. Build ``ModelConfig`` (no weight loading — just architecture/ports metadata).
-      2. Build ``BackendRPCServerVisitor`` via the shared factory.
+      1. Pick mode from ``DASH_SC_GRPC_FORWARD_ADDR`` (proxy if set,
+         inference otherwise). Inference mode additionally builds
+         ``ModelConfig`` + ``BackendRPCServerVisitor``; proxy mode skips both
+         since it only needs outbound channels to the configured backends.
+      2. Construct the chosen servicer (``DashScProxyServicer`` or
+         ``DashScInferenceServicer``).
       3. Spin up a dedicated asyncio loop in a background thread — same loop
          hosts the aio gRPC server AND backend ``enqueue`` coroutines, so the
          request path never leaves this loop.
@@ -128,25 +140,44 @@ class DashScApp:
 
     def start(self, ready_pipe_writer=None) -> None:
         try:
-            model_config = ModelFactory.create_model_config(
-                model_args=self.py_env_configs.model_args,
-                lora_config=self.py_env_configs.lora_config,
-                kv_cache_config=self.py_env_configs.kv_cache_config,
-                profiling_debug_logging_config=self.py_env_configs.profiling_debug_logging_config,
-                generate_env_config=self.py_env_configs.generate_env_config,
-                embedding_config=self.py_env_configs.embedding_config,
-                quantization_config=self.py_env_configs.quantization_config,
-                render_config=self.py_env_configs.render_config,
-            )
+            port = self.server_config.dash_sc_grpc_server_port
+            is_proxy = bool(os.environ.get(_FORWARD_ENV_KEY, "").strip())
 
-            backend_visitor = create_backend_rpc_server_visitor(
-                py_env_configs=self.py_env_configs,
-                model_config=model_config,
-            )
+            if is_proxy:
+                # Proxy mode: no model / weight loading / visitor needed — the
+                # servicer is a transparent reverse proxy fed by outbound
+                # channels to ``DASH_SC_GRPC_FORWARD_ADDR``. Skipping the
+                # backend-visitor and model-config construction here avoids the
+                # heavy engine init path (which would fail in proxy-only
+                # deployments where no model is mounted).
+                servicer: Any = DashScProxyServicer()
+            else:
+                model_config = ModelFactory.create_model_config(
+                    model_args=self.py_env_configs.model_args,
+                    lora_config=self.py_env_configs.lora_config,
+                    kv_cache_config=self.py_env_configs.kv_cache_config,
+                    profiling_debug_logging_config=self.py_env_configs.profiling_debug_logging_config,
+                    generate_env_config=self.py_env_configs.generate_env_config,
+                    embedding_config=self.py_env_configs.embedding_config,
+                    quantization_config=self.py_env_configs.quantization_config,
+                    render_config=self.py_env_configs.render_config,
+                )
 
-            echo_prefix_ids = _derive_echo_prefix_ids(
-                model_config, self.py_env_configs.generate_env_config
-            )
+                backend_visitor = create_backend_rpc_server_visitor(
+                    py_env_configs=self.py_env_configs,
+                    model_config=model_config,
+                )
+
+                echo_prefix_ids = _derive_echo_prefix_ids(
+                    model_config, self.py_env_configs.generate_env_config
+                )
+                servicer = DashScInferenceServicer(
+                    backend_visitor=backend_visitor,
+                    ip=self.server_config.ip,
+                    port=port,
+                    server_id=self.server_config.frontend_server_id,
+                    echo_prefix_ids=echo_prefix_ids,
+                )
 
             loop = self._start_enqueue_loop()
 
@@ -156,23 +187,21 @@ class DashScApp:
             # (split via the ``protocol`` tag the interceptor injects).
             kmonitor.init()
 
-            port = self.server_config.dash_sc_grpc_server_port
             logging.info(
-                "[DashScApp] starting gRPC server rank_id=%s server_id=%s port=%s",
+                "[DashScApp] starting gRPC server rank_id=%s server_id=%s port=%s mode=%s",
                 self.server_config.rank_id,
                 self.server_config.frontend_server_id,
                 port,
+                "proxy" if is_proxy else "inference",
             )
             self._grpc_server.start_on_loop(
                 loop,
                 port=port,
-                backend_visitor=backend_visitor,
-                ip=self.server_config.ip,
+                servicer=servicer,
                 server_id=self.server_config.frontend_server_id,
                 log_path=get_log_path(),
                 backup_count=self.py_env_configs.profiling_debug_logging_config.log_file_backup_count,
                 rank_id=self.server_config.rank_id,
-                echo_prefix_ids=echo_prefix_ids,
             )
             logging.info("[DashScApp] gRPC server bound on port %s", port)
         except BaseException as e:
