@@ -298,7 +298,11 @@ markexpr = "manual and smoke and H20"
 [tool.rtp_llm.pytest_ci.profiles.smoke_sm8x_oss]
 description = "OSS smoke SM8x (smoke-sm8x-oss)"
 paths = ["rtp_llm/test/smoke/suites/"]
-markexpr = "manual and smoke and not H20 and not MI308X and not SM100 and not SM100_ARM and not PPU_ZW810E"
+# NOTE: rocm marker is `MI308X_ROCM7` (suffixed), not `MI308X` — pytest marker
+# matching is exact-token. Run 39158147 leaked all rocm cases into
+# smoke-light-sm8x and they crashed with `libcudart.so.12 cannot open` when
+# dispatched to MI308X workers carrying cuda12_9-built .so files.
+markexpr = "manual and smoke and not H20 and not MI308X_ROCM7 and not SM100 and not SM100_ARM and not PPU_ZW810E"
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_sm100_oss]
 description = "OSS smoke SM100 (smoke-sm100-oss)"
