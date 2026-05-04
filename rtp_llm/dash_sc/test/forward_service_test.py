@@ -510,6 +510,28 @@ class ChannelPoolTest(TestCase):
         self.assertEqual(_parse_channels_per_addr("-4"), 1)
         self.assertEqual(_parse_channels_per_addr("4"), 4)
 
+    def test_next_stub_returns_none_after_close(self) -> None:
+        """Shutdown race: after ``close()`` clears the pool, ``_next_stub``
+        must return ``(None, -1)`` instead of raising ``ZeroDivisionError``
+        on the empty-list modulo — and ``ModelStreamInfer`` must translate
+        that into a proper UNAVAILABLE abort.
+        """
+        with patch("grpc.insecure_channel", return_value=MagicMock()):
+            servicer = PureForwardServicer(["10.0.0.1:8096"])
+        servicer.close()
+        self.assertEqual(servicer._next_stub(), (None, -1))
+
+        ctx = MagicMock()
+        ctx.abort.side_effect = grpc.RpcError("UNAVAILABLE")
+
+        def request_gen():
+            yield _make_request("req1")
+
+        with self.assertRaises(grpc.RpcError):
+            list(servicer.ModelStreamInfer(request_gen(), ctx))
+        ctx.abort.assert_called_once()
+        self.assertEqual(ctx.abort.call_args[0][0], grpc.StatusCode.UNAVAILABLE)
+
 
 if __name__ == "__main__":
     main()
