@@ -1,7 +1,9 @@
-"""Pure gRPC forward servicer for predict_v2.proto.
+"""Pure gRPC forward servicer for predict_v2.proto (grpc.aio).
 
 Supports multiple downstream addresses with round-robin selection across
-an optional per-addr HTTP/2 channel pool.
+an optional per-addr HTTP/2 channel pool. Runs on grpc.aio — every servicer
+method is a coroutine or async generator so the whole forward path stays on
+a single asyncio event loop.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 
 # Per-addr HTTP/2 connection pool size. The forwarder multiplexes every
-# outbound RPC over ``grpc.insecure_channel(addr)``, which is one HTTP/2
+# outbound RPC over ``grpc.aio.insecure_channel(addr)``, which is one HTTP/2
 # connection. When that one connection fails (keepalive timeout, LBS RST,
 # backend GC stall) *every* concurrent stream on it aborts simultaneously —
 # the 14:19 cascade (22 × 1ms ``Exception iterating requests!`` inside 100ms)
@@ -30,10 +32,7 @@ _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 # bandwidth.
 #
 # Default 1 is backward-compatible: set
-# ``DASH_SC_GRPC_FORWARD_CHANNELS_PER_ADDR=N`` in deployment to enable. Pool
-# size is decoupled from ``DashScGrpcConfig.max_server_workers`` — that
-# controls inbound concurrency, this controls outbound failure domains. A
-# single server worker reuses the whole pool across the lifetime of its RPC.
+# ``DASH_SC_GRPC_FORWARD_CHANNELS_PER_ADDR=N`` in deployment to enable.
 _CHANNELS_PER_ADDR_ENV_KEY = "DASH_SC_GRPC_FORWARD_CHANNELS_PER_ADDR"
 _DEFAULT_CHANNELS_PER_ADDR = 1
 
@@ -94,7 +93,7 @@ def _parse_channels_per_addr(env_value: str) -> int:
 
 
 class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
-    """Pure transparent proxy with connection pool for multiple downstream addresses."""
+    """Pure transparent proxy (grpc.aio) with a channel pool across downstream addrs."""
 
     @staticmethod
     def has_forward_config() -> bool:
@@ -124,7 +123,7 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
 
         self._forward_addrs = forward_addrs
         self._channels_per_addr = channels_per_addr
-        self._channels: List[grpc.Channel] = []
+        self._channels: List[grpc.aio.Channel] = []
         self._stubs: List[predict_v2_pb2_grpc.GRPCInferenceServiceStub] = []
         # Parallel list: for stub i, ``_stub_addr_idx[i]`` is the index into
         # ``_forward_addrs`` — lets ``_next_stub`` return the original addr
@@ -134,17 +133,15 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
 
         for addr_i, addr in enumerate(forward_addrs):
             for _ in range(channels_per_addr):
-                channel = grpc.insecure_channel(addr, options=_FORWARD_CHANNEL_OPTS)
+                channel = grpc.aio.insecure_channel(addr, options=_FORWARD_CHANNEL_OPTS)
                 stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
                 self._channels.append(channel)
                 self._stubs.append(stub)
                 self._stub_addr_idx.append(addr_i)
 
-        # Round-robin cursor. A Lock makes concurrent ``_next_stub`` safe under
-        # the gRPC thread pool. Contention is negligible (one increment per
-        # RPC entry), but without it two workers racing ``__iadd__`` could
-        # skew distribution under extreme load. ``itertools.cycle`` would be
-        # simpler but is not thread-safe.
+        # Round-robin cursor. Even under a single-loop aio server, ``_next_stub``
+        # is plain sync code so a Lock is cheap insurance against future
+        # multi-worker topologies that share the servicer across threads.
         self._rr_idx = 0
         self._rr_lock = threading.Lock()
 
@@ -181,24 +178,29 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             self._rr_idx = (self._rr_idx + 1) % len(self._stubs)
         return self._stubs[i], self._stub_addr_idx[i]
 
-    def close(self):
+    async def close(self) -> None:
+        """Close all aio channels. Safe to call multiple times."""
         for channel in self._channels:
-            if channel is not None:
-                channel.close()
+            if channel is None:
+                continue
+            try:
+                await channel.close()
+            except Exception as e:
+                logging.warning("[DashScGrpc] forward channel close failed: %s", e)
         self._channels.clear()
         self._stubs.clear()
 
-    def ModelStreamInfer(self, request_iterator, context):
+    async def ModelStreamInfer(self, request_iterator, context):
         stub, idx = self._next_stub()
         if stub is None:
             # Shutdown race: ``close()`` cleared ``_stubs`` after grpcio had
-            # already dispatched this RPC. ``context.abort`` sends the client
-            # a proper UNAVAILABLE + message, raises ``grpc.RpcError`` here
-            # so the handler unwinds cleanly, and the interceptor's
-            # ``_classify_rpc_exception`` picks the code up as
-            # ``UNAVAILABLE`` (bounded ``error_code`` bucket) instead of
+            # already dispatched this RPC. ``context.abort`` raises
+            # ``grpc.aio.AbortError`` / ``grpc.RpcError`` here, the interceptor's
+            # ``_classify_rpc_exception`` picks the code up as ``UNAVAILABLE``
+            # (bounded ``error_code`` bucket) instead of
             # ``UNKNOWN_ZeroDivisionError``.
-            context.abort(grpc.StatusCode.UNAVAILABLE, "forwarder shutting down")
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "forwarder shutting down")
+            return
         addr = self._forward_addrs[idx]
 
         # Grab the access-log aggregate (installed by the access-log
@@ -225,31 +227,16 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
 
         upstream_iter = stub.ModelStreamInfer(request_iterator, metadata=md)
 
-        # Cancel propagation mirrors ``dash_sc/service.py::_register_cancel_callback``:
-        # grpc-python does NOT auto-cancel a streaming call when the consumer
-        # stops iterating, and the server thread is blocked inside ``next(it)``
-        # so it cannot observe the inbound cancel on its own. ``add_callback``
-        # fires on a grpcio-internal thread the moment the inbound RPC
-        # terminates (cancel / deadline / normal close) and cancels the
-        # downstream stub call there, so rtp-llm stops burning GPU on a
-        # client that is already gone. Without this the forward->rtp-llm RPC
-        # keeps running long after the chat side has cut (observed: 567s
-        # tail with 2 tokens).
-        def _cancel_downstream() -> None:
-            try:
-                upstream_iter.cancel()
-            except Exception:
-                pass
-
-        try:
-            context.add_callback(_cancel_downstream)
-        except Exception:
-            pass
+        # Cancel propagation under grpc.aio is implicit: when the inbound RPC
+        # is cancelled by the client, the grpc.aio framework cancels the
+        # handler coroutine; ``asyncio.CancelledError`` then unwinds through
+        # the ``async for`` over ``upstream_iter`` and cancels the downstream
+        # aio call automatically. No ``context.add_callback`` plumbing needed.
 
         if agg is not None:
 
-            def counting_response_iter():
-                for resp in upstream_iter:
+            async def counting_response_iter():
+                async for resp in upstream_iter:
                     try:
                         agg.downstream_resp_count += 1
                     except Exception:
@@ -260,10 +247,23 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         else:
             downstream_iter = upstream_iter
 
-        yield from self._buffered_iter(downstream_iter, agg)
+        # Explicit aclose() wrapping: when the RPC generator is aclose()'d by
+        # grpc.aio (client disconnect) or athrow()'d by a handler, the
+        # exception lands at our ``yield resp`` below — but Python does *not*
+        # automatically close the inner ``_buffered_iter`` in that case. The
+        # inner would leak suspended at its own yield and its
+        # ``except GeneratorExit`` (responsible for the
+        # ``dropped_buffered_on_exception`` stage) would never fire. Wrapping
+        # in try/finally + aclose() makes the close deterministic.
+        buffered = self._buffered_iter(downstream_iter, agg)
+        try:
+            async for resp in buffered:
+                yield resp
+        finally:
+            await buffered.aclose()
 
     @staticmethod
-    def _buffered_iter(downstream_iter, diag_agg=None):
+    async def _buffered_iter(downstream_iter, diag_agg=None):
         """Hold the first chunk until the second arrives, then yield both back-to-back.
 
         Smooths PD-disaggregation TPOT perception: in PD mode the gap between
@@ -298,18 +298,18 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 except Exception:
                     pass
 
-        it = iter(downstream_iter)
+        it = downstream_iter.__aiter__()
         buffered = None
         _set_stage("waiting_first")
         try:
             try:
-                buffered = next(it)
-            except StopIteration:
+                buffered = await it.__anext__()
+            except StopAsyncIteration:
                 return
             _set_stage("waiting_second")
             try:
-                second = next(it)
-            except StopIteration:
+                second = await it.__anext__()
+            except StopAsyncIteration:
                 yield buffered
                 buffered = None
                 _set_stage("flushed_first")
@@ -318,13 +318,12 @@ class PureForwardServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             buffered = None
             yield second
             _set_stage("flushed_both")
-            yield from it
+            async for remaining in it:
+                yield remaining
         except GeneratorExit:
-            # Consumer called ``gen.close()`` on the outer RPC generator —
-            # yielding is forbidden after GeneratorExit (Python raises
-            # ``RuntimeError: generator ignored GeneratorExit`` and prints
-            # an "Exception ignored in:" traceback to stderr at GC time).
-            # The buffered frame is lost; there is no wire to flush to.
+            # Consumer called ``aclose()`` on the outer RPC generator —
+            # yielding is forbidden after GeneratorExit. The buffered frame
+            # is lost; there is no wire to flush to.
             if buffered is not None:
                 _set_stage("dropped_buffered_on_exception")
             raise

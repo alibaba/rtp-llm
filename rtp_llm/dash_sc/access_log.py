@@ -42,7 +42,7 @@ import dataclasses
 import logging
 import struct
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import grpc
 import orjson
@@ -707,28 +707,12 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         rank_id: Optional[int] = None,
         server_id: Optional[int] = None,
         raw_mode: bool = False,
-        pool_pending_depth_fn: Optional[Callable[[], int]] = None,
-        pool_size: Optional[int] = None,
     ) -> None:
         self._logger = logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME)
         self._query_logger = logging.getLogger(DASH_SC_GRPC_QUERY_LOGGER_NAME)
         self._rank_id = rank_id
         self._server_id = server_id
         self._raw_mode = raw_mode
-        # Pool saturation observability. ``pool_pending_depth_fn`` returns the
-        # current pending-queue depth of the grpcio server's ThreadPoolExecutor;
-        # sampled on every handler entry so a sudden backlog is visible in
-        # kmonitor within one arrival, not at the next flush tick. ``pool_size``
-        # lets us threshold-warn ("pending > pool/2") without a second config.
-        # Both optional — older callers that don't pass them get the prior
-        # zero-overhead behavior.
-        self._pool_probe = pool_pending_depth_fn
-        self._pool_size = pool_size
-        # Warning throttle: one WARN per 5s max. ``float`` assignment is atomic
-        # in CPython, so no Lock — occasional near-simultaneous double-log is
-        # acceptable for a diagnostic message. Zero-init means the first
-        # backlog event always fires.
-        self._last_pool_warn_ts: float = 0.0
         self._base_tags: dict[str, str] = {
             "protocol": _PROTOCOL_TAG,
             "rank_id": str(rank_id) if rank_id is not None else "",
@@ -857,60 +841,8 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         # share (~30% on the forwarder path) and broke parity between the
         # access log line count and the Grafana arrival curve.
         self._report_request_arrived(agg)
-        # Emit the query log at handler entry (arrival), not at inbound-stream
-        # drain. Originally we tagged the log on drain so an ``arrival_ts`` +
-        # ``req_read_done_ts`` diff could surface ``aquila → forward`` queueing
-        # latency. But the drain signal is asymmetric across the two tiers of
-        # this forwarder: the outer ``PureForwardServicer`` hands the inbound
-        # iterator straight to a client stub whose sender thread eagerly drains
-        # it (drain fires fast, ~ms after arrival), while the inner
-        # ``DashScGrpcInferenceServicer`` uses a ``for req in request_iterator:
-        # yield from iter_real_model_stream_infer(...)`` pattern where the
-        # ``yield from`` blocks the entire inference; the ``for`` loop only
-        # retries — and hits ``StopIteration`` — after generation finishes,
-        # which on long streams is minutes later. In production (commit
-        # 6410b2af1) this asymmetry showed up as 1046 outer query lines vs
-        # ~10 inner ones for the same RPCs — the inner tier's query log was
-        # effectively a second access log, useless as an arrival signal. Firing
-        # on handler entry makes the two tiers symmetric and restores the
-        # "tail -f query log = see new requests land" contract.
         self._emit_query_log(agg)
-        self._probe_pool_depth(method)
         return agg
-
-    def _probe_pool_depth(self, method: str) -> None:
-        """Sample grpcio server ThreadPoolExecutor backlog, report gauge + warn.
-
-        Fires once per handler entry. When all pool workers are occupied
-        (typically by long streaming RPCs) further arrivals sit in the
-        executor's internal queue; ``_work_queue.qsize()`` surfaces that as a
-        positive depth before the cascade manifests as ``req_count=0`` client
-        disconnects. ``pending > pool_size/2`` is the chosen WARN threshold —
-        a pool at 50% backlog has lost most of its headroom and will saturate
-        on any burst.
-        """
-        if self._pool_probe is None:
-            return
-        try:
-            depth = int(self._pool_probe())
-        except Exception:
-            return
-        kmonitor.report(
-            GaugeMetrics.DASH_SC_GRPC_SERVER_POOL_PENDING,
-            depth,
-            self._tags(method),
-        )
-        if self._pool_size and depth * 2 > self._pool_size:
-            now = time.time()
-            if now - self._last_pool_warn_ts >= 5.0:
-                self._last_pool_warn_ts = now
-                logging.warning(
-                    "[DashScGrpc] server thread pool backlog: pending=%d pool_size=%d "
-                    "(RPCs are queueing — long-running streams may be starving new arrivals; "
-                    "raise DashScGrpcConfig.max_server_workers if sustained)",
-                    depth,
-                    self._pool_size,
-                )
 
     def _on_response_chunk(self, agg: _RpcAggregate, resp) -> None:
         """Unified per-chunk hook: count, capture content, emit first-token / iter metrics."""
@@ -1111,6 +1043,154 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
 
             try:
                 for resp in inner(counted_reqs(), context):
+                    self._on_response_chunk(agg, resp)
+                    yield resp
+            except BaseException as e:
+                exc = e
+                raise
+            finally:
+                self._finalize(agg, context, exc)
+
+        return behavior
+
+
+class DashScGrpcAccessLogAioInterceptor(
+    grpc.aio.ServerInterceptor, DashScGrpcAccessLogInterceptor
+):
+    """grpc.aio variant of the access-log interceptor.
+
+    Reuses all non-wrap helpers from :class:`DashScGrpcAccessLogInterceptor`
+    (``_RpcAggregate`` / ``_new_aggregate`` / ``_finalize`` / ``_on_response_chunk``
+    / ``_emit_query_log`` / ``_classify_*`` / ``_report_*`` are all pure logic —
+    no ``await`` inside — so the sync class is the correct mixin). Only
+    ``intercept_service`` and the four ``_wrap_*_aio`` methods are redefined
+    so the wrappers become ``async def`` coroutines / ``async for``-driven
+    generators.
+
+    There is no thread pool under grpc.aio, so the pool-saturation gauge
+    plumbing from the sync path is intentionally absent here.
+    """
+
+    async def intercept_service(self, continuation, handler_call_details):
+        handler = await continuation(handler_call_details)
+        if handler is None:
+            return handler
+
+        method = handler_call_details.method
+        stream_type = _STREAM_TYPE[
+            (handler.request_streaming, handler.response_streaming)
+        ]
+
+        if handler.request_streaming and handler.response_streaming:
+            return grpc.stream_stream_rpc_method_handler(
+                self._wrap_stream_stream_aio(
+                    handler.stream_stream, method, stream_type
+                ),
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        if handler.request_streaming and not handler.response_streaming:
+            return grpc.stream_unary_rpc_method_handler(
+                self._wrap_stream_unary_aio(handler.stream_unary, method, stream_type),
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        if not handler.request_streaming and handler.response_streaming:
+            return grpc.unary_stream_rpc_method_handler(
+                self._wrap_unary_stream_aio(handler.unary_stream, method, stream_type),
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        return grpc.unary_unary_rpc_method_handler(
+            self._wrap_unary_unary_aio(handler.unary_unary, method, stream_type),
+            request_deserializer=handler.request_deserializer,
+            response_serializer=handler.response_serializer,
+        )
+
+    def _wrap_unary_unary_aio(self, inner, method, stream_type):
+        async def behavior(request, context):
+            agg = self._new_aggregate(method, stream_type, context)
+            agg.req_count = 1
+            self._capture_first_request(agg, request)
+            exc: Optional[BaseException] = None
+            try:
+                resp = await inner(request, context)
+                self._on_response_chunk(agg, resp)
+                return resp
+            except BaseException as e:
+                exc = e
+                raise
+            finally:
+                self._finalize(agg, context, exc)
+
+        return behavior
+
+    def _wrap_unary_stream_aio(self, inner, method, stream_type):
+        async def behavior(request, context):
+            agg = self._new_aggregate(method, stream_type, context)
+            agg.req_count = 1
+            self._capture_first_request(agg, request)
+            exc: Optional[BaseException] = None
+            try:
+                async for resp in inner(request, context):
+                    self._on_response_chunk(agg, resp)
+                    yield resp
+            except BaseException as e:
+                exc = e
+                raise
+            finally:
+                self._finalize(agg, context, exc)
+
+        return behavior
+
+    def _wrap_stream_unary_aio(self, inner, method, stream_type):
+        async def behavior(request_iterator, context):
+            agg = self._new_aggregate(method, stream_type, context)
+            exc: Optional[BaseException] = None
+
+            async def counted_reqs():
+                first = True
+                async for req in request_iterator:
+                    agg.req_count += 1
+                    if first:
+                        self._capture_first_request(agg, req)
+                        first = False
+                    else:
+                        if agg.raw_mode:
+                            agg.capture_request(req)
+                    yield req
+
+            try:
+                resp = await inner(counted_reqs(), context)
+                self._on_response_chunk(agg, resp)
+                return resp
+            except BaseException as e:
+                exc = e
+                raise
+            finally:
+                self._finalize(agg, context, exc)
+
+        return behavior
+
+    def _wrap_stream_stream_aio(self, inner, method, stream_type):
+        async def behavior(request_iterator, context):
+            agg = self._new_aggregate(method, stream_type, context)
+            exc: Optional[BaseException] = None
+
+            async def counted_reqs():
+                first = True
+                async for req in request_iterator:
+                    agg.req_count += 1
+                    if first:
+                        self._capture_first_request(agg, req)
+                        first = False
+                    else:
+                        if agg.raw_mode:
+                            agg.capture_request(req)
+                    yield req
+
+            try:
+                async for resp in inner(counted_reqs(), context):
                     self._on_response_chunk(agg, resp)
                     yield resp
             except BaseException as e:
