@@ -23,7 +23,6 @@ from rtp_llm.dash_sc.access_log import (
     init_dash_sc_grpc_access_logger,
     init_dash_sc_grpc_query_logger,
 )
-from rtp_llm.dash_sc.inference.servicer import DashScInferenceServicer
 from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
 
@@ -118,25 +117,23 @@ class DashScGrpcServer:
         self,
         port: int,
         *,
-        backend_visitor=None,
-        ip: str = "",
+        servicer: predict_v2_pb2_grpc.GRPCInferenceServiceServicer,
         server_id: str = "",
         log_path: str = "",
         backup_count: int = 0,
         rank_id: Optional[int] = None,
-        echo_prefix_ids: Optional[list[int]] = None,
     ) -> grpc.aio.Server:
         """Bind + start the aio gRPC server. Must be awaited on the owning loop.
 
-        ``backend_visitor=None`` -> fake mode.
+        ``servicer`` is fully constructed by the caller — the server no longer
+        inspects env or decides between proxy/inference mode. This keeps mode
+        selection at the process-boundary (``DashScApp`` / ``__main__``) where
+        it belongs, not inside a shared infrastructure class.
 
-        ``ip`` / ``server_id`` + the dash_sc gRPC ``port`` feed ``generate_request_id``
-        inside the servicer so the backend ``GenerateInput.request_id`` follows the same
-        snowflake scheme as the HTTP path in ``FrontendServer``.
-
-        ``log_path`` / ``backup_count`` / ``rank_id`` configure the access log file
-        (``<log_path>/dash_sc_grpc_access_r{rank}_s{server}.log``). Empty ``log_path``
-        -> no file handler (the interceptor still runs so tests see logger calls).
+        ``log_path`` / ``backup_count`` / ``rank_id`` / ``server_id`` configure
+        the access log file (``<log_path>/dash_sc_grpc_access_r{rank}_s{server}.log``).
+        Empty ``log_path`` -> no file handler (the interceptor still runs so
+        tests see logger calls).
         """
         if self._server is not None:
             logging.warning("[DashScGrpc] server already started")
@@ -178,11 +175,16 @@ class DashScGrpcServer:
                     DASH_SC_GRPC_QUERY_LOG_FILENAME, rank_id, server_id_int
                 ),
             )
-        is_forward = DashScProxyServicer.has_forward_config()
+        # ``raw_mode`` is purely a servicer-shape property: the proxy ships
+        # opaque proto frames end-to-end (needs full dumps to debug wire
+        # issues), the inference servicer ships parsed struct fields. Inferring
+        # it from ``isinstance`` keeps the two concerns coupled without
+        # reintroducing an env-var probe here.
+        is_proxy = isinstance(servicer, DashScProxyServicer)
         interceptor = DashScGrpcAccessLogAioInterceptor(
             rank_id=rank_id,
             server_id=server_id_int,
-            raw_mode=is_forward,
+            raw_mode=is_proxy,
         )
         # Deliberately no ``maximum_concurrent_rpcs`` — under grpc.aio concurrent
         # RPCs are coroutines on one loop, not threads, so any positive value
@@ -194,18 +196,6 @@ class DashScGrpcServer:
             options=opts,
             interceptors=[interceptor],
         )
-        if is_forward:
-            servicer = DashScProxyServicer()
-            mode = "pure forward"
-        else:
-            servicer = DashScInferenceServicer(
-                backend_visitor=backend_visitor,
-                ip=ip,
-                port=port,
-                server_id=server_id,
-                echo_prefix_ids=echo_prefix_ids,
-            )
-            mode = "real" if backend_visitor else "fake"
 
         predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(servicer, server)
         server.add_insecure_port(f"0.0.0.0:{port}")
@@ -213,9 +203,9 @@ class DashScGrpcServer:
         self._server = server
         self._servicer = servicer
         logging.info(
-            "[DashScGrpc] Listening on 0.0.0.0:%s (predict_v2.proto, %s)",
+            "[DashScGrpc] Listening on 0.0.0.0:%s (predict_v2.proto, servicer=%s)",
             port,
-            mode,
+            type(servicer).__name__,
         )
         return server
 
@@ -224,14 +214,12 @@ class DashScGrpcServer:
         loop: asyncio.AbstractEventLoop,
         *,
         port: int,
-        backend_visitor=None,
-        ip: str = "",
+        servicer: predict_v2_pb2_grpc.GRPCInferenceServiceServicer,
         server_id: str = "",
         log_path: str = "",
         backup_count: int = 0,
         rank_id: Optional[int] = None,
         startup_timeout_s: float = _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S,
-        echo_prefix_ids: Optional[list[int]] = None,
     ) -> None:
         """Schedule ``start()`` on ``loop`` and block until it returns or raises.
 
@@ -244,13 +232,11 @@ class DashScGrpcServer:
         fut = asyncio.run_coroutine_threadsafe(
             self.start(
                 port=port,
-                backend_visitor=backend_visitor,
-                ip=ip,
+                servicer=servicer,
                 server_id=server_id,
                 log_path=log_path,
                 backup_count=backup_count,
                 rank_id=rank_id,
-                echo_prefix_ids=echo_prefix_ids,
             ),
             loop,
         )
@@ -320,36 +306,16 @@ class DashScGrpcServer:
 
 
 def main():
-    """Standalone entry (fake mode only). Usage: python -m rtp_llm.dash_sc.server [--port PORT]"""
-    import argparse
+    """Standalone fake-inference entry. Usage: python -m rtp_llm.dash_sc.server [--port PORT].
 
-    parser = argparse.ArgumentParser(
-        description="DashSc gRPC server (predict_v2.proto wire, fake mode)"
-    )
-    parser.add_argument(
-        "--port", type=int, default=8000, help="gRPC port (default: 8000)"
-    )
-    parser.add_argument(
-        "--dash_sc_grpc_config_json",
-        type=str,
-        default="",
-        help="Optional JSON for DashScGrpcConfig (same shape as --dash_sc_grpc_config_json on main server).",
-    )
-    args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
-    dash_sc_cfg = None
-    if args.dash_sc_grpc_config_json.strip():
-        from rtp_llm.ops import DashScGrpcConfig
+    Preserved for backward compatibility with existing docs / tooling. New
+    callers should prefer the per-mode entry points:
+    ``python -m rtp_llm.dash_sc.inference`` (fake inference) and
+    ``python -m rtp_llm.dash_sc.proxy`` (reverse-proxy).
+    """
+    from rtp_llm.dash_sc.inference.__main__ import main as inference_main
 
-        dash_sc_cfg = DashScGrpcConfig()
-        dash_sc_cfg.from_json(args.dash_sc_grpc_config_json.strip())
-
-    async def _run():
-        grpc_server = DashScGrpcServer(dash_sc_grpc_config=dash_sc_cfg)
-        server = await grpc_server.start(args.port, backend_visitor=None)
-        await server.wait_for_termination()
-
-    asyncio.run(_run())
+    inference_main()
 
 
 if __name__ == "__main__":
