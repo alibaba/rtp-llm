@@ -1,8 +1,8 @@
-"""Pure gRPC forward servicer for predict_v2.proto (grpc.aio).
+"""gRPC→gRPC reverse-proxy servicer for predict_v2.proto (grpc.aio).
 
-Supports multiple downstream addresses with round-robin selection across
-an optional per-addr HTTP/2 channel pool. Runs on grpc.aio — every servicer
-method is a coroutine or async generator so the whole forward path stays on
+Supports multiple backend addresses with round-robin selection across an
+optional per-addr HTTP/2 channel pool. Runs on grpc.aio — every servicer
+method is a coroutine or async generator so the whole proxy path stays on
 a single asyncio event loop.
 """
 

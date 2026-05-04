@@ -1,6 +1,6 @@
-"""Unit tests for ``rtp_llm.dash_sc.forward_service`` (grpc.aio).
+"""Unit tests for ``rtp_llm.dash_sc.proxy_servicer`` (grpc.aio).
 
-Tests verify the async request_iterator is passed correctly to the downstream
+Tests verify the async request_iterator is passed correctly to the backend
 stub, first-chunk buffering behavior, access-log diagnostic injection, metadata
 propagation, and the per-addr channel pool.
 """
@@ -13,12 +13,12 @@ from unittest.mock import MagicMock, patch
 
 import grpc
 
-from rtp_llm.dash_sc.forward_service import (
+from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.dash_sc.proxy_servicer import (
     DashScProxyServicer,
     _parse_channels_per_addr,
     _parse_forward_addrs,
 )
-from rtp_llm.dash_sc.proto import predict_v2_pb2
 
 
 def _make_request(
