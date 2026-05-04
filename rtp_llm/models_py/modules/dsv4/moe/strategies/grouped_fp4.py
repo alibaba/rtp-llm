@@ -7,12 +7,12 @@ in ``select_strategy``).
 Wired into ``MoE`` via ``select_strategy`` when ep_size == 1 and the
 DeepGEMM kernel is available + opted in.
 
-Phase 2 (per ``.claude/plans/optimized-riding-mist.md::Phase 2``) will add
-4 prefill optimizations to ``forward``:
-  - quant-first reorder (input quantized once before scatter, not M_padded times)
-  - Triton ep_scatter (replaces argsort/bincount/cumsum/index_copy chain)
-  - fused silu+mul+fp8_quant kernel (replaces clamp/silu/mul/cast/quant chain)
-  - Triton ep_gather (replaces index_select+sum, no fp32 [N, topk, D] materialization)
+Forward is the 4-opt prefill path:
+  (1) quant input ONCE pre-permute (vs. ×topk on padded buffer)
+  (2) Triton ep_scatter (vs. argsort + bincount + cumsum + index_copy chain)
+  (3) Fused silu+mul+fp8 quant kernel (vs. clamp + silu + mul + cast + quant)
+  (4) Triton ep_gather with router-weight reduce (vs. index_select +
+      fp32 [N,topk,D] materialize + sum)
 """
 
 from __future__ import annotations
@@ -21,15 +21,27 @@ import os
 from typing import Dict, Optional
 
 import torch
-import torch.nn.functional as F
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     m_grouped_fp8_fp4_gemm_nt_contiguous,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+    ep_gather,
+    ep_scatter,
+    recompute_topk_ids_sum_expert_count,
+)
+from rtp_llm.models_py.utils.math import align, ceil_div
 
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
+from .._silu_mul_fp8_quant_triton import silu_mul_fp8_quant_packed
 from ..quant_layouts import FP4_BLOCK, FP8_BLOCK
+
+
+# ep_scatter requires m_indices.shape[0] % BLOCK_E == 0 (BLOCK_E=128); also
+# DeepGEMM contiguous requires per-expert M to be a multiple of the kernel's
+# alignment (128 on SM100). We use the same constant.
+_GROUPED_ALIGNMENT = 128
 
 
 def _has_fp8_fp4_grouped_kernel() -> bool:
@@ -136,146 +148,145 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         weights: torch.Tensor,
         indices: torch.Tensor,
     ) -> torch.Tensor:
-        """Single-GPU grouped FP4 expert compute.
+        """4-opt prefill path; returns ``[N, D] fp32``.
 
         Args:
-          x: [N, D] BF16 flattened tokens (post-MoE-gate activation).
-          weights: [N, topk] FP32 router weights.
-          indices: [N, topk] int64 expert IDs.
+          x: ``[N, D]`` BF16 flattened tokens (post-MoE-gate activation).
+          weights: ``[N, topk]`` FP32 router weights.
+          indices: ``[N, topk]`` int64 expert IDs.
 
         Returns:
-          y: [N, D] float32 sum over (token, top-k) of
+          y: ``[N, D]`` float32 sum over (token, top-k) of
              ``weight * expert[idx](x)``.
-
-        Flow:
-          1. Expand each token into topk copies, sort by expert id.
-          2. Compute per-expert counts and pad each group to
-             ``get_mk_alignment_for_contiguous_layout()`` (128 on SM100).
-             The kernel REQUIRES this alignment — without it, internal
-             block scheduling produces wrong outputs even on the valid
-             rows; the error compounds catastrophically across the 60
-             V4-Flash layers.
-          3. Build a padded activation buffer (zero on padding rows) and
-             a per-row ``grouped_layout`` tensor (expert id on real rows,
-             ``-1`` on padding rows so the kernel skips them).
-          4. Quantize, run grouped FP8×FP4 GEMM for gate+up.
-          5. Clamped SwiGLU + per-slot router weight (zero on padding rows
-             ⇒ they contribute exactly zero to the down result).
-          6. Quantize, run grouped FP8×FP4 GEMM for down.
-          7. Single-gather un-permute back to token order, reduce top-k.
-
-        Layout reference: ``deepgemm/tests/generators.py::generate_m_grouped_contiguous``.
         """
-        import deep_gemm
-
         cfg = self.cfg
         N, D = x.shape
-        topk = indices.size(-1)
         E = cfg.n_routed_experts
         inter = cfg.moe_inter_dim
+        device = x.device
 
         if N == 0:
-            return torch.zeros(N, D, dtype=torch.float32, device=x.device)
+            return torch.zeros(N, D, dtype=torch.float32, device=device)
 
-        M_ALIGN = deep_gemm.get_mk_alignment_for_contiguous_layout()
-
-        # (1) flatten + sort by expert
-        expanded_x = x.unsqueeze(1).expand(N, topk, D).reshape(N * topk, D)
-        flat_indices = indices.flatten().contiguous()  # [NK] int64
-        flat_weights = weights.flatten().contiguous()  # [NK] fp32
-        perm = torch.argsort(flat_indices, stable=True)  # [NK]
-        inv_perm = torch.empty_like(perm)
-        inv_perm[perm] = torch.arange(N * topk, device=x.device, dtype=perm.dtype)
-        expert_per_slot = flat_indices.index_select(0, perm)  # [NK] sorted expert ids
-
-        # (2) per-expert counts → exclusive-scan offsets (real + aligned).
-        # NOTE the EXCLUSIVE scan: the first expert's slot starts at 0, so
-        # ``sorted_offsets[0] == 0``.  An inclusive ``cumsum`` would give the
-        # END offset and break ``within_expert`` for the first expert.
-        counts = torch.bincount(flat_indices.to(torch.int64), minlength=E)  # [E]
-        aligned_counts = ((counts + M_ALIGN - 1) // M_ALIGN) * M_ALIGN  # [E]
-        sorted_offsets = torch.cat([counts.new_zeros(1), counts.cumsum(0)[:-1]])  # [E]
-        aligned_offsets = torch.cat(
-            [aligned_counts.new_zeros(1), aligned_counts.cumsum(0)[:-1]]
-        )  # [E]
-        # CPU sync — required to allocate the padded tensor with a Python
-        # int shape.  Eager-only by construction; cuda-graph capture takes
-        # the legacy local path (see MoE.forward()).
-        M_padded = int(aligned_counts.sum().item())
-
-        # (3) destination row per slot: aligned_offsets[expert] + within_expert
-        slot_idx = torch.arange(N * topk, device=x.device, dtype=torch.int64)
-        within_expert = slot_idx - sorted_offsets[expert_per_slot]
-        dest = aligned_offsets[expert_per_slot] + within_expert  # [NK]
-
-        # (4) padded activation + grouped_layout (zero-init for padding rows)
-        perm_x = torch.zeros(M_padded, D, dtype=x.dtype, device=x.device)
-        perm_weights = torch.zeros(M_padded, dtype=flat_weights.dtype, device=x.device)
-        grouped_layout = torch.full((M_padded,), -1, dtype=torch.int32, device=x.device)
-        perm_x.index_copy_(0, dest, expanded_x.index_select(0, perm))
-        perm_weights.index_copy_(0, dest, flat_weights.index_select(0, perm))
-        grouped_layout.index_copy_(0, dest, expert_per_slot.to(torch.int32))
-
-        # (5) gate+up GEMM via grouped FP8×FP4
+        # (1) Quant input ONCE — column-major TMA-aligned UE8M0 packed scale,
+        # shape compatible with both ep_scatter input and DeepGEMM contiguous.
         a_fp8, a_scale = sgl_per_token_group_quant_fp8(
-            perm_x,
+            x.contiguous(),
             group_size=FP8_BLOCK,
             eps=1e-4,
             column_major_scales=True,
             scale_tma_aligned=True,
             scale_ue8m0=True,
         )
+
+        # Per-expert counts in local index space (== global since ep_size==1).
+        adjusted_topk_ids, num_recv = recompute_topk_ids_sum_expert_count(
+            indices,
+            current_expert_start_id=0,
+            num_local_experts=E,
+        )
+
+        # Sum of aligned counts → all_tokens (CPU sync, ~E ints; same kind of
+        # sync the framework's contiguous executor does at deepgemm_hybrid_executor.py:445).
+        num_recv_cpu = num_recv.cpu().tolist()
+        aligned_counts_list = [align(c, _GROUPED_ALIGNMENT) for c in num_recv_cpu]
+        all_tokens = sum(aligned_counts_list)
+        if all_tokens == 0:
+            return torch.zeros((N, D), dtype=torch.float32, device=device)
+
+        # ep_scatter's kernel_1 builds expert_start_loc as the EXCLUSIVE cumsum
+        # of the per-expert counts it receives. For per-expert padded layout we
+        # therefore must pass the ALIGNED counts (not the raw ``num_recv``) —
+        # otherwise consecutive experts overlap each other's padding rows and
+        # the GEMM reads garbage. Mirrors framework
+        # ``deepgemm_hybrid_executor.py::execute_contiguous`` which builds a
+        # GPU tensor of aligned counts before calling ep_scatter.
+        aligned_counts = torch.tensor(
+            aligned_counts_list,
+            dtype=torch.int32, pin_memory=True, device="cpu",
+        ).to(device, non_blocking=True)
+
+        # (2) Triton ep_scatter: per-expert padded layout in 1 kernel pair.
+        # Output scale is column-major TMA-aligned int32 (matches DeepGEMM
+        # contiguous expectation when scale_ue8m0=True) — see framework's
+        # deepgemm_hybrid_executor.py:427-432 for the same allocation pattern.
+        scatter_out = torch.empty(
+            (all_tokens, D), dtype=torch.float8_e4m3fn, device=device
+        )
+        scatter_out_scale = torch.zeros(
+            [ceil_div(D // FP8_BLOCK, 4), all_tokens],
+            device=device, dtype=torch.int,
+        ).transpose(0, 1)
+        # m_indices is fully overwritten by ep_scatter's kernel_1 (one expert_id
+        # per row across the aligned region). Padding rows therefore tag a real
+        # expert and DeepGEMM does (wasted) compute against it; ep_gather only
+        # fetches the valid rows tracked in ``output_index`` so the wasted
+        # output is discarded. Matches framework pattern.
+        m_indices = torch.empty(all_tokens, dtype=torch.int32, device=device)
+        output_index = torch.empty_like(adjusted_topk_ids)
+        expert_start_loc = torch.empty_like(aligned_counts)
+        ep_scatter(
+            a_fp8,
+            a_scale,
+            adjusted_topk_ids,
+            aligned_counts,
+            expert_start_loc,
+            scatter_out,
+            scatter_out_scale,
+            m_indices,
+            output_index,
+            scale_ue8m0=True,
+        )
+        # Defensive clamp against any -1 leakage (e.g. if num_local_experts is
+        # later split for EP > 1); matches framework safety guard.
+        m_indices.clamp_(min=0, max=E - 1)
+        del a_fp8, a_scale
+
+        # GEMM 1: gate+up
         s13_fp32 = self._s13.float()
         gate_up = torch.empty(
-            M_padded, 2 * inter, device=x.device, dtype=torch.bfloat16
+            all_tokens, 2 * inter, device=device, dtype=torch.bfloat16
         )
         m_grouped_fp8_fp4_gemm_nt_contiguous(
-            (a_fp8, a_scale),
+            (scatter_out, scatter_out_scale),
             (self._w13, s13_fp32),
             gate_up,
-            grouped_layout,
+            m_indices,
             recipe_a=(1, FP8_BLOCK),
             recipe_b=(1, FP4_BLOCK),
         )
-        del a_fp8, a_scale, s13_fp32
+        del scatter_out, scatter_out_scale, s13_fp32
 
-        # (6) clamped SwiGLU + per-slot router weight (padding rows: weight=0
-        # so their contribution to down GEMM input is exactly 0)
-        gate = gate_up[:, :inter].float()
-        up = gate_up[:, inter:].float()
-        if cfg.swiglu_limit > 0:
-            up = torch.clamp(up, min=-cfg.swiglu_limit, max=cfg.swiglu_limit)
-            gate = torch.clamp(gate, max=cfg.swiglu_limit)
-        hidden = F.silu(gate) * up
-        hidden = hidden * perm_weights.unsqueeze(-1)
-        hidden = hidden.to(torch.bfloat16)
-        del gate, up, gate_up
-
-        # (7) down GEMM via grouped FP8×FP4
-        h_fp8, h_scale = sgl_per_token_group_quant_fp8(
-            hidden,
+        # (3) Fused SiLU+clamp+mul + per-token-group FP8 quant + UE8M0 packed scale.
+        # Router weight is NOT applied here — the ep_gather below folds it
+        # into the topk-reduce.
+        h_fp8, h_scale = silu_mul_fp8_quant_packed(
+            gate_up,
+            clamp_limit=cfg.swiglu_limit,
             group_size=FP8_BLOCK,
-            eps=1e-4,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=True,
         )
+        del gate_up
+
+        # GEMM 2: down
         s2_fp32 = self._s2.float()
-        down_out = torch.empty(M_padded, D, device=x.device, dtype=torch.bfloat16)
+        down_out = torch.empty(
+            all_tokens, D, device=device, dtype=torch.bfloat16
+        )
         m_grouped_fp8_fp4_gemm_nt_contiguous(
             (h_fp8, h_scale),
             (self._w2, s2_fp32),
             down_out,
-            grouped_layout,
+            m_indices,
             recipe_a=(1, FP8_BLOCK),
             recipe_b=(1, FP4_BLOCK),
         )
         del h_fp8, h_scale, s2_fp32
 
-        # (8) un-permute (single fused gather) + reduce top-k.
-        # ``dest[inv_perm[t]]`` = padded position holding token ``t``'s
-        # expert output.  ``inv_perm`` undoes the argsort; the ``dest``
-        # indirection then jumps to the right padded row.
-        gather_idx = dest.index_select(0, inv_perm)  # [NK]
-        unperm = down_out.index_select(0, gather_idx).view(N, topk, D)
-        return unperm.float().sum(dim=1)  # [N, D] fp32
+        # (4) Triton ep_gather: per output token accumulates topk source rows
+        # × router weight in fp32 register, single BF16 store. No
+        # [N, topk, D] fp32 intermediate (legacy materialised ~700 MB at
+        # N=4k, topk=6, D=7168).
+        gather_out = torch.empty((N, D), dtype=torch.bfloat16, device=device)
+        ep_gather(down_out, adjusted_topk_ids, weights, output_index, gather_out)
+        return gather_out.float()
+
