@@ -9,6 +9,17 @@ import pytest
 from rtp_llm.test.smoke_framework.manifest import build_smoke_params
 from rtp_llm.test.smoke_framework.runner import run_smoke_test
 
+# Cluster-side `kv_cache_manager_bin` is built into bazel runfiles
+# (`external/remote_kv_cache_manager_server/bin/`), but pytest+REAPI
+# (--remote per-test dispatch) doesn't ship those runfiles to the worker —
+# every case here fails with `FileNotFoundError: ...kv_cache_manager_bin`.
+# Skip until the binary is staged into the pytest tarball or these tests
+# are migrated to a bazel test target. See PR 537 run 39158495.
+pytestmark = pytest.mark.skip(
+    reason="cuda_remote_cache requires kv_cache_manager_bin from bazel "
+    "runfiles; not staged for pytest+REAPI dispatch yet"
+)
+
 SMOKE_CASES = {   'remote_cache_basic': {   'task_info': 'data/model/qwen25/q_r_l20_remote_cache.json',
                               'smoke_args': '--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 '
                                             '--write_cache_sync 1 --enable_remote_cache true --enable_device_cache 0',
