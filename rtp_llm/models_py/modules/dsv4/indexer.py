@@ -35,9 +35,13 @@ class Indexer(nn.Module):
         max_batch_size: int,
         max_seq_len: int,
         norm_eps: float = 1e-6,
-        weights: Optional[Dict[str, torch.Tensor]] = None,
-        prefix: str = "",
+        layer_weights: Optional[Dict[str, torch.Tensor]] = None,
     ):
+        """``layer_weights`` is the framework's per-layer dict
+        (``ModelWeights.weights[layer_id]``), keyed by ``W.v4_*`` enum.
+        Indexer reads ``W.v4_indexer_wq_b_{w,s}``, ``W.v4_indexer_weights_proj_w``,
+        and the four ``W.v4_indexer_compressor_*`` keys for its nested
+        ``Compressor``."""
         super().__init__()
         self.dim = dim
         self.n_heads = index_n_heads
@@ -47,27 +51,24 @@ class Indexer(nn.Module):
         self.q_lora_rank = q_lora_rank
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
-        self._factory_mode = weights is not None
 
-        if self._factory_mode:
-            from rtp_llm.models_py.modules.dsv4.attention import (
-                _v4_fp8_linear_from_dict,
-            )
+        from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear
+        from rtp_llm.utils.model_weight import W
 
-            self.wq_b = _v4_fp8_linear_from_dict(
-                weights,
-                f"{prefix}.wq_b.weight",
-                f"{prefix}.wq_b.scale",
-            )
-            # weights_proj is a plain BF16 weight tensor; forward calls
-            # ``F.linear(x, self.weights_proj)`` directly.
-            self.weights_proj = weights[f"{prefix}.weights_proj.weight"]
-        else:
-            self.wq_b = QuantizedLinear(
-                q_lora_rank, index_n_heads * index_head_dim, storage="fp8"
-            )
-            self.weights_proj = None
+        self.wq_b = _v4_fp8_linear(
+            layer_weights[W.v4_indexer_wq_b_w],
+            layer_weights[W.v4_indexer_wq_b_s],
+        )
+        # weights_proj is a plain BF16 weight tensor; forward calls
+        # ``F.linear(x, self.weights_proj)`` directly.
+        self.weights_proj = layer_weights[W.v4_indexer_weights_proj_w]
 
+        inner_cmp_weights = {
+            "ape": layer_weights[W.v4_indexer_compressor_ape],
+            "wkv": layer_weights[W.v4_indexer_compressor_wkv],
+            "wgate": layer_weights[W.v4_indexer_compressor_wgate],
+            "norm": layer_weights[W.v4_indexer_compressor_norm],
+        }
         self.compressor = Compressor(
             dim=dim,
             head_dim=index_head_dim,
@@ -76,8 +77,7 @@ class Indexer(nn.Module):
             max_batch_size=max_batch_size,
             norm_eps=norm_eps,
             rotate=True,
-            weights=weights,
-            prefix=f"{prefix}.compressor" if self._factory_mode else "",
+            compressor_weights=inner_cmp_weights,
         )
         # Pool-only (#50): self.kv_cache is NEVER a persistent Python-owned
         # tensor.  Each forward / forward_decode call gathers the indexer's
@@ -367,7 +367,7 @@ class Indexer(nn.Module):
             self.compressor.forward_decode(x, start_pos)
 
             # qr -> wq_b -> [B, 1, n_heads * head_dim] -> unflatten
-            if self._factory_mode and qr.dim() > 2:
+            if qr.dim() > 2:
                 shape = qr.shape
                 q = self.wq_b(qr.reshape(-1, shape[-1])).view(
                     *shape[:-1],
@@ -454,7 +454,7 @@ class Indexer(nn.Module):
             self.compressor.forward_decode_vectorized(x, start_pos)
 
             # qr -> wq_b -> [B, 1, n_heads * head_dim] -> [B, 1, H_idx, D_idx]
-            if self._factory_mode and qr.dim() > 2:
+            if qr.dim() > 2:
                 shape = qr.shape
                 q = self.wq_b(qr.reshape(-1, shape[-1])).view(
                     *shape[:-1],
@@ -630,7 +630,7 @@ class Indexer(nn.Module):
 
         self._propagate_pool_to_nested()
         try:
-            if self._factory_mode and qr.dim() > 2:
+            if qr.dim() > 2:
                 shape = qr.shape
                 q = self.wq_b(qr.reshape(-1, shape[-1])).view(
                     *shape[:-1],

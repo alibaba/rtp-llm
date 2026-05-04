@@ -226,7 +226,9 @@ def forward_layers(
     h = v4._hc_head_reduce(h)
     if _rt_on:
         _rt.record("decode_hc_reduced", h)
-    h = v4.norm(h)
+    # Framework RMSNorm wants 2D — collapse [B, q_len, dim] then view back.
+    bsz, q_len, dim_ = h.shape
+    h = v4.norm(h.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
     if _rt_on:
         _rt.record("decode_final_norm", h)
         step = getattr(v4, "_dbg_step", 0)

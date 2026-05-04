@@ -11,10 +11,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4.attention import Attention
 from rtp_llm.models_py.modules.dsv4.mhc import hc_split_sinkhorn
 from rtp_llm.models_py.modules.dsv4.moe import MoE
-from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 # P-sinkhorn (plan_0427.md): single-Triton-kernel replacement for
 # mhc.py:hc_split_sinkhorn (~135 launches → 1).  32× per-call speedup
@@ -52,42 +52,17 @@ from rtp_llm.models_py.modules.dsv4._mhc_tilelang import tk_mhc_post as _tk_mhc_
 from rtp_llm.models_py.modules.dsv4._mhc_tilelang import tk_mhc_pre as _tk_mhc_pre
 
 
-class _RMSNorm(nn.Module):
-    """Single-launch RMSNorm, delegates to framework C++ ``rtp_llm_ops.rmsnorm``.
+def _maybe_squeeze_hc_1d(t: torch.Tensor) -> torch.Tensor:
+    """Reverse ``weight_module.py:357``'s "1D scale → 2D unsqueeze" heuristic.
 
-    Weight is ``bf16`` (not fp32 as in DeepSeek's reference ``inference/model.py``
-    — the author's comment there is explicit: "checkpoint stores bf16, param
-    here is fp32 for convenient". vLLM/SGLang load the same checkpoint with
-    bf16 weight; we follow that. The C++ kernel requires bf16 weight (silent
-    NaN otherwise, verified in bench_rmsnorm_cpp_vs_triton.py).
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        eps: float = 1e-6,
-        weight: Optional[torch.Tensor] = None,
-    ):
-        super().__init__()
-        self.eps = eps
-        self.dim = dim
-        # Pass the framework loader's bf16 tensor at construction (factory
-        # mode) or ``None`` for unit-test paths that bind it later.
-        self.weight = weight
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # C++ op requires 2D input; reshape and restore.
-        orig_shape = x.shape
-        x_2d = x.reshape(-1, self.dim)
-        out = torch.empty_like(x_2d)
-        rtp_llm_ops.rmsnorm(
-            out,
-            x_2d,
-            self.weight.data,
-            self.eps,
-            torch.cuda.current_stream().cuda_stream,
-        )
-        return out.view(orig_shape)
+    The framework auto-promotes any 1D float scale tensor to ``[N, 1]`` so
+    per-row UE8M0 quant scales broadcast cleanly. mHC scales (hc_*_scale,
+    hc_head_scale) are also 1D but are NOT quant scales — they're plain
+    learnable factors. Squeeze trailing 1-dim back to keep the forward
+    shape contract with the legacy load path."""
+    if t.dim() == 2 and t.shape[-1] == 1:
+        return t.squeeze(-1)
+    return t
 
 
 class Block(nn.Module):
@@ -127,21 +102,23 @@ class Block(nn.Module):
         hc_sinkhorn_iters: int,
         hc_eps: float,
         norm_eps: float = 1e-6,
-        weights: Optional[Dict[str, torch.Tensor]] = None,
-        prefix: str = "",
+        layer_weights: Optional[Dict[str, torch.Tensor]] = None,
         tp_size: int = 1,
         tp_rank: int = 0,
         ep_size: int = 1,
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
     ):
+        """``layer_weights`` is the framework's per-layer dict
+        (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
+        Block reads ``W.v4_attn_norm`` / ``W.v4_ffn_norm`` / ``W.v4_hc_*``
+        and forwards the dict to ``Attention`` and ``MoE``."""
         super().__init__()
         self.layer_id = layer_id
         self.norm_eps = norm_eps
         self.hc_eps = hc_eps
         self.hc_mult = hc_mult
         self.hc_sinkhorn_iters = hc_sinkhorn_iters
-        self._factory_mode = weights is not None
 
         self.attn = Attention(
             layer_id=layer_id,
@@ -166,8 +143,7 @@ class Block(nn.Module):
             index_head_dim=index_head_dim,
             index_topk=index_topk,
             norm_eps=norm_eps,
-            weights=weights,
-            prefix=f"{prefix}.attn" if self._factory_mode else "",
+            layer_weights=layer_weights,
             tp_size=tp_size,
             tp_rank=tp_rank,
         )
@@ -183,43 +159,34 @@ class Block(nn.Module):
             swiglu_limit=swiglu_limit,
             n_hash_layers=n_hash_layers,
             vocab_size=vocab_size,
-            weights=weights,
-            prefix=f"{prefix}.ffn" if self._factory_mode else "",
+            layer_weights=layer_weights,
             ep_size=ep_size,
             ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
         )
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight
-        # into _RMSNorm at construction time.
-        self.attn_norm = _RMSNorm(
-            dim,
-            norm_eps,
-            weight=weights[f"{prefix}.attn_norm.weight"] if self._factory_mode else None,
-        )
-        self.ffn_norm = _RMSNorm(
-            dim,
-            norm_eps,
-            weight=weights[f"{prefix}.ffn_norm.weight"] if self._factory_mode else None,
-        )
+        # into ``RMSNorm`` at construction time.  Norms here see 2D inputs
+        # ``[T, dim]`` from the hc_pre output, so framework ``RMSNorm``
+        # (which expects 2D) drops in directly.
+        from rtp_llm.utils.model_weight import W
+
+        self.attn_norm = RMSNorm(layer_weights[W.v4_attn_norm], norm_eps)
+        self.ffn_norm = RMSNorm(layer_weights[W.v4_ffn_norm], norm_eps)
 
         mix_hc = (2 + hc_mult) * hc_mult
         hc_dim = hc_mult * dim
-        if self._factory_mode:
-            self.hc_attn_fn = weights[f"{prefix}.hc_attn_fn"]
-            self.hc_ffn_fn = weights[f"{prefix}.hc_ffn_fn"]
-            self.hc_attn_base = weights[f"{prefix}.hc_attn_base"]
-            self.hc_ffn_base = weights[f"{prefix}.hc_ffn_base"]
-            self.hc_attn_scale = weights[f"{prefix}.hc_attn_scale"]
-            self.hc_ffn_scale = weights[f"{prefix}.hc_ffn_scale"]
-        else:
-            # Unit-test path — caller binds tensors externally.
-            self.hc_attn_fn = None
-            self.hc_ffn_fn = None
-            self.hc_attn_base = None
-            self.hc_ffn_base = None
-            self.hc_attn_scale = None
-            self.hc_ffn_scale = None
+        self.hc_attn_fn = layer_weights[W.v4_hc_attn_fn]
+        self.hc_ffn_fn = layer_weights[W.v4_hc_ffn_fn]
+        self.hc_attn_base = layer_weights[W.v4_hc_attn_base]
+        self.hc_ffn_base = layer_weights[W.v4_hc_ffn_base]
+        # Scales are 1D mHC factors; the framework's
+        # ``weight_module.py:357`` "1D scale → 2D unsqueeze" heuristic
+        # (intended for per-row UE8M0 quant scales) over-promotes them
+        # to ``[N, 1]`` — squeeze them back to 1D so the forward sees
+        # the same shape as the legacy load path.
+        self.hc_attn_scale = _maybe_squeeze_hc_1d(layer_weights[W.v4_hc_attn_scale])
+        self.hc_ffn_scale = _maybe_squeeze_hc_1d(layer_weights[W.v4_hc_ffn_scale])
 
     def _hc_fn_bf16(self, hc_fn: torch.Tensor) -> torch.Tensor:
         """Lazy-cached bf16 view of an FP32 hc_fn parameter.
@@ -437,7 +404,10 @@ class Block(nn.Module):
             self.hc_attn_base,
             dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
         )
-        x_pre = self.attn_norm(x_pre)
+        # Framework RMSNorm wants 2D — collapse [B, q_len, dim] → [B*q_len, dim]
+        # and view back; attention.forward_decode wants the original 3D shape.
+        bsz, q_len, dim_ = x_pre.shape
+        x_pre = self.attn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
         attn_out = self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
@@ -456,7 +426,8 @@ class Block(nn.Module):
             self.hc_ffn_base,
             dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
         )
-        x_pre = self.ffn_norm(x_pre)
+        bsz, q_len, dim_ = x_pre.shape
+        x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
         ffn_out = self.ffn(x_pre, input_ids)
@@ -724,8 +695,10 @@ class MTPBlock(Block):
             hc_sinkhorn_iters=hc_sinkhorn_iters,
             hc_eps=hc_eps,
             norm_eps=norm_eps,
-            weights=weights,
-            prefix=prefix,
+            # MTP descriptor weight tags not declared yet; pass None so
+            # Block stays in the legacy unit-test path until W.v4_mtp_*
+            # lands.  See note below.
+            layer_weights=None,
             tp_size=tp_size,
             tp_rank=tp_rank,
             ep_size=ep_size,
@@ -735,7 +708,14 @@ class MTPBlock(Block):
         from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 
         self.dim = dim
-        if self._factory_mode:
+        # MTP weight tags (W.v4_mtp_*) not declared in the descriptor yet;
+        # MTPBlock still consumes the legacy ckpt-key ``weights`` dict + the
+        # ``mtp.{i}.*`` prefix.  Once the descriptor lands, migrate the body
+        # to ``layer_weights[W.v4_mtp_*]`` and drop ``weights/prefix``.
+        # ``transformer.py`` asserts ``n_mtp_layers == 0`` so this branch is
+        # never hit in production.
+        _mtp_factory = weights is not None
+        if _mtp_factory:
             from rtp_llm.models_py.modules.dsv4.attention import (
                 _v4_fp8_linear_from_dict,
             )
@@ -756,24 +736,18 @@ class MTPBlock(Block):
             self.h_proj = QuantizedLinear(dim, dim, storage="fp8")
             self._h_proj_is_factory = False
 
-        self.enorm = _RMSNorm(
-            dim,
-            norm_eps,
-            weight=weights[f"{prefix}.enorm.weight"] if self._factory_mode else None,
-        )
-        self.hnorm = _RMSNorm(
-            dim,
-            norm_eps,
-            weight=weights[f"{prefix}.hnorm.weight"] if self._factory_mode else None,
-        )
-        self.norm = _RMSNorm(
-            dim,
-            norm_eps,
-            weight=weights[f"{prefix}.norm.weight"] if self._factory_mode else None,
-        )
+        # MTPBlock norms see N-D inputs ([B, S, hc, dim] for hnorm, etc.);
+        # framework ``RMSNorm`` expects 2D, so callers must reshape.
+        # MTPBlock itself is not instantiated yet (n_mtp_layers==0 assert
+        # in transformer.py); this construction is only reached once
+        # W.v4_mtp_* tags land and the body is migrated.
+        assert _mtp_factory, "MTPBlock requires weights; unit-test None path retired"
+        self.enorm = RMSNorm(weights[f"{prefix}.enorm.weight"], norm_eps)
+        self.hnorm = RMSNorm(weights[f"{prefix}.hnorm.weight"], norm_eps)
+        self.norm = RMSNorm(weights[f"{prefix}.norm.weight"], norm_eps)
 
         hc_dim = hc_mult * dim
-        if self._factory_mode:
+        if _mtp_factory:
             self.hc_head_fn = weights[f"{prefix}.hc_head_fn"]
             self.hc_head_base = weights[f"{prefix}.hc_head_base"]
             self.hc_head_scale = weights[f"{prefix}.hc_head_scale"]
