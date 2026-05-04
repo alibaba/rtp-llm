@@ -97,10 +97,11 @@ def record(name: str, tensor: torch.Tensor) -> None:
     buf = _get_buf()
     if buf is None:
         return
+    tensor = _trim_tensor(tensor)
     if _STREAM:
         buf.append((name, _snapshot_cpu(tensor)))
     else:
-        buf.append((name, _trim_tensor(tensor).detach().clone()))
+        buf.append((name, tensor.detach().clone()))
 
 
 def record_if_level(level: int, name: str, tensor: torch.Tensor) -> None:
