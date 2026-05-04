@@ -163,7 +163,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             kv_cache.kv_scale_base_by_layer.push_back(t);
         }
 
-        kv_cache.layer_group_types            = layout.layer_group_types;
+        kv_cache.layer_group_types             = layout.layer_group_types;
         kv_cache.group_region_names            = layout.group_region_names;
         kv_cache.layer_region_to_group_id      = layout.layer_region_to_group_id;
         kv_cache.kv_cache_base_by_layer_region = layout.layers_to_kv_buffer_ptrs_by_attn;
@@ -178,7 +178,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             for (size_t l = 0; l < num_layers; ++l) {
                 for (size_t a = 0; a < attn_count && a < layout.layers_to_kv_buffer_ptrs_by_attn[l].size(); ++a) {
                     auto& t = layout.layers_to_kv_buffer_ptrs_by_attn[l][a];
-                    kv_cache.kv_cache_base_by_layer_region_flat[l * attn_count + a] = t.defined() ? t : torch::empty({0});
+                    kv_cache.kv_cache_base_by_layer_region_flat[l * attn_count + a] =
+                        t.defined() ? t : torch::empty({0});
                 }
             }
         }
@@ -195,6 +196,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
+    }
+    const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
+    if (enable_cuda_graph_ && py_model_class_name == "DeepSeekV4Model" && !params.kv_cache_layer_layout.has_value()) {
+        RTP_LLM_LOG_WARNING(
+            "Disable CUDA graph for DeepSeekV4 warmup without kv_cache_layer_layout; real executor can capture after "
+            "CacheManager is initialized.");
+        enable_cuda_graph_ = false;
     }
     if (enable_cuda_graph_) {
 #if USING_CUDA || USING_ROCM

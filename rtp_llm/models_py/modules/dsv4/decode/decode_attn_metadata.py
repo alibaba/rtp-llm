@@ -340,7 +340,7 @@ def allocate_decode_metadata(
     pool_block_tables: Dict[int, torch.Tensor] = {}
     pool_write_slot_mappings: Dict[int, torch.Tensor] = {}
     if paged_pool_specs:
-        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
 
         for attn_type, (_, max_blocks) in paged_pool_specs.items():
             pool_block_tables[attn_type] = torch.zeros(
