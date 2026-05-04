@@ -35,20 +35,21 @@ except Exception:  # pragma: no cover
 def _use_fused_gate(score_func: str, x_size_0: int) -> bool:
     """Gate for the fused router-gate kernel.
 
-    Defaults to OFF: the kernel is bit-equivalent to the eager FP32 epilogue
-    in microbench (max abs diff 4.5e-8 at rel ~2e-7, top-k strict-equal 100%
-    across 5 random seeds), but in practice the slight fp32 reduction-order
-    drift in `weights / weights.sum()` is enough to flip greedy decode on
-    tied/near-tied logits across ~60 layers — re-capturing all 6 V4-Flash
-    smoke goldens is required when this is on.  The per-call win (~0.18 ms)
-    over 43 layers/forward is small (~8 ms / ~0.25% of the 3090 ms prefill),
-    so we keep this opt-in for users willing to pay the golden churn.
+    Defaults to ON (2026-05-04): the kernel is bit-equivalent to the eager
+    FP32 epilogue in microbench (max abs diff 4.5e-8 at rel ~2e-7, top-k
+    strict-equal 100% across 5 random seeds).  ULP-scale fp32 reduction-order
+    drift in ``weights / weights.sum()`` can flip greedy decode on tied /
+    near-tied logits across ~60 layers, so V4-Flash smoke goldens must be
+    re-captured.  Per-call win is ~0.18 ms × 43 layers ≈ ~8 ms / forward
+    (~0.25% of 3090 ms prefill); the broader value is collapsing 7-10
+    elementwise + topk launches per layer into one kernel, which compounds
+    nicely with launch-overhead-bound regimes (small prefill, decode).
 
-    Set ``DSV4_GATE_FUSED=1`` to enable.
+    Set ``DSV4_GATE_FUSED=0`` to revert to the eager epilogue for debugging.
     """
     if not _GATE_FUSED_OK or fused_sqrtsoftplus_gate is None:
         return False
-    if os.environ.get("DSV4_GATE_FUSED", "0") != "1":
+    if os.environ.get("DSV4_GATE_FUSED", "1") == "0":
         return False
     if score_func != "sqrtsoftplus":
         return False
