@@ -11,5 +11,5 @@
 --extra-index-url https://mirrors.aliyun.com/pypi/simple/
 
 numpy==1.26.4
-torch==2.5.1
-torch-npu==2.5.1
+torch==2.9.0+cpu
+torch-npu==2.9.0

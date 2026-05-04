@@ -194,7 +194,6 @@ build:ascend --copt="-DUSING_ASCEND=1"
 build:ascend --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
 build:ascend --linkopt="-L/usr/local/Ascend/ascend-toolkit/latest/lib64"
 build:ascend --linkopt="-lascendcl"
-build:ascend --linkopt="-laclblas"
 build:ascend --linkopt="-lhccl"
 build:ascend --copt=-Wno-deprecated-declarations
 build:ascend --action_env LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/add-ons/"

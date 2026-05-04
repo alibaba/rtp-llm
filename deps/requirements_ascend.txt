@@ -1,4 +1,4 @@
 # Ascend NPU dependencies
-torch==2.5.1
-torch_npu==2.5.1
+torch==2.9.0+cpu
+torch_npu==2.9.0
 numpy==1.26.4

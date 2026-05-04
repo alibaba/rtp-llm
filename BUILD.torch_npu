@@ -1,0 +1,30 @@
+cc_library(
+    name = "torch_npu",
+    srcs = glob([
+        "torch_npu.libs/libtorch_npu*.so*",
+        "torch_npu/lib/libtorch_npu*.so*",
+    ]),
+    hdrs = glob([
+        "torch_npu/include/**/*.h",
+        "torch_npu/include/**/*.hpp",
+    ]),
+    deps = [
+        "@local_config_python//:python_headers",
+        "@torch_cpu_ascend//:torch",
+    ],
+    strip_include_prefix = "torch_npu/include",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "torch_npu_api",
+    hdrs = glob([
+        "torch_npu/include/**/*.h",
+        "torch_npu/include/**/*.hpp",
+    ]),
+    deps = [
+        "@local_config_python//:python_headers",
+    ],
+    strip_include_prefix = "torch_npu/include",
+    visibility = ["//visibility:public"],
+)

@@ -61,7 +61,7 @@ def whl_deps():
     return select({
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": ["pyrsmi==0.2.0", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.13.dev14%2Bgfa35072d0.d20260402-cp310-cp310-linux_x86_64.whl"],
-        "@rtp_llm//:using_ascend": ["torch==2.5.1", "torch_npu==2.5.1"],
+        "@rtp_llm//:using_ascend": ["torch==2.9.0+cpu", "torch_npu==2.9.0"],
         "//conditions:default": ["torch==2.1.2"],
     })
 
@@ -97,9 +97,10 @@ def torch_deps():
             "@torch_2.8_py310_cuda//:torch_libs",
         ],
         "@rtp_llm//:using_ascend": [
-            "@torch_ascend//:torch_api",
-            "@torch_ascend//:torch",
-            "@torch_ascend//:torch_libs",
+            "@torch_cpu_ascend//:torch_api",
+            "@torch_cpu_ascend//:torch",
+            "@torch_cpu_ascend//:torch_libs",
+            "@torch_npu_ascend//:torch_npu",
         ],
         "//conditions:default": [
             "@torch_2.1_py310_cpu//:torch_api",

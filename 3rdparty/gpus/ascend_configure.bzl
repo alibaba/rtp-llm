@@ -8,13 +8,7 @@
   * `TF_ASCEND_VERSION`: The version of the CANN toolkit.
 """
 
-load(
-    ":cuda_configure.bzl",
-    "make_copy_dir_rule",
-    "make_copy_files_rule",
-    "to_list_of_strings",
-    "verify_build_defines",
-)
+
 
 _ASCEND_TOOLKIT_PATH = "ASCEND_TOOLKIT_PATH"
 _TF_ASCEND_VERSION = "TF_ASCEND_VERSION"
@@ -79,95 +73,62 @@ def ascend_is_configured():
 def _ascend_create(repository_ctx, toolkit_path, include_path, lib_path, version):
     """Generate the @local_config_ascend repository from CANN installation."""
 
-    # --- Copy headers ---
-    copy_rules = []
+    # Symlink headers so they exist at analysis time (glob evaluation time)
+    repository_ctx.symlink(repository_ctx.path(include_path), "ascend/include")
 
-    copy_rules.append(
-        make_copy_dir_rule(
-            repository_ctx,
-            name = "ascend-include",
-            src_dir = include_path,
-            out_dir = "ascend/include",
-            exceptions = None,
-        )
-    )
-
-    # --- Copy library files ---
+    # Symlink library files
+    repository_ctx.execute(["mkdir", "-p", "ascend/lib"])
     lib_files = {
         "libascendcl.so": "ascend",
-        "libaclblas.so":  "aclblas",
         "libhccl.so":     "hccl",
     }
-
-    lib_srcs = []
-    lib_outs = []
     for lib_name, target_name in lib_files.items():
-        src = lib_path + "/" + lib_name
-        if repository_ctx.path(src).exists:
-            lib_srcs.append(src)
-            lib_outs.append("ascend/lib/" + lib_name)
-
-    copy_rules.append(
-        make_copy_files_rule(
-            repository_ctx,
-            name = "ascend-lib",
-            srcs = lib_srcs,
-            outs = lib_outs,
-        )
-    )
+        src = repository_ctx.path(lib_path + "/" + lib_name)
+        if src.exists:
+            repository_ctx.symlink(src, "ascend/lib/" + lib_name)
 
     # --- Generate BUILD content ---
     build_content = """package(default_visibility = ["//visibility:public"])
 
 config_setting(
     name = "using_ascend",
-    values = {{"define": "using_ascend=true"}},
+    values = {"define": "using_ascend=true"},
 )
 
 cc_library(
     name = "ascend_headers",
-    hdrs = glob(["ascend/include/**/*.h"]),
-    includes = [".", "ascend/include"],
+    hdrs = glob(["include/**/*.h"]),
+    includes = [".", "include"],
     visibility = ["//visibility:public"],
 )
 
 cc_library(
     name = "ascend",
-    srcs = ["ascend/lib/libascendcl.so"],
-    data = ["ascend/lib/libascendcl.so"],
-    includes = [".", "ascend/include"],
-    linkstatic = 1,
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "aclblas",
-    srcs = ["ascend/lib/libaclblas.so"],
-    data = ["ascend/lib/libaclblas.so"],
-    includes = [".", "ascend/include"],
+    srcs = ["lib/libascendcl.so"],
+    data = ["lib/libascendcl.so"],
+    includes = [".", "include"],
     linkstatic = 1,
     visibility = ["//visibility:public"],
 )
 
 cc_library(
     name = "hccl",
-    srcs = ["ascend/lib/libhccl.so"],
-    data = ["ascend/lib/libhccl.so"],
-    includes = [".", "ascend/include"],
+    srcs = ["lib/libhccl.so"],
+    data = ["lib/libhccl.so"],
+    includes = [".", "include"],
     linkstatic = 1,
     visibility = ["//visibility:public"],
 )
-
-""" + "\n".join(copy_rules)
+"""
 
     repository_ctx.file("ascend/BUILD", build_content)
 
     # --- Generate build_defs.bzl ---
     repository_ctx.file("ascend/build_defs.bzl", """def if_ascend(if_true, if_false = []):
-    return select({{
+    return select({
         "@local_config_ascend//ascend:using_ascend": if_true,
         "//conditions:default": if_false,
-    }})
+    })
 
 def ascend_default_copts():
     return if_ascend([])
