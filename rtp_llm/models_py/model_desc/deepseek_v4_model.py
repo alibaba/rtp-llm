@@ -385,7 +385,9 @@ class DeepSeekV4Model(GptModelBase):
         )
         device = next(self.v4.parameters()).device
 
-        paged_pool_specs = build_paged_pool_specs(self.kv_cache, self.v4)
+        paged_pool_specs = build_paged_pool_specs(
+            self.kv_cache, self.v4, max_seq_len=int(self._v4_args.max_seq_len)
+        )
         # Snapshot framework's group ordering — CUDA-graph replay path
         # inside ``DSv4DecodeFmhaImpl.prepare`` has no live kv_cache, so
         # carry the list in the config. Position IS the group id.
