@@ -42,26 +42,6 @@ def dash_sc_grpc_server_channel_options(dash_sc_grpc_config) -> list[tuple[str, 
     return sorted((str(k), int(v)) for k, v in cfg.get_server_config().items())
 
 
-def dash_sc_grpc_server_max_concurrent_rpcs(dash_sc_grpc_config) -> Optional[int]:
-    """Always ``None`` (unlimited) under grpc.aio.
-
-    ``DashScGrpcConfig.max_server_workers`` was sized for the sync grpcio
-    thread pool — one worker per concurrent RPC, so values like 64 made
-    sense when each long stream occupied a whole thread. Passing the same
-    number to ``grpc.aio.server(maximum_concurrent_rpcs=N)`` is a category
-    error: under aio, concurrent RPCs are coroutines on a single loop, not
-    threads, so ``N`` becomes a hard RPC admission cap — once ``N`` long
-    streams are in flight every new RPC is aborted with
-    ``RESOURCE_EXHAUSTED / Concurrent RPC limit exceeded!`` (observed
-    post-migration on the forwarder access log). Backpressure under aio
-    comes from the backend visitor's own concurrency, not from an RPC
-    admission cap. The C++ Config struct keeps the field for wire
-    compatibility, but this function deliberately ignores its value.
-    """
-    _ = _resolve_dash_sc_grpc_config(dash_sc_grpc_config)
-    return None
-
-
 # Max time for grpc.aio.Server.start() + bind before start_on_loop returns.
 _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S = 30.0
 
@@ -163,7 +143,6 @@ class DashScGrpcServer:
             return self._server
         cfg = _resolve_dash_sc_grpc_config(self._config)
         opts = _merge_server_keepalive(dash_sc_grpc_server_channel_options(cfg))
-        max_concurrent = dash_sc_grpc_server_max_concurrent_rpcs(cfg)
 
         server_id_int: Optional[int]
         try:
@@ -205,10 +184,15 @@ class DashScGrpcServer:
             server_id=server_id_int,
             raw_mode=is_forward,
         )
+        # Deliberately no ``maximum_concurrent_rpcs`` — under grpc.aio concurrent
+        # RPCs are coroutines on one loop, not threads, so any positive value
+        # becomes a hard admission cap (RESOURCE_EXHAUSTED once N long streams
+        # are in flight). Backpressure comes from the backend visitor's own
+        # concurrency instead. ``DashScGrpcConfig.max_server_workers`` is
+        # retained on the C++ struct for wire compatibility but ignored here.
         server = grpc.aio.server(
             options=opts,
             interceptors=[interceptor],
-            maximum_concurrent_rpcs=max_concurrent,
         )
         if is_forward:
             servicer = PureForwardServicer()
@@ -229,10 +213,9 @@ class DashScGrpcServer:
         self._server = server
         self._servicer = servicer
         logging.info(
-            "[DashScGrpc] Listening on 0.0.0.0:%s (predict_v2.proto, %s, max_concurrent_rpcs=%s)",
+            "[DashScGrpc] Listening on 0.0.0.0:%s (predict_v2.proto, %s)",
             port,
             mode,
-            "unlimited" if max_concurrent is None else max_concurrent,
         )
         return server
 
