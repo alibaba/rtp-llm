@@ -20,9 +20,9 @@ py_library(
         "app.py",
         "client.py",
         "codec.py",
-        "forward_service.py",
+        "inference_servicer.py",
+        "proxy_servicer.py",
         "server.py",
-        "service.py",
     ],
     data = [":grpc_client_scripts"],
     visibility = ["//visibility:public"],
@@ -44,16 +44,16 @@ py_test(
 )
 
 py_test(
-    name = "service_test",
-    srcs = ["test/service_test.py"],
+    name = "inference_servicer_test",
+    srcs = ["test/inference_servicer_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},
 )
 
 py_test(
-    name = "forward_service_test",
-    srcs = ["test/forward_service_test.py"],
+    name = "proxy_servicer_test",
+    srcs = ["test/proxy_servicer_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},

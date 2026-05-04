@@ -23,9 +23,9 @@ from rtp_llm.dash_sc.access_log import (
     init_dash_sc_grpc_access_logger,
     init_dash_sc_grpc_query_logger,
 )
-from rtp_llm.dash_sc.forward_service import DashScProxyServicer
+from rtp_llm.dash_sc.inference_servicer import DashScInferenceServicer
 from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
-from rtp_llm.dash_sc.service import DashScInferenceServicer
+from rtp_llm.dash_sc.proxy_servicer import DashScProxyServicer
 
 
 def _resolve_dash_sc_grpc_config(dash_sc_grpc_config):
