@@ -404,11 +404,16 @@ class Indexer(nn.Module):
                 T_r = int(compressed_len[r].item())
                 if T_r <= 0:
                     continue
-                kv_r = self.kv_cache[r : r + 1, :T_r]  # [1, T_r, D_idx]
-                q_r = q[r : r + 1].float()  # [1, 1, H_idx, D_idx]
-                w_r = weights[r : r + 1].float()  # [1, 1, H_idx]
-                score = torch.einsum("bshd,btd->bsht", q_r, kv_r.float())
-                score = (score.relu_() * w_r.unsqueeze(-1)).sum(dim=2)  # [1, 1, T_r]
+                from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
+                    v4_indexer_score,
+                )
+
+                kv_r = self.kv_cache[r : r + 1, :T_r].contiguous()  # [1, T_r, D_idx]
+                q_r = q[r : r + 1].contiguous()  # [1, 1, H_idx, D_idx]
+                w_r = weights[r : r + 1]  # [1, 1, H_idx]
+                score = v4_indexer_score(
+                    q_r, kv_r, w_r, q_pos=None, compress_ratio=1
+                )  # [1, 1, T_r]
                 k_r = min(K, T_r)
                 topk_r = score.topk(k_r, dim=-1)[1].to(torch.int32)
                 out_topk_buffer[r : r + 1, :, :k_r] = topk_r
@@ -481,11 +486,17 @@ class Indexer(nn.Module):
             # only returns valid leading indices.
             compressed_len = ((start_pos + 1) // ratio).to(torch.int64).view(bsz, 1, 1)
             T_max = self.kv_cache.shape[1]
-            kv_full = self.kv_cache[:bsz].float()  # [B, T_max, D_idx]
-            q32 = q.float()
-            w32 = weights.float()
-            score = torch.einsum("bshd,btd->bsht", q32, kv_full)
-            score = (score.relu_() * w32.unsqueeze(-1)).sum(dim=2)
+            from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
+                v4_indexer_score,
+            )
+
+            score = v4_indexer_score(
+                q.contiguous(),
+                self.kv_cache[:bsz].contiguous(),
+                weights,
+                q_pos=None,
+                compress_ratio=1,
+            )
 
             t_arange = torch.arange(T_max, device=score.device).view(1, 1, T_max)
             score = torch.where(
@@ -670,60 +681,50 @@ class Indexer(nn.Module):
             if _dbg is not None:
                 _rt.record_if_level(2, f"{_dbg}_weights", weights)
 
-            # Per-token index score: for each Q token we score every key in
-            # ``kv_cache[:, :end_pos//ratio]``, ReLU, weight-sum over heads.
-            # The naive einsum materializes ``[B, S, n_heads, T]`` fp32 which
-            # is ``O(S*T*H)`` — 64 GB at S=64K, T=16K, H=64.  Chunk in S to
-            # keep peak memory bounded (under a few GB) at any seqlen.
-            # Without this, warmup prefill at max_seq_len ≥ 32K OOMs.
-            kv = self.kv_cache[:bsz, : end_pos // ratio]
-            q_f = q.float()
-            w_f = weights.float()
-            S = q_f.size(1)
-            max_chunk_bytes = 2 * (1 << 30)
-            T = kv.size(1)
-            denom = max(self.n_heads * max(T, 1) * 4, 1)
-            chunk_size = max(1, min(S, max_chunk_bytes // denom))
-            if chunk_size >= S:
-                index_score = torch.einsum("bshd,btd->bsht", q_f, kv.float())
-                index_score = (index_score.relu_() * w_f.unsqueeze(-1)).sum(dim=2)
-            else:
-                parts = []
-                kv_f = kv.float()
-                for i in range(0, S, chunk_size):
-                    end = min(i + chunk_size, S)
-                    score = torch.einsum(
-                        "bshd,btd->bsht",
-                        q_f[:, i:end],
-                        kv_f,
-                    )
-                    score = (score.relu_() * w_f[:, i:end].unsqueeze(-1)).sum(dim=2)
-                    parts.append(score)
-                index_score = torch.cat(parts, dim=1)
-                del parts, kv_f
+            # Fused Triton kernel: einsum + ReLU + weighted-sum over heads
+            # streaming the H axis with fp32 accumulators. Folds the prefill
+            # causal mask into the kernel so we never materialize [B,S,H,T]
+            # fp32 (the einsum intermediate would be ~64 GB at S=64K, T=16K,
+            # H=64) and skip the post-add -inf mask.
+            from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
+                v4_indexer_score,
+            )
 
+            kv = self.kv_cache[:bsz, : end_pos // ratio]
             # Causal mask: each Q token at GLOBAL position g can only read
             # compressed KV blocks [0, (g+1)//ratio).  Only needed for prefill
             # (start_pos == 0).  Decode always has start_pos > 0.
             is_prefill = not is_batched and seqlen > 1
-            if _dbg is not None:
-                _rt.record_if_level(2, f"{_dbg}_score_pre_mask", index_score)
             if is_prefill:
-                T_comp = index_score.size(-1)
                 if cp_on:
-                    q_pos_1b = (cp_ctx.global_positions + 1).unsqueeze(1)
+                    q_pos = cp_ctx.global_positions.to(torch.int32).unsqueeze(0)
                 else:
                     sp_scalar = (
                         int(start_pos.item())
                         if isinstance(start_pos, torch.Tensor)
                         else int(start_pos)
                     )
-                    q_pos_1b = (
-                        sp_scalar + torch.arange(1, seqlen + 1, device=x.device)
-                    ).unsqueeze(1)
-                kv_cols = torch.arange(T_comp, device=x.device)
-                mask = kv_cols >= (q_pos_1b // ratio)
-                index_score = index_score + torch.where(mask, float("-inf"), 0.0)
+                    q_pos = (
+                        sp_scalar
+                        + torch.arange(seqlen, device=x.device, dtype=torch.int32)
+                    ).unsqueeze(0)
+                # Kernel computes thr=(q_pos+1)//ratio, matching the prior
+                # post-add mask (kv_col >= (q_pos+1)//ratio → -inf).
+                index_score = v4_indexer_score(
+                    q.contiguous(),
+                    kv.contiguous(),
+                    weights,
+                    q_pos=q_pos.expand(bsz, seqlen).contiguous(),
+                    compress_ratio=ratio,
+                )
+            else:
+                index_score = v4_indexer_score(
+                    q.contiguous(),
+                    kv.contiguous(),
+                    weights,
+                    q_pos=None,
+                    compress_ratio=1,
+                )
             if _dbg is not None:
                 _rt.record_if_level(2, f"{_dbg}_score_post_mask", index_score)
 
