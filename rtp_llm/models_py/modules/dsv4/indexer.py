@@ -601,6 +601,7 @@ class Indexer(nn.Module):
         rd = self.rope_head_dim
         cp_ctx = self._cp_ctx
         is_batched = isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
+        is_prefill = seqlen > 1
 
         # Batched prefill dispatch (seqlen > 1 with [B] start_pos).  The
         # scalar body below is called per-row from _forward_batched_prefill.
@@ -610,10 +611,7 @@ class Indexer(nn.Module):
             )
 
         cp_on = (
-            cp_ctx is not None
-            and cp_ctx.cp_size > 1
-            and not is_batched
-            and start_pos == 0
+            cp_ctx is not None and cp_ctx.cp_size > 1 and not is_batched and is_prefill
         )
         # Master switch: gated by both MOEDBG (process-wide) and per-instance
         # _dbg_prefix (set externally; e.g. attention layer-0..2 wiring).
@@ -621,7 +619,7 @@ class Indexer(nn.Module):
 
         if cp_on:
             freqs_cis = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
-            end_pos = cp_ctx.seq_len_full
+            end_pos = cp_ctx.seq_len_total
         elif is_batched:
             positions = start_pos.long()
             freqs_cis = self.freqs_cis[positions].unsqueeze(1)  # [B, 1, rope_dim//2]
@@ -691,21 +689,22 @@ class Indexer(nn.Module):
             )
 
             kv = self.kv_cache[:bsz, : end_pos // ratio]
-            # Causal mask: each Q token at GLOBAL position g can only read
-            # compressed KV blocks [0, (g+1)//ratio).  Only needed for prefill
-            # (start_pos == 0).  Decode always has start_pos > 0.
-            is_prefill = not is_batched and seqlen > 1
+            # Causal mask: each prefill Q token at absolute position g can
+            # only read compressed KV blocks [0, (g+1)//ratio).  This applies
+            # to both fresh and continuation prefill because the suffix
+            # compressor writes all current blocks before index scoring.
+            is_prefill = (not is_batched) and seqlen > 1
             if is_prefill:
                 if cp_on:
                     q_pos = cp_ctx.global_positions.to(torch.int32).unsqueeze(0)
                 else:
-                    sp_scalar = (
+                    sp = (
                         int(start_pos.item())
                         if isinstance(start_pos, torch.Tensor)
                         else int(start_pos)
                     )
                     q_pos = (
-                        sp_scalar
+                        sp
                         + torch.arange(seqlen, device=x.device, dtype=torch.int32)
                     ).unsqueeze(0)
                 # Kernel computes thr=(q_pos+1)//ratio, matching the prior
@@ -737,13 +736,13 @@ class Indexer(nn.Module):
                 if cp_on:
                     q_pos_1b = (cp_ctx.global_positions + 1).unsqueeze(1)
                 else:
-                    sp_scalar = (
+                    sp = (
                         int(start_pos.item())
                         if isinstance(start_pos, torch.Tensor)
                         else int(start_pos)
                     )
-                    q_pos_1b = (
-                        sp_scalar + torch.arange(1, seqlen + 1, device=x.device)
+                    q_pos_1b = torch.arange(
+                        sp + 1, sp + seqlen + 1, device=x.device
                     ).unsqueeze(1)
                 mask = topk_idxs >= (q_pos_1b // ratio)
                 topk_idxs = torch.where(mask, -1, topk_idxs + offset)
