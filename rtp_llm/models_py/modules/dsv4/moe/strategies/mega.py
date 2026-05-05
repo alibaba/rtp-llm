@@ -27,24 +27,19 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        # Mega requires EP > 1, factory mode, SM100, dist-init — all checked
-        # by ``_mega_moe_available()`` except ep_size > 1, which we check here.
-        return cfg.factory_mode and cfg.ep_size > 1 and _mega_moe_available()
+        # Mega requires EP > 1, SM100, dist-init — all checked by
+        # ``_mega_moe_available()`` except ep_size > 1, which we check here.
+        return cfg.ep_size > 1 and _mega_moe_available()
 
-    def setup_weights(
-        self,
-        weights: Optional[Dict[str, torch.Tensor]],
-        prefix: str,
-    ) -> None:
-        """Stack EP-local routed expert weights, convert SFs to the
-        int32 UTCCP-transposed layout required by ``fp8_fp4_mega_moe``,
-        and register the symmetric-memory dispatch buffer.
+    def setup_weights(self, layer_weights: Dict) -> None:
+        """Stack EP-local routed-expert SFs into the int32 UTCCP-transposed
+        layout ``fp8_fp4_mega_moe`` expects, then register the symm-mem
+        dispatch buffer.
 
-        V4 ckpt stores, per expert i:
-          w1.weight [inter, dim//2] int8  (FP4 gate)
-          w3.weight [inter, dim//2] int8  (FP4 up)
-          w2.weight [dim, inter//2] int8  (FP4 down)
-          ... .scale [inter, dim//FP4_BLOCK] / [dim, inter//FP4_BLOCK] UE8M0
+        Routed weights arrive as already-EP-sliced stacks (loader handles
+        the rank slicing): ``layer_weights[W.v4_routed_w{1,2,3}_{w,s}]``
+        each shaped ``[E_local, ...]``. We pop them so the only references
+        kept alive are the kernel-consumable l1/l2 buffers below.
 
         Mega MoE expects, per expert:
           L1 w [2*inter, dim//2] int8 (gate | up rows concatenated)
@@ -54,19 +49,13 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
           L2 w [dim, inter//2] int8
           L2 sf [dim, ...] int32
 
-        Pops the following keys from ``weights`` (factory_mode):
-          ``{prefix}.experts.{i}.{w1,w2,w3}.{weight,scale}`` for
-          i in [local_expert_start, local_expert_end).
-
-        Eager init (weights=None) is not supported — Mega is a factory-mode
-        path; tests that need a Mega instance must construct it with synthetic
-        stacked weights via ``setup_weights`` themselves.
+        Memory: serialise L1 → L2 with ``del`` + ``empty_cache()`` between
+        stages. Pre-allocating both fp32 SF stacks at once (and feeding
+        the live tuple into ``transform_weights_for_mega_moe`` whose internal
+        interleave allocates another ~size(w13)+size(w2) transient) OOMs
+        268 GB on V4-Pro cp4. Splitting keeps the live set ≤ one stack.
         """
-        if weights is None:
-            raise RuntimeError(
-                "MegaMoEStrategy requires factory_mode (weights dict). "
-                "Eager init is not supported."
-            )
+        from rtp_llm.utils.model_weight import W
 
         import deep_gemm
         import torch.distributed as dist
@@ -75,44 +64,53 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         E = cfg.n_local_experts
         D = cfg.dim
         inter = cfg.moe_inter_dim
-        start = cfg.local_expert_start
-        device = weights[f"{prefix}.experts.{start}.w1.weight"].device
 
-        # (1) Stack EP-local experts into [E_local, ...] tensors.  SF is
-        # kept as fp32 initially — ``transform_sf_into_required_layout``
-        # is the only entry point that produces the int32 layout the
-        # kernel consumes.
+        # Pop L1 (w1/w3) stacks from layer_weights so the framework's
+        # ModelWeights drops its references.
+        st_w1_w = layer_weights.pop(W.v4_routed_w1_w)
+        st_w1_s = layer_weights.pop(W.v4_routed_w1_s)
+        st_w3_w = layer_weights.pop(W.v4_routed_w3_w)
+        st_w3_s = layer_weights.pop(W.v4_routed_w3_s)
+        device = st_w1_w.device
+
+        # --- L1 (gate + up): stack, transform SF, drop the fp32 stack.
         w13 = torch.empty((E, 2 * inter, D // 2), dtype=torch.int8, device=device)
         s13 = torch.empty(
             (E, 2 * inter, D // FP4_BLOCK), dtype=torch.float32, device=device
         )
-        w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
-        s2 = torch.empty((E, D, inter // FP4_BLOCK), dtype=torch.float32, device=device)
-        for local_i in range(E):
-            p = f"{prefix}.experts.{start + local_i}"
-            w13[local_i, :inter].copy_(weights.pop(f"{p}.w1.weight"))
-            s13[local_i, :inter].copy_(weights.pop(f"{p}.w1.scale").float())
-            w13[local_i, inter:].copy_(weights.pop(f"{p}.w3.weight"))
-            s13[local_i, inter:].copy_(weights.pop(f"{p}.w3.scale").float())
-            w2[local_i].copy_(weights.pop(f"{p}.w2.weight"))
-            s2[local_i].copy_(weights.pop(f"{p}.w2.scale").float())
-
-        # (2) Repack SFs to the kernel's required int32 layout (MN-major,
-        # TMA-aligned, packed 4-UE8M0-per-int32).
+        w13[:, :inter].copy_(st_w1_w)
+        s13[:, :inter].copy_(st_w1_s.float())
+        w13[:, inter:].copy_(st_w3_w)
+        s13[:, inter:].copy_(st_w3_s.float())
+        del st_w1_w, st_w1_s, st_w3_w, st_w3_s
         s13_int = deep_gemm.transform_sf_into_required_layout(
             s13, 2 * inter, D, (1, FP4_BLOCK), E
         )
+        del s13
+        torch.cuda.empty_cache()
+
+        # --- L2 (down): only after L1's fp32 buffer has been freed.
+        st_w2_w = layer_weights.pop(W.v4_routed_w2_w)
+        st_w2_s = layer_weights.pop(W.v4_routed_w2_s)
+        w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
+        s2 = torch.empty((E, D, inter // FP4_BLOCK), dtype=torch.float32, device=device)
+        w2.copy_(st_w2_w)
+        s2.copy_(st_w2_s.float())
+        del st_w2_w, st_w2_s
         s2_int = deep_gemm.transform_sf_into_required_layout(
             s2, D, inter, (1, FP4_BLOCK), E
         )
+        del s2
+        torch.cuda.empty_cache()
 
-        # (3) Apply Mega MoE-specific transforms: L1 gate/up interleave
-        # (gran=8 along N) + both SFs UTCCP-transposed.  Returns the
-        # final weights that the kernel reads directly each forward.
+        # Mega MoE transform: L1 gate/up interleave (gran=8 along N) +
+        # both SFs UTCCP-transposed. Drop inputs immediately after.
         (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
             (w13, s13_int),
             (w2, s2_int),
         )
+        del w13, s13_int, w2, s2_int
+        torch.cuda.empty_cache()
 
         # Stash as plain attributes (not Parameters — the kernel reads
         # raw int8/int32 buffers with no autograd).  Original stacked
