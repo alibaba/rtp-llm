@@ -62,7 +62,18 @@ docs = [
 
 [tool.setuptools]
 package-dir = {"" = "."}
-packages = ["rtp_llm"]
+
+# Use namespace-package discovery so the wheel actually contains every
+# subpackage (rtp_llm.cpp, rtp_llm.models_py, rtp_llm.config, rtp_llm.ops,
+# rtp_llm.server, ...). The previous `packages = ["rtp_llm"]` literal was a
+# footgun: any reorg could silently drop subpackages from the wheel while
+# `pip install` still succeeded — `import rtp_llm.cpp` would then fail at
+# runtime.  `exclude` keeps test code (lives alongside source) out of the
+# published wheel.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rtp_llm", "rtp_llm.*"]
+exclude = ["rtp_llm.test*", "rtp_llm.*.test*"]
 
 # ``dependencies`` is dynamic but no source is declared here: setuptools accepts
 # ``install_requires=`` from setup.py for any field marked dynamic in [project]
