@@ -59,52 +59,49 @@ class Expert(nn.Module):
         inter_dim: int,
         swiglu_limit: float = 0.0,
         storage: str = "fp8",
-        weights: Optional[Dict[str, torch.Tensor]] = None,
-        prefix: str = "",
+        expert_weights: Optional[Dict[str, torch.Tensor]] = None,
     ):
+        """``expert_weights`` is a 6-key dict ``{"w1_w","w1_s","w2_w","w2_s",
+        "w3_w","w3_s"}`` extracted by the caller from the layer's W tags
+        (shared: ``W.v4_shared_w{1,2,3}_{w,s}``; routed: per-expert slice
+        of ``W.v4_routed_w{1,2,3}_{w,s}``)."""
         super().__init__()
-        self._factory_mode_fp8 = weights is not None and storage == "fp8"
+        # storage="fp8" → CudaFp8DeepGEMMLinear (2D input only).
+        # storage="fp4" → QuantizedLinear with bound weight/scale (accepts N-D).
+        self._uses_fp8_linear = storage == "fp8"
 
-        if self._factory_mode_fp8:
-            from rtp_llm.models_py.modules.dsv4.attention import (
-                _v4_fp8_linear_from_dict,
-            )
+        assert expert_weights is not None, "Expert requires expert_weights (descriptor path)"
 
-            self.w1 = _v4_fp8_linear_from_dict(
-                weights, f"{prefix}.w1.weight", f"{prefix}.w1.scale"
-            )
-            self.w2 = _v4_fp8_linear_from_dict(
-                weights, f"{prefix}.w2.weight", f"{prefix}.w2.scale"
-            )
-            self.w3 = _v4_fp8_linear_from_dict(
-                weights, f"{prefix}.w3.weight", f"{prefix}.w3.scale"
-            )
+        if self._uses_fp8_linear:
+            from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear
+
+            self.w1 = _v4_fp8_linear(expert_weights["w1_w"], expert_weights["w1_s"])
+            self.w2 = _v4_fp8_linear(expert_weights["w2_w"], expert_weights["w2_s"])
+            self.w3 = _v4_fp8_linear(expert_weights["w3_w"], expert_weights["w3_s"])
         else:
+            # Legacy storage="fp4" — bind weight + scale directly from
+            # the framework tensors; forward still dequants on the fly
+            # (until S4 swaps to grouped GEMM).
             self.w1 = QuantizedLinear(dim, inter_dim, storage=storage)  # gate
             self.w2 = QuantizedLinear(inter_dim, dim, storage=storage)  # down
             self.w3 = QuantizedLinear(dim, inter_dim, storage=storage)  # up
-            if weights is not None:
-                # Legacy storage="fp4" — copy weight + scale into Parameters;
-                # forward still dequants on the fly (until S4 swaps to grouped GEMM).
-                for name in ("w1", "w2", "w3"):
-                    lin = getattr(self, name)
-                    lin.weight = nn.Parameter(
-                        weights[f"{prefix}.{name}.weight"], requires_grad=False
-                    )
-                    lin.scale = nn.Parameter(
-                        weights[f"{prefix}.{name}.scale"], requires_grad=False
-                    )
+            self.w1.weight = expert_weights["w1_w"]
+            self.w1.scale = expert_weights["w1_s"]
+            self.w2.weight = expert_weights["w2_w"]
+            self.w2.scale = expert_weights["w2_s"]
+            self.w3.weight = expert_weights["w3_w"]
+            self.w3.scale = expert_weights["w3_s"]
         self.swiglu_limit = swiglu_limit
 
     def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
-        """Route through a factory LinearBase (expects 2D input) or legacy
+        """Route through CudaFp8DeepGEMMLinear (expects 2D input) or
         QuantizedLinear (accepts N-D).
 
         NB: do **not** name this ``_apply`` — that shadows
         ``nn.Module._apply``, breaking ``.to(device, dtype)`` for anything
         containing an ``Expert``.
         """
-        if self._factory_mode_fp8 and x.dim() > 2:
+        if self._uses_fp8_linear and x.dim() > 2:
             shape = x.shape
             return layer(x.reshape(-1, shape[-1])).view(*shape[:-1], -1)
         return layer(x)

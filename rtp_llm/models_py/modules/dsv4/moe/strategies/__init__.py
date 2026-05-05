@@ -1,8 +1,8 @@
 """DeepSeek-V4 MoE routed-expert strategies.
 
 Each strategy implements the ``RoutedExpertsStrategy`` interface from
-``base.py``. ``select_strategy`` picks one based on (ep_size, factory_mode,
-env-vars, kernel availability).
+``base.py``. ``select_strategy`` picks one based on (ep_size, env-vars,
+kernel availability).
 
 Importing this package populates the strategy registry (each
 ``@register_strategy``-decorated class registers itself on import). Order
