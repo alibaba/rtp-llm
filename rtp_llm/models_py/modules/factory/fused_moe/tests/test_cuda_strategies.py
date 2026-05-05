@@ -23,10 +23,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.common.strategy.batched_tr
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
     CudaFp8PerBlockEpNormalStrategy,
-    CudaFp8PerBlockNoDPMaskedStrategy,
-    CudaFp8PerBlockNoDPStrategy,
-    CudaFp8PerTensorNoDPStrategy,
-    CudaW4a8Int4PerChannelNoDPStrategy,
+    CudaFp8PerBlockPureTPMaskedStrategy,
+    CudaFp8PerBlockPureTPStrategy,
+    CudaFp8PerTensorPureTPStrategy,
+    CudaW4a8Int4PerChannelPureTPStrategy,
 )
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 
@@ -169,7 +169,7 @@ class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):
         self.assertTrue(strategy.can_handle(config))
 
 
-class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
+class TestCudaFp8PerBlockPureTPStrategy(unittest.TestCase):
     """Test CUDA FP8 PerBlock single GPU strategy"""
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
@@ -186,7 +186,7 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
             enable_cuda_graph=False,
         )
 
-        strategy = CudaFp8PerBlockNoDPStrategy()
+        strategy = CudaFp8PerBlockPureTPStrategy()
         self.assertTrue(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
@@ -203,7 +203,7 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
             enable_cuda_graph=False,
         )
 
-        strategy = CudaFp8PerBlockNoDPStrategy()
+        strategy = CudaFp8PerBlockPureTPStrategy()
         self.assertTrue(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
@@ -220,14 +220,14 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
             enable_cuda_graph=False,
         )
 
-        strategy = CudaFp8PerBlockNoDPStrategy()
+        strategy = CudaFp8PerBlockPureTPStrategy()
         self.assertTrue(strategy.can_handle(config))
         config.enable_cuda_graph = True
         self.assertFalse(strategy.can_handle(config))
 
     def test_priority(self) -> None:
         """Test priority"""
-        strategy = CudaFp8PerBlockNoDPStrategy()
+        strategy = CudaFp8PerBlockPureTPStrategy()
         router_type = RouterType.PURE_TP
         executor_type = ExecutorType.DEEPGEMM_CONTINUOUS
         expected_priority = router_type.value * 10 + executor_type.value
@@ -238,7 +238,7 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         self.assertEqual(strategy.priority, expected_priority)
 
 
-class TestCudaFp8PerBlockNoDPMaskedStrategy(unittest.TestCase):
+class TestCudaFp8PerBlockPureTPMaskedStrategy(unittest.TestCase):
     """Test CUDA FP8 PerBlock No DP Masked strategy"""
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
@@ -252,11 +252,11 @@ class TestCudaFp8PerBlockNoDPMaskedStrategy(unittest.TestCase):
                 ep_size=1, tp_size=1, dp_size=1
             ),
             moe_config=create_moe_config(
-                use_all_gather=True, moe_strategy="fp8_per_block_no_dp_masked"
+                use_all_gather=True, moe_strategy="fp8_per_block_pure_tp_masked"
             ),
         )
 
-        strategy = CudaFp8PerBlockNoDPMaskedStrategy()
+        strategy = CudaFp8PerBlockPureTPMaskedStrategy()
         self.assertTrue(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
@@ -270,16 +270,16 @@ class TestCudaFp8PerBlockNoDPMaskedStrategy(unittest.TestCase):
                 ep_size=2, tp_size=2, dp_size=1
             ),
             moe_config=create_moe_config(
-                use_all_gather=True, moe_strategy="fp8_per_block_no_dp_masked"
+                use_all_gather=True, moe_strategy="fp8_per_block_pure_tp_masked"
             ),
         )
 
-        strategy = CudaFp8PerBlockNoDPMaskedStrategy()
+        strategy = CudaFp8PerBlockPureTPMaskedStrategy()
         self.assertTrue(strategy.can_handle(config))
 
     def test_priority(self) -> None:
         """Test priority"""
-        strategy = CudaFp8PerBlockNoDPMaskedStrategy()
+        strategy = CudaFp8PerBlockPureTPMaskedStrategy()
         router_type = RouterType.PURE_TP
         executor_type = ExecutorType.DEEPGEMM_MASKED
         expected_priority = router_type.value * 10 + executor_type.value
@@ -455,7 +455,7 @@ class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
         self.assertEqual(strategy.priority, expected_priority)
 
 
-class TestCudaFp8PerTensorNoDPStrategy(unittest.TestCase):
+class TestCudaFp8PerTensorPureTPStrategy(unittest.TestCase):
     """Test CUDA FP8 PerTensor single GPU strategy"""
 
     def test_can_handle_fp8_per_tensor_compressed(self) -> None:
@@ -468,7 +468,7 @@ class TestCudaFp8PerTensorNoDPStrategy(unittest.TestCase):
             moe_config=create_moe_config(use_all_gather=True),
         )
 
-        strategy = CudaFp8PerTensorNoDPStrategy()
+        strategy = CudaFp8PerTensorPureTPStrategy()
         self.assertTrue(strategy.can_handle(config))
 
     def test_can_handle_fp8_dynamic_per_tensor(self) -> None:
@@ -481,12 +481,12 @@ class TestCudaFp8PerTensorNoDPStrategy(unittest.TestCase):
             moe_config=create_moe_config(use_all_gather=True),
         )
 
-        strategy = CudaFp8PerTensorNoDPStrategy()
+        strategy = CudaFp8PerTensorPureTPStrategy()
         self.assertTrue(strategy.can_handle(config))
 
     def test_priority(self) -> None:
         """Test priority"""
-        strategy = CudaFp8PerTensorNoDPStrategy()
+        strategy = CudaFp8PerTensorPureTPStrategy()
         router_type = RouterType.PURE_TP
         executor_type = ExecutorType.CUTLASS_FP8
         expected_priority = router_type.value * 10 + executor_type.value
@@ -497,7 +497,7 @@ class TestCudaFp8PerTensorNoDPStrategy(unittest.TestCase):
         self.assertEqual(strategy.priority, expected_priority)
 
 
-class TestCudaW4a8Int4PerChannelNoDPStrategy(unittest.TestCase):
+class TestCudaW4a8Int4PerChannelPureTPStrategy(unittest.TestCase):
     """Test CUDA W4A8 INT4 PerChannel single GPU strategy"""
 
     def test_can_handle_w4a8_int4_per_channel(self) -> None:
@@ -510,12 +510,12 @@ class TestCudaW4a8Int4PerChannelNoDPStrategy(unittest.TestCase):
             moe_config=create_moe_config(use_all_gather=True),
         )
 
-        strategy = CudaW4a8Int4PerChannelNoDPStrategy()
+        strategy = CudaW4a8Int4PerChannelPureTPStrategy()
         self.assertTrue(strategy.can_handle(config))
 
     def test_priority(self) -> None:
         """Test priority"""
-        strategy = CudaW4a8Int4PerChannelNoDPStrategy()
+        strategy = CudaW4a8Int4PerChannelPureTPStrategy()
         router_type = RouterType.PURE_TP
         executor_type = ExecutorType.CUTLASS_W4A8_INT4_PER_CHANNEL
         expected_priority = router_type.value * 10 + executor_type.value

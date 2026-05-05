@@ -70,10 +70,10 @@ Each hardware and configuration combination has a corresponding strategy class:
 
 - **CUDA Strategies** (located in `rtp_llm/models_py/modules/cuda/moe/strategy/`):
   - `CudaNoQuantEpLowLatencyStrategy`: EP low latency without quantization
-  - `CudaFp8PerBlockNoDPStrategy`: FP8 PerBlock without DP
+  - `CudaFp8PerBlockPureTPStrategy`: FP8 PerBlock pure TP (single GPU or tp==ep, dp==1)
   - `CudaFp8PerBlockEpLowLatencyStrategy`: FP8 PerBlock EP low latency
   - `CudaFp8PerBlockEpNormalStrategy`: FP8 PerBlock EP normal
-  - `CudaFp8PerTensorNoDPStrategy`: FP8 PerTensor without DP
+  - `CudaFp8PerTensorPureTPStrategy`: FP8 PerTensor pure TP (single GPU or tp==ep, dp==1)
   - `CudaFp8PerTensorEpLowLatencyStrategy`: FP8 PerTensor EP low latency
   - `CudaFp8PerTensorEpNormalStrategy`: FP8 PerTensor EP normal
   - `BatchedTritonStrategy`: Fallback strategy using Triton

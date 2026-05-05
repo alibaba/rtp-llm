@@ -68,12 +68,12 @@ class CudaFp8PerTensorEpNormalStrategy(MoeStrategy):
         )
 
 
-class CudaFp8PerTensorNoDPStrategy(MoeStrategy):
-    """CUDA FP8 PerTensor single GPU strategy"""
+class CudaFp8PerTensorPureTPStrategy(MoeStrategy):
+    """CUDA FP8 PerTensor pure TP strategy (single GPU or tp==ep, dp==1)."""
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        checker.check(config.moe_strategy == "fp8_per_tensor_no_dp" or config.moe_strategy == "auto")
+        checker.check(config.moe_strategy == "fp8_per_tensor_pure_tp" or config.moe_strategy == "auto")
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_moe import (

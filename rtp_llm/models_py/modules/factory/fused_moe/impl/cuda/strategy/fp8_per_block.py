@@ -19,8 +19,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 )
 
 
-class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
-    """CUDA FP8 PerBlock single GPU strategy"""
+class CudaFp8PerBlockPureTPStrategy(MoeStrategy):
+    """CUDA FP8 PerBlock pure TP strategy (single GPU or tp==ep, dp==1)."""
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -28,7 +28,7 @@ class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
         checker.check(
-            config.moe_strategy == "fp8_per_block_no_dp"
+            config.moe_strategy == "fp8_per_block_pure_tp"
             or config.moe_strategy == "auto"
         )
 
@@ -51,15 +51,15 @@ class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
         )
 
 
-class CudaFp8PerBlockNoDPMaskedStrategy(MoeStrategy):
-    """CUDA FP8 PerBlock No DP Masked strategy"""
+class CudaFp8PerBlockPureTPMaskedStrategy(MoeStrategy):
+    """CUDA FP8 PerBlock pure TP strategy with masked executor."""
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
-        checker.check(config.moe_strategy == "fp8_per_block_no_dp_masked")
+        checker.check(config.moe_strategy == "fp8_per_block_pure_tp_masked")
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2 import (

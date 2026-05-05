@@ -17,12 +17,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 )
 
 
-class CudaFp4NoDPStrategy(MoeStrategy):
-    """CUDA FP4 PerGroup single GPU strategy"""
+class CudaFp4PureTPStrategy(MoeStrategy):
+    """CUDA FP4 PerGroup pure TP strategy (single GPU or tp==ep, dp==1)."""
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        checker.check(config.moe_strategy == "fp4_no_dp" or config.moe_strategy == "auto")
+        checker.check(config.moe_strategy == "fp4_pure_tp" or config.moe_strategy == "auto")
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor import (
