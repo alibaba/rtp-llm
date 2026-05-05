@@ -27,7 +27,7 @@ SMOKE_CASES = {   'softmax_probs': {   'task_info': 'data/model/qwen25/q_r_softm
                 'platform': 'cuda',
                 'markers': ['smoke', 'cuda', 'L20'],
                 'timeout': 600},
-    'bf16': {   'task_info': 'data/model/qwen25/q_r_s.json',
+    'bf16': {   'task_info': 'data/model/qwen25/q_r_s_bf16.json',
                 'smoke_args': '--act_type BF16 --warm_up 0',
                 'gpu_type': 'L20',
                 'platform': 'cuda',

@@ -105,8 +105,8 @@
                             ],
                             "beam_responses": [
                                 "\n\nThe error message you're encountering, \"Name",
-                                "\n\nThe error you're encountering, `NameError",
                                 "\n\nThe error message you're encountering, `Name",
+                                "\n\nThe error you're encountering, `NameError",
                                 "\n\nThe error you're encountering, `TypeError:",
                                 "\n\nThe error you're encountering is due to a"
                             ],
