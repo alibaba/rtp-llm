@@ -1,0 +1,3 @@
+ff449b6426812d1e5e107715af899fcff5e81419
+Vendored from /home/serina.wzq/vllm at HEAD
+Files: cache_utils.py fused_compress_quant_cache.py fused_indexer_q.py compressor_utils.py

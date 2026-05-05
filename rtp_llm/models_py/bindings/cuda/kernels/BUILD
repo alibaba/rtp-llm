@@ -57,6 +57,47 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Vendored from vLLM (csrc/persistent_topk.cuh + csrc/topk.cu @ b55d830).
+# Replaces torch.topk on the DSv4 indexer decode hot path:
+#   K=512 / T_max=2048: torch.topk ~30us → this kernel ~5-10us.
+# See dsv4_persistent_topk.h for the contract.
+cc_library(
+    name = "dsv4_persistent_topk",
+    srcs = ["dsv4_persistent_topk.cu"],
+    hdrs = [
+        "dsv4_persistent_topk.h",
+        "dsv4_persistent_topk.cuh",
+    ],
+    deps = cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+# Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill).
+# Per-row TopK for DSv4 indexer prefill: hybrid insertion-sort blocks for the
+# first 12288 rows, radix-select blocks beyond.
+cc_library(
+    name = "dsv4_top_k_per_row_prefill",
+    srcs = ["dsv4_top_k_per_row_prefill.cu"],
+    hdrs = [
+        "dsv4_top_k_per_row_prefill.h",
+        "dsv4_top_k_per_row_prefill.cuh",
+    ],
+    deps = cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "cuda_no_aux_tc",
     srcs = ["no_aux_tc_kernels.cu"],

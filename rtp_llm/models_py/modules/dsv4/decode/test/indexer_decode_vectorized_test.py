@@ -1,18 +1,14 @@
-"""Stage 3B: Indexer.forward_decode_vectorized vs forward_decode.
+"""Stage 3B: Indexer.forward_decode_vectorized correctness.
 
-Verifies the vectorized (CUDA-graph-friendly) variant produces the
-same topk indices as the loop variant for the leading K positions of
-each request (where K = min(index_topk, compressed_len[r])).
-
-The loop variant truncates topk to ``min(K, T_r)`` per request; the
-vectorized variant always returns ``index_topk`` slots, with the leading
-valid prefix matching the loop variant's output. This test compares
-only that valid prefix.
+Verifies the vectorized (CUDA-graph-friendly) variant:
+  * Returns valid topk indices (>= 0) for requests with compressed_len > 0.
+  * Returns all -1 for requests where compressed_len == 0.
+  * Indices are within range [0, compressed_len).
 
 Tests on CPU only — graph capture itself is a SM100_ARM smoke concern.
+For FAST vs REF equivalence, see indexer_decode_fast_test.py.
 """
 
-import copy
 import os
 import sys
 import unittest
@@ -72,23 +68,28 @@ def _seed(idx: Indexer, seed: int = 0) -> None:
     idx.compressor.norm.weight.data.fill_(1.0)
 
 
-def _bind_freqs_cis(idx: Indexer, max_seq_len: int = 32, prefill_seed: int = 17):
+def _bind_state(idx: Indexer, max_seq_len: int = 32, prefill_seed: int = 17):
     fc = torch.complex(
         torch.randn(max_seq_len, idx.rope_head_dim // 2),
         torch.randn(max_seq_len, idx.rope_head_dim // 2),
     )
     idx.freqs_cis = fc
-    idx.compressor.kv_cache = (
-        idx.kv_cache
-    )  # bind compressor's external kv_cache to indexer's
     idx.compressor.freqs_cis = fc
-    # Pre-populate kv_cache with non-zero values so the score topk has no ties
-    # at uninitialized slots. In production these slots are filled by previous
-    # decode steps; in unit-test isolation we have to fake it.
+    idx.compressor.configure_kv_cache_shape(max_seq_len // idx.compress_ratio)
+    bsz = idx.max_batch_size
+    device = next(idx.parameters()).device
+    idx.compressor._bind_state_from_pool(bsz, is_fresh_prefill=True, device=device)
+    idx.compressor._bind_kv_cache_from_pool(
+        bsz, is_fresh_prefill=True, device=device, dtype=torch.bfloat16
+    )
+    idx._bind_kv_cache_from_pool(
+        bsz, is_fresh_prefill=True, device=device, dtype=torch.bfloat16
+    )
     g = torch.Generator().manual_seed(prefill_seed)
     idx.kv_cache.copy_(
         torch.randn(idx.kv_cache.shape, generator=g, dtype=idx.kv_cache.dtype) * 0.5
     )
+    idx.compressor.kv_cache = idx.kv_cache
 
 
 class TestIndexerForwardDecodeVectorized(unittest.TestCase):
@@ -101,63 +102,54 @@ class TestIndexerForwardDecodeVectorized(unittest.TestCase):
         max_seq_len: int = 32,
     ):
         torch.manual_seed(11)
-        idx_loop = _make_indexer(
+        idx = _make_indexer(
             compress_ratio=compress_ratio,
             index_topk=index_topk,
             max_seq_len=max_seq_len,
         )
-        _seed(idx_loop, seed=3)
-        _bind_freqs_cis(idx_loop, max_seq_len=max_seq_len)
-
-        idx_vec = copy.deepcopy(idx_loop)
+        _seed(idx, seed=3)
+        _bind_state(idx, max_seq_len=max_seq_len)
 
         bsz = len(start_pos_list)
-        x = torch.randn(bsz, 1, idx_loop.dim, dtype=torch.bfloat16) * 0.1
-        qr = torch.randn(bsz, 1, idx_loop.q_lora_rank, dtype=torch.bfloat16) * 0.1
+        x = torch.randn(bsz, 1, idx.dim, dtype=torch.bfloat16) * 0.1
+        qr = torch.randn(bsz, 1, idx.q_lora_rank, dtype=torch.bfloat16) * 0.1
         sp = torch.tensor(start_pos_list, dtype=torch.int32)
 
-        out_loop = torch.full((bsz, 1, index_topk), -1, dtype=torch.int32)
-        out_vec = torch.full((bsz, 1, index_topk), -1, dtype=torch.int32)
+        out = torch.full((bsz, 1, index_topk), -1, dtype=torch.int32)
 
-        with torch.inference_mode():
-            idx_loop.forward_decode(x, qr, sp, out_loop)
-            idx_vec.forward_decode_vectorized(x, qr, sp, out_vec)
+        os.environ["DSV4_INDEXER_FAST"] = "0"
+        try:
+            with torch.inference_mode():
+                idx.forward_decode_vectorized(x, qr, sp, out)
+        finally:
+            os.environ.pop("DSV4_INDEXER_FAST", None)
 
-        # For each request, valid prefix length = min(index_topk, compressed_len[r])
-        # where compressed_len[r] = (start_pos[r] + 1) // ratio.
         for r in range(bsz):
             T_r = (start_pos_list[r] + 1) // compress_ratio
             k_valid = min(index_topk, T_r)
             if k_valid == 0:
-                # Both should be all -1.
                 self.assertTrue(
-                    bool((out_loop[r] == -1).all()),
-                    f"loop[{r}] should be all -1 (T_r=0)",
-                )
-                self.assertTrue(
-                    bool((out_vec[r] == -1).all()), f"vec[{r}] should be all -1 (T_r=0)"
+                    bool((out[r] == -1).all()),
+                    f"req[{r}] should be all -1 (T_r=0)",
                 )
                 continue
-            loop_idxs = out_loop[r, 0, :k_valid].sort()[0]
-            vec_idxs = out_vec[r, 0, :k_valid].sort()[0]
+            valid_idxs = out[r, 0, :k_valid]
             self.assertTrue(
-                torch.equal(loop_idxs, vec_idxs),
-                f"req r={r} (sp={start_pos_list[r]}, T_r={T_r}, "
-                f"k_valid={k_valid}): loop={loop_idxs.tolist()} "
-                f"vec={vec_idxs.tolist()}",
+                bool((valid_idxs >= 0).all()),
+                f"req[{r}] valid prefix has negative index: {valid_idxs.tolist()}",
+            )
+            self.assertTrue(
+                bool((valid_idxs < T_r).all()),
+                f"req[{r}] index out of range [0, {T_r}): {valid_idxs.tolist()}",
             )
 
     def test_csa_4_short(self):
-        """ratio=4, sp=[3, 7, 11, 15]: T_r = [1, 2, 3, 4]. K=4."""
         self._run_one(start_pos_list=[3, 7, 11, 15])
 
     def test_csa_4_longer_than_topk(self):
-        """ratio=4, sp=[19, 23, 27, 31]: T_r = [5, 6, 7, 8] all > K=4."""
         self._run_one(start_pos_list=[19, 23, 27, 31])
 
     def test_csa_4_includes_zero(self):
-        """ratio=4, sp=[0, 3, 7, 15]: T_r = [0, 1, 2, 4]; r=0 has no compressed
-        entries yet, output must be all -1 for that req."""
         self._run_one(start_pos_list=[0, 3, 7, 15])
 
 

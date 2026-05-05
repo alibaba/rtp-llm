@@ -21,47 +21,85 @@ py_test(
     exec_properties = {"gpu": "H20"},
 )
 
-# ── DSV4 SWA prefill Triton kernel UTs ────────────────────────────────────
-# Lightweight: only need the triton kernel files + torch / triton runtime.
-# Avoid `py_standalone_testlib` because it pulls model_loader / flash-mla
-# which break under --config=cuda13.
-load("//bazel:arch_select.bzl", "requirement")
-requirement(["torch", "triton"])
-
-_swa_triton_ut_deps = [
-    "//rtp_llm/models_py:modules",
-    ":torch",
-    ":triton",
-]
-
+# P0 cleanup gate: v4_indexer_score is now the only path producing the
+# indexer score (REF branch removed in indexer.py).  Locks down kernel
+# math + perf vs eager.
 py_test(
-    name = "test_swa_fp8_kv_roundtrip",
-    srcs = ["test_swa_fp8_kv_roundtrip.py"],
-    deps = _swa_triton_ut_deps,
+    name = "test_v4_indexer_score",
+    srcs = ["test_v4_indexer_score.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )
 
+# P0 cleanup gate: v4_compressor_pool is now the only path producing the
+# compressor pool output (REF branch removed in compressor.py).
 py_test(
-    name = "test_swa_slot_mapping",
-    srcs = ["test_swa_slot_mapping.py"],
-    deps = _swa_triton_ut_deps,
+    name = "test_v4_compressor_pool",
+    srcs = ["test_v4_compressor_pool.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )
 
+# PP4 wireup: Compressor → fused {pool+RMSNorm+RoPE+FP8 quant+scatter}
+# round-trip test. Locks the env-gated FP8 fast path for both prefill and
+# the boundary decode case against the bf16 4-launch reference.
 py_test(
-    name = "test_swa_prefill_gather_lens",
-    srcs = ["test_swa_prefill_gather_lens.py"],
-    deps = _swa_triton_ut_deps,
+    name = "test_compressor_fused_wireup",
+    srcs = ["test_compressor_fused_wireup.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )
 
+# P1 — vLLM-vendored persistent radix-select TopK for the indexer decode
+# hot path.  Replaces torch.topk (~30us → ~5-10us at K=512/T=2048).
+# Auto-skipped via pytest.mark.skipif when the .so binding is missing.
 py_test(
-    name = "test_swa_combine_topk",
-    srcs = ["test_swa_combine_topk.py"],
-    deps = _swa_triton_ut_deps,
+    name = "test_dsv4_persistent_topk",
+    srcs = ["test_dsv4_persistent_topk.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+# vLLM-vendored per-row TopK for the DSv4 indexer prefill (hybrid
+# insertion-sort + radix-select).  Auto-skipped when the .so binding is
+# missing.
+py_test(
+    name = "test_dsv4_top_k_per_row_prefill",
+    srcs = ["test_dsv4_top_k_per_row_prefill.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+# DeepGEMM FP8 non-paged MQA logits for indexer prefill — equivalence vs
+# bf16 ``v4_indexer_score`` reference. Auto-skipped when ``deep_gemm`` is
+# unavailable.
+py_test(
+    name = "test_fp8_mqa_prefill_indexer_score",
+    srcs = ["test_fp8_mqa_prefill_indexer_score.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )

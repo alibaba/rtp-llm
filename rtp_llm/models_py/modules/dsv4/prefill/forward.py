@@ -206,6 +206,7 @@ def forward_layers(
             cu_seqlens,  # [B+1]
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
+            attn_inputs=attn_inputs,
         )  # [T, hc, dim]
         if write_cache_store_impl is not None:
             write_cache_store_impl(kv_cache, layer_idx)
