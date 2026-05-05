@@ -1,6 +1,6 @@
 """GroupedFP4Strategy: single-card DeepGEMM ``m_grouped_fp8_fp4_gemm_nt_contiguous``.
 
-EP == 1 + factory_mode + DeepGEMM ≥ 2.4 + SM100. Opt-in via
+EP == 1 + DeepGEMM ≥ 2.4 + SM100. Opt-in via
 ``DSV4_USE_GROUPED_FP4=1`` (legacy toggle, mapped to ``forced='grouped_fp4'``
 in ``select_strategy``).
 
@@ -83,35 +83,34 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        return cfg.ep_size == 1 and cfg.factory_mode and _has_fp8_fp4_grouped_kernel()
+        return cfg.ep_size == 1 and _has_fp8_fp4_grouped_kernel()
 
-    def setup_weights(
-        self,
-        weights: Optional[Dict[str, torch.Tensor]],
-        prefix: str,
-    ) -> None:
-        """Stack all routed experts into ``[E, ...]`` int8 + UE8M0 SF tensors.
+    def setup_weights(self, layer_weights: Dict) -> None:
+        """Stack EP-sliced routed-expert tensors into ``[E, ...]`` int8 +
+        UE8M0 SF buffers in the layout DeepGEMM's contiguous kernel reads.
 
-        Pops keys (factory_mode):
-          ``{prefix}.experts.{i}.{w1,w2,w3}.{weight,scale}`` for i in [0, n_routed_experts).
+        Pops keys: ``W.v4_routed_w{1,2,3}_{w,s}`` from ``layer_weights``
+        (each shaped ``[E_local, ...]``).
 
-        Memory: stacked tensors are alloc'd/copied via a per-expert mini-buffer
-        pattern to avoid holding both the loader's dict entries AND the stacked
-        layout simultaneously: ``weights.pop`` detaches each tensor from the
-        loader BEFORE the next expert's allocation runs, and
-        ``torch.cuda.empty_cache()`` after the copy loop returns the freed FP4
-        blocks to the CUDA driver so they don't sit in the caching allocator
-        while KV-pool sizing measures available HBM.
+        Memory: pop the framework's stacked tensors so the only references
+        kept alive are the repacked grouped buffers below, then bulk-copy
+        in one `[:, :inter].copy_(stacked)` shot per slice (vs the legacy
+        per-expert loop) — same allocation footprint, simpler code path.
+        ``torch.cuda.empty_cache()`` after the copies returns the freed
+        FP4 blocks to the CUDA driver so they don't sit in PyTorch's
+        caching allocator while KV-pool sizing measures available HBM.
         """
-        if weights is None:
-            raise RuntimeError(
-                "GroupedFP4Strategy requires factory_mode (weights dict). "
-                "Eager init is not supported."
-            )
+        from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
         E, D, inter = cfg.n_routed_experts, cfg.dim, cfg.moe_inter_dim
-        device = weights[f"{prefix}.experts.0.w1.weight"].device
+        stacked_w1_w = layer_weights.pop(W.v4_routed_w1_w)
+        stacked_w1_s = layer_weights.pop(W.v4_routed_w1_s)
+        stacked_w2_w = layer_weights.pop(W.v4_routed_w2_w)
+        stacked_w2_s = layer_weights.pop(W.v4_routed_w2_s)
+        stacked_w3_w = layer_weights.pop(W.v4_routed_w3_w)
+        stacked_w3_s = layer_weights.pop(W.v4_routed_w3_s)
+        device = stacked_w1_w.device
 
         self._w13 = torch.empty(
             (E, 2 * inter, D // 2), dtype=torch.int8, device=device
@@ -127,15 +126,16 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             dtype=torch.float8_e8m0fnu,
             device=device,
         )
-        for i in range(E):
-            p = f"{prefix}.experts.{i}"
-            # w1 → [:inter], w3 → [inter:2*inter]
-            self._w13[i, :inter].copy_(weights.pop(f"{p}.w1.weight"))
-            self._s13[i, :inter].copy_(weights.pop(f"{p}.w1.scale"))
-            self._w13[i, inter:].copy_(weights.pop(f"{p}.w3.weight"))
-            self._s13[i, inter:].copy_(weights.pop(f"{p}.w3.scale"))
-            self._w2[i].copy_(weights.pop(f"{p}.w2.weight"))
-            self._s2[i].copy_(weights.pop(f"{p}.w2.scale"))
+        # Bulk copy from stacked → repacked layout (one slice per dim,
+        # no per-expert iteration).
+        self._w13[:, :inter].copy_(stacked_w1_w)
+        self._s13[:, :inter].copy_(stacked_w1_s)
+        self._w13[:, inter:].copy_(stacked_w3_w)
+        self._s13[:, inter:].copy_(stacked_w3_s)
+        self._w2.copy_(stacked_w2_w)
+        self._s2.copy_(stacked_w2_s)
+        del stacked_w1_w, stacked_w1_s, stacked_w2_w, stacked_w2_s
+        del stacked_w3_w, stacked_w3_s
 
         # Return loader's freed FP4 blocks to CUDA so the KV-cache
         # planner sees the real residual HBM rather than what's

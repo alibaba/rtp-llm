@@ -43,21 +43,16 @@ class DeepEPStrategy(RoutedExpertsStrategy):
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        # ep_size > 1 + factory_mode (eager init has no DeepEP wrapper available
-        # in unit tests). Mega-vs-DeepEP priority is enforced by registry order
+        # ep_size > 1. Mega-vs-DeepEP priority is enforced by registry order
         # (Mega registered first).
-        return cfg.ep_size > 1 and cfg.factory_mode
+        return cfg.ep_size > 1
 
-    def setup_weights(
-        self,
-        weights: Optional[Dict[str, torch.Tensor]],
-        prefix: str,
-    ) -> None:
+    def setup_weights(self, layer_weights: Dict) -> None:
         """Delegates to ``LocalLoopStrategy.setup_weights`` — DeepEP has no
         weights of its own; it dispatches recv tokens to the per-expert loop
         owned by the inner ``LocalLoopStrategy``.
         """
-        self._local.setup_weights(weights, prefix)
+        self._local.setup_weights(layer_weights)
 
     @staticmethod
     def _pad_topk_for_deepep(

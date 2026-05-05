@@ -85,45 +85,30 @@ class Gate(nn.Module):
         route_scale: float = 1.0,
         n_hash_layers: int = 0,
         vocab_size: int = 0,
-        weights: Optional[Dict[str, torch.Tensor]] = None,
-        prefix: str = "",
+        layer_weights: Optional[Dict[str, torch.Tensor]] = None,
     ):
+        """``layer_weights`` is the framework's per-layer dict
+        (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
+        Reads ``W.v4_router_w`` and either ``W.v4_router_tid2eid`` (hash
+        layers) or ``W.v4_router_bias`` (non-hash)."""
         super().__init__()
         self.dim = dim
         self.topk = n_activated_experts
         self.score_func = score_func
         self.route_scale = route_scale
         self.hash = layer_id < n_hash_layers
-        self._factory_mode = weights is not None
         self._dbg_prefix: Optional[str] = None
 
-        if self._factory_mode:
-            self.weight = nn.Parameter(weights[f"{prefix}.weight"], requires_grad=False)
-            if self.hash:
-                assert vocab_size > 0
-                self.tid2eid = nn.Parameter(
-                    weights[f"{prefix}.tid2eid"].to(torch.int32),
-                    requires_grad=False,
-                )
-                self.bias = None
-            else:
-                self.bias = nn.Parameter(
-                    weights[f"{prefix}.bias"].float(),
-                    requires_grad=False,
-                )
+        from rtp_llm.utils.model_weight import W
+
+        assert layer_weights is not None, "Gate requires layer_weights (descriptor path)"
+        self.weight = layer_weights[W.v4_router_w]
+        if self.hash:
+            assert vocab_size > 0
+            self.tid2eid = layer_weights[W.v4_router_tid2eid]
+            self.bias = None
         else:
-            self.weight = nn.Parameter(torch.empty(n_routed_experts, dim))
-            if self.hash:
-                assert vocab_size > 0
-                self.tid2eid = nn.Parameter(
-                    torch.empty(vocab_size, n_activated_experts, dtype=torch.int32),
-                    requires_grad=False,
-                )
-                self.bias = None
-            else:
-                self.bias = nn.Parameter(
-                    torch.empty(n_routed_experts, dtype=torch.float32)
-                )
+            self.bias = layer_weights[W.v4_router_bias]
 
     def _weight_bf16(self) -> torch.Tensor:
         """Lazy-cached BF16 view of ``self.weight``.

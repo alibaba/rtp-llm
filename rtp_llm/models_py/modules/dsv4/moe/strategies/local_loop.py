@@ -1,10 +1,8 @@
 """LocalLoopStrategy: Python-level for-loop over per-expert ``Expert`` modules.
 
 Universal fallback path:
-  - ep_size == 1 + (factory_mode without grouped FP4 kernel, or eager init test)
-  - ep_size > 1 + non-factory eager init (test only; in production this is
-    DeepEPStrategy which composes a LocalLoopStrategy for the local compute
-    on dispatched recv tokens)
+  - ep_size == 1 without the grouped FP4 kernel (also composed inside
+    ``DeepEPStrategy`` for the local compute on dispatched recv tokens)
   - cuda-graph capture (forward dispatches to graph-safe variant internally)
 
 Owns the ``self._local_y_buf`` fp32 accumulator (lazy-allocated, reused
@@ -37,45 +35,49 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         # ensures higher-priority paths get picked first.
         return True
 
-    def setup_weights(
-        self,
-        weights: Optional[Dict[str, torch.Tensor]],
-        prefix: str,
-    ) -> None:
-        """Build per-expert ``Expert`` ModuleList.
+    def setup_weights(self, layer_weights: Dict) -> None:
+        """Build per-expert ``Expert`` ModuleList from EP-sliced stacks.
 
-        Pops keys (factory_mode):
-          ``{prefix}.experts.{i}.{w1,w2,w3}.{weight,scale}`` for i in
-          [local_expert_start, local_expert_end). Non-local slots stay None.
-
-        Eager init (weights=None): every slot is allocated as an empty Expert
-        for unit tests.
+        Pops keys: ``W.v4_routed_w{1,2,3}_{w,s}`` from ``layer_weights``
+        (each shaped ``[E_local, ...]``). Slots for non-local experts stay
+        ``None``; preserves V4-official indexing convention
+        (``self.experts[global_idx]``) so forward loops stay identical
+        across ranks.
         """
-        cfg = self.cfg
-        factory_mode = weights is not None
+        from rtp_llm.utils.model_weight import W
 
-        # EP sharding: only build the ``n_local_experts`` Experts that live on
-        # this rank; slots for non-local experts are None. Preserves V4-official
-        # indexing convention (``self.experts[global_idx]``) so forward loops
-        # stay identical across ranks.
+        cfg = self.cfg
+        stacked_routed = {
+            "w1_w": layer_weights.pop(W.v4_routed_w1_w),
+            "w1_s": layer_weights.pop(W.v4_routed_w1_s),
+            "w2_w": layer_weights.pop(W.v4_routed_w2_w),
+            "w2_s": layer_weights.pop(W.v4_routed_w2_s),
+            "w3_w": layer_weights.pop(W.v4_routed_w3_w),
+            "w3_s": layer_weights.pop(W.v4_routed_w3_s),
+        }
+
+        def _expert_at(global_idx: int) -> Optional[Expert]:
+            if not (cfg.local_expert_start <= global_idx < cfg.local_expert_end):
+                return None
+            local_idx = global_idx - cfg.local_expert_start
+            ew = {
+                "w1_w": stacked_routed["w1_w"][local_idx],
+                "w1_s": stacked_routed["w1_s"][local_idx],
+                "w2_w": stacked_routed["w2_w"][local_idx],
+                "w2_s": stacked_routed["w2_s"][local_idx],
+                "w3_w": stacked_routed["w3_w"][local_idx],
+                "w3_s": stacked_routed["w3_s"][local_idx],
+            }
+            return Expert(
+                cfg.dim,
+                cfg.moe_inter_dim,
+                swiglu_limit=cfg.swiglu_limit,
+                storage="fp4",
+                expert_weights=ew,
+            )
+
         self.experts = nn.ModuleList(
-            [
-                (
-                    Expert(
-                        cfg.dim,
-                        cfg.moe_inter_dim,
-                        swiglu_limit=cfg.swiglu_limit,
-                        storage="fp4",
-                        weights=weights,
-                        prefix=(
-                            f"{prefix}.experts.{i}" if factory_mode else ""
-                        ),
-                    )
-                    if cfg.local_expert_start <= i < cfg.local_expert_end
-                    else None
-                )
-                for i in range(cfg.n_routed_experts)
-            ]
+            [_expert_at(i) for i in range(cfg.n_routed_experts)]
         )
 
         # Lazy fp32 accumulator buffer — replaces a per-forward

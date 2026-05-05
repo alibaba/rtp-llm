@@ -50,14 +50,23 @@ class MoE(nn.Module):
         swiglu_limit: float,
         n_hash_layers: int,
         vocab_size: int,
-        weights: Optional[Dict[str, torch.Tensor]] = None,
-        prefix: str = "",
+        layer_weights: Optional[Dict] = None,
         ep_size: int = 1,
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
         strategy: Optional[str] = None,
     ):
+        """``layer_weights`` is the framework's per-layer dict
+        (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
+        Forwards router/shared sub-dicts to ``Gate``/``Expert``; reads the
+        stacked routed tensors ``W.v4_routed_w{1,2,3}_{w,s}`` (shape
+        ``[E_local, ...]``) directly into mega-moe / grouped-fp4 / per-expert
+        paths via the chosen strategy."""
         super().__init__()
+        assert layer_weights is not None, (
+            "MoE requires layer_weights (descriptor path); legacy "
+            "weights/prefix dict path was removed."
+        )
         self.layer_id = layer_id
         self.dim = dim
         self.n_routed_experts = n_routed_experts
@@ -65,8 +74,6 @@ class MoE(nn.Module):
         self.moe_inter_dim = moe_inter_dim
         self.swiglu_limit = swiglu_limit
         self.max_tokens_per_rank = max_tokens_per_rank
-        factory_mode = weights is not None
-        self._factory_mode = factory_mode
 
         assert (
             n_routed_experts % max(ep_size, 1) == 0
@@ -77,6 +84,8 @@ class MoE(nn.Module):
         self.local_expert_start = ep_rank * self.n_local_experts
         self.local_expert_end = self.local_expert_start + self.n_local_experts
 
+        from rtp_llm.utils.model_weight import W
+
         self.gate = Gate(
             layer_id,
             dim,
@@ -86,17 +95,23 @@ class MoE(nn.Module):
             route_scale,
             n_hash_layers,
             vocab_size,
-            weights=weights,
-            prefix=f"{prefix}.gate" if factory_mode else "",
+            layer_weights=layer_weights,
         )
         assert n_shared_experts == 1, "V4 always has exactly 1 shared expert"
+        shared_w = {
+            "w1_w": layer_weights[W.v4_shared_w1_w],
+            "w1_s": layer_weights[W.v4_shared_w1_s],
+            "w2_w": layer_weights[W.v4_shared_w2_w],
+            "w2_s": layer_weights[W.v4_shared_w2_s],
+            "w3_w": layer_weights[W.v4_shared_w3_w],
+            "w3_s": layer_weights[W.v4_shared_w3_s],
+        }
         self.shared_experts = Expert(
             dim,
             moe_inter_dim,
             swiglu_limit=0.0,
             storage="fp8",
-            weights=weights,
-            prefix=f"{prefix}.shared_experts" if factory_mode else "",
+            expert_weights=shared_w,
         )
 
         # --- Strategy selection + weight setup ---
@@ -113,7 +128,6 @@ class MoE(nn.Module):
             local_expert_start=self.local_expert_start,
             local_expert_end=self.local_expert_end,
             max_tokens_per_rank=max_tokens_per_rank,
-            factory_mode=factory_mode,
         )
         forced = _resolve_forced(strategy)
         strategy_cls = select_strategy(cfg, forced=forced)
@@ -121,7 +135,7 @@ class MoE(nn.Module):
         # (e.g. LocalLoopStrategy.experts ModuleList) propagate through
         # ``MoE.to(device)``.
         self._strategy = strategy_cls(cfg)
-        self._strategy.setup_weights(weights, prefix)
+        self._strategy.setup_weights(layer_weights)
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt

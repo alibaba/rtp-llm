@@ -24,7 +24,7 @@ from rtp_llm.models_py.modules.dsv4.moe.strategies import (
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import _resolve_forced
 
 
-def _cfg(ep_size: int = 1, factory_mode: bool = True) -> MoeCfg:
+def _cfg(ep_size: int = 1) -> MoeCfg:
     """A minimal MoeCfg sufficient for ``can_handle`` checks."""
     n_local = 256 // max(ep_size, 1)
     return MoeCfg(
@@ -40,7 +40,6 @@ def _cfg(ep_size: int = 1, factory_mode: bool = True) -> MoeCfg:
         local_expert_start=0,
         local_expert_end=n_local,
         max_tokens_per_rank=8192,
-        factory_mode=factory_mode,
     )
 
 
@@ -64,7 +63,7 @@ def _env(**kw):
 
 
 class StrategySelectTest(unittest.TestCase):
-    """Cover the (ep_size, factory_mode, kernel_avail, mega_avail) matrix."""
+    """Cover the (ep_size, kernel_avail, mega_avail) matrix."""
 
     def setUp(self):
         # Ensure clean env baseline for every test.
@@ -77,57 +76,42 @@ class StrategySelectTest(unittest.TestCase):
 
     # --- auto-pick matrix --------------------------------------------------
 
-    def test_ep1_factory_with_grouped_kernel_picks_grouped(self):
+    def test_ep1_with_grouped_kernel_picks_grouped(self):
         with mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=True), \
              mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
-            self.assertIs(select_strategy(_cfg(ep_size=1, factory_mode=True)),
+            self.assertIs(select_strategy(_cfg(ep_size=1)),
                           GroupedFP4Strategy)
 
-    def test_ep1_factory_no_grouped_falls_to_local(self):
+    def test_ep1_no_grouped_falls_to_local(self):
         with mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=False), \
              mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False), \
              mock.patch.object(DeepEPStrategy, "can_handle", return_value=False):
-            self.assertIs(select_strategy(_cfg(ep_size=1, factory_mode=True)),
+            self.assertIs(select_strategy(_cfg(ep_size=1)),
                           LocalLoopStrategy)
 
-    def test_ep1_eager_picks_local(self):
-        # GroupedFP4.can_handle returns False because factory_mode=False.
-        # We do NOT mock so we exercise the real ``can_handle`` predicates.
-        self.assertIs(select_strategy(_cfg(ep_size=1, factory_mode=False)),
-                      LocalLoopStrategy)
-
-    def test_ep_gt1_factory_with_mega_picks_mega(self):
+    def test_ep_gt1_with_mega_picks_mega(self):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=True):
-            self.assertIs(select_strategy(_cfg(ep_size=4, factory_mode=True)),
+            self.assertIs(select_strategy(_cfg(ep_size=4)),
                           MegaMoEStrategy)
 
-    def test_ep_gt1_factory_no_mega_picks_deepep(self):
+    def test_ep_gt1_no_mega_picks_deepep(self):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
-            # DeepEPStrategy.can_handle is True for ep_size>1 + factory_mode
-            self.assertIs(select_strategy(_cfg(ep_size=4, factory_mode=True)),
+            self.assertIs(select_strategy(_cfg(ep_size=4)),
                           DeepEPStrategy)
-
-    def test_ep_gt1_eager_picks_local(self):
-        # No factory mode → DeepEP.can_handle False → LocalLoop fallback.
-        with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
-            self.assertIs(select_strategy(_cfg(ep_size=4, factory_mode=False)),
-                          LocalLoopStrategy)
 
     # --- forced override ---------------------------------------------------
 
     def test_forced_known_and_capable_returns_it(self):
         self.assertIs(
-            select_strategy(_cfg(ep_size=1, factory_mode=True),
-                            forced="local_loop"),
+            select_strategy(_cfg(ep_size=1), forced="local_loop"),
             LocalLoopStrategy,
         )
 
     def test_forced_known_but_incapable_raises(self):
-        # Force grouped_fp4 in eager-init cfg (factory_mode=False) — kernel
-        # check would fail anyway, but factory_mode is the cheaper false branch.
-        with self.assertRaises(RuntimeError) as cm:
-            select_strategy(_cfg(ep_size=1, factory_mode=False),
-                            forced="grouped_fp4")
+        # Force grouped_fp4 with grouped kernel mocked unavailable.
+        with mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=False):
+            with self.assertRaises(RuntimeError) as cm:
+                select_strategy(_cfg(ep_size=1), forced="grouped_fp4")
         self.assertIn("Forced MoE strategy 'grouped_fp4'", str(cm.exception))
         self.assertIn("cannot handle", str(cm.exception))
 
