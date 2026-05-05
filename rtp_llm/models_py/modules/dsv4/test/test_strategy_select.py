@@ -125,21 +125,25 @@ class StrategySelectTest(unittest.TestCase):
 
     def test_env_dsv4_moe_strategy_overrides_ctor(self):
         with _env(DSV4_MOE_STRATEGY="local_loop"):
-            self.assertEqual(_resolve_forced(None), "local_loop")
-            self.assertEqual(_resolve_forced("mega"), "local_loop")
+            self.assertEqual(_resolve_forced(None), ("local_loop", True))
+            self.assertEqual(_resolve_forced("mega"), ("local_loop", True))
 
     def test_env_dsv4_moe_strategy_auto_falls_through(self):
         with _env(DSV4_MOE_STRATEGY="auto"):
-            self.assertIsNone(_resolve_forced(None))
-            self.assertEqual(_resolve_forced("mega"), "mega")
+            self.assertEqual(_resolve_forced(None), (None, False))
+            self.assertEqual(_resolve_forced("mega"), ("mega", True))
 
-    def test_legacy_use_mega_moe_1_translates_to_mega(self):
+    def test_legacy_use_mega_moe_1_translates_to_mega_nonstrict(self):
+        # Legacy toggle is non-strict: ``select_strategy`` falls through to
+        # auto-pick when the named strategy can't handle the cfg (e.g.
+        # ep_size=1 + Mega). Smokes commonly leave DSV4_USE_MEGA_MOE=1
+        # ON across configs that include ep_size=1.
         with _env(DSV4_USE_MEGA_MOE="1"):
-            self.assertEqual(_resolve_forced(None), "mega")
+            self.assertEqual(_resolve_forced(None), ("mega", False))
 
-    def test_legacy_use_grouped_fp4_1_translates_to_grouped(self):
+    def test_legacy_use_grouped_fp4_1_translates_to_grouped_nonstrict(self):
         with _env(DSV4_USE_GROUPED_FP4="1"):
-            self.assertEqual(_resolve_forced(None), "grouped_fp4")
+            self.assertEqual(_resolve_forced(None), ("grouped_fp4", False))
 
     def test_legacy_conflicting_positives_raise(self):
         with _env(DSV4_USE_MEGA_MOE="1", DSV4_USE_GROUPED_FP4="1"):
@@ -156,9 +160,22 @@ class StrategySelectTest(unittest.TestCase):
     def test_legacy_negation_does_not_force_alternative(self):
         # DSV4_USE_MEGA_MOE=0 should NOT force a different strategy — it just
         # disables mega via the strategy's own can_handle (mega_buf checks
-        # the same env var). _resolve_forced returns None so auto-pick runs.
+        # the same env var). _resolve_forced returns (None, False) so
+        # auto-pick runs.
         with _env(DSV4_USE_MEGA_MOE="0"):
-            self.assertIsNone(_resolve_forced(None))
+            self.assertEqual(_resolve_forced(None), (None, False))
+
+    def test_legacy_force_nonstrict_falls_through_when_incapable(self):
+        # Legacy DSV4_USE_MEGA_MOE=1 + ep_size=1 cfg: Mega.can_handle False
+        # because ep_size=1; should silently fall through to LocalLoop
+        # (NOT raise — that's the strict-mode behaviour). Mirrors the
+        # 64k_cp4_ep1 smoke that has ep_size=1 + DSV4_USE_MEGA_MOE=1.
+        with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False), \
+             mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=False):
+            self.assertIs(
+                select_strategy(_cfg(ep_size=1), forced="mega", strict=False),
+                LocalLoopStrategy,
+            )
 
 
 if __name__ == "__main__":
