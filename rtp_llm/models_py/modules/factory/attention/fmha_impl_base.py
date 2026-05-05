@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 import torch
 
@@ -10,6 +10,11 @@ from rtp_llm.ops.compute_ops import LayerKVCache, ParamsBase, PyAttentionInputs
 
 class MlaImplBase(object):
     """Base class for MLA attention implementations."""
+
+    # User-facing backend name for explicit dispatch via --attn_backend.
+    # Subclasses MUST override (e.g. "flashinfer_mla", "sparse_mla"); empty
+    # default trips the startup assertion in attention/__init__.py.
+    NAME: ClassVar[str] = ""
 
     def __init__(
         self,
@@ -101,6 +106,15 @@ class FMHAImplBase(ABC):
     该类定义了 FMHA 实现必须提供的接口方法。
     所有具体的实现类都应该继承此类并实现这些方法。
     """
+
+    # User-facing backend name for explicit dispatch via --attn_backend
+    # (see attn_factory.py:_get_effective_backends and the help text in
+    # rtp_llm/server/server_args/fmha_group_args.py). Concrete subclasses MUST
+    # override; the empty default trips the startup assertion in
+    # attention/__init__.py:_validate_impl_names so a missing NAME surfaces at
+    # import time rather than as a generic "can not find mha type" runtime
+    # error when the user types --attn_backend=<name>.
+    NAME: ClassVar[str] = ""
 
     @abstractmethod
     def forward(
