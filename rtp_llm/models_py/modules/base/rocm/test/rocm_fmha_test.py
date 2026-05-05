@@ -4,11 +4,15 @@ from typing import List, Optional, Tuple
 from unittest import SkipTest, TestCase, main
 
 import aiter
+import pytest
 import torch
 import torch.nn.functional as F
 from aiter import dtypes
 from einops import rearrange, repeat
+
 from rtp_llm.ops.compute_ops import paged_attention_atrex
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 
 def construct_local_mask(
@@ -234,11 +238,20 @@ def run_ck(
 
 _PARTITION_SIZE = 512
 _PARTITION_SIZE_ROCM = 256
-_DEVICE_PROPERTIES = torch.cuda.get_device_properties("cuda")
-_ON_NAVI = (
-    hasattr(_DEVICE_PROPERTIES, "gcnArchName")
-    and "gfx1" in torch.cuda.get_device_properties("cuda").gcnArchName
-)
+# Module-level torch.cuda.get_device_properties() crashes pytest collection
+# on no-GPU hosts (collector container has CPU-only torch). Defer
+# evaluation: only `_use_rocm_custom_paged_attention` needs `_ON_NAVI`,
+# and that function only runs inside @pytest.mark.gpu(MI308X) tests, which
+# are skipped on no-GPU hosts before the body executes.
+try:
+    _DEVICE_PROPERTIES = torch.cuda.get_device_properties("cuda")
+    _ON_NAVI = (
+        hasattr(_DEVICE_PROPERTIES, "gcnArchName")
+        and "gfx1" in _DEVICE_PROPERTIES.gcnArchName
+    )
+except (RuntimeError, AssertionError):
+    _DEVICE_PROPERTIES = None
+    _ON_NAVI = False
 
 
 def _use_rocm_custom_paged_attention(
@@ -471,10 +484,8 @@ def run_atrex(
 ) -> torch.Tensor:
     # Whether to use rocm custom paged attention or not
     num_seqs, num_heads, head_size = query.shape
-    block_size = value_cache.shape[3]    
-    max_num_partitions = (
-        max_seq_len + _PARTITION_SIZE - 1
-    ) // _PARTITION_SIZE
+    block_size = value_cache.shape[3]
+    max_num_partitions = (max_seq_len + _PARTITION_SIZE - 1) // _PARTITION_SIZE
     assert _PARTITION_SIZE % block_size == 0
     x = 16 // key_cache.element_size()
     grp_size = num_heads // num_kv_heads
@@ -511,7 +522,7 @@ def run_atrex(
     return output
 
 
-def test_flash_attn_output(
+def _run_flash_attn_output(
     batch_size,
     nheads,
     seqlen_q,
@@ -712,7 +723,7 @@ def asm_V_shuffle(VC):
     return VC
 
 
-def test_paged_attention(
+def _run_paged_attention(
     ctx_lens: int,
     num_seqs: int,
     num_heads: int,
@@ -923,9 +934,9 @@ class FmhaTest(TestCase):
                 bias_type=bias_type,
                 deterministic=deterministic,
                 mha_type=mha_type,
-                dtype=dtype,
+                dtype=str(dtype),
             ):
-                out, out_ref, out_pt = test_flash_attn_output(
+                out, out_ref, out_pt = _run_flash_attn_output(
                     batch_size,
                     nheads,
                     seqlen_q,
@@ -951,7 +962,7 @@ class FmhaTest(TestCase):
         num_heads = (32, 8)
         ctx_len = 128
         torch_dtype = dtypes.bf16
-        result = test_paged_attention(
+        result = _run_paged_attention(
             ctx_len, 128, num_heads, 128, False, 16, torch_dtype, "auto", 0, "cuda:0"
         )
         self.assertIsInstance(result, dict)

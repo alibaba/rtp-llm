@@ -3,13 +3,13 @@ from typing import Any, Dict
 
 import torch
 from pydantic import BaseModel
-from smoke.base_comparer import BaseComparer
-from smoke.common_def import QueryStatus, SmokeException
 
 from rtp_llm.models.downstream_modules.reranker.api_datatype import (
     VoyageRerankerRequest,
     VoyageRerankerResponse,
 )
+from rtp_llm.test.smoke.base_comparer import BaseComparer
+from rtp_llm.test.smoke.common_def import QueryStatus, SmokeException
 
 
 class RerankerComparer(BaseComparer):

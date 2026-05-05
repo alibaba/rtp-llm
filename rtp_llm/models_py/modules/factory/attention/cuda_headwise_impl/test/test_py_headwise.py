@@ -5,8 +5,11 @@ import unittest
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+import pytest
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
     HeadWisePrefillAttnOp,
@@ -167,10 +170,22 @@ class TestHeadwisePrefillOp(unittest.TestCase):
     ) -> torch.Tensor:
         op = self._get_or_create_op(case)
         if not op.support(attn_inputs):
-            self.skipTest("HeadWisePrefillAttnOp not supported (missing flashinfer/rtp_kernel)")
+            self.skipTest(
+                "HeadWisePrefillAttnOp not supported (missing flashinfer/rtp_kernel)"
+            )
         op.prepare(attn_inputs)
         op._get_headwise_config(0)
         return op.forward(qkv, cache, None)
+
+    def tearDown(self):
+        """Release GPU memory between test methods."""
+        self._op = None
+        self._cached_op_key = None
+        self.compiled_flex_attention = None
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
 
     # -------------------------
     # Core Test Runner Logic
@@ -212,6 +227,14 @@ class TestHeadwisePrefillOp(unittest.TestCase):
 
         torch.testing.assert_close(out_ref_flat, out_op_flat, rtol=rtol, atol=atol)
         logging.info(f"✓ Test passed for case: {case}")
+
+        del q, k, v, cache, qkv, attn_inputs, out_op, out_ref, out_op_flat, out_ref_flat
+        self._op = None
+        self._cached_op_key = None
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
 
     # -------------------------
     # Test Cases (replaces the old main loop)

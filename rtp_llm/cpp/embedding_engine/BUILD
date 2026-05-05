@@ -1,5 +1,4 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "requirement", "whl_deps")
 
 cc_library(
     name = "embedding_engine",

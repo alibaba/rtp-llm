@@ -4,6 +4,10 @@ import sys
 import unittest
 from typing import List
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest, compare_tensors
@@ -11,7 +15,12 @@ from base_attention_test import BaseAttentionTest, compare_tensors
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
 )
-from rtp_llm.ops.compute_ops import PyAttentionInputs, fill_mla_params, get_typemeta, rtp_llm_ops
+from rtp_llm.ops.compute_ops import (
+    PyAttentionInputs,
+    fill_mla_params,
+    get_typemeta,
+    rtp_llm_ops,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -311,7 +320,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
 
         seq_t = torch.tensor(sequence_lengths, dtype=torch.int32)
         attn_inputs.sequence_lengths = (seq_t - 1).pin_memory()
-        attn_inputs.input_lengths = torch.ones(batch_size, dtype=torch.int32).pin_memory()
+        attn_inputs.input_lengths = torch.ones(
+            batch_size, dtype=torch.int32
+        ).pin_memory()
         attn_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
 
         kv_cache_block_id = self._create_kv_cache_block_ids(
@@ -332,7 +343,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         capture_bs = 4
         seq_lens = [64, 128, 256, 512]
         inputs = self._create_cuda_graph_inputs(
-            capture_bs, seq_lens, config.seq_size_per_block,
+            capture_bs,
+            seq_lens,
+            config.seq_size_per_block,
         )
 
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, inputs)
@@ -358,7 +371,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         capture_seq_lens = [64, 128, 256, 512, 64, 128, 256, 512]
 
         capture_inputs = self._create_cuda_graph_inputs(
-            capture_bs, capture_seq_lens, config.seq_size_per_block,
+            capture_bs,
+            capture_seq_lens,
+            config.seq_size_per_block,
         )
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
         fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
@@ -370,7 +385,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         run_bs = 3
         run_seq_lens = [100, 200, 300]
         run_inputs = self._create_cuda_graph_inputs(
-            run_bs, run_seq_lens, config.seq_size_per_block,
+            run_bs,
+            run_seq_lens,
+            config.seq_size_per_block,
         )
         attn_op.prepare_for_cuda_graph_replay(run_inputs)
 
@@ -399,7 +416,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         run_seq_lens = [100, 200]
 
         capture_inputs = self._create_cuda_graph_inputs(
-            capture_bs, capture_seq_lens, config.seq_size_per_block,
+            capture_bs,
+            capture_seq_lens,
+            config.seq_size_per_block,
         )
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
         fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
@@ -407,7 +426,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         attn_op.prepare(capture_inputs)
 
         run_inputs = self._create_cuda_graph_inputs(
-            run_bs, run_seq_lens, config.seq_size_per_block,
+            run_bs,
+            run_seq_lens,
+            config.seq_size_per_block,
         )
         attn_op.prepare_for_cuda_graph_replay(run_inputs)
 
@@ -420,7 +441,8 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
 
         for i in range(run_bs + 1):
             self.assertEqual(
-                page_indptr[i], expected_indptr[i],
+                page_indptr[i],
+                expected_indptr[i],
                 f"page_indptr[{i}] mismatch: expected {expected_indptr[i]}, got {page_indptr[i]}",
             )
 
@@ -429,10 +451,13 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         for i, seq_len in enumerate(run_seq_lens):
             expected = seq_len % 64 or 64
             self.assertEqual(
-                last_page_len[i], expected,
+                last_page_len[i],
+                expected,
                 f"last_page_len[{i}] mismatch: expected {expected}, got {last_page_len[i]}",
             )
-        logging.info(f"Page table update OK: indptr={expected_indptr}, last_page_len={[s % 64 or 64 for s in run_seq_lens]}")
+        logging.info(
+            f"Page table update OK: indptr={expected_indptr}, last_page_len={[s % 64 or 64 for s in run_seq_lens]}"
+        )
 
 
 if __name__ == "__main__":

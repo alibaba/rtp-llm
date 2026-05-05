@@ -8,6 +8,10 @@ import logging
 import math
 import unittest
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (

@@ -120,7 +120,6 @@ class AutoModel:
 
     def _set_configs(self):
         """Set configuration structures instead of environment variables."""
-        # Create PyEnvConfigs to hold all configurations
         self.py_env_configs = PyEnvConfigs()
 
     def _init_kv_cache(self):
@@ -154,12 +153,18 @@ class AutoModel:
     def _prepare_prefill_attention_inputs(self, input_length: int) -> PyAttentionInputs:
         need_block_nums = self._check_block_nums(input_length)
         attention_inputs = PyAttentionInputs()
-        attention_inputs.input_lengths = torch.tensor([input_length], dtype=torch.int32)
-        attention_inputs.sequence_lengths = torch.tensor([], dtype=torch.int32)
+        attention_inputs.input_lengths = torch.tensor(
+            [input_length], dtype=torch.int32, device="cpu"
+        )
+        attention_inputs.sequence_lengths = torch.tensor(
+            [], dtype=torch.int32, device="cpu"
+        )
         attention_inputs.cu_seqlens = torch.tensor(
             [0, input_length], dtype=torch.int32, device=self.device
         )
-        attention_inputs.prefix_lengths = torch.tensor([0], dtype=torch.int32)
+        attention_inputs.prefix_lengths = torch.tensor(
+            [0], dtype=torch.int32, device="cpu"
+        )
         attention_inputs.padding_offset = torch.tensor(
             [0 for _ in range(input_length)], dtype=torch.int32, device=self.device
         )
@@ -172,7 +177,9 @@ class AutoModel:
             attention_inputs.kv_cache_block_id_device
         )
         attention_inputs.kv_cache_block_id_host = torch.tensor(
-            [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
+            [[i for i in range(1, need_block_nums + 1)]],
+            dtype=torch.int32,
+            device="cpu",
         )
         attention_inputs.kv_cache_kernel_block_id_host = (
             attention_inputs.kv_cache_block_id_host
@@ -195,12 +202,16 @@ class AutoModel:
         attention_inputs.padding_offset = torch.tensor(
             [0], dtype=torch.int32, device=self.device
         )
-        attention_inputs.input_lengths = torch.tensor([1], dtype=torch.int32)
-        attention_inputs.prefix_lengths = torch.tensor([], dtype=torch.int32)
+        attention_inputs.input_lengths = torch.tensor(
+            [1], dtype=torch.int32, device="cpu"
+        )
+        attention_inputs.prefix_lengths = torch.tensor(
+            [], dtype=torch.int32, device="cpu"
+        )
 
         # sequence_lengths is index, so minus 1
         attention_inputs.sequence_lengths = torch.tensor(
-            [sequence_length - 1], dtype=torch.int32
+            [sequence_length - 1], dtype=torch.int32, device="cpu"
         ).pin_memory()
         attention_inputs.kv_cache_block_id_device = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]],
@@ -211,7 +222,9 @@ class AutoModel:
             attention_inputs.kv_cache_block_id_device
         )
         attention_inputs.kv_cache_block_id_host = torch.tensor(
-            [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
+            [[i for i in range(1, need_block_nums + 1)]],
+            dtype=torch.int32,
+            device="cpu",
         )
         attention_inputs.kv_cache_kernel_block_id_host = (
             attention_inputs.kv_cache_block_id_host

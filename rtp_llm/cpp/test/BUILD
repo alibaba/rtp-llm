@@ -1,5 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 load("//bazel:device_defs.bzl",
     "device_impl_target", "device_test_envs")
 
@@ -41,14 +41,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-filegroup(
-    name = "py_testdata",
-    srcs = glob([
-        "python/*",
-        "python/**/*",
-    ]),
-)
-
 cc_test(
     name = "sampler_test",
     srcs = [
@@ -65,5 +57,5 @@ cc_test(
         "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
     }),
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
