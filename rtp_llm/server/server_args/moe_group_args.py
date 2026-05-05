@@ -170,6 +170,8 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
             "fp8_per_block_no_dp",
             "fp8_per_block_ep_low_latency",
             "fp8_per_block_ep_normal",
+            "fp8_per_block_pure_cp",
+            "fp8_per_block_pure_dp",
             "fp8_per_tensor_no_dp",
             "fp8_per_tensor_ep_low_latency",
             "fp8_per_tensor_ep_normal",
