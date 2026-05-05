@@ -157,6 +157,7 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
                  "fp8_per_block_pure_tp_masked", "fp8_per_block_pure_tp", "fp8_per_block_ep_low_latency", "fp8_per_block_ep_normal",
                  "fp8_per_tensor_pure_tp", "fp8_per_tensor_ep_low_latency", "fp8_per_tensor_ep_normal",
                  "w4a8_int4_per_channel_pure_tp", "w4a8_int4_per_channel_ep_low_latency", "w4a8_int4_per_channel_ep_normal",
+                 "fp8_per_block_pure_cp", "fp8_per_block_pure_dp",
                  "fp4_ep_low_latency", "fp4_ep_normal", "fp4_pure_tp"],
         default="auto",
         help="指定moe strategy, 默认为auto",

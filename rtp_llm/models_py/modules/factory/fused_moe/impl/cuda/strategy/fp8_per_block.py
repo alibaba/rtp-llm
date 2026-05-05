@@ -80,6 +80,92 @@ class CudaFp8PerBlockPureTPMaskedStrategy(MoeStrategy):
         )
 
 
+class CudaFp8PerBlockPureDPStrategy(MoeStrategy):
+    """CUDA FP8 PerBlock pure DP+EP strategy using allgather+reduce_scatter.
+
+    Pure DP attention + EP MoE only: tp_size == 1, dp_size > 1, ep_size == dp_size.
+    Mixed tp>1+dp>1 deliberately falls through to DeepEP strategies.
+    """
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method == "FP8_PER_BLOCK")
+        is_pure_dp_ep = (
+            config.parallelism_config.tp_size == 1
+            and config.dp_size > 1
+            and config.ep_size == config.dp_size
+        )
+        is_explicit = config.moe_strategy == "fp8_per_block_pure_dp"
+        is_auto_dp = config.moe_strategy == "auto" and is_pure_dp_ep
+        checker.check(is_explicit or is_auto_dp)
+        if is_explicit:
+            checker.check(is_pure_dp_ep)
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2 import (
+            DeepGemmMaskedExecutorV2,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_dp_router import (
+            PureDpRouterFp8PerBlock,
+        )
+
+        quant_config = FusedMoEQuantConfig(
+            quant_dtype=torch.float8_e4m3fn,
+            block_shape=[128, 128],
+        )
+        return StrategyAttributes(
+            router_class=PureDpRouterFp8PerBlock,
+            executor_class=DeepGemmMaskedExecutorV2,
+            quant_config=quant_config,
+        )
+
+
+class CudaFp8PerBlockPureCPStrategy(MoeStrategy):
+    """CUDA FP8 PerBlock pure CP+EP strategy using allgather+reduce_scatter.
+
+    Pure CP attention + EP MoE only: tp_size > 1, dp_size == 1,
+    ep_size == tp_size, prefill CP enabled. No padding needed since CP
+    splits context evenly across ranks.
+    """
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method == "FP8_PER_BLOCK")
+        is_pure_cp_ep = (
+            config.dp_size == 1
+            and resolver.is_cp_equal_ep(config)
+            and config.ep_size > 1
+            and config.parallelism_config.prefill_cp_config.is_enabled()
+        )
+        is_explicit = config.moe_strategy == "fp8_per_block_pure_cp"
+        is_auto_cp = config.moe_strategy == "auto" and is_pure_cp_ep
+        checker.check(is_explicit or is_auto_cp)
+        if is_explicit:
+            checker.check(is_pure_cp_ep)
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor import (
+            DeepGemmHybridExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_cp_router import (
+            PureCpRouterFp8PerBlock,
+        )
+
+        quant_config = FusedMoEQuantConfig(
+            quant_dtype=torch.float8_e4m3fn,
+            block_shape=[128, 128],
+        )
+        return StrategyAttributes(
+            router_class=PureCpRouterFp8PerBlock,
+            executor_class=DeepGemmHybridExecutor,
+            quant_config=quant_config,
+        )
+
+
 class CudaFp8PerBlockEpLowLatencyStrategy(MoeStrategy):
     """CUDA FP8 PerBlock EP low latency strategy"""
 

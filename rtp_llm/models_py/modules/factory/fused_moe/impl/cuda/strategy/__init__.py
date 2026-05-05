@@ -3,6 +3,8 @@
 from .fp8_per_block import (
     CudaFp8PerBlockEpLowLatencyStrategy,
     CudaFp8PerBlockEpNormalStrategy,
+    CudaFp8PerBlockPureCPStrategy,
+    CudaFp8PerBlockPureDPStrategy,
     CudaFp8PerBlockPureTPMaskedStrategy,
     CudaFp8PerBlockPureTPStrategy,
 )
@@ -32,6 +34,8 @@ __all__ = [
     "CudaNoQuantCppStrategy",
     "CudaNoQuantDpNormalStrategy",
     # FP8 PerBlock
+    "CudaFp8PerBlockPureCPStrategy",
+    "CudaFp8PerBlockPureDPStrategy",
     "CudaFp8PerBlockPureTPMaskedStrategy",
     "CudaFp8PerBlockPureTPStrategy",
     "CudaFp8PerBlockEpLowLatencyStrategy",
