@@ -46,7 +46,8 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
 
     // All groups use TOKENS_PER_BLOCK = 256
     // Pool 0/1/2: variable num_blocks (large), entries_per_block = 256/ratio
-    // Pool 3/4/5/6: fixed 2 blocks per request
+    // Pool 3/4/5/6: fixed 2 blocks per request. HCA_STATE stores its
+    // 128-row compressor state in one block.
     //
     // KV pools use TYPE_UINT8 as store_dtype because entry_elems (KV_ENTRY_BYTES /
     // INDEXER_ENTRY_BYTES) is already in bytes. getTypeSize(TYPE_UINT8) = 1, so
@@ -82,26 +83,28 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
         true,
         0,
     };
-    // Pool 3: Indexer State — fixed 2 blocks per request
+    // Pool 3: Indexer State — fixed 2 blocks per request. Each logical
+    // block stores the full CSA overlap state: previous 4 + current 4 rows.
     uint32_t idx_coff         = 2;
     uint32_t idx_state_dim    = idx_coff * idx_head_dim;
     dsv4_config.pool_specs[3] = {
         DSV4CacheType::INDEXER_STATE,
         num_csa,
         idx_state_dim * 2,
-        4,
+        8,
         DataType::TYPE_FP32,
         false,
         2,
     };
-    // Pool 4: CSA State — fixed 2 blocks per request
+    // Pool 4: CSA State — fixed 2 blocks per request. Each logical block
+    // stores the full CSA overlap state: previous 4 + current 4 rows.
     uint32_t csa_coff         = 2;
     uint32_t csa_state_dim    = csa_coff * head_dim;
     dsv4_config.pool_specs[4] = {
         DSV4CacheType::CSA_STATE,
         num_csa,
         csa_state_dim * 2,
-        4,
+        8,
         DataType::TYPE_FP32,
         false,
         2,
@@ -112,7 +115,7 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
         DSV4CacheType::HCA_STATE,
         num_hca,
         hca_state_dim * 2,
-        8,
+        128,
         DataType::TYPE_FP32,
         false,
         2,
@@ -221,9 +224,9 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
         max_group_layers = std::max(max_group_layers, dsv4_config.pool_specs[i].layer_num);
     }
     config.group_layer_num             = static_cast<int>(max_group_layers);
-    config.full_group_num              = 3;     // Pool 0/1/2 (CSA_KV, HCA_KV, INDEXER_KV)
+    config.full_group_num              = 3;  // Pool 0/1/2 (CSA_KV, HCA_KV, INDEXER_KV)
     config.linear_group_num            = 0;
-    config.swa_group_num               = 4;     // Pool 3/4/5/6 (INDEXER_STATE, CSA_STATE, HCA_STATE, SWA_KV)
+    config.swa_group_num               = 4;  // Pool 3/4/5/6 (INDEXER_STATE, CSA_STATE, HCA_STATE, SWA_KV)
     config.linear_fixed_cap            = 0;
     config.use_independent_block_pools = true;  // DSV4: each group gets its own BlockPool
 

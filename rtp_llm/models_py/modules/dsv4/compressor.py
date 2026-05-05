@@ -26,8 +26,6 @@ from rtp_llm.models_py.modules.dsv4.rope import (
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-_STATE_BOUNDARY_CACHE = {}
-
 # P2 (prefill_opt/final_plan.md): fused softmax+weighted-sum Triton kernel.
 # Replaces the prefill `(kv * score.softmax(dim=2)).sum(dim=2)` chain
 # (~10 launches) with one kernel.  Set DSV4_COMPRESSOR_FAST=0 to force
@@ -273,18 +271,104 @@ class Compressor(nn.Module):
         )
         return valid, safe_slot
 
-    def _state_cache_key(self, block_id: int) -> tuple:
-        ptr = (
-            int(self._state_pool_view.data_ptr())
-            if self._state_pool_view is not None
-            else 0
-        )
-        return (ptr, int(block_id), self.compress_ratio, self.head_dim)
-
     def _tokens_per_pool_block(self) -> int:
         if self._kv_eb > 0:
             return int(self._kv_eb) * int(self.compress_ratio)
         return 256
+
+    def _compute_logical_state_pool_slots(
+        self,
+        bsz: int,
+        T: int,
+        block_indices: torch.Tensor,
+        block_table: torch.Tensor,
+        eb: int,
+        device: torch.device,
+    ) -> tuple:
+        """Slot math for one logical overlap-state block per request row.
+
+        CSA/Indexer overlap state has ``T == 2 * ratio`` rows.  With
+        ``entries_per_block >= T`` each logical token block stores the full
+        previous/current overlap state, so memory/device cache transfer is
+        self-contained and does not need a Python side cache keyed by physical
+        block id.
+        """
+        pos = torch.arange(T, device=device, dtype=torch.long)
+        bt_long = block_table[:bsz].to(device=device, dtype=torch.long)
+        block_idx = block_indices.to(device=device, dtype=torch.long)
+        if block_idx.dim() == 0:
+            block_idx = block_idx.unsqueeze(0)
+        if block_idx.numel() == 1 and bsz > 1:
+            block_idx = block_idx.expand(bsz)
+        in_capacity = (block_idx >= 0) & (block_idx < int(bt_long.shape[1]))
+        safe_block_idx = torch.where(
+            in_capacity, block_idx, torch.zeros_like(block_idx)
+        )
+        block_id = bt_long.gather(1, safe_block_idx.view(bsz, 1)).squeeze(1)
+        row_valid = in_capacity & (block_id > 0)
+        valid = row_valid.unsqueeze(1).expand(bsz, T)
+        safe_slot = block_id.unsqueeze(1) * int(eb) + pos.unsqueeze(0)
+        safe_slot = torch.where(valid, safe_slot, torch.zeros_like(safe_slot))
+        return valid, safe_slot
+
+    def _state_read_block_indices(self, start_pos, bsz: int, device: torch.device):
+        if isinstance(start_pos, torch.Tensor):
+            sp_t = start_pos.detach().to(device=device, dtype=torch.long)
+            if sp_t.dim() == 0:
+                sp_t = sp_t.unsqueeze(0)
+            if sp_t.numel() == 1 and bsz > 1:
+                sp_t = sp_t.expand(bsz)
+        else:
+            sp_t = torch.full((bsz,), int(start_pos), device=device, dtype=torch.long)
+        block_tokens = self._tokens_per_pool_block()
+        prev_pos = torch.clamp(sp_t - 1, min=0)
+        return prev_pos // int(block_tokens)
+
+    def _state_write_block_indices(self, end_pos, bsz: int, device: torch.device):
+        if isinstance(end_pos, torch.Tensor):
+            ep_t = end_pos.detach().to(device=device, dtype=torch.long)
+            if ep_t.dim() == 0:
+                ep_t = ep_t.unsqueeze(0)
+            if ep_t.numel() == 1 and bsz > 1:
+                ep_t = ep_t.expand(bsz)
+        else:
+            ep_t = torch.full((bsz,), int(end_pos), device=device, dtype=torch.long)
+        block_tokens = self._tokens_per_pool_block()
+        last_pos = torch.clamp(ep_t - 1, min=0)
+        return last_pos // int(block_tokens)
+
+    def _write_state_to_pool_at_blocks(
+        self,
+        kv_state: torch.Tensor,
+        score_state: torch.Tensor,
+        block_indices: torch.Tensor,
+    ) -> None:
+        if (
+            self._state_pool_view is None
+            or self._state_block_table is None
+            or self._state_eb <= 0
+            or kv_state is None
+            or score_state is None
+        ):
+            return
+        bsz = int(kv_state.shape[0])
+        T = int(kv_state.shape[1])
+        device = kv_state.device
+        valid, safe_slot = self._compute_logical_state_pool_slots(
+            bsz, T, block_indices, self._state_block_table, self._state_eb, device
+        )
+        merged = torch.cat([kv_state, score_state], dim=-1)
+        merged_flat = merged.reshape(bsz * T, -1)
+        slot_mapping = torch.where(
+            valid, safe_slot, torch.full_like(safe_slot, -1)
+        ).reshape(-1)
+        from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
+            write_kv_to_pool,
+        )
+
+        write_kv_to_pool(
+            merged_flat, slot_mapping, self._state_pool_view, mask_negative=True
+        )
 
     def _remember_boundary_state(
         self,
@@ -294,6 +378,7 @@ class Compressor(nn.Module):
         seqlen: int,
         bsz: int,
     ) -> None:
+        """Persist block-boundary overlap state into the STATE pool itself."""
         if (
             not self.overlap
             or self._state_pool_view is None
@@ -317,64 +402,25 @@ class Compressor(nn.Module):
             local_start = local_end - ratio + 1
             if local_start < 0 or local_end >= seqlen or block_idx >= max_cols:
                 continue
-            for b in range(bsz):
-                block_id = int(self._state_block_table[b, block_idx].item())
-                if block_id <= 0:
-                    continue
-                kv_rows = kv[b, local_start : local_end + 1].detach().clone()
-                score_rows = (
-                    (score[b, local_start : local_end + 1] + self.ape).detach().clone()
-                )
-                _STATE_BOUNDARY_CACHE[self._state_cache_key(block_id)] = (
-                    kv_rows,
-                    score_rows,
-                )
-
-    def _restore_boundary_state(
-        self,
-        start_pos,
-        bsz: int,
-    ) -> None:
-        if (
-            not self.overlap
-            or self.kv_state is None
-            or self.score_state is None
-            or self._state_pool_view is None
-            or self._state_block_table is None
-            or self._state_eb <= 0
-        ):
-            return
-        if isinstance(start_pos, torch.Tensor):
-            sp_t = start_pos.detach().to(device=self.kv_state.device, dtype=torch.long)
-            if sp_t.dim() == 0:
-                sp_t = sp_t.unsqueeze(0)
-            if sp_t.numel() == 1 and bsz > 1:
-                sp_t = sp_t.expand(bsz)
-        else:
-            sp_t = torch.full(
-                (bsz,), int(start_pos), device=self.kv_state.device, dtype=torch.long
+            kv_state = torch.zeros(
+                bsz,
+                self._state_rows,
+                self._state_dim,
+                dtype=torch.float32,
+                device=kv.device,
             )
-        block_tokens = self._tokens_per_pool_block()
-        if block_tokens <= 0:
-            return
-        max_cols = int(self._state_block_table.shape[1])
-        for b in range(bsz):
-            sp_b = int(sp_t[b].item())
-            if sp_b <= 0 or sp_b % block_tokens != 0:
-                continue
-            block_idx = sp_b // block_tokens - 1
-            if block_idx < 0 or block_idx >= max_cols:
-                continue
-            block_id = int(self._state_block_table[b, block_idx].item())
-            if block_id <= 0:
-                continue
-            cached = _STATE_BOUNDARY_CACHE.get(self._state_cache_key(block_id))
-            if cached is None:
-                continue
-            kv_rows, score_rows = cached
-            ratio = self.compress_ratio
-            self.kv_state[b, :ratio] = kv_rows.to(device=self.kv_state.device)
-            self.score_state[b, :ratio] = score_rows.to(device=self.score_state.device)
+            score_state = torch.full(
+                (bsz, self._state_rows, self._state_dim),
+                float("-inf"),
+                dtype=torch.float32,
+                device=score.device,
+            )
+            kv_state[:, :ratio] = kv[:, local_start : local_end + 1]
+            score_state[:, :ratio] = score[:, local_start : local_end + 1] + self.ape
+            block_indices = torch.full(
+                (bsz,), block_idx, device=kv.device, dtype=torch.long
+            )
+            self._write_state_to_pool_at_blocks(kv_state, score_state, block_indices)
 
     def _bind_state_from_pool(
         self, bsz: int, is_fresh_prefill: bool, device: torch.device, start_pos=None
@@ -404,9 +450,15 @@ class Compressor(nn.Module):
                 device=device,
             )
             return
-        valid, safe_slot = self._compute_tail_pool_slots(
-            bsz, T, self._state_block_table, self._state_eb, device
-        )
+        if self.overlap and start_pos is not None and self._state_eb >= T:
+            block_indices = self._state_read_block_indices(start_pos, bsz, device)
+            valid, safe_slot = self._compute_logical_state_pool_slots(
+                bsz, T, block_indices, self._state_block_table, self._state_eb, device
+            )
+        else:
+            valid, safe_slot = self._compute_tail_pool_slots(
+                bsz, T, self._state_block_table, self._state_eb, device
+            )
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
         if self._dbg_prefix is not None and _rt.ENABLED:
@@ -428,10 +480,8 @@ class Compressor(nn.Module):
         sc_rows = torch.where(valid_bcast, gathered[:, half_dim:], neg_inf_row)
         self.kv_state = kv_rows.view(bsz, T, half_dim).contiguous()
         self.score_state = sc_rows.view(bsz, T, half_dim).contiguous()
-        if start_pos is not None:
-            self._restore_boundary_state(start_pos, bsz)
 
-    def _scatter_state_to_pool(self, bsz: int) -> None:
+    def _scatter_state_to_pool(self, bsz: int, end_pos=None) -> None:
         """Write ``self.kv_state`` / ``self.score_state`` to the STATE pool
         (CSA_STATE / HCA_STATE / INDEXER_STATE).  Pool slot layout per entry
         ``[2 * half_dim]`` fp32 = ``kv_row || score_row``.  No-op when pool
@@ -446,9 +496,15 @@ class Compressor(nn.Module):
             return
         device = self.kv_state.device
         T = self._state_rows
-        valid, safe_slot = self._compute_tail_pool_slots(
-            bsz, T, self._state_block_table, self._state_eb, device
-        )
+        if self.overlap and end_pos is not None and self._state_eb >= T:
+            block_indices = self._state_write_block_indices(end_pos, bsz, device)
+            valid, safe_slot = self._compute_logical_state_pool_slots(
+                bsz, T, block_indices, self._state_block_table, self._state_eb, device
+            )
+        else:
+            valid, safe_slot = self._compute_tail_pool_slots(
+                bsz, T, self._state_block_table, self._state_eb, device
+            )
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
         if self._dbg_prefix is not None and _rt.ENABLED:
@@ -795,7 +851,7 @@ class Compressor(nn.Module):
         finally:
             # #50: write state + kv_cache back to framework pools and clear
             # the ephemeral Python tensors.
-            self._scatter_state_to_pool(bsz)
+            self._scatter_state_to_pool(bsz, start_pos + 1)
             self._scatter_kv_cache_to_pool(bsz, self._kv_write_mask)
             self.kv_state = None
             self.score_state = None
@@ -940,7 +996,7 @@ class Compressor(nn.Module):
             return out
         finally:
             # #50: scatter state + kv_cache back to framework pools and clear.
-            self._scatter_state_to_pool(bsz)
+            self._scatter_state_to_pool(bsz, start_pos + 1)
             self._scatter_kv_cache_to_pool(bsz, self._kv_write_mask)
             self.kv_state = None
             self.score_state = None
@@ -1060,10 +1116,31 @@ class Compressor(nn.Module):
         self._bind_kv_cache_from_pool(
             bsz, is_fresh_prefill, device=x.device, dtype=x.dtype
         )
+        if sequence_lengths is not None:
+            seq_for_state = sequence_lengths.to(device=x.device, dtype=torch.long)
+            if seq_for_state.dim() == 0:
+                seq_for_state = seq_for_state.unsqueeze(0)
+            if seq_for_state.numel() == 1 and bsz > 1:
+                seq_for_state = seq_for_state.expand(bsz)
+        else:
+            seq_for_state = torch.full(
+                (bsz,), seqlen, device=x.device, dtype=torch.long
+            )
+        if isinstance(start_pos, torch.Tensor):
+            sp_for_state = start_pos.to(device=x.device, dtype=torch.long)
+            if sp_for_state.dim() == 0:
+                sp_for_state = sp_for_state.unsqueeze(0)
+            if sp_for_state.numel() == 1 and bsz > 1:
+                sp_for_state = sp_for_state.expand(bsz)
+        else:
+            sp_for_state = torch.full(
+                (bsz,), int(start_pos), device=x.device, dtype=torch.long
+            )
+        state_end_pos = sp_for_state + seq_for_state
         try:
             return self._forward_scalar_impl(x, start_pos, sequence_lengths)
         finally:
-            self._scatter_state_to_pool(bsz)
+            self._scatter_state_to_pool(bsz, state_end_pos)
             self._scatter_kv_cache_to_pool(bsz, self._kv_write_mask)
             self.kv_state = None
             self.score_state = None
