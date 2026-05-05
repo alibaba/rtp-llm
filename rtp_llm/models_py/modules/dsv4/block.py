@@ -446,6 +446,7 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor,  # [B+1] int64
         kv_cache=None,
         block_tables_by_type=None,
+        attn_inputs=None,
     ) -> torch.Tensor:
         """Flat per-block forward — accepts ``[T, hc, dim]`` hidden and 1D
         ``input_ids`` / ``positions`` / ``cu_seqlens``, matching the vLLM
@@ -526,6 +527,7 @@ class Block(nn.Module):
             sequence_lengths=seqlens,
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
+            attn_inputs=attn_inputs,
         )  # [B, max_S, dim]
         attn_out = attn_out_padded[b_idx, s_idx]  # [T, dim]
         if _dbg_layer:

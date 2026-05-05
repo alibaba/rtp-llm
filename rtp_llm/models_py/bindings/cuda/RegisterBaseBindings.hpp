@@ -22,6 +22,8 @@
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
 
 using namespace rtp_llm;
 
@@ -56,6 +58,35 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("weight"),
                   py::arg("eps"),
                   py::arg("cuda_stream") = 0);
+
+    // Vendored from vLLM (csrc/persistent_topk.cuh + csrc/topk.cu @ b55d830).
+    // Replaces torch.topk on the DSv4 indexer decode hot path.
+    // K must be 512, 1024, or 2048; logits float32 [N, T]; lengths int32 [N];
+    // output int32 [N, K] (-1 padding past lengths[r]).  workspace: uint8 ≥1MB.
+    rtp_ops_m.def("dsv4_persistent_topk",
+                  &dsv4_persistent_topk,
+                  "DSv4 persistent radix-select TopK (K∈{512,1024,2048})",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
+    // Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill).
+    // Per-row TopK for the DSv4 indexer prefill: hybrid insertion-sort blocks
+    // for the first 12288 rows, radix-select blocks beyond.
+    rtp_ops_m.def("dsv4_top_k_per_row_prefill",
+                  &dsv4_top_k_per_row_prefill,
+                  "DSv4 per-row TopK (prefill, hybrid insertion+radix)",
+                  py::arg("logits"),
+                  py::arg("row_starts"),
+                  py::arg("row_ends"),
+                  py::arg("indices_out"),
+                  py::arg("num_rows"),
+                  py::arg("stride0"),
+                  py::arg("stride1"),
+                  py::arg("top_k"));
 
     rtp_ops_m.def("fused_add_rmsnorm",
                   &fused_add_rmsnorm,

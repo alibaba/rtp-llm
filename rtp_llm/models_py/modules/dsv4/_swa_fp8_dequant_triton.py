@@ -239,3 +239,122 @@ def dequantize_swa_window_to_bf16(
         offset=0,
     )
     return out
+
+
+# --------------------------------------------------------------------------
+# Per-slot fancy-index dequant (striped-layout aware).
+#
+# Used by dual-pool decode paths that already have flat slot indices
+# (`block_id * block_size + pos_in_block`) and need a small N of tokens
+# dequant'd. Cannot use `pool[slot, :]` fancy-index because the canonical
+# 584B layout is per-block striped (data in the first `bs*576` bytes,
+# scales in the trailing `bs*8` bytes) — bytes [0:584] of one pool row
+# do NOT correspond to one token's data + scale.
+# --------------------------------------------------------------------------
+
+
+@triton.jit
+def _dequantize_slots_kernel(
+    out_ptr,  # [N, 512] bf16
+    out_stride0,
+    pool_ptr,  # [num_blocks, block_size, 584] uint8
+    pool_block_stride: tl.constexpr,  # bytes per block (may be padded > bs*584)
+    slot_indices_ptr,  # [N] int64
+    block_size: tl.constexpr,
+    fp8_dim: tl.constexpr,  # 448
+    bf16_dim: tl.constexpr,  # 64
+    scale_dim: tl.constexpr,  # 8
+    quant_block: tl.constexpr,  # 64
+    token_data_size: tl.constexpr,  # 576
+    n_quant_blocks: tl.constexpr,  # 7
+):
+    """One program per output slot. Sentinel slots (slot < 0) write zeros."""
+    pid = tl.program_id(0)
+    slot = tl.load(slot_indices_ptr + pid)
+
+    output_row_ptr = out_ptr + pid * out_stride0
+
+    if slot < 0:
+        # Sentinel: zero the row.
+        for j in tl.static_range((fp8_dim + bf16_dim) // 16):
+            chunk_offsets = j * 16 + tl.arange(0, 16)
+            zero_vec = tl.zeros((16,), dtype=tl.bfloat16)
+            tl.store(output_row_ptr + chunk_offsets, zero_vec)
+        return
+
+    blk = (slot // block_size).to(tl.int64)
+    off = slot % block_size
+
+    cache_block_ptr = pool_ptr + blk * pool_block_stride
+    token_data_ptr = cache_block_ptr + off * token_data_size
+    token_scale_ptr = cache_block_ptr + block_size * token_data_size + off * scale_dim
+    token_fp8_ptr = token_data_ptr
+    token_bf16_ptr = token_data_ptr + fp8_dim
+
+    # NoPE: 7 tiles × 64 elements, UE8M0 scale per tile.
+    for qblock_idx in tl.static_range(n_quant_blocks):
+        qblock_start = qblock_idx * quant_block
+        if qblock_start < fp8_dim:
+            offsets = qblock_start + tl.arange(0, quant_block)
+            mask = offsets < fp8_dim
+            x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
+            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+            x_float = x_fp8.to(tl.float32)
+            encoded_scale = tl.load(token_scale_ptr + qblock_idx)
+            exponent = encoded_scale.to(tl.float32) - 127.0
+            scale = tl.exp2(exponent)
+            x_dequant = x_float * scale
+            tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask)
+
+    # RoPE: bf16 passthrough.
+    bf16_output_offset = fp8_dim
+    bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
+    for j in tl.static_range(bf16_dim // 16):
+        chunk_offsets = j * 16 + tl.arange(0, 16)
+        bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
+        tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+
+
+def dequantize_slots_to_bf16(
+    pool_3d: torch.Tensor,  # [num_blocks, block_size, 584] uint8
+    slot_indices: torch.Tensor,  # [N] int (flat slot ids; <0 = sentinel)
+) -> torch.Tensor:
+    """Per-slot fancy-index dequant of canonical 584B FP8 KV → [N, 512] bf16.
+
+    Replacement for the deleted ``_kv_fp8_dequant_canonical.unpack_kv_fp8_canonical``.
+    Striped-layout aware: addresses data and scale regions independently.
+    Sentinel rows (slot < 0) are zero-filled.
+    """
+    assert (
+        pool_3d.dim() == 3
+        and pool_3d.shape[-1] == ENTRY_BYTES
+        and pool_3d.dtype == torch.uint8
+    ), (
+        f"pool_3d must be [num_blocks, block_size, {ENTRY_BYTES}] uint8; "
+        f"got shape={tuple(pool_3d.shape)} dtype={pool_3d.dtype}"
+    )
+    assert pool_3d.stride(2) == 1 and pool_3d.stride(1) == ENTRY_BYTES, (
+        "pool_3d must be packed within each token (stride[1]=584, stride[2]=1); "
+        f"got stride={pool_3d.stride()}"
+    )
+    block_size = int(pool_3d.shape[1])
+    N = int(slot_indices.numel())
+    out = torch.empty((N, HEAD_DIM), dtype=torch.bfloat16, device=pool_3d.device)
+    if N == 0:
+        return out
+    slots_i64 = slot_indices.reshape(-1).to(torch.int64).contiguous()
+    _dequantize_slots_kernel[(N,)](
+        out,
+        out.stride(0),
+        pool_3d,
+        pool_block_stride=int(pool_3d.stride(0)),
+        slot_indices_ptr=slots_i64,
+        block_size=block_size,
+        fp8_dim=NOPE_DIM,
+        bf16_dim=ROPE_DIM,
+        scale_dim=SCALE_BYTES_PER_TOKEN,
+        quant_block=TILE_SIZE,
+        token_data_size=TOKEN_DATA_SIZE,
+        n_quant_blocks=NOPE_TILES,
+    )
+    return out

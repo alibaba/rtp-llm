@@ -36,24 +36,24 @@ class TestForwardDecodeAPISurface(unittest.TestCase):
         prefill_sig = inspect.signature(Attention.forward)
         self.assertIn("start_pos", prefill_sig.parameters)
 
-    def test_compressor_has_forward_decode(self):
+    def test_compressor_has_forward_decode_vectorized(self):
         from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 
-        self.assertTrue(callable(getattr(Compressor, "forward_decode", None)))
-        sig = inspect.signature(Compressor.forward_decode)
+        self.assertTrue(
+            callable(getattr(Compressor, "forward_decode_vectorized", None))
+        )
+        sig = inspect.signature(Compressor.forward_decode_vectorized)
         self.assertIn("start_pos", sig.parameters)
-        # Prefill `forward` untouched
         prefill_sig = inspect.signature(Compressor.forward)
         self.assertIn("start_pos", prefill_sig.parameters)
 
-    def test_indexer_has_forward_decode(self):
+    def test_indexer_has_forward_decode_vectorized(self):
         from rtp_llm.models_py.modules.dsv4.indexer import Indexer
 
-        self.assertTrue(callable(getattr(Indexer, "forward_decode", None)))
-        sig = inspect.signature(Indexer.forward_decode)
+        self.assertTrue(callable(getattr(Indexer, "forward_decode_vectorized", None)))
+        sig = inspect.signature(Indexer.forward_decode_vectorized)
         self.assertIn("start_pos", sig.parameters)
         self.assertIn("out_topk_buffer", sig.parameters)
-        # Prefill `forward` untouched
         prefill_sig = inspect.signature(Indexer.forward)
         self.assertIn("offset", prefill_sig.parameters)
 
@@ -85,23 +85,21 @@ class TestPrefillUntouched(unittest.TestCase):
     but we can spot-check the start_pos==0 branch text remains).
     """
 
-    def test_attention_forward_still_branches_on_start_pos(self):
+    def test_attention_forward_still_has_prefill_path(self):
         import inspect
 
         from rtp_llm.models_py.modules.dsv4.attention import Attention
 
         src = inspect.getsource(Attention.forward)
-        # Prefill arm key strings still present
-        self.assertIn("if start_pos == 0", src)
-        self.assertIn("self.kv_cache[:bsz, :seqlen]", src)
+        self.assertIn("start_pos", src)
+        self.assertIn("_forward_prefill", src)
 
     def test_compressor_forward_still_has_prefill_arm(self):
         import inspect
 
         from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 
-        src = inspect.getsource(Compressor.forward)
-        self.assertIn("if start_pos == 0:", src)
+        src = inspect.getsource(Compressor._forward_prefill_body)
         self.assertIn("seqlen >= ratio", src)
 
     def test_indexer_forward_still_has_prefill_chunked_einsum(self):

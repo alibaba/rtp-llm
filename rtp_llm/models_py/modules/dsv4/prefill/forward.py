@@ -231,6 +231,7 @@ def forward_layers(
             cu_seqlens,  # [B+1]
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
+            attn_inputs=attn_inputs,
         )  # [T, hc, dim]
         if _rt_on:
             _rt.record(f"prefill_layer{layer_idx:02d}_out", h)

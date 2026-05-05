@@ -29,6 +29,8 @@ wgate FP32 GEMMs, and the post-pool RMSNorm + RoPE all live in
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -36,8 +38,8 @@ import triton.language as tl
 
 @triton.jit
 def _v4_compressor_pool_fwd(
-    kv_ptr,  # [B, NB, G, D] fp32
-    score_ptr,  # [B, NB, G, D] fp32
+    kv_ptr,  # raw state ptr — see OVERLAP for layout
+    score_ptr,
     out_ptr,  # [B, NB, D]    fp32
     # strides — D-stride==1 assumed (caller asserts contiguous)
     kv_b: tl.constexpr,
@@ -52,24 +54,27 @@ def _v4_compressor_pool_fwd(
     G: tl.constexpr,
     D: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    # P2: when OVERLAP=True the input is the *raw* CSA state of shape
+    # [B, NB=1, 2r, 2d] in memory and we synthesize the post-cat view
+    # ``cat([state[:, :ratio, :d], state[:, ratio:, d:]], dim=g)`` directly
+    # in the load step.  G must equal 2*ratio in that case, and the caller
+    # must pass the *raw-state* d-axis stride (== 2*D).
+    OVERLAP: tl.constexpr = False,
+    SPLIT_D: tl.constexpr = 0,  # = D when OVERLAP, else unused
 ):
     """One program handles one (b, nb, d_tile).
 
-    Loads score[G, BLOCK_D] and kv[G, BLOCK_D] tiles, computes per-D
-    softmax over G, weighted sum, writes [BLOCK_D] fp32 to out.
+    OVERLAP=False (HCA decode + indexer + post-_overlap_transform inputs):
+        Loads score[G, BLOCK_D] and kv[G, BLOCK_D] tiles directly.
+    OVERLAP=True  (CSA decode raw-state path, P2):
+        ``g < ratio`` rows take the LOWER half of the raw state's d axis;
+        ``g >= ratio`` rows take the UPPER half.  Result is identical to
+        feeding the kernel the post-``torch.cat`` view, but skips the
+        2× alloc+copy.
 
-    -inf entries in score (carried in by overlap_transform's fill value)
-    contribute zero after exp(-inf - max) = 0; the divisor sum still
-    behaves correctly since at least one entry per (b, nb, d_pos) is
-    finite (the kernel doesn't need a special path for them).
+    -inf entries in score (overlap_transform fill value) contribute zero
+    after exp(-inf - max) = 0; the softmax denom stays correct.
     """
-    # Cast pids to int64 BEFORE the per-axis stride multiplies: at long
-    # context the (B, NB, *) grid combined with constexpr strides like
-    # score_b = NB*G*D can push ``pid * stride`` close to / past
-    # INT32_MAX.  Even when current shapes stay safely below 2^31, future
-    # B>1 or larger D would silently overflow — same pattern that bit
-    # v4_rmsnorm and _fused_rmsnorm_rope_kernel.  Int64 promotion is
-    # zero-cost (one cast per program).
     pid_b = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1).to(tl.int64)
     pid_d = tl.program_id(2).to(tl.int64)
@@ -78,15 +83,20 @@ def _v4_compressor_pool_fwd(
     d_off = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
     d_mask = d_off < D
 
+    if OVERLAP:
+        # Raw state d-index: lower half rows read [d_off]; upper half read
+        # [d_off + SPLIT_D].  Encoded as a per-row offset.
+        ratio = G // 2
+        upper = (g_off >= ratio).to(tl.int64)  # [G] 0/1
+        d_idx = d_off[None, :] + upper[:, None] * SPLIT_D  # [G, BLOCK_D]
+    else:
+        d_idx = d_off[None, :] + (
+            g_off[:, None] - g_off[:, None]
+        )  # broadcast to [G, BLOCK_D]
+
     score_ptrs = (
-        score_ptr
-        + pid_b * score_b
-        + pid_n * score_n
-        + g_off[:, None] * score_g
-        + d_off[None, :]
+        score_ptr + pid_b * score_b + pid_n * score_n + g_off[:, None] * score_g + d_idx
     )
-    # Mask invalid d columns to -inf so softmax denom matches REF (those
-    # cols won't be read — we mask the store too).
     score = tl.load(
         score_ptrs,
         mask=d_mask[None, :],
@@ -97,13 +107,9 @@ def _v4_compressor_pool_fwd(
     score_max = tl.max(score, axis=0)  # [BLOCK_D]
     score = tl.exp(score - score_max[None, :])  # [G, BLOCK_D]
     score_sum = tl.sum(score, axis=0)  # [BLOCK_D]
-    # Guard against all-(-inf) columns (would give 0/0); REF gets nan in
-    # the same case so we let it propagate, but avoid crashing on div.
     score = score / score_sum[None, :]
 
-    kv_ptrs = (
-        kv_ptr + pid_b * kv_b + pid_n * kv_n + g_off[:, None] * kv_g + d_off[None, :]
-    )
+    kv_ptrs = kv_ptr + pid_b * kv_b + pid_n * kv_n + g_off[:, None] * kv_g + d_idx
     kv = tl.load(kv_ptrs, mask=d_mask[None, :], other=0.0).to(tl.float32)
 
     out = tl.sum(kv * score, axis=0)  # [BLOCK_D]
@@ -113,20 +119,33 @@ def _v4_compressor_pool_fwd(
 
 
 def v4_compressor_pool(
-    kv: torch.Tensor,  # [B, NB, G, D] fp32
-    score: torch.Tensor,  # [B, NB, G, D] fp32
+    kv: torch.Tensor,
+    score: torch.Tensor,
+    *,
+    overlap: bool = False,
+    out_d: Optional[int] = None,
 ) -> torch.Tensor:
     """Fused per-D softmax over G + weighted-sum.
 
-    Returns ``out [B, NB, D]`` in fp32, matching the REF math
-    ``(kv * score.softmax(dim=2)).sum(dim=2)``.
+    Two modes (selected by ``overlap``):
 
-    Both inputs must be contiguous in the last (D) axis.  The G axis
-    must be a power of 2 ≤ 256 (CSA: 8, HCA: 128 in V4-Flash).
+    ``overlap=False`` (default — HCA decode, indexer compressor, prefill
+    post-``_overlap_transform``):
+        ``kv``, ``score`` shape ``[B, NB, G, D]`` fp32, contiguous in D.
+        Returns ``out [B, NB, D]`` fp32 == ``(kv * score.softmax(dim=2)).sum(dim=2)``.
+
+    ``overlap=True`` (P2 — CSA decode raw-state path):
+        ``kv``, ``score`` shape ``[B, NB, 2r, 2d]`` fp32, contiguous in D.
+        Effective ``G = 2r``, output ``D = d`` (= ``out_d``, default ``2d // 2``).
+        Result equals feeding the kernel the post-``torch.cat`` view
+            ``torch.cat([state[:, :, :r, :d], state[:, :, r:, d:]], dim=2)``
+        but skips the 2× alloc+copy.
+
+    G must be a power of 2 ≤ 256.  CSA: G=8, HCA: G=128 in V4-Flash.
     """
     assert kv.dim() == 4 and score.dim() == 4
     assert kv.shape == score.shape
-    B, NB, G, D = kv.shape
+    B, NB, G, D_in = kv.shape
     assert (
         kv.dtype == torch.float32 and score.dtype == torch.float32
     ), f"expected fp32 inputs, got kv={kv.dtype} score={score.dtype}"
@@ -135,13 +154,21 @@ def v4_compressor_pool(
     ), "kv and score must be contiguous along D"
     assert G & (G - 1) == 0 and G <= 256, f"G must be a power of 2, ≤ 256 (got {G})"
 
+    if overlap:
+        assert G % 2 == 0, "overlap requires G = 2*ratio (even)"
+        D = out_d if out_d is not None else D_in // 2
+        assert (
+            D * 2 == D_in
+        ), f"overlap raw-state D_in must equal 2*out_d (got D_in={D_in}, out_d={D})"
+        SPLIT_D = D
+    else:
+        D = D_in
+        SPLIT_D = 0
+
     out = torch.empty((B, NB, D), dtype=torch.float32, device=kv.device)
     if NB == 0:
         return out
 
-    # BLOCK_D: HCA (G=128) keeps tile small to fit shared mem; CSA (G=8)
-    # can take a much larger tile.  Both cap at D so we don't pay grid-
-    # launch overhead on tiny D.
     if G >= 64:
         BLOCK_D = min(64, triton.next_power_of_2(D))
     else:
@@ -164,5 +191,7 @@ def v4_compressor_pool(
         G=G,
         D=D,
         BLOCK_D=BLOCK_D,
+        OVERLAP=overlap,
+        SPLIT_D=SPLIT_D,
     )
     return out
