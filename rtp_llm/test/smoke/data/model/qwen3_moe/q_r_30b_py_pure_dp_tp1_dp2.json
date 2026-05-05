@@ -1,0 +1,131 @@
+{
+  "model_type": "qwen_3_moe",
+  "model_path": "/mnt/nas1/hf/Qwen3-30B-A3B-Instruct-2507-FP8",
+  "query_result": [
+    {
+      "query": {
+        "prompt": "$prompt:s1",
+        "generate_config": {
+          "max_new_tokens": 32,
+          "temperature": 0.0,
+          "top_p": 0.1,
+          "top_k": 1
+        }
+      },
+      "result": {
+        "response": " explain in simple terms\n\nSure! Let's break down the **CAP Theorem** in simple terms.\n\n---\n\n### 🌐 What is the CAP Theorem",
+        "response_alternatives": null,
+        "hidden_states": null,
+        "logits": null,
+        "loss": null,
+        "input_ids": null,
+        "output_ids": null,
+        "aux_info": {
+          "input_len": 6,
+          "prefix_len": 0,
+          "reuse_len": 0,
+          "local_reuse_len": 0,
+          "remote_reuse_len": 0,
+          "memory_reuse_len": 0,
+          "prefill_total_reuse_len": 0,
+          "prefill_local_reuse_len": 0,
+          "prefill_remote_reuse_len": 0,
+          "prefill_memory_reuse_len": 0,
+          "decode_total_reuse_len": 0,
+          "decode_local_reuse_len": 0,
+          "decode_remote_reuse_len": 0,
+          "decode_memory_reuse_len": 0,
+          "output_len": 32,
+          "step_output_len": 32,
+          "iter_count": 32,
+          "cum_log_probs": [],
+          "beam_responses": [],
+          "pd_sep": false,
+          "softmax_probs": []
+        }
+      }
+    },
+    {
+      "query": {
+        "prompt_batch": [
+          "$prompt:s1",
+          "$prompt:s3"
+        ],
+        "generate_config": {
+          "max_new_tokens": 32,
+          "temperature": 0.0,
+          "top_p": 0.1,
+          "top_k": 1
+        }
+      },
+      "result": {
+        "response_batch": [
+          {
+            "response": " explain in simple terms\n\nSure! Let's break down the **CAP Theorem** in simple terms.\n\n---\n\n### 🌐 What is the CAP Theorem",
+            "response_alternatives": null,
+            "hidden_states": null,
+            "logits": null,
+            "loss": null,
+            "input_ids": null,
+            "output_ids": null,
+            "aux_info": {
+              "input_len": 6,
+              "prefix_len": 0,
+              "reuse_len": 0,
+              "local_reuse_len": 0,
+              "remote_reuse_len": 0,
+              "memory_reuse_len": 0,
+              "prefill_total_reuse_len": 0,
+              "prefill_local_reuse_len": 0,
+              "prefill_remote_reuse_len": 0,
+              "prefill_memory_reuse_len": 0,
+              "decode_total_reuse_len": 0,
+              "decode_local_reuse_len": 0,
+              "decode_remote_reuse_len": 0,
+              "decode_memory_reuse_len": 0,
+              "output_len": 32,
+              "step_output_len": 32,
+              "iter_count": 32,
+              "cum_log_probs": [],
+              "beam_responses": [],
+              "pd_sep": false,
+              "softmax_probs": []
+            }
+          },
+          {
+            "response": "\n\nThe error `NameError: name 'screen_manager' is not defined` means that you're trying to use a variable or object called `screen_manager`,",
+            "response_alternatives": null,
+            "hidden_states": null,
+            "logits": null,
+            "loss": null,
+            "input_ids": null,
+            "output_ids": null,
+            "aux_info": {
+              "input_len": 12,
+              "prefix_len": 0,
+              "reuse_len": 0,
+              "local_reuse_len": 0,
+              "remote_reuse_len": 0,
+              "memory_reuse_len": 0,
+              "prefill_total_reuse_len": 0,
+              "prefill_local_reuse_len": 0,
+              "prefill_remote_reuse_len": 0,
+              "prefill_memory_reuse_len": 0,
+              "decode_total_reuse_len": 0,
+              "decode_local_reuse_len": 0,
+              "decode_remote_reuse_len": 0,
+              "decode_memory_reuse_len": 0,
+              "output_len": 32,
+              "step_output_len": 32,
+              "iter_count": 32,
+              "cum_log_probs": [],
+              "beam_responses": [],
+              "pd_sep": false,
+              "softmax_probs": []
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

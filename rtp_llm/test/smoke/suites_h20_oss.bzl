@@ -94,6 +94,18 @@ def h20_oss_suites():
                 gpu_type=["H20"]
             ),
             smoke_test(
+                name="mla_pure_cp_pd",
+                task_info="data/model/glm5/glm_5_fp8_q_r_h20_cp.json",
+                envs={
+                    "prefill": [],
+                    "decode": []},
+                smoke_args={
+                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 0 --use_all_gather 1 --moe_strategy fp8_per_block_pure_cp --cp_rotate_method ALL_GATHER",
+                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather=0"
+                },
+                gpu_type=["H20"]
+            ),
+            smoke_test(
                 name="mla_load_quant_tp2",
                 task_info="data/model/deepseek-r1-4layer/r1_fp8_q_r_h20.json",
                 smoke_args="--cache_store_rdma_mode 0 --use_local 1 --seq_size_per_block 64 --decode_entrance 1 --act_type bf16 --quantization FP8_PER_BLOCK --tp_size 2 --reserver_runtime_mem_mb 5026",
@@ -111,6 +123,12 @@ def h20_oss_suites():
                 name="moe_masked_fp8_tp2",
                 task_info="data/model/qwen3_moe/q_r_30b_py_masked_without_deepep_tp2.json",
                 smoke_args="--moe_strategy fp8_per_block_no_dp_masked --quantization FP8_PER_BLOCK --warm_up 0 --act_type BF16 --tp_size 2 --world_size 2 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="moe_pure_dp_fp8_dp2",
+                task_info="data/model/qwen3_moe/q_r_30b_py_pure_dp_tp1_dp2.json",
+                smoke_args="--moe_strategy fp8_per_block_pure_dp --quantization FP8_PER_BLOCK --warm_up 0 --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --use_deepep_moe 0 --use_all_gather 1 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
                 gpu_type=["H20"],
             ),
             smoke_test(
