@@ -272,8 +272,8 @@ class CaseRunner(object):
             )
             kvcm_src_logs_path = os.path.join(srcdir, "rtp_llm/logs")
         else:
-            # pytest+REAPI path — `kv_cache_manager_bin` is staged by
-            # setup.py:stage_kvcm_binary into rtp_llm/libs/kv_cache_manager_server/bin/.
+            # pytest+REAPI path — setup.py stages `kv_cache_manager_bin` from
+            # a top-level Bazel output into rtp_llm/libs/kv_cache_manager_server/bin/.
             # Resolve via package introspection so it works regardless of cwd.
             import rtp_llm
             libs_dir = os.path.join(os.path.dirname(rtp_llm.__file__), "libs")

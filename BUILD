@@ -143,6 +143,14 @@ cc_binary(
     ],
 )
 
+genrule(
+    name = "remote_kv_cache_manager_server_bin",
+    srcs = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
+    outs = ["kv_cache_manager_bin"],
+    cmd = "cp -f $(location @remote_kv_cache_manager_server//:bin/kv_cache_manager_bin) $@ && chmod 755 $@",
+    visibility = ["//visibility:public"],
+)
+
 exports_files(["cc_test_wrapper.sh"])
 
 py_runtime(

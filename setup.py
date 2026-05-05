@@ -582,6 +582,125 @@ from _build.reapi_retry import REAPI_RETRYABLE_EXIT_CODES, reapi_max_retries
 _REAPI_RETRYABLE_EXIT_CODES = REAPI_RETRYABLE_EXIT_CODES
 _REAPI_MAX_RETRIES = reapi_max_retries()
 
+_STAGED_OUTPUT_CORE = "core"
+_STAGED_OUTPUT_RUNTIME = "runtime"
+
+_CORE_BAZEL_STAGED_OUTPUTS = [
+    (
+        _STAGED_OUTPUT_CORE,
+        "//:th_transformer",
+        ("libth_transformer.so",),
+    ),
+    (
+        _STAGED_OUTPUT_CORE,
+        "//:rtp_compute_ops",
+        ("librtp_compute_ops.so",),
+    ),
+    (
+        _STAGED_OUTPUT_CORE,
+        "//:th_transformer_config",
+        ("libth_transformer_config.so",),
+    ),
+]
+
+_REMOTE_KVCM_RUNTIME_BAZEL_STAGED_OUTPUTS = [
+    (
+        _STAGED_OUTPUT_RUNTIME,
+        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_shared",
+        ("kv_cache_manager_client.so",),
+    ),
+    (
+        _STAGED_OUTPUT_RUNTIME,
+        "//3rdparty/3fs:hf3fs_shared",
+        (
+            "libhf3fs_api_shared.so",
+            "libboost_atomic.so.1.71.0",
+            "libboost_context.so.1.71.0",
+            "libboost_filesystem.so.1.71.0",
+            "libboost_program_options.so.1.71.0",
+            "libboost_regex.so.1.71.0",
+            "libboost_system.so.1.71.0",
+            "libboost_thread.so.1.71.0",
+            "libdouble-conversion.so.3",
+            "libgflags.so.2.2",
+            "libglog.so.0",
+            "libevent-2.1.so.7",
+            "libdwarf.so.1",
+            "libicui18n.so.66",
+            "libicuuc.so.66",
+            "libicudata.so.66",
+            "libunwind.so.8",
+            "libssl.so.1.1",
+            "libcrypto.so.1.1",
+        ),
+    ),
+]
+
+_REMOTE_KVCM_SERVER_BAZEL_STAGED_OUTPUTS = [
+    (
+        _STAGED_OUTPUT_RUNTIME,
+        "//:remote_kv_cache_manager_server_bin",
+        (("kv_cache_manager_bin", "kv_cache_manager_server/bin/kv_cache_manager_bin"),),
+    ),
+]
+
+
+def _bazel_config_names(bazel_args: list) -> set:
+    """Return config names from resolved Bazel args."""
+    names = set()
+    for i, arg in enumerate(bazel_args):
+        if arg.startswith("--config="):
+            names.add(arg.split("=", 1)[1])
+        elif arg == "--config" and i + 1 < len(bazel_args):
+            names.add(bazel_args[i + 1])
+    return names
+
+
+def _include_remote_kvcm_runtime_outputs(bazel_args: list) -> bool:
+    """Whether to build/package RPM-backed remote-KVCM runtime libraries.
+
+    PPU smoke does not exercise remote KVCM, and cuda12_9_arm is cache-only in
+    this workflow. Keep those builds lean and avoid forcing x86 RPM targets
+    onto non-x86 platforms.
+    """
+    config_names = _bazel_config_names(bazel_args)
+    return not any(name == "ppu" or "arm" in name.lower() for name in config_names)
+
+
+def _selected_bazel_staged_outputs(build_config: str, bazel_args: list = None) -> list:
+    """Return the Bazel targets and outputs that should be staged into libs/."""
+    if bazel_args is None:
+        bazel_args = parse_bazel_config(default_config=build_config)
+    staged_outputs = list(_CORE_BAZEL_STAGED_OUTPUTS)
+    include_remote_kvcm = _include_remote_kvcm_runtime_outputs(bazel_args)
+    if include_remote_kvcm:
+        staged_outputs.extend(_REMOTE_KVCM_RUNTIME_BAZEL_STAGED_OUTPUTS)
+        staged_outputs.extend(_REMOTE_KVCM_SERVER_BAZEL_STAGED_OUTPUTS)
+    return staged_outputs
+
+
+def _bazel_targets_for_staged_outputs(staged_outputs: list) -> list:
+    """Deduplicate Bazel targets while preserving declaration order."""
+    targets = []
+    seen = set()
+    for _, target, _ in staged_outputs:
+        if target not in seen:
+            targets.append(target)
+            seen.add(target)
+    return targets
+
+
+def _has_remote_download_arg(bazel_args: list) -> bool:
+    return any(arg.startswith("--remote_download") for arg in bazel_args)
+
+
+def _with_default_remote_download(bazel_args: list, mode: str) -> list:
+    """Add a remote output download default unless the user already chose one."""
+    if not is_remote_enabled() or _has_remote_download_arg(bazel_args):
+        return bazel_args
+    return [*bazel_args, f"--remote_download_{mode}"]
+
+
 # Canonical PATH used when invoking bazelisk. Bazel includes PATH in the
 # action environment hash by default, so a transient PATH (uv build venv,
 # user shell tweaks, /tmp/build-env-…) busts the REAPI cache. Pinning to
@@ -677,17 +796,13 @@ def build_bazel_extensions(build_config: str) -> None:
     print(f"Build log: {log_file}")
     print(f"=" * 60)
 
-    # Bazel targets to build
-    targets = [
-        "//:th_transformer",
-        "//:rtp_compute_ops",
-        "//:th_transformer_config",
-    ]
-
     # Auto-set output_user_root for platform-specific cache isolation
     # This ensures PPU/CUDA/ROCm builds don't share cache, maximizing cache reuse
     # Note: --output_user_root must be before the 'build' command
     cmd, build_args = _get_bazel_cmd_prefix(build_config)
+    build_args = _with_default_remote_download(build_args, "toplevel")
+    staged_outputs = _selected_bazel_staged_outputs(build_config, build_args)
+    targets = _bazel_targets_for_staged_outputs(staged_outputs)
 
     # Add 'build' command and targets
     cmd.extend(["build", *targets])
@@ -797,7 +912,12 @@ def build_bazel_extensions(build_config: str) -> None:
     # Stage fresh libs only after Bazel succeeded (if the build failed above, we
     # never wipe — previous rtp_llm/libs is left intact).
     _wipe_rtp_llm_libs(project_root)
-    copy_extensions(project_root, build_config)
+    copy_extensions(
+        project_root,
+        build_config,
+        staged_outputs=staged_outputs,
+        require_all_outputs=True,
+    )
 
 
 def _safe_copy_so(src: Path, dst: Path) -> bool:
@@ -805,8 +925,8 @@ def _safe_copy_so(src: Path, dst: Path) -> bool:
 
     Returns True on success, False if src is a broken symlink / missing
     (which can happen when copy_extensions runs against a stale bazel-bin
-    where some _solib_local symlinks point to garbage-collected paths —
-    common when RTP_SKIP_BAZEL_BUILD=1 is used to seed test venvs).
+    where symlinks point to garbage-collected paths — common when
+    RTP_SKIP_BAZEL_BUILD=1 is used to seed test venvs).
     """
     try:
         if not src.exists():
@@ -822,125 +942,86 @@ def _safe_copy_so(src: Path, dst: Path) -> bool:
         return False
 
 
-def copy_core_so_files(bazel_bin: Path, target_dir: Path) -> None:
-    """Copy core .so files (always required)."""
-    core_so_files = [
-        "libth_transformer.so",
-        "librtp_compute_ops.so",
-        "libth_transformer_config.so",
-    ]
-
-    for so_file in core_so_files:
-        src = bazel_bin / so_file
-        if src.exists():
-            dst = target_dir / so_file
-            print(f"  {src} → {dst}")
-            _safe_copy_so(src, dst)
-        else:
-            # Try to find in subdirectories
-            found = list(bazel_bin.glob(f"**/{so_file}"))
-            if found:
-                src = found[0]
-                dst = target_dir / so_file
-                print(f"  {src} → {dst}")
-                _safe_copy_so(src, dst)
-            else:
-                print(f"  Warning: {so_file} not found in {bazel_bin}")
-
-    # Copy RTP-LLM specific libs from _solib_local using a whitelist.
-    # Only libs whose names start with one of these prefixes are bundled;
-    # everything else (torch, CUDA/NVIDIA, ROCm system, HIP, libc10, …)
-    # is already available in the runtime environment (system or pip).
-    #
-    # Whitelist rationale:
-    #   kv_cache_manager_client  — remote KV-cache gRPC client (CUDA builds)
-    #   module_                  — ROCm aiter fused kernels
-    _SOLIB_INCLUDE_PREFIXES = (
-        "kv_cache_manager_client",
-        "module_",
-    )
-    solib_dir = bazel_bin / "_solib_local"
-    if solib_dir.exists():
-        for so_file in solib_dir.rglob("*.so"):
-            if not any(
-                so_file.name.startswith(prefix) for prefix in _SOLIB_INCLUDE_PREFIXES
-            ):
-                continue
-            dst = target_dir / so_file.name
-            if not dst.exists():
-                print(f"  solib: {so_file.name} → {dst}")
-                _safe_copy_so(so_file, dst)
+def _bazel_target_output_dir(bazel_bin: Path, target: str) -> Path:
+    """Return the bazel-bin package directory for a target label."""
+    if not target.startswith("//"):
+        return bazel_bin
+    package = target[2:].split(":", 1)[0]
+    return bazel_bin / package if package else bazel_bin
 
 
-def copy_kernel_so_files(bazel_bin: Path, target_dir: Path) -> int:
-    """Copy transitive runtime .so files needed by kv_cache_manager_client.
+def _find_bazel_output_for_target(
+    bazel_bin: Path, target: str, output_name: str
+) -> Path:
+    """Find an output declared for a specific top-level Bazel target."""
+    expected = _bazel_target_output_dir(bazel_bin, target) / output_name
+    if expected.exists():
+        return expected
 
-    Pruning rationale (verified via ldd / nm / strings on a fresh CUDA build):
-      - The 3 main .so (libth_transformer, librtp_compute_ops, libth_transformer_config)
-        statically link all kernel code (fmha_v2, cutlass, FlashAttention, etc.).
-      - No source code (C++/Python) dlopens libfa / libflashinfer* / libfpA_intB /
-        libint8_gemm / libmoe* — they were build-time copy-products that were never
-        actually loaded at runtime.
-      - kv_cache_manager_client.so (CUDA-only RDMA KV-cache client) DOES need
-        libhf3fs + boost + a handful of system libs; we keep those.
-      - ROCm aiter `module_*.so` is picked up via _solib_local whitelist in
-        copy_core_so_files (single source of truth), so not re-listed here.
+    found = [p for p in bazel_bin.glob(f"**/{output_name}") if p.is_file()]
+    if not found:
+        return None
 
-    Returns:
-        int: Number of files copied
+    # Prefer target package outputs over incidental shared-library symlink trees.
+    found.sort(key=lambda p: ("_solib" in p.parts, len(p.parts), str(p)))
+    return found[0]
+
+
+def _normalize_staged_output(output_spec) -> tuple:
+    """Return ``(source_name, destination_relpath)`` for a staging output."""
+    if isinstance(output_spec, tuple):
+        return output_spec
+    return output_spec, output_spec
+
+
+def stage_bazel_outputs(
+    project_root: Path,
+    staged_outputs: list,
+    require_all_outputs: bool = True,
+) -> None:
+    """Copy Bazel target outputs into ``rtp_llm/libs``.
+
+    Each copied file is declared next to its Bazel target in the staged-output
+    tables above. This keeps top-level build targets and packaging
+    expectations in one place, which is important when remote builds use
+    ``--remote_download_toplevel``.
     """
-    kernel_so_patterns = [
-        # Runtime deps of kv_cache_manager_client (from bazel external pkgs)
-        "libhf3fs_api_shared.so",
-        "libboost_atomic.so.1.71.0",
-        "libboost_context.so.1.71.0",
-        "libboost_filesystem.so.1.71.0",
-        "libboost_program_options.so.1.71.0",
-        "libboost_regex.so.1.71.0",
-        "libboost_system.so.1.71.0",
-        "libboost_thread.so.1.71.0",
-        "libdouble-conversion.so.3",
-        "libgflags.so.2.2",
-        "libglog.so.0",
-        "libevent-2.1.so.7",
-        "libdwarf.so.1",
-        "libicui18n.so.66",
-        "libicuuc.so.66",
-        "libicudata.so.66",
-        "libunwind.so.8",
-        "libssl.so.1.1",
-        "libcrypto.so.1.1",
-    ]
+    bazel_bin = project_root / "bazel-bin"
+    target_dir = project_root / "rtp_llm" / "libs"
+    target_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nCopying kernel extensions:")
-
-    # First, collect all matching files and deduplicate by filename
-    # Use a dict to store unique files: key is filename, value is source path
-    unique_files = {}
-
-    for pattern in kernel_so_patterns:
-        # Search in bazel-bin root first
-        found_files = list(bazel_bin.glob(pattern))
-        # Also search in subdirectories
-        found_files.extend(list(bazel_bin.glob(f"**/{pattern}")))
-
-        for src in found_files:
-            if src.is_file():
-                filename = src.name
-                # Only keep the first occurrence of each filename
-                if filename not in unique_files:
-                    unique_files[filename] = src
-
-    # Now copy all unique files
+    missing = []
     copied_count = 0
-    for filename, src in sorted(unique_files.items()):
-        dst = target_dir / filename
-        print(f"  {src} → {dst}")
-        _safe_copy_so(src, dst)
-        copied_count += 1
+    for kind, target, output_specs in staged_outputs:
+        print(f"  target {target}:")
+        for output_spec in output_specs:
+            output_name, dest_relpath = _normalize_staged_output(output_spec)
+            src = _find_bazel_output_for_target(bazel_bin, target, output_name)
+            if not src:
+                print(f"    Warning: {output_name} not found for {target}")
+                if require_all_outputs or kind == _STAGED_OUTPUT_CORE:
+                    missing.append((target, output_name))
+                continue
+            dst = target_dir / dest_relpath
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            print(f"    {src} -> {dst}")
+            if _safe_copy_so(src, dst):
+                copied_count += 1
 
-    print(f"  Copied {copied_count} kernel .so files")
-    return copied_count
+    if missing:
+        existing = sorted(p.name for p in target_dir.glob("*.so"))
+        detail = "\n".join(f"    - {target}: {name}" for target, name in missing)
+        raise RuntimeError(
+            "Build succeeded but required Bazel outputs are missing:\n"
+            f"{detail}\n"
+            f"  Existing in {target_dir}: {existing}\n"
+            "  Possible causes:\n"
+            "    - bazel-bin symlink is broken\n"
+            "    - a staging target did not produce its declared output\n"
+            "    - remote_download_toplevel was used without a matching top-level target"
+        )
+
+    print(f"  Copied {copied_count} staged Bazel output(s)")
 
 
 def generate_pyi_stubs(project_root: Path) -> None:
@@ -1058,115 +1139,31 @@ def _wipe_rtp_llm_libs(project_root: Path) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
 
 
-def copy_extensions(project_root: Path, build_config: str) -> None:
-    """Copy built .so files and proto files from bazel-bin to package.
+def copy_extensions(
+    project_root: Path,
+    build_config: str,
+    staged_outputs: list = None,
+    require_all_outputs: bool = False,
+) -> None:
+    """Copy built Bazel outputs from bazel-bin to package.
 
-    This function orchestrates the copying of all extension files by calling
-    specialized sub-functions for different file categories.
-    Validates that required core .so files exist after copying.
+    The output list is keyed by Bazel target so packaging stays aligned with
+    the targets requested by ``build_bazel_extensions``. Core libraries are
+    always required; runtime files are required only for fresh builds.
     """
-    bazel_bin = project_root / "bazel-bin"
     target_dir = project_root / "rtp_llm" / "libs"
-
     target_dir.mkdir(parents=True, exist_ok=True)
+    staged_outputs = staged_outputs or _selected_bazel_staged_outputs(build_config)
 
     print(f"\nCopying extensions to {target_dir}:")
-
-    # Copy core .so files
-    copy_core_so_files(bazel_bin, target_dir)
-
-    # Copy kernel .so files
-    copy_kernel_so_files(bazel_bin, target_dir)
-
-    # Validate core .so files exist
-    required = [
-        "libth_transformer.so",
-        "librtp_compute_ops.so",
-        "libth_transformer_config.so",
-    ]
-    missing = [f for f in required if not (target_dir / f).exists()]
-    if missing:
-        existing = sorted(p.name for p in target_dir.glob("*.so"))
-        raise RuntimeError(
-            f"Build succeeded but required .so files are missing: {missing}\n"
-            f"  Existing in {target_dir}: {existing}\n"
-            "  Possible causes:\n"
-            "    - bazel-bin symlink is broken\n"
-            "    - Bazel build target did not produce expected outputs"
-        )
+    stage_bazel_outputs(
+        project_root,
+        staged_outputs=staged_outputs,
+        require_all_outputs=require_all_outputs,
+    )
 
     # Auto-generate .pyi type stubs from the freshly compiled .so files
     generate_pyi_stubs(project_root)
-
-    # Stage `kv_cache_manager_bin` (from @remote_kv_cache_manager_server bazel
-    # http_archive) into the source tree so smoke tests using
-    # remote_kv_cache_manager (cuda_remote_cache, eagle_remote_cache_tp2,
-    # next_long_reuse_remote, …) can find it under pytest+REAPI dispatch where
-    # bazel `external/` runfiles aren't available. See `stage_kvcm_binary`.
-    stage_kvcm_binary(project_root, build_config)
-
-
-def stage_kvcm_binary(project_root: Path, build_config: str) -> None:
-    """Copy `kv_cache_manager_bin` from bazel external/ into rtp_llm/libs/.
-
-    Background — main-internal smoke tests run via `bazel test`, where the
-    binary is on the runfiles tree at
-    `<TEST_SRCDIR>/<TEST_WORKSPACE>/external/remote_kv_cache_manager_server/bin/kv_cache_manager_bin`.
-    PR 537's pytest+REAPI path doesn't reproduce that tree on the worker.
-
-    Strategy: `bazelisk fetch` triggers extraction of the http_archive into
-    `$(bazelisk info output_base)/external/remote_kv_cache_manager_server/bin/`,
-    then we cp the binary into `rtp_llm/libs/kv_cache_manager_server/bin/` so
-    it's both discoverable via the standard package-relative path AND included
-    in the pytest+REAPI CAS upload (extended glob in
-    `rtp_llm/test/remote_tests/remote_exec_rtp.py:_collect_repo_runtime_files`).
-
-    Skip on platforms that genuinely don't need it (PPU has no remote KVCM
-    smoke), and let `RTP_SKIP_KVCM_STAGE=1` opt out for emergency CI rollback.
-    """
-    if os.environ.get("RTP_SKIP_KVCM_STAGE", "0") == "1":
-        print("[kvcm] RTP_SKIP_KVCM_STAGE=1 — skipping kv_cache_manager_bin staging")
-        return
-    if build_config == "ppu":
-        # PPU smoke doesn't exercise remote_kvcm; keep PPU build lean.
-        return
-
-    target_dir = project_root / "rtp_llm" / "libs" / "kv_cache_manager_server" / "bin"
-    target_bin = target_dir / "kv_cache_manager_bin"
-
-    bazelisk = shutil.which("bazelisk") or "bazelisk"
-    env = _bazel_subprocess_env()
-    try:
-        subprocess.run(
-            [bazelisk, "fetch", "@remote_kv_cache_manager_server//..."],
-            cwd=str(project_root),
-            env=env,
-            check=True,
-        )
-        info = subprocess.run(
-            [bazelisk, "info", "output_base"],
-            cwd=str(project_root),
-            env=env,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"[kvcm] WARNING: bazelisk fetch failed (exit {e.returncode}); skipping kvcm staging")
-        return
-
-    output_base = Path(info.stdout.strip())
-    src_bin = output_base / "external" / "remote_kv_cache_manager_server" / "bin" / "kv_cache_manager_bin"
-    if not src_bin.exists():
-        print(f"[kvcm] WARNING: source not found at {src_bin}; skipping")
-        return
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-    if target_bin.exists():
-        target_bin.chmod(0o755)
-    shutil.copy2(src_bin, target_bin)
-    target_bin.chmod(0o755)
-    print(f"[kvcm] staged {src_bin} → {target_bin}")
 
 
 def build_all():
@@ -1555,6 +1552,7 @@ class BazelTest(Command):
 
         # Use same bazel cmd prefix as build_bazel_extensions for cache reuse
         cmd, build_args = _get_bazel_cmd_prefix(build_config)
+        build_args = _with_default_remote_download(build_args, "minimal")
 
         if self.compile_only:
             cmd.extend(["build", self.test_target, "--build_tests_only"])
