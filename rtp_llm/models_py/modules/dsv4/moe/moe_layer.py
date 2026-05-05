@@ -129,8 +129,8 @@ class MoE(nn.Module):
             local_expert_end=self.local_expert_end,
             max_tokens_per_rank=max_tokens_per_rank,
         )
-        forced = _resolve_forced(strategy)
-        strategy_cls = select_strategy(cfg, forced=forced)
+        forced, strict = _resolve_forced(strategy)
+        strategy_cls = select_strategy(cfg, forced=forced, strict=strict)
         # Register strategy as a child nn.Module so its child weights
         # (e.g. LocalLoopStrategy.experts ModuleList) propagate through
         # ``MoE.to(device)``.
