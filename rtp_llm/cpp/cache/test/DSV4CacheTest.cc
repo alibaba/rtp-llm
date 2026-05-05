@@ -107,13 +107,16 @@ TEST(DSV4ConfigCreatorTest, ProPoolSpecs) {
     EXPECT_EQ(dsv4.pool_specs[2].entry_elems, DSV4CacheConfig::INDEXER_ENTRY_BYTES);
 
     EXPECT_EQ(dsv4.pool_specs[3].layer_num, 30u);
+    EXPECT_EQ(dsv4.pool_specs[3].entries_per_block, 8u);
     EXPECT_FALSE(dsv4.pool_specs[3].is_paged);
     EXPECT_EQ(dsv4.pool_specs[3].fixed_blocks_per_req, 2u);
 
     EXPECT_EQ(dsv4.pool_specs[4].layer_num, 30u);
+    EXPECT_EQ(dsv4.pool_specs[4].entries_per_block, 8u);
     EXPECT_EQ(dsv4.pool_specs[4].fixed_blocks_per_req, 2u);
 
     EXPECT_EQ(dsv4.pool_specs[5].layer_num, 31u);
+    EXPECT_EQ(dsv4.pool_specs[5].entries_per_block, 128u);
     EXPECT_EQ(dsv4.pool_specs[5].fixed_blocks_per_req, 2u);
 
     EXPECT_EQ(dsv4.pool_specs[6].layer_num, 61u);
@@ -138,9 +141,9 @@ TEST(DSV4ConfigCreatorTest, BlockSizeBytes) {
     EXPECT_EQ(dsv4.pool_specs[0].block_size_bytes(), 64u * DSV4CacheConfig::KV_ENTRY_BYTES);
     EXPECT_EQ(dsv4.pool_specs[1].block_size_bytes(), 2u * DSV4CacheConfig::KV_ENTRY_BYTES);
     EXPECT_EQ(dsv4.pool_specs[2].block_size_bytes(), 64u * DSV4CacheConfig::INDEXER_ENTRY_BYTES);
-    EXPECT_EQ(dsv4.pool_specs[3].block_size_bytes(), 4u * 512u * 4u);
-    EXPECT_EQ(dsv4.pool_specs[4].block_size_bytes(), 4u * 2048u * 4u);
-    EXPECT_EQ(dsv4.pool_specs[5].block_size_bytes(), 8u * 1024u * 4u);
+    EXPECT_EQ(dsv4.pool_specs[3].block_size_bytes(), 8u * 512u * 4u);
+    EXPECT_EQ(dsv4.pool_specs[4].block_size_bytes(), 8u * 2048u * 4u);
+    EXPECT_EQ(dsv4.pool_specs[5].block_size_bytes(), 128u * 1024u * 4u);
     EXPECT_EQ(dsv4.pool_specs[6].block_size_bytes(),
               DSV4CacheConfig::TOKENS_PER_BLOCK * DSV4CacheConfig::KV_ENTRY_BYTES);
 }
@@ -207,15 +210,15 @@ TEST(DSV4KVCacheSpecTest, StateSpecFloat32) {
         DSV4CacheType::CSA_STATE,
         30,
         2048,
-        4,
+        8,
         DataType::TYPE_FP32,
         false,
         2,
     };
     DSV4StateSpec spec(pool_spec, 256);
 
-    EXPECT_EQ(spec.block_size(), 4u * 2048u);
-    EXPECT_EQ(spec.block_size_bytes(), 4u * 2048u * 4u);  // float32 = 4 bytes
+    EXPECT_EQ(spec.block_size(), 8u * 2048u);
+    EXPECT_EQ(spec.block_size_bytes(), 8u * 2048u * 4u);  // float32 = 4 bytes
     EXPECT_EQ(spec.cache_type, DSV4CacheType::CSA_STATE);
     EXPECT_EQ(spec.state_dim, 2048u);
     EXPECT_EQ(spec.fixed_blocks_per_req, 2u);
@@ -243,14 +246,14 @@ TEST(DSV4KVCacheSpecTest, HCAStateSpec) {
         DSV4CacheType::HCA_STATE,
         31,
         1024,
-        8,
+        128,
         DataType::TYPE_FP32,
         false,
         2,
     };
     DSV4StateSpec spec(pool_spec, 256);
 
-    EXPECT_EQ(spec.block_size_bytes(), 8u * 1024u * 4u);
+    EXPECT_EQ(spec.block_size_bytes(), 128u * 1024u * 4u);
     EXPECT_EQ(spec.fixed_blocks_per_req, 2u);
     EXPECT_EQ(spec.cache_type, DSV4CacheType::HCA_STATE);
 }
@@ -494,7 +497,7 @@ TEST_F(DSV4AllocatorTest, KVBlockStrideIsMaxAcrossGroups) {
         expected_max = std::max(expected_max, dsv4.pool_specs[i].block_size_bytes());
     }
     EXPECT_EQ(config.kv_block_stride_bytes, expected_max);
-    EXPECT_EQ(expected_max, DSV4CacheConfig::TOKENS_PER_BLOCK * DSV4CacheConfig::KV_ENTRY_BYTES);
+    EXPECT_EQ(expected_max, dsv4.pool_specs[5].block_size_bytes());
 }
 
 TEST_F(DSV4AllocatorTest, AllGroupsParticipateInPrefixCache) {
@@ -660,13 +663,13 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     InsertInfo insert_info{batch_res, complete_token_ids, /*is_resident=*/false};
     allocator->insertIntoCache(insert_info);
 
-    // FULL groups cache from the beginning. SWA/state groups only expose the
-    // last two reusable tail keys.
+    // With manually populated non-null block IDs, every group inserts the
+    // corresponding full-block cache keys.
     for (int gid = 0; gid < 3; gid++) {
         EXPECT_TRUE(block_cache->contains(200, gid)) << "group " << gid << " should be cached";
     }
     for (int gid = 3; gid < 7; gid++) {
-        EXPECT_FALSE(block_cache->contains(200, gid)) << "SWA group " << gid << " should not cache non-tail key";
+        EXPECT_TRUE(block_cache->contains(200, gid)) << "SWA group " << gid << " should cache key 200";
         EXPECT_TRUE(block_cache->contains(201, gid)) << "SWA group " << gid << " should cache tail key 201";
         EXPECT_TRUE(block_cache->contains(202, gid)) << "SWA group " << gid << " should cache tail key 202";
     }
@@ -714,13 +717,13 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     InsertInfo insert_info{batch_res, complete_token_ids, /*is_resident=*/false};
     allocator->insertIntoCache(insert_info);
 
-    // FULL groups cache from the beginning. SWA/state groups only expose the
-    // last two reusable tail keys.
+    // With manually populated non-null block IDs, every group inserts the
+    // corresponding full-block cache keys.
     for (int gid = 0; gid < 3; gid++) {
         EXPECT_TRUE(block_cache->contains(300, gid)) << "Flash group " << gid << " should be cached";
     }
     for (int gid = 3; gid < 7; gid++) {
-        EXPECT_FALSE(block_cache->contains(300, gid)) << "Flash SWA group " << gid << " should not cache non-tail key";
+        EXPECT_TRUE(block_cache->contains(300, gid)) << "Flash SWA group " << gid << " should cache key 300";
         EXPECT_TRUE(block_cache->contains(301, gid)) << "Flash SWA group " << gid << " should cache tail key 301";
         EXPECT_TRUE(block_cache->contains(302, gid)) << "Flash SWA group " << gid << " should cache tail key 302";
     }
@@ -731,7 +734,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
 }
 
 // ============================================================
-// Prefix cache: paged FULL groups reuse; SWA/state groups require two matched tail blocks.
+// Prefix cache: paged FULL groups reuse; SWA/state groups require a matched latest tail block.
 // ============================================================
 
 TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
@@ -853,7 +856,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
     allocator->free(free_info);
 }
 
-TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresTwoSWATailHits) {
+TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
     auto config    = makeDSV4AllocatorConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -885,10 +888,10 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresTwoSWATailHits) {
     batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
     batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
 
-    const int spb = allocator->seqSizePerBlock();
-    auto      cti = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
-    auto      gi  = std::make_shared<GenerateInput>();
-    gi->input_ids = torch::arange(3 * spb + 1, torch::kInt32);
+    const int spb       = allocator->seqSizePerBlock();
+    auto      cti       = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
+    auto      gi        = std::make_shared<GenerateInput>();
+    gi->input_ids       = torch::arange(3 * spb + 1, torch::kInt32);
     gi->generate_config = std::make_shared<GenerateConfig>();
     cti->init(gi);
 
@@ -898,7 +901,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresTwoSWATailHits) {
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
-    EXPECT_EQ(result.reuse_len, 0) << "SWA must hit both tail blocks before paged prefix reuse is accepted";
+    EXPECT_GT(result.reuse_len, 0) << "latest SWA tail hit should allow paged prefix reuse";
 
     FreeInfo free_info{batch_res};
     allocator->free(free_info);
@@ -981,10 +984,10 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksAreDistributedAcrossGroups) {
     batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
     batch_res->setBatchCacheKeys(0, CacheKeysType{600, 601});
 
-    const int spb = allocator->seqSizePerBlock();
-    auto      cti = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
-    auto      gi  = std::make_shared<GenerateInput>();
-    gi->input_ids = torch::arange(spb, torch::kInt32);
+    const int spb       = allocator->seqSizePerBlock();
+    auto      cti       = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
+    auto      gi        = std::make_shared<GenerateInput>();
+    gi->input_ids       = torch::arange(spb, torch::kInt32);
     gi->generate_config = std::make_shared<GenerateConfig>();
     cti->init(gi);
 
