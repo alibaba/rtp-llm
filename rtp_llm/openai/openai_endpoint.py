@@ -177,6 +177,8 @@ class OpenaiEndpoint(object):
             config.temperature = request.temperature
         if request.top_p != None:
             config.top_p = request.top_p
+        if request.top_k != None:
+            config.top_k = request.top_k
         if request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
         if request.n != None:
