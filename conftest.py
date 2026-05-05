@@ -2,13 +2,28 @@
 # xdist Per-Worker GPU Slicing (MUST be first — before any torch import)
 # ============================================================================
 import os as _os
+import re as _re
 import sys as _sys
 
 _xdist_worker = _os.environ.get("PYTEST_XDIST_WORKER")
 if _xdist_worker:
     _os.environ["_RTP_TORCH_BEFORE_SLICE"] = "1" if "torch" in _sys.modules else "0"
 
-    _wn = int(_xdist_worker.replace("gw", ""))
+    # Worker name parse: pytest-xdist standard is "gw0", "gw1", ...
+    # Custom runners (remote sessions, controller-only modes) may pass other
+    # names. Parse defensively — fall back to slice 0 + warn rather than
+    # raising ValueError at module-import time (which surfaces as a confusing
+    # ImportError to the test runner).
+    _m = _re.match(r"^gw(\d+)$", _xdist_worker)
+    if _m:
+        _wn = int(_m.group(1))
+    else:
+        _wn = 0
+        _sys.stderr.write(
+            f"[conftest_gpu_slice] WARN: unparseable worker '{_xdist_worker}', "
+            f"defaulting to slice 0; GPU pool affinity may be incorrect\n"
+        )
+
     _cvd = _os.environ.get("CUDA_VISIBLE_DEVICES")
     _hvd = _os.environ.get("HIP_VISIBLE_DEVICES")
     _pool = _cvd or _hvd or ""
@@ -17,10 +32,20 @@ if _xdist_worker:
         _gpu_per_worker = int(_os.environ.get("GPU_COUNT_PER_WORKER", "1"))
         _start = _wn * _gpu_per_worker
         _my_gpus = _all_gpus[_start : _start + _gpu_per_worker]
-        if _my_gpus:
-            _slice = ",".join(_my_gpus)
-        else:
-            _slice = ""
+        # Fail-fast on pool exhaustion. Silently writing CVD="" hides the
+        # misconfiguration: tests would collect 0 items / pass trivially while
+        # the real problem (worker count > pool size) goes unnoticed.
+        if not _my_gpus:
+            _sys.stderr.write(
+                f"[conftest_gpu_slice] FATAL: GPU pool '{_pool}' exhausted: "
+                f"worker '{_xdist_worker}' (idx={_wn}) needs slice "
+                f"[{_start}:{_start + _gpu_per_worker}] but pool has only "
+                f"{len(_all_gpus)} GPU(s). Reduce -n WORKER_COUNT or expand "
+                f"the GPU pool (CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES).\n"
+            )
+            _sys.stderr.flush()
+            _sys.exit(2)  # 2 = pytest "command-line usage error"
+        _slice = ",".join(_my_gpus)
         if _cvd is not None:
             _os.environ["CUDA_VISIBLE_DEVICES"] = _slice
         if _hvd is not None:
