@@ -10,14 +10,12 @@ rather than going through ``rtp_llm.models_py.modules.factory.fused_moe``.
 
 Strategies (priority high→low for ``forced=None``):
 
-    ep_size  factory  env / kernel                 → strategy
-    --------------------------------------------------------------
-    >1       True     mega available + dist-init    MegaMoEStrategy
-    >1       True     mega unavailable              DeepEPStrategy
-    >1       False    (eager test)                  LocalLoopStrategy
-    1        True     grouped FP4 kernel available  GroupedFP4Strategy
-    1        True     grouped unavailable           LocalLoopStrategy
-    1        False    (eager test)                  LocalLoopStrategy
+    ep_size  env / kernel                 → strategy
+    --------------------------------------------------------
+    >1       mega available + dist-init    MegaMoEStrategy
+    >1       mega unavailable              DeepEPStrategy
+    1        grouped FP4 kernel available  GroupedFP4Strategy
+    1        grouped unavailable           LocalLoopStrategy
 
 A model can override the auto-pick via:
   - ``MoE(strategy="mega"|"grouped_fp4"|"local_loop"|"deepep")`` ctor kwarg
@@ -56,7 +54,6 @@ class MoeCfg:
     local_expert_start: int
     local_expert_end: int
     max_tokens_per_rank: int
-    factory_mode: bool
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -93,11 +90,13 @@ class RoutedExpertsStrategy(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-    def setup_weights(self, weights: Optional[Dict[str, torch.Tensor]], prefix: str) -> None:
-        """Pop the strategy's own expert weights from ``weights`` (factory mode)
-        or allocate empty Parameters (eager init, ``weights=None``).
+    def setup_weights(self, layer_weights: Dict) -> None:
+        """Pop the strategy's own routed-expert stacks from ``layer_weights``
+        (the framework's per-layer ``ModelWeights.weights[layer_id]`` dict
+        keyed by ``W.v4_*`` enum). The stacks are already EP-sliced by the
+        loader: each ``W.v4_routed_w{1,2,3}_{w,s}`` has shape ``[E_local, ...]``.
 
-        Each strategy's docstring lists the exact key patterns it pops, so a
+        Each strategy's docstring lists the exact W keys it pops, so a
         post-init audit can detect leftover keys (= bug).
         """
         raise NotImplementedError
@@ -206,8 +205,8 @@ def select_strategy(
                 if not cls.can_handle(cfg):
                     raise RuntimeError(
                         f"Forced MoE strategy {forced!r} cannot handle cfg "
-                        f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size}, "
-                        f"factory_mode={cfg.factory_mode}). Check env / kernel availability."
+                        f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size}). "
+                        "Check env / kernel availability."
                     )
                 return cls
         names = [c.name for c in _STRATEGY_PRIORITY]
@@ -220,5 +219,5 @@ def select_strategy(
             return cls
     raise RuntimeError(
         f"No MoE strategy can handle cfg (layer_id={cfg.layer_id}, "
-        f"ep_size={cfg.ep_size}, factory_mode={cfg.factory_mode})"
+        f"ep_size={cfg.ep_size})"
     )
