@@ -115,18 +115,24 @@ else:
         except (ImportError, AttributeError, ValueError):
             pass  # Skip SparseMlaImpl if CUDA < 12.9 or flash_mla not available
 
-    from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
-        PyFlashinferDecodeImpl,
-        PyFlashinferPagedPrefillImpl,
-        PyFlashinferPrefillImpl,
-    )
+        # py_flashinfer_mha and prefill_cp_flashinfer hard-import flashinfer
+        # at module top-level; they're CUDA-only and must NOT load on
+        # CPU/Ppu/Yitian/ArmCpu test workers (where flashinfer is not pip-
+        # installed, so collection used to crash with ModuleNotFoundError).
+        # Pulled inside the `device_type == DeviceType.Cuda` branch so the
+        # else-of-ROCm fallback path stays import-safe.
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+            PyFlashinferDecodeImpl,
+            PyFlashinferPagedPrefillImpl,
+            PyFlashinferPrefillImpl,
+        )
 
-    PREFILL_MHA_IMPS.append(PyFlashinferPrefillImpl)
-    PREFILL_MHA_IMPS.append(PyFlashinferPagedPrefillImpl)
-    DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
+        PREFILL_MHA_IMPS.append(PyFlashinferPrefillImpl)
+        PREFILL_MHA_IMPS.append(PyFlashinferPagedPrefillImpl)
+        DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
 
-    from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer import (
-        CPFlashInferImpl,
-    )
+        from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer import (
+            CPFlashInferImpl,
+        )
 
-    PREFILL_MHA_IMPS.append(CPFlashInferImpl)
+        PREFILL_MHA_IMPS.append(CPFlashInferImpl)
