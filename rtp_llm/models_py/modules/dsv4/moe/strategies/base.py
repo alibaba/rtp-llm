@@ -139,35 +139,37 @@ def register_strategy(cls: Type[RoutedExpertsStrategy]) -> Type[RoutedExpertsStr
     return cls
 
 
-def _resolve_forced(strategy_arg: Optional[str]) -> Optional[str]:
+def _resolve_forced(strategy_arg: Optional[str]) -> tuple[Optional[str], bool]:
     """Apply env-var overrides on top of constructor kwarg.
 
-    Precedence (highest first):
-      1. ``DSV4_MOE_STRATEGY`` env var (if not "auto")
-      2. legacy toggles ``DSV4_USE_MEGA_MOE`` / ``DSV4_USE_GROUPED_FP4``
-         (translated to mega / grouped_fp4 / their negation as appropriate)
-      3. ``strategy_arg`` ctor kwarg
+    Returns ``(forced_name, strict)``:
+      - ``forced_name``: the strategy name to try, or ``None`` (auto-pick)
+      - ``strict``: ``True`` → fail loudly if can_handle is False (explicit
+        opt-in via ``DSV4_MOE_STRATEGY=...`` env or ctor kwarg);
+        ``False`` → silently fall through to auto-pick if can_handle is False
+        (legacy ``DSV4_USE_MEGA_MOE=1`` / ``DSV4_USE_GROUPED_FP4=1`` toggles —
+        historically a "use if applicable" hint, NOT a hard force; e.g.
+        ``DSV4_USE_MEGA_MOE=1`` was commonly left on for ep_size=1 smokes
+        where Mega is fundamentally incompatible).
 
-    Returns the strategy name string or ``None`` (auto-pick).
+    Precedence (highest first):
+      1. ``DSV4_MOE_STRATEGY`` env var (if not "auto") — strict
+      2. legacy toggles (translated; non-strict)
+      3. ``strategy_arg`` ctor kwarg — strict
 
     Raises ``RuntimeError`` on conflicting toggles.
     """
     env = os.environ.get("DSV4_MOE_STRATEGY", "").strip()
     if env and env != "auto":
-        return env
+        return env, True
 
     use_mega = os.environ.get("DSV4_USE_MEGA_MOE")
     use_grouped = os.environ.get("DSV4_USE_GROUPED_FP4")
     legacy_pos: list[str] = []
-    legacy_neg: list[str] = []
     if use_mega == "1":
         legacy_pos.append("mega")
-    if use_mega == "0":
-        legacy_neg.append("mega")
     if use_grouped == "1":
         legacy_pos.append("grouped_fp4")
-    if use_grouped == "0":
-        legacy_neg.append("grouped_fp4")
 
     if len(legacy_pos) > 1:
         raise RuntimeError(
@@ -181,38 +183,40 @@ def _resolve_forced(strategy_arg: Optional[str]) -> Optional[str]:
             f"toggle forces {legacy_pos[0]!r}. Pick one source of truth."
         )
     if legacy_pos:
-        return legacy_pos[0]
-    return strategy_arg  # may be None → auto
+        return legacy_pos[0], False
+    return strategy_arg, strategy_arg is not None  # ctor kwarg → strict
 
 
 def select_strategy(
     cfg: MoeCfg,
     forced: Optional[str] = None,
+    strict: bool = True,
 ) -> Type[RoutedExpertsStrategy]:
     """Pick a strategy class for ``cfg``.
 
-    ``forced``: ctor-passed strategy name (after ``_resolve_forced`` env merge).
-    If set, the named strategy MUST exist and ``can_handle`` MUST return True;
-    otherwise raises ``RuntimeError``. No silent fallback — explicit failure
-    surfaces config bugs early.
-
-    If ``forced`` is None, returns the first strategy in ``_STRATEGY_PRIORITY``
-    whose ``can_handle(cfg)`` returns True.
+    ``forced``: strategy name to try (after ``_resolve_forced`` env merge).
+    ``strict``: when True (explicit opt-in: ctor kwarg or
+    ``DSV4_MOE_STRATEGY``), fail loudly if ``forced`` can't handle cfg.
+    When False (legacy env toggle), fall through silently to auto-pick.
     """
     if forced is not None:
         for cls in _STRATEGY_PRIORITY:
             if cls.name == forced:
-                if not cls.can_handle(cfg):
+                if cls.can_handle(cfg):
+                    return cls
+                if strict:
                     raise RuntimeError(
                         f"Forced MoE strategy {forced!r} cannot handle cfg "
                         f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size}). "
                         "Check env / kernel availability."
                     )
-                return cls
-        names = [c.name for c in _STRATEGY_PRIORITY]
-        raise RuntimeError(
-            f"Unknown MoE strategy {forced!r}. Available: {names}"
-        )
+                # Non-strict (legacy toggle) → fall through to auto-pick.
+                break
+        else:
+            names = [c.name for c in _STRATEGY_PRIORITY]
+            raise RuntimeError(
+                f"Unknown MoE strategy {forced!r}. Available: {names}"
+            )
 
     for cls in _STRATEGY_PRIORITY:
         if cls.can_handle(cfg):
