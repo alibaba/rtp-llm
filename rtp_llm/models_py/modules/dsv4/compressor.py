@@ -450,7 +450,7 @@ class Compressor(nn.Module):
                 device=device,
             )
             return
-        if self.overlap and start_pos is not None and self._state_eb >= T:
+        if start_pos is not None and self._state_eb >= T:
             block_indices = self._state_read_block_indices(start_pos, bsz, device)
             valid, safe_slot = self._compute_logical_state_pool_slots(
                 bsz, T, block_indices, self._state_block_table, self._state_eb, device
@@ -496,7 +496,7 @@ class Compressor(nn.Module):
             return
         device = self.kv_state.device
         T = self._state_rows
-        if self.overlap and end_pos is not None and self._state_eb >= T:
+        if end_pos is not None and self._state_eb >= T:
             block_indices = self._state_write_block_indices(end_pos, bsz, device)
             valid, safe_slot = self._compute_logical_state_pool_slots(
                 bsz, T, block_indices, self._state_block_table, self._state_eb, device
@@ -763,15 +763,15 @@ class Compressor(nn.Module):
         dtype = x.dtype
         # #50: pool-only lifecycle.  Bind state + kv_cache from the
         # framework pools at entry; scatter back + clear at exit.
-        self._bind_state_from_pool(bsz, is_fresh_prefill=False, device=x.device)
+        self._bind_state_from_pool(
+            bsz, is_fresh_prefill=False, device=x.device, start_pos=start_pos
+        )
         self._bind_kv_cache_from_pool(
             bsz, is_fresh_prefill=False, device=x.device, dtype=dtype
         )
         try:
             x32 = x.float()  # [B, 1, dim]
-            kv_all = torch.nn.functional.linear(
-                x32, self.wkv
-            )  # [B, 1, coff*head_dim]
+            kv_all = torch.nn.functional.linear(x32, self.wkv)  # [B, 1, coff*head_dim]
             score_all = torch.nn.functional.linear(
                 x32, self.wgate
             )  # [B, 1, coff*head_dim]
@@ -893,16 +893,16 @@ class Compressor(nn.Module):
         dtype = x.dtype
         device = x.device
         # #50: pool-only lifecycle.
-        self._bind_state_from_pool(bsz, is_fresh_prefill=False, device=device)
+        self._bind_state_from_pool(
+            bsz, is_fresh_prefill=False, device=device, start_pos=start_pos
+        )
         self._bind_kv_cache_from_pool(
             bsz, is_fresh_prefill=False, device=device, dtype=dtype
         )
         try:
             x32 = x.float()
             kv_all = torch.nn.functional.linear(x32, self.wkv)  # [B, 1, coff*d]
-            score_all = torch.nn.functional.linear(
-                x32, self.wgate
-            )  # [B, 1, coff*d]
+            score_all = torch.nn.functional.linear(x32, self.wgate)  # [B, 1, coff*d]
 
             sp = start_pos.to(torch.long)
             sp_mod = sp % ratio  # [B]
