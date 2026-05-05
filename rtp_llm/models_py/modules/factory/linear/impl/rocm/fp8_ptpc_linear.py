@@ -120,3 +120,59 @@ class RocmFp8PTPCLinear(LinearBase):
             output = output.to(original_dtype)
 
         return output
+
+    def forward_prequantized(
+        self,
+        input_fp8: torch.Tensor,
+        input_scales: torch.Tensor,
+    ) -> torch.Tensor:
+        """Same as forward() but skips the per-token FP8 quant step.
+
+        Used by Qwen3 ROCm fused path where the upstream RMSNorm has
+        already produced (input_fp8, input_scales) via the fused
+        rmsnorm + per-token quant kernel. Avoids duplicate quantization.
+
+        Args:
+            input_fp8: (M, K) torch.float8_e4m3fnuz, pre-quantized input
+            input_scales: (M, 1) torch.float32, per-token scale factors
+
+        Returns:
+            output: (M, N) torch.bfloat16
+        """
+        M = input_fp8.shape[0]
+        N = self.output_size
+        K = input_fp8.shape[-1]
+
+        # ensure input_scales is fp32 (mirror forward())
+        if input_scales.dtype != torch.float32:
+            input_scales = input_scales.to(torch.float32)
+
+        x_scales = input_scales
+        w_scales = self.weight_scales
+
+        # Same dispatch rules as forward():
+        # - K < 192 OR M >= 1024: aiter cktile (caller-allocated output)
+        # - else                : aiter default
+        if K < 192 or M >= 1024:
+            output = torch.empty(
+                (M, N), dtype=torch.bfloat16, device=input_fp8.device
+            )
+            gemm_a8w8_bpreshuffle_cktile(
+                input_fp8, self.weight, x_scales, w_scales, output
+            )
+        else:
+            output = aiter.gemm_a8w8_bpreshuffle(
+                input_fp8,
+                self.weight,
+                x_scales,
+                w_scales,
+                None,
+                torch.bfloat16,
+            )
+
+        # Add bias if present
+        if self.bias is not None:
+            output = output + self.bias.to(output.dtype)
+
+        return output
+

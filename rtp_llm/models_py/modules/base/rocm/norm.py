@@ -5,6 +5,12 @@ import torch.nn.functional as F
 from aiter import layernorm2d_fwd as layernorm2d_fwd
 from aiter import rms_norm
 from aiter import rmsnorm2d_fwd_with_add as fused_add_rmsnorm
+from aiter import (
+    rmsnorm2d_fwd_with_add_dynamicquant as fused_add_rmsnorm_quant,
+)
+from aiter import (
+    rmsnorm2d_fwd_with_dynamicquant as fused_rmsnorm_quant,
+)
 from torch import nn
 
 from rtp_llm.models_py.modules.base.common.norm import (
@@ -188,3 +194,65 @@ class FusedQKRMSNorm(nn.Module):
             self.size_per_head,
         )
         return hidden_states
+
+
+class RMSNormFusedQuant(nn.Module):
+    """ROCm-only RMSNorm + per-token FP8 quant 2-in-1 fused module."""
+
+    def __init__(self, weight, eps=1e-6):
+        super().__init__()
+        self.weight = weight
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        m, k = hidden_states.shape
+        out_fp8 = torch.empty(
+            (m, k), dtype=torch.float8_e4m3fnuz, device=hidden_states.device
+        )
+        out_scale = torch.empty(
+            (m, 1), dtype=torch.float32, device=hidden_states.device
+        )
+        fused_rmsnorm_quant(
+            out_fp8,
+            hidden_states,
+            out_scale,
+            self.weight.data,
+            self.variance_epsilon,
+            0,      # use_model_sensitive_rmsnorm
+            0,      # group_size (0 = per-token)
+            False,  # shuffle_scale
+        )
+        return out_fp8, out_scale
+
+
+class RMSResNormFusedQuant(nn.Module):
+    """ROCm-only residual_add + RMSNorm + per-token FP8 quant 3-in-1 fused module."""
+
+    def __init__(self, weight, eps=1e-6):
+        super().__init__()
+        self.weight = weight
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states, residual):
+        m, k = hidden_states.shape
+        out_fp8 = torch.empty(
+            (m, k), dtype=torch.float8_e4m3fnuz, device=hidden_states.device
+        )
+        out_scale = torch.empty(
+            (m, 1), dtype=torch.float32, device=hidden_states.device
+        )
+        residual_out = torch.empty_like(residual)
+        fused_add_rmsnorm_quant(
+            out_fp8,
+            hidden_states,
+            residual,
+            residual_out,
+            out_scale,
+            self.weight.data,
+            self.variance_epsilon,
+            0,      # use_model_sensitive_rmsnorm
+            0,      # group_size
+            False,  # shuffle_scale
+        )
+        return out_fp8, out_scale, residual_out
+
