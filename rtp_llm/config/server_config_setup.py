@@ -53,14 +53,28 @@ def auto_configure_deepep(
     - PD separation + Decode node + Multi-node multi-GPU (>=9 GPUs): 1, 1, 1
     """
 
-    # in cp mode, do not use all gather, tp_size set to 1
-    tp_size = parallelism_config.get_attn_tp_size()
+    # MoE uses physical TP topology, not attention TP. get_attn_tp_size()
+    # returns 1 when CP is enabled, which would incorrectly disable
+    # use_all_gather for ep_size == tp_size configurations.
+    tp_size = parallelism_config.tp_size
     ep_size = parallelism_config.ep_size
+    dp_size = parallelism_config.dp_size
     moe_config.ll_num_max_token = ll_num_max_token
+    # allgather is valid only in "pure" parallel modes:
+    #   - single GPU (ep==1)
+    #   - pure TP                 (tp>1, dp==1, ep==tp, prefill CP disabled)
+    #   - pure CP attention + EP  (tp>1, dp==1, ep==tp, prefill CP enabled)
+    #   - pure DP attention + EP  (tp==1, dp>1, ep==dp)
+    # Mixed tp>1 with dp>1 is intentionally routed back to DeepEP.
+    cp_enabled = parallelism_config.prefill_cp_config.is_enabled()
+    is_single_gpu = ep_size == 1
+    is_pure_tp = tp_size > 1 and dp_size == 1 and ep_size == tp_size and not cp_enabled
+    is_pure_cp_ep = tp_size > 1 and dp_size == 1 and ep_size == tp_size and cp_enabled
+    is_pure_dp_ep = tp_size == 1 and dp_size > 1 and ep_size == dp_size
     moe_config.use_all_gather = (
         moe_config.use_all_gather
         and not deep_ep_config.use_deepep_low_latency
-        and (ep_size == tp_size or ep_size == 1)
+        and (is_single_gpu or is_pure_tp or is_pure_cp_ep or is_pure_dp_ep)
     )
     if moe_config.use_all_gather:
         moe_config.use_deepep_moe = False
