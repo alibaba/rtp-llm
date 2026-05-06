@@ -89,22 +89,47 @@ def _running_under_pytest() -> bool:
 
 _bootstrap_error = None
 
-# `from .ops import *` previously ran here, but rtp_llm.ops imports torch
-# at module level (rtp_llm/ops/__init__.py:10). Eager loading meant pytest
-# entry-point plugin discovery (which imports `rtp_llm.test.remote_tests.
-# plugin` → triggers `rtp_llm/__init__.py`) pulled torch into sys.modules
-# BEFORE conftest.py's GPU slicing had a chance to set CUDA_VISIBLE_DEVICES.
-# Result: cuInit() saw the wrong CVD; test_gpu_isolation
-# (test_torch_not_imported_before_gpu_slice + test_device_count_matches_cvd)
-# failed deterministically on every ut-sm8x run.
+
+# `from .ops import *` is needed at runtime for two reasons:
+#   (a) downstream code does `from rtp_llm.ops import X` and the eager
+#       import resolves the heavy `librtp_compute_ops.so` upfront.
+#   (b) it AVOIDS a circular import — `rtp_llm.device.device_base`
+#       imports `rtp_llm.ops.compute_ops`, which imports
+#       `rtp_llm.models_py.utils.arch.is_cuda`. If `.ops` isn't
+#       fully loaded BEFORE arch.py first runs, the chain
+#         arch → device → device_base → compute_ops → arch (partial)
+#       fails with `ImportError: cannot import name 'is_cuda' from
+#       partially initialized module rtp_llm.models_py.utils.arch`
+#       (run 39338093 smoke-light-sm8x tp2/beam_search_tp2 reproduction).
 #
-# Defer the ops import: downstream modules use `from rtp_llm.ops import X`
-# explicitly (start_server.py, models/llama.py, pipeline.py …), which Python
-# resolves on demand without needing the eager star-import. Keep `import
-# triton` here so the `_bootstrap_error` still surfaces missing triton at
-# rtp_llm import time (triton itself does NOT pull torch).
+# But .ops imports torch at module level (rtp_llm/ops/__init__.py:10),
+# so eager loading at PYTEST PLUGIN DISCOVERY (when pytest imports
+# `rtp_llm.test.remote_tests.plugin` → triggers `rtp_llm/__init__.py`)
+# pulls torch into sys.modules BEFORE conftest.py runs its xdist GPU
+# slicing. Result: torch.cuInit() seen the wrong CUDA_VISIBLE_DEVICES;
+# test_gpu_isolation (test_torch_not_imported_before_gpu_slice +
+# test_device_count_matches_cvd) failed deterministically on ut-sm8x.
+#
+# Resolution: defer .ops only during pytest plugin discovery — once
+# conftest.py's slicing has run (signalled by `_RTP_CONFTEST_DONE` env
+# var that conftest sets at the END of its module-level code), eager
+# ops loading is safe and DESIRED for downstream import correctness.
+def _in_pytest_plugin_discovery() -> bool:
+    """True iff this import is happening during pytest's plugin discovery."""
+    if "pytest" not in sys.modules:
+        return False
+    # conftest.py sets this AFTER its top-level GPU-slicing block runs
+    # (and AFTER torch can be safely imported, since CVD is already set).
+    if os.environ.get("_RTP_CONFTEST_DONE"):
+        return False
+    return True
+
+
 try:
     import triton  # noqa: F401
+
+    if not _in_pytest_plugin_discovery():
+        from .ops import *  # noqa: F401,F403
 except Exception as exc:
     _bootstrap_error = exc
     if not _running_under_pytest():

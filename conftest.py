@@ -71,6 +71,16 @@ if _xdist_worker:
     _sys.stderr.write(f"[conftest] faulthandler → {_fault_path}\n")
     _sys.stderr.flush()
 
+
+# Signal to rtp_llm/__init__.py that conftest has run (xdist or not); eager
+# .ops import (which transitively pulls torch) is now safe. Without this,
+# .ops stays deferred during plugin-discovery — but downstream test code
+# triggering arch → device → device_base → compute_ops → arch hits a
+# circular ImportError (run 39338093 smoke-light-sm8x tp2 reproduction).
+# Set unconditionally (outside the `if _xdist_worker` block) so non-xdist
+# pytest sessions (e.g. session-mode controller) also flip the flag.
+_os.environ["_RTP_CONFTEST_DONE"] = "1"
+
 # ============================================================================
 # GPU isolation is handled by:
 #   - conftest.py module-level code (above): xdist workers slice inherited CVD
