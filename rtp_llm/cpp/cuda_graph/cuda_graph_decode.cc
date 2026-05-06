@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 namespace rtp_llm {
 void CudaGraphRunner::replayDecode(int bs) {
@@ -63,6 +64,7 @@ void CudaGraphRunner::captureDecode() {
         graph_instances_[bs].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
         captureDecodeOneBatchSize(bs);
+        cuda_graph::finish_capture_session();
         replayAndSyncCheck(bs, "batch size");
         RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
     }

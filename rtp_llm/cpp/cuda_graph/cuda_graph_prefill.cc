@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include <optional>
 
 namespace rtp_llm {
@@ -18,7 +19,7 @@ void CudaGraphRunner::capturePrefill() {
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, max_bs_, seq_len);
         // Prefill-specific settings, one the first seq is valid, the post ones are all empty
-        if (is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == max_seq_len_) {
+        if (isEmbeddingStylePrefillCudaGraph()) {
             // embedding model, without kv cache
             inputs.attention_inputs.prefix_lengths.fill_(0);
             // Must set cu_seqlens/cu_kv_seqlens/input_lengths to match actual seq_len,
@@ -74,6 +75,7 @@ void CudaGraphRunner::capturePrefill() {
         graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
             graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
         capturePrefillOneSeqLen(seq_len);
+        cuda_graph::finish_capture_session();
         replayAndSyncCheck(seq_len, "seq len");
         RTP_LLM_LOG_INFO("capture success for seq_len: %d", seq_len);
     }
@@ -81,8 +83,8 @@ void CudaGraphRunner::capturePrefill() {
 }
 
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
-    // Draft model prefill (num_tokens_per_bs_ != max_seq_len_): capture at multiples of num_tokens_per_bs_
-    if (num_tokens_per_bs_ != max_seq_len_) {
+    // MTP draft prefill: capture at multiples of num_tokens_per_bs_
+    if (isMtpDraftPrefillCudaGraph()) {
         std::vector<int> result;
         for (int i = 1; i <= max_bs_; ++i) {
             result.push_back(i * num_tokens_per_bs_);
