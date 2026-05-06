@@ -218,11 +218,20 @@ test --test_env NCCL_DEBUG="INFO"
 # for dp scatter add stable result
 test --test_env TZ=Asia/Shanghai
 
-test:cuda --test_env PATH="/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-test:cuda --test_env LD_LIBRARY_PATH="/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64"
+# NOTE: /opt/conda310/bin MUST stay on PATH — many cpp tests use
+# `#!/usr/bin/env python3` shebangs / subprocess invocations and conda310
+# is the only python3 in the dev images.  Dropping it caused
+# `/usr/bin/env: 'python3': No such file or directory` to fail all 54 cpp-ut
+# tests on REAPI workers (PR 965 run 39271211 cpp-ut job).
+test:cuda --test_env PATH="/opt/conda310/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+test:cuda --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64"
 
-test:rocm --test_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/rocm/lib/:/opt/amdgpu/lib64/"
-test:rocm --test_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260423"
+# ROCm: gcc-toolset-12 lib64 MUST come first so dlopen of aiter JIT-built
+# .so finds GCC 12 libstdc++ (has __cxx11::ostringstream::str() const).
+# conda310 lib AFTER gcc-toolset-12 to avoid clobbering libstdc++ resolution
+# but BEFORE rocm/amdgpu so python finds its own runtime.
+test:rocm --test_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/conda310/lib/:/lib64:/opt/rocm/lib/:/opt/amdgpu/lib64/"
+test:rocm --test_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260423"
 
 # compat for low driver < 535
 test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/cuda/lib64/stubs"
