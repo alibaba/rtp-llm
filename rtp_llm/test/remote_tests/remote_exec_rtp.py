@@ -254,6 +254,22 @@ def build_remote_setup_command(rootdir: Path) -> str:
         # PPU_HOME on the worker is the only reliable disambiguation. Safe on
         # non-PPU workers — /usr/local/PPU_SDK simply won't exist there.
         "[ -d /usr/local/PPU_SDK ] && export PPU_HOME=/usr/local/PPU_SDK; "
+        # Disk eviction: REAPI workers reuse /home/admin/ across pytest
+        # sessions; each session's prepare_venv.py creates a NEW venv
+        # at /home/admin/venvs/rtp-llm-{platform}-{hash} but never cleans
+        # the old ones. The disk fills up over days → CAS download fails
+        # with "Quota exceeded (os error 122)" or pip install fails with
+        # "Disk quota exceeded" (run 39354184/39362227/39363672/39365110
+        # ut-sm9x H20 worker 33.126.67.104 / na175 disk full, exit -178
+        # surfaces as bash 78). Evict venvs not touched in >7 days BEFORE
+        # prepare_venv runs, so the current session always has space.
+        # Keep recent venvs (other in-flight CI jobs may need them).
+        # Belt-and-suspenders: also evict /tmp/uv-rtp-llm-* caches.
+        "find /home/admin/venvs -maxdepth 1 -type d -name 'rtp-llm-*' "
+        "  -mtime +7 -exec rm -rf {} + 2>/dev/null; "
+        "find /tmp -maxdepth 1 -type d -name 'uv-rtp-llm-*' "
+        "  -mtime +3 -exec rm -rf {} + 2>/dev/null; "
+        'echo "[remote_setup] disk after eviction: $(df -h /home/admin 2>/dev/null | tail -1)"; '
         + gpu_diag
         + 'echo ">>>PHASE:pip_install_start $(date +%s)"; '
         "mkdir -p logs; "
