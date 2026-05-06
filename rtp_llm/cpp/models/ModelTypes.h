@@ -123,6 +123,7 @@ public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
+    virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
 
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;

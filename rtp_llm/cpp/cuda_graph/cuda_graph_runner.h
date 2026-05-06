@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 #include <pybind11/embed.h>
@@ -74,6 +75,8 @@ public:
     void           captureDecodeOneBatchSize(int bs);
     void           capturePrefillOneSeqLen(int seq_len);
     void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
+    void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
+    void           prepareAttentionInputs(const PyModelInputs& inputs, CudaGraphState& state);
     bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           replayGraph(int key);
     void           replayDecode(int bs);
@@ -147,6 +150,8 @@ private:
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();
+
+    std::atomic<bool> prepared_attention_inputs_ = false;
 };
 
 }  // namespace rtp_llm

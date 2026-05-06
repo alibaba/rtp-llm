@@ -47,6 +47,25 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
 
 void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputs");
+    prepareInputData(inputs, state);
+    prepareAttentionInputs(inputs, state);
+}
+
+void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphState& state) {
+    RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputData");
+    const size_t graph_idx =
+        is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+    auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
+    int   token_num        = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
+
+    optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, token_num * sizeof(int));
+    optimizedCopyAsync(inputs.input_hiddens,
+                       py_model_inputs_.input_hiddens,
+                       inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
+}
+
+void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs, CudaGraphState& state) {
+    RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs");
     // 1. non spec cuda graph:
     // is_prefill_cuda_graph_mode_ is set true only when use embedding model
     // 2. spec cuda graph:
@@ -60,6 +79,7 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
 
     // should wait last forward done before prepare inputs
     forward_event_.synchronize();
+    prepared_attention_inputs_.store(true, std::memory_order_release);
 
     const size_t graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
@@ -126,13 +146,10 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
     // attention kernels only use kv_cache_kernel_block_id_{host,device}. Cache store operations
     // run outside the CUDA graph and read from the original (non-graph) inputs directly.
 
-    // Common device copy
-    int token_num = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
+    // input_ids / input_hiddens are handled by prepareInputData. They MUST NOT be touched here
+    // because the async-prepare path (PyWrappedModel::prepareAttentionInputs) calls this with
+    // undefined empty tensors for those slots, which would crash on element_size().
 
-    tryAddD2DCopy(inputs.input_ids, py_model_inputs_.input_ids, token_num * sizeof(int));
-    tryAddD2DCopy(inputs.input_hiddens,
-                  py_model_inputs_.input_hiddens,
-                  inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
     tryAddD2DCopy(inputs.attention_inputs.cu_seqlens,
                   py_model_inputs_.attention_inputs.cu_seqlens,
                   (state.current_batch_size + 1) * sizeof(int));
@@ -263,9 +280,14 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
             .fill_(last_valid);
     }
 
-    // launch prepare_cuda_graph when attention inputs are ready
+    // launch prepare_cuda_graph when attention inputs are ready.
+    // GIL is required: this function may be invoked from an AsyncRunner worker thread
+    // (MtpExecutor::decodeStep) and from the engine main thread (PyWrappedModel::forward),
+    // neither of which holds the GIL on entry. pybind11's attr() and call operator construct
+    // a Python args tuple via PyTuple_New, which segfaults without the GIL.
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputs(prepare_cuda_graph)");
+        py::gil_scoped_acquire gil;
         attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs_.attention_inputs);
     }
 }
@@ -273,9 +295,24 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
 PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphState& state) {
     PyModelOutputs outputs;
 
+    // RAII guard: ensure prepared_attention_inputs_ is always reset to false on scope exit,
+    // even if forward() throws after async prepareAttentionInputs set it to true.
+    struct PreparedFlagGuard {
+        std::atomic<bool>& flag;
+        ~PreparedFlagGuard() {
+            flag.store(false, std::memory_order_release);
+        }
+    } flag_guard{prepared_attention_inputs_};
+
     // decode or embedding model only
     RTP_LLM_LOG_DEBUG("Replay Start");
-    prepareInputs(inputs, state);
+
+    if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
+        prepareInputs(inputs, state);
+    } else {
+        prepareInputData(inputs, state);
+    }
+
     if (is_prefill_cuda_graph_mode_) {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");

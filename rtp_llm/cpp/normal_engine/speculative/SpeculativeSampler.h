@@ -11,8 +11,8 @@ namespace speculative {
 
 struct SpeculativeSamplerOutput {
 public:
-    std::vector<torch::Tensor> accept_tokens;
-    std::vector<int>           accept_len;
+    torch::Tensor accept_tokens;
+    torch::Tensor accept_len;
 };
 
 struct FastTopKSamplerOutput {

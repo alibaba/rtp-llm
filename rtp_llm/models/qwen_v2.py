@@ -411,10 +411,10 @@ class QWenV2Embedding(QWenV2):
 
 
 class QwenV2MTPWeight(QWenV2Weight):
-    vocab_prune = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.vocab_prune = False
 
     def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
         super()._process_meta(meta_dicts, weight_keys)

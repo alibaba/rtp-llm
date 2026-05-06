@@ -4,6 +4,7 @@
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <optional>
 #include <string>
+#include <atomic>
 #include <mutex>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
@@ -40,6 +41,7 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
+    void            prepareAttentionInputs(const GptModelInputs& inputs) override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -100,6 +102,10 @@ private:
     // is_pinned() is expensive on CPU; only assert during first N forwards as a sanity check.
     static constexpr int kPinnedCheckForwardCount = 3;
     int                  pinned_check_remaining_{kPinnedCheckForwardCount};
+
+    std::atomic<bool>            prepared_attention_inputs_{false};
+    torch_ext::PyAttentionInputs attention_inputs_;
+    CudaGraphState               graph_state_;
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.

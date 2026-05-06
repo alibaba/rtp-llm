@@ -402,14 +402,60 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     return callForwardPostLayers(hidden_states, inputs, false);
 }
 
-GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
-    RTP_LLM_PROFILE_SCOPE("py_model.forward");
+void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
+    RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
     d2d_copies_.clear();
-    DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
-    holdInputsHostBuffers(inputs);
     if (pinned_check_remaining_ > 0) {
         --pinned_check_remaining_;
     }
+
+    DevicePerfWrapper wrapper(enable_device_perf_, "py model prepareAttentionInputs");
+    auto              attention_inputs = buildPyAttentionInputs(inputs);
+    if (!inputs.warmup && inputs.pd_separation) {
+        attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+        cache_store_async_writer_->init();
+    }
+    setupKVCacheForAttentionInputs(attention_inputs, inputs);
+
+    calculatePaddingOffset(attention_inputs);
+    attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
+
+    attention_inputs_ = attention_inputs;
+    prepared_attention_inputs_.store(true, std::memory_order_release);
+
+    // CRITICAL ORDERING: flush queued H2D copies BEFORE graph_runner_->prepareAttentionInputs.
+    // graph_runner internally launches strided D2D copies that READ from these freshly allocated
+    // CUDA tensors (e.g. kv_cache_kernel_block_id_device_by_group); without flushing first, the
+    // D2D copies see uninitialized device memory and pollute the capture buffer, which the
+    // QKV+RoPE+KVCache kernel then dereferences as block-id pointers → WARP_ILLEGAL_ADDRESS.
+    // (Pre-d318b63ea forward() did fusedCopy before graph_runner->forward; the async-prepare
+    // extraction split those steps and broke the implicit ordering.)
+    fusedCopy(d2d_copies_);
+
+    graph_state_         = CudaGraphState();
+    auto empty_tensor    = torch::Tensor();
+    auto py_model_inputs = PyModelInputs({empty_tensor, empty_tensor, attention_inputs_, empty_tensor});
+
+    if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
+        graph_runner_->prepareAttentionInputs(py_model_inputs, graph_state_);
+    }
+}
+
+GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
+    RTP_LLM_PROFILE_SCOPE("py_model.forward");
+    DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
+    holdInputsHostBuffers(inputs);
+
+    // RAII guard: ensure prepared_attention_inputs_ is always reset to false on scope exit,
+    // even if forward() throws. Without this, an exception after async prepareAttentionInputs
+    // would leave the flag true, causing the next forward() to use stale attention_inputs_.
+    struct PreparedFlagGuard {
+        std::atomic<bool>& flag;
+        ~PreparedFlagGuard() {
+            flag.store(false, std::memory_order_release);
+        }
+    } flag_guard{prepared_attention_inputs_};
+
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
@@ -421,48 +467,50 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
         }
 
+        // Direct async H2D for combo_tokens (the only tensorHoldHostAndToCuda call site that
+        // used to live on this code path). Bypass d2d_copies_ so forward() does not depend on
+        // the fused-copy queue — that queue is now an internal detail of prepareAttentionInputs.
+        // Host buffer is already kept alive by holdInputsHostBuffers() above.
         torch::Tensor token_ids;
-        token_ids = tensorHoldHostAndToCuda(inputs.combo_tokens);
+        if (inputs.combo_tokens.device().is_cuda()) {
+            token_ids = inputs.combo_tokens;
+        } else {
+            buffer_holder_.hold_host(inputs.combo_tokens);
+            token_ids = inputs.combo_tokens.to(torch::kCUDA, /*non_blocking=*/true);
+        }
 
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
 
-        auto attention_inputs      = buildPyAttentionInputs(inputs);
         auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
 
+        if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
+            prepareAttentionInputs(inputs);
+        }
+
         if (device_props_.enable_prefill_cp) {
-            attention_inputs.context_parallel_info = cp_params;
+            attention_inputs_.context_parallel_info = cp_params;
         }
 
-        if (!inputs.warmup && inputs.pd_separation) {
-            attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
-            cache_store_async_writer_->init();
-        }
-        setupKVCacheForAttentionInputs(attention_inputs, inputs);
+        // No fusedCopy here: prepareAttentionInputs (above) already flushed its queue,
+        // and combo_tokens above used direct .to(non_blocking=true). Both are async on
+        // the current stream and will be ordered correctly with the kernels below.
 
-        calculatePaddingOffset(attention_inputs);
-        attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
-
-        // launch fused copy
-        fusedCopy(d2d_copies_);
-
-        auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
+        auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
-        CudaGraphState graph_state;
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state)) {
-            py::gil_scoped_acquire gil;
+        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
             RTP_LLM_LOG_DEBUG(
                 "[PyWrappedModel] using CUDA graph forward, is_target_verify=%d, is_prefill=%d, graph_bs=%d",
                 py_model_inputs.attention_inputs.is_target_verify,
                 py_model_inputs.attention_inputs.is_prefill,
-                graph_state.current_real_graph_bs);
+                graph_state_.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
-            py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state);
+            py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
         } else {

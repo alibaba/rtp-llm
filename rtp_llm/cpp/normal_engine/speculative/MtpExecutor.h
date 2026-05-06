@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
+#include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 
 namespace rtp_llm {
@@ -25,6 +26,10 @@ struct MtpMetricsCollector {
 
 class MtpBufferHolder {
 public:
+    void hold(const torch::Tensor& tensor) {
+        tensor_holder_.push_back(tensor);
+    }
+
     void hold(const GptModelInputs& model_input) {
         tensor_holder_.push_back(model_input.combo_tokens);
         tensor_holder_.push_back(model_input.input_lengths);
@@ -141,5 +146,10 @@ private:
     torch::Tensor draft_kv_cache_layer_to_group;
 
     torch::Tensor d2t_map_;
+
+    torch::Stream collect_metrics_stream_;
+
+    AsyncRunner target_verify_prepare_runner_;
+    AsyncRunner draft_prefill_prepare_runner_;
 };
 };  // namespace rtp_llm

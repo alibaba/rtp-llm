@@ -406,6 +406,9 @@ void invokeMappingDraft2Target(IdType*     tokens,
 
 // Forward-declare rejection-sampling kernel from rtp_llm/models_py/bindings/rocm/speculative_sampling/sampling.cu
 // (same amd_bfloat16.h transitive-include hazard — kept out of the include graph).
+// NOTE: This declaration is intentionally at global scope (not inside namespace rtp_llm)
+// because the ROCm kernel implementation is also defined at global scope. The call site
+// uses ::invokeRejectionSampling to match. This compiles and links correctly.
 template<typename DType, typename IdType>
 hipError_t invokeRejectionSampling(DType*      draft_probs,
                                    IdType*     draft_token_ids,

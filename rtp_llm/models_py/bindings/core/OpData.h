@@ -358,47 +358,32 @@ struct AllGatherParams {
 };
 
 struct SpeculativeSamplingParams {
-    torch::Tensor& draft_probs_d;
-    torch::Tensor& draft_token_ids_d;
-    torch::Tensor& uniform_samples_d;
-    torch::Tensor& target_probs_d;
-    torch::Tensor& output_token_ids_d;
-    torch::Tensor& output_accepted_token_num_d;
-    torch::Tensor& output_emitted_token_num_d;
-
-    SpeculativeSamplingParams(torch::Tensor& draft_probs_d,
-                              torch::Tensor& draft_token_ids_d,
-                              torch::Tensor& uniform_samples_d,
-                              torch::Tensor& target_probs_d,
-                              torch::Tensor& output_token_ids_d,
-                              torch::Tensor& output_accepted_token_num_d,
-                              torch::Tensor& output_emitted_token_num_d):
-        draft_probs_d(draft_probs_d),
-        draft_token_ids_d(draft_token_ids_d),
-        uniform_samples_d(uniform_samples_d),
-        target_probs_d(target_probs_d),
-        output_token_ids_d(output_token_ids_d),
-        output_accepted_token_num_d(output_accepted_token_num_d),
-        output_emitted_token_num_d(output_emitted_token_num_d) {}
+    torch::Tensor draft_probs_d;
+    torch::Tensor draft_token_ids_d;
+    torch::Tensor uniform_samples_d;
+    torch::Tensor target_probs_d;
+    torch::Tensor output_token_ids_d;
+    torch::Tensor output_accepted_token_num_d;
+    torch::Tensor output_emitted_token_num_d;
 };
 
 struct RejectionSamplingParams {
-    torch::Tensor& draft_probs_d;
-    torch::Tensor& draft_token_ids_d;
-    torch::Tensor& uniform_samples_d;
-    torch::Tensor& target_probs_d;
-    torch::Tensor& target_token_ids_d;
-    torch::Tensor& output_token_ids_d;
-    torch::Tensor& output_accepted_token_num_d;
-    torch::Tensor& do_sample_d;
+    torch::Tensor draft_probs_d;
+    torch::Tensor draft_token_ids_d;
+    torch::Tensor uniform_samples_d;
+    torch::Tensor target_probs_d;
+    torch::Tensor target_token_ids_d;
+    torch::Tensor output_token_ids_d;
+    torch::Tensor output_accepted_token_num_d;
+    torch::Tensor do_sample_d;
 };
 
 struct MappingDraft2TargetParams {
-    torch::Tensor&       tokens;
-    const torch::Tensor& d2t_map;
-    int                  batch_size;
-    int                  token_offset;
-    int                  token_stride;
+    torch::Tensor tokens;
+    torch::Tensor d2t_map;
+    int           batch_size;
+    int           token_offset;
+    int           token_stride;
 };
 
 }  // namespace rtp_llm
