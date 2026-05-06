@@ -882,9 +882,7 @@ class Attention(nn.Module):
             return None
         return raw_u8[:, :useful_bytes].view(vec_dtype).view(-1, vec_dim)
 
-    def _pool_view_3d_fp8(
-        self, attn_type: int
-    ) -> Optional[torch.Tensor]:
+    def _pool_view_3d_fp8(self, attn_type: int) -> Optional[torch.Tensor]:
         """Return ``[num_blocks, eb, ENTRY_BYTES]`` uint8 view of an FP8 KV
         pool, respecting C++-side TMA padding (per-block stride may exceed
         ``eb * ENTRY_BYTES``). The flat 2D form ``_pool_view`` returns is
@@ -1494,15 +1492,11 @@ class Attention(nn.Module):
             )
 
             HD_DEQUANT = 512
-            assert dtype == torch.bfloat16, (
-                f"FP8 pool read returns bf16; got requested dtype={dtype}"
-            )
-            out = torch.zeros(
-                (bsz, T, HD_DEQUANT), dtype=torch.bfloat16, device=device
-            )
-            seq_lens = torch.full(
-                (bsz,), T, dtype=torch.int32, device=device
-            )
+            assert (
+                dtype == torch.bfloat16
+            ), f"FP8 pool read returns bf16; got requested dtype={dtype}"
+            out = torch.zeros((bsz, T, HD_DEQUANT), dtype=torch.bfloat16, device=device)
+            seq_lens = torch.full((bsz,), T, dtype=torch.int32, device=device)
             bt_for_kernel = bt[:bsz].to(torch.int32).contiguous()
             dequantize_and_gather_k_cache(
                 out, pool_3d, seq_lens, None, bt_for_kernel, eb, 0
@@ -2027,9 +2021,7 @@ class Attention(nn.Module):
                 indices_fp8 = (
                     attn_metadata.swa_abs_idx[:bsz].to(torch.int32).contiguous()
                 )
-                cache_seqlens_fp8 = (attn_metadata.start_pos[:bsz] + 1).to(
-                    torch.int32
-                )
+                cache_seqlens_fp8 = (attn_metadata.start_pos[:bsz] + 1).to(torch.int32)
                 o = fp8_sparse_op.forward(
                     q,
                     swa_view_3d_fp8,
@@ -2582,14 +2574,9 @@ class Attention(nn.Module):
                     and self._kv_cache_is_fp8
                     and self.compress_ratio
                 ):
-                    from rtp_llm.models_py.modules.dsv4.attn_type import (
-                        CSA_KV,
-                        HCA_KV,
-                    )
+                    from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV
 
-                    _fp8_cmp_at = (
-                        CSA_KV if self.compress_ratio == 4 else HCA_KV
-                    )
+                    _fp8_cmp_at = CSA_KV if self.compress_ratio == 4 else HCA_KV
                     cmp_write_start = sp_int // ratio
                     NB_total = (sp_int + seqlen) // ratio
                     NB_new = NB_total - cmp_write_start
@@ -2728,7 +2715,11 @@ class Attention(nn.Module):
 
                 _topk_idxs_i32 = topk_idxs.to(torch.int32)
                 topk_length = (
-                    (_topk_idxs_i32 >= 0).sum(dim=-1).reshape(-1).contiguous()
+                    (_topk_idxs_i32 >= 0)
+                    .sum(dim=-1)
+                    .to(torch.int32)
+                    .reshape(-1)
+                    .contiguous()
                 )
                 _B_TOPK = 128
                 _K = _topk_idxs_i32.shape[-1]
