@@ -115,12 +115,20 @@ _bootstrap_error = None
 # var that conftest sets at the END of its module-level code), eager
 # ops loading is safe and DESIRED for downstream import correctness.
 def _in_pytest_plugin_discovery() -> bool:
-    """True iff this import is happening during pytest's plugin discovery."""
+    """True iff this import is happening during pytest's plugin discovery.
+
+    conftest.py sets `sys._RTP_CONFTEST_DONE = True` (Python attribute, NOT
+    env var) at the end of its module-level slicing block. We use a Python-
+    level flag because env vars LEAK from the controller pytest into spawned
+    xdist workers — if the controller's conftest already ran (env var set),
+    the worker's plugin discovery would see the inherited env var and skip
+    the deferral, importing torch BEFORE the worker's own conftest runs.
+    sys._RTP_CONFTEST_DONE is process-local so each xdist worker correctly
+    sees False until its own conftest sets it.
+    """
     if "pytest" not in sys.modules:
         return False
-    # conftest.py sets this AFTER its top-level GPU-slicing block runs
-    # (and AFTER torch can be safely imported, since CVD is already set).
-    if os.environ.get("_RTP_CONFTEST_DONE"):
+    if getattr(sys, "_RTP_CONFTEST_DONE", False):
         return False
     return True
 

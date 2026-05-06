@@ -77,9 +77,15 @@ if _xdist_worker:
 # .ops stays deferred during plugin-discovery — but downstream test code
 # triggering arch → device → device_base → compute_ops → arch hits a
 # circular ImportError (run 39338093 smoke-light-sm8x tp2 reproduction).
-# Set unconditionally (outside the `if _xdist_worker` block) so non-xdist
-# pytest sessions (e.g. session-mode controller) also flip the flag.
-_os.environ["_RTP_CONFTEST_DONE"] = "1"
+#
+# CRITICAL: use sys attribute (process-local), NOT os.environ. Env vars
+# leak from the controller pytest into spawned xdist workers via fork/spawn
+# inheritance — if the controller's conftest set _RTP_CONFTEST_DONE in env,
+# each xdist worker's plugin discovery would inherit it and skip the
+# deferral, importing torch BEFORE the worker's own conftest runs. That's
+# exactly the bug run 39345025 ut-sm8x reproduced. sys attribute is per-
+# Python-process so each worker correctly starts with it unset.
+_sys._RTP_CONFTEST_DONE = True  # type: ignore[attr-defined]
 
 # ============================================================================
 # GPU isolation is handled by:
