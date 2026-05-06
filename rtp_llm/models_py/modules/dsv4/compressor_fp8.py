@@ -114,17 +114,20 @@ class CompressorFP8(PoolBackedModule):
         self.rotate = rotate
         coff = 1 + self.overlap
 
-        # ape stays FP32; wkv/wgate cast BF16 for tensor-core dispatch
-        # (matches BF16 ``Compressor`` ctor pattern).
-        self.ape = compressor_weights["ape"]
+        # ape / wkv / wgate stay FP32 — CompressorFP8._forward_prefill_body
+        # accumulates in FP32 for the (kv * softmax(score)).sum reduction
+        # before the FP8 quant write. (BF16 ``Compressor`` casts wkv/wgate
+        # to BF16 because its body keeps the partials in BF16; FP8 path
+        # diverges here.)
+        self.ape = compressor_weights["ape"].float()
         self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
         self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
         with torch.no_grad():
             self.wkv.weight = nn.Parameter(
-                compressor_weights["wkv"].to(torch.bfloat16), requires_grad=False
+                compressor_weights["wkv"].float(), requires_grad=False
             )
             self.wgate.weight = nn.Parameter(
-                compressor_weights["wgate"].to(torch.bfloat16), requires_grad=False
+                compressor_weights["wgate"].float(), requires_grad=False
             )
         self.norm = _CompressorNorm(head_dim)
         self.norm.weight = nn.Parameter(

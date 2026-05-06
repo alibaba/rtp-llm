@@ -875,7 +875,53 @@ class Attention(nn.Module):
         raw_u8 = base.view(torch.uint8)
         if raw_u8.shape[1] < useful_bytes:
             return None
+        # FP8 pools may have C++-side TMA padding (stride_bytes >
+        # useful_bytes), making the slice non-viewable. Callers that
+        # need this layout must use ``_pool_view_3d_fp8`` instead.
+        if vec_dtype == torch.uint8 and stride_bytes > useful_bytes:
+            return None
         return raw_u8[:, :useful_bytes].view(vec_dtype).view(-1, vec_dim)
+
+    def _pool_view_3d_fp8(
+        self, attn_type: int
+    ) -> Optional[torch.Tensor]:
+        """Return ``[num_blocks, eb, ENTRY_BYTES]`` uint8 view of an FP8 KV
+        pool, respecting C++-side TMA padding (per-block stride may exceed
+        ``eb * ENTRY_BYTES``). The flat 2D form ``_pool_view`` returns is
+        invalid here because the slice it produces is non-contiguous and
+        can't be ``.view()``'d through the dtype/shape chain.
+        """
+        if self._kv_cache is None:
+            return None
+        spec = self._pool_spec.get(attn_type)
+        if spec is None:
+            return None
+        attn_type_enum = _ATTN_TYPE_ENUM_BY_INT.get(attn_type)
+        if attn_type_enum is None:
+            return None
+        try:
+            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_enum)
+        except RuntimeError:
+            return None
+        base = layer_kv.kv_cache_base
+        if base is None or base.numel() == 0 or base.dim() != 2:
+            return None
+        vec_dtype, vec_dim = spec
+        if vec_dtype != torch.uint8:
+            return None
+        stride_bytes = int(base.shape[1]) * int(base.element_size())
+        bytes_per_entry = vec_dim
+        if bytes_per_entry <= 0 or stride_bytes < bytes_per_entry:
+            return None
+        eb = stride_bytes // bytes_per_entry
+        raw_u8 = base.view(torch.uint8)
+        num_blocks = int(raw_u8.shape[0])
+        # as_strided: dim-0 stride = stride_bytes (jump over per-block
+        # padding); dim-1 stride = bytes_per_entry; dim-2 stride = 1.
+        return raw_u8.as_strided(
+            (num_blocks, eb, bytes_per_entry),
+            (stride_bytes, bytes_per_entry, 1),
+        )
 
     def _pool_entries_per_block(self, attn_type: int) -> int:
         """Derive ``entries_per_block`` from the framework pool tensor for
@@ -1056,10 +1102,19 @@ class Attention(nn.Module):
         bt = self._block_tables_by_type.get(SWA_KV)
         if bt is None or bt.numel() == 0:
             return
-        pool_view = self._pool_view(SWA_KV)
         eb = self._pool_entries_per_block(SWA_KV)
-        if pool_view is None or eb <= 0:
+        if eb <= 0:
             return
+        # FP8 SWA pool uses TMA per-block padding which makes the 2D
+        # ``_pool_view`` slice non-viewable (RuntimeError). Skip the 2D
+        # view for FP8; the FP8 write branch below uses a 3D as_strided
+        # view directly. BF16 path keeps the existing 2D view contract.
+        if self._kv_cache_is_fp8:
+            pool_view = None
+        else:
+            pool_view = self._pool_view(SWA_KV)
+            if pool_view is None:
+                return
 
         max_seqlen = int(kv_full.shape[1])
         if max_seqlen == 0:
@@ -1126,7 +1181,22 @@ class Attention(nn.Module):
         source = torch.gather(kv_full[:bsz], 1, gather_idx)  # [B, max_n_write, D]
         source_flat = source.reshape(bsz * max_n_write, self.head_dim)
         slot_mapping = slot.reshape(-1)
-        write_kv_to_pool(source_flat, slot_mapping, pool_view, mask_negative=True)
+        if self._kv_cache_is_fp8:
+            # FP8 SWA pool: 584B per slot (fp8 NoPE 448 + bf16 RoPE 128 +
+            # ue8m0 scale 8). 3D view honoring TMA per-block padding.
+            from rtp_llm.models_py.modules.dsv4._swa_fp8_kv_insert_triton import (
+                quantize_and_insert_k_cache,
+            )
+
+            pool_3d = self._pool_view_3d_fp8(SWA_KV)
+            assert (
+                pool_3d is not None
+            ), "FP8 SWA pool view unavailable in _prefill_write_swa_to_pool"
+            quantize_and_insert_k_cache(
+                source_flat.to(torch.bfloat16), pool_3d, slot_mapping
+            )
+        else:
+            write_kv_to_pool(source_flat, slot_mapping, pool_view, mask_negative=True)
 
     def _prefill_read_swa_from_pool(
         self,
@@ -1327,7 +1397,14 @@ class Attention(nn.Module):
                 kv_at, state_at = HCA_KV, HCA_STATE
             else:
                 kv_at, state_at = None, None
-            kv_view = self._pool_view(kv_at) if kv_at is not None else None
+            # FP8 KV pool has TMA per-block padding which the flat 2D
+            # ``_pool_view`` cannot represent; use the 3D as_strided form
+            # instead. CompressorFP8 stores whatever shape it receives
+            # in ``_kv_pool_view`` and dispatches via ``_pool_view_3d``.
+            if kv_at is not None and self._kv_cache_is_fp8:
+                kv_view = self._pool_view_3d_fp8(kv_at)
+            else:
+                kv_view = self._pool_view(kv_at) if kv_at is not None else None
             kv_bt = (
                 bt_by_type.get(kv_at)
                 if (bt_by_type is not None and kv_at is not None)
@@ -1348,7 +1425,10 @@ class Attention(nn.Module):
             )
 
         if self.indexer is not None:
-            kv_view = self._pool_view(INDEXER_KV)
+            if self._kv_cache_is_fp8:
+                kv_view = self._pool_view_3d_fp8(INDEXER_KV)
+            else:
+                kv_view = self._pool_view(INDEXER_KV)
             kv_bt = bt_by_type.get(INDEXER_KV) if bt_by_type is not None else None
             kv_eb = self._pool_entries_per_block(INDEXER_KV)
             state_view = self._pool_view(INDEXER_STATE)
@@ -1394,12 +1474,47 @@ class Attention(nn.Module):
         bt = self._block_tables_by_type.get(attn_type)
         if bt is None or bt.numel() == 0 or T == 0:
             return None
-        pool_view = self._pool_view(attn_type)
         eb = self._pool_entries_per_block(attn_type)
-        if pool_view is None or eb <= 0:
+        if eb <= 0:
+            return None
+
+        # FP8 KV pool: dequantize on read. The 584B per-slot layout
+        # matches vLLM's fp8_ds_mla scheme so we route the [0, T) prefix
+        # through ``dequantize_and_gather_k_cache`` (gather_lens=T,
+        # seq_lens=T, offset=0 ⇒ writes out[:, 0:T, :] bf16). The
+        # zero-row sentinel logic the BF16 path uses for unallocated
+        # blocks is replaced by the kernel reading whatever physical
+        # block_id maps to — caller must pass T ≤ what was written.
+        if self._kv_cache_is_fp8:
+            pool_3d = self._pool_view_3d_fp8(attn_type)
+            if pool_3d is None or pool_3d.shape[-1] != _DSV4_FP8_KV_ENTRY_BYTES:
+                return None
+            from rtp_llm.models_py.modules.dsv4._swa_fp8_dequant_triton import (
+                dequantize_and_gather_k_cache,
+            )
+
+            HD_DEQUANT = 512
+            assert dtype == torch.bfloat16, (
+                f"FP8 pool read returns bf16; got requested dtype={dtype}"
+            )
+            out = torch.zeros(
+                (bsz, T, HD_DEQUANT), dtype=torch.bfloat16, device=device
+            )
+            seq_lens = torch.full(
+                (bsz,), T, dtype=torch.int32, device=device
+            )
+            bt_for_kernel = bt[:bsz].to(torch.int32).contiguous()
+            dequantize_and_gather_k_cache(
+                out, pool_3d, seq_lens, None, bt_for_kernel, eb, 0
+            )
+            return out
+
+        pool_view = self._pool_view(attn_type)
+        if pool_view is None:
             return None
         max_blocks = bt.shape[1]
         pool_capacity = max_blocks * eb
+
         pos = torch.arange(T, device=device, dtype=torch.long)  # [T]
         in_capacity_row = pos < pool_capacity  # [T]
         safe_pos = torch.where(in_capacity_row, pos, torch.zeros_like(pos))
@@ -2009,6 +2124,7 @@ class Attention(nn.Module):
         sequence_lengths=None,
         kv_cache: Optional[Any] = None,
         block_tables_by_type: Optional[Dict[int, torch.Tensor]] = None,
+        attn_inputs: Any = None,
     ) -> torch.Tensor:
         """qwen3-style: ``kv_cache`` (framework KVCache handle) and
         ``block_tables_by_type`` (per-request, per-attn_type block tables)
@@ -2067,21 +2183,6 @@ class Attention(nn.Module):
         is_batched_prefill = is_batched and seqlen > 1
         is_prefill_attn = is_batched_prefill or (not is_batched and seqlen > 1)
         cp_on = cp_ctx is not None and cp_ctx.cp_size > 1 and is_prefill_attn
-
-        # FP8 KV path post-rebase guard: ctor wires CompressorFP8 / IndexerFP8
-        # but the FP8 prefill forward (SWA quant write + CSA/HCA pool dequant
-        # for kv_cat, or flash_mla_sparse_fwd dispatch) was dropped in the
-        # rebase onto upstream's _forward_body structure (origin's independent
-        # restructure clashed with the original 5406e08d3 implementation).
-        # Fail loudly here rather than silently producing wrong output.
-        if self._kv_cache_is_fp8 and is_prefill_attn:
-            raise NotImplementedError(
-                "DSV4 FP8 KV prefill forward not yet rewired on upstream's "
-                "_forward_body (Phase 4 of the rebase). CompressorFP8 / "
-                "IndexerFP8 ctor dispatch is in place; SWA quant-write + "
-                "compressed-pool dequant + sparse_attn FP8 dispatch still "
-                "need to be ported from the dropped 5406e08d3 commit."
-            )
 
         # ``any_cont`` decides whether prefill attention reads the temporary
         # linear [current KV | current compressed KV] buffer (fresh prefill) or
@@ -2415,6 +2516,46 @@ class Attention(nn.Module):
                 kv_compress = self.compressor(
                     x, start_pos, sequence_lengths=sequence_lengths
                 )
+                # FP8 path: CompressorFP8 wrote the compressed K to the
+                # CSA/HCA pool itself and returns None. Materialize a bf16
+                # ``kv_compress`` for the BF16 sparse_attn dispatch by
+                # dequantizing the just-written suffix from the pool. Skip
+                # the BF16 ``_prefill_paged_write_kv_range`` below — the
+                # FP8 writer already populated the FP8 layout (a second
+                # bf16 write would corrupt the per-block striped scales).
+                _fp8_compressor_handled_pool_write = False
+                if (
+                    kv_compress is None
+                    and self._kv_cache_is_fp8
+                    and self.compress_ratio
+                ):
+                    from rtp_llm.models_py.modules.dsv4.attn_type import (
+                        CSA_KV,
+                        HCA_KV,
+                    )
+
+                    _fp8_cmp_at = (
+                        CSA_KV if self.compress_ratio == 4 else HCA_KV
+                    )
+                    cmp_write_start = sp_int // ratio
+                    NB_total = (sp_int + seqlen) // ratio
+                    NB_new = NB_total - cmp_write_start
+                    if NB_new > 0:
+                        # Read the entire [0, NB_total) range, then slice
+                        # the new suffix [cmp_write_start, NB_total).
+                        full_range = self._prefill_paged_read_kv(
+                            _fp8_cmp_at,
+                            bsz,
+                            NB_total,
+                            self.head_dim,
+                            torch.bfloat16,
+                            device,
+                        )
+                        if full_range is not None:
+                            kv_compress = full_range[
+                                :, cmp_write_start:NB_total, :
+                            ].contiguous()
+                            _fp8_compressor_handled_pool_write = True
                 if _dbg:
                     self.compressor._dbg_prefix = None
                     if kv_compress is not None:
@@ -2434,7 +2575,7 @@ class Attention(nn.Module):
 
                         cmp_at = HCA_KV
                     cmp_write_start = sp_int // ratio
-                    if cmp_at is not None:
+                    if cmp_at is not None and not _fp8_compressor_handled_pool_write:
                         self._prefill_paged_write_kv_range(
                             cmp_at, kv_compress, bsz, cmp_write_start
                         )
