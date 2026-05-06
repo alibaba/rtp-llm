@@ -43,9 +43,10 @@ except Exception:  # pragma: no cover — keep V4 importable without Triton
 
 
 def _use_compressor_fast() -> bool:
-    if not _COMPRESSOR_FAST_OK:
-        return False
-    return os.environ.get("DSV4_COMPRESSOR_FAST", "1") != "0"
+    enabled = os.environ.get("DSV4_COMPRESSOR_FAST", "1") != "0"
+    if enabled and not _COMPRESSOR_FAST_OK:
+        raise RuntimeError("DSV4 compressor fast path requires Triton compressor kernel")
+    return enabled
 
 
 class _CompressorNorm(nn.Module):
@@ -1434,7 +1435,12 @@ class Compressor(nn.Module):
             # + weighted sum.  REF chain materializes 3 fp32 intermediates
             # of size [B, NB, G, D] each (softmax exp/sum, masked mul,
             # then sum).  See _compressor_triton.py.
-            if _use_compressor_fast() and kv.is_cuda and kv.numel() > 0:
+            if _use_compressor_fast() and kv.numel() > 0:
+                if not kv.is_cuda:
+                    raise RuntimeError(
+                        "DSV4 compressor fast path requires CUDA tensors by default; "
+                        f"got device={kv.device}"
+                    )
                 kv_c = kv if kv.is_contiguous() else kv.contiguous()
                 sc_c = score if score.is_contiguous() else score.contiguous()
                 kv = v4_compressor_pool(kv_c, sc_c)
