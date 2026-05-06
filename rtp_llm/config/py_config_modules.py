@@ -11,6 +11,7 @@ from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
     ConcurrencyConfig,
+    DashScGrpcConfig,
     DeviceResourceConfig,
     EPLBConfig,
     FfnDisAggregateConfig,
@@ -36,12 +37,12 @@ print(f"import rtp_llm.ops took {consume_s:.2f}s")
 
 DEFAULT_START_PORT = 8088
 COORDINATOR_INFO_PORT_NUM = 11
-MIN_WORKER_INFO_PORT_NUM = 8
+MIN_WORKER_INFO_PORT_NUM = 9
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 
 
 class ServerConfig:
-    """Port layout : base = start_port + rank_id * worker_info_port_num, then +0..+7."""
+    """Port layout : base = start_port + rank_id * worker_info_port_num, then +0..+8."""
 
     def __init__(self):
         self.frontend_server_count = 4
@@ -84,6 +85,11 @@ class ServerConfig:
     def embedding_rpc_server_port(self) -> int:
         return self._server_base() + 7
 
+    @property
+    def dash_sc_grpc_server_port(self) -> int:
+        """DashSc gRPC listen port (ModelStreamInfer, wire: predict_v2.proto); base + 8."""
+        return self._server_base() + 8
+
     def set_local_rank(self, local_rank: int):
         """Update rank_id in place; server_port-related properties reflect new values."""
         self.rank_id = local_rank
@@ -106,7 +112,8 @@ class ServerConfig:
             f"cache_store_listen_port: {self.cache_store_listen_port}\n"
             f"cache_store_rdma_listen_port: {self.cache_store_rdma_listen_port}\n"
             f"http_port: {self.http_port}\n"
-            f"embedding_rpc_server_port: {self.embedding_rpc_server_port}"
+            f"embedding_rpc_server_port: {self.embedding_rpc_server_port}\n"
+            f"dash_sc_grpc_server_port: {self.dash_sc_grpc_server_port}"
         )
 
 
@@ -447,6 +454,7 @@ class PyEnvConfigs:
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()
         self.grpc_config = GrpcConfig()
+        self.dash_sc_grpc_config = DashScGrpcConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
 
@@ -498,5 +506,6 @@ class PyEnvConfigs:
             + self.runtime_config.fifo_scheduler_config.to_string()
             + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
+            "[dash_sc_grpc_config]\n" + self.dash_sc_grpc_config.to_string() + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )
