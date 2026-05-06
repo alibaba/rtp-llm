@@ -39,6 +39,8 @@ import os
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.indexer_topk import select_indexer_topk
+
 try:
     import deep_gemm
 except Exception:  # pragma: no cover - non-cuda env
@@ -192,32 +194,16 @@ class IndexerDecodeV4Op:
             compress_ratio=1,
         )
 
-        # Mask t >= compressed_len_per_req[b] to -inf.
-        t_range = torch.arange(T_max, device=device, dtype=torch.int32)
-        valid = t_range.view(1, 1, T_max) < compressed_len_per_req.view(B, 1, 1).to(
-            torch.int32
-        )
-        score = torch.where(valid, score, torch.full_like(score, float("-inf")))
-
         # topk; if K > T_max we still pick top-T_max valid then -1-pad.
         k_eff = min(self.index_topk, T_max)
-        idxs = score.topk(k_eff, dim=-1).indices.to(torch.int32)
-        if k_eff < self.index_topk:
-            pad = torch.full(
-                (B, q_len, self.index_topk - k_eff),
-                -1,
-                dtype=torch.int32,
-                device=device,
-            )
+        idxs = select_indexer_topk(
+            score,
+            self.index_topk,
+            lengths=compressed_len_per_req.view(B, 1).expand(B, q_len).reshape(-1),
+        )
+        if k_eff < self.index_topk and idxs.shape[-1] != self.index_topk:
+            pad = torch.full((B, q_len, self.index_topk - k_eff), -1, dtype=torch.int32, device=device)
             idxs = torch.cat([idxs, pad], dim=-1)
-
-        # Mask out-of-range topk slots (when valid count < K) to -1 so
-        # downstream sparse_attn skips them. A row with `valid_count < K`
-        # produced argmax over -inf entries which got valid index but
-        # corresponds to an invalid t. Safer to mask: any idx >= valid
-        # length is invalid.
-        cmp_len_b = compressed_len_per_req.view(B, 1, 1).to(torch.int32)
-        idxs = torch.where(idxs < cmp_len_b, idxs, torch.full_like(idxs, -1))
 
         out_buffer.copy_(idxs)
         return out_buffer
@@ -374,24 +360,11 @@ class IndexerDecodeV4Op:
 
         # ---- TopK + length mask ---------------------------------------
         logits = logits.view(B, q_len, max_seq_len)
-        t_range = torch.arange(max_seq_len, device=device, dtype=torch.int32)
-        valid = t_range.view(1, 1, max_seq_len) < compressed_len_per_req.view(
-            B, 1, 1
-        ).to(torch.int32)
-        logits = torch.where(valid, logits, torch.full_like(logits, float("-inf")))
-
-        k_eff = min(self.index_topk, max_seq_len)
-        idxs = logits.topk(k_eff, dim=-1).indices.to(torch.int32)
-        if k_eff < self.index_topk:
-            pad = torch.full(
-                (B, q_len, self.index_topk - k_eff),
-                -1,
-                dtype=torch.int32,
-                device=device,
-            )
-            idxs = torch.cat([idxs, pad], dim=-1)
-        cmp_len_b = compressed_len_per_req.view(B, 1, 1).to(torch.int32)
-        idxs = torch.where(idxs < cmp_len_b, idxs, torch.full_like(idxs, -1))
+        idxs = select_indexer_topk(
+            logits,
+            self.index_topk,
+            lengths=compressed_len_per_req.view(B, 1).expand(B, q_len).reshape(-1),
+        )
 
         out_buffer.copy_(idxs)
         return out_buffer

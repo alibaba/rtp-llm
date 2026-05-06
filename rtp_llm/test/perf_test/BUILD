@@ -144,6 +144,7 @@ py_test(
     ],
     env = {
         "LOAD_PYTHON_MODEL": "1",
+        "LOCAL_WORLD_SIZE": "4",
         "ENABLE_FMHA": "on",
         "DG_JIT_CPP_STANDARD": "20",
         "DETERMINISTIC_GEMM": "1",
@@ -203,6 +204,7 @@ py_test(
     ],
     env = {
         "LOAD_PYTHON_MODEL": "1",
+        "LOCAL_WORLD_SIZE": "4",
         "ENABLE_FMHA": "on",
         "DG_JIT_CPP_STANDARD": "20",
         "DETERMINISTIC_GEMM": "1",
@@ -259,6 +261,7 @@ py_test(
     ],
     env = {
         "LOAD_PYTHON_MODEL": "1",
+        "LOCAL_WORLD_SIZE": "4",
         "ENABLE_FMHA": "on",
         "DG_JIT_CPP_STANDARD": "20",
         "DETERMINISTIC_GEMM": "1",

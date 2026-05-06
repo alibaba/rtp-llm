@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4._metadata_triton import build_pool_slots
-from rtp_llm.models_py.modules.dsv4._nvtx import nvtx_range
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     cp_all_gather_full_async,
@@ -363,7 +363,7 @@ class Compressor(nn.Module):
         bsz = int(kv_state.shape[0])
         T = int(kv_state.shape[1])
         device = kv_state.device
-        with nvtx_range("dsv4.compressor.write_state_blocks"):
+        with record_function_range("dsv4.compressor.write_state_blocks"):
             valid, safe_slot = self._compute_logical_state_pool_slots(
                 bsz, T, block_indices, self._state_block_table, self._state_eb, device
             )
@@ -402,13 +402,13 @@ class Compressor(nn.Module):
         block_tokens = self._tokens_per_pool_block()
         if block_tokens <= 0:
             return
-        with nvtx_range("dsv4.compressor.remember_boundary_state"):
+        with record_function_range("dsv4.compressor.remember_boundary_state"):
             first_block = (sp_int + block_tokens - 1) // block_tokens
             last_block = (sp_int + seqlen - 1) // block_tokens
             max_cols = int(self._state_block_table.shape[1])
             ratio = self.compress_ratio
 
-            with nvtx_range("dsv4.compressor.boundary_state_build"):
+            with record_function_range("dsv4.compressor.boundary_state_build"):
                 device = kv.device
                 valid_start = max(
                     first_block,
@@ -455,7 +455,7 @@ class Compressor(nn.Module):
                 kv_state[:, :, :ratio] = kv_rows
                 score_state[:, :, :ratio] = score_rows + self.ape
 
-            with nvtx_range("dsv4.compressor.boundary_state_write"):
+            with record_function_range("dsv4.compressor.boundary_state_write"):
                 bt_long = self._state_block_table[:bsz].to(
                     device=device, dtype=torch.long
                 )
@@ -502,7 +502,7 @@ class Compressor(nn.Module):
             or self._state_block_table is None
             or self._state_eb <= 0
         ):
-            with nvtx_range("dsv4.compressor.bind_state_init"):
+            with record_function_range("dsv4.compressor.bind_state_init"):
                 self.kv_state = torch.zeros(
                     bsz, T, half_dim, dtype=torch.float32, device=device
                 )
@@ -513,7 +513,7 @@ class Compressor(nn.Module):
                     device=device,
                 )
             return
-        with nvtx_range("dsv4.compressor.bind_state_pool"):
+        with record_function_range("dsv4.compressor.bind_state_pool"):
             if start_pos is not None and self._state_eb >= T:
                 block_indices = self._state_read_block_indices(start_pos, bsz, device)
                 valid, safe_slot = self._compute_logical_state_pool_slots(
@@ -538,7 +538,7 @@ class Compressor(nn.Module):
             _rt.record_if_level(
                 2, f"{self._dbg_prefix}_state_bind_valid", valid.to(torch.int32)
             )
-        with nvtx_range("dsv4.compressor.bind_state_gather"):
+        with record_function_range("dsv4.compressor.bind_state_gather"):
             gathered = self._state_pool_view.index_select(
                 0, safe_slot.reshape(-1)
             )  # [B*T, 2*half]
@@ -566,7 +566,7 @@ class Compressor(nn.Module):
             return
         device = self.kv_state.device
         T = self._state_rows
-        with nvtx_range("dsv4.compressor.scatter_state_slot_meta"):
+        with record_function_range("dsv4.compressor.scatter_state_slot_meta"):
             if end_pos is not None and self._state_eb >= T:
                 block_indices = self._state_write_block_indices(end_pos, bsz, device)
                 valid, safe_slot = self._compute_logical_state_pool_slots(
@@ -596,7 +596,7 @@ class Compressor(nn.Module):
                 f"{self._dbg_prefix}_state_score_before_scatter",
                 self.score_state[:bsz],
             )
-        with nvtx_range("dsv4.compressor.scatter_state_write"):
+        with record_function_range("dsv4.compressor.scatter_state_write"):
             merged = torch.cat(
                 [self.kv_state[:bsz], self.score_state[:bsz]], dim=-1
             )  # [B, T, 2*half]
@@ -664,7 +664,7 @@ class Compressor(nn.Module):
             _rt.record_if_level(
                 2, f"{self._dbg_prefix}_kv_bind_valid", valid.to(torch.int32)
             )
-        with nvtx_range("dsv4.compressor.pool_bind_kv"):
+        with record_function_range("dsv4.compressor.pool_bind_kv"):
             from rtp_llm.models_py.modules.dsv4._pool_triton import (
                 masked_gather_from_pool,
             )
@@ -709,7 +709,7 @@ class Compressor(nn.Module):
             return
         device = self.kv_cache.device
         T = int(self.kv_cache.shape[1])
-        with nvtx_range("dsv4.compressor.scatter_kv_slot_meta"):
+        with record_function_range("dsv4.compressor.scatter_kv_slot_meta"):
             valid, safe_slot = self._compute_pool_slots(
                 bsz, T, self._kv_block_table, self._kv_eb, device
             )
@@ -725,7 +725,7 @@ class Compressor(nn.Module):
             _rt.record_if_level(
                 2, f"{self._dbg_prefix}_kv_before_scatter", self.kv_cache[:bsz]
             )
-        with nvtx_range("dsv4.compressor.scatter_kv_slot_mapping"):
+        with record_function_range("dsv4.compressor.scatter_kv_slot_mapping"):
             slot_mapping = torch.where(
                 valid, safe_slot, torch.full_like(safe_slot, -1)
             ).reshape(-1)
@@ -735,7 +735,7 @@ class Compressor(nn.Module):
             write_kv_to_pool,
         )
 
-        with nvtx_range("dsv4.compressor.pool_scatter_kv"):
+        with record_function_range("dsv4.compressor.pool_scatter_kv"):
             write_kv_to_pool(flat, slot_mapping, self._kv_pool_view, mask_negative=True)
 
     def _rmsnorm(self, x: torch.Tensor) -> torch.Tensor:
@@ -754,7 +754,7 @@ class Compressor(nn.Module):
 
     def _overlap_transform(self, tensor: torch.Tensor, value=0):
         # tensor: [b,s,r,2d] -> [b,s,2r,d]; first ratio rows pull from previous window's tail
-        with nvtx_range("dsv4.compressor.overlap_transform"):
+        with record_function_range("dsv4.compressor.overlap_transform"):
             b, s, _, _ = tensor.size()
             ratio, d = self.compress_ratio, self.head_dim
             new_tensor = tensor.new_full((b, s, 2 * ratio, d), value)
@@ -1241,9 +1241,9 @@ class Compressor(nn.Module):
         x_bf = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
         # Full-sequence BF16 projections. The removed abs256 chunking created
         # thousands of small GEMM launches in long CP prefill.
-        with nvtx_range("dsv4.compressor.linear_kv_full"):
+        with record_function_range("dsv4.compressor.linear_kv_full"):
             kv = torch.nn.functional.linear(x_bf, self.wkv).float()
-        with nvtx_range("dsv4.compressor.linear_score_full"):
+        with record_function_range("dsv4.compressor.linear_score_full"):
             score = torch.nn.functional.linear(x_bf, self.wgate).float()
         if _dbg is not None:
             _rt.record_if_level(2, f"{_dbg}_x_in", x)
