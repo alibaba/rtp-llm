@@ -19,6 +19,7 @@ from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
+from rtp_llm.models_py.modules.dsv4.hc import build_hc_head
 
 
 @dataclass
@@ -161,12 +162,9 @@ class V4Transformer(nn.Module):
         super().__init__()
         self.args = args
         self.max_seq_len = args.max_seq_len
-        self.norm_eps = args.norm_eps
-        self.hc_eps = args.hc_eps
         self.hc_mult = args.hc_mult
 
         from rtp_llm.utils.model_weight import W
-        from rtp_llm.models_py.modules.dsv4.block import _maybe_squeeze_hc_1d
 
         gw = mw.global_weights
         # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
@@ -197,11 +195,16 @@ class V4Transformer(nn.Module):
         # ``F.linear`` in forward.  head.weight ships as bf16 (descriptor
         # data_type=bf16, see ``rtp_llm/models/deepseek_v4.py`` for the
         # loader-RAM rationale); cast to fp32 ParallelHead here.
-        hc_dim = args.hc_mult * args.dim
         self.head_weight = gw[W.lm_head].float()
-        self.hc_head_fn = gw[W.v4_hc_head_fn]
-        self.hc_head_base = gw[W.v4_hc_head_base]
-        self.hc_head_scale = _maybe_squeeze_hc_1d(gw[W.v4_hc_head_scale])
+        self.head_hc = build_hc_head(
+            gw[W.v4_hc_head_fn],
+            gw[W.v4_hc_head_base],
+            gw[W.v4_hc_head_scale],
+            dim=args.dim,
+            hc_mult=args.hc_mult,
+            norm_eps=args.norm_eps,
+            hc_eps=args.hc_eps,
+        )
 
         self._dbg_step = 0
 
@@ -233,59 +236,8 @@ class V4Transformer(nn.Module):
                     ic.set_cp_ctx(cp_ctx)
 
     def _hc_head_reduce(self, x: torch.Tensor) -> torch.Tensor:
-        """Reduce the hc axis.  Accepts ``[B, S, hc, d] -> [B, S, d]`` or
-        the flat ``[T, hc, d] -> [T, d]`` layout that vLLM uses.  Uses
-        ``dim=-2`` / ``flatten(-2)`` so both shapes go through the same
-        code path; TK is gated on 4D and wraps 3D via unsqueeze/squeeze
-        so the fast path stays available after the forward_layers shim
-        is removed."""
-        from rtp_llm.models_py.modules.dsv4._mhc_tilelang import tk_mhc_head
-
-        if x.dim() != 3:
-            tk_y = tk_mhc_head(
-                x,
-                self.hc_head_fn,
-                self.hc_head_scale,
-                self.hc_head_base,
-                norm_eps=self.norm_eps,
-                pre_eps=self.hc_eps,
-                hc_mult=self.hc_mult,
-            )
-            if tk_y is not None:
-                return tk_y
-        shape, dtype = x.size(), x.dtype
-        x_flat = x.flatten(-2).float()  # [..., hc*d]
-        rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
-        positions = getattr(self, "_hc_head_positions", None)
-        if (
-            x.dim() == 3
-            and positions is not None
-            and positions.numel() == x_flat.shape[0]
-        ):
-            pos = positions.to(device=x_flat.device, dtype=torch.long)
-            block = pos // 256
-            mixes_linear = torch.empty(
-                x_flat.shape[0],
-                self.hc_head_fn.shape[0],
-                dtype=x_flat.dtype,
-                device=x_flat.device,
-            )
-            start = 0
-            while start < x_flat.shape[0]:
-                cur = block[start]
-                end = start + 1
-                while end < x_flat.shape[0] and bool((block[end] == cur).item()):
-                    end += 1
-                mixes_linear[start:end] = F.linear(x_flat[start:end], self.hc_head_fn)
-                start = end
-        else:
-            mixes_linear = F.linear(x_flat, self.hc_head_fn)
-        mixes = mixes_linear * rsqrt
-        pre = (
-            torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
-        )
-        y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=-2)
-        return y.to(dtype)
+        """Reduce the hc axis for ``[B, S, hc, d]`` or flat ``[T, hc, d]``."""
+        return self.head_hc.head(x)
 
     @torch.inference_mode()
     def forward_decode(

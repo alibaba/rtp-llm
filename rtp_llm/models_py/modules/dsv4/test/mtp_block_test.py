@@ -80,19 +80,19 @@ class TestMTPBlockForward(unittest.TestCase):
         # Force hc params + norms back to fp32 — MTPBlock defaults to
         # float32 Parameters for those, but `.to(bfloat16)` above cast
         # them.  Reset to match real-ckpt layout.
-        for name in (
-            "hc_attn_fn",
-            "hc_attn_base",
-            "hc_attn_scale",
-            "hc_ffn_fn",
-            "hc_ffn_base",
-            "hc_ffn_scale",
-            "hc_head_fn",
-            "hc_head_base",
-            "hc_head_scale",
+        for obj, name in (
+            (mtp.attn_hc, "fn"),
+            (mtp.attn_hc, "base"),
+            (mtp.attn_hc, "scale"),
+            (mtp.ffn_hc, "fn"),
+            (mtp.ffn_hc, "base"),
+            (mtp.ffn_hc, "scale"),
+            (mtp.head_hc, "fn"),
+            (mtp.head_hc, "base"),
+            (mtp.head_hc, "scale"),
         ):
-            p = getattr(mtp, name)
-            setattr(mtp, name, nn.Parameter(p.float(), requires_grad=False))
+            p = getattr(obj, name)
+            setattr(obj, name, nn.Parameter(p.float(), requires_grad=False))
         # ``_RMSNorm`` uses the framework C++ ``rtp_llm_ops.rmsnorm`` which
         # needs bf16 weight (vLLM-aligned); leave these as bf16 after the
         # model-level ``.to(bfloat16)`` cast above.

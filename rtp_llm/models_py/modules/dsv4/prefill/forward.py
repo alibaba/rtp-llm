@@ -267,9 +267,7 @@ def forward_layers(
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.
-    v4._hc_head_positions = positions
     h = v4._hc_head_reduce(h)  # [T, dim]
-    v4._hc_head_positions = None
     if _rt_on:
         _rt.record("prefill_hc_reduced", h)
     h = v4.norm(h)  # [T, dim]

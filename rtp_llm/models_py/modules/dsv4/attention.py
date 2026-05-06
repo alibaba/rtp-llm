@@ -44,8 +44,9 @@ from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsn
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
-    cp_all_gather_full,
+    cp_all_gather_full_async,
     cp_freqs_cis_local,
+    cp_wait_gather_full,
 )
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
 from rtp_llm.models_py.modules.dsv4.qlinear import (
@@ -902,10 +903,10 @@ class Attention(nn.Module):
         safe_pos = torch.where(in_capacity_row, pos, torch.zeros_like(pos))
         block_in_seq = safe_pos // eb  # [T]
         in_block = safe_pos % eb  # [T]
-        bt_long = bt.to(torch.long)
-        # Double-axis gather: block_id[b, t] = bt_long[b, block_in_seq[t]].
-        b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)  # [B,1]
-        block_id = bt_long[:bsz][b_idx, block_in_seq.unsqueeze(0)]  # [B, T]
+        bt_long = bt[:bsz].to(device=device, dtype=torch.long)
+        block_id = bt_long.gather(
+            1, block_in_seq.unsqueeze(0).expand(bsz, -1)
+        )  # [B, T]
         in_capacity = in_capacity_row.unsqueeze(0).expand(bsz, -1)  # [B, T]
         # Mirror ``_scatter_kv_pool``'s ``if bid <= 0: continue`` sentinel:
         # unallocated blocks (bid <= 0) and over-capacity rows both → -1.
@@ -952,8 +953,7 @@ class Attention(nn.Module):
             in_capacity, block_in_seq, torch.zeros_like(block_in_seq)
         )
         bt_long = bt[:bsz].to(device=device, dtype=torch.long)
-        b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
-        block_id = bt_long[b_idx, safe_block.unsqueeze(0).expand(bsz, -1)]
+        block_id = bt_long.gather(1, safe_block.unsqueeze(0).expand(bsz, -1))
         valid = in_capacity.unsqueeze(0) & (block_id > 0)
         slot_per = torch.where(
             valid,
@@ -1042,7 +1042,7 @@ class Attention(nn.Module):
         # the full request tail physical blocks populated, not just the final
         # ``window_size`` rows.
         n_write_per_row = seq_t  # [B]
-        max_n_write = int(n_write_per_row.max().item()) if bsz > 0 else 0
+        max_n_write = max_seqlen
         if max_n_write == 0:
             return
 
@@ -1053,25 +1053,19 @@ class Attention(nn.Module):
         global_pos = sp_t.unsqueeze(1) + j.unsqueeze(0)  # [B, max_n_write]
         block_in_seq = global_pos // eb
         in_block = global_pos % eb
-        bt_long = bt.to(torch.long)
+        bt_long = bt[:bsz].to(device=device, dtype=torch.long)
         in_capacity = block_in_seq < max_blocks
         safe_in_seq = torch.where(
             in_capacity, block_in_seq, torch.zeros_like(block_in_seq)
         )
-        b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)  # [B,1]
-        block_id = bt_long[:bsz][b_idx, safe_in_seq]  # [B, max_n_write]
+        block_id = bt_long.gather(1, safe_in_seq)  # [B, max_n_write]
         valid = (block_id > 0) & in_capacity & row_valid
         slot = torch.where(
             valid, block_id * eb + in_block, torch.full_like(in_block, -1)
         )
 
-        # Gather source rows: src[b, j] = kv_full[b, j].
-        src_pos = j.unsqueeze(0).expand(bsz, -1)  # [B, max_n_write]
-        # Clamp to [0, max_seqlen-1] for safe gather; invalid positions are
-        # masked by slot == -1 so the gathered value doesn't matter.
-        src_pos_safe = src_pos.clamp(min=0, max=max(max_seqlen - 1, 0))
-        gather_idx = src_pos_safe.unsqueeze(-1).expand(-1, -1, self.head_dim)
-        source = torch.gather(kv_full[:bsz], 1, gather_idx)  # [B, max_n_write, D]
+        # Source rows are already dense request-major: src[b, j] = kv_full[b, j].
+        source = kv_full[:bsz, :max_n_write]
         source_flat = source.reshape(bsz * max_n_write, self.head_dim)
         slot_mapping = slot.reshape(-1)
         write_kv_to_pool(source_flat, slot_mapping, pool_view, mask_negative=True)
@@ -1140,20 +1134,24 @@ class Attention(nn.Module):
         safe_block = torch.where(
             in_capacity, block_in_seq, torch.zeros_like(block_in_seq)
         )
-        bt_long = bt.to(torch.long)
-        b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
-        block_id = bt_long[:bsz][b_idx, safe_block]
+        bt_long = bt[:bsz].to(device=device, dtype=torch.long)
+        block_id = bt_long.gather(1, safe_block)
         valid = valid_pos & in_capacity & (block_id > 0)
         safe_slot = torch.where(
             valid, block_id * eb + in_block, torch.zeros_like(block_id)
         )
 
-        gathered = pool_view.index_select(0, safe_slot.reshape(-1))
-        if gathered.dtype != dtype:
-            gathered = gathered.to(dtype)
-        zero_row = torch.zeros((), dtype=dtype, device=device)
-        out = torch.where(valid.reshape(-1).unsqueeze(-1), gathered, zero_row)
-        return out.view(bsz, win, self.head_dim).contiguous()
+        from rtp_llm.models_py.modules.dsv4._pool_triton import (
+            masked_gather_from_pool,
+        )
+
+        return masked_gather_from_pool(
+            pool_view,
+            safe_slot,
+            valid,
+            out_shape=(bsz, win, self.head_dim),
+            dtype=dtype,
+        )
 
     def _prefill_read_swa_dense_abs_from_pool(
         self,
@@ -1208,8 +1206,7 @@ class Attention(nn.Module):
             in_capacity_row, block_in_seq, torch.zeros_like(block_in_seq)
         )
         bt_long = bt[:bsz].to(device=device, dtype=torch.long)
-        b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
-        block_id = bt_long[b_idx, safe_block.unsqueeze(0).expand(bsz, -1)]
+        block_id = bt_long.gather(1, safe_block.unsqueeze(0).expand(bsz, -1))
         valid = in_capacity_row.unsqueeze(0) & (block_id > 0)
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
@@ -1231,23 +1228,35 @@ class Attention(nn.Module):
             valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
         )
 
-        gathered = pool_view.index_select(0, safe_slot.reshape(-1))
-        if gathered.dtype != dtype:
-            gathered = gathered.to(dtype)
-        zero_row = torch.zeros((), dtype=dtype, device=device)
-        out = torch.where(valid.reshape(-1).unsqueeze(-1), gathered, zero_row)
-        out = out.view(bsz, dense_len, self.head_dim).contiguous()
-        for b in range(bsz):
-            sp_b = int(sp_t[b].item())
-            seq_b = int(seq_t[b].item())
-            if current_kv_full is not None and seq_b > 0 and sp_b < dense_len:
-                dst_end = min(sp_b + seq_b, dense_len)
-                copy_len = dst_end - sp_b
-                if copy_len > 0:
-                    src = current_kv_full[b, :copy_len]
-                    if src.dtype != dtype:
-                        src = src.to(dtype)
-                    out[b, sp_b:dst_end] = src
+        from rtp_llm.models_py.modules.dsv4._pool_triton import (
+            masked_gather_from_pool,
+        )
+
+        out = masked_gather_from_pool(
+            pool_view,
+            safe_slot,
+            valid,
+            out_shape=(bsz, dense_len, self.head_dim),
+            dtype=dtype,
+        )
+        if current_kv_full is not None and current_kv_full.shape[1] > 0:
+            local_pos = pos.unsqueeze(0) - sp_t.unsqueeze(1)  # [B, dense_len]
+            max_current = int(current_kv_full.shape[1])
+            overlay = (
+                (local_pos >= 0)
+                & (local_pos < seq_t.unsqueeze(1))
+                & (local_pos < max_current)
+            )
+            safe_local = local_pos.clamp(min=0, max=max_current - 1)
+            src = current_kv_full
+            if src.dtype != dtype:
+                src = src.to(dtype)
+            src = torch.gather(
+                src,
+                1,
+                safe_local.unsqueeze(-1).expand(-1, -1, self.head_dim),
+            )
+            out = torch.where(overlay.unsqueeze(-1), src, out)
         return out.contiguous()
 
     def _set_compressor_pool_context(self) -> None:
@@ -1353,9 +1362,10 @@ class Attention(nn.Module):
         safe_pos = torch.where(in_capacity_row, pos, torch.zeros_like(pos))
         block_in_seq = safe_pos // eb
         in_block = safe_pos % eb
-        bt_long = bt.to(torch.long)
-        b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)  # [B,1]
-        block_id = bt_long[:bsz][b_idx, block_in_seq.unsqueeze(0)]  # [B, T]
+        bt_long = bt[:bsz].to(device=device, dtype=torch.long)
+        block_id = bt_long.gather(
+            1, block_in_seq.unsqueeze(0).expand(bsz, -1)
+        )  # [B, T]
         in_capacity = in_capacity_row.unsqueeze(0).expand(bsz, -1)  # [B, T]
         valid = (block_id > 0) & in_capacity
         safe_slot = torch.where(
@@ -1363,18 +1373,17 @@ class Attention(nn.Module):
             block_id * eb + in_block.unsqueeze(0),
             torch.zeros_like(block_id),
         )  # [B, T]
-        gathered = pool_view.index_select(0, safe_slot.reshape(-1))  # [B*T, vec_dim]
-        # Pool storage dtype matches source_buf dtype by construction (see
-        # _prefill_paged_write_kv which writes via write_kv_to_pool →
-        # index_copy_).  BF16 KV pools, fp32 STATE pools.  Enforce dtype
-        # + zero-fill sentinels in one where().
-        if gathered.dtype != dtype:
-            gathered = gathered.to(dtype)
-        zero_row = torch.zeros((), dtype=dtype, device=device)
-        out_flat = torch.where(
-            valid.reshape(-1).unsqueeze(-1), gathered, zero_row
-        )  # [B*T, vec_dim]
-        return out_flat.view(bsz, T, vec_dim).contiguous()
+        from rtp_llm.models_py.modules.dsv4._pool_triton import (
+            masked_gather_from_pool,
+        )
+
+        return masked_gather_from_pool(
+            pool_view,
+            safe_slot,
+            valid,
+            out_shape=(bsz, T, vec_dim),
+            dtype=dtype,
+        )
 
     def _gather_kv_cache_dense_from_pool(
         self,
@@ -2043,7 +2052,7 @@ class Attention(nn.Module):
         elif is_batched_decode:
             # Batched decode: each batch element at different position, seqlen=1
             # Gather freqs for each batch element's position
-            positions = start_pos.long()
+            positions = start_pos.to(torch.long)
             freqs_cis = self.freqs_cis[positions]  # [B, rope_dim//2]
             freqs_cis = freqs_cis.unsqueeze(1)  # [B, 1, rope_dim//2]
         elif is_batched_prefill:
@@ -2097,12 +2106,20 @@ class Attention(nn.Module):
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_post_rope_local", kv)
 
-        # Under CP prefill, all-gather KV across the CP (== TP) group
-        # and strip padding so every rank has the FULL uncompressed
-        # sliding KV in logical order; attention then runs with rank-
-        # local Q × full-KV.
+        # Under CP prefill, start the KV all-gather as soon as rank-local KV
+        # is ready. Top-k/indexer work below is independent and can overlap
+        # with the collective; restore/wait happens at the first KV consumer.
+        kv_full_handle = None
         if cp_on:
-            kv_full = cp_all_gather_full(kv, cp_ctx)  # [1, seq_len_full, head_dim]
+            assert cp_ctx is not None
+            if kv.dim() != 3 or kv.size(0) != 1:
+                raise RuntimeError(
+                    f"CP attention KV expects [1, T_local, D], got {tuple(kv.shape)}"
+                )
+            # CP gather API is flattened token-major 2D; attention owns the
+            # module-local batch dimension.
+            kv_full_handle = cp_all_gather_full_async(kv.squeeze(0), cp_ctx)
+            kv_full = None
             seqlen_full = cp_ctx.seq_len_full
         else:
             kv_full = kv
@@ -2125,9 +2142,6 @@ class Attention(nn.Module):
             )
         else:
             prefill_kv_len = sp_int + seqlen
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_full", kv_full)
-
         prefill_swa_dense_len = prefill_kv_len
         # Build topk_idxs — rows = rank-local Q; columns reference either the
         # fresh-prefill [sliding | compressed] tensor or the continuation
@@ -2296,6 +2310,12 @@ class Attention(nn.Module):
                     f"L{self.layer_id:02d}_attn_topk_{dbg_pos_name}",
                     topk_idxs[:, dbg_pos_idx : dbg_pos_idx + 1],
                 )
+
+        if cp_on:
+            assert kv_full_handle is not None
+            kv_full = cp_wait_gather_full(kv_full_handle).unsqueeze(0)
+        if _dbg:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_full", kv_full)
 
         if is_prefill_attn:
             if cp_on:

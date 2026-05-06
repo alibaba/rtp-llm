@@ -2,8 +2,8 @@
 
 Thin adapter over the vendored ``rtp_llm.models_py.3rdparty.tile_kernels``
 (DeepSeek TileKernels). Each entry point caches a compile-success/failure
-verdict — if a kernel fails to JIT once on the local tilelang revision, we
-flip a sticky flag and the call site falls back to the PyTorch reference.
+verdict. A failure is returned to the caller as ``None``; production HC callers
+must treat that as fail-fast rather than falling back implicitly.
 
 Why per-op flags rather than a single ``_TK_AVAILABLE``: empirically
 ``pre_big_fuse`` has hit ``decouple_type_cast`` ICEs while ``post`` /
@@ -13,6 +13,9 @@ regression.
 Activation gate (``_can_use_tk``):
   * ``DSV4_USE_TK_MHC=0`` env disables the path entirely (parity testing).
   * residual must be bf16 contiguous.
+  * residual must be on CUDA.
+  * residual's flattened HC hidden size must be divisible by TileLang's
+    256-wide hidden tile.
   * ``hc_mult == 4`` (only mult upstream guarantees).
   * ``torch.is_grad_enabled()`` must be False (we serve, not train).
   * residual.numel() > 0.
@@ -76,11 +79,15 @@ def _can_use_tk(residual: torch.Tensor, hc_mult: int) -> bool:
         return False
     if residual.dtype != torch.bfloat16:
         return False
+    if not residual.is_cuda:
+        return False
     if torch.is_grad_enabled():
         return False
     if residual.numel() == 0:
         return False
     if not residual.is_contiguous():
+        return False
+    if (int(residual.shape[-1]) * int(residual.shape[-2])) % 256 != 0:
         return False
     return True
 
@@ -100,7 +107,7 @@ def tk_mhc_pre(
     """TK ``mhc_pre`` wrapper.
 
     Returns (layer_input, post_mix [..., hc, 1], comb_mix [..., hc, hc])
-    on success, or ``None`` to signal "fall back to REF".
+    on success, or ``None`` to signal "TileLang unavailable".
     """
     global _TK_PRE_OK
     if not _can_use_tk(residual, hc_mult):
@@ -127,7 +134,7 @@ def tk_mhc_pre(
         return out, post_mix, comb_mix
     except Exception as e:
         if _TK_PRE_OK is None:
-            _log.warning("tk mhc_pre disabled after JIT failure: %r", e)
+            _log.exception("tk mhc_pre disabled after JIT failure")
         _TK_PRE_OK = False
         return None
 
@@ -139,7 +146,7 @@ def tk_mhc_post(
     comb_mix: torch.Tensor,
     hc_mult: int = 4,
 ) -> torch.Tensor | None:
-    """TK ``mhc_post`` wrapper. Returns ``None`` on fallback."""
+    """TK ``mhc_post`` wrapper. Returns ``None`` when TileLang is unavailable."""
     global _TK_POST_OK
     if not _can_use_tk(residual, hc_mult):
         return None
@@ -155,7 +162,7 @@ def tk_mhc_post(
         return out
     except Exception as e:
         if _TK_POST_OK is None:
-            _log.warning("tk mhc_post disabled after JIT failure: %r", e)
+            _log.exception("tk mhc_post disabled after JIT failure")
         _TK_POST_OK = False
         return None
 
@@ -170,7 +177,7 @@ def tk_mhc_head(
     pre_eps: float,
     hc_mult: int = 4,
 ) -> torch.Tensor | None:
-    """TK ``mhc_head`` wrapper. Returns ``None`` on fallback."""
+    """TK ``mhc_head`` wrapper. Returns ``None`` when TileLang is unavailable."""
     global _TK_HEAD_OK
     if not _can_use_tk(residual, hc_mult):
         return None
@@ -193,6 +200,6 @@ def tk_mhc_head(
         return out
     except Exception as e:
         if _TK_HEAD_OK is None:
-            _log.warning("tk mhc_head disabled after JIT failure: %r", e)
+            _log.exception("tk mhc_head disabled after JIT failure")
         _TK_HEAD_OK = False
         return None
