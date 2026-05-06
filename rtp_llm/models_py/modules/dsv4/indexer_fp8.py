@@ -233,15 +233,25 @@ class IndexerFP8(PoolBackedModule):
 
             freqs_per_b = self.freqs_cis[start_pos.long()]
             q = self._compute_indexer_q(qr, freqs_per_b, batched_rope=True)
-            weights = F.linear(x, self.weights_proj) * (self.softmax_scale * self.n_heads**-0.5)
+            weights = F.linear(x, self.weights_proj) * (
+                self.softmax_scale * self.n_heads**-0.5
+            )
 
             compressed_len = ((start_pos + 1) // ratio).to(torch.int64).view(bsz, 1, 1)
 
             # Always use DeepGEMM (FP8 path).
             T_cache = self._kv_block_table.shape[1] * self._kv_eb
-            sp_max = int(start_pos.max().item())
-            T_live = (((sp_max + 1) // ratio) + 31) & ~31
-            T_max = max(32, min(T_cache, T_live))
+            # Capture-aware: under cuda graph capture we can't D2H sync via
+            # ``.item()`` (operation-not-permitted on captured stream), so
+            # fall back to the static upper bound. Eager keeps the dynamic
+            # clamp to avoid overshoot.
+            if x.is_cuda and torch.cuda.is_current_stream_capturing():
+                T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
+                T_max = max(32, min(T_cache, T_static))
+            else:
+                sp_max = int(start_pos.max().item())
+                T_live = (((sp_max + 1) // ratio) + 31) & ~31
+                T_max = max(32, min(T_cache, T_live))
 
             q_fp8, w_fold = indexer_q_fp8_quant_fold(
                 _as_bf16_contig(q), _as_bf16_contig(weights)
@@ -336,7 +346,9 @@ class IndexerFP8(PoolBackedModule):
         try:
             q = self._compute_indexer_q(qr, freqs_cis)
             self.compressor(x, start_pos)
-            weights = F.linear(x, self.weights_proj) * (self.softmax_scale * self.n_heads**-0.5)
+            weights = F.linear(x, self.weights_proj) * (
+                self.softmax_scale * self.n_heads**-0.5
+            )
 
             S = q.size(1)
             T = end_pos // ratio

@@ -136,6 +136,16 @@ class CompressorFP8(PoolBackedModule):
         )
         self.norm_eps = norm_eps
 
+        # Fuse wkv + wgate into one fp32 weight matrix; saves one SIMT
+        # SGEMM launch per compressor decode call (~92/step at bs16).
+        # Both weights share the same input projection, so cat along
+        # out-dim collapses 2× F.linear into 1× F.linear + slice. wkv /
+        # wgate Parameter objects are re-pointed to views of the fused
+        # storage so memory cost is zero (single backing buffer); state
+        # dict / external introspection still sees identical data.
+        self._wkv_wgate_fused: Optional[torch.Tensor] = None
+        self._fuse_wkv_wgate(coff)
+
         # State buffer geometry — PoolBackedModule reads these in
         # ``_bind_state_from_pool``.
         self._state_rows = coff * compress_ratio
@@ -151,6 +161,21 @@ class CompressorFP8(PoolBackedModule):
     # -- exposure for legacy callers reading ``_kv_cache_t`` (e.g.
     #    attention.py:1452); FP8 path stores no per-step bf16 cache,
     #    so just track the maximum compressed length the layer expects.
+    def _fuse_wkv_wgate(self, coff: int) -> None:
+        """Concat wkv + wgate along out-dim into one fused fp32 weight,
+        then re-point ``wkv.weight`` / ``wgate.weight`` to views of the
+        fused storage (zero memory overhead). Forward paths use
+        ``self._wkv_wgate_fused`` directly so a single F.linear emits
+        one GEMM launch covering both projections."""
+        with torch.no_grad():
+            fused = torch.cat(
+                [self.wkv.weight.data, self.wgate.weight.data], dim=0
+            ).contiguous()
+            self._wkv_wgate_fused = fused
+            out_dim = coff * self.head_dim
+            self.wkv.weight = nn.Parameter(fused[:out_dim], requires_grad=False)
+            self.wgate.weight = nn.Parameter(fused[out_dim:], requires_grad=False)
+
     def configure_kv_cache_shape(self, kv_cache_t: int) -> None:
         # Stored only as informational metadata — NOT used for any
         # FP8-side allocation. Kept for compatibility with the BF16
@@ -316,8 +341,11 @@ class CompressorFP8(PoolBackedModule):
         sp_int = start_pos
 
         x32 = x.float()
-        kv = torch.nn.functional.linear(x32, self.wkv.weight)
-        score = torch.nn.functional.linear(x32, self.wgate.weight)
+        # Fused wkv + wgate GEMM (1 launch instead of 2). Output split
+        # along last dim — slicing returns views, no copy.
+        out_dim = (1 + self.overlap) * self.head_dim
+        fused_out = torch.nn.functional.linear(x32, self._wkv_wgate_fused)
+        kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
         cp_ctx = self._cp_ctx
         if cp_should_gather(cp_ctx, start_pos):
@@ -426,8 +454,10 @@ class CompressorFP8(PoolBackedModule):
         self.kv_cache = None
         try:
             x32 = x.float()
-            kv_all = torch.nn.functional.linear(x32, self.wkv.weight)
-            score_all = torch.nn.functional.linear(x32, self.wgate.weight)
+            # Fused wkv + wgate GEMM (1 launch instead of 2).
+            out_dim = (1 + self.overlap) * self.head_dim
+            fused_out = torch.nn.functional.linear(x32, self._wkv_wgate_fused)
+            kv_all, score_all = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
             sp = start_pos.to(torch.long)
             sp_mod = sp % ratio
