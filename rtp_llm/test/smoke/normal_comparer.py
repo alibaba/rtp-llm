@@ -74,6 +74,11 @@ class AuxInfo(BaseModel):
     iter_count: Optional[int] = None
     cum_log_probs: Optional[Union[List[float], List[None]]] = None
     beam_responses: Optional[List[str]] = None
+    # Allow multiple acceptable beam_responses orderings for cuBLAS/NCCL non-
+    # determinism (close-cum_log_probs beams swap rank across runs). If set,
+    # comparer accepts actual.beam_responses == expect.beam_responses OR any
+    # entry in beam_responses_alternatives.
+    beam_responses_alternatives: Optional[List[List[str]]] = None
     pd_sep: Optional[bool] = None
     softmax_probs: Optional[List[float]] = None
 
@@ -361,8 +366,26 @@ class NormalComparer(BaseComparer):
             actual_val = getattr(actual_aux, field)
             check_equal(field, expect_val, actual_val)
 
+        # beam_responses: accept exact match OR any beam_responses_alternatives
+        # entry. Logs the matched-alt path so flaky-acceptance is auditable.
+        def beam_matches(expect_beams: Any, actual_beams: Any) -> bool:
+            if expect_beams == actual_beams:
+                return True
+            alts = expect_aux.beam_responses_alternatives
+            if alts and actual_beams in alts:
+                logging.info(
+                    f"[STABILITY_DIAG] beam_responses matched alternative: "
+                    f"primary={expect_beams} actual={actual_beams} "
+                    f"alternatives={alts}"
+                )
+                return True
+            return False
+
         check_equal(
-            "beam_responses", expect_aux.beam_responses, actual_aux.beam_responses
+            "beam_responses",
+            expect_aux.beam_responses,
+            actual_aux.beam_responses,
+            beam_matches,
         )
 
         def is_close_list(a: Any, b: Any) -> bool:

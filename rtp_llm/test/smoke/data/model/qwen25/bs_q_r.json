@@ -110,6 +110,15 @@
                                 "\n\nThe error you're encountering, `TypeError:",
                                 "\n\nThe error you're encountering is due to a"
                             ],
+                            "beam_responses_alternatives": [
+                                [
+                                    "\n\nThe error message you're encountering, \"Name",
+                                    "\n\nThe error you're encountering, `NameError",
+                                    "\n\nThe error message you're encountering, `Name",
+                                    "\n\nThe error you're encountering, `TypeError:",
+                                    "\n\nThe error you're encountering is due to a"
+                                ]
+                            ],
                             "pd_sep": false,
                             "softmax_probs": []
                         }
