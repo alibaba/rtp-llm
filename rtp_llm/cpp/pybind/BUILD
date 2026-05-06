@@ -60,12 +60,14 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:device_perf_wrapper",
+        "//rtp_llm/cpp/utils:kv_cache_utils",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
     ] + torch_deps() + select_py_bindings() + select({
         "@//:using_ascend": [
             "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
             "@havenask//aios/autil:stack_tracer",
+            "//rtp_llm/models_py/bindings/ascend:ascend_host_utils",
         ],
         "//conditions:default": [],
     }) + select({

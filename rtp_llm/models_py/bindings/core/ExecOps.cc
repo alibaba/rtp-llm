@@ -20,6 +20,13 @@
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
+#elif USING_ASCEND
+#include "rtp_llm/models_py/bindings/ascend/ascend_host_utils.h"
+#include "rtp_llm/models_py/bindings/ascend/ascend_types_hdr.h"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#include <torch_npu/csrc/core/npu/NPUStream.h>
+#pragma GCC diagnostic pop
 #endif
 #include <pybind11/functional.h>
 
@@ -27,6 +34,11 @@
 using DeviceGuard = at::cuda::CUDAGuard;
 #elif USING_ROCM
 using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
+#elif USING_ASCEND
+// Ascend does not need a device guard alias here; keep it as a no-op.
+struct DeviceGuard {
+    DeviceGuard(int) {}
+};
 #endif
 
 namespace rtp_llm {
@@ -45,6 +57,8 @@ void             multiMergeCopy(const MultiMergeCopyParams& params);
 #include <hip/hip_runtime.h>
 #include <ATen/hip/HIPContext.h>
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
+#elif USING_ASCEND
+#include <acl/acl.h>
 #endif
 
 using namespace std;
@@ -97,11 +111,18 @@ void runtimeSyncAndCheck() {
     check_cuda_error();
 }
 
-#else  // ROCm
+#elif USING_ROCM
 
 void runtimeSyncAndCheck() {
     ROCM_CHECK(hipDeviceSynchronize());
     ROCM_CHECK_ERROR();
+}
+
+#elif USING_ASCEND
+
+void runtimeSyncAndCheck() {
+    ASCEND_CHECK(aclrtSynchronizeDevice());
+    ASCEND_CHECK_ERROR();
 }
 
 #endif  // USING_CUDA
@@ -118,11 +139,20 @@ std::shared_ptr<torch::Event> runtimeCreateEvent() {
     return event;
 }
 
-#else  // ROCm
+#elif USING_ROCM
 
 std::shared_ptr<torch::Event> runtimeCreateEvent() {
     auto event = std::make_shared<torch::Event>(torch::kHIP);
     event->record(at::hip::getCurrentHIPStream(at::hip::current_device()));
+    return event;
+}
+
+#elif USING_ASCEND
+
+std::shared_ptr<torch::Event> runtimeCreateEvent() {
+    // Based on xLLM's ascend implementation
+    auto event = std::make_shared<torch::Event>(torch::kPrivateUse1);
+    event->record(c10_npu::getCurrentNPUStream().unwrap());
     return event;
 }
 
@@ -303,6 +333,14 @@ torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor we
 torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
     return weight;
 }
+#elif USING_ASCEND
+torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai) {
+    return weight;
+}
+
+torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
+    return weight;
+}
 #endif
 
 // ============================================================
@@ -321,6 +359,10 @@ void cudaCheckLastError() {
     if (err != hipSuccess) {
         RTP_LLM_LOG_ERROR("ROCm error: %s", hipGetErrorString(err));
     }
+#elif USING_ASCEND
+    // TODO: fix ascend check last error?
+    ASCEND_CHECK(aclrtSynchronizeDevice());
+    ASCEND_CHECK_ERROR();
 #endif
 }
 
@@ -331,6 +373,8 @@ void cudaPreRun(int device_id) {
     at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream(device_id));
 #elif USING_ROCM
     hipSetDevice(device_id);
+#elif USING_ASCEND
+    ASCEND_CHECK(aclrtSetDevice(device_id));
 #endif
 }
 
@@ -339,12 +383,18 @@ void cudaPreRun(int device_id) {
 void cudaProfilerBegin() {
 #if USING_CUDA
     check_cuda_value(cudaProfilerStart());
+#else
+    // no-op on ROCm / Ascend
+    // TODO: fix profiler on Ascend
 #endif
 }
 
 void cudaProfilerEnd() {
 #if USING_CUDA
     check_cuda_value(cudaProfilerStop());
+#else
+    // no-op on ROCm / Ascend
+    // TODO: fix profiler on Ascend
 #endif
 }
 
@@ -358,6 +408,9 @@ ExecStatus getGpuExecStatus() {
     RTP_LLM_CHECK(error == cudaSuccess);
 #elif USING_ROCM
     hipMemGetInfo(&mem.free_bytes, &total_bytes);
+#elif USING_ASCEND
+    std::tie(mem.used_bytes, mem.free_bytes) = ascend::getDeviceMemoryInfo(false);
+    total_bytes = mem.used_bytes + mem.free_bytes;
 #endif
     mem.used_bytes      = total_bytes - mem.free_bytes;
     mem.available_bytes = mem.free_bytes;
@@ -367,7 +420,11 @@ ExecStatus getGpuExecStatus() {
 }
 
 torch::Device getTorchCudaDevice() {
+#if USING_ASCEND
+    return torch::Device(torch::kPrivateUse1);
+#else
     return torch::Device(torch::kCUDA);
+#endif
 }
 
 namespace {
@@ -551,6 +608,9 @@ MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_ove
 #elif USING_ROCM
         RTP_LLM_LOG_INFO("Initialize runtime (ROCm). device_id=%zu", device_id);
         ROCM_CHECK(hipSetDevice(device_id));
+#elif USING_ASCEND
+        RTP_LLM_LOG_INFO("Initialize runtime (Ascend). device_id=%zu", device_id);
+        ASCEND_CHECK(aclrtSetDevice(device_id));
 #endif
 
         g_enable_comm_overlap = enable_comm_overlap;
