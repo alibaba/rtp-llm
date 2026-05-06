@@ -51,14 +51,14 @@ def _use_fused_gate(score_func: str, x_size_0: int) -> bool:
 
     Set ``DSV4_GATE_FUSED=0`` to revert to the eager epilogue for debugging.
     """
-    if not _GATE_FUSED_OK or fused_sqrtsoftplus_gate is None:
-        return False
     if os.environ.get("DSV4_GATE_FUSED", "1") == "0":
         return False
     if score_func != "sqrtsoftplus":
         return False
     if x_size_0 == 0:
         return False
+    if not _GATE_FUSED_OK or fused_sqrtsoftplus_gate is None:
+        raise RuntimeError("DSV4 fused gate is enabled by default but unavailable")
     return True
 
 

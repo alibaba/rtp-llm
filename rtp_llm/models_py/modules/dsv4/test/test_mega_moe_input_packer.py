@@ -36,10 +36,34 @@ def _make_buf(tokens, dim, topk, device):
 
 class TestMegaMoeInputPacker(unittest.TestCase):
     def test_dispatch(self):
-        with _env("DSV4_MEGA_MOE_INPUT_PACKER", "torch"):
+        old = os.environ.pop("DSV4_MEGA_MOE_INPUT_PACKER", None)
+        try:
+            self.assertIsInstance(get_mega_moe_input_packer(), FusedMegaMoeInputPacker)
+        finally:
+            if old is not None:
+                os.environ["DSV4_MEGA_MOE_INPUT_PACKER"] = old
+        with _env("DSV4_MOE_STRICT_FUSED", "0"), _env(
+            "DSV4_MEGA_MOE_INPUT_PACKER", "torch"
+        ):
             self.assertIsInstance(get_mega_moe_input_packer(), TorchMegaMoeInputPacker)
         with _env("DSV4_MEGA_MOE_INPUT_PACKER", "fused"):
             self.assertIsInstance(get_mega_moe_input_packer(), FusedMegaMoeInputPacker)
+
+    def test_fused_rejects_unsupported_without_fallback(self):
+        tokens = 2
+        dim = 128
+        topk = 8
+        x = torch.randn(tokens, dim, dtype=torch.bfloat16)
+        weights = torch.randn(tokens, topk, dtype=torch.float32)
+        indices = torch.randint(0, 256, (tokens, topk), dtype=torch.int64)
+        buf = _make_buf(tokens, dim, topk, "cpu")
+        with self.assertRaisesRegex(RuntimeError, "requires CUDA bf16"):
+            FusedMegaMoeInputPacker().pack(x, weights, indices, buf, tokens)
+
+    def test_strict_rejects_torch_packer(self):
+        with _env("DSV4_MEGA_MOE_INPUT_PACKER", "torch"):
+            with self.assertRaisesRegex(RuntimeError, "forbids"):
+                get_mega_moe_input_packer()
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_fused_matches_torch_buffer_bits(self):
@@ -53,7 +77,8 @@ class TestMegaMoeInputPacker(unittest.TestCase):
                 indices = torch.randint(0, 256, (tokens, topk), device="cuda", dtype=torch.int64)
                 ref = _make_buf(tokens, dim, topk, "cuda")
                 got = _make_buf(tokens, dim, topk, "cuda")
-                TorchMegaMoeInputPacker().pack(x, weights, indices, ref, tokens)
+                with _env("DSV4_MOE_STRICT_FUSED", "0"):
+                    TorchMegaMoeInputPacker().pack(x, weights, indices, ref, tokens)
                 FusedMegaMoeInputPacker().pack(x, weights, indices, got, tokens)
                 self.assertTrue(torch.equal(ref.x.view(torch.uint8).cpu(), got.x.view(torch.uint8).cpu()))
                 self.assertTrue(torch.equal(ref.x_sf.cpu(), got.x_sf.cpu()))

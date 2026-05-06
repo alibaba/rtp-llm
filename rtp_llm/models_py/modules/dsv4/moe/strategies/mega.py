@@ -20,6 +20,7 @@ from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from ..mega_buf import _get_or_create_mega_buf, _mega_moe_enabled
 from ..input_packer import get_mega_moe_input_packer
 from ..quant_layouts import FP4_BLOCK
+from ..shared_expert import strict_fused_moe_enabled
 
 
 @register_strategy
@@ -165,8 +166,8 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         """Run the fused DeepGEMM Mega MoE kernel: dispatch + L1 GEMM +
         SwiGLU + L2 GEMM + combine — all fused, symm-mem backed.
 
-        Returns the combined routed-expert output in FP32 (to match the
-        contract of ``DeepEPStrategy`` / ``LocalLoopStrategy``).
+        Returns the combined routed-expert output in BF16.  The MoE epilogue
+        owns the final routed+shared cast.
         """
         import deep_gemm
 
@@ -179,6 +180,8 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 f"max_tokens_per_rank). Raise the budget at startup."
             )
         if T == 0:
+            if strict_fused_moe_enabled():
+                return self._mega_y[:0]
             return torch.zeros_like(x, dtype=torch.float32)
 
         # Fill the symm-mem buffer slots.  Only the first T rows are
@@ -198,4 +201,4 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             activation_clamp=self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None,
             fast_math=True,
         )
-        return y.float()
+        return y
