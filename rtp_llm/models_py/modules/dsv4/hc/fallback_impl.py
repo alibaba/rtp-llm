@@ -2,11 +2,48 @@
 
 from __future__ import annotations
 
+from typing import Tuple
+
 import torch
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase, HCUnitBase
-from rtp_llm.models_py.modules.dsv4.mhc import hc_split_sinkhorn
+
+
+def _hc_split_sinkhorn(
+    mixes: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    hc_mult: int = 4,
+    sinkhorn_iters: int = 20,
+    eps: float = 1e-6,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """PyTorch reference for the TileLang mHC pre mixer.
+
+    Production uses the TileLang path in ``hc/tilelang_impl.py``. This helper
+    only backs ``DSV4_HC_IMPL=fallback`` for CPU/dev/reference runs.
+    """
+    hc = hc_mult
+    *batch, mix_hc = mixes.size()
+    assert mix_hc == (hc + 2) * hc, (
+        f"mix_hc={mix_hc}, expected (hc+2)*hc={(hc + 2) * hc}"
+    )
+
+    pre_raw = mixes[..., :hc] * hc_scale[0] + hc_base[:hc]
+    pre = pre_raw.sigmoid() + eps
+
+    post_raw = mixes[..., hc : 2 * hc] * hc_scale[1] + hc_base[hc : 2 * hc]
+    post = 2.0 * post_raw.sigmoid()
+
+    comb_raw = mixes[..., 2 * hc :] * hc_scale[2] + hc_base[2 * hc :]
+    comb = comb_raw.view(*batch, hc, hc)
+    comb = comb.softmax(dim=-1) + eps
+    comb = comb / (comb.sum(dim=-2, keepdim=True) + eps)
+    for _ in range(sinkhorn_iters - 1):
+        comb = comb / (comb.sum(dim=-1, keepdim=True) + eps)
+        comb = comb / (comb.sum(dim=-2, keepdim=True) + eps)
+
+    return pre, post, comb
 
 
 class FallbackHCUnit(HCUnitBase):
@@ -33,7 +70,7 @@ class FallbackHCUnit(HCUnitBase):
             x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps
         ).to(dtype)
         mixes = self._linear_mixes(x_flat, rsqrt).contiguous()
-        pre, post, comb = hc_split_sinkhorn(
+        pre, post, comb = _hc_split_sinkhorn(
             mixes,
             self.scale,
             self.base,

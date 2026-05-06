@@ -65,6 +65,18 @@ class TestHCImpl(unittest.TestCase):
         self.assertEqual(tuple(y.shape), (2, 5, dim))
         self.assertEqual(tuple(post.shape), (2, 5, hc, 1))
         self.assertEqual(tuple(comb.shape), (2, 5, hc, hc))
+        torch.testing.assert_close(
+            comb.sum(dim=-1),
+            torch.ones_like(comb.sum(dim=-1)),
+            atol=5e-3,
+            rtol=5e-3,
+        )
+        torch.testing.assert_close(
+            comb.sum(dim=-2),
+            torch.ones_like(comb.sum(dim=-2)),
+            atol=5e-3,
+            rtol=5e-3,
+        )
         out = unit.post(y, x, post, comb)
         self.assertEqual(tuple(out.shape), tuple(x.shape))
         reduced = head.head(x)

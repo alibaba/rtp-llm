@@ -200,22 +200,30 @@ def build_cp_context(
     """Compute the per-forward derived CPContext from framework metadata."""
     padding_mask = cp_info.prefill_qkv_padding_mask
     restore_indices = cp_info.prefill_qkv_restore_indice
+    chunk_lengths = getattr(cp_info, "prefill_cp_chunk_lengths", None)
+    if chunk_lengths is None or int(chunk_lengths.numel()) != 1:
+        got = None if chunk_lengths is None else int(chunk_lengths.numel())
+        raise ValueError(
+            "DSV4 CP build_cp_context supports a single prefill stream only; "
+            f"got prefill_cp_chunk_lengths.numel()={got}"
+        )
     if padding_mask.device != device:
         padding_mask = padding_mask.to(device)
+    if restore_indices.device != device:
         restore_indices = restore_indices.to(device)
     padded_seq_len = int(padding_mask.shape[0])
 
     # For B=1 single prefill stream (V4 is B=1 only), cp_size * chunk_length
     # must equal padded_seq_len.  Assert so future multi-stream support
     # triggers a clean failure instead of silent index corruption.
-    assert cp_size * chunk_length == padded_seq_len, (
+    if cp_size * chunk_length != padded_seq_len:
+        raise ValueError(
         f"cp_size({cp_size}) * chunk_length({chunk_length}) != "
         f"padded_seq_len({padded_seq_len}) — multi-stream CP not yet supported"
-    )
+        )
     pair_size = chunk_length // 2
-    assert (
-        pair_size * 2 == chunk_length
-    ), f"chunk_length({chunk_length}) must be even for zigzag CP"
+    if pair_size * 2 != chunk_length:
+        raise ValueError(f"chunk_length({chunk_length}) must be even for zigzag CP")
 
     # Formula-based current-input positions (matches ZigZagProcessor::plan).
     arange_pair = torch.arange(pair_size, dtype=torch.long, device=device)
@@ -224,7 +232,18 @@ def build_cp_context(
     relative_positions = torch.cat([even_positions, odd_positions])  # [chunk_length]
 
     local_is_real = padding_mask[relative_positions] == 1  # [chunk_length] bool
-    unpad_restore = restore_indices[padding_mask == 1].to(torch.long)  # [seq_len_full]
+    # V4 CP supports a single prefill stream in this Python path.  The C++
+    # zigzag planner builds padding_mask as real-token prefix followed by
+    # padding, so avoid bool-indexing (aten::nonzero + stream sync) here.
+    actual_lengths_cpu = getattr(cp_info, "prefill_actual_input_lengths_cpu", None)
+    if actual_lengths_cpu is None or int(actual_lengths_cpu.numel()) != 1:
+        got = None if actual_lengths_cpu is None else int(actual_lengths_cpu.numel())
+        raise ValueError(
+            "DSV4 CP build_cp_context requires one prefill actual length for "
+            f"the single prefill stream path; got {got}"
+        )
+    seq_len_full = int(actual_lengths_cpu.reshape(-1)[0].item())
+    unpad_restore = restore_indices[:seq_len_full].to(torch.long)
     seq_len_full = int(unpad_restore.shape[0])
     prefix_length = int(position_offset)
     global_positions = relative_positions + prefix_length

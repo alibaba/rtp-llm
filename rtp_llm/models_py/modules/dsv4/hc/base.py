@@ -27,6 +27,8 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.dsv4._nvtx import nvtx_range
+
 
 class HCMode(str, Enum):
     TILELANG = "tilelang"
@@ -115,7 +117,10 @@ class HCUnitBase(nn.Module):
             ``[B, S, hc_mult, hc_mult]``.
         """
         leading = self._check_residual_shape(x, "pre input")
-        y, post, comb = self._pre_impl(x, dbg_tag=dbg_tag)
+        layer = f"L{self.layer_id:02d}" if self.layer_id >= 0 else "Lxx"
+        name = self.name or "unit"
+        with nvtx_range(f"dsv4.hc.{layer}.{name}.pre"):
+            y, post, comb = self._pre_impl(x, dbg_tag=dbg_tag)
         self._check_pre_output(leading, y, post, comb)
         return y, post, comb
 
@@ -162,7 +167,10 @@ class HCUnitBase(nn.Module):
                 f"{self.__class__.__name__}.post expected comb shape={expected_comb}, "
                 f"got {tuple(comb.shape)}"
             )
-        out = self._post_impl(x, residual, post, comb)
+        layer = f"L{self.layer_id:02d}" if self.layer_id >= 0 else "Lxx"
+        name = self.name or "unit"
+        with nvtx_range(f"dsv4.hc.{layer}.{name}.post"):
+            out = self._post_impl(x, residual, post, comb)
         if tuple(out.shape) != tuple(residual.shape):
             raise ValueError(
                 f"{self.__class__.__name__}.post returned shape={tuple(out.shape)}, "
@@ -224,7 +232,8 @@ class HCHeadBase(nn.Module):
             ``[T, dim]`` or ``[B, S, dim]`` with the same leading token layout.
         """
         leading = self._check_residual_shape(x, "head input")
-        out = self._head_impl(x)
+        with nvtx_range("dsv4.hc.head"):
+            out = self._head_impl(x)
         expected = leading + (self.dim,)
         if tuple(out.shape) != expected:
             raise ValueError(
