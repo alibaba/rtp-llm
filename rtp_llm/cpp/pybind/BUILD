@@ -63,6 +63,12 @@ cc_library(
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
     ] + torch_deps() + select_py_bindings() + select({
+        "@//:using_ascend": [
+            "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+            "@havenask//aios/autil:stack_tracer",
+        ],
+        "//conditions:default": [],
+    }) + select({
         "@//:using_cuda12": ["//rtp_llm/models_py/bindings/cuda/ops:gpu_base"],
         "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],
         "@//:using_ascend": [],
