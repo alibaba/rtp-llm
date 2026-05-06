@@ -228,6 +228,16 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("topk_indices_offset"),
                   py::arg("row_starts") = py::none());
 
+    rtp_ops_m.def("persistent_topk",
+                  &persistent_topk,
+                  "Persistent TopK kernel",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
     rtp_ops_m.def("indexer_k_quant_and_cache",
                   &rtp_llm::indexer_k_quant_and_cache,
                   "Indexer K quantization and cache kernel",

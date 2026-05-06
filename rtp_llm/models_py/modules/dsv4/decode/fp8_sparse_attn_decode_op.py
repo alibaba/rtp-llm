@@ -8,8 +8,7 @@ attention output.
 Mirrors the Phase 1 :class:`SparseAttnV4DecodeOp` interface so the
 substitution is local to ``Attention.forward_decode_fp8``.
 
-The reference fallback (used on dev boxes without flash_mla / without
-CUDA) dequantizes the FP8 KV slots back to bf16 via
+The reference implementation dequantizes the FP8 KV slots back to bf16 via
 :func:`dequantize_v4_kv_slot` and runs the Phase 1 ``_sparse_attn``
 Python reference. This produces an output close to but not bit-equal
 to the FlashMLA path (~1-3% rel diff from FP8 quant noise); the
@@ -43,10 +42,20 @@ try:
             _FLASH_MLA_AVAILABLE = True
 except (ImportError, AttributeError, ValueError) as e:
     logging.warning(
-        "[dsv4-fp8] flash_mla not available (%s); FP8 sparse attn falls back "
-        "to dequant + Python reference",
+        "[dsv4-fp8] flash_mla not available (%s); FP8 sparse attn fast path "
+        "will fail unless reference is called explicitly",
         e,
     )
+
+
+def _flash_mla_unavailable_reason(q: torch.Tensor, kv_cache: torch.Tensor) -> str:
+    if not _FLASH_MLA_AVAILABLE:
+        return "flash_mla import failed or CUDA version is below 12.9"
+    if not q.is_cuda:
+        return f"q is on {q.device}, expected CUDA"
+    if not kv_cache.is_cuda:
+        return f"kv_cache is on {kv_cache.device}, expected CUDA"
+    return "unknown"
 
 
 def _dequant_kv_view_to_bf16(
@@ -54,7 +63,7 @@ def _dequant_kv_view_to_bf16(
 ) -> torch.Tensor:
     """Dequantize a full packed FP8 cache back to bf16 ``[..., 512]``.
 
-    Slow Python loop — only used by the reference fallback path. Production
+    Slow Python loop — only used by the explicit reference path. Production
     runtime hits :func:`flash_mla_with_kvcache` which reads packed FP8
     directly.
 
@@ -118,20 +127,18 @@ class SparseAttnV4DecodeFp8Op:
         cache_seqlens: Optional[torch.Tensor] = None,
         block_table: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if _FLASH_MLA_AVAILABLE and q.is_cuda and kv_cache.is_cuda:
-            return self._forward_flash_mla(
-                q,
-                kv_cache,
-                attn_sink,
-                topk_idxs,
-                cache_seqlens,
-                block_table,
+        if not (_FLASH_MLA_AVAILABLE and q.is_cuda and kv_cache.is_cuda):
+            raise RuntimeError(
+                "DSV4 FP8 sparse attention requires the FlashMLA fast path by "
+                f"default: {_flash_mla_unavailable_reason(q, kv_cache)}."
             )
-        return self._forward_reference(
+        return self._forward_flash_mla(
             q,
             kv_cache,
             attn_sink,
             topk_idxs,
+            cache_seqlens,
+            block_table,
         )
 
     def _forward_flash_mla(
@@ -216,7 +223,7 @@ class SparseAttnV4DecodeFp8Op:
         attn_sink: torch.Tensor,
         topk_idxs: torch.Tensor,
     ) -> torch.Tensor:
-        """CPU / no-flash_mla fallback: dequant KV → BF16, run Phase 1 ref."""
+        """Reference path: dequant KV to BF16, then run Phase 1 ref."""
         from rtp_llm.models_py.modules.dsv4.attention import _sparse_attn
 
         B, q_len, H, D = q.shape

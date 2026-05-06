@@ -137,11 +137,84 @@ def _silu_mul_fp8_quant_packed_kernel(
     tl.store(scale_ptrs, packed_scale, mask=row_mask)
 
 
+@triton.jit
+def _silu_mul_fp8_quant_packed_split_kernel(
+    gate_ptr,             # [M, inter] BF16
+    up_ptr,               # [M, inter] BF16
+    output_q_ptr,         # [M, inter] FP8 e4m3fn
+    output_scale_ptr,     # column-major [num_packed_groups, tma_aligned_M] int32 view
+    M,
+    gate_stride_m,
+    up_stride_m,
+    output_q_stride_m,
+    output_scale_stride_k,
+    clamp_limit,
+    N_2: tl.constexpr,
+    NUM_GROUPS: tl.constexpr,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
+):
+    pid_pack = tl.program_id(0)
+    pid_m = tl.program_id(1)
+    m_offset = pid_m * BLOCK_M
+
+    if m_offset >= M:
+        return
+
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, GROUP_SIZE)
+    row_mask = (m_offset + offs_m) < M
+
+    gate_base = (m_offset + offs_m[:, None]) * gate_stride_m
+    up_base = (m_offset + offs_m[:, None]) * up_stride_m
+    out_base = (m_offset + offs_m[:, None]) * output_q_stride_m
+
+    packed_scale = tl.zeros((BLOCK_M,), dtype=tl.int32)
+
+    for pack_idx in tl.static_range(4):
+        group_id = pid_pack * 4 + pack_idx
+        if group_id < NUM_GROUPS:
+            n_offset = group_id * GROUP_SIZE
+            cols = n_offset + offs_n
+            mask = row_mask[:, None] & (cols[None, :] < N_2)
+            gate = tl.load(gate_ptr + gate_base + cols[None, :], mask=mask, other=0.0).to(tl.float32)
+            up = tl.load(up_ptr + up_base + cols[None, :], mask=mask, other=0.0).to(tl.float32)
+
+            if HAS_CLAMP:
+                gate = tl.minimum(gate, clamp_limit)
+                up = tl.clamp(up, -clamp_limit, clamp_limit)
+
+            y = (gate / (1.0 + tl.exp(-gate))) * up
+            y = y.to(tl.bfloat16).to(tl.float32)
+
+            absmax = tl.max(tl.abs(y), axis=1)
+            scale_raw = tl.maximum(absmax / fp8_max, 1e-10)
+            exponent = tl.ceil(tl.log2(scale_raw))
+            scale = tl.math.exp2(exponent)
+
+            y_q = tl.clamp(y / scale[:, None], fp8_min, fp8_max)
+            tl.store(
+                output_q_ptr + out_base + cols[None, :],
+                y_q.to(output_q_ptr.dtype.element_ty),
+                mask=mask,
+            )
+
+            exponent_biased = tl.clamp(exponent + 127.0, 0.0, 255.0).to(tl.int32)
+            packed_scale = packed_scale | (exponent_biased << (pack_idx * 8))
+
+    scale_ptrs = output_scale_ptr + pid_pack * output_scale_stride_k + m_offset + offs_m
+    tl.store(scale_ptrs, packed_scale, mask=row_mask)
+
+
 def silu_mul_fp8_quant_packed(
     gate_up: torch.Tensor,
     clamp_limit: float = 0.0,
     group_size: int = 128,
     output_q: Optional[torch.Tensor] = None,
+    output_scale: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fuse SiLU + clamp + mul + per-token-group FP8 quant + UE8M0 packed scale.
 
@@ -183,14 +256,19 @@ def silu_mul_fp8_quant_packed(
         assert output_q.shape == (M, N_2)
         assert output_q.dtype == fp8_dtype
 
-    # Allocate as [num_packed_groups, tma_aligned_M] int32 row-major, then
-    # transpose + slice to [M, num_packed_groups] giving the column-major
-    # TMA-aligned layout DeepGEMM expects.
-    output_scale_packed = torch.zeros(
-        (num_packed_groups, tma_aligned_M),
-        dtype=torch.int32,
-        device=gate_up.device,
-    ).T[:M, :]
+    if output_scale is None:
+        # Allocate as [num_packed_groups, tma_aligned_M] int32 row-major, then
+        # transpose + slice to [M, num_packed_groups] giving the column-major
+        # TMA-aligned layout DeepGEMM expects.
+        output_scale_packed = torch.empty(
+            (num_packed_groups, tma_aligned_M),
+            dtype=torch.int32,
+            device=gate_up.device,
+        ).T[:M, :]
+    else:
+        assert output_scale.shape == (M, num_packed_groups)
+        assert output_scale.dtype == torch.int32
+        output_scale_packed = output_scale
 
     BLOCK_M = 8
     grid = (num_packed_groups, (M + BLOCK_M - 1) // BLOCK_M)
@@ -217,6 +295,83 @@ def silu_mul_fp8_quant_packed(
         HAS_CLAMP=has_clamp,
         num_warps=num_warps,
         num_stages=num_stages,
+    )
+
+    return output_q, output_scale_packed
+
+
+def silu_mul_fp8_quant_packed_from_parts(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    clamp_limit: float = 0.0,
+    group_size: int = 128,
+    output_q: Optional[torch.Tensor] = None,
+    output_scale: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Same fused activation+quant path as :func:`silu_mul_fp8_quant_packed`,
+    but reads gate/up from two contiguous BF16 GEMM outputs.
+    """
+    assert gate.dim() == 2 and up.dim() == 2
+    assert gate.shape == up.shape, f"gate/up shape mismatch: {gate.shape} vs {up.shape}"
+    assert gate.is_contiguous() and up.is_contiguous(), "gate/up must be contiguous"
+    assert gate.dtype == torch.bfloat16 and up.dtype == torch.bfloat16
+
+    M, N_2 = gate.shape
+    assert N_2 % group_size == 0, (
+        f"inter ({N_2}) must be a multiple of group_size ({group_size})"
+    )
+
+    fp8_dtype = torch.float8_e4m3fn
+    finfo = torch.finfo(fp8_dtype)
+    fp8_min, fp8_max = finfo.min, finfo.max
+
+    num_groups_per_row = N_2 // group_size
+    num_packed_groups = (num_groups_per_row + 3) // 4
+    tma_aligned_M = ((M + 3) // 4) * 4
+
+    if output_q is None:
+        output_q = torch.empty((M, N_2), dtype=fp8_dtype, device=gate.device)
+    else:
+        assert output_q.shape == (M, N_2)
+        assert output_q.dtype == fp8_dtype
+
+    if output_scale is None:
+        output_scale_packed = torch.empty(
+            (num_packed_groups, tma_aligned_M),
+            dtype=torch.int32,
+            device=gate.device,
+        ).T[:M, :]
+    else:
+        assert output_scale.shape == (M, num_packed_groups)
+        assert output_scale.dtype == torch.int32
+        output_scale_packed = output_scale
+
+    if M == 0:
+        return output_q, output_scale_packed
+
+    BLOCK_M = 8
+    grid = (num_packed_groups, (M + BLOCK_M - 1) // BLOCK_M)
+    has_clamp = clamp_limit > 0
+    _silu_mul_fp8_quant_packed_split_kernel[grid](
+        gate,
+        up,
+        output_q,
+        output_scale_packed,
+        M,
+        gate.stride(0),
+        up.stride(0),
+        output_q.stride(0),
+        output_scale_packed.stride(1),
+        clamp_limit if has_clamp else 0.0,
+        N_2=N_2,
+        NUM_GROUPS=num_groups_per_row,
+        fp8_min=fp8_min,
+        fp8_max=fp8_max,
+        GROUP_SIZE=group_size,
+        BLOCK_M=BLOCK_M,
+        HAS_CLAMP=has_clamp,
+        num_warps=max(4, group_size // 32),
+        num_stages=2,
     )
 
     return output_q, output_scale_packed

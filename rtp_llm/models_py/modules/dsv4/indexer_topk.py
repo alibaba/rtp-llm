@@ -16,6 +16,9 @@ from typing import Optional
 
 import torch
 
+_FAST_TOPK_VALUES = (2048,)
+_PERSISTENT_TOPK_VALUES = (512, 1024, 2048)
+
 
 def _backend_name() -> str:
     return os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower()
@@ -90,7 +93,7 @@ class IndexerTopKBackend(ABC):
 
 
 class TorchIndexerTopKBackend(IndexerTopKBackend):
-    """Exact PyTorch fallback matching the pre-optimization implementation."""
+    """Exact PyTorch backend matching the pre-optimization implementation."""
 
     name = "torch"
 
@@ -137,56 +140,10 @@ class FastIndexerTopKBackend(IndexerTopKBackend):
 
     RTP already carries ``fast_topk_v2`` adapted from SGLang's
     ``sgl-kernel/csrc/elementwise/topk.cu`` and TileLang's DSv3.2 selector.
-    That kernel is currently specialized for ``topk=2048``; unsupported cases
-    intentionally fall back to the exact PyTorch backend.
+    That kernel remains a DeepSeek V3.2/TileLang-specialized topk=2048 path.
     """
 
     name = "fast"
-
-    def __init__(self) -> None:
-        self._fallback = TorchIndexerTopKBackend()
-
-    def select(
-        self,
-        score: torch.Tensor,
-        topk: int,
-        *,
-        lengths: Optional[torch.Tensor] = None,
-        offset: int | torch.Tensor = 0,
-    ) -> torch.Tensor:
-        if not (
-            score.is_cuda and score.dtype == torch.float32 and int(topk) == 2048
-        ):
-            return self._fallback.select(score, topk, lengths=lengths, offset=offset)
-        flat, shape = _flatten_score(score)
-        lengths_i32 = _normalize_lengths(score, topk, lengths)
-        try:
-            from rtp_llm.models_py.kernels.cuda.fast_topk import fast_topk_v2
-
-            out = fast_topk_v2(flat, lengths_i32, int(topk))
-            out = _apply_offset(out, offset)
-            return _reshape_indices(out, shape)
-        except Exception:
-            if _backend_name() == "fast":
-                raise
-            return self._fallback.select(score, topk, lengths=lengths, offset=offset)
-
-
-class PersistentIndexerTopKBackend(IndexerTopKBackend):
-    """Persistent TopK branch for long decode rows.
-
-    vLLM uses a persistent TopK kernel for DeepSeek sparse indexer decode when
-    ``topk`` is 512/1024/2048.  RTP may not be built with that binding yet, so
-    this backend calls ``rtp_llm_ops.persistent_topk`` when present and otherwise
-    falls back.  Keeping a distinct backend lets us wire tests and env dispatch
-    now, while preserving a single implementation point for the CUDA port.
-    """
-
-    name = "persistent"
-
-    def __init__(self) -> None:
-        self._fast = FastIndexerTopKBackend()
-        self._torch = TorchIndexerTopKBackend()
 
     def select(
         self,
@@ -199,28 +156,63 @@ class PersistentIndexerTopKBackend(IndexerTopKBackend):
         if not (
             score.is_cuda
             and score.dtype == torch.float32
-            and int(topk) in (512, 1024, 2048)
+            and int(topk) in _FAST_TOPK_VALUES
         ):
-            return self._fast.select(score, topk, lengths=lengths, offset=offset)
+            raise RuntimeError(
+                "DSV4 fast indexer TopK requires CUDA float32 scores and "
+                "topk=2048; "
+                f"got device={score.device}, dtype={score.dtype}, topk={int(topk)}"
+            )
         flat, shape = _flatten_score(score)
         lengths_i32 = _normalize_lengths(score, topk, lengths)
-        try:
-            from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-            persistent_topk = getattr(rtp_llm_ops, "persistent_topk")
-            out = torch.empty(
-                (flat.shape[0], int(topk)), dtype=torch.int32, device=flat.device
+        from rtp_llm.models_py.kernels.cuda.fast_topk import fast_topk_v2
+
+        out = fast_topk_v2(flat, lengths_i32, int(topk))
+        out = _apply_offset(out, offset)
+        return _reshape_indices(out, shape)
+
+
+class PersistentIndexerTopKBackend(IndexerTopKBackend):
+    """Persistent TopK branch for long decode rows.
+
+    vLLM uses a persistent TopK kernel for DeepSeek sparse indexer rows when
+    ``topk`` is 512/1024/2048. This backend calls RTP's port of that kernel.
+    """
+
+    name = "persistent"
+
+    def select(
+        self,
+        score: torch.Tensor,
+        topk: int,
+        *,
+        lengths: Optional[torch.Tensor] = None,
+        offset: int | torch.Tensor = 0,
+    ) -> torch.Tensor:
+        if not (
+            score.is_cuda
+            and score.dtype == torch.float32
+            and int(topk) in _PERSISTENT_TOPK_VALUES
+        ):
+            raise RuntimeError(
+                "DSV4 persistent indexer TopK requires CUDA float32 scores and "
+                "topk in {512, 1024, 2048}; "
+                f"got device={score.device}, dtype={score.dtype}, topk={int(topk)}"
             )
-            workspace = torch.empty((1 << 20,), dtype=torch.uint8, device=flat.device)
-            persistent_topk(
-                flat, lengths_i32, out, workspace, int(topk), int(flat.shape[1])
-            )
-            out = _apply_offset(out, offset)
-            return _reshape_indices(out, shape)
-        except AttributeError:
-            if _backend_name() == "persistent":
-                return self._torch.select(score, topk, lengths=lengths, offset=offset)
-            return self._fast.select(score, topk, lengths=lengths, offset=offset)
+        flat, shape = _flatten_score(score)
+        lengths_i32 = _normalize_lengths(score, topk, lengths)
+
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        persistent_topk = getattr(rtp_llm_ops, "persistent_topk")
+        out = torch.empty(
+            (flat.shape[0], int(topk)), dtype=torch.int32, device=flat.device
+        )
+        workspace = torch.empty((1 << 20,), dtype=torch.uint8, device=flat.device)
+        persistent_topk(flat, lengths_i32, out, workspace, int(topk), int(flat.shape[1]))
+        out = _apply_offset(out, offset)
+        return _reshape_indices(out, shape)
 
 
 class HisaIndexerTopKBackend(IndexerTopKBackend):
@@ -246,6 +238,45 @@ class HisaIndexerTopKBackend(IndexerTopKBackend):
         )
 
 
+class AutoIndexerTopKBackend(IndexerTopKBackend):
+    """Use the fastest exact backend available for the current shape."""
+
+    name = "auto"
+
+    def __init__(self) -> None:
+        self._fast = FastIndexerTopKBackend()
+        self._persistent = PersistentIndexerTopKBackend()
+        self._torch = TorchIndexerTopKBackend()
+
+    def select(
+        self,
+        score: torch.Tensor,
+        topk: int,
+        *,
+        lengths: Optional[torch.Tensor] = None,
+        offset: int | torch.Tensor = 0,
+    ) -> torch.Tensor:
+        if (
+            score.is_cuda
+            and score.dtype == torch.float32
+            and int(topk) in _FAST_TOPK_VALUES
+        ):
+            try:
+                return self._fast.select(score, topk, lengths=lengths, offset=offset)
+            except (ImportError, AttributeError):
+                pass
+        if (
+            score.is_cuda
+            and score.dtype == torch.float32
+            and int(topk) in _PERSISTENT_TOPK_VALUES
+        ):
+            try:
+                return self._persistent.select(score, topk, lengths=lengths, offset=offset)
+            except (ImportError, AttributeError):
+                pass
+        return self._torch.select(score, topk, lengths=lengths, offset=offset)
+
+
 def get_indexer_topk_backend() -> IndexerTopKBackend:
     name = _backend_name()
     if name == "torch":
@@ -261,7 +292,7 @@ def get_indexer_topk_backend() -> IndexerTopKBackend:
             "invalid DSV4_INDEXER_TOPK_BACKEND="
             f"{name!r}; expected auto|torch|fast|persistent|hisa"
         )
-    return FastIndexerTopKBackend()
+    return AutoIndexerTopKBackend()
 
 
 def select_indexer_topk(

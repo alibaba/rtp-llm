@@ -21,17 +21,27 @@ except Exception:  # pragma: no cover - CPU-only import
 if triton is not None:
 
     @triton.jit
-    def _pack_x_kernel(
+    def _pack_mega_moe_inputs_kernel(
         x_ptr,
+        weights_ptr,
+        indices_ptr,
         out_fp8_ptr,
         out_sf_ptr,
+        out_weights_ptr,
+        out_indices_ptr,
         M: tl.constexpr,
         N: tl.constexpr,
+        K: tl.constexpr,
         x_stride_m: tl.constexpr,
+        weights_stride_m: tl.constexpr,
+        indices_stride_m: tl.constexpr,
         out_stride_m: tl.constexpr,
         sf_stride_m: tl.constexpr,
+        out_weights_stride_m: tl.constexpr,
+        out_indices_stride_m: tl.constexpr,
         eps: tl.constexpr,
         fp8_max: tl.constexpr,
+        BLOCK_K: tl.constexpr,
     ):
         pid_m = tl.program_id(0)
         pid_blk = tl.program_id(1)
@@ -57,31 +67,29 @@ if triton is not None:
         packed = tl.sum(ue8m0 << (group_offsets * 8))
         tl.store(out_sf_ptr + pid_m * sf_stride_m + pid_blk, packed, mask=pid_m < M)
 
-    @triton.jit
-    def _pack_router_kernel(
-        weights_ptr,
-        indices_ptr,
-        out_weights_ptr,
-        out_indices_ptr,
-        M: tl.constexpr,
-        K: tl.constexpr,
-        weights_stride_m: tl.constexpr,
-        indices_stride_m: tl.constexpr,
-        out_weights_stride_m: tl.constexpr,
-        out_indices_stride_m: tl.constexpr,
-        BLOCK_K: tl.constexpr,
-    ):
-        pid = tl.program_id(0)
-        offs = tl.arange(0, BLOCK_K)
-        mask = (pid < M) & (offs < K)
-        w = tl.load(
-            weights_ptr + pid * weights_stride_m + offs, mask=mask, other=0.0
-        ).to(tl.float32)
-        idx = tl.load(
-            indices_ptr + pid * indices_stride_m + offs, mask=mask, other=0
-        ).to(tl.int64)
-        tl.store(out_weights_ptr + pid * out_weights_stride_m + offs, w, mask=mask)
-        tl.store(out_indices_ptr + pid * out_indices_stride_m + offs, idx, mask=mask)
+        if pid_blk == 0:
+            router_offs = tl.arange(0, BLOCK_K)
+            router_mask = (pid_m < M) & (router_offs < K)
+            w = tl.load(
+                weights_ptr + pid_m * weights_stride_m + router_offs,
+                mask=router_mask,
+                other=0.0,
+            ).to(tl.float32)
+            idx = tl.load(
+                indices_ptr + pid_m * indices_stride_m + router_offs,
+                mask=router_mask,
+                other=0,
+            ).to(tl.int64)
+            tl.store(
+                out_weights_ptr + pid_m * out_weights_stride_m + router_offs,
+                w,
+                mask=router_mask,
+            )
+            tl.store(
+                out_indices_ptr + pid_m * out_indices_stride_m + router_offs,
+                idx,
+                mask=router_mask,
+            )
 
 
 def fused_pack_mega_moe_inputs(
@@ -101,6 +109,10 @@ def fused_pack_mega_moe_inputs(
         raise ValueError(f"x must be [T,D], got {tuple(x.shape)}")
     if weights.shape != indices.shape:
         raise ValueError("weights and indices must have identical [T,topk] shape")
+    if weights.dtype != torch.float32:
+        raise ValueError(f"weights must be float32, got {weights.dtype}")
+    if indices.dtype != torch.int64:
+        raise ValueError(f"indices must be int64, got {indices.dtype}")
     T, D = x.shape
     if T == 0:
         return
@@ -111,33 +123,29 @@ def fused_pack_mega_moe_inputs(
             f"out_sf shape mismatch: expected second dim {D // 128}, got {out_sf.shape}"
         )
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
-    grid_x = (T, triton.cdiv(D, 128))
-    _pack_x_kernel[grid_x](
-        x,
-        out_fp8,
-        out_sf,
-        T,
-        D,
-        x.stride(0),
-        out_fp8.stride(0),
-        out_sf.stride(0),
-        1.0e-4,
-        fp8_max,
-        num_warps=4,
-    )
     topk = weights.shape[1]
     block_k = triton.next_power_of_2(topk)
-    _pack_router_kernel[(T,)](
+    grid = (T, triton.cdiv(D, 128))
+    _pack_mega_moe_inputs_kernel[grid](
+        x,
         weights,
         indices,
+        out_fp8,
+        out_sf,
         out_weights,
         out_indices,
         T,
+        D,
         topk,
+        x.stride(0),
         weights.stride(0),
         indices.stride(0),
+        out_fp8.stride(0),
+        out_sf.stride(0),
         out_weights.stride(0),
         out_indices.stride(0),
+        1.0e-4,
+        fp8_max,
         BLOCK_K=block_k,
-        num_warps=1,
+        num_warps=4,
     )

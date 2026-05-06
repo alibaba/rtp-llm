@@ -30,9 +30,10 @@ except Exception:  # pragma: no cover — keep V4 importable without Triton
 
 
 def _use_silu_mul_split() -> bool:
-    if not _SILU_MUL_SPLIT_OK:
-        return False
-    return os.environ.get("DSV4_EXPERT_SILU_FUSED", "1") != "0"
+    enabled = os.environ.get("DSV4_EXPERT_SILU_FUSED", "1") != "0"
+    if enabled and not _SILU_MUL_SPLIT_OK:
+        raise RuntimeError("DSV4 fused Expert SiLU path is enabled by default but unavailable")
+    return enabled
 
 
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
