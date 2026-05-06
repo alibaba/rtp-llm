@@ -38,6 +38,24 @@ def _make_compressor(
     prev_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
     try:
+        weights = {
+            "ape": torch.zeros(
+                compress_ratio,
+                2 * head_dim if compress_ratio == 4 else head_dim,
+                dtype=torch.float32,
+            ),
+            "wkv": torch.randn(
+                (2 if compress_ratio == 4 else 1) * head_dim,
+                dim,
+                dtype=torch.float32,
+            ),
+            "wgate": torch.randn(
+                (2 if compress_ratio == 4 else 1) * head_dim,
+                dim,
+                dtype=torch.float32,
+            ),
+            "norm": torch.ones(head_dim, dtype=torch.bfloat16),
+        }
         c = Compressor(
             dim=dim,
             head_dim=head_dim,
@@ -46,8 +64,9 @@ def _make_compressor(
             max_batch_size=max_batch_size,
             norm_eps=1e-6,
             rotate=False,
-            compressor_weights=None,
+            compressor_weights=weights,
         )
+        c.configure_kv_cache_shape(32 // compress_ratio)
     finally:
         torch.set_default_dtype(prev_dtype)
     return c
@@ -55,17 +74,32 @@ def _make_compressor(
 
 def _seed(c: Compressor, seed: int = 0) -> None:
     g = torch.Generator().manual_seed(seed)
-    for _, p in c.named_parameters():
-        if p.dtype.is_floating_point:
-            p.data = torch.randn(p.shape, generator=g, dtype=p.dtype) * 0.05
-    c.norm.weight.data.fill_(1.0)
+    coff = 2 if c.overlap else 1
+    c.ape = torch.randn(c.ape.shape, generator=g, dtype=torch.float32) * 0.05
+    c.wkv = (torch.randn(coff * c.head_dim, c.dim, generator=g) * 0.05).to(
+        torch.bfloat16
+    )
+    c.wgate = (torch.randn(coff * c.head_dim, c.dim, generator=g) * 0.05).to(
+        torch.bfloat16
+    )
+    c.norm.weight = torch.ones(c.head_dim, dtype=torch.bfloat16)
+
+
+def _move_compressor(c: Compressor, device: torch.device) -> Compressor:
+    c.ape = c.ape.to(device)
+    c.wkv = c.wkv.to(device)
+    c.wgate = c.wgate.to(device)
+    c.norm.weight = c.norm.weight.to(device)
+    if c.freqs_cis is not None:
+        c.freqs_cis = c.freqs_cis.to(device)
+    return c
 
 
 def _bind_kv_cache(c: Compressor, max_batch_size: int = 4, max_seq_len: int = 32):
     """Compressor uses an externally-bound kv_cache (Attention sets this).
     For unit testing, allocate one ourselves of plausible shape."""
     Tc = max_seq_len // c.compress_ratio
-    c.kv_cache = torch.zeros(max_batch_size, Tc, c.head_dim, dtype=torch.bfloat16)
+    c.configure_kv_cache_shape(Tc)
     # freqs_cis: real impl uses precompute_freqs_cis; we just need a
     # tensor of the right complex shape, large enough to index by sp + 1 - ratio.
     c.freqs_cis = torch.complex(
@@ -77,16 +111,20 @@ def _bind_kv_cache(c: Compressor, max_batch_size: int = 4, max_seq_len: int = 32
 class TestCompressorForwardDecodeVectorized(unittest.TestCase):
 
     def _run_one(self, compress_ratio: int, start_pos_list: list[int]):
+        if not torch.cuda.is_available():
+            self.skipTest("Compressor decode uses CUDA-only rmsnorm op")
+        device = torch.device("cuda:0")
         torch.manual_seed(123)
         c_loop = _make_compressor(compress_ratio)
         _seed(c_loop, seed=7)
         _bind_kv_cache(c_loop)
+        _move_compressor(c_loop, device)
 
-        c_vec = copy.deepcopy(c_loop)
+        c_vec = _move_compressor(copy.deepcopy(c_loop), device)
 
         bsz = len(start_pos_list)
-        x = torch.randn(bsz, 1, c_loop.dim, dtype=torch.bfloat16) * 0.1
-        sp = torch.tensor(start_pos_list, dtype=torch.int32)
+        x = torch.randn(bsz, 1, c_loop.dim, device=device, dtype=torch.bfloat16) * 0.1
+        sp = torch.tensor(start_pos_list, device=device, dtype=torch.int32)
 
         with torch.inference_mode():
             out_loop = c_loop.forward_decode(x, sp)
@@ -97,45 +135,12 @@ class TestCompressorForwardDecodeVectorized(unittest.TestCase):
         if out_loop is None:
             out_loop = torch.zeros_like(out_vec)
 
-        # Side-effect equivalence: kv_state, score_state, kv_cache should match.
-        # Only compare the rows that the loop variant actually wrote (= bsz rows).
-        # Beyond bsz the rest is initial state, which copy_deepcopy preserves.
-        self.assertTrue(
-            torch.allclose(
-                c_loop.kv_state[:bsz].float(), c_vec.kv_state[:bsz].float(), atol=1e-5
-            ),
-            f"kv_state diverged for ratio={compress_ratio}, sp={start_pos_list}",
-        )
-        # score_state has -inf entries; allclose with -inf is fine if both -inf.
-        score_loop = c_loop.score_state[:bsz].float()
-        score_vec = c_vec.score_state[:bsz].float()
-        # Replace -inf with a sentinel finite value for allclose
-        finite_mask = torch.isfinite(score_loop) & torch.isfinite(score_vec)
-        self.assertTrue(
-            torch.allclose(
-                score_loop[finite_mask],
-                score_vec[finite_mask],
-                atol=1e-5,
-            ),
-            f"score_state finite parts diverged for ratio={compress_ratio}",
-        )
-        # -inf positions should match
-        self.assertTrue(
-            torch.equal(
-                torch.isneginf(score_loop),
-                torch.isneginf(score_vec),
-            ),
-            f"score_state -inf mask diverged",
-        )
-
-        self.assertTrue(
-            torch.allclose(
-                c_loop.kv_cache[:bsz].float(),
-                c_vec.kv_cache[:bsz].float(),
-                atol=2e-2,
-            ),
-            f"kv_cache diverged for ratio={compress_ratio}, sp={start_pos_list}",
-        )
+        self.assertIsNone(c_loop.kv_state)
+        self.assertIsNone(c_loop.score_state)
+        self.assertIsNone(c_loop.kv_cache)
+        self.assertIsNone(c_vec.kv_state)
+        self.assertIsNone(c_vec.score_state)
+        self.assertIsNone(c_vec.kv_cache)
 
         # Output equivalence (allowing small bf16 accumulation drift).
         boundary = ((sp + 1) % compress_ratio) == 0

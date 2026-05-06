@@ -17,7 +17,7 @@ from typing import Dict, Optional
 import torch
 
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
-from ..mega_buf import _get_or_create_mega_buf, _mega_moe_available
+from ..mega_buf import _get_or_create_mega_buf, _mega_moe_enabled
 from ..quant_layouts import FP4_BLOCK, _per_token_cast_to_fp8_packed_ue8m0
 
 
@@ -28,8 +28,8 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
         # Mega requires EP > 1, SM100, dist-init — all checked by
-        # ``_mega_moe_available()`` except ep_size > 1, which we check here.
-        return cfg.ep_size > 1 and _mega_moe_available()
+        # ``_mega_moe_enabled()`` except ep_size > 1, which we check here.
+        return cfg.ep_size > 1 and _mega_moe_enabled()
 
     def setup_weights(self, layer_weights: Dict) -> None:
         """Stack EP-local routed-expert SFs into the int32 UTCCP-transposed

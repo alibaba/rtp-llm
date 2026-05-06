@@ -34,6 +34,12 @@ from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
+from rtp_llm.models_py.modules.dsv4._metadata_triton import (
+    build_cp_compress_topk_idxs,
+    build_cp_window_topk_idxs,
+    build_swa_pool_slot_mapping,
+)
+from rtp_llm.models_py.modules.dsv4._nvtx import nvtx_range
 
 # Audit §7.4 P0 (row 1) + §7.3.4: fused RMSNorm + partial RoPE, single
 # Triton launch.  Covers every Q/KV decode + prefill site.  Standalone
@@ -273,6 +279,14 @@ def _get_window_topk_idxs_cp(
         invalid = offsets.unsqueeze(0) < (window_size - valid_count.unsqueeze(1))
         matrix = torch.where(invalid, torch.full_like(idxs, -1), idxs)
         return matrix.unsqueeze(0).expand(bsz, -1, -1).contiguous()
+    if global_positions.is_cuda:
+        with nvtx_range("dsv4.attn.cp_window_topk_meta"):
+            return build_cp_window_topk_idxs(
+                global_positions,
+                bsz=bsz,
+                seq_len_total=seq_len_total,
+                window_size=window_size,
+            )
 
     W = min(window_size, max(seq_len_total, 1))
     # Per-row window start, clamped to 0 for early Q positions whose
@@ -409,6 +423,15 @@ def _get_compress_topk_idxs_cp(
     T_comp = max(seq_len_total // ratio, 0)
     if T_comp == 0:
         return torch.full((bsz, S_local, 0), -1, dtype=torch.long, device=device)
+    if global_positions.is_cuda:
+        with nvtx_range("dsv4.attn.cp_compress_topk_meta"):
+            return build_cp_compress_topk_idxs(
+                global_positions,
+                bsz=bsz,
+                seq_len_total=seq_len_total,
+                ratio=ratio,
+                offset=offset,
+            )
     cols = torch.arange(T_comp, device=device)  # [T_comp]
     max_allowed = (global_positions + 1) // ratio  # [S_local]
     mask = cols.unsqueeze(0) >= max_allowed.unsqueeze(1)  # [S_local, T_comp]
@@ -1015,59 +1038,68 @@ class Attention(nn.Module):
         device = kv_full.device
         max_blocks = bt.shape[1]
 
-        # Normalize sp -> [B] int64 tensor.
-        if isinstance(sp, torch.Tensor):
-            sp_t = sp.to(device=device, dtype=torch.long)
-            if sp_t.dim() == 0:
-                sp_t = sp_t.unsqueeze(0)
-            if sp_t.numel() == 1 and bsz > 1:
-                sp_t = sp_t.expand(bsz)
-        else:
-            sp_t = torch.full((bsz,), int(sp), device=device, dtype=torch.long)
-
-        # Per-row seqlens (valid new-token count).  None => max_seqlen for all.
-        if row_seqlens is None:
-            seq_t = torch.full((bsz,), max_seqlen, device=device, dtype=torch.long)
-        else:
-            seq_t = row_seqlens.to(device=device, dtype=torch.long)
-            if seq_t.dim() == 0:
-                seq_t = seq_t.unsqueeze(0)
-            if seq_t.numel() == 1 and bsz > 1:
-                seq_t = seq_t.expand(bsz)
-
         # Write every token from this prefill that maps to a currently
         # allocated SWA block-table entry.  Attention itself only consumes a
         # sliding window, but prefix-cache reuse may stop at an earlier block
         # boundary than this request's final token.  Those boundary states need
         # the full request tail physical blocks populated, not just the final
         # ``window_size`` rows.
-        n_write_per_row = seq_t  # [B]
         max_n_write = max_seqlen
         if max_n_write == 0:
             return
 
-        j = torch.arange(max_n_write, device=device, dtype=torch.long)  # [max_n_write]
-        # Row-local validity: j < n_write[b] -> valid position.
-        row_valid = j.unsqueeze(0) < n_write_per_row.unsqueeze(1)  # [B, max_n_write]
-        # Global positions per (row, j): sp[b] + j.
-        global_pos = sp_t.unsqueeze(1) + j.unsqueeze(0)  # [B, max_n_write]
-        block_in_seq = global_pos // eb
-        in_block = global_pos % eb
-        bt_long = bt[:bsz].to(device=device, dtype=torch.long)
-        in_capacity = block_in_seq < max_blocks
-        safe_in_seq = torch.where(
-            in_capacity, block_in_seq, torch.zeros_like(block_in_seq)
-        )
-        block_id = bt_long.gather(1, safe_in_seq)  # [B, max_n_write]
-        valid = (block_id > 0) & in_capacity & row_valid
-        slot = torch.where(
-            valid, block_id * eb + in_block, torch.full_like(in_block, -1)
-        )
+        with nvtx_range("dsv4.attn.swa_pool_slot_meta"):
+            slot_mapping = build_swa_pool_slot_mapping(
+                bt[:bsz],
+                bsz=bsz,
+                T=max_n_write,
+                eb=eb,
+                sp=sp,
+                row_seqlens=row_seqlens,
+            )
+
+        if slot_mapping is None:
+            # CPU/reference fallback.
+            if isinstance(sp, torch.Tensor):
+                sp_t = sp.to(device=device, dtype=torch.long)
+                if sp_t.dim() == 0:
+                    sp_t = sp_t.unsqueeze(0)
+                if sp_t.numel() == 1 and bsz > 1:
+                    sp_t = sp_t.expand(bsz)
+            else:
+                sp_t = torch.full((bsz,), int(sp), device=device, dtype=torch.long)
+
+            if row_seqlens is None:
+                seq_t = torch.full((bsz,), max_seqlen, device=device, dtype=torch.long)
+            elif isinstance(row_seqlens, torch.Tensor):
+                seq_t = row_seqlens.to(device=device, dtype=torch.long)
+                if seq_t.dim() == 0:
+                    seq_t = seq_t.unsqueeze(0)
+                if seq_t.numel() == 1 and bsz > 1:
+                    seq_t = seq_t.expand(bsz)
+            else:
+                seq_t = torch.full((bsz,), int(row_seqlens), device=device, dtype=torch.long)
+
+            j = torch.arange(max_n_write, device=device, dtype=torch.long)
+            row_valid = j.unsqueeze(0) < seq_t.unsqueeze(1)
+            global_pos = sp_t.unsqueeze(1) + j.unsqueeze(0)
+            block_in_seq = global_pos // eb
+            in_block = global_pos % eb
+            bt_long = bt[:bsz].to(device=device, dtype=torch.long)
+            in_capacity = block_in_seq < max_blocks
+            safe_in_seq = torch.where(
+                in_capacity, block_in_seq, torch.zeros_like(block_in_seq)
+            )
+            block_id = bt_long.gather(1, safe_in_seq)
+            valid = (block_id > 0) & in_capacity & row_valid
+            slot = torch.where(
+                valid, block_id * eb + in_block, torch.full_like(in_block, -1)
+            )
+            slot_mapping = slot.reshape(-1)
 
         # Source rows are already dense request-major: src[b, j] = kv_full[b, j].
         source = kv_full[:bsz, :max_n_write]
         source_flat = source.reshape(bsz * max_n_write, self.head_dim)
-        slot_mapping = slot.reshape(-1)
         write_kv_to_pool(source_flat, slot_mapping, pool_view, mask_negative=True)
 
     def _prefill_read_swa_from_pool(
@@ -2146,36 +2178,37 @@ class Attention(nn.Module):
         # Build topk_idxs — rows = rank-local Q; columns reference either the
         # fresh-prefill [sliding | compressed] tensor or the continuation
         # paged-pool [SWA absolute stream | compressed] tensor.
-        if cp_on:
-            topk_idxs = _get_window_topk_idxs_cp(
-                win,
-                bsz,
-                prefill_kv_len,
-                cp_ctx.global_positions,
-            )
-        elif is_batched_decode:
-            # Batched decode: vectorized topk_idxs — each batch at different ring position
-            sp = start_pos % win  # [B]
-            offsets = torch.arange(win, device=device)  # [win]
-            idxs = (sp.unsqueeze(1) + 1 + offsets.unsqueeze(0)) % win  # [B, win]
-            valid_count = torch.clamp(start_pos + 1, max=win)  # [B]
-            invalid = offsets.unsqueeze(0) < (win - valid_count.unsqueeze(1))
-            idxs = torch.where(invalid, -1, idxs)
-            topk_idxs = idxs.unsqueeze(1)  # [B, 1, win]
-        elif is_batched_prefill:
-            sp_t = start_pos.to(device=device, dtype=torch.long)
-            if sequence_lengths is not None:
-                row_seqlens = sequence_lengths.to(device=device, dtype=torch.long)
-            else:
-                row_seqlens = torch.full(
-                    (bsz,), seqlen, device=device, dtype=torch.long
+        with nvtx_range("dsv4.attn.topk.window"):
+            if cp_on:
+                topk_idxs = _get_window_topk_idxs_cp(
+                    win,
+                    bsz,
+                    prefill_kv_len,
+                    cp_ctx.global_positions,
                 )
-            topk_idxs = _get_window_topk_idxs_batched(
-                win, seqlen, sp_t, row_seqlens, device
-            )
-        else:
-            sp = int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
-            topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, sp, device)
+            elif is_batched_decode:
+                # Batched decode: vectorized topk_idxs — each batch at different ring position
+                sp = start_pos % win  # [B]
+                offsets = torch.arange(win, device=device)  # [win]
+                idxs = (sp.unsqueeze(1) + 1 + offsets.unsqueeze(0)) % win  # [B, win]
+                valid_count = torch.clamp(start_pos + 1, max=win)  # [B]
+                invalid = offsets.unsqueeze(0) < (win - valid_count.unsqueeze(1))
+                idxs = torch.where(invalid, -1, idxs)
+                topk_idxs = idxs.unsqueeze(1)  # [B, 1, win]
+            elif is_batched_prefill:
+                sp_t = start_pos.to(device=device, dtype=torch.long)
+                if sequence_lengths is not None:
+                    row_seqlens = sequence_lengths.to(device=device, dtype=torch.long)
+                else:
+                    row_seqlens = torch.full(
+                        (bsz,), seqlen, device=device, dtype=torch.long
+                    )
+                topk_idxs = _get_window_topk_idxs_batched(
+                    win, seqlen, sp_t, row_seqlens, device
+                )
+            else:
+                sp = int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
+                topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, sp, device)
         if self.compress_ratio:
             # Fresh prefill attends over [current sliding KV | current compressed KV].
             # Continuation prefill uses a dense absolute SWA view; decode keeps
@@ -2184,76 +2217,81 @@ class Attention(nn.Module):
                 offset = prefill_swa_dense_len
             else:
                 offset = win
-            if self.indexer is not None:
-                if _dbg:
-                    self.indexer._dbg_prefix = f"L{self.layer_id:02d}_attn_idx"
-                if is_batched_decode:
-                    # Indexer now supports tensor start_pos directly
-                    compress_idxs = self.indexer(x, qr, start_pos, offset)
-                elif is_batched_prefill:
-                    # Indexer batched prefill passes through sp tensor;
-                    # Indexer handles per-row seqlens internally.
-                    compress_idxs = self.indexer(
-                        x,
-                        qr,
-                        start_pos,
+            with nvtx_range("dsv4.attn.topk.compress"):
+                if self.indexer is not None:
+                    if _dbg:
+                        self.indexer._dbg_prefix = f"L{self.layer_id:02d}_attn_idx"
+                    if is_batched_decode:
+                        # Indexer now supports tensor start_pos directly
+                        compress_idxs = self.indexer(x, qr, start_pos, offset)
+                    elif is_batched_prefill:
+                        # Indexer batched prefill passes through sp tensor;
+                        # Indexer handles per-row seqlens internally.
+                        compress_idxs = self.indexer(
+                            x,
+                            qr,
+                            start_pos,
+                            offset,
+                            sequence_lengths=sequence_lengths,
+                        )
+                    else:
+                        compress_idxs = self.indexer(x, qr, start_pos, offset)
+                    if _dbg:
+                        self.indexer._dbg_prefix = None
+                        _rt.record_if_level(
+                            2,
+                            f"L{self.layer_id:02d}_attn_compress_idxs",
+                            compress_idxs,
+                        )
+                elif cp_on:
+                    compress_idxs = _get_compress_topk_idxs_cp(
+                        ratio,
+                        bsz,
+                        prefill_kv_len,
                         offset,
-                        sequence_lengths=sequence_lengths,
+                        cp_ctx.global_positions,
+                    )
+                elif is_batched_decode:
+                    # Vectorized compress_idxs for HCA batched decode (no indexer)
+                    n_entries = (start_pos + 1) // ratio  # [B]
+                    max_entries = int(n_entries.max().item())
+                    if max_entries > 0:
+                        entry_range = torch.arange(max_entries, device=device)
+                        valid = entry_range.unsqueeze(0) < n_entries.unsqueeze(
+                            1
+                        )  # [B, max_entries]
+                        c_idxs = torch.where(valid, entry_range.unsqueeze(0) + offset, -1)
+                        compress_idxs = c_idxs.unsqueeze(1)  # [B, 1, max_entries]
+                    else:
+                        compress_idxs = torch.full(
+                            (bsz, 1, 0), -1, device=device, dtype=torch.long
+                        )
+                elif is_batched_prefill:
+                    sp_t_cmp = start_pos.to(device=device, dtype=torch.long)
+                    if sequence_lengths is not None:
+                        row_seqlens_cmp = sequence_lengths.to(
+                            device=device, dtype=torch.long
+                        )
+                    else:
+                        row_seqlens_cmp = torch.full(
+                            (bsz,), seqlen, device=device, dtype=torch.long
+                        )
+                    compress_idxs = _get_compress_topk_idxs_batched(
+                        ratio, seqlen, offset, sp_t_cmp, row_seqlens_cmp, device
                     )
                 else:
-                    compress_idxs = self.indexer(x, qr, start_pos, offset)
-                if _dbg:
-                    self.indexer._dbg_prefix = None
-                    _rt.record_if_level(
-                        2,
-                        f"L{self.layer_id:02d}_attn_compress_idxs",
-                        compress_idxs,
+                    sp_int = (
+                        int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
                     )
-            elif cp_on:
-                compress_idxs = _get_compress_topk_idxs_cp(
-                    ratio,
-                    bsz,
-                    prefill_kv_len,
-                    offset,
-                    cp_ctx.global_positions,
-                )
-            elif is_batched_decode:
-                # Vectorized compress_idxs for HCA batched decode (no indexer)
-                n_entries = (start_pos + 1) // ratio  # [B]
-                max_entries = int(n_entries.max().item())
-                if max_entries > 0:
-                    entry_range = torch.arange(max_entries, device=device)
-                    valid = entry_range.unsqueeze(0) < n_entries.unsqueeze(
-                        1
-                    )  # [B, max_entries]
-                    c_idxs = torch.where(valid, entry_range.unsqueeze(0) + offset, -1)
-                    compress_idxs = c_idxs.unsqueeze(1)  # [B, 1, max_entries]
-                else:
-                    compress_idxs = torch.full(
-                        (bsz, 1, 0), -1, device=device, dtype=torch.long
+                    compress_idxs = _get_compress_topk_idxs(
+                        ratio, bsz, seqlen, sp_int, offset, device
                     )
-            elif is_batched_prefill:
-                sp_t_cmp = start_pos.to(device=device, dtype=torch.long)
-                if sequence_lengths is not None:
-                    row_seqlens_cmp = sequence_lengths.to(
-                        device=device, dtype=torch.long
-                    )
-                else:
-                    row_seqlens_cmp = torch.full(
-                        (bsz,), seqlen, device=device, dtype=torch.long
-                    )
-                compress_idxs = _get_compress_topk_idxs_batched(
-                    ratio, seqlen, offset, sp_t_cmp, row_seqlens_cmp, device
-                )
-            else:
-                sp_int = (
-                    int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
-                )
-                compress_idxs = _get_compress_topk_idxs(
-                    ratio, bsz, seqlen, sp_int, offset, device
-                )
-            topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
-        topk_idxs = topk_idxs.long()
+            with nvtx_range("dsv4.attn.topk.cat_cast"):
+                topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
+                topk_idxs = topk_idxs.long()
+        else:
+            with nvtx_range("dsv4.attn.topk.cat_cast"):
+                topk_idxs = topk_idxs.long()
 
         dbg_last_idx = None
         dbg_pos_idx = None
@@ -2320,8 +2358,10 @@ class Attention(nn.Module):
         if is_prefill_attn:
             if cp_on:
                 pool_read_start = cp_ctx.prefix_length
-                row_seqlens_for_pool = torch.full(
-                    (bsz,), seqlen_full, device=device, dtype=torch.long
+                row_seqlens_for_pool = (
+                    torch.full((bsz,), seqlen_full, device=device, dtype=torch.long)
+                    if any_cont
+                    else seqlen_full
                 )
             else:
                 pool_read_start = start_pos

@@ -94,10 +94,12 @@ class StrategySelectTest(unittest.TestCase):
             self.assertIs(select_strategy(_cfg(ep_size=4)),
                           MegaMoEStrategy)
 
-    def test_ep_gt1_no_mega_picks_deepep(self):
+    def test_ep_gt1_no_mega_raises(self):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
-            self.assertIs(select_strategy(_cfg(ep_size=4)),
-                          DeepEPStrategy)
+            with self.assertRaises(RuntimeError) as cm:
+                select_strategy(_cfg(ep_size=4))
+        self.assertIn("requires MegaMoEStrategy", str(cm.exception))
+        self.assertIn("fallback to DeepEP/LocalLoop is disabled", str(cm.exception))
 
     # --- forced override ---------------------------------------------------
 
@@ -114,6 +116,13 @@ class StrategySelectTest(unittest.TestCase):
                 select_strategy(_cfg(ep_size=1), forced="grouped_fp4")
         self.assertIn("Forced MoE strategy 'grouped_fp4'", str(cm.exception))
         self.assertIn("cannot handle", str(cm.exception))
+
+    def test_forced_ep_gt1_non_mega_raises_even_if_capable(self):
+        with mock.patch.object(DeepEPStrategy, "can_handle", return_value=True):
+            with self.assertRaises(RuntimeError) as cm:
+                select_strategy(_cfg(ep_size=4), forced="deepep")
+        self.assertIn("requires MegaMoEStrategy", str(cm.exception))
+        self.assertIn("bypass Mega", str(cm.exception))
 
     def test_forced_unknown_raises(self):
         with self.assertRaises(RuntimeError) as cm:
@@ -158,12 +167,16 @@ class StrategySelectTest(unittest.TestCase):
             self.assertIn("Conflicting MoE strategy", str(cm.exception))
 
     def test_legacy_negation_does_not_force_alternative(self):
-        # DSV4_USE_MEGA_MOE=0 should NOT force a different strategy — it just
-        # disables mega via the strategy's own can_handle (mega_buf checks
-        # the same env var). _resolve_forced returns (None, False) so
-        # auto-pick runs.
+        # DSV4_USE_MEGA_MOE=0 should NOT force a different strategy. EP>1
+        # select_strategy() treats disabled Mega as a fatal config error.
         with _env(DSV4_USE_MEGA_MOE="0"):
             self.assertEqual(_resolve_forced(None), (None, False))
+
+    def test_legacy_negation_ep_gt1_raises(self):
+        with _env(DSV4_USE_MEGA_MOE="0"):
+            with self.assertRaises(RuntimeError) as cm:
+                select_strategy(_cfg(ep_size=4))
+        self.assertIn("DSV4_USE_MEGA_MOE=0 disables Mega MoE", str(cm.exception))
 
     def test_legacy_force_nonstrict_falls_through_when_incapable(self):
         # Legacy DSV4_USE_MEGA_MOE=1 + ep_size=1 cfg: Mega.can_handle False
