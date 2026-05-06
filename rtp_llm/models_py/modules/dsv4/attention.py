@@ -48,10 +48,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_freqs_cis_local,
 )
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
-from rtp_llm.models_py.modules.dsv4.qlinear import (
-    QuantizedLinear,
-    _fp8_dequant_to_fp32,
-)
+from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear, _fp8_dequant_to_fp32
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
     apply_rotary_emb_batched,
@@ -189,7 +186,10 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     # factory plumbing is unchanged.
     local = {"_w": w, "_s": s}
     return LinearFactory.create_linear_from_weights(
-        local, "_w", "_s", quant_config=_V4_FP8_BLOCK_CFG,
+        local,
+        "_w",
+        "_s",
+        quant_config=_V4_FP8_BLOCK_CFG,
     )
 
 
@@ -203,8 +203,6 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
         s = _repack_v4_fp8_scale_to_int32(s)
         weights[scale_key] = s
     return _v4_fp8_linear(w, s)
-
-
 
 
 def _get_window_topk_idxs(
@@ -583,9 +581,7 @@ class Attention(nn.Module):
             if col_slice is not None:
                 w = w[:, col_slice]
                 if scale_is_packed_int32:
-                    assert (
-                        col_slice.start % 512 == 0 and col_slice.stop % 512 == 0
-                    ), (
+                    assert col_slice.start % 512 == 0 and col_slice.stop % 512 == 0, (
                         f"col_slice {col_slice} not aligned to 512 for "
                         f"packed int32 scale; framework path requires "
                         f"K-slices on 512-byte boundaries"
@@ -665,15 +661,28 @@ class Attention(nn.Module):
                 "wgate": layer_weights[W.v4_compressor_wgate],
                 "norm": layer_weights[W.v4_compressor_norm],
             }
-            self.compressor = Compressor(
-                dim=dim,
-                head_dim=head_dim,
-                rope_head_dim=rope_head_dim,
-                compress_ratio=compress_ratio,
-                max_batch_size=max_batch_size,
-                norm_eps=norm_eps,
-                compressor_weights=outer_cmp_weights,
-            )
+            if self._kv_cache_is_fp8:
+                from rtp_llm.models_py.modules.dsv4.compressor_fp8 import CompressorFP8
+
+                self.compressor = CompressorFP8(
+                    dim=dim,
+                    head_dim=head_dim,
+                    rope_head_dim=rope_head_dim,
+                    compress_ratio=compress_ratio,
+                    max_batch_size=max_batch_size,
+                    norm_eps=norm_eps,
+                    compressor_weights=outer_cmp_weights,
+                )
+            else:
+                self.compressor = Compressor(
+                    dim=dim,
+                    head_dim=head_dim,
+                    rope_head_dim=rope_head_dim,
+                    compress_ratio=compress_ratio,
+                    max_batch_size=max_batch_size,
+                    norm_eps=norm_eps,
+                    compressor_weights=outer_cmp_weights,
+                )
             # Phase E5: Compressor.kv_cache is self-managed (was an alias
             # into ``Attention.kv_cache[:, win:]``).  Configure shape here
             # because the Compressor doesn't know ``max_seq_len``.
@@ -683,19 +692,36 @@ class Attention(nn.Module):
             # absent (warmup, unit tests), ``_bind_kv_cache_from_pool``
             # needs the T hint to allocate the ephemeral zero tensor.
             if compress_ratio == 4:
-                self.indexer = Indexer(
-                    dim=dim,
-                    q_lora_rank=q_lora_rank,
-                    index_n_heads=index_n_heads,
-                    index_head_dim=index_head_dim,
-                    rope_head_dim=rope_head_dim,
-                    index_topk=index_topk,
-                    compress_ratio=compress_ratio,
-                    max_batch_size=max_batch_size,
-                    max_seq_len=max_seq_len,
-                    norm_eps=norm_eps,
-                    layer_weights=layer_weights,
-                )
+                if self._kv_cache_is_fp8:
+                    from rtp_llm.models_py.modules.dsv4.indexer_fp8 import IndexerFP8
+
+                    self.indexer = IndexerFP8(
+                        dim=dim,
+                        q_lora_rank=q_lora_rank,
+                        index_n_heads=index_n_heads,
+                        index_head_dim=index_head_dim,
+                        rope_head_dim=rope_head_dim,
+                        index_topk=index_topk,
+                        compress_ratio=compress_ratio,
+                        max_batch_size=max_batch_size,
+                        max_seq_len=max_seq_len,
+                        norm_eps=norm_eps,
+                        layer_weights=layer_weights,
+                    )
+                else:
+                    self.indexer = Indexer(
+                        dim=dim,
+                        q_lora_rank=q_lora_rank,
+                        index_n_heads=index_n_heads,
+                        index_head_dim=index_head_dim,
+                        rope_head_dim=rope_head_dim,
+                        index_topk=index_topk,
+                        compress_ratio=compress_ratio,
+                        max_batch_size=max_batch_size,
+                        max_seq_len=max_seq_len,
+                        norm_eps=norm_eps,
+                        layer_weights=layer_weights,
+                    )
                 # Configure nested indexer compressor shape hint so warmup
                 # (where pool context is absent) can still allocate an
                 # ephemeral zero kv_cache for the write at the tail of

@@ -101,9 +101,13 @@ class IndexerFP8(PoolBackedModule):
         max_batch_size: int,
         max_seq_len: int,
         norm_eps: float = 1e-6,
-        weights: Optional[Dict[str, torch.Tensor]] = None,
-        prefix: str = "",
+        layer_weights: Optional[Dict[str, torch.Tensor]] = None,
     ):
+        """``layer_weights`` is the framework's per-layer dict
+        (``ModelWeights.weights[layer_id]``), keyed by ``W.v4_*`` enum.
+        Indexer reads ``W.v4_indexer_wq_b_{w,s}``, ``W.v4_indexer_weights_proj_w``,
+        and the four ``W.v4_indexer_compressor_*`` keys for its nested
+        ``CompressorFP8``."""
         super().__init__()
         assert index_head_dim == INDEXER_HEAD_DIM, (
             f"IndexerFP8 locked to index_head_dim={INDEXER_HEAD_DIM} "
@@ -113,6 +117,10 @@ class IndexerFP8(PoolBackedModule):
             "deep_gemm.fp8_paged_mqa_logits not available — IndexerFP8 cannot "
             "operate without DeepGEMM. Use IndexerBF16 (or install deep_gemm)."
         )
+        assert layer_weights is not None, (
+            "IndexerFP8 requires layer_weights — meta-tensor / stand-alone "
+            "construction is not supported (use the BF16 path for that)."
+        )
         self.dim = dim
         self.n_heads = index_n_heads
         self.head_dim = index_head_dim
@@ -121,29 +129,25 @@ class IndexerFP8(PoolBackedModule):
         self.q_lora_rank = q_lora_rank
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
-        self._factory_mode = weights is not None
 
-        if self._factory_mode:
-            from rtp_llm.models_py.modules.dsv4.attention import (
-                _v4_fp8_linear_from_dict,
-            )
+        from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear
+        from rtp_llm.utils.model_weight import W
 
-            self.wq_b = _v4_fp8_linear_from_dict(
-                weights,
-                f"{prefix}.wq_b.weight",
-                f"{prefix}.wq_b.scale",
-            )
-            self.weights_proj = nn.Linear(dim, index_n_heads, bias=False)
-            self.weights_proj.weight = nn.Parameter(
-                weights[f"{prefix}.weights_proj.weight"], requires_grad=False
-            )
-        else:
-            self.wq_b = QuantizedLinear(
-                q_lora_rank, index_n_heads * index_head_dim, storage="fp8"
-            )
-            self.weights_proj = nn.Linear(dim, index_n_heads, bias=False)
+        self.wq_b = _v4_fp8_linear(
+            layer_weights[W.v4_indexer_wq_b_w],
+            layer_weights[W.v4_indexer_wq_b_s],
+        )
+        # weights_proj is plain BF16 — store the tensor directly (matches
+        # BF16 ``Indexer`` which uses ``F.linear(x, self.weights_proj)``).
+        self.weights_proj = layer_weights[W.v4_indexer_weights_proj_w]
 
         # Nested compressor: 132B layout (head_dim=128).
+        inner_cmp_weights = {
+            "ape": layer_weights[W.v4_indexer_compressor_ape],
+            "wkv": layer_weights[W.v4_indexer_compressor_wkv],
+            "wgate": layer_weights[W.v4_indexer_compressor_wgate],
+            "norm": layer_weights[W.v4_indexer_compressor_norm],
+        }
         self.compressor = CompressorFP8(
             dim=dim,
             head_dim=index_head_dim,
@@ -152,8 +156,7 @@ class IndexerFP8(PoolBackedModule):
             max_batch_size=max_batch_size,
             norm_eps=norm_eps,
             rotate=True,
-            weights=weights,
-            prefix=f"{prefix}.compressor" if self._factory_mode else "",
+            compressor_weights=inner_cmp_weights,
         )
         self.max_batch_size = max_batch_size
         self._kv_cache_t = max_seq_len // compress_ratio
@@ -190,7 +193,9 @@ class IndexerFP8(PoolBackedModule):
         batched_rope: bool = False,
     ) -> torch.Tensor:
         """qr → wq_b → unflatten → RoPE → q [B, S, H, D]."""
-        if self._factory_mode and qr.dim() > 2:
+        # Framework FP8 linear (CudaFp8DeepGEMMLinear) requires 2D input;
+        # flatten leading dims and restore.
+        if qr.dim() > 2:
             shape = qr.shape
             q = self.wq_b(qr.reshape(-1, shape[-1])).view(
                 *shape[:-1], self.n_heads * self.head_dim

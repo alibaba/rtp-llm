@@ -87,13 +87,20 @@ class CompressorFP8(PoolBackedModule):
         max_batch_size: int,
         norm_eps: float = 1e-6,
         rotate: bool = False,
-        weights: Optional[Dict[str, torch.Tensor]] = None,
-        prefix: str = "",
+        compressor_weights: Optional[Dict[str, torch.Tensor]] = None,
     ):
+        """``compressor_weights`` is a 4-key dict ``{"ape", "wkv", "wgate",
+        "norm"}`` extracted by the caller from ``layer_weights[W.v4_*compressor_*]``
+        — same shape as the BF16 ``Compressor`` ctor."""
         super().__init__()
         assert head_dim in (KV_HEAD_DIM, INDEXER_HEAD_DIM), (
             f"CompressorFP8 supports head_dim in {{{KV_HEAD_DIM}, "
             f"{INDEXER_HEAD_DIM}}} (CSA/HCA 584B and indexer 132B); got {head_dim}"
+        )
+        assert compressor_weights is not None, (
+            "CompressorFP8 requires compressor_weights — meta-tensor / "
+            "stand-alone construction is not supported (use the BF16 path "
+            "for that)."
         )
         self.dim = dim
         self.head_dim = head_dim
@@ -106,36 +113,24 @@ class CompressorFP8(PoolBackedModule):
         self.overlap = compress_ratio == 4
         self.rotate = rotate
         coff = 1 + self.overlap
-        self._factory_mode = weights is not None
 
-        if self._factory_mode:
-            self.ape = nn.Parameter(
-                weights[f"{prefix}.ape"].float(), requires_grad=False
+        # ape stays FP32; wkv/wgate cast BF16 for tensor-core dispatch
+        # (matches BF16 ``Compressor`` ctor pattern).
+        self.ape = compressor_weights["ape"]
+        self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
+        self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
+        with torch.no_grad():
+            self.wkv.weight = nn.Parameter(
+                compressor_weights["wkv"].to(torch.bfloat16), requires_grad=False
             )
-            self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
-            self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
-            with torch.no_grad():
-                self.wkv.weight = nn.Parameter(
-                    weights[f"{prefix}.wkv.weight"].float(), requires_grad=False
-                )
-                self.wgate.weight = nn.Parameter(
-                    weights[f"{prefix}.wgate.weight"].float(), requires_grad=False
-                )
-            self.norm = _CompressorNorm(head_dim)
-            self.norm.weight = nn.Parameter(
-                weights[f"{prefix}.norm.weight"].to(torch.bfloat16),
-                requires_grad=False,
+            self.wgate.weight = nn.Parameter(
+                compressor_weights["wgate"].to(torch.bfloat16), requires_grad=False
             )
-        else:
-            self.ape = nn.Parameter(
-                torch.empty(compress_ratio, coff * head_dim, dtype=torch.float32)
-            )
-            self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
-            self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
-            with torch.no_grad():
-                self.wkv.weight = nn.Parameter(self.wkv.weight.float())
-                self.wgate.weight = nn.Parameter(self.wgate.weight.float())
-            self.norm = _CompressorNorm(head_dim)
+        self.norm = _CompressorNorm(head_dim)
+        self.norm.weight = nn.Parameter(
+            compressor_weights["norm"].to(torch.bfloat16),
+            requires_grad=False,
+        )
         self.norm_eps = norm_eps
 
         # State buffer geometry — PoolBackedModule reads these in
