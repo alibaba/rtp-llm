@@ -15,6 +15,8 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_freqs_cis_local
+from rtp_llm.models_py.modules.dsv4._metadata_triton import build_pool_slots
+from rtp_llm.models_py.modules.dsv4._nvtx import nvtx_range
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
@@ -182,21 +184,28 @@ class Indexer(nn.Module):
             self.kv_cache = torch.zeros(bsz, T, D, dtype=dtype, device=device)
             return
         eb = self._kv_eb
-        max_blocks = self._kv_block_table.shape[1]
-        pool_capacity = max_blocks * eb
-        pos = torch.arange(T, device=device, dtype=torch.long)
-        in_capacity_row = pos < pool_capacity
-        safe_pos = torch.where(in_capacity_row, pos, torch.zeros_like(pos))
-        block_in_seq = safe_pos // eb
-        in_block = safe_pos % eb
-        bt_long = self._kv_block_table.to(torch.long)
-        b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
-        block_id = bt_long[:bsz][b_idx, block_in_seq.unsqueeze(0)]
-        in_capacity = in_capacity_row.unsqueeze(0).expand(bsz, -1)
-        valid = (block_id > 0) & in_capacity
-        safe_slot = torch.where(
-            valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
-        )
+        with nvtx_range("dsv4.indexer.pool_bind_slot_meta"):
+            fast = build_pool_slots(self._kv_block_table, bsz=bsz, T=T, eb=eb)
+            if fast is None:
+                max_blocks = self._kv_block_table.shape[1]
+                pool_capacity = max_blocks * eb
+                pos = torch.arange(T, device=device, dtype=torch.long)
+                in_capacity_row = pos < pool_capacity
+                safe_pos = torch.where(in_capacity_row, pos, torch.zeros_like(pos))
+                block_in_seq = safe_pos // eb
+                in_block = safe_pos % eb
+                bt_long = self._kv_block_table.to(torch.long)
+                b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
+                block_id = bt_long[:bsz][b_idx, block_in_seq.unsqueeze(0)]
+                in_capacity = in_capacity_row.unsqueeze(0).expand(bsz, -1)
+                valid = (block_id > 0) & in_capacity
+                safe_slot = torch.where(
+                    valid,
+                    block_id * eb + in_block.unsqueeze(0),
+                    torch.zeros_like(block_id),
+                )
+            else:
+                valid, safe_slot = fast
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
         if self._dbg_prefix is not None and _rt.ENABLED:
@@ -204,39 +213,18 @@ class Indexer(nn.Module):
             _rt.record_if_level(
                 2, f"{self._dbg_prefix}_kv_bind_valid", valid.to(torch.int32)
             )
-        gathered = self._kv_pool_view.index_select(0, safe_slot.reshape(-1))
-        if gathered.dtype != dtype:
-            gathered = gathered.to(dtype)
-        zero_row = torch.zeros((), dtype=dtype, device=device)
-        out_flat = torch.where(valid.reshape(-1).unsqueeze(-1), gathered, zero_row)
-        self.kv_cache = out_flat.view(bsz, T, D).contiguous()
+        with nvtx_range("dsv4.indexer.pool_bind_kv"):
+            from rtp_llm.models_py.modules.dsv4._pool_triton import (
+                masked_gather_from_pool,
+            )
 
-    def _weights_proj_abs_blocked(self, x: torch.Tensor, start_pos) -> torch.Tensor:
-        bsz, seqlen, _ = x.shape
-        if seqlen <= 1:
-            return F.linear(x, self.weights_proj)
-        if isinstance(start_pos, torch.Tensor):
-            if start_pos.numel() != 1:
-                return F.linear(x, self.weights_proj)
-            sp = int(start_pos.item())
-        else:
-            sp = int(start_pos)
-
-        out = torch.empty(
-            bsz,
-            seqlen,
-            self.n_heads,
-            dtype=x.dtype,
-            device=x.device,
-        )
-        block = 256
-        start = 0
-        while start < seqlen:
-            abs_pos = sp + start
-            end = min(seqlen, start + (block - (abs_pos % block)))
-            out[:, start:end] = F.linear(x[:, start:end], self.weights_proj)
-            start = end
-        return out
+            self.kv_cache = masked_gather_from_pool(
+                self._kv_pool_view,
+                safe_slot,
+                valid,
+                out_shape=(bsz, T, D),
+                dtype=dtype,
+            ).contiguous()
 
     def _write_current_compressed_to_pool(
         self,
@@ -251,7 +239,10 @@ class Indexer(nn.Module):
             or compressed.numel() == 0
         ):
             return
-        if isinstance(start_pos, torch.Tensor):
+        cp_ctx = self._cp_ctx
+        if cp_ctx is not None and cp_ctx.cp_size > 1:
+            sp = int(cp_ctx.prefix_length)
+        elif isinstance(start_pos, torch.Tensor):
             if start_pos.numel() != 1:
                 return
             sp = int(start_pos.item())
@@ -264,36 +255,38 @@ class Indexer(nn.Module):
 
         device = compressed.device
         eb = int(self._kv_eb)
-        write_start = sp // self.compress_ratio
-        pos = torch.arange(
-            write_start, write_start + n, device=device, dtype=torch.long
-        )
-        block_in_seq = pos // eb
-        in_block = pos % eb
-        in_capacity = block_in_seq < int(self._kv_block_table.shape[1])
-        safe_block = torch.where(
-            in_capacity, block_in_seq, torch.zeros_like(block_in_seq)
-        )
-        bt_long = self._kv_block_table[:bsz].to(device=device, dtype=torch.long)
-        b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
-        block_id = bt_long[b_idx, safe_block.unsqueeze(0).expand(bsz, -1)]
-        valid = in_capacity.unsqueeze(0) & (block_id > 0)
-        safe_slot = torch.where(
-            valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
-        )
-        slot_mapping = torch.where(
-            valid, safe_slot, torch.full_like(safe_slot, -1)
-        ).reshape(-1)
+        with nvtx_range("dsv4.indexer.write_current_slot_meta"):
+            write_start = sp // self.compress_ratio
+            pos = torch.arange(
+                write_start, write_start + n, device=device, dtype=torch.long
+            )
+            block_in_seq = pos // eb
+            in_block = pos % eb
+            in_capacity = block_in_seq < int(self._kv_block_table.shape[1])
+            safe_block = torch.where(
+                in_capacity, block_in_seq, torch.zeros_like(block_in_seq)
+            )
+            bt_long = self._kv_block_table[:bsz].to(device=device, dtype=torch.long)
+            b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
+            block_id = bt_long[b_idx, safe_block.unsqueeze(0).expand(bsz, -1)]
+            valid = in_capacity.unsqueeze(0) & (block_id > 0)
+            safe_slot = torch.where(
+                valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
+            )
+            slot_mapping = torch.where(
+                valid, safe_slot, torch.full_like(safe_slot, -1)
+            ).reshape(-1)
         from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
             write_kv_to_pool,
         )
 
-        write_kv_to_pool(
-            compressed[:bsz].reshape(bsz * n, -1),
-            slot_mapping,
-            self._kv_pool_view,
-            mask_negative=True,
-        )
+        with nvtx_range("dsv4.indexer.write_current_to_pool"):
+            write_kv_to_pool(
+                compressed[:bsz].reshape(bsz * n, -1),
+                slot_mapping,
+                self._kv_pool_view,
+                mask_negative=True,
+            )
 
     def _overlay_current_compressed(
         self,
@@ -302,7 +295,10 @@ class Indexer(nn.Module):
     ) -> None:
         if compressed is None or self.kv_cache is None or compressed.numel() == 0:
             return
-        if isinstance(start_pos, torch.Tensor):
+        cp_ctx = self._cp_ctx
+        if cp_ctx is not None and cp_ctx.cp_size > 1:
+            sp = int(cp_ctx.prefix_length)
+        elif isinstance(start_pos, torch.Tensor):
             if start_pos.numel() != 1:
                 return
             sp = int(start_pos.item())
@@ -400,13 +396,13 @@ class Indexer(nn.Module):
                 T_r = int(compressed_len[r].item())
                 if T_r <= 0:
                     continue
+                kv_r = self.kv_cache[r : r + 1, :T_r].contiguous()  # [1, T_r, D_idx]
+                q_r = q[r : r + 1].contiguous()  # [1, 1, H_idx, D_idx]
+                w_r = weights[r : r + 1]  # [1, 1, H_idx]
                 from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
                     v4_indexer_score,
                 )
 
-                kv_r = self.kv_cache[r : r + 1, :T_r].contiguous()  # [1, T_r, D_idx]
-                q_r = q[r : r + 1].contiguous()  # [1, 1, H_idx, D_idx]
-                w_r = weights[r : r + 1]  # [1, 1, H_idx]
                 score = v4_indexer_score(
                     q_r, kv_r, w_r, q_pos=None, compress_ratio=1
                 )  # [1, 1, T_r]
@@ -651,7 +647,8 @@ class Indexer(nn.Module):
             # into the INDEXER_KV pool via its own bind/scatter lifecycle.
             if _dbg is not None:
                 self.compressor._dbg_prefix = f"{_dbg}_cmp"
-            current_compressed = self.compressor(x, start_pos)
+            with nvtx_range("dsv4.indexer.nested_compressor"):
+                current_compressed = self.compressor(x, start_pos)
             self._write_current_compressed_to_pool(current_compressed, start_pos)
             if _dbg is not None:
                 self.compressor._dbg_prefix = None
@@ -669,20 +666,11 @@ class Indexer(nn.Module):
                     f"{_dbg}_compressor_kv_cache",
                     self.kv_cache[:bsz, : end_pos // ratio],
                 )
-            weights = self._weights_proj_abs_blocked(x, start_pos) * (
-                self.softmax_scale * self.n_heads**-0.5
-            )
+            with nvtx_range("dsv4.indexer.weights_proj_full"):
+                weights = F.linear(x, self.weights_proj)
+            weights = weights * (self.softmax_scale * self.n_heads**-0.5)
             if _dbg is not None:
                 _rt.record_if_level(2, f"{_dbg}_weights", weights)
-
-            # Fused Triton kernel: einsum + ReLU + weighted-sum over heads
-            # streaming the H axis with fp32 accumulators. Folds the prefill
-            # causal mask into the kernel so we never materialize [B,S,H,T]
-            # fp32 (the einsum intermediate would be ~64 GB at S=64K, T=16K,
-            # H=64) and skip the post-add -inf mask.
-            from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
-                v4_indexer_score,
-            )
 
             kv = self.kv_cache[:bsz, : end_pos // ratio]
             # Causal mask: each prefill Q token at absolute position g can
@@ -705,45 +693,57 @@ class Indexer(nn.Module):
                     ).unsqueeze(0)
                 # Kernel computes thr=(q_pos+1)//ratio, matching the prior
                 # post-add mask (kv_col >= (q_pos+1)//ratio → -inf).
-                index_score = v4_indexer_score(
-                    q.contiguous(),
-                    kv.contiguous(),
-                    weights,
-                    q_pos=q_pos.expand(bsz, seqlen).contiguous(),
-                    compress_ratio=ratio,
-                )
+                with nvtx_range("dsv4.indexer.score"):
+                    from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
+                        v4_indexer_score,
+                    )
+
+                    index_score = v4_indexer_score(
+                        q.contiguous(),
+                        kv.contiguous(),
+                        weights,
+                        q_pos=q_pos.expand(bsz, seqlen).contiguous(),
+                        compress_ratio=ratio,
+                    )
             else:
-                index_score = v4_indexer_score(
-                    q.contiguous(),
-                    kv.contiguous(),
-                    weights,
-                    q_pos=None,
-                    compress_ratio=1,
-                )
+                with nvtx_range("dsv4.indexer.score"):
+                    from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
+                        v4_indexer_score,
+                    )
+
+                    index_score = v4_indexer_score(
+                        q.contiguous(),
+                        kv.contiguous(),
+                        weights,
+                        q_pos=None,
+                        compress_ratio=1,
+                    )
             if _dbg is not None:
                 _rt.record_if_level(2, f"{_dbg}_score_post_mask", index_score)
 
-            topk_idxs = index_score.topk(
-                min(self.index_topk, end_pos // ratio), dim=-1
-            )[1]
+            with nvtx_range("dsv4.indexer.topk"):
+                topk_idxs = index_score.topk(
+                    min(self.index_topk, end_pos // ratio), dim=-1
+                )[1]
             if _dbg is not None:
                 _rt.record_if_level(2, f"{_dbg}_topk_pre_offset", topk_idxs)
-            if is_prefill:
-                if cp_on:
-                    q_pos_1b = (cp_ctx.global_positions + 1).unsqueeze(1)
+            with nvtx_range("dsv4.indexer.topk_postprocess"):
+                if is_prefill:
+                    if cp_on:
+                        q_pos_1b = (cp_ctx.global_positions + 1).unsqueeze(1)
+                    else:
+                        sp = (
+                            int(start_pos.item())
+                            if isinstance(start_pos, torch.Tensor)
+                            else int(start_pos)
+                        )
+                        q_pos_1b = torch.arange(
+                            sp + 1, sp + seqlen + 1, device=x.device
+                        ).unsqueeze(1)
+                    mask = topk_idxs >= (q_pos_1b // ratio)
+                    topk_idxs = torch.where(mask, -1, topk_idxs + offset)
                 else:
-                    sp = (
-                        int(start_pos.item())
-                        if isinstance(start_pos, torch.Tensor)
-                        else int(start_pos)
-                    )
-                    q_pos_1b = torch.arange(
-                        sp + 1, sp + seqlen + 1, device=x.device
-                    ).unsqueeze(1)
-                mask = topk_idxs >= (q_pos_1b // ratio)
-                topk_idxs = torch.where(mask, -1, topk_idxs + offset)
-            else:
-                topk_idxs = topk_idxs + offset
+                    topk_idxs = topk_idxs + offset
             if _dbg is not None:
                 _rt.record_if_level(2, f"{_dbg}_topk_final", topk_idxs)
             return topk_idxs

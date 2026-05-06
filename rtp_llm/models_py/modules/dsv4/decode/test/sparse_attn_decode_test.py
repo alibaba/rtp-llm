@@ -6,6 +6,7 @@ available, falling back to the reference otherwise.
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -139,17 +140,12 @@ class TestSparseAttnDecodeOpReferenceFallback(unittest.TestCase):
         sink = torch.randn(H, device=device, dtype=torch.float32) * 0.5
         topk = torch.randint(0, T_max, (B, q_len, K), device=device, dtype=torch.int32)
         op = SparseAttnV4DecodeOp(n_heads=H, head_dim=D, softmax_scale=sm_scale)
-        out_op = op.forward(q, kv, sink, topk)
+        with patch.object(_tl, "tilelang_available", return_value=False):
+            out_op = op.forward(q, kv, sink, topk)
         out_ref = _sparse_attn(q, kv, sink, topk, sm_scale)
         self.assertEqual(tuple(out_op.shape), (B, q_len, H, D))
         self.assertEqual(out_op.dtype, torch.bfloat16)
-        # When tilelang is unavailable, op MUST equal ref bit-for-bit
-        # (it literally calls _sparse_attn). When tilelang is on, fall
-        # back to the loose 5e-3 mean-rel tolerance.
-        if not _tl.tilelang_available():
-            self.assertTrue(torch.equal(out_op, out_ref))
-        else:
-            self.assertLess(_rel_mean(out_ref, out_op), 5e-3)
+        self.assertTrue(torch.equal(out_op, out_ref))
 
     def test_cpu_reference(self):
         self._run("cpu")

@@ -13,7 +13,7 @@ Strategies (priority high→low for ``forced=None``):
     ep_size  env / kernel                 → strategy
     --------------------------------------------------------
     >1       mega available + dist-init    MegaMoEStrategy
-    >1       mega unavailable              DeepEPStrategy
+    >1       mega unavailable/disabled     RuntimeError
     1        grouped FP4 kernel available  GroupedFP4Strategy
     1        grouped unavailable           LocalLoopStrategy
 
@@ -203,6 +203,12 @@ def select_strategy(
         for cls in _STRATEGY_PRIORITY:
             if cls.name == forced:
                 if cls.can_handle(cfg):
+                    if cfg.ep_size > 1 and cls.name != "mega":
+                        raise RuntimeError(
+                            "DSV4 EP MoE requires MegaMoEStrategy. "
+                            f"Requested strategy {forced!r} would bypass Mega "
+                            f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size})."
+                        )
                     return cls
                 if strict:
                     raise RuntimeError(
@@ -217,6 +223,25 @@ def select_strategy(
             raise RuntimeError(
                 f"Unknown MoE strategy {forced!r}. Available: {names}"
             )
+
+    if cfg.ep_size > 1:
+        mega_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "mega"), None)
+        if mega_cls is None:
+            raise RuntimeError(
+                "DSV4 EP MoE requires MegaMoEStrategy, but it is not registered."
+            )
+        if mega_cls.can_handle(cfg):
+            return mega_cls
+        from rtp_llm.models_py.modules.dsv4.moe.mega_buf import (
+            _mega_moe_disabled_or_unavailable_reason,
+        )
+
+        raise RuntimeError(
+            "DSV4 EP MoE requires MegaMoEStrategy by default; fallback to "
+            "DeepEP/LocalLoop is disabled. "
+            f"layer_id={cfg.layer_id}, ep_size={cfg.ep_size}. "
+            f"Reason: {_mega_moe_disabled_or_unavailable_reason()}."
+        )
 
     for cls in _STRATEGY_PRIORITY:
         if cls.can_handle(cfg):
