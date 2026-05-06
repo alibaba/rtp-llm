@@ -82,6 +82,11 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         "//rtp_llm/cpp/cache",
+        "//rtp_llm/cpp/disaggregate/cache_store",
+        "//rtp_llm/cpp/model_rpc:model_rpc_server",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "@havenask//aios/autil:base64",
+        "@havenask//aios/autil:zlib",
     ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
