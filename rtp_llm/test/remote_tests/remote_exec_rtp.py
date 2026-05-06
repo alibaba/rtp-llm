@@ -227,57 +227,26 @@ def build_remote_setup_command(rootdir: Path) -> str:
     return (
         "export HOME=/home/admin; "
         "export RTP_SKIP_BAZEL_BUILD=1; "
-        'export LD_LIBRARY_PATH="$PWD/rtp_llm/libs:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64"; '
-        # ROCm dev image (rtp_llm_dev_rocm:2026_04_15_21_09_b045964 onwards)
-        # ships gcc-toolset-12 but does NOT put its libstdc++ on the default
-        # ld search path. aiter's hipcc-clang JIT-compiles `.so` files
-        # referencing GCC 11+ libstdc++ symbols (e.g.
-        # `std::__cxx11::ostringstream::str() const`); when ld resolves
-        # `libstdc++.so.6` to the system /usr/lib64 copy (older GCC) the
-        # dlopen fails with `undefined symbol`. Prepend gcc-toolset-12 lib64
-        # ahead of system paths so the JIT-built `.so` finds GCC 12's
-        # libstdc++. Unconditional — ld silently skips non-existent
-        # directories, so safe on CUDA/PPU workers (run 39277006 smoke-amd
-        # showed the previous `[ -d /opt/rocm ]` guard didn't trigger on
-        # MI308X-ROCM7 REAPI workers; the dev image keeps ROCm at
-        # /opt/rocm-7.2 with /opt/rocm symlink that doesn't always resolve
-        # before the venv layer interposes).
+        # /opt/conda310/lib is critical on ROCm workers: aiter's JIT-built
+        # `.so` files reference GCC 11+ libstdc++ symbols (e.g. ref-qualified
+        # `std::__cxx11::ostringstream::str() const&` =
+        # _ZNKRSt7__cxx1119basic_ostringstream...3strEv). The system
+        # /usr/lib64/libstdc++.so.6 on the rocm dev image is GCC 8.5 (no
+        # such symbol); /opt/conda310/lib/libstdc++.so.6.0.29 (GCC 11.2)
+        # IS the right copy. The bazel-driven test path always set this
+        # via .bazelrc `test:rocm --test_env LD_LIBRARY_PATH=.../opt/conda310/lib/...`,
+        # but the pytest --remote prologue lost that. Without it, venv
+        # `bin/python` (whose `$ORIGIN/../lib` is empty) falls back to
+        # /usr/lib64 → ImportError on aiter dlopen. Append gcc-toolset-12
+        # + /opt/rocm + /opt/amdgpu paths for symmetry with .bazelrc; ld
+        # silently skips non-existent dirs so safe on CUDA/PPU workers.
         'export LD_LIBRARY_PATH='
-        '"/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/rocm/lib:'
-        '/opt/amdgpu/lib64:${LD_LIBRARY_PATH}"; '
-        # LD_LIBRARY_PATH alone is NOT enough: /opt/conda310/bin/python has
-        # `libstdc++.so.6` resolution baked into its rpath, so the conda
-        # libstdc++ (older GCC) loads first and any subsequent dlopen sees
-        # it as already-resolved (single libstdc++ per process). Force-load
-        # the newest libstdc++ on the worker via LD_PRELOAD before python.
-        # Run 39300872 confirmed gcc-toolset-12 dir exists but its lib64
-        # is empty (binaries-only image variant); aiter JIT was actually
-        # compiled with hipcc-clang, so the GCC 11+ libstdc++ symbol must
-        # live somewhere else on the worker. Find ALL libstdc++.so.6 and
-        # pick the one that defines the missing ostringstream::str() const&
-        # symbol — that's the libstdc++ aiter linked against at JIT time.
-        'STDCPP_CAND=$(find /opt /usr /lib64 -maxdepth 6 -name "libstdc++.so.6*" '
-        '-not -path "*/conda*" 2>/dev/null); '
-        'echo "[remote_setup] libstdc++ candidates:"; echo "$STDCPP_CAND" | head -20; '
-        'STDCPP_TARGET=""; '
-        'for f in $STDCPP_CAND; do '
-        '  if [ -f "$f" ] && nm -D "$f" 2>/dev/null | grep -q "_ZNKRSt7__cxx1119basic_ostringstream"; then '
-        '    STDCPP_TARGET="$f"; break; '
-        '  fi; '
-        'done; '
-        'if [ -n "$STDCPP_TARGET" ]; then '
-        '  export LD_PRELOAD="$STDCPP_TARGET:${LD_PRELOAD}"; '
-        '  echo "[remote_setup] LD_PRELOAD libstdc++ → $STDCPP_TARGET"; '
-        'else '
-        '  echo "[remote_setup] WARNING: no libstdc++ with GCC 11+ ostringstream symbol found"; '
-        'fi; '
-        # Diagnostic — appears in remote_stdout.log per-worker so we can
-        # confirm the prologue ran and the gcc-toolset-12 path is on the
-        # search list when aiter dlopens its JIT cache.
+        '"$PWD/rtp_llm/libs:/opt/conda310/lib:/opt/rh/gcc-toolset-12/root/usr/lib64:'
+        '/opt/rocm/lib:/opt/amdgpu/lib64:'
+        '/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64"; '
+        # Diagnostic — appears in remote_stdout.log so we can verify the
+        # prologue ran. Drops if smoke-amd starts passing consistently.
         'echo "[remote_setup] LD_LIBRARY_PATH=$LD_LIBRARY_PATH"; '
-        'echo "[remote_setup] LD_PRELOAD=${LD_PRELOAD:-(unset)}"; '
-        'echo "[remote_setup] /opt/rocm exists: $([ -d /opt/rocm ] && echo yes || echo no), '
-        '/opt/rh/gcc-toolset-12 exists: $([ -d /opt/rh/gcc-toolset-12 ] && echo yes || echo no)"; '
         # PPU detection signal for rtp_llm.device.device_type.get_device_type():
         # PPU torch wheel reports torch.cuda.is_available()=True and strips the
         # `+ppu1.5.2.oe` local segment from torch.__version__ (so it reads as
