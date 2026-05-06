@@ -214,7 +214,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
 
     generate_stream->resetBeginTime(currentTimeUs());
     RTP_LLM_LOG_DEBUG(
-        "decode init stream[%d]: %s", generate_stream->streamId(), generate_stream->debugString().c_str());
+        "decode init stream[%s]: %s", generate_stream->streamLogTag().c_str(), generate_stream->debugString().c_str());
     engine_->enqueue(generate_stream);
     RTP_LLM_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
     decode_context.error_status =
@@ -653,10 +653,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 }
 
                 auto block_pos_list = blockPositionsForCacheTransfer(block_num,
-                                                                      load_context.reuse_block_size,
-                                                                      use_hybrid,
-                                                                      group_type,
-                                                                      /*hybrid_full_from_begin=*/true);
+                                                                     load_context.reuse_block_size,
+                                                                     use_hybrid,
+                                                                     group_type,
+                                                                     /*hybrid_full_from_begin=*/true);
 
                 for (size_t block_pos : block_pos_list) {
                     auto block_id = block_ids[block_pos];
@@ -774,17 +774,17 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 group_type = mtp_cache_cfg.group_types[gid];
                             }
                             auto block_pos_list = blockPositionsForCacheTransfer(block_num,
-                                                                                  load_context.reuse_block_size,
-                                                                                  mtp_use_hybrid,
-                                                                                  group_type,
-                                                                                  /*hybrid_full_from_begin=*/true);
+                                                                                 load_context.reuse_block_size,
+                                                                                 mtp_use_hybrid,
+                                                                                 group_type,
+                                                                                 /*hybrid_full_from_begin=*/true);
 
                             for (size_t block_pos : block_pos_list) {
-                                auto       block_id       = block_ids[block_pos];
+                                auto block_id = block_ids[block_pos];
                                 if (isNullBlockIdx(block_id)) {
                                     continue;
                                 }
-                                auto cache_key = makeCacheKey(model_id,
+                                auto       cache_key      = makeCacheKey(model_id,
                                                               std::to_string(load_context.cache_keys[block_pos]),
                                                               layer_id,
                                                               region_name);
