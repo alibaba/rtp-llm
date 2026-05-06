@@ -26,6 +26,7 @@ public:
                                                 int               block_id,
                                                 int               partition_count,
                                                 int               partition_id) const override;
+    void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end) override;
 
     CacheLayerLayout allLayerCacheBase() const override;
 
