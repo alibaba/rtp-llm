@@ -76,6 +76,11 @@ protected:
     size_t                          max_batch_tokens_size_   = 0;
     size_t                          max_generate_batch_size_ = 1;
     const bool                      need_fill_fake_stream_   = false;
+    // Context-Parallel prefill (dsv4) is single-request only end-to-end:
+    // cp_all_gather_full asserts B==1, freqs_cis / global_positions /
+    // unpad_restore are derived from one zigzag sequence. Until CP gains
+    // per-request layout, force prefill to one stream per round.
+    const bool                      cp_force_single_prefill_ = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;
     std::mutex                      lock_;
