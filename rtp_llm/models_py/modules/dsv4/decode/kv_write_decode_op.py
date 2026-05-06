@@ -194,7 +194,7 @@ def write_kv_to_pool(
     # Compressed-K / boundary write: -1 entries must be skipped, but we
     # cannot use boolean masking (CUDA-graph hostile). Reuse the
     # compressed-write trick: redirect -1 to slot 0, delta=0 there.
-    valid = slot_long >= 0
+    valid = (slot_long >= 0) & (slot_long < int(pool_view.shape[0]))
     safe_slot = torch.where(valid, slot_long, torch.zeros_like(slot_long))
     existing = pool_view.index_select(0, safe_slot)
     delta = torch.where(

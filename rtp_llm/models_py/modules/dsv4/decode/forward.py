@@ -37,17 +37,45 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
 def build_paged_pool_specs(
     kv_cache: Optional[Any],
     v4: Any,
+    max_seq_len: Optional[int] = None,
+    attn_inputs: Optional[Any] = None,
 ) -> Dict[int, Tuple[int, int]]:
     """Per-attn_type ``(entries_per_block, max_blocks_per_req)`` for the
     decode-FMHA impl's metadata pre-allocation.
 
     ``entries_per_block`` is derived from the framework pool tensor's
     stride on layer 0 (all layers share the same allocator geometry per
-    attn_type). Pools 3-6 get fixed 2 blocks/req; SWA gets 2 blocks (256
-    entries/block × 2 = 512-slot ring, plenty for win).
+    attn_type). ``max_blocks_per_req`` must match the framework block-table
+    width, not the number of physically live blocks in tail/fixed pools:
+    CUDA graph replay copies the framework's full by-group block tables into
+    stable metadata buffers and decode uses absolute positions against those
+    tables.
     """
     if kv_cache is None or not v4.layers:
         return {}
+    by_group = (
+        getattr(attn_inputs, "kv_cache_kernel_block_id_device_by_group", None)
+        if attn_inputs is not None
+        else None
+    )
+    group_region_names = getattr(kv_cache, "group_region_names", None) or []
+
+    def max_blocks_for_attn_type(attn_type: int) -> int:
+        if by_group is not None and group_region_names:
+            for group_id, group_attn_type in enumerate(group_region_names):
+                if int(group_attn_type) != int(attn_type) or group_id >= len(by_group):
+                    continue
+                group_block_table = by_group[group_id]
+                if (
+                    group_block_table is not None
+                    and group_block_table.dim() >= 2
+                    and group_block_table.shape[1] > 0
+                ):
+                    return int(group_block_table.shape[1])
+        if max_seq_len is not None:
+            return max(1, (int(max_seq_len) + 255) // 256)
+        return 2
+
     # ``_pool_entries_per_block`` reads ``self._kv_cache`` which is only
     # bound during ``Attention.forward_decode``'s try/finally. Caller
     # (decode/forward.forward_decode) invokes us BEFORE the layer forward
@@ -82,7 +110,10 @@ def build_paged_pool_specs(
                     attn._kv_cache = kv_cache
                 entries_per_block = attn._pool_entries_per_block(attn_type)
                 if entries_per_block > 0:
-                    specs[attn_type] = (entries_per_block, 2)
+                    specs[attn_type] = (
+                        entries_per_block,
+                        max_blocks_for_attn_type(attn_type),
+                    )
                     break
         return specs
     finally:
@@ -217,6 +248,7 @@ def forward_decode(
     """
     from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
         DSv4DecodeFmhaImpl,
+        DSv4NoKvCacheCudaGraphWarmupImpl,
     )
     from rtp_llm.ops.compute_ops import PyModelOutputs
 
@@ -229,10 +261,24 @@ def forward_decode(
     if input_ids.device != param_dev:
         input_ids = input_ids.to(param_dev)
 
+    if isinstance(fmha_impl, DSv4NoKvCacheCudaGraphWarmupImpl):
+        return PyModelOutputs(
+            torch.zeros(
+                (input_ids.numel(), v4_args.dim),
+                dtype=torch.bfloat16,
+                device=param_dev,
+            )
+        )
+
     if isinstance(fmha_impl, DSv4DecodeFmhaImpl):
         meta = fmha_impl.metadata
     else:
-        paged_specs = build_paged_pool_specs(kv_cache, v4)
+        paged_specs = build_paged_pool_specs(
+            kv_cache,
+            v4,
+            max_seq_len=int(v4_args.max_seq_len),
+            attn_inputs=attn,
+        )
         meta = build_metadata_eager(
             v4_args,
             attn,

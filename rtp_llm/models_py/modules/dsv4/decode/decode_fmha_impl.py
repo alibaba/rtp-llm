@@ -176,3 +176,22 @@ class DSv4DecodeFmhaImpl:
         rather than a silent correctness bug (a captured graph still
         holds the old pointer and would compute on stale values)."""
         self.prepare(attn_inputs, forbid_realloc=True)
+
+
+class DSv4NoKvCacheCudaGraphWarmupImpl:
+    """Marker impl for the cache-less engine warmup executor.
+
+    ``NormalEngine::prefillWarmUp`` constructs a temporary Python model with
+    no KV cache manager, but ``PyWrappedModel`` still initializes CUDA graph
+    capture when graph mode is enabled. Production DSv4 decode requires the
+    framework paged KV pools; this marker lets that cache-less warmup capture
+    a cheap no-op graph without reintroducing the retired register-buffer path.
+    The real executor is constructed after the cache manager exists and uses
+    :class:`DSv4DecodeFmhaImpl`.
+    """
+
+    def support_cuda_graph(self) -> bool:
+        return True
+
+    def prepare_cuda_graph(self, attn_inputs) -> None:
+        return None

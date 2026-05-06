@@ -32,6 +32,13 @@ from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
     DSv4DecodeFmhaImpl,
     DSv4DecodeFmhaImplConfig,
 )
+from rtp_llm.models_py.modules.dsv4.decode.forward import build_paged_pool_specs
+from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import write_kv_to_pool
+from rtp_llm.models_py.modules.dsv4.decode.pool_slot_mapping import (
+    compute_kv_pool_slot_mapping,
+)
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import PoolBackedModule
+from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, INDEXER_STATE, SWA_KV
 
 
 @dataclass
@@ -39,6 +46,31 @@ class _StubAttnInputs:
     """Minimal PyAttentionInputs-shaped stub for unit tests."""
 
     sequence_lengths: torch.Tensor
+    kv_cache_kernel_block_id_device_by_group: list = None
+
+
+class _StubAttn:
+    def __init__(self, entries_by_type):
+        self._kv_cache = None
+        self._entries_by_type = entries_by_type
+
+    def _pool_entries_per_block(self, attn_type):
+        return self._entries_by_type.get(attn_type, 0)
+
+
+class _StubLayer:
+    def __init__(self, attn):
+        self.attn = attn
+
+
+class _StubV4:
+    def __init__(self, entries_by_type):
+        self.layers = [_StubLayer(_StubAttn(entries_by_type))]
+
+
+class _StubKvCache:
+    def __init__(self, group_region_names):
+        self.group_region_names = group_region_names
 
 
 def _make_impl(bs: int = 4) -> DSv4DecodeFmhaImpl:
@@ -156,6 +188,103 @@ class TestDSv4DecodeFmhaImpl(unittest.TestCase):
         )
         max_s = impl.config.max_seq_len  # 64
         self.assertTrue(bool((impl.metadata.start_pos < max_s).all()))
+
+    def test_paged_pool_specs_use_framework_block_table_width(self):
+        """CUDA graph metadata must allocate the same block-table width as
+        C++ capture inputs. DSV4 tail/fixed pools may only have two live
+        blocks, but their block tables are still indexed by absolute segment."""
+        width = 17
+        kv_cache = _StubKvCache([SWA_KV, CSA_KV, INDEXER_STATE])
+        v4 = _StubV4({SWA_KV: 256, CSA_KV: 64, INDEXER_STATE: 4})
+        attn_inputs = _StubAttnInputs(
+            sequence_lengths=torch.tensor([0], dtype=torch.int32),
+            kv_cache_kernel_block_id_device_by_group=[
+                torch.zeros(2, width, dtype=torch.int32),
+                torch.zeros(2, width, dtype=torch.int32),
+                torch.zeros(2, width, dtype=torch.int32),
+            ],
+        )
+
+        specs = build_paged_pool_specs(
+            kv_cache,
+            v4,
+            max_seq_len=8192,
+            attn_inputs=attn_inputs,
+        )
+
+        self.assertEqual(specs[SWA_KV], (256, width))
+        self.assertEqual(specs[CSA_KV], (64, width))
+        self.assertEqual(specs[INDEXER_STATE], (4, width))
+
+    def test_paged_block_table_copy_preserves_invalid_ids(self):
+        """Synthetic CUDA graph capture starts with zero block tables. The
+        DSv4 impl should preserve those sentinel ids in metadata instead of
+        rewriting them to a valid physical block."""
+        cfg = DSv4DecodeFmhaImplConfig(
+            max_batch_size=2,
+            q_len=1,
+            window_size=8,
+            head_dim=32,
+            max_seq_len=64,
+            compress_ratios=[4],
+            index_topk=4,
+            paged_pool_specs={SWA_KV: (256, 4), CSA_KV: (64, 4)},
+            group_region_names=[SWA_KV, CSA_KV],
+        )
+        by_group = [
+            torch.tensor([[0, -1, 11, 12], [0, 0, 21, 22]], dtype=torch.int32),
+            torch.tensor([[0, 31, 32, 0], [0, 41, 42, 0]], dtype=torch.int32),
+        ]
+        impl = DSv4DecodeFmhaImpl(
+            cfg,
+            device=torch.device("cpu"),
+            attn_inputs=_StubAttnInputs(
+                sequence_lengths=torch.tensor([3, 7], dtype=torch.int32),
+                kv_cache_kernel_block_id_device_by_group=by_group,
+            ),
+        )
+
+        self.assertTrue(torch.equal(impl.metadata.pool_block_tables[SWA_KV], by_group[0]))
+        self.assertTrue(torch.equal(impl.metadata.pool_block_tables[CSA_KV], by_group[1]))
+
+    def test_pool_slot_helpers_skip_null_and_oob_blocks(self):
+        block_table = torch.tensor([[0, -1, 2]], dtype=torch.int32)
+        abs_pos = torch.tensor([0, 4, 8, 12, -1], dtype=torch.int32)
+
+        mapped = compute_kv_pool_slot_mapping(
+            block_table,
+            abs_pos,
+            entries_per_block=4,
+        )
+
+        self.assertTrue(
+            torch.equal(mapped, torch.tensor([-1, -1, 8, -1, -1], dtype=torch.long))
+        )
+
+    def test_pool_backed_module_masks_oob_physical_slots(self):
+        helper = PoolBackedModule()
+        block_table = torch.tensor([[999, 1]], dtype=torch.int32)
+
+        valid, safe_slot = helper._compute_pool_slots(
+            bsz=1,
+            T=4,
+            block_table=block_table,
+            eb=4,
+            device=torch.device("cpu"),
+            pool_rows=16,
+        )
+
+        self.assertFalse(bool(valid.any()))
+        self.assertTrue(torch.equal(safe_slot, torch.zeros_like(safe_slot)))
+
+    def test_write_kv_to_pool_skips_oob_slots(self):
+        pool = torch.zeros(2, 1, dtype=torch.float32)
+        src = torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float32)
+        slots = torch.tensor([1, 2, -1], dtype=torch.long)
+
+        write_kv_to_pool(src, slots, pool, mask_negative=True)
+
+        self.assertTrue(torch.equal(pool[:, 0], torch.tensor([0.0, 1.0])))
 
 
 if __name__ == "__main__":

@@ -399,6 +399,7 @@ class DeepSeekV4Model(GptModelBase):
         from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImpl,
             DSv4DecodeFmhaImplConfig,
+            DSv4NoKvCacheCudaGraphWarmupImpl,
         )
 
         batch_size = (
@@ -406,15 +407,25 @@ class DeepSeekV4Model(GptModelBase):
         )
         device = next(self.v4.parameters()).device
 
-        paged_pool_specs = build_paged_pool_specs(self.kv_cache, self.v4)
+        if self.kv_cache is None:
+            logging.warning(
+                "[DeepSeekV4Model] CUDA graph warmup requested before KV cache "
+                "manager initialization; using DSv4 no-KV warmup impl"
+            )
+            return DSv4NoKvCacheCudaGraphWarmupImpl()
+
+        paged_pool_specs = build_paged_pool_specs(
+            self.kv_cache,
+            self.v4,
+            max_seq_len=int(self._v4_args.max_seq_len),
+            attn_inputs=attn,
+        )
         # Snapshot framework's group ordering — CUDA-graph replay path
         # inside ``DSv4DecodeFmhaImpl.prepare`` has no live kv_cache, so
         # carry the list in the config. Position IS the group id.
-        group_region_names_snapshot = (
-            [int(t) for t in (self.kv_cache.group_region_names or [])]
-            if self.kv_cache is not None
-            else []
-        )
+        group_region_names_snapshot = [
+            int(t) for t in (self.kv_cache.group_region_names or [])
+        ]
 
         cfg = DSv4DecodeFmhaImplConfig(
             max_batch_size=batch_size,

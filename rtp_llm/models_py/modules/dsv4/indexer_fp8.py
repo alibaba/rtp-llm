@@ -231,11 +231,19 @@ class IndexerFP8(PoolBackedModule):
 
             compressed_len = ((start_pos + 1) // ratio).to(torch.int64).view(bsz, 1, 1)
 
-            # Always use DeepGEMM (FP8 path).
+            # Always use DeepGEMM (FP8 path).  Eager decode trims the
+            # scored context length from the live max position. During CUDA
+            # graph capture that D2H scalar read is illegal, so capture with
+            # a static upper bound; replay updates block tables and lengths
+            # in-place before the captured kernels run.
             T_cache = self._kv_block_table.shape[1] * self._kv_eb
-            sp_max = int(start_pos.max().item())
-            T_live = (((sp_max + 1) // ratio) + 31) & ~31
-            T_max = max(32, min(T_cache, T_live))
+            if q.is_cuda and torch.cuda.is_current_stream_capturing():
+                T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
+                T_max = max(32, min(T_cache, T_static))
+            else:
+                sp_max = int(start_pos.max().item())
+                T_live = (((sp_max + 1) // ratio) + 31) & ~31
+                T_max = max(32, min(T_cache, T_live))
 
             q_fp8, w_fold = indexer_q_fp8_quant_fold(
                 _as_bf16_contig(q), _as_bf16_contig(weights)
@@ -366,7 +374,14 @@ class IndexerFP8(PoolBackedModule):
                 )
             else:
                 valid, safe_slot = self._compute_pool_slots(
-                    bsz, T, self._kv_block_table, self._kv_eb, x.device
+                    bsz,
+                    T,
+                    self._kv_block_table,
+                    self._kv_eb,
+                    x.device,
+                    pool_rows=int(
+                        self._kv_pool_view.numel() // self._kv_pool_view.shape[-1]
+                    ),
                 )
                 slot_mapping = torch.where(
                     valid, safe_slot, torch.full_like(safe_slot, -1)

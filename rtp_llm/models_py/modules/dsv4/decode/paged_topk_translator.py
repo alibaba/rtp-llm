@@ -72,24 +72,26 @@ def gather_dual_pool_kv_packed(
     win = swa_global.shape[1]
     K = cmp_global.shape[1]
 
-    # SWA half: index_select with -1-safe redirect, then mask to 0.
+    # SWA half: index_select with -1 / out-of-pool safe redirect, then mask to 0.
+    swa_valid = (swa_global >= 0) & (swa_global < int(swa_pool_view.shape[0]))
     swa_safe = torch.where(
-        swa_global >= 0,
+        swa_valid,
         swa_global,
         torch.zeros_like(swa_global),
     ).to(torch.long)
     swa_kv = swa_pool_view.index_select(0, swa_safe.view(-1)).view(T, win, head_dim)
-    swa_mask = (swa_global >= 0).unsqueeze(-1)
+    swa_mask = swa_valid.unsqueeze(-1)
     swa_kv = torch.where(swa_mask, swa_kv, torch.zeros_like(swa_kv))
 
     # Compressed half: same pattern, different pool.
+    cmp_valid = (cmp_global >= 0) & (cmp_global < int(cmp_pool_view.shape[0]))
     cmp_safe = torch.where(
-        cmp_global >= 0,
+        cmp_valid,
         cmp_global,
         torch.zeros_like(cmp_global),
     ).to(torch.long)
     cmp_kv = cmp_pool_view.index_select(0, cmp_safe.view(-1)).view(T, K, head_dim)
-    cmp_mask = (cmp_global >= 0).unsqueeze(-1)
+    cmp_mask = cmp_valid.unsqueeze(-1)
     cmp_kv = torch.where(cmp_mask, cmp_kv, torch.zeros_like(cmp_kv))
 
     return torch.cat([swa_kv, cmp_kv], dim=1).view(batch_size, q_len, win + K, head_dim)
@@ -115,7 +117,7 @@ def translate_local_to_global_slots(
     block_n = 128
     while block_n > 1 and K % block_n != 0:
         block_n //= 2
-    return triton_convert_req_index_to_global_index(
+    out = triton_convert_req_index_to_global_index(
         req_id_per_token,
         block_table,
         local_idx.contiguous(),
@@ -123,3 +125,20 @@ def translate_local_to_global_slots(
         NUM_TOPK_TOKENS=K,
         BLOCK_N=block_n,
     )
+    local_i64 = local_idx.to(torch.long)
+    valid_local = local_i64 >= 0
+    block_in_seq = torch.where(
+        valid_local,
+        local_i64 // int(block_size),
+        torch.zeros_like(local_i64),
+    )
+    in_table = block_in_seq < int(block_table.shape[1])
+    safe_block_in_seq = torch.where(
+        in_table,
+        block_in_seq,
+        torch.zeros_like(block_in_seq),
+    )
+    req = req_id_per_token.to(torch.long).view(-1, 1).expand_as(safe_block_in_seq)
+    block_id = block_table.to(torch.long)[req, safe_block_in_seq]
+    valid = valid_local & in_table & (block_id > 0)
+    return torch.where(valid, out, torch.full_like(out, -1))

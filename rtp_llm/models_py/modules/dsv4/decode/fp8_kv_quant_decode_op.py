@@ -25,12 +25,14 @@ The ``slot_mapping`` is the same flat-slot tensor produced by the
 metadata builder (``DSv4DecodeAttnMetadata.slot_mapping_swa`` etc.),
 with -1 sentinels skipped (mirrors Phase 1 ``write_swa_k_decode``).
 
-Output cache shape: ``[num_blocks, block_size, 584]`` uint8. For V4
-Phase 4 we use ``num_blocks=1, block_size=max_B*T`` so the kv_cache
-tensor is contiguous and addressable by a flat slot index — keeps us
-on the per-request (not block-paged) layout in line with the Phase 1-3
-register_buffer scheme. M4 hetero pool can replace this with a real
-block_table later without touching the ops.
+Output cache shape: ``[num_blocks, block_size, 584]`` uint8. Slot ids are
+flat in token space: ``block_idx = slot // block_size`` and
+``block_offset = slot % block_size``. The tensor shape is a kernel ABI; do
+not parse a slot via ``kv_cache_packed[b, t, :]`` when ``block_size > 1``.
+The MODEL1 byte layout inside each block is split as ``block_size * 576``
+bytes of NoPE+RoPE followed by ``block_size * 8`` scale bytes, and the
+batch/block stride may be padded to a multiple of 576 for FlashMLA's TMA
+path.
 """
 
 from __future__ import annotations
@@ -54,6 +56,64 @@ SCALE_BYTES_PER_TOKEN = 8  # 7 scale bytes + 1 padding byte
 ENTRY_BYTES = NOPE_ROPE_STRIDE + SCALE_BYTES_PER_TOKEN  # = 584
 
 FP8_E4M3_MAX = 448.0  # max representable in fp8_e4m3fn
+
+
+def _model1_block_bytes(kv_cache_packed: torch.Tensor, block_idx: int) -> torch.Tensor:
+    """Return a 1D byte view for one MODEL1 block.
+
+    ``concat_and_cache_ds_model1_kernel`` uses ``kv_cache.stride(0)`` as the
+    physical block stride and computes all intra-block offsets manually. The
+    logical ``[block_size, 584]`` dimensions are not a true per-slot layout.
+    """
+    assert kv_cache_packed.dtype == torch.uint8 and kv_cache_packed.dim() == 3
+    block_stride = int(kv_cache_packed.stride(0))
+    blocks = kv_cache_packed.as_strided(
+        (kv_cache_packed.shape[0], block_stride),
+        (block_stride, 1),
+    )
+    return blocks[int(block_idx)]
+
+
+def _model1_slot_views(
+    kv_cache_packed: torch.Tensor,
+    block_idx: int,
+    block_offset: int,
+    block_size: Optional[int] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return ``(nope_rope[576], scales[8])`` views for one MODEL1 slot."""
+    if block_size is None:
+        block_size = int(kv_cache_packed.shape[1])
+    block = _model1_block_bytes(kv_cache_packed, block_idx)
+    nope_rope_start = int(block_offset) * NOPE_ROPE_STRIDE
+    scale_start = (
+        int(block_size) * NOPE_ROPE_STRIDE
+        + int(block_offset) * SCALE_BYTES_PER_TOKEN
+    )
+    return (
+        block[nope_rope_start : nope_rope_start + NOPE_ROPE_STRIDE],
+        block[scale_start : scale_start + SCALE_BYTES_PER_TOKEN],
+    )
+
+
+def read_model1_kv_slot_bytes(
+    kv_cache_packed: torch.Tensor,
+    block_idx: int,
+    block_offset: int,
+    block_size: Optional[int] = None,
+) -> torch.Tensor:
+    """Materialize one logical MODEL1 slot as contiguous ``[584]`` bytes.
+
+    This is the safe Python-side reader for tests/reference code. It stitches
+    the split physical layout back into the logical ``[NoPE+RoPE][scales]``
+    order expected by the dequantizer.
+    """
+    nope_rope, scale_bytes = _model1_slot_views(
+        kv_cache_packed, block_idx, block_offset, block_size
+    )
+    slot = torch.empty(ENTRY_BYTES, dtype=torch.uint8, device=kv_cache_packed.device)
+    slot[:NOPE_ROPE_STRIDE] = nope_rope
+    slot[NOPE_ROPE_STRIDE:] = scale_bytes
+    return slot
 
 
 def quantize_v4_kv_decode(
@@ -191,33 +251,27 @@ def reference_quantize_v4_kv_decode(
         # ---- RoPE: 64 bf16 → 128 bytes (no quantization) ----
         rope_bytes = k_pe_token.contiguous().view(torch.uint8)  # [128] uint8
 
-        # ---- Write into kv_cache_packed[block_idx, block_offset, :] ----
-        slot_view = kv_cache_packed[block_idx, block_offset]  # [584] uint8
-        # NoPE region: [0, 448)
-        slot_view[:NOPE_BYTES] = torch.tensor(list(nope_bytes), dtype=torch.uint8)
-        # RoPE region: [448, 576)
-        slot_view[NOPE_BYTES : NOPE_BYTES + ROPE_BYTES] = rope_bytes
-
-        # ---- Scale region: at end of block (after all tokens' NoPE+RoPE) ----
-        # The CUDA kernel layout puts scales at:
-        #   block_idx * block_stride + block_size * nope_rope_stride + block_offset * 8
-        # block_stride = block_size * entry_bytes = block_size * 584
-        # So within a block, the scale offset is:
-        #   block_size * 576 + block_offset * 8
-        # We have kv_cache_packed[block_idx, block_offset, :] which is the
-        # 584-byte slot view — but the scales for token block_offset live
-        # PHYSICALLY at the end of the block, not at offset 576 of this slot.
-        # Since the entry_size=584 includes the scale region for this token,
-        # use the trailing 8 bytes of THIS slot for the scales (the layout
-        # treats each slot as 584 bytes, with scales appended).
-        slot_view[NOPE_BYTES + ROPE_BYTES :] = torch.tensor(
+        nope_rope_view, scale_view = _model1_slot_views(
+            kv_cache_packed, block_idx, block_offset, block_size
+        )
+        nope_rope_view[:NOPE_BYTES] = torch.tensor(
+            list(nope_bytes),
+            dtype=torch.uint8,
+            device=kv_cache_packed.device,
+        )
+        nope_rope_view[NOPE_BYTES : NOPE_BYTES + ROPE_BYTES] = rope_bytes
+        scale_view[:] = torch.tensor(
             list(scale_bytes),
             dtype=torch.uint8,
+            device=kv_cache_packed.device,
         )
 
 
 def dequantize_v4_kv_slot(
-    slot_view: torch.Tensor,
+    slot_or_cache: torch.Tensor,
+    block_idx: Optional[int] = None,
+    block_offset: Optional[int] = None,
+    block_size: Optional[int] = None,
 ) -> torch.Tensor:
     """Inverse: read a single 584-byte slot back into a 512-dim bf16 K vector.
 
@@ -225,22 +279,36 @@ def dequantize_v4_kv_slot(
     quantize-then-dequantize round-trip stays within fp8_e4m3 precision.
 
     Args:
-        slot_view: ``[584]`` uint8 — one packed FP8 slot.
+        slot_or_cache: either a materialized ``[584]`` logical slot, or the
+            full ``[num_blocks, block_size, 584]`` MODEL1 cache.
+        block_idx/block_offset: when provided, read the slot from the full
+            cache using MODEL1's split physical layout.
 
     Returns:
         ``[512]`` bf16 — K vector reconstructed from the packed slot.
     """
-    assert slot_view.dtype == torch.uint8 and slot_view.shape == (ENTRY_BYTES,)
+    if block_idx is None:
+        assert slot_or_cache.dtype == torch.uint8 and slot_or_cache.shape == (
+            ENTRY_BYTES,
+        )
+        nope_rope = slot_or_cache[:NOPE_ROPE_STRIDE]
+        scale_bytes = slot_or_cache[NOPE_ROPE_STRIDE:]
+    else:
+        assert block_offset is not None
+        nope_rope, scale_bytes = _model1_slot_views(
+            slot_or_cache,
+            int(block_idx),
+            int(block_offset),
+            block_size,
+        )
 
-    # NoPE: 7 tiles. Match the input device — slot_view comes from kv_cache_fp8
+    # NoPE: 7 tiles. Match the input device — slot_or_cache comes from kv_cache_fp8
     # which is on the model's CUDA device; allocating ``nope_out`` on the
-    # default (CPU) device caused ``torch.cat([nope_out, rope_out])`` to fail
-    # because rope_out (a view of slot_view) is on CUDA.
-    nope_out = torch.empty(NOPE_DIM, dtype=torch.bfloat16, device=slot_view.device)
-    scale_bytes = slot_view[NOPE_BYTES + ROPE_BYTES :]  # [8] uint8
+    # default (CPU) device caused ``torch.cat([nope_out, rope_out])`` to fail.
+    nope_out = torch.empty(NOPE_DIM, dtype=torch.bfloat16, device=slot_or_cache.device)
     for tile_idx in range(NOPE_TILES):
         scale = _ue8m0_byte_to_scale(int(scale_bytes[tile_idx].item()))
-        tile_quant = slot_view[tile_idx * TILE_SIZE : (tile_idx + 1) * TILE_SIZE]
+        tile_quant = nope_rope[tile_idx * TILE_SIZE : (tile_idx + 1) * TILE_SIZE]
         tile_fp8 = tile_quant.view(torch.float8_e4m3fn)
         nope_out[tile_idx * TILE_SIZE : (tile_idx + 1) * TILE_SIZE] = (
             tile_fp8.float() * scale
@@ -248,7 +316,7 @@ def dequantize_v4_kv_slot(
 
     # RoPE: bf16 view of the 128-byte slice
     rope_out = (
-        slot_view[NOPE_BYTES : NOPE_BYTES + ROPE_BYTES]
+        nope_rope[NOPE_BYTES : NOPE_BYTES + ROPE_BYTES]
         .contiguous()
         .view(torch.bfloat16)
     )

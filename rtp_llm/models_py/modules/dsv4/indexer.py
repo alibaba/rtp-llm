@@ -255,7 +255,12 @@ class Indexer(PoolBackedModule):
             )
             return
         valid, safe_slot = self._compute_pool_slots(
-            bsz, T, self._kv_block_table, self._kv_eb, device
+            bsz,
+            T,
+            self._kv_block_table,
+            self._kv_eb,
+            device,
+            pool_rows=int(self._kv_pool_view.numel() // self._kv_pool_view.shape[-1]),
         )
         # -1 in slot_mapping → kernel writes zeros for that slot.
         slot_mapping = torch.where(
@@ -463,7 +468,14 @@ class Indexer(PoolBackedModule):
             if is_fp8_pool_prefill and T > 0:
                 # Build slot_mapping for the live K range [0, T).
                 valid, safe_slot = self._compute_pool_slots(
-                    bsz, T, self._kv_block_table, self._kv_eb, x.device
+                    bsz,
+                    T,
+                    self._kv_block_table,
+                    self._kv_eb,
+                    x.device,
+                    pool_rows=int(
+                        self._kv_pool_view.numel() // self._kv_pool_view.shape[-1]
+                    ),
                 )
                 slot_mapping = torch.where(
                     valid, safe_slot, torch.full_like(safe_slot, -1)

@@ -164,6 +164,14 @@ def dequantize_and_gather_k_cache(
         f"got stride={k_cache.stride()}"
     )
 
+    block_table_i32 = block_table.to(dtype=torch.int32, device=k_cache.device)
+    valid_block = (block_table_i32 > 0) & (block_table_i32 < int(k_cache.shape[0]))
+    block_table_i32 = torch.where(
+        valid_block, block_table_i32, torch.zeros_like(block_table_i32)
+    )
+    if not block_table_i32.is_contiguous():
+        block_table_i32 = block_table_i32.contiguous()
+
     num_reqs = seq_lens.shape[0]
     NUM_WORKERS = 128
     _dequantize_and_gather_k_kernel[(num_reqs, NUM_WORKERS)](
@@ -172,10 +180,10 @@ def dequantize_and_gather_k_cache(
         out.stride(1),
         k_cache,
         seq_lens,
-        block_table,
+        block_table_i32,
         offset,
         gather_lens,
-        max_blocks_per_seq=block_table.shape[-1],
+        max_blocks_per_seq=block_table_i32.shape[-1],
         fp8_dim=NOPE_DIM,
         bf16_dim=ROPE_DIM,
         scale_dim=SCALE_BYTES_PER_TOKEN,
@@ -223,9 +231,6 @@ def dequantize_swa_window_to_bf16(
     # Gather seq_lens[r] tokens (the entire SWA window for request r) starting
     # at ring position 0. The kernel addresses kv_cache_packed via block_table
     # so the physical layout is fully driven by the framework's allocation.
-    bt_i32 = block_table.to(dtype=torch.int32, device=kv_cache_packed.device)
-    if not bt_i32.is_contiguous():
-        bt_i32 = bt_i32.contiguous()
     seq_i32 = seq_lens.to(dtype=torch.int32, device=kv_cache_packed.device)
     if not seq_i32.is_contiguous():
         seq_i32 = seq_i32.contiguous()
@@ -234,7 +239,7 @@ def dequantize_swa_window_to_bf16(
         k_cache=kv_cache_packed,
         seq_lens=seq_i32,
         gather_lens=None,
-        block_table=bt_i32,
+        block_table=block_table,
         block_size=block_size,
         offset=0,
     )
@@ -342,7 +347,12 @@ def dequantize_slots_to_bf16(
     out = torch.empty((N, HEAD_DIM), dtype=torch.bfloat16, device=pool_3d.device)
     if N == 0:
         return out
-    slots_i64 = slot_indices.reshape(-1).to(torch.int64).contiguous()
+    slots_i64 = slot_indices.reshape(-1).to(torch.int64)
+    valid_slot = (slots_i64 >= 0) & (
+        slots_i64 < int(pool_3d.shape[0]) * int(pool_3d.shape[1])
+    )
+    slots_i64 = torch.where(valid_slot, slots_i64, torch.full_like(slots_i64, -1))
+    slots_i64 = slots_i64.contiguous()
     _dequantize_slots_kernel[(N,)](
         out,
         out.stride(0),

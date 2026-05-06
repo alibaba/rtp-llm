@@ -340,22 +340,12 @@ def allocate_decode_metadata(
     pool_block_tables: Dict[int, torch.Tensor] = {}
     pool_write_slot_mappings: Dict[int, torch.Tensor] = {}
     if paged_pool_specs:
-        from rtp_llm.models_py.modules.dsv4.decode.pool_layout import SWA_KV
-
         for attn_type, (_, max_blocks) in paged_pool_specs.items():
             pool_block_tables[attn_type] = torch.zeros(
                 B, max_blocks, dtype=torch.int32, device=device
             )
-            # SWA_KV is the always-write path (mask_negative=False downstream),
-            # so it must hold a *valid* slot at all times — including during
-            # framework warmup where update_decode_metadata_in_place's paged
-            # branch is skipped (no block_tables yet). Slot 0 is always a
-            # valid pool index; warmup writes overlap there harmlessly.
-            # Compressed pools (CSA/HCA/INDEXER) use mask_negative=True and
-            # require -1 sentinel for non-boundary tokens.
-            sentinel = 0 if attn_type == SWA_KV else -1
             pool_write_slot_mappings[attn_type] = torch.full(
-                (T_total,), sentinel, dtype=torch.int64, device=device
+                (T_total,), -1, dtype=torch.int64, device=device
             )
 
     # Pre-allocate swa_abs_idx[B, q_len, win] int32 (always — Phase 2B-2a

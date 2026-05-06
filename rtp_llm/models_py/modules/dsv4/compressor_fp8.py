@@ -195,8 +195,9 @@ class CompressorFP8(PoolBackedModule):
         block_in_seq = safe_logical // eb
         in_block = safe_logical % eb
         block_id = bt[b_idx, block_in_seq]
-        valid = valid_in & in_capacity & (block_id > 0)
         safe_slot = block_id * eb + in_block
+        pool_rows = int(self._kv_pool_view.numel() // self._kv_pool_view.shape[-1])
+        valid = valid_in & in_capacity & (block_id > 0) & (safe_slot < pool_rows)
         return torch.where(valid, safe_slot, torch.full_like(safe_slot, -1))
 
     def _run_fused_pool_write(

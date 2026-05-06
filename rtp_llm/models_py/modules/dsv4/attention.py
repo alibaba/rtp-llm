@@ -1071,11 +1071,13 @@ class Attention(nn.Module):
         block_id = bt_long[:bsz][b_idx, block_in_seq.unsqueeze(0)]  # [B, T]
         in_capacity = in_capacity_row.unsqueeze(0).expand(bsz, -1)  # [B, T]
         # Mirror ``_scatter_kv_pool``'s ``if bid <= 0: continue`` sentinel:
-        # unallocated blocks (bid <= 0) and over-capacity rows both → -1.
-        valid = (block_id > 0) & in_capacity
+        # unallocated blocks (bid <= 0), over-capacity rows, and physical
+        # block ids outside this pool all map to -1.
+        candidate_slot = block_id * eb + in_block.unsqueeze(0)
+        valid = (block_id > 0) & in_capacity & (candidate_slot < int(pool_view.shape[0]))
         slot_per = torch.where(
             valid,
-            block_id * eb + in_block.unsqueeze(0),
+            candidate_slot,
             torch.full_like(block_id, -1),
         )  # [B, T]
         slot_mapping = slot_per.reshape(-1)  # [B*T]
@@ -1202,9 +1204,15 @@ class Attention(nn.Module):
         )
         b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)  # [B,1]
         block_id = bt_long[:bsz][b_idx, safe_in_seq]  # [B, max_n_write]
-        valid = (block_id > 0) & in_capacity & row_valid
+        candidate_slot = block_id * eb + in_block
+        valid = (
+            (block_id > 0)
+            & in_capacity
+            & row_valid
+            & (candidate_slot < int(pool_view.shape[0]))
+        )
         slot = torch.where(
-            valid, block_id * eb + in_block, torch.full_like(in_block, -1)
+            valid, candidate_slot, torch.full_like(in_block, -1)
         )
 
         # Gather source rows: src[b, j] = kv_full[b, src_start[b] + j].
@@ -1410,12 +1418,11 @@ class Attention(nn.Module):
         b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)  # [B,1]
         block_id = bt_long[:bsz][b_idx, block_in_seq.unsqueeze(0)]  # [B, T]
         in_capacity = in_capacity_row.unsqueeze(0).expand(bsz, -1)  # [B, T]
+        candidate_slot = block_id * eb + in_block.unsqueeze(0)
         valid = (block_id > 0) & in_capacity
-        safe_slot = torch.where(
-            valid,
-            block_id * eb + in_block.unsqueeze(0),
-            torch.zeros_like(block_id),
-        )  # [B, T]
+        if pool_view is not None:
+            valid = valid & (candidate_slot < int(pool_view.shape[0]))
+        safe_slot = torch.where(valid, candidate_slot, torch.zeros_like(block_id))  # [B, T]
         # FP8 SWA pool: use miji's real dequant (dequantize_swa_window_to_bf16)
         # which reads the 584B/token packed pool via block_table. Only valid
         # for the SWA layer-0 shape (T == win); CSA/HCA 584B pools still go
@@ -1742,7 +1749,7 @@ class Attention(nn.Module):
                 kv_flat,
                 swa_pool_slots[: bsz * q_len],
                 swa_view,
-                mask_negative=False,
+                mask_negative=True,
             )
 
         # CSA / HCA: build / fill compressed topk; write compressed-K.

@@ -205,6 +205,7 @@ class PoolBackedModule(nn.Module):
         block_table: torch.Tensor,
         eb: int,
         device: torch.device,
+        pool_rows: Optional[int] = None,
     ) -> tuple:
         max_blocks = block_table.shape[1]
         pool_capacity = max_blocks * eb
@@ -217,10 +218,11 @@ class PoolBackedModule(nn.Module):
         b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
         block_id = bt_long[:bsz][b_idx, block_in_seq.unsqueeze(0)]
         in_capacity = in_capacity_row.unsqueeze(0).expand(bsz, -1)
+        candidate_slot = block_id * eb + in_block.unsqueeze(0)
         valid = (block_id > 0) & in_capacity
-        safe_slot = torch.where(
-            valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
-        )
+        if pool_rows is not None:
+            valid = valid & (candidate_slot < int(pool_rows))
+        safe_slot = torch.where(valid, candidate_slot, torch.zeros_like(block_id))
         return valid, safe_slot
 
     def _bind_state_from_pool(
@@ -245,7 +247,12 @@ class PoolBackedModule(nn.Module):
             )
             return
         valid, safe_slot = self._compute_pool_slots(
-            bsz, T, self._state_block_table, self._state_eb, device
+            bsz,
+            T,
+            self._state_block_table,
+            self._state_eb,
+            device,
+            pool_rows=int(self._state_pool_view.shape[0]),
         )
         gathered = self._state_pool_view.index_select(0, safe_slot.reshape(-1))
         valid_bcast = valid.reshape(-1).unsqueeze(-1)
@@ -268,7 +275,12 @@ class PoolBackedModule(nn.Module):
         device = self.kv_state.device
         T = self._state_rows
         valid, safe_slot = self._compute_pool_slots(
-            bsz, T, self._state_block_table, self._state_eb, device
+            bsz,
+            T,
+            self._state_block_table,
+            self._state_eb,
+            device,
+            pool_rows=int(self._state_pool_view.shape[0]),
         )
         merged = torch.cat([self.kv_state[:bsz], self.score_state[:bsz]], dim=-1)
         merged_flat = merged.reshape(bsz * T, -1)
@@ -315,7 +327,12 @@ class PoolBackedModule(nn.Module):
             self.kv_cache = torch.zeros(bsz, T, D, dtype=dtype, device=device)
             return
         valid, safe_slot = self._compute_pool_slots(
-            bsz, T, self._kv_block_table, self._kv_eb, device
+            bsz,
+            T,
+            self._kv_block_table,
+            self._kv_eb,
+            device,
+            pool_rows=int(self._kv_pool_view.shape[0]),
         )
         gathered = self._kv_pool_view.index_select(0, safe_slot.reshape(-1))
         if gathered.dtype != dtype:
@@ -337,7 +354,12 @@ class PoolBackedModule(nn.Module):
         device = self.kv_cache.device
         T = int(self.kv_cache.shape[1])
         valid, safe_slot = self._compute_pool_slots(
-            bsz, T, self._kv_block_table, self._kv_eb, device
+            bsz,
+            T,
+            self._kv_block_table,
+            self._kv_eb,
+            device,
+            pool_rows=int(self._kv_pool_view.shape[0]),
         )
         if block_mask is not None:
             valid = valid & block_mask[:bsz].to(device)

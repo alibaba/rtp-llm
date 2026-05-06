@@ -151,6 +151,14 @@ def dequantize_and_gather_k_cache(
 
     In-place writes ``out``. No return.
     """
+    block_table_i32 = block_table.to(dtype=torch.int32, device=k_cache.device)
+    valid_block = (block_table_i32 > 0) & (block_table_i32 < int(k_cache.shape[0]))
+    block_table_i32 = torch.where(
+        valid_block, block_table_i32, torch.zeros_like(block_table_i32)
+    )
+    if not block_table_i32.is_contiguous():
+        block_table_i32 = block_table_i32.contiguous()
+
     num_reqs = seq_lens.shape[0]
     _dequantize_and_gather_k_kernel[(num_reqs, _NUM_WORKERS_PER_REQ)](
         out,
@@ -158,10 +166,10 @@ def dequantize_and_gather_k_cache(
         out.stride(1),
         k_cache,
         seq_lens,
-        block_table,
+        block_table_i32,
         offset,
         gather_lens,
-        max_blocks_per_seq=block_table.shape[-1],
+        max_blocks_per_seq=block_table_i32.shape[-1],
         fp8_dim=_TOKEN_FP8_DIM,
         bf16_dim=_TOKEN_BF16_DIM,
         scale_dim=_TOKEN_SCALE_DIM,

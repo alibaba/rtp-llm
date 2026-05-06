@@ -24,10 +24,10 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.modules.dsv4.decode.fp8_kv_quant_decode_op import (
-    ENTRY_BYTES,
     NOPE_DIM,
     ROPE_DIM,
     dequantize_v4_kv_slot,
+    read_model1_kv_slot_bytes,
 )
 
 _FLASH_MLA_AVAILABLE = False
@@ -73,10 +73,12 @@ def _dequant_kv_view_to_bf16(
     )
     for b in range(num_blocks):
         for s in range(block_size):
-            slot_view = kv_cache_packed[b, s]
+            slot_view = read_model1_kv_slot_bytes(kv_cache_packed, b, s, block_size)
             if bool((slot_view == 0).all()):
                 continue  # skip empty slots
-            out[b, s] = dequantize_v4_kv_slot(slot_view)
+            out[b, s] = dequantize_v4_kv_slot(
+                kv_cache_packed, b, s, block_size
+            )
     return out
 
 
@@ -108,6 +110,7 @@ class SparseAttnV4DecodeFp8Op:
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.softmax_scale = softmax_scale
+        self._warned_nonzero_sink = False
 
     def forward(
         self,
@@ -201,11 +204,20 @@ class SparseAttnV4DecodeFp8Op:
             indices=topk_3d,
             softmax_scale=self.softmax_scale,
         )
-        # V4-Flash attn_sink is zero; non-zero case is unsupported by FlashMLA native path.
-        if attn_sink is not None and attn_sink.abs().max().item() > 0:
-            logging.warning(
-                "[dsv4-fp8] non-zero attn_sink with FlashMLA path: sink correction deferred"
-            )
+        # V4-Flash attn_sink is zero. Avoid tensor.item() while CUDA graph is
+        # capturing; if a non-zero sink ever appears, warn once on an eager call.
+        is_capturing = q.is_cuda and torch.cuda.is_current_stream_capturing()
+        if (
+            attn_sink is not None
+            and not is_capturing
+            and not self._warned_nonzero_sink
+        ):
+            self._warned_nonzero_sink = True
+            if attn_sink.abs().max().item() > 0:
+                logging.warning(
+                    "[dsv4-fp8] non-zero attn_sink with FlashMLA path: sink "
+                    "correction deferred"
+                )
 
         return attn_out.view(B, q_len, H, self.head_dim).contiguous()
 
@@ -220,27 +232,15 @@ class SparseAttnV4DecodeFp8Op:
         from rtp_llm.models_py.modules.dsv4.attention import _sparse_attn
 
         B, q_len, H, D = q.shape
-        # Dequantize the packed FP8 cache to a bf16 view.
-        # For per-request (single-block) layout, kv_cache is [1, B*T, 584];
-        # but our wrapper interface mirrors Phase 1's [B, T, head_dim] view.
-        # Reshape: [num_blocks, block_size, 584] → [num_blocks*block_size, 584]
-        # → dequant → [num_blocks*block_size, 512] → reshape to [B, T, 512].
-        flat_packed = kv_cache.reshape(-1, ENTRY_BYTES)
-        T_total = flat_packed.shape[0]
-        kv_bf16 = torch.zeros(
-            (T_total, NOPE_DIM + ROPE_DIM),
-            dtype=torch.bfloat16,
-            device=q.device,
-        )
-        for t in range(T_total):
-            slot = flat_packed[t]
-            if bool((slot == 0).all()):
-                continue
-            kv_bf16[t] = dequantize_v4_kv_slot(slot)
-
-        # Reshape to [B, T_per_req, head_dim] — assumes single-block layout
-        # with block_size = T_per_req per request (Phase 4 default).
-        T_per_req = T_total // B
-        kv_view = kv_bf16.view(B, T_per_req, self.head_dim)
+        kv_bf16 = _dequant_kv_view_to_bf16(kv_cache)
+        if kv_bf16.shape[0] == B:
+            kv_view = kv_bf16
+        else:
+            # Compatibility with a single physical block holding all requests.
+            T_total = kv_bf16.shape[0] * kv_bf16.shape[1]
+            T_per_req = T_total // B
+            kv_view = kv_bf16.reshape(T_total, self.head_dim).view(
+                B, T_per_req, self.head_dim
+            )
 
         return _sparse_attn(q, kv_view, attn_sink, topk_idxs, self.softmax_scale)

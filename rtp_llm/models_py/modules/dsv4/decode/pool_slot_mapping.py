@@ -81,18 +81,19 @@ def compute_kv_pool_slot_mapping(
     block_in_seq = safe_pos // entries_per_block
     in_block = safe_pos - block_in_seq * entries_per_block
 
-    # Clamp block_in_seq to [0, max_blocks-1] to keep gather in range when
-    # abs_pos overflows the request's allocation (shouldn't happen for valid
-    # tokens; defensive against sentinel rows beyond [:bsz]).
+    # Clamp only for the gather address. The original in-table predicate is
+    # preserved so overflowed logical positions and NULL block ids become -1.
     max_blocks = block_table.shape[1]
-    block_in_seq = block_in_seq.clamp_(0, max_blocks - 1)
+    in_table = block_in_seq < max_blocks
+    safe_block_in_seq = block_in_seq.clamp(0, max_blocks - 1)
 
     # Gather block_id per token.
     flat_bt = block_table.to(torch.long)
-    block_id = flat_bt[req_idx, block_in_seq]
+    block_id = flat_bt[req_idx, safe_block_in_seq]
     global_slot = block_id * entries_per_block + in_block
+    valid = (~skip) & in_table & (block_id > 0)
 
-    return torch.where(skip, torch.full_like(global_slot, -1), global_slot)
+    return torch.where(valid, global_slot, torch.full_like(global_slot, -1))
 
 
 def compute_state_pool_slot_mapping(
@@ -131,8 +132,10 @@ def compute_state_pool_slot_mapping(
         .reshape(-1)
     )
     max_blocks = block_table.shape[1]
-    safe_slot = safe_slot.clamp_(0, max_blocks - 1)
+    in_table = safe_slot < max_blocks
+    safe_slot = safe_slot.clamp(0, max_blocks - 1)
     flat_bt = block_table.to(torch.long)
     block_id = flat_bt[req_idx, safe_slot]
+    valid = (~skip) & in_table & (block_id > 0)
 
-    return torch.where(skip, torch.full_like(block_id, -1), block_id)
+    return torch.where(valid, block_id, torch.full_like(block_id, -1))
