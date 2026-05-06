@@ -228,6 +228,20 @@ def build_remote_setup_command(rootdir: Path) -> str:
         "export HOME=/home/admin; "
         "export RTP_SKIP_BAZEL_BUILD=1; "
         'export LD_LIBRARY_PATH="$PWD/rtp_llm/libs:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64"; '
+        # ROCm dev image (rtp_llm_dev_rocm:2026_04_15_21_09_b045964 onwards)
+        # ships gcc-toolset-12 but does NOT put its libstdc++ on the default
+        # ld search path. aiter's hipcc-clang JIT-compiles `.so` files
+        # referencing GCC 11+ libstdc++ symbols (e.g.
+        # `std::__cxx11::ostringstream::str() const`); when ld resolves
+        # `libstdc++.so.6` to the system /usr/lib64 copy (older GCC) the
+        # dlopen fails with `undefined symbol`. Prepend gcc-toolset-12 lib64
+        # ahead of system paths so the JIT-built `.so` finds GCC 12's
+        # libstdc++. Guard on /opt/rocm to keep the change scoped to ROCm
+        # workers — CUDA/PPU workers don't need it (and don't ship the
+        # gcc-toolset-12 path).
+        '[ -d /opt/rocm ] && export LD_LIBRARY_PATH='
+        '"/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/rocm/lib:'
+        '/opt/amdgpu/lib64:${LD_LIBRARY_PATH}"; '
         # PPU detection signal for rtp_llm.device.device_type.get_device_type():
         # PPU torch wheel reports torch.cuda.is_available()=True and strips the
         # `+ppu1.5.2.oe` local segment from torch.__version__ (so it reads as
