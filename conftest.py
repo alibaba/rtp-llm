@@ -9,6 +9,36 @@ _xdist_worker = _os.environ.get("PYTEST_XDIST_WORKER")
 if _xdist_worker:
     _os.environ["_RTP_TORCH_BEFORE_SLICE"] = "1" if "torch" in _sys.modules else "0"
 
+    # Cleanup stale GPU verification records from prior pytest sessions
+    # on this REAPI worker. Without this, test_workers_have_disjoint_gpus
+    # globs `_GPU_VERIFY_DIR/gw*.json` and sees PREVIOUS session's worker
+    # records — a session with different GPU pool size leaves stale files
+    # claiming the same CVD, producing false "GPU OVERLAP" failures
+    # (run 39354184 ut-sm8x: gw0 and gw3 both reported CVD=0).
+    #
+    # Two-pronged cleanup:
+    #   (a) every worker deletes its OWN gw{N}.json — guarantees no stale
+    #       record survives for current worker indices.
+    #   (b) gw0 ALSO sweeps the dir — catches stale files from previous
+    #       sessions with HIGHER worker count (e.g. prior session had
+    #       gw0..gw7, current has gw0..gw3 → gw4..gw7 stale would mislead
+    #       the disjoint check).
+    # Conftest module load happens BEFORE test execution, so cleanup is
+    # always strictly before test_record_worker_gpu writes the fresh file.
+    _verify_dir = _os.environ.get("GPU_VERIFY_DIR", "/tmp/rtp_llm_gpu_verify")
+    _own_record = f"{_verify_dir}/{_xdist_worker}.json"
+    try:
+        _os.unlink(_own_record)
+    except OSError:
+        pass
+    if _xdist_worker == "gw0":
+        import glob as _glob
+        for _stale in _glob.glob(f"{_verify_dir}/gw*.json"):
+            try:
+                _os.unlink(_stale)
+            except OSError:
+                pass
+
     # Worker name parse: pytest-xdist standard is "gw0", "gw1", ...
     # Custom runners (remote sessions, controller-only modes) may pass other
     # names. Parse defensively — fall back to slice 0 + warn rather than
