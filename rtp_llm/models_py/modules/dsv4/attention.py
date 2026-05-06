@@ -1939,11 +1939,14 @@ class Attention(nn.Module):
 
         swa_pool_bt = attn_metadata.pool_block_tables.get(SWA_KV)
         swa_view_cache = self._pool_view(SWA_KV)
+        swa_view_3d_fp8 = (
+            self._pool_view_3d_fp8(SWA_KV) if self._kv_cache_is_fp8 else None
+        )
 
         # Decide which paged read variant to use, if any.
         use_paged_swa_read = (
             not self.compress_ratio
-            and swa_view_cache is not None
+            and (swa_view_cache is not None or swa_view_3d_fp8 is not None)
             and attn_metadata.swa_abs_idx is not None
             and swa_pool_bt is not None
             and swa_pool_bt.numel() > 0
@@ -1962,10 +1965,15 @@ class Attention(nn.Module):
         cmp_view_cache = (
             self._pool_view(cmp_attn_type) if cmp_attn_type is not None else None
         )
+        cmp_view_3d_fp8 = (
+            self._pool_view_3d_fp8(cmp_attn_type)
+            if (self._kv_cache_is_fp8 and cmp_attn_type is not None)
+            else None
+        )
         use_paged_dual_read = (
             self.compress_ratio in (4, 128)
-            and swa_view_cache is not None
-            and cmp_view_cache is not None
+            and (swa_view_cache is not None or swa_view_3d_fp8 is not None)
+            and (cmp_view_cache is not None or cmp_view_3d_fp8 is not None)
             and attn_metadata.swa_abs_idx is not None
             and swa_pool_bt is not None
             and swa_pool_bt.numel() > 0
@@ -2002,7 +2010,35 @@ class Attention(nn.Module):
                     2, f"L{self.layer_id:02d}_decode_swa_global", swa_global
                 )
 
-            if use_paged_swa_read:
+            if use_paged_swa_read and swa_view_3d_fp8 is not None:
+                # FP8 path: FlashMLA reads the packed FP8 pool directly
+                # (block_table + per-request virtual indices). swa_abs_idx
+                # already holds per-request abs positions with -1 padding,
+                # which is the FlashMLA `indices` contract.
+                from rtp_llm.models_py.modules.dsv4.decode.fp8_sparse_attn_decode_op import (
+                    SparseAttnV4DecodeFp8Op,
+                )
+
+                fp8_sparse_op = SparseAttnV4DecodeFp8Op(
+                    n_heads=self.n_heads,
+                    head_dim=self.head_dim,
+                    softmax_scale=self.softmax_scale,
+                )
+                indices_fp8 = (
+                    attn_metadata.swa_abs_idx[:bsz].to(torch.int32).contiguous()
+                )
+                cache_seqlens_fp8 = (attn_metadata.start_pos[:bsz] + 1).to(
+                    torch.int32
+                )
+                o = fp8_sparse_op.forward(
+                    q,
+                    swa_view_3d_fp8,
+                    self.attn_sink,
+                    indices_fp8,
+                    cache_seqlens=cache_seqlens_fp8,
+                    block_table=swa_pool_bt[:bsz].to(torch.int32).contiguous(),
+                )
+            elif use_paged_swa_read:
                 # Zero-copy: pool view fed straight to TileLang kernel.
                 q_packed = (
                     q.transpose(0, 1).contiguous() if q_len > 1 else q.transpose(0, 1)
@@ -2039,16 +2075,33 @@ class Attention(nn.Module):
                     "Phase 2B-2b dual-pool paged read currently supports "
                     f"q_len=1 only (got {q_len})"
                 )
-                kv_packed_4d = gather_dual_pool_kv_packed(
-                    swa_view_cache,
-                    cmp_view_cache,
-                    swa_global,
-                    cmp_global,
-                    self.head_dim,
-                    bsz,
-                    q_len,
-                )  # [B, 1, win+K, D]
-                kv_packed = kv_packed_4d.view(bsz, win + K_cmp, self.head_dim)
+                if swa_view_3d_fp8 is not None and cmp_view_3d_fp8 is not None:
+                    # FP8 dual-pool: per-slot dequant via existing kernel
+                    # then concat → bf16 packed buffer for sparse_attn.
+                    from rtp_llm.models_py.modules.dsv4._swa_fp8_dequant_triton import (
+                        dequantize_slots_to_bf16,
+                    )
+
+                    swa_global_flat = swa_global.reshape(-1)
+                    cmp_global_flat = cmp_global.reshape(-1)
+                    swa_bf16 = dequantize_slots_to_bf16(
+                        swa_view_3d_fp8, swa_global_flat
+                    ).view(bsz, win, self.head_dim)
+                    cmp_bf16 = dequantize_slots_to_bf16(
+                        cmp_view_3d_fp8, cmp_global_flat
+                    ).view(bsz, K_cmp, self.head_dim)
+                    kv_packed = torch.cat([swa_bf16, cmp_bf16], dim=1)
+                else:
+                    kv_packed_4d = gather_dual_pool_kv_packed(
+                        swa_view_cache,
+                        cmp_view_cache,
+                        swa_global,
+                        cmp_global,
+                        self.head_dim,
+                        bsz,
+                        q_len,
+                    )  # [B, 1, win+K, D]
+                    kv_packed = kv_packed_4d.view(bsz, win + K_cmp, self.head_dim)
                 if _dbg_decode:
                     _rt.record_if_level(
                         2, f"L{self.layer_id:02d}_decode_kv_packed", kv_packed
