@@ -248,24 +248,29 @@ def build_remote_setup_command(rootdir: Path) -> str:
         # LD_LIBRARY_PATH alone is NOT enough: /opt/conda310/bin/python has
         # `libstdc++.so.6` resolution baked into its rpath, so the conda
         # libstdc++ (older GCC) loads first and any subsequent dlopen sees
-        # it as already-resolved (single libstdc++ per process). Run
-        # 39286866 smoke-amd confirmed this: the diagnostic showed
-        # gcc-toolset-12 lib on the search path, /opt/rocm exists, /opt/rh
-        # exists — yet aiter `mha_varlen_fwd_fp16_*.so` still failed with
-        # the same `undefined symbol _ZNKRSt7__cxx1119basic_ostringstream
-        # ...3strEv` (GCC 11+ ref-qualified `ostringstream::str() const &`).
-        # Force-load gcc-toolset-12's libstdc++ ahead of python's RPATH
-        # resolution via LD_PRELOAD when the file exists.
-        'if [ -f /opt/rh/gcc-toolset-12/root/usr/lib64/libstdc++.so.6 ]; then '
-        '  export LD_PRELOAD="/opt/rh/gcc-toolset-12/root/usr/lib64/libstdc++.so.6:${LD_PRELOAD}"; '
+        # it as already-resolved (single libstdc++ per process). Force-load
+        # the newest available libstdc++ via LD_PRELOAD before any python.
+        # Search under /opt/rh/gcc-toolset-12 (canonical lib64 + arch-
+        # specific lib/gcc/.../12) — run 39286866 showed lib64/libstdc++
+        # was missing on MI308X-ROCM7 workers, so the shell hard-coded
+        # path was a no-op.
+        'GCC_TS_STDCPP=$(ls /opt/rh/gcc-toolset-12/root/usr/lib64/libstdc++.so.6 '
+        '/opt/rh/gcc-toolset-12/root/usr/lib/gcc/*/12/libstdc++.so.6 2>/dev/null | head -1); '
+        'if [ -z "$GCC_TS_STDCPP" ]; then '
+        '  GCC_TS_STDCPP=$(find /opt/rh/gcc-toolset-12 -name libstdc++.so.6 2>/dev/null | head -1); '
+        'fi; '
+        'if [ -n "$GCC_TS_STDCPP" ] && [ -f "$GCC_TS_STDCPP" ]; then '
+        '  export LD_PRELOAD="$GCC_TS_STDCPP:${LD_PRELOAD}"; '
         'fi; '
         # Diagnostic — appears in remote_stdout.log per-worker so we can
         # confirm the prologue ran and the gcc-toolset-12 path is on the
         # search list when aiter dlopens its JIT cache.
         'echo "[remote_setup] LD_LIBRARY_PATH=$LD_LIBRARY_PATH"; '
         'echo "[remote_setup] LD_PRELOAD=${LD_PRELOAD:-(unset)}"; '
+        'echo "[remote_setup] GCC_TS_STDCPP=${GCC_TS_STDCPP:-(empty)}"; '
         'echo "[remote_setup] /opt/rocm exists: $([ -d /opt/rocm ] && echo yes || echo no), '
         '/opt/rh/gcc-toolset-12 exists: $([ -d /opt/rh/gcc-toolset-12 ] && echo yes || echo no)"; '
+        'echo "[remote_setup] gcc-toolset-12 contents:"; ls -la /opt/rh/gcc-toolset-12/root/usr/lib64/libstdc++* 2>&1 | head -5 || true; '
         # PPU detection signal for rtp_llm.device.device_type.get_device_type():
         # PPU torch wheel reports torch.cuda.is_available()=True and strips the
         # `+ppu1.5.2.oe` local segment from torch.__version__ (so it reads as
