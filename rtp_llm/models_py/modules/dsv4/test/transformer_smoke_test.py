@@ -68,19 +68,19 @@ def test_tiny_v4_forward():
 
     # Init mHC params
     for layer in model.layers:
-        torch.nn.init.normal_(layer.hc_attn_fn, std=0.02)
-        torch.nn.init.normal_(layer.hc_ffn_fn, std=0.02)
-        torch.nn.init.zeros_(layer.hc_attn_base)
-        torch.nn.init.zeros_(layer.hc_ffn_base)
-        torch.nn.init.ones_(layer.hc_attn_scale)
-        torch.nn.init.ones_(layer.hc_ffn_scale)
+        torch.nn.init.normal_(layer.attn_hc.fn, std=0.02)
+        torch.nn.init.normal_(layer.ffn_hc.fn, std=0.02)
+        torch.nn.init.zeros_(layer.attn_hc.base)
+        torch.nn.init.zeros_(layer.ffn_hc.base)
+        torch.nn.init.ones_(layer.attn_hc.scale)
+        torch.nn.init.ones_(layer.ffn_hc.scale)
         # attn_sink small negative for tiny init
         torch.nn.init.constant_(layer.attn.attn_sink, -10.0)
 
-    torch.nn.init.normal_(model.hc_head_fn, std=0.02)
-    torch.nn.init.zeros_(model.hc_head_base)
-    torch.nn.init.ones_(model.hc_head_scale)
-    torch.nn.init.normal_(model.head.weight, std=0.02)
+    torch.nn.init.normal_(model.head_hc.fn, std=0.02)
+    torch.nn.init.zeros_(model.head_hc.base)
+    torch.nn.init.ones_(model.head_hc.scale)
+    torch.nn.init.normal_(model.head_weight, std=0.02)
 
     # PREFILL
     B, S = 1, 32

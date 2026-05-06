@@ -17,8 +17,9 @@ import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
-    cp_all_gather_full,
+    cp_all_gather_full_async,
     cp_should_gather,
+    cp_wait_gather_full,
 )
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
@@ -1201,19 +1202,41 @@ class Compressor(nn.Module):
             and seqlen == 1
         )
 
-        # CP prefill: all-gather rank-local kv / score to the current full
-        # input before the S-pool step so the pool sees all new tokens in
-        # logical order.  This also applies to continuation prefill; decode
-        # reaches this path only with ``cp_ctx`` cleared.
         cp_ctx = self._cp_ctx
-        if not is_batched_decode and cp_should_gather(cp_ctx, start_pos):
-            kv = cp_all_gather_full(kv, cp_ctx)
-            score = cp_all_gather_full(score, cp_ctx)
+        cp_gather = not is_batched_decode and cp_should_gather(cp_ctx, start_pos)
+        kv_gather_handle = None
+        score_gather_handle = None
+        if cp_gather:
+            assert cp_ctx is not None
+            if kv.dim() != 3 or kv.size(0) != 1:
+                raise RuntimeError(
+                    f"CP compressor KV expects [1, T_local, H], got {tuple(kv.shape)}"
+                )
+            if score.dim() != 3 or score.size(0) != 1:
+                raise RuntimeError(
+                    f"CP compressor score expects [1, T_local, H], got {tuple(score.shape)}"
+                )
+            # CP prefill: start kv / score gathers before metadata rebinding so
+            # the paired collectives are in flight before the S-pool consumer.
+            gather_stream = torch.cuda.Stream(device=kv.device) if kv.is_cuda else None
+            kv_gather_handle = cp_all_gather_full_async(
+                kv.squeeze(0), cp_ctx, stream=gather_stream
+            )
+            score_gather_handle = cp_all_gather_full_async(
+                score.squeeze(0), cp_ctx, stream=gather_stream
+            )
+            gathered_bsz, gathered_seqlen = 1, cp_ctx.seq_len_full
+
+        if cp_gather:
+            assert kv_gather_handle is not None
+            assert score_gather_handle is not None
+            kv = cp_wait_gather_full(kv_gather_handle).unsqueeze(0)
+            score = cp_wait_gather_full(score_gather_handle).unsqueeze(0)
             # After gather the effective seqlen is the FULL un-padded
             # prefill len; the caller's ``seqlen`` / ``bsz`` above
             # reflected the rank-local padded slice.  Rebind so
             # downstream pool/pooling-mask/RoPE math operates on full.
-            bsz, seqlen = kv.size(0), kv.size(1)
+            bsz, seqlen = gathered_bsz, gathered_seqlen
         if _dbg is not None:
             _rt.record_if_level(2, f"{_dbg}_kv_full", kv)
             _rt.record_if_level(2, f"{_dbg}_score_full", score)
