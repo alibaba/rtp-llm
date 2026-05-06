@@ -44,6 +44,15 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
     uint32_t num_hca = dsv4_config.num_hca_layers();
     uint32_t num_all = dsv4_config.num_all_layers();
 
+    // Select per-entry byte size + logical dtype from kv_cache_dtype.
+    // FP8 KV cache packs 448 fp8 NoPE + 64 bf16 RoPE + 8 UE8M0 scale bytes
+    // into 584-byte slots; BF16 path keeps 1024-byte slots. INDEXER_KV
+    // mirrors the choice (132B for FP8, 256B for BF16).
+    const bool     fp8_kv              = (attn.kv_cache_dtype == KvCacheDataType::FP8);
+    const uint32_t kv_entry_bytes      = DSV4CacheConfig::kvEntryBytes(fp8_kv);
+    const uint32_t indexer_entry_bytes = DSV4CacheConfig::indexerEntryBytes(fp8_kv);
+    const DataType kv_logical_dtype    = fp8_kv ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_BF16;
+
     // All groups use TOKENS_PER_BLOCK = 256
     // Pool 0/1/2: variable num_blocks (large), entries_per_block = 256/ratio
     // Pool 3/4/5/6: fixed 2 blocks per request. HCA_STATE stores its
@@ -53,35 +62,38 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
     // INDEXER_ENTRY_BYTES) is already in bytes. getTypeSize(TYPE_UINT8) = 1, so
     // block_size_bytes = entries_per_block * entry_bytes * 1 = correct byte count.
 
-    // Pool 0: CSA KV (ratio=4, 64 entries per block, bf16 head_dim=512 → 1024 bytes/entry)
+    // Pool 0: CSA KV (ratio=4, 64 entries per block; FP8: 584B, BF16: 1024B per entry)
     dsv4_config.pool_specs[0] = {
         DSV4CacheType::CSA_KV,
         num_csa,
-        DSV4CacheConfig::KV_ENTRY_BYTES,
+        kv_entry_bytes,
         DSV4CacheConfig::TOKENS_PER_BLOCK / 4,
         DataType::TYPE_UINT8,
         true,
         0,
+        kv_logical_dtype,
     };
-    // Pool 1: HCA KV (ratio=128, 2 entries per block, bf16 head_dim=512 → 1024 bytes/entry)
+    // Pool 1: HCA KV (ratio=128, 2 entries per block; FP8: 584B, BF16: 1024B per entry)
     dsv4_config.pool_specs[1] = {
         DSV4CacheType::HCA_KV,
         num_hca,
-        DSV4CacheConfig::KV_ENTRY_BYTES,
+        kv_entry_bytes,
         DSV4CacheConfig::TOKENS_PER_BLOCK / 128,
         DataType::TYPE_UINT8,
         true,
         0,
+        kv_logical_dtype,
     };
-    // Pool 2: Indexer KV (ratio=4, 64 entries per block, bf16 index_head_dim=128 → 256 bytes/entry)
+    // Pool 2: Indexer KV (ratio=4, 64 entries per block; FP8: 132B, BF16: 256B per entry)
     dsv4_config.pool_specs[2] = {
         DSV4CacheType::INDEXER_KV,
         num_csa,
-        DSV4CacheConfig::INDEXER_ENTRY_BYTES,
+        indexer_entry_bytes,
         DSV4CacheConfig::TOKENS_PER_BLOCK / 4,
         DataType::TYPE_UINT8,
         true,
         0,
+        kv_logical_dtype,
     };
     // Pool 3: Indexer State — fixed 2 blocks per request. Each logical
     // block stores the full CSA overlap state: previous 4 + current 4 rows.
@@ -124,11 +136,12 @@ void DSV4ConfigCreator::buildPoolSpecs(DSV4CacheConfig& dsv4_config, const Model
     dsv4_config.pool_specs[6] = {
         DSV4CacheType::SWA_KV,
         num_all,
-        DSV4CacheConfig::KV_ENTRY_BYTES,
+        kv_entry_bytes,
         DSV4CacheConfig::TOKENS_PER_BLOCK,
         DataType::TYPE_UINT8,
         false,
         2,
+        kv_logical_dtype,
     };
 }
 
