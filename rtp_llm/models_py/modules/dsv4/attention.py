@@ -2068,6 +2068,21 @@ class Attention(nn.Module):
         is_prefill_attn = is_batched_prefill or (not is_batched and seqlen > 1)
         cp_on = cp_ctx is not None and cp_ctx.cp_size > 1 and is_prefill_attn
 
+        # FP8 KV path post-rebase guard: ctor wires CompressorFP8 / IndexerFP8
+        # but the FP8 prefill forward (SWA quant write + CSA/HCA pool dequant
+        # for kv_cat, or flash_mla_sparse_fwd dispatch) was dropped in the
+        # rebase onto upstream's _forward_body structure (origin's independent
+        # restructure clashed with the original 5406e08d3 implementation).
+        # Fail loudly here rather than silently producing wrong output.
+        if self._kv_cache_is_fp8 and is_prefill_attn:
+            raise NotImplementedError(
+                "DSV4 FP8 KV prefill forward not yet rewired on upstream's "
+                "_forward_body (Phase 4 of the rebase). CompressorFP8 / "
+                "IndexerFP8 ctor dispatch is in place; SWA quant-write + "
+                "compressed-pool dequant + sparse_attn FP8 dispatch still "
+                "need to be ported from the dropped 5406e08d3 commit."
+            )
+
         # ``any_cont`` decides whether prefill attention reads the temporary
         # linear [current KV | current compressed KV] buffer (fresh prefill) or
         # the framework paged pools (continuation / mixed prefill).  Compute it
