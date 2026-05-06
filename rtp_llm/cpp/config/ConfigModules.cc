@@ -178,6 +178,7 @@ std::string HWKernelConfig::to_string() const {
     std::ostringstream oss;
     oss << "deep_gemm_num_sm: " << deep_gemm_num_sm << "\n"
         << "arm_gemm_use_kai: " << arm_gemm_use_kai << "\n"
+        << "enable_stable_scatter_add: " << enable_stable_scatter_add << "\n"
         << "enable_multi_block_mode: " << enable_multi_block_mode << "\n"
         << "ft_disable_custom_ar: " << ft_disable_custom_ar << "\n"
         << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
@@ -189,7 +190,9 @@ std::string HWKernelConfig::to_string() const {
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
         << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n"
         << "disable_dpc_random: " << disable_dpc_random << "\n"
-        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag;
+        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag << "\n"
+        << "deterministic_gemm: " << deterministic_gemm << "\n"
+        << "deterministic_attn: " << deterministic_attn;
     return oss.str();
 }
 
@@ -211,7 +214,6 @@ std::string MoeConfig::to_string() const {
         << "use_deepep_internode: " << use_deepep_internode << "\n"
         << "use_deepep_low_latency: " << use_deepep_low_latency << "\n"
         << "use_deepep_p2p_low_latency: " << use_deepep_p2p_low_latency << "\n"
-        << "use_mori_ep: " << use_mori_ep << "\n"
         << "fake_balance_expert: " << fake_balance_expert << "\n"
         << "hack_moe_expert: " << hack_moe_expert << "\n"
         << "deep_ep_num_sm: " << deep_ep_num_sm << "\n"
@@ -226,7 +228,7 @@ std::string MoeConfig::to_string() const {
 // ModelSpecificConfig
 std::string ModelSpecificConfig::to_string() const {
     std::ostringstream oss;
-    // Empty struct — no fields remaining.
+    oss << "load_python_model: " << load_python_model;
     return oss.str();
 }
 
@@ -364,6 +366,7 @@ std::string RuntimeConfig::to_string() const {
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
+        << "use_gather_batch_scheduler: " << use_gather_batch_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"
         << batch_decode_scheduler_config.to_string() << "\n}\n"
         << "fifo_scheduler_config: {\n"
@@ -479,18 +482,18 @@ void GrpcConfig::from_json(const std::string& json_str) {
     max_server_pollers = parse_optional_root_int_json(json_str, "max_server_pollers", 0);
 }
 
-BailianGrpcConfig::BailianGrpcConfig(const std::string& json_str) {
+DashScGrpcConfig::DashScGrpcConfig(const std::string& json_str) {
     from_json(json_str);
 }
 
-std::string BailianGrpcConfig::to_string() const {
+std::string DashScGrpcConfig::to_string() const {
     std::ostringstream oss;
     append_grpc_maps_to_stream(oss, *this);
     oss << "max_server_workers: " << max_server_workers << "\n";
     return oss.str();
 }
 
-void BailianGrpcConfig::from_json(const std::string& json_str) {
+void DashScGrpcConfig::from_json(const std::string& json_str) {
     if (json_str.empty()) {
         return;
     }

@@ -9,9 +9,9 @@ from rtp_llm.config.model_args import ModelArgs
 st = time.time()
 from rtp_llm.ops import (
     ArpcConfig,
-    BailianGrpcConfig,
     CacheStoreConfig,
     ConcurrencyConfig,
+    DashScGrpcConfig,
     DeviceResourceConfig,
     EPLBConfig,
     FfnDisAggregateConfig,
@@ -34,6 +34,7 @@ from rtp_llm.ops import (
 consume_s = time.time() - st
 print(f"import rtp_llm.ops took {consume_s:.2f}s")
 
+
 DEFAULT_START_PORT = 8088
 COORDINATOR_INFO_PORT_NUM = 11
 MIN_WORKER_INFO_PORT_NUM = 9
@@ -45,11 +46,9 @@ class ServerConfig:
 
     def __init__(self):
         self.frontend_server_count = 4
-        self.vit_server_count = 1
         self.start_port = DEFAULT_START_PORT
         self.timeout_keep_alive = 5
         self.frontend_server_id = 0
-        self.vit_server_id = 0
         self.rank_id = 0
         self.ip: str = ""
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
@@ -87,8 +86,8 @@ class ServerConfig:
         return self._server_base() + 7
 
     @property
-    def bailian_grpc_server_port(self) -> int:
-        """Bailian gRPC listen port (ModelStreamInfer, wire: predict_v2.proto); base + 8."""
+    def dash_sc_grpc_server_port(self) -> int:
+        """DashSc gRPC listen port (ModelStreamInfer, wire: predict_v2.proto); base + 8."""
         return self._server_base() + 8
 
     def set_local_rank(self, local_rank: int):
@@ -101,11 +100,9 @@ class ServerConfig:
     def to_string(self):
         return (
             f"frontend_server_count: {self.frontend_server_count}\n"
-            f"vit_server_count: {self.vit_server_count}\n"
             f"start_port: {self.start_port}\n"
             f"timeout_keep_alive: {self.timeout_keep_alive}\n"
             f"frontend_server_id: {self.frontend_server_id}\n"
-            f"vit_server_id: {self.vit_server_id}\n"
             f"rank_id: {self.rank_id}\n"
             f"worker_info_port_num: {self.worker_info_port_num}\n"
             f"shutdown_timeout: {self.shutdown_timeout}\n"
@@ -116,7 +113,7 @@ class ServerConfig:
             f"cache_store_rdma_listen_port: {self.cache_store_rdma_listen_port}\n"
             f"http_port: {self.http_port}\n"
             f"embedding_rpc_server_port: {self.embedding_rpc_server_port}\n"
-            f"bailian_grpc_server_port: {self.bailian_grpc_server_port}"
+            f"dash_sc_grpc_server_port: {self.dash_sc_grpc_server_port}"
         )
 
 
@@ -249,15 +246,6 @@ class VitConfig:
         self.igraph_vipserver: int = 0
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
-        self.mm_preprocess_max_workers: int = 4
-        self.biencoder_preprocess: bool = False
-        self.extra_input_in_mm_embedding = ""
-        self.mm_timeout_ms: Optional[int] = None
-        self.extra_data_path: str = ""
-        self.local_extra_data_path: str = ""
-        self.disable_access_log: bool = False
-        self.use_local_preprocess: bool = False
-        self.vit_proxy_load_balance_strategy: str = "round_robin"
 
     def to_string(self):
         return (
@@ -272,16 +260,7 @@ class VitConfig:
             f"igraph_search_dom: {self.igraph_search_dom}\n"
             f"igraph_vipserver: {self.igraph_vipserver}\n"
             f"igraph_table_name: {self.igraph_table_name}\n"
-            f"igraph_default_key: {self.default_key}\n"
-            f"mm_preprocess_max_workers: {self.mm_preprocess_max_workers}\n"
-            f"biencoder_preprocess: {self.biencoder_preprocess}\n"
-            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
-            f"mm_timeout_ms: {self.mm_timeout_ms}\n"
-            f"extra_data_path: {self.extra_data_path}\n"
-            f"local_extra_data_path: {self.local_extra_data_path}\n"
-            f"disable_access_log: {self.disable_access_log}\n"
-            f"use_local_preprocess: {self.use_local_preprocess}\n"
-            f"vit_proxy_load_balance_strategy: {self.vit_proxy_load_balance_strategy}"
+            f"igraph_default_key: {self.default_key}"
         )
 
 
@@ -339,9 +318,13 @@ class QuantizationConfig:
 class EmbeddingConfig:
     def __init__(self):
         self.embedding_model: int = 0
+        self.extra_input_in_mm_embedding = ""
 
     def to_string(self):
-        return f"embedding_model: {self.embedding_model}"
+        return (
+            f"embedding_model: {self.embedding_model}\n"
+            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}"
+        )
 
 
 class RoleConfig:
@@ -412,7 +395,7 @@ class JITConfig:
 
 class DeepEPConfig:
     """
-    Configuration for DeepEP / MoriEP settings.
+    Configuration for DeepEP settings.
     Used to track whether user has explicitly set these values.
     If all are None, auto_configure_deepep will be called.
     Otherwise, these values will be copied to moe_config.
@@ -422,14 +405,12 @@ class DeepEPConfig:
         self.use_deepep_moe: Optional[bool] = None
         self.use_deepep_internode: Optional[bool] = None
         self.use_deepep_low_latency: Optional[bool] = None
-        self.use_mori_ep: Optional[bool] = None
 
     def to_string(self):
         return (
             f"use_deepep_moe: {self.use_deepep_moe}\n"
             f"use_deepep_internode: {self.use_deepep_internode}\n"
-            f"use_deepep_low_latency: {self.use_deepep_low_latency}\n"
-            f"use_mori_ep: {self.use_mori_ep}"
+            f"use_deepep_low_latency: {self.use_deepep_low_latency}"
         )
 
 
@@ -471,7 +452,7 @@ class PyEnvConfigs:
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()
         self.grpc_config = GrpcConfig()
-        self.bailian_grpc_config = BailianGrpcConfig()
+        self.dash_sc_grpc_config = DashScGrpcConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
 
@@ -523,6 +504,6 @@ class PyEnvConfigs:
             + self.runtime_config.fifo_scheduler_config.to_string()
             + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
-            "[bailian_grpc_config]\n" + self.bailian_grpc_config.to_string() + "\n\n"
+            "[dash_sc_grpc_config]\n" + self.dash_sc_grpc_config.to_string() + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )

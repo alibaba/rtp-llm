@@ -1,6 +1,5 @@
 import asyncio
 import gc
-import json
 import logging
 import socket
 import threading
@@ -21,16 +20,16 @@ from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
-from rtp_llm.distribute.distributed_server import get_world_info
+from rtp_llm.distribute.distributed_server import (
+    get_dp_addrs_from_world_info,
+    get_world_info,
+)
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
-from rtp_llm.frontend.frontend_worker import get_dp_addrs_from_world_info
-from rtp_llm.openai.api_datatype import (
-    BatchChatCompletionRequest,
-    ChatCompletionRequest,
-)
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
 from rtp_llm.utils.util import AtomicCounter, async_request_server
 from rtp_llm.utils.version_info import VersionInfo
@@ -63,13 +62,13 @@ class FrontendApp(object):
         py_env_configs: PyEnvConfigs,
         separated_frontend: bool = False,
     ):
+        self.py_env_configs = py_env_configs
         self.server_config = py_env_configs.server_config
         self.frontend_server = FrontendServer(
             self.server_config.rank_id,
             self.server_config.frontend_server_id,
             py_env_configs,
         )
-        self.bailian_grpc_config = py_env_configs.bailian_grpc_config
         self.separated_frontend = separated_frontend
 
         # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
@@ -120,52 +119,8 @@ class FrontendApp(object):
             "Backend health_check did not become ready within %ds" % timeout_s
         )
 
-    def _start_bailian_grpc_server(self) -> None:
-        """Prepare Bailian gRPC (predict_v2.proto wire); always enabled. Bind in FastAPI startup."""
-        self._bailian_grpc_port = self.server_config.bailian_grpc_server_port
-        self._bailian_grpc_backend_visitor = None
-        if getattr(self.frontend_server, "_frontend_worker", None) is not None:
-            self._bailian_grpc_backend_visitor = (
-                self.frontend_server._frontend_worker.backend_rpc_server_visitor
-            )
-        self._bailian_grpc_start_pending = True
-        logging.info(
-            "Bailian gRPC will start in app startup on port %s", self._bailian_grpc_port
-        )
-
-    def _run_bailian_grpc_server_startup(self) -> None:
-        if not getattr(self, "_bailian_grpc_start_pending", False):
-            return
-        self._bailian_grpc_start_pending = False
-        try:
-            from rtp_llm.bailian.bailian_grpc_server import (
-                set_bailian_grpc_enqueue_event_loop,
-                start_bailian_grpc_server_in_thread,
-            )
-
-            set_bailian_grpc_enqueue_event_loop(asyncio.get_running_loop())
-            # Blocks until grpc.Server.start() / bind succeeds; daemon thread then waits forever.
-            start_bailian_grpc_server_in_thread(
-                self._bailian_grpc_port,
-                backend_visitor=getattr(self, "_bailian_grpc_backend_visitor", None),
-                bailian_grpc_config=self.bailian_grpc_config,
-            )
-            logging.info(
-                "Started Bailian gRPC server on port %s (enqueue_event_loop=uvicorn)",
-                self._bailian_grpc_port,
-            )
-        except Exception as e:
-            logging.error(
-                "Failed to start Bailian gRPC server: %s. "
-                "Ensure grpcio-tools is installed and run: python -m rtp_llm.bailian.generate_proto_py",
-                e,
-                exc_info=True,
-            )
-            raise
-
     def start(self):
         self.frontend_server.start()
-        self._start_bailian_grpc_server()
         app = self.create_app()
 
         loop = "auto"
@@ -176,7 +131,6 @@ class FrontendApp(object):
             asyncio.set_event_loop(asyncio.new_event_loop())
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         logging.info(
             f"server_config.ip = {self.server_config.ip}, port = {self.server_config.server_port}, rank id = {self.server_config.rank_id}, server_id = {self.server_config.frontend_server_id}, separated_frontend = {self.separated_frontend}"
@@ -224,24 +178,11 @@ class FrontendApp(object):
             # PD 不分离时在 Uvicorn 的 loop 里等后端就绪，channel 在此 loop 创建并一直复用
             if not self.separated_frontend:
                 await self._wait_backend_health_ready_impl()
-            self._run_bailian_grpc_server_startup()
             RunVar("_default_thread_limiter").set(
                 CapacityLimiter(
                     self.frontend_server._global_controller.max_concurrency * 2
                 )
             )
-
-        @app.on_event("shutdown")
-        async def _shutdown_bailian_grpc():
-            # grpc.Server.stop can block up to ``grace``; avoid blocking the event loop.
-            to = self.server_config.shutdown_timeout
-            grace = None if to < 0 else float(to)
-            try:
-                from rtp_llm.bailian.bailian_grpc_server import stop_bailian_grpc_server
-
-                await asyncio.to_thread(stop_bailian_grpc_server, grace)
-            except Exception as e:
-                logging.warning("[BailianGrpc] shutdown failed: %s", e, exc_info=True)
 
         async def check_all_health():
             if not self.frontend_server.check_health():
@@ -266,7 +207,6 @@ class FrontendApp(object):
         @app.get("/status")
         @app.post("/status")
         @app.post("/health_check")
-        @app.get("/")
         async def health_check():
             if self.separated_frontend:
                 await check_all_health()
@@ -281,7 +221,19 @@ class FrontendApp(object):
                     status_code=400,
                     content={"error": f" HTTP health check failed"},
                 )
+            return "ok"
 
+        @app.get("/")
+        async def health():
+            if self.separated_frontend:
+                await check_all_health()
+                return {"status": "home"}
+            response = await self.grpc_client.post_request("health_check", {})
+            if response.get("status", "") != "ok":
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
+                )
             return "ok"
 
         @app.get("/cache_status")
@@ -325,9 +277,6 @@ class FrontendApp(object):
             if "error" not in response:
                 response["frontend_available_concurrency"] = (
                     self.frontend_server._global_controller.get_available_concurrency()
-                )
-                response["frontend_concurrency_limit"] = (
-                    self.frontend_server._global_controller.max_concurrency
                 )
             else:
                 return ORJSONResponse(
@@ -385,30 +334,6 @@ class FrontendApp(object):
             finally:
                 active_requests.decrement()
 
-        @app.post("/v1/batch/chat/completions")
-        async def batch_chat_completion(
-            request: BatchChatCompletionRequest, raw_request: RawRequest
-        ):
-            global active_requests
-            active_requests.increment()
-            try:
-                return await self.frontend_server.batch_chat_completion(
-                    request, raw_request
-                )
-            finally:
-                active_requests.decrement()
-
-        @app.post("/batch_infer")
-        async def batch_infer(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
-            global active_requests
-            active_requests.increment()
-            try:
-                if isinstance(req, str):
-                    req = json.loads(req)
-                return await self.frontend_server.batch_infer(req, raw_request)
-            finally:
-                active_requests.decrement()
-
         @app.post("/update_scheduler_info")
         async def update_scheduler_info(req: Union[str, Dict[Any, Any]]):
             result = await self.grpc_client.post_request("update_scheduler_info", req)
@@ -436,8 +361,6 @@ class FrontendApp(object):
             return self.frontend_server.tokenize(req)
 
         if self.frontend_server.is_embedding:
-            from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
-
             # embedding
             @app.post("/v1/embeddings/similarity")
             @app.post("/v1/reranker")

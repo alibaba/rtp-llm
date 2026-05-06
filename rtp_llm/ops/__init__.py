@@ -111,7 +111,7 @@ try:
     from libth_transformer_config import (
         ArpcConfig,
         AttentionConfigs,
-        BailianGrpcConfig,
+        DashScGrpcConfig,
         GrpcConfig,
         BatchDecodeSchedulerConfig,
         CacheStoreConfig,
@@ -167,7 +167,6 @@ try:
     from libth_transformer_config import (
         get_block_cache_keys as cpp_get_block_cache_keys,
     )
-    from libth_transformer_config import MultimodalInput, MMPreprocessConfig
 
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
@@ -206,12 +205,16 @@ except BaseException as e:
 
 try:
 
+    from libth_transformer import MultimodalInput as MultimodalInputCpp
     from libth_transformer import RtpEmbeddingOp, RtpLLMOp
     from libth_transformer import EmbeddingCppOutput
 
     libth_transformer_imported = True
 except BaseException as e:
-    EmbeddingCppOutput = RtpEmbeddingOp = RtpLLMOp = EmptyClass
+    MultimodalInputCpp = EmbeddingCppOutput = (
+        EmptyClass
+    )
+    RtpEmbeddingOp = RtpLLMOp = EmptyClass
 
     logging.info(
         "libth_transformer not imported, you may under python standalone mode or frontend mode now."
