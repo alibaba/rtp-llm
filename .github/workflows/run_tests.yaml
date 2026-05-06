@@ -57,7 +57,7 @@ jobs:
     - name: Check out rocm_benchmark source code
       uses: actions/checkout@v3
       with:
-        repository: ROCm/rocm_benchmark
+        repository: yuzho-amd/rocm_benchmark
         token: ${{ secrets.PUSH_TO_MAIN }}
         path: rocm_benchmark
 
@@ -121,7 +121,7 @@ jobs:
     - name: Check out rocm_benchmark source code
       uses: actions/checkout@v3
       with:
-        repository: ROCm/rocm_benchmark
+        repository: yuzho-amd/rocm_benchmark
         token: ${{ secrets.PUSH_TO_MAIN }}
         path: rocm_benchmark
 
@@ -196,7 +196,7 @@ jobs:
     - name: Check out rocm_benchmark source code
       uses: actions/checkout@v3
       with:
-        repository: ROCm/rocm_benchmark
+        repository: yuzho-amd/rocm_benchmark
         token: ${{ secrets.PUSH_TO_MAIN }}
         path: rocm_benchmark
 
