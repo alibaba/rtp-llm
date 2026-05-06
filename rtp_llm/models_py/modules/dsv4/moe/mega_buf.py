@@ -60,36 +60,54 @@ def _get_or_create_mega_buf(
     return buf
 
 
-def _mega_moe_available() -> bool:
-    """Whether DeepGEMM's ``fp8_fp4_mega_moe`` (symm-mem fused dispatch +
-    L1 GEMM + SwiGLU + L2 GEMM + combine, SM100-only) is usable here.
-
-    Requires: deep_gemm ≥ 2.5 (commit 891d57b introduced it), torch ≥ 2.9
-    for ``torch.distributed._symmetric_memory``, CUDA device SM100+, and
-    an initialised world-size process group of size > 1."""
+def _mega_moe_unavailable_reason() -> str | None:
+    """Return ``None`` when Mega MoE can run, otherwise a human-readable reason."""
     try:
         import deep_gemm
 
         if not hasattr(deep_gemm, "fp8_fp4_mega_moe"):
-            return False
-    except Exception:
-        return False
+            return "deep_gemm.fp8_fp4_mega_moe is missing"
+    except Exception as e:
+        return f"failed to import deep_gemm: {e}"
     try:
         import torch.distributed as dist
 
-        if not dist.is_initialized() or dist.get_world_size() <= 1:
-            return False
-    except Exception:
-        return False
+        if not dist.is_initialized():
+            return "torch.distributed is not initialized"
+        if dist.get_world_size() <= 1:
+            return f"distributed world_size={dist.get_world_size()} is not > 1"
+    except Exception as e:
+        return f"failed to query torch.distributed: {e}"
     if not torch.cuda.is_available():
-        return False
+        return "CUDA is not available"
     cap = torch.cuda.get_device_capability()
-    return cap[0] >= 10
+    if cap[0] < 10:
+        return f"CUDA device capability sm{cap[0]}{cap[1]} is below SM100"
+    return None
+
+
+def _mega_moe_available() -> bool:
+    """Whether DeepGEMM's ``fp8_fp4_mega_moe`` (symm-mem fused dispatch +
+    L1 GEMM + SwiGLU + L2 GEMM + combine, SM100-only) is usable here.
+
+    Requires: deep_gemm >= 2.5 (commit 891d57b introduced it), torch >= 2.9
+    for ``torch.distributed._symmetric_memory``, CUDA device SM100+, and
+    an initialised world-size process group of size > 1."""
+    return _mega_moe_unavailable_reason() is None
 
 
 def _mega_moe_enabled() -> bool:
-    """Default on when ``_mega_moe_available()`` holds; set
-    ``DSV4_USE_MEGA_MOE=0`` to force the pre-mega per-expert path."""
+    """Default on when ``_mega_moe_available()`` holds.
+
+    ``DSV4_USE_MEGA_MOE=0`` disables Mega explicitly. EP>1 callers must treat
+    that as a configuration error rather than falling back to DeepEP.
+    """
     if os.environ.get("DSV4_USE_MEGA_MOE", "1") == "0":
         return False
     return _mega_moe_available()
+
+
+def _mega_moe_disabled_or_unavailable_reason() -> str:
+    if os.environ.get("DSV4_USE_MEGA_MOE", "1") == "0":
+        return "DSV4_USE_MEGA_MOE=0 disables Mega MoE"
+    return _mega_moe_unavailable_reason() or "unknown Mega MoE availability failure"

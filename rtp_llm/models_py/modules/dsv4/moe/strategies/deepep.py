@@ -1,12 +1,13 @@
 """DeepEPStrategy: ACCL-EP normal-mode dispatch + per-expert local compute + combine.
 
-EP > 1, used when Mega is unavailable (no SM100, or no dist init, or
-``DSV4_USE_MEGA_MOE=0``). Composes ``LocalLoopStrategy`` for the local
-per-expert compute on the dispatched recv tokens.
+EP > 1 DeepEP implementation. DSV4 automatic strategy selection no longer
+falls back here when Mega is unavailable; EP>1 requires Mega and fails fast.
+This class is kept as an explicit implementation for targeted tests or
+experiments. Composes ``LocalLoopStrategy`` for the local per-expert compute
+on the dispatched recv tokens.
 
-Wired into ``MoE`` via ``select_strategy`` when ep_size > 1 and Mega is
-unavailable. Direct port of the pre-refactor ``_routed_experts_deepep``
-+ ``_pad_topk_for_deepep`` + the ``_DEEPEP_SUPPORTED_TOPK`` constant.
+Direct port of the pre-refactor ``_routed_experts_deepep`` +
+``_pad_topk_for_deepep`` + the ``_DEEPEP_SUPPORTED_TOPK`` constant.
 """
 
 from __future__ import annotations

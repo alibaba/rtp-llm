@@ -15,9 +15,12 @@ Tests on CPU only — graph capture itself is a SM100_ARM smoke concern.
 import copy
 import os
 import sys
+import types
 import unittest
+from unittest.mock import patch
 
 import torch
+import torch.nn as nn
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.abspath(os.path.join(_THIS, "..", "..", "..", "..", "..", ".."))
@@ -25,6 +28,14 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
+from rtp_llm.utils.model_weight import W
+
+
+def _as_linear(weight: torch.Tensor, scale: torch.Tensor) -> nn.Linear:
+    del scale
+    linear = nn.Linear(weight.shape[1], weight.shape[0], bias=False, dtype=torch.bfloat16)
+    linear.weight.data.copy_(weight.to(torch.bfloat16))
+    return linear
 
 
 def _make_indexer(
@@ -41,20 +52,49 @@ def _make_indexer(
     prev_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
     try:
-        idx = Indexer(
-            dim=dim,
-            q_lora_rank=q_lora_rank,
-            index_n_heads=index_n_heads,
-            index_head_dim=index_head_dim,
-            rope_head_dim=rope_head_dim,
-            index_topk=index_topk,
-            compress_ratio=compress_ratio,
-            max_batch_size=max_batch_size,
-            max_seq_len=max_seq_len,
-            norm_eps=1e-6,
-            weights=None,
-            prefix="",
-        )
+        weights = {
+            W.v4_indexer_wq_b_w: torch.randn(
+                index_n_heads * index_head_dim, q_lora_rank, dtype=torch.float32
+            )
+            * 0.05,
+            W.v4_indexer_wq_b_s: torch.ones(1, 1, dtype=torch.int32),
+            W.v4_indexer_weights_proj_w: torch.randn(
+                index_n_heads, dim, dtype=torch.bfloat16
+            )
+            * 0.05,
+            W.v4_indexer_compressor_ape: torch.zeros(
+                compress_ratio, 2 * index_head_dim, dtype=torch.float32
+            ),
+            W.v4_indexer_compressor_wkv: torch.randn(
+                2 * index_head_dim, dim, dtype=torch.float32
+            )
+            * 0.05,
+            W.v4_indexer_compressor_wgate: torch.randn(
+                2 * index_head_dim, dim, dtype=torch.float32
+            )
+            * 0.05,
+            W.v4_indexer_compressor_norm: torch.ones(
+                index_head_dim, dtype=torch.bfloat16
+            ),
+        }
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.attention._v4_fp8_linear",
+            side_effect=_as_linear,
+        ):
+            idx = Indexer(
+                dim=dim,
+                q_lora_rank=q_lora_rank,
+                index_n_heads=index_n_heads,
+                index_head_dim=index_head_dim,
+                rope_head_dim=rope_head_dim,
+                index_topk=index_topk,
+                compress_ratio=compress_ratio,
+                max_batch_size=max_batch_size,
+                max_seq_len=max_seq_len,
+                norm_eps=1e-6,
+                layer_weights=weights,
+            )
+            idx.compressor.configure_kv_cache_shape(max_seq_len // compress_ratio)
     finally:
         torch.set_default_dtype(prev_dtype)
     return idx
@@ -73,22 +113,25 @@ def _seed(idx: Indexer, seed: int = 0) -> None:
 
 
 def _bind_freqs_cis(idx: Indexer, max_seq_len: int = 32, prefill_seed: int = 17):
+    del prefill_seed
     fc = torch.complex(
         torch.randn(max_seq_len, idx.rope_head_dim // 2),
         torch.randn(max_seq_len, idx.rope_head_dim // 2),
     )
     idx.freqs_cis = fc
-    idx.compressor.kv_cache = (
-        idx.kv_cache
-    )  # bind compressor's external kv_cache to indexer's
     idx.compressor.freqs_cis = fc
-    # Pre-populate kv_cache with non-zero values so the score topk has no ties
-    # at uninitialized slots. In production these slots are filled by previous
-    # decode steps; in unit-test isolation we have to fake it.
-    g = torch.Generator().manual_seed(prefill_seed)
-    idx.kv_cache.copy_(
-        torch.randn(idx.kv_cache.shape, generator=g, dtype=idx.kv_cache.dtype) * 0.5
-    )
+
+
+def _move_indexer(idx: Indexer, device: torch.device) -> Indexer:
+    idx.to(device)
+    idx.weights_proj = idx.weights_proj.to(device)
+    idx.freqs_cis = idx.freqs_cis.to(device)
+    idx.compressor.ape = idx.compressor.ape.to(device)
+    idx.compressor.wkv = idx.compressor.wkv.to(device)
+    idx.compressor.wgate = idx.compressor.wgate.to(device)
+    idx.compressor.norm.weight = idx.compressor.norm.weight.to(device)
+    idx.compressor.freqs_cis = idx.compressor.freqs_cis.to(device)
+    return idx
 
 
 class TestIndexerForwardDecodeVectorized(unittest.TestCase):
@@ -100,6 +143,9 @@ class TestIndexerForwardDecodeVectorized(unittest.TestCase):
         index_topk: int = 4,
         max_seq_len: int = 32,
     ):
+        if not torch.cuda.is_available():
+            self.skipTest("Indexer decode uses CUDA-only v4_indexer_score")
+        device = torch.device("cuda:0")
         torch.manual_seed(11)
         idx_loop = _make_indexer(
             compress_ratio=compress_ratio,
@@ -108,16 +154,42 @@ class TestIndexerForwardDecodeVectorized(unittest.TestCase):
         )
         _seed(idx_loop, seed=3)
         _bind_freqs_cis(idx_loop, max_seq_len=max_seq_len)
+        _move_indexer(idx_loop, device)
 
-        idx_vec = copy.deepcopy(idx_loop)
+        idx_vec = _move_indexer(copy.deepcopy(idx_loop), device)
 
         bsz = len(start_pos_list)
-        x = torch.randn(bsz, 1, idx_loop.dim, dtype=torch.bfloat16) * 0.1
-        qr = torch.randn(bsz, 1, idx_loop.q_lora_rank, dtype=torch.bfloat16) * 0.1
-        sp = torch.tensor(start_pos_list, dtype=torch.int32)
+        x = torch.randn(bsz, 1, idx_loop.dim, device=device, dtype=torch.bfloat16) * 0.1
+        qr = (
+            torch.randn(
+                bsz, 1, idx_loop.q_lora_rank, device=device, dtype=torch.bfloat16
+            )
+            * 0.1
+        )
+        sp = torch.tensor(start_pos_list, device=device, dtype=torch.int32)
 
-        out_loop = torch.full((bsz, 1, index_topk), -1, dtype=torch.int32)
-        out_vec = torch.full((bsz, 1, index_topk), -1, dtype=torch.int32)
+        out_loop = torch.full(
+            (bsz, 1, index_topk), -1, device=device, dtype=torch.int32
+        )
+        out_vec = torch.full(
+            (bsz, 1, index_topk), -1, device=device, dtype=torch.int32
+        )
+        kv_fixture = torch.randn(
+            bsz,
+            max_seq_len // compress_ratio,
+            idx_loop.head_dim,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+
+        def bind_fixture(self, bsz, is_fresh_prefill, device, dtype):
+            del is_fresh_prefill
+            self.kv_cache = kv_fixture[:bsz].to(device=device, dtype=dtype).clone()
+
+        idx_loop._bind_kv_cache_from_pool = types.MethodType(bind_fixture, idx_loop)
+        idx_vec._bind_kv_cache_from_pool = types.MethodType(bind_fixture, idx_vec)
+        idx_loop.compressor.forward_decode = lambda *args, **kwargs: None
+        idx_vec.compressor.forward_decode_vectorized = lambda *args, **kwargs: None
 
         with torch.inference_mode():
             idx_loop.forward_decode(x, qr, sp, out_loop)

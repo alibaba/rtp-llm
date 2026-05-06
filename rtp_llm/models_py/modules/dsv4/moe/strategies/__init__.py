@@ -6,8 +6,8 @@ kernel availability).
 
 Importing this package populates the strategy registry (each
 ``@register_strategy``-decorated class registers itself on import). Order
-of import below = priority for ``select_strategy(forced=None)`` auto-pick:
-Mega > GroupedFP4 > DeepEP > LocalLoop.
+of import below = priority for ``select_strategy(forced=None)`` auto-pick.
+EP>1 is special-cased to require Mega and fail fast when it is unavailable.
 """
 
 from .base import (
