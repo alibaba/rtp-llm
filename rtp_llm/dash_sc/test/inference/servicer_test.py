@@ -254,6 +254,77 @@ class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self._gen_ids(chunks[2]), [5])
 
 
+class IterRealModelStreamInferStopWordsTest(unittest.IsolatedAsyncioTestCase):
+    """``extra_stop_word_ids`` injection (renderer + env extras the dash-sc path
+    misses because pre-tokenized input bypasses the OpenAI endpoint)."""
+
+    def _req(self) -> predict_v2_pb2.ModelInferRequest:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.id = "stop-trace"
+        req.model_name = "default"
+        _add_input_tensor(req, "input_ids", "INT32", [1], struct.pack("<i", 42))
+        return req
+
+    async def _captured_stop_words(self, *, extra_stop_word_ids):
+        captured: list = []
+
+        class _CaptureVisitor:
+            async def enqueue(self, gi):
+                captured.append(gi)
+                return _FakeAsyncStream([])
+
+        await _drain(
+            iter_real_model_stream_infer(
+                self._req(),
+                [42],
+                SamplingParams(),
+                OtherParams(),
+                _CaptureVisitor(),
+                rtp_llm_request_id=1,
+                extra_stop_word_ids=extra_stop_word_ids,
+            )
+        )
+        self.assertEqual(len(captured), 1)
+        return list(captured[0].generate_config.stop_words_list or [])
+
+    async def test_extra_stop_word_ids_appended(self) -> None:
+        sw = await self._captured_stop_words(extra_stop_word_ids=[[154827], [154829]])
+        self.assertIn([154827], sw)
+        self.assertIn([154829], sw)
+
+    async def test_none_leaves_stop_words_unchanged(self) -> None:
+        sw = await self._captured_stop_words(extra_stop_word_ids=None)
+        self.assertNotIn([154827], sw)
+        self.assertNotIn([154829], sw)
+
+    async def test_dedup_against_request_stop_words(self) -> None:
+        """When the request carries a stop_word that's also in extras, the
+        merged list keeps a single entry. (Extras themselves are pre-deduped
+        at startup by ``_derive_stop_word_ids_list``, so the hot path only
+        dedups extras-vs-request, not extras-vs-extras.)"""
+        captured: list = []
+
+        class _CaptureVisitor:
+            async def enqueue(self, gi):
+                captured.append(gi)
+                return _FakeAsyncStream([])
+
+        await _drain(
+            iter_real_model_stream_infer(
+                self._req(),
+                [42],
+                SamplingParams(stop_words_list=((154827,),)),
+                OtherParams(),
+                _CaptureVisitor(),
+                rtp_llm_request_id=1,
+                extra_stop_word_ids=[[154827], [154829]],
+            )
+        )
+        sw = list(captured[0].generate_config.stop_words_list or [])
+        self.assertEqual(sw.count([154827]), 1)
+        self.assertIn([154829], sw)
+
+
 async def _areq_iter(requests):
     for r in requests:
         yield r
