@@ -5,6 +5,8 @@
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/DSV4CacheConfig.h"
+#include "rtp_llm/cpp/cache/DSV4ConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -18,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <numeric>
 #include <thread>
 
 namespace rtp_llm {
@@ -44,10 +47,49 @@ protected:
                                               rtp_llm::DataType::TYPE_INT8);
     }
 
+    CacheConfig makeDsv4Config(uint32_t block_num = 16) {
+        ModelConfig mc;
+        mc.num_layers                   = 43;
+        mc.hidden_size                  = 4096;
+        mc.attn_config.head_num         = 64;
+        mc.attn_config.kv_head_num      = 1;
+        mc.attn_config.size_per_head    = 512;
+        mc.attn_config.rope_head_dim    = 64;
+        mc.attn_config.sliding_window   = 128;
+        mc.attn_config.indexer_head_dim = 128;
+        mc.attn_config.indexer_head_num = 64;
+        mc.attn_config.indexer_topk     = 512;
+        mc.attn_config.o_groups         = 8;
+        mc.attn_config.o_lora_rank      = 1024;
+        std::vector<int> ratios         = {0, 0};
+        for (int i = 2; i < 43; ++i) {
+            ratios.push_back((i % 2 == 0) ? 4 : 128);
+        }
+        ratios.push_back(0);  // MTP tail marker.
+        mc.attn_config.layer_compress_ratios = ratios;
+
+        ParallelismConfig pc;
+        auto              config = DSV4ConfigCreator::createConfig(mc, pc);
+        config.block_num         = block_num;
+        config.group_block_nums.assign(config.groupNums(), block_num);
+        return config;
+    }
+
     // Build a PREFILL stream with reuse_cache enabled
     void prepareStream(const std::vector<int>& input_tokens) {
-        auto cache_config = makeConfig();
-        cache_manager_    = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr);
+        prepareStreamWithConfig(input_tokens, makeConfig(), /*tokens_per_block=*/8, RoleType::PREFILL);
+    }
+
+    void prepareDsv4Stream(const std::vector<int>& input_tokens, RoleType role_type = RoleType::PREFILL) {
+        prepareStreamWithConfig(
+            input_tokens, makeDsv4Config(), static_cast<int>(DSV4CacheConfig::TOKENS_PER_BLOCK), role_type);
+    }
+
+    void prepareStreamWithConfig(const std::vector<int>& input_tokens,
+                                 const CacheConfig&      cache_config,
+                                 int                     tokens_per_block,
+                                 RoleType                role_type) {
+        cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr);
         ASSERT_TRUE(cache_manager_->init());
         initial_free_blocks_ = cache_manager_->freeBlocksNum();
 
@@ -55,7 +97,7 @@ protected:
         resource_context.cache_manager       = cache_manager_;
         resource_context.reuse_cache         = true;
         resource_context.enable_device_cache = true;
-        resource_context.role_type           = RoleType::PREFILL;
+        resource_context.role_type           = role_type;
 
         auto generate_input                   = std::make_shared<GenerateInput>();
         auto generate_config                  = std::make_shared<GenerateConfig>();
@@ -67,8 +109,8 @@ protected:
         generate_input->generate_config = generate_config;
 
         ModelConfig model_config;
-        model_config.attn_config.tokens_per_block = 8;
-        model_config.max_seq_len                  = 2048;
+        model_config.attn_config.tokens_per_block = tokens_per_block;
+        model_config.max_seq_len                  = std::max<int64_t>(2048, input_tokens.size() + tokens_per_block);
         RuntimeConfig runtime_config;
 
         stream_ = std::make_shared<NormalGenerateStream>(
@@ -326,6 +368,118 @@ TEST_F(PdSepKVCacheReleaseTest, testHoldWithoutReleasePDSep_ResourceReleasedStil
     // After ref drop, blocks should be returned (minus any held by device cache for reuse)
     EXPECT_GE(cache_manager_->freeBlocksNum(), initial_free_blocks_ - 2)
         << "Blocks should be freed once pd_kvcache_ref_ is dropped (minus device cache refs)";
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDeviceCache) {
+    const int        spb = static_cast<int>(DSV4CacheConfig::TOKENS_PER_BLOCK);
+    std::vector<int> tokens(3 * spb + 17);
+    std::iota(tokens.begin(), tokens.end(), 1);
+
+    prepareDsv4Stream(tokens, RoleType::PREFILL);
+    allocateAndFinish();
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_EQ(resource.kvCache().groupNums(), DSV4_NUM_POOLS);
+    ASSERT_GT(resource.curBlocksNum(), 0);
+    for (int gid = 0; gid < DSV4_NUM_POOLS; ++gid) {
+        ASSERT_EQ(resource.kvCache().blocksNum(0, gid), 4) << "group " << gid;
+        const auto& blocks = resource.kvCache().blocks(0, gid);
+        if (gid < 3) {
+            EXPECT_FALSE(isNullBlockIdx(blocks[0])) << "paged group " << gid;
+        } else {
+            EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "tail group " << gid << " should keep only tail blocks";
+            EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "tail group " << gid;
+            EXPECT_FALSE(isNullBlockIdx(blocks[3])) << "tail group " << gid;
+        }
+    }
+
+    resource.holdKVCacheForPDSep();
+    ASSERT_NE(resource.pd_kvcache_ref_, nullptr);
+
+    stream_->releaseResource();
+    EXPECT_TRUE(resource.resource_released_);
+    resource.releaseKVCacheForPDSep();
+    EXPECT_EQ(resource.pd_kvcache_ref_, nullptr);
+
+    ResourceContext resource_context2;
+    resource_context2.cache_manager       = cache_manager_;
+    resource_context2.reuse_cache         = true;
+    resource_context2.enable_device_cache = true;
+    resource_context2.role_type           = RoleType::PREFILL;
+
+    auto generate_input2                   = std::make_shared<GenerateInput>();
+    auto generate_config2                  = std::make_shared<GenerateConfig>();
+    generate_config2->num_return_sequences = 1;
+    generate_config2->reuse_cache          = true;
+    generate_config2->enable_device_cache  = true;
+    generate_input2->input_ids       = torch::tensor(std::vector<int32_t>(tokens.begin(), tokens.end()), torch::kInt32);
+    generate_input2->generate_config = generate_config2;
+
+    ModelConfig model_config;
+    model_config.attn_config.tokens_per_block = spb;
+    model_config.max_seq_len                  = 4096;
+    RuntimeConfig runtime_config;
+
+    auto stream2 = std::make_shared<NormalGenerateStream>(
+        generate_input2, model_config, runtime_config, resource_context2, nullptr);
+    stream2->generate_status_->status = StreamState::RUNNING;
+
+    auto& resource2 = stream2->streamCacheResource();
+    ASSERT_TRUE(resource2.initKVBlock().ok());
+    EXPECT_GE(stream2->reuseLength(), spb) << "DSV4 prefill should reuse cached 7-group prefix blocks";
+    EXPECT_EQ(resource2.kvCache().groupNums(), DSV4_NUM_POOLS);
+
+    stream2->generate_status_->status = StreamState::FINISHED;
+    stream2->fillSubGenerateStatus(StreamState::FINISHED);
+    stream2->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testDsv4DecodeFirstMallocBypassesLocalDeviceReuseInPDSep) {
+    const int        spb = static_cast<int>(DSV4CacheConfig::TOKENS_PER_BLOCK);
+    std::vector<int> tokens(3 * spb + 17);
+    std::iota(tokens.begin(), tokens.end(), 1);
+
+    prepareDsv4Stream(tokens, RoleType::PREFILL);
+    allocateAndFinish();
+    auto& prefill_resource = stream_->streamCacheResource();
+    prefill_resource.holdKVCacheForPDSep();
+    stream_->releaseResource();
+    prefill_resource.releaseKVCacheForPDSep();
+
+    ResourceContext decode_resource_context;
+    decode_resource_context.cache_manager       = cache_manager_;
+    decode_resource_context.reuse_cache         = true;
+    decode_resource_context.enable_device_cache = true;
+    decode_resource_context.role_type           = RoleType::DECODE;
+
+    auto decode_input                   = std::make_shared<GenerateInput>();
+    auto decode_config                  = std::make_shared<GenerateConfig>();
+    decode_config->num_return_sequences = 1;
+    decode_config->reuse_cache          = true;
+    decode_config->enable_device_cache  = true;
+    decode_input->input_ids       = torch::tensor(std::vector<int32_t>(tokens.begin(), tokens.end()), torch::kInt32);
+    decode_input->generate_config = decode_config;
+
+    ModelConfig model_config;
+    model_config.attn_config.tokens_per_block = spb;
+    model_config.max_seq_len                  = 4096;
+    RuntimeConfig runtime_config;
+
+    auto decode_stream = std::make_shared<NormalGenerateStream>(
+        decode_input, model_config, runtime_config, decode_resource_context, nullptr);
+    decode_stream->generate_status_->status = StreamState::RUNNING;
+
+    auto& decode_resource = decode_stream->streamCacheResource();
+    ASSERT_TRUE(decode_resource.initKVBlock().ok());
+
+    EXPECT_EQ(decode_stream->reuseLength(), 0)
+        << "Hybrid DSV4 decode first malloc must not consume local device-cache reuse; PD load owns reuse.";
+    EXPECT_EQ(decode_resource.kvCache().groupNums(), DSV4_NUM_POOLS);
+    for (int gid = 0; gid < DSV4_NUM_POOLS; ++gid) {
+        EXPECT_EQ(decode_resource.kvCache().blocksNum(0, gid), 4) << "group " << gid;
+    }
+
+    decode_stream->releaseResource();
 }
 
 }  // namespace rtp_llm
