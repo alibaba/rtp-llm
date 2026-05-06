@@ -26,6 +26,7 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4._indexer_cp_gather_triton import (
     gather_indexer_k_for_prefill,
@@ -232,7 +233,7 @@ class IndexerFP8(PoolBackedModule):
 
             freqs_per_b = self.freqs_cis[start_pos.long()]
             q = self._compute_indexer_q(qr, freqs_per_b, batched_rope=True)
-            weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
+            weights = F.linear(x, self.weights_proj) * (self.softmax_scale * self.n_heads**-0.5)
 
             compressed_len = ((start_pos + 1) // ratio).to(torch.int64).view(bsz, 1, 1)
 
@@ -335,7 +336,7 @@ class IndexerFP8(PoolBackedModule):
         try:
             q = self._compute_indexer_q(qr, freqs_cis)
             self.compressor(x, start_pos)
-            weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
+            weights = F.linear(x, self.weights_proj) * (self.softmax_scale * self.n_heads**-0.5)
 
             S = q.size(1)
             T = end_pos // ratio

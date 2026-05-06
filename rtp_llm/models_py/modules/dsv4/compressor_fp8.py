@@ -268,7 +268,9 @@ class CompressorFP8(PoolBackedModule):
     # --------------------------------------------------------------
     # Forward (prefill)
     # --------------------------------------------------------------
-    def forward(self, x: torch.Tensor, start_pos) -> Optional[torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, start_pos, sequence_lengths=None
+    ) -> Optional[torch.Tensor]:
         """Prefill entry. ``bsz==1`` (FIFO scheduler).
 
         Writes FP8 pool directly via ``v4_compressor_kv_fused``. State
