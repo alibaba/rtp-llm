@@ -185,8 +185,10 @@ class PyAttentionInputs:
     dtype: TypeMeta
     input_lengths: torch.Tensor
     is_cuda_graph: bool
+    is_draft_prefill_cuda_graph_capture: bool
     is_prefill: bool
     is_s_padded: bool
+    is_target_verify: bool
     kv_cache_block_id_device: torch.Tensor
     kv_cache_kernel_block_id_device_by_group: list[torch.Tensor]
     kv_cache_block_id_host: torch.Tensor

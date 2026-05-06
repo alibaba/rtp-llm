@@ -27,6 +27,9 @@ struct CKAttn {
     torch::Tensor input_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor padding_offset;
+    int           prefill_runtime_max_seq_len         = -1;
+    int           prefill_runtime_max_prefix_len      = -1;
+    int           prefill_runtime_seq_len_with_prefix = -1;
     int           max_seq_len;
     bool          decode_plan;
 

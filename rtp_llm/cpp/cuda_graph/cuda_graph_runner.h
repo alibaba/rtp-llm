@@ -91,6 +91,14 @@ private:
     void captureOneGraphInstance(int key, const char* key_type);
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
+
+    bool isEmbeddingStylePrefillCudaGraph() const {
+        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == max_seq_len_;
+    }
+    bool isMtpDraftPrefillCudaGraph() const {
+        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+    }
+    void applyDraftPrefillGraphCaptureFlag(torch_ext::PyAttentionInputs& attn);
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
     // Common memory hold creation logic

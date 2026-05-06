@@ -22,7 +22,6 @@ namespace rtp_llm {
 // +--------------------------------+-----------------------------+--------------------------------------+--------------+
 // Notes:
 // - Speculative sampling: model_id == 0 (target), model_id == 1 (draft)
-// - Target model with spec sampling processes multiple tokens per batch for verification phase
 // clang-format on
 
 // Helper function for optimized tensor copy using async operations with current CUDA stream
@@ -585,6 +584,7 @@ void CudaGraphRunner::initCapture() {
 
         torch::Tensor output;
         capture_mem_hold_ = CaptureMemoryHold(output, inputs, is_prefill_cuda_graph_mode_);
+        applyDraftPrefillGraphCaptureFlag(capture_mem_hold_.py_model_inputs_.attention_inputs);
         initKernelInternalMemory();
 
         // get real output data type (params already prepared in attn impl __init__/create_params)
@@ -598,30 +598,38 @@ void CudaGraphRunner::initCapture() {
         logCudaGraphPoolMemory("before_capture");
 
         if (is_prefill_cuda_graph_mode_) {
-            RTP_LLM_LOG_INFO("initCapture forward post check start for prefill");
-            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host[1] = max_num_token_;
-            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens[1]      = max_num_token_;
-            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens[1]   = max_num_token_;
-            capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths[0]   = max_num_token_;
-            capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_d[0] = max_num_token_;
+            if (isEmbeddingStylePrefillCudaGraph()) {
+                RTP_LLM_LOG_INFO("initCapture forward post check start for prefill (embedding-style)");
+                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host[1] = max_num_token_;
+                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens[1]      = max_num_token_;
+                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens[1]   = max_num_token_;
+                capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths[0]   = max_num_token_;
+                capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_d[0] = max_num_token_;
 
-            PyModelInputs inputs = capture_mem_hold_.py_model_inputs_;
-            inputs.attention_inputs.cu_seqlens_host =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host.slice(0, 0, 2);
-            inputs.attention_inputs.cu_seqlens =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, 2);
-            inputs.attention_inputs.cu_kv_seqlens =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.slice(0, 0, 2);
-            inputs.attention_inputs.input_lengths =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, 1);
-            inputs.attention_inputs.input_lengths_d =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_d.slice(0, 0, 1);
-            inputs.attention_inputs.kv_cache_kernel_block_id_device =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.slice(0, 0, 1);
-            inputs.attention_inputs.kv_cache_kernel_block_id_host =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host.slice(0, 0, 1);
-            py_forward_method_(inputs);
-            RTP_LLM_LOG_INFO("initCapture forward post check end for prefill");
+                PyModelInputs inputs = capture_mem_hold_.py_model_inputs_;
+                inputs.attention_inputs.cu_seqlens_host =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host.slice(0, 0, 2);
+                inputs.attention_inputs.cu_seqlens =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, 2);
+                inputs.attention_inputs.cu_kv_seqlens =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.slice(0, 0, 2);
+                inputs.attention_inputs.input_lengths =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, 1);
+                inputs.attention_inputs.input_lengths_d =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_d.slice(0, 0, 1);
+                inputs.attention_inputs.kv_cache_kernel_block_id_device =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.slice(0, 0, 1);
+                inputs.attention_inputs.kv_cache_kernel_block_id_host =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host.slice(0, 0, 1);
+                py_forward_method_(inputs);
+                RTP_LLM_LOG_INFO("initCapture forward post check end for prefill");
+            } else {
+                RTP_LLM_CHECK_WITH_INFO(
+                    isMtpDraftPrefillCudaGraph(),
+                    "prefill cuda graph: expected embedding-style or MTP draft layout");
+                RTP_LLM_LOG_INFO(
+                    "initCapture skip embedding-style batch-1 post-check (MTP draft prefill graph; max_bs metadata only)");
+            }
             capturePrefill();
         } else {
             captureDecode();
@@ -673,7 +681,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         PyModelOutputs outputs;
         {
             cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
-            CudaGraphCaptureGuard capture_guard;
+            cuda_graph::GraphNcclCaptureContext capture_ctx;
+            CudaGraphCaptureGuard capture_guard(&capture_ctx);
             try {
                 auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
                 outputs             = py_outputs_obj.cast<PyModelOutputs>();
@@ -707,6 +716,10 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
     replayGraph(key);
     cuda_graph::graphDeviceSynchronize();
     RTP_LLM_LOG_INFO("replay end check for %s %d", key_type, key);
+}
+
+void CudaGraphRunner::applyDraftPrefillGraphCaptureFlag(torch_ext::PyAttentionInputs& attn) {
+    attn.is_draft_prefill_cuda_graph_capture = isMtpDraftPrefillCudaGraph();
 }
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
@@ -782,6 +795,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_layer_to_group;
     inputs.bert_embedding_inputs        = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
     inputs.attention_inputs.is_s_padded = true;
+    applyDraftPrefillGraphCaptureFlag(inputs.attention_inputs);
 }
 
 CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {

@@ -602,7 +602,8 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     """
     rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
     if rocm_rccl.should_use_capture_collectives(group == Group.TP):
-        return rocm_rccl.capture_all_gather(tensor)
+        process_group = _get_group(group)
+        return rocm_rccl.capture_all_gather(tensor, process_group)
 
     if group == Group.TP:
         symm_mem_comm = get_symm_mem_communicator()
