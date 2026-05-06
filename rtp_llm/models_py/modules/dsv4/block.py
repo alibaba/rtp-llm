@@ -4,7 +4,6 @@ Mirrors `inference/model.py:Block`. Each call applies hc_pre/F/hc_post
 twice — once for Attention and once for MoE FFN.
 """
 
-import os
 from typing import Dict, Optional
 
 import torch
@@ -13,56 +12,8 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4.attention import Attention
-from rtp_llm.models_py.modules.dsv4.mhc import hc_split_sinkhorn
+from rtp_llm.models_py.modules.dsv4.hc import build_hc_head, build_hc_unit
 from rtp_llm.models_py.modules.dsv4.moe import MoE
-
-# P-sinkhorn (plan_0427.md): single-Triton-kernel replacement for
-# mhc.py:hc_split_sinkhorn (~135 launches → 1).  32× per-call speedup
-# (1.340 ms → 0.041 ms at B=1 T=16384 HC=4 iters=20), max abs diff
-# < 5e-7 vs eager (essentially fp32 round-off).  Default ON; gate via
-# ``DSV4_SINKHORN_FUSED=0`` to disable.
-try:
-    from rtp_llm.models_py.modules.dsv4._sinkhorn_triton import fused_hc_split_sinkhorn
-
-    _SINKHORN_FUSED_OK = True
-except Exception:  # pragma: no cover
-    fused_hc_split_sinkhorn = None
-    _SINKHORN_FUSED_OK = False
-
-
-def _use_fused_sinkhorn(mixes: torch.Tensor, hc_mult: int) -> bool:
-    if not _SINKHORN_FUSED_OK or fused_hc_split_sinkhorn is None:
-        return False
-    if os.environ.get("DSV4_SINKHORN_FUSED", "1") == "0":
-        return False
-    if hc_mult != 4:
-        return False
-    if mixes.dtype != torch.float32:
-        return False
-    if mixes.numel() == 0:
-        return False
-    return True
-
-
-# Vendored TileKernels (DeepSeek) fused mHC entry points.  See
-# rtp_llm/models_py/3rdparty/tile_kernels and the _mhc_tilelang adapter.
-# Each TK call returns None to signal "fall back to REF" (env-disabled,
-# wrong dtype/mult, autograd, or per-op JIT-fail sticky verdict).
-from rtp_llm.models_py.modules.dsv4._mhc_tilelang import tk_mhc_post as _tk_mhc_post
-from rtp_llm.models_py.modules.dsv4._mhc_tilelang import tk_mhc_pre as _tk_mhc_pre
-
-
-def _maybe_squeeze_hc_1d(t: torch.Tensor) -> torch.Tensor:
-    """Reverse ``weight_module.py:357``'s "1D scale → 2D unsqueeze" heuristic.
-
-    The framework auto-promotes any 1D float scale tensor to ``[N, 1]`` so
-    per-row UE8M0 quant scales broadcast cleanly. mHC scales (hc_*_scale,
-    hc_head_scale) are also 1D but are NOT quant scales — they're plain
-    learnable factors. Squeeze trailing 1-dim back to keep the forward
-    shape contract with the legacy load path."""
-    if t.dim() == 2 and t.shape[-1] == 1:
-        return t.squeeze(-1)
-    return t
 
 
 class Block(nn.Module):
@@ -115,10 +66,6 @@ class Block(nn.Module):
         and forwards the dict to ``Attention`` and ``MoE``."""
         super().__init__()
         self.layer_id = layer_id
-        self.norm_eps = norm_eps
-        self.hc_eps = hc_eps
-        self.hc_mult = hc_mult
-        self.hc_sinkhorn_iters = hc_sinkhorn_iters
 
         self.attn = Attention(
             layer_id=layer_id,
@@ -174,212 +121,30 @@ class Block(nn.Module):
         self.attn_norm = RMSNorm(layer_weights[W.v4_attn_norm], norm_eps)
         self.ffn_norm = RMSNorm(layer_weights[W.v4_ffn_norm], norm_eps)
 
-        mix_hc = (2 + hc_mult) * hc_mult
-        hc_dim = hc_mult * dim
-        self.hc_attn_fn = layer_weights[W.v4_hc_attn_fn]
-        self.hc_ffn_fn = layer_weights[W.v4_hc_ffn_fn]
-        self.hc_attn_base = layer_weights[W.v4_hc_attn_base]
-        self.hc_ffn_base = layer_weights[W.v4_hc_ffn_base]
-        # Scales are 1D mHC factors; the framework's
-        # ``weight_module.py:357`` "1D scale → 2D unsqueeze" heuristic
-        # (intended for per-row UE8M0 quant scales) over-promotes them
-        # to ``[N, 1]`` — squeeze them back to 1D so the forward sees
-        # the same shape as the legacy load path.
-        self.hc_attn_scale = _maybe_squeeze_hc_1d(layer_weights[W.v4_hc_attn_scale])
-        self.hc_ffn_scale = _maybe_squeeze_hc_1d(layer_weights[W.v4_hc_ffn_scale])
-
-    def _hc_fn_bf16(self, hc_fn: torch.Tensor) -> torch.Tensor:
-        """Lazy-cached bf16 view of an FP32 hc_fn parameter.
-
-        The FP32 → BF16 cast is ~30 µs on a [24, 16384] tensor; we cache by
-        ``id(hc_fn)`` so attn vs ffn fns get separate slots.  Memory: ~768 KB
-        per fn × 2 fns / layer × 43 layers ≈ 64 MB total — acceptable for
-        cutting per-call cast latency to zero.
-        """
-        cache = getattr(self, "_bf16_cache", None)
-        if cache is None:
-            cache = {}
-            self._bf16_cache = cache
-        key = id(hc_fn)
-        bf = cache.get(key)
-        if bf is None or bf.shape != hc_fn.shape or bf.device != hc_fn.device:
-            bf = hc_fn.to(torch.bfloat16)
-            cache[key] = bf
-        return bf
-
-    def _hc_linear_mixes(
-        self, x_flat: torch.Tensor, hc_fn_bf16: torch.Tensor, rsqrt: torch.Tensor
-    ) -> torch.Tensor:
-        positions = getattr(self, "_hc_positions", None)
-        if (
-            x_flat.dim() != 2
-            or positions is None
-            or positions.numel() != x_flat.shape[0]
-        ):
-            return (F.linear(x_flat, hc_fn_bf16) * rsqrt).float()
-
-        pos = positions.to(device=x_flat.device, dtype=torch.long)
-        block = pos // 256
-        T = int(x_flat.shape[0])
-        out = torch.empty(
-            T, hc_fn_bf16.shape[0], dtype=x_flat.dtype, device=x_flat.device
+        self.attn_hc = build_hc_unit(
+            layer_weights[W.v4_hc_attn_fn],
+            layer_weights[W.v4_hc_attn_base],
+            layer_weights[W.v4_hc_attn_scale],
+            dim=dim,
+            hc_mult=hc_mult,
+            hc_sinkhorn_iters=hc_sinkhorn_iters,
+            norm_eps=norm_eps,
+            hc_eps=hc_eps,
+            layer_id=layer_id,
+            name="attn",
         )
-        start = 0
-        while start < T:
-            cur = block[start]
-            end = start + 1
-            while end < T and bool((block[end] == cur).item()):
-                end += 1
-            out[start:end] = F.linear(x_flat[start:end], hc_fn_bf16)
-            start = end
-        return (out * rsqrt).float()
-
-    def _hc_pre(
-        self,
-        x: torch.Tensor,
-        hc_fn: torch.Tensor,
-        hc_scale: torch.Tensor,
-        hc_base: torch.Tensor,
-        dbg_tag: Optional[str] = None,
-    ):
-        """Accepts ``[B, S, hc, d]`` or the flat ``[T, hc, d]`` layout.
-        Returns ``y``, ``post [..., hc, 1]``, ``comb [..., hc, hc]`` with
-        leading shape matching the input.  REF path uses ``dim=-2`` /
-        ``flatten(-2)`` so 3D and 4D share code; TK is 4D-only, so 3D
-        input is wrapped with unsqueeze/squeeze around the TK call."""
-        # Vendored TK fast path. Falls back to the REF rewrite below on
-        # JIT-fail / unsupported shape (sticky per-op).
-        tk_x = x.unsqueeze(0) if x.dim() == 3 else x
-        tk_out = _tk_mhc_pre(
-            tk_x,
-            hc_fn,
-            hc_scale,
-            hc_base,
-            norm_eps=self.norm_eps,
-            pre_eps=self.hc_eps,
-            sinkhorn_eps=self.hc_eps,
-            sinkhorn_iters=self.hc_sinkhorn_iters,
-            hc_mult=self.hc_mult,
+        self.ffn_hc = build_hc_unit(
+            layer_weights[W.v4_hc_ffn_fn],
+            layer_weights[W.v4_hc_ffn_base],
+            layer_weights[W.v4_hc_ffn_scale],
+            dim=dim,
+            hc_mult=hc_mult,
+            hc_sinkhorn_iters=hc_sinkhorn_iters,
+            norm_eps=norm_eps,
+            hc_eps=hc_eps,
+            layer_id=layer_id,
+            name="ffn",
         )
-        if tk_out is not None:
-            self._dbg_record_hc_pre_path(dbg_tag, x, "tk", use_fused=None)
-            if x.dim() == 3:
-                y_tk, post_tk, comb_tk = tk_out
-                return y_tk.squeeze(0), post_tk.squeeze(0), comb_tk.squeeze(0)
-            return tk_out
-        shape, dtype = x.size(), x.dtype
-        x_flat = x.flatten(-2)  # [..., hc*d] bf16
-        # FP32 squared mean → rsqrt, single cast.  Kept in fp32 because the
-        # accumulation magnitude here is what determines numeric stability of
-        # the layer norm; a bf16 reduction on hc*d=16384 would lose ~7 bits.
-        x_flat_f32 = x_flat.float()
-        rsqrt = torch.rsqrt(
-            x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps
-        ).to(dtype)
-        mixes = self._hc_linear_mixes(x_flat, self._hc_fn_bf16(hc_fn), rsqrt)
-        mixes = mixes.contiguous()
-        use_fused = _use_fused_sinkhorn(mixes, self.hc_mult)
-        self._dbg_record_hc_pre_path(dbg_tag, x, "fallback", use_fused=use_fused)
-        if use_fused:
-            pre, post, comb = fused_hc_split_sinkhorn(
-                mixes,
-                hc_scale.contiguous(),
-                hc_base.contiguous(),
-                hc_mult=self.hc_mult,
-                sinkhorn_iters=self.hc_sinkhorn_iters,
-                eps=self.hc_eps,
-            )
-        else:
-            pre, post, comb = hc_split_sinkhorn(
-                mixes,
-                hc_scale,
-                hc_base,
-                hc_mult=self.hc_mult,
-                sinkhorn_iters=self.hc_sinkhorn_iters,
-                eps=self.hc_eps,
-            )
-        y = torch.sum(pre.to(dtype).unsqueeze(-1) * x.view(*shape), dim=-2)
-        # post in the [..., hc, 1] convention so _hc_post can call TK mhc_post.
-        return y.to(dtype), post.unsqueeze(-1), comb
-
-    def _dbg_record_hc_pre_path(
-        self,
-        dbg_tag: Optional[str],
-        x: torch.Tensor,
-        path: str,
-        use_fused: Optional[bool],
-    ) -> None:
-        if dbg_tag is None:
-            return
-        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
-
-        if not _rt.ENABLED:
-            return
-        path_code = 1.0 if path == "tk" else 0.0
-        fused_code = -1.0 if use_fused is None else float(use_fused)
-        _rt.record_if_level(
-            2,
-            f"{dbg_tag}_path_codes",
-            torch.tensor([path_code, fused_code], device=x.device, dtype=torch.float32),
-        )
-        try:
-            import torch.distributed as dist
-
-            rank = dist.get_rank() if dist.is_initialized() else 0
-        except Exception:
-            rank = 0
-        print(
-            "MOEDBG_HC_PRE_PATH "
-            f"rank={rank} layer={self.layer_id} tag={dbg_tag} "
-            f"path={path} use_fused_sinkhorn={use_fused}",
-            flush=True,
-        )
-
-    def _hc_post(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor,
-        post: torch.Tensor,
-        comb: torch.Tensor,
-    ):
-        """Combine sublayer output ``x`` with per-stream residual via post/comb.
-
-        Three paths, fastest-first:
-          1. TileKernels ``mhc_post`` — single fused kernel, ~35× the REF.
-          2. BF16 BMM rewrite — ``comb.T @ residual`` runs as a tensor-core BMM.
-          3. Original 5D broadcast+sum — last resort for non-bf16 / odd shapes.
-
-        ``post`` arrives shaped ``[..., hc, 1]`` (``_hc_pre`` unsqueezes).
-        Path 1 consumes that shape directly; paths 2/3 squeeze back to ``[..., hc]``.
-        Accepts either ``[B, T, d]`` or flat ``[T, d]`` layout; TK is 4D-only
-        and wraps 3D inputs with unsqueeze/squeeze.  The slow fallback reduces
-        along ``dim=-3`` so both shapes share code.
-        """
-        if post.dim() == residual.dim() and x.dim() != 2:
-            tk_x = x.unsqueeze(0) if x.dim() == 2 else x
-            tk_res = residual.unsqueeze(0) if residual.dim() == 3 else residual
-            tk_post = post.unsqueeze(0) if post.dim() == 3 else post
-            tk_comb = comb.unsqueeze(0) if comb.dim() == 3 else comb
-            tk_out = _tk_mhc_post(tk_x, tk_res, tk_post, tk_comb, hc_mult=self.hc_mult)
-            if tk_out is not None:
-                return tk_out.squeeze(0) if x.dim() == 2 else tk_out
-
-        if post.dim() == residual.dim():
-            post_b = post.squeeze(-1)
-        else:
-            post_b = post
-
-        if x.dtype == torch.bfloat16 and residual.dtype == torch.bfloat16:
-            post_bf16 = post_b.to(x.dtype)
-            first = post_bf16.unsqueeze(-1) * x.unsqueeze(-2)
-            comb_bf16 = comb.to(x.dtype)
-            second = torch.sum(comb_bf16.unsqueeze(-1) * residual.unsqueeze(-2), dim=-3)
-            return (first + second).to(x.dtype)
-
-        y = post_b.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
-            comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=-3
-        )
-        return y.type_as(x)
 
     def forward_decode(
         self,
@@ -397,11 +162,8 @@ class Block(nn.Module):
         _dbg_layer = _rt.should_record_layer(self.layer_id)
         # Attention path
         residual = x
-        x_pre, post, comb = self._hc_pre(
+        x_pre, post, comb = self.attn_hc.pre(
             x,
-            self.hc_attn_fn,
-            self.hc_attn_scale,
-            self.hc_attn_base,
             dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
         )
         # Framework RMSNorm wants 2D — collapse [B, q_len, dim] → [B*q_len, dim]
@@ -413,17 +175,14 @@ class Block(nn.Module):
         attn_out = self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
-        x = self._hc_post(attn_out, residual, post, comb)
+        x = self.attn_hc.post(attn_out, residual, post, comb)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_residual", x)
 
         # FFN path — MoE has no per-step state, reuse existing forward
         residual = x
-        x_pre, post, comb = self._hc_pre(
+        x_pre, post, comb = self.ffn_hc.pre(
             x,
-            self.hc_ffn_fn,
-            self.hc_ffn_scale,
-            self.hc_ffn_base,
             dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
         )
         bsz, q_len, dim_ = x_pre.shape
@@ -433,7 +192,7 @@ class Block(nn.Module):
         ffn_out = self.ffn(x_pre, input_ids)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
-        x = self._hc_post(ffn_out, residual, post, comb)
+        x = self.ffn_hc.post(ffn_out, residual, post, comb)
         return x
 
     def forward(
@@ -447,7 +206,7 @@ class Block(nn.Module):
     ) -> torch.Tensor:
         """Flat per-block forward — accepts ``[T, hc, dim]`` hidden and 1D
         ``input_ids`` / ``positions`` / ``cu_seqlens``, matching the vLLM
-        DSV4 layer layout.  ``_hc_pre`` / ``_hc_post`` are flat-native;
+        DSV4 layer layout.  HC pre/post are flat-native;
         ``self.ffn`` (MoE) reshapes to 2D internally so any shape flows.
 
         Attention is called with a padded ``[B, max_S, dim]`` tensor and
@@ -460,7 +219,6 @@ class Block(nn.Module):
         """
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
-        self._hc_positions = positions
         # Master switch: when MOEDBG=0 the AND short-circuits so neither the
         # layer_id compare nor any record_if_level call site below runs.
         # By default keep the narrow trace from _record_tensor; use
@@ -480,11 +238,8 @@ class Block(nn.Module):
             dbg_pos_name = f"pos{dbg_pos}"
         # Attention path
         residual = x
-        x_pre, post, comb = self._hc_pre(
+        x_pre, post, comb = self.attn_hc.pre(
             x,
-            self.hc_attn_fn,
-            self.hc_attn_scale,
-            self.hc_attn_base,
             dbg_tag=f"L{self.layer_id:02d}_attn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], [T, hc, 1], [T, hc, hc]
         x_pre = self.attn_norm(x_pre)  # [T, dim]
@@ -497,26 +252,48 @@ class Block(nn.Module):
                     x_pre[dbg_pos_mask].contiguous(),
                 )
 
-        # Scatter flat [T, dim] into padded [B, max_S, dim] so that
-        # Attention._forward_body's [B, S, dim] body processes every
-        # request in a single layer call.
+        # Present flat [T, dim] as [B, S, dim] for Attention.  The common
+        # prefill layouts (single request, or dense equal-length batch) are
+        # already request-major, so a view is enough.  Ragged batches keep
+        # the padded scatter/gather fallback.
         cu_long = cu_seqlens.to(torch.long)
         batch_size = int(cu_long.numel() - 1)
         seqlens = cu_long[1:] - cu_long[:-1]  # [B]
         T = int(x_pre.size(0))
         D = int(x_pre.size(-1))
         device = x_pre.device
-        max_S = int(seqlens.max().item()) if batch_size > 0 else 0
-        t_idx = torch.arange(T, device=device, dtype=torch.long)
-        # right=True so tokens at cu_seqlens[b] land in request b
-        # (cu_long[1:] are exclusive ends).
-        b_idx = torch.searchsorted(cu_long[1:].contiguous(), t_idx, right=True)
-        s_idx = t_idx - cu_long[:-1][b_idx]
-        x_padded = torch.zeros(batch_size, max_S, D, dtype=x_pre.dtype, device=device)
-        x_padded[b_idx, s_idx] = x_pre
+        max_S = (
+            int(seqlens.max().item())
+            if batch_size > 0 and seqlens.device.type == "cpu"
+            else T
+        )
         # Per-row start_pos = absolute position of each request's first
         # token, pulled directly off the flat positions tensor.
         start_pos_per_req = positions[cu_long[:-1]].to(torch.long)  # [B]
+
+        equal_len_dense = (
+            T == batch_size * max_S
+            and seqlens.device.type == "cpu"
+            and bool((seqlens == max_S).all().item())
+        )
+        dense_layout = (
+            batch_size == 1
+            or (batch_size > 1 and equal_len_dense)
+        )
+        if dense_layout:
+            x_padded = x_pre.view(batch_size, max_S, D)
+            b_idx = None
+            s_idx = None
+        else:
+            t_idx = torch.arange(T, device=device, dtype=torch.long)
+            # right=True so tokens at cu_seqlens[b] land in request b
+            # (cu_long[1:] are exclusive ends).
+            b_idx = torch.searchsorted(cu_long[1:].contiguous(), t_idx, right=True)
+            s_idx = t_idx - cu_long[:-1][b_idx]
+            x_padded = torch.zeros(
+                batch_size, max_S, D, dtype=x_pre.dtype, device=device
+            )
+            x_padded[b_idx, s_idx] = x_pre
 
         attn_out_padded = self.attn(
             x_padded,  # [B, max_S, dim]
@@ -525,7 +302,10 @@ class Block(nn.Module):
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
         )  # [B, max_S, dim]
-        attn_out = attn_out_padded[b_idx, s_idx]  # [T, dim]
+        if dense_layout:
+            attn_out = attn_out_padded.reshape(T, D)
+        else:
+            attn_out = attn_out_padded[b_idx, s_idx]  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_out", attn_out)
             if dbg_pos_mask is not None:
@@ -534,7 +314,7 @@ class Block(nn.Module):
                     f"L{self.layer_id:02d}_attn_out_{dbg_pos_name}",
                     attn_out[dbg_pos_mask].contiguous(),
                 )
-        x = self._hc_post(attn_out, residual, post, comb)  # [T, hc, dim]
+        x = self.attn_hc.post(attn_out, residual, post, comb)  # [T, hc, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_residual", x)
             if dbg_pos_mask is not None:
@@ -546,11 +326,8 @@ class Block(nn.Module):
 
         # FFN path
         residual = x
-        x_pre, post, comb = self._hc_pre(
+        x_pre, post, comb = self.ffn_hc.pre(
             x,
-            self.hc_ffn_fn,
-            self.hc_ffn_scale,
-            self.hc_ffn_base,
             dbg_tag=f"L{self.layer_id:02d}_ffn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], ...
         x_pre = self.ffn_norm(x_pre)  # [T, dim]
@@ -582,14 +359,13 @@ class Block(nn.Module):
                     f"L{self.layer_id:02d}_ffn_out_{dbg_pos_name}",
                     ffn_out[dbg_pos_mask].contiguous(),
                 )
-        x = self._hc_post(ffn_out, residual, post, comb)  # [T, hc, dim]
+        x = self.ffn_hc.post(ffn_out, residual, post, comb)  # [T, hc, dim]
         if _dbg_layer and dbg_pos_mask is not None:
             _rt.record_if_level(
                 2,
                 f"L{self.layer_id:02d}_ffn_residual_{dbg_pos_name}",
                 x[dbg_pos_mask].contiguous(),
             )
-        self._hc_positions = None
         return x  # [T, hc, dim]
 
 
@@ -746,16 +522,19 @@ class MTPBlock(Block):
         self.hnorm = RMSNorm(weights[f"{prefix}.hnorm.weight"], norm_eps)
         self.norm = RMSNorm(weights[f"{prefix}.norm.weight"], norm_eps)
 
-        hc_dim = hc_mult * dim
         if _mtp_factory:
-            self.hc_head_fn = weights[f"{prefix}.hc_head_fn"]
-            self.hc_head_base = weights[f"{prefix}.hc_head_base"]
-            self.hc_head_scale = weights[f"{prefix}.hc_head_scale"]
+            self.head_hc = build_hc_head(
+                weights[f"{prefix}.hc_head_fn"],
+                weights[f"{prefix}.hc_head_base"],
+                weights[f"{prefix}.hc_head_scale"],
+                dim=dim,
+                hc_mult=hc_mult,
+                norm_eps=norm_eps,
+                hc_eps=hc_eps,
+            )
         else:
             # Unit-test path — caller binds tensors externally.
-            self.hc_head_fn = None
-            self.hc_head_base = None
-            self.hc_head_scale = None
+            self.head_hc = None
 
     def _apply_proj(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
         """Factory FP8 linears want 2D input; QuantizedLinear accepts N-D."""
@@ -807,14 +586,7 @@ class MTPBlock(Block):
         )  # [S, hc, dim]
         x_after = x_after_flat.unsqueeze(0)  # [B=1, S, hc, dim]
 
-        # hc_head_reduce (same math as V4Transformer._hc_head_reduce)
-        shape, dtype = x_after.size(), x_after.dtype
-        x_flat = x_after.flatten(2).float()  # [B, S, hc*dim]
-        rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x_flat, self.hc_head_fn) * rsqrt
-        pre = (
-            torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
-        )
-        h = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=2)  # [B, S, dim]
+        dtype = x_after.dtype
+        h = self.head_hc.head(x_after)  # [B, S, dim]
         h = self.norm(h.to(dtype))  # [B, S, dim]
         return F.linear(h.float(), lm_head_weight)  # [B, S, vocab]

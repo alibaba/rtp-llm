@@ -1,0 +1,132 @@
+from unittest.mock import patch
+
+import torch
+
+from rtp_llm.models_py.modules.dsv4.cp import (
+    CPContext,
+    CPSyncGatherHandle,
+    CudaAsyncCPGatherImpl,
+    SyncCPGatherImpl,
+    build_cp_gather_impl,
+    cp_all_gather_full,
+    cp_wait_gather_full,
+)
+
+
+def _make_cp_ctx() -> CPContext:
+    return CPContext(
+        cp_size=2,
+        cp_rank=0,
+        chunk_length=2,
+        padded_seq_len=4,
+        seq_len_full=3,
+        relative_positions=torch.tensor([0, 3], dtype=torch.long),
+        prefix_length=0,
+        global_positions=torch.tensor([0, 3], dtype=torch.long),
+        local_is_real=torch.tensor([True, True]),
+        unpad_restore=torch.tensor([0, 3, 1], dtype=torch.long),
+        seq_len_total=3,
+        cp_info=object(),
+    )
+
+
+def _assert_raises(fn, exc_type, msg_substr: str):
+    try:
+        fn()
+    except exc_type as exc:
+        assert msg_substr in str(exc), str(exc)
+        return
+    raise AssertionError(f"expected {exc_type.__name__} containing {msg_substr!r}")
+
+
+def test_cp_all_gather_full_restores_2d_and_unpads():
+    ctx = _make_cp_ctx()
+    local = torch.zeros((2, 6), dtype=torch.float32)
+    gathered = torch.arange(24, dtype=torch.float32).reshape(4, 6)
+
+    with patch("rtp_llm.models_py.modules.dsv4.cp.all_gather", return_value=gathered):
+        full = cp_all_gather_full(local, ctx)
+
+    assert tuple(full.shape) == (3, 6)
+    assert torch.equal(full, gathered.index_select(0, ctx.unpad_restore))
+
+
+def test_sync_cp_gather_impl_restores_2d_on_cpu():
+    ctx = _make_cp_ctx()
+    local = torch.zeros((2, 2), dtype=torch.float32)
+    gathered = torch.tensor(
+        [
+            [10.0, 11.0],
+            [20.0, 21.0],
+            [30.0, 31.0],
+            [40.0, 41.0],
+        ]
+    )
+
+    with patch("rtp_llm.models_py.modules.dsv4.cp.all_gather", return_value=gathered):
+        handle = SyncCPGatherImpl().start(local, ctx)
+        full = cp_wait_gather_full(handle)
+
+    expected = gathered.index_select(0, ctx.unpad_restore)
+    assert isinstance(handle, CPSyncGatherHandle)
+    assert torch.equal(full, expected)
+
+
+def test_cp_all_gather_full_rejects_non_2d_and_wrong_t_local():
+    ctx = _make_cp_ctx()
+
+    _assert_raises(
+        lambda: cp_all_gather_full(torch.zeros((2,), dtype=torch.float32), ctx),
+        ValueError,
+        "expects 2D",
+    )
+    _assert_raises(
+        lambda: cp_all_gather_full(torch.zeros((1, 2, 6), dtype=torch.float32), ctx),
+        ValueError,
+        "expects 2D",
+    )
+    _assert_raises(
+        lambda: cp_all_gather_full(torch.zeros((3, 6), dtype=torch.float32), ctx),
+        ValueError,
+        "T_local",
+    )
+
+
+def test_cuda_async_cp_gather_impl_fails_fast_on_cpu():
+    ctx = _make_cp_ctx()
+    local = torch.zeros((2, 6), dtype=torch.float32)
+
+    _assert_raises(
+        lambda: CudaAsyncCPGatherImpl().start(local, ctx),
+        RuntimeError,
+        "requires CUDA",
+    )
+
+
+def test_cp_gather_default_impl_is_cuda_async():
+    with patch.dict("os.environ", {}, clear=True):
+        assert isinstance(build_cp_gather_impl(), CudaAsyncCPGatherImpl)
+
+
+def test_cp_wait_gather_full_rejects_unknown_handle():
+    _assert_raises(
+        lambda: cp_wait_gather_full(object()),
+        TypeError,
+        "unsupported CP gather handle",
+    )
+
+
+if __name__ == "__main__":
+    test_cp_all_gather_full_restores_2d_and_unpads()
+    print("PASS test_cp_all_gather_full_restores_2d_and_unpads")
+    test_sync_cp_gather_impl_restores_2d_on_cpu()
+    print("PASS test_sync_cp_gather_impl_restores_2d_on_cpu")
+    test_cp_all_gather_full_rejects_non_2d_and_wrong_t_local()
+    print("PASS test_cp_all_gather_full_rejects_non_2d_and_wrong_t_local")
+    test_cuda_async_cp_gather_impl_fails_fast_on_cpu()
+    print("PASS test_cuda_async_cp_gather_impl_fails_fast_on_cpu")
+    test_cp_gather_default_impl_is_cuda_async()
+    print("PASS test_cp_gather_default_impl_is_cuda_async")
+    test_cp_wait_gather_full_rejects_unknown_handle()
+    print("PASS test_cp_wait_gather_full_rejects_unknown_handle")
+    print("ALL TESTS PASSED")

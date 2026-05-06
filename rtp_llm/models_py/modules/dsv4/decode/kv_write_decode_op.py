@@ -162,16 +162,15 @@ def write_kv_to_pool(
             ``Attention._pool_view``). Modified in place.
         mask_negative: when False (e.g. SWA which always emits a valid
             slot), use unconditional ``index_copy_`` — the fast path.
-            When True (CSA/HCA boundary writes), use the safe-redirect
-            + delta-encode + atomic-add trick from
-            :func:`write_compressed_k_decode` to handle ``-1`` slots
-            without a CUDA-graph-hostile boolean mask / D2H sync.
+            When True (CSA/HCA boundary writes), CUDA uses a fused masked
+            copy helper so ``-1`` slots are skipped without ``nonzero`` /
+            ``index_select`` / D2H sync.  CPU keeps the compact torch
+            fallback.
 
     CUDA-graph safety:
       * No host scalar reads, no boolean indexing.
-      * `slot_mapping` may legally be -1 — the safe-redirect path turns
-        these into delta=0 writes against slot 0; multiple -1 redirects
-        sum to 0, so they're harmless.
+      * `slot_mapping` may legally be -1 — the CUDA masked-copy path skips
+        those rows inside the kernel.
       * Empty inputs short-circuit to a no-op (matches ``write_*`` above).
     """
     if k_state.numel() == 0 or slot_mapping.numel() == 0:
@@ -191,25 +190,29 @@ def write_kv_to_pool(
         pool_view.index_copy_(0, slot_long, k_state)
         return
 
-    # Compressed-K / boundary write: -1 entries must be skipped, but we
-    # cannot use boolean masking (CUDA-graph hostile). Reuse the
-    # compressed-write trick: redirect -1 to slot 0, delta=0 there.
-    valid = slot_long >= 0
-    safe_slot = torch.where(valid, slot_long, torch.zeros_like(slot_long))
-    if not (
-        pool_view.is_cuda
-        and torch.cuda.is_available()
-        and torch.cuda.is_current_stream_capturing()
-    ):
-        valid_idx = valid.nonzero(as_tuple=False).flatten()
-        if valid_idx.numel() > 0:
-            pool_view.index_copy_(
-                0,
-                slot_long.index_select(0, valid_idx),
-                k_state.index_select(0, valid_idx),
-            )
-        return
+    # Compressed-K / boundary write: -1 entries must be skipped.  Avoid
+    # data-dependent compaction on CUDA; the helper is capture-safe and
+    # writes only rows whose slot is non-negative.
+    if pool_view.is_cuda:
+        from rtp_llm.models_py.modules.dsv4._pool_triton import masked_copy_to_pool
 
-    existing = pool_view.index_select(0, safe_slot)
-    source = torch.where(valid.unsqueeze(-1), k_state, existing)
-    pool_view.index_copy_(0, safe_slot, source)
+        if masked_copy_to_pool(k_state, slot_mapping, pool_view):
+            return
+
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            valid = slot_long >= 0
+            safe_slot = torch.where(valid, slot_long, torch.zeros_like(slot_long))
+            existing = pool_view.index_select(0, safe_slot)
+            source = torch.where(valid.unsqueeze(-1), k_state, existing)
+            pool_view.index_copy_(0, safe_slot, source)
+            return
+
+    # CPU / unsupported fallback: compact valid rows before index_copy_.
+    valid = slot_long >= 0
+    valid_idx = valid.nonzero(as_tuple=False).flatten()
+    if valid_idx.numel() > 0:
+        pool_view.index_copy_(
+            0,
+            slot_long.index_select(0, valid_idx),
+            k_state.index_select(0, valid_idx),
+        )

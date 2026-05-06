@@ -72,25 +72,26 @@ def gather_dual_pool_kv_packed(
     win = swa_global.shape[1]
     K = cmp_global.shape[1]
 
-    # SWA half: index_select with -1-safe redirect, then mask to 0.
-    swa_safe = torch.where(
-        swa_global >= 0,
-        swa_global,
-        torch.zeros_like(swa_global),
-    ).to(torch.long)
-    swa_kv = swa_pool_view.index_select(0, swa_safe.view(-1)).view(T, win, head_dim)
-    swa_mask = (swa_global >= 0).unsqueeze(-1)
-    swa_kv = torch.where(swa_mask, swa_kv, torch.zeros_like(swa_kv))
+    from rtp_llm.models_py.modules.dsv4._pool_triton import masked_gather_from_pool
 
-    # Compressed half: same pattern, different pool.
-    cmp_safe = torch.where(
-        cmp_global >= 0,
+    # Fused -1-safe gather + zero-fill for each pool.  CUDA avoids the
+    # repeated torch.where -> index_select -> torch.where launch chain; CPU
+    # falls back inside the helper.
+    swa_kv = masked_gather_from_pool(
+        swa_pool_view,
+        swa_global,
+        swa_global >= 0,
+        out_shape=(T, win, head_dim),
+        dtype=swa_pool_view.dtype,
+    )
+
+    cmp_kv = masked_gather_from_pool(
+        cmp_pool_view,
         cmp_global,
-        torch.zeros_like(cmp_global),
-    ).to(torch.long)
-    cmp_kv = cmp_pool_view.index_select(0, cmp_safe.view(-1)).view(T, K, head_dim)
-    cmp_mask = (cmp_global >= 0).unsqueeze(-1)
-    cmp_kv = torch.where(cmp_mask, cmp_kv, torch.zeros_like(cmp_kv))
+        cmp_global >= 0,
+        out_shape=(T, K, head_dim),
+        dtype=cmp_pool_view.dtype,
+    )
 
     return torch.cat([swa_kv, cmp_kv], dim=1).view(batch_size, q_len, win + K, head_dim)
 

@@ -132,27 +132,17 @@ def _stub_moe(model):
             def patched_forward(x, start_pos, input_ids=None):
                 # Attention path (unchanged)
                 residual = x
-                x_pre, post, comb = orig_layer._hc_pre(
-                    x,
-                    orig_layer.hc_attn_fn,
-                    orig_layer.hc_attn_scale,
-                    orig_layer.hc_attn_base,
-                )
+                x_pre, post, comb = orig_layer.attn_hc.pre(x)
                 x_pre = orig_layer.attn_norm(x_pre)
                 attn_out = orig_layer.attn(x_pre, start_pos)
-                x = orig_layer._hc_post(attn_out, residual, post, comb)
+                x = orig_layer.attn_hc.post(attn_out, residual, post, comb)
 
                 # FFN path — identity instead of MoE
                 residual = x
-                x_pre, post, comb = orig_layer._hc_pre(
-                    x,
-                    orig_layer.hc_ffn_fn,
-                    orig_layer.hc_ffn_scale,
-                    orig_layer.hc_ffn_base,
-                )
+                x_pre, post, comb = orig_layer.ffn_hc.pre(x)
                 x_pre = orig_layer.ffn_norm(x_pre)
                 ffn_out = x_pre  # identity
-                x = orig_layer._hc_post(ffn_out, residual, post, comb)
+                x = orig_layer.ffn_hc.post(ffn_out, residual, post, comb)
                 return x
 
             return patched_forward

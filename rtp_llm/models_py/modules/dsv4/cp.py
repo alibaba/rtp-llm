@@ -27,11 +27,13 @@ stashed on each module via ``_cp_ctx`` before ``forward`` runs.  A
 single-rank path unchanged.
 """
 
+import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
+from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
 
@@ -69,6 +71,122 @@ class CPContext:
     seq_len_total: int
     # Raw cp_info, kept for any caller needing extra fields.
     cp_info: object
+
+
+@dataclass
+class CPSyncGatherHandle:
+    """Completed synchronous CP gather result."""
+
+    full_2d: torch.Tensor
+
+
+@dataclass
+class CPCudaAsyncGatherHandle:
+    """In-flight CUDA/NCCL CP gather result."""
+
+    cp_ctx: CPContext
+    gathered: torch.Tensor
+    work: Any
+    stream: Any
+    local_2d: torch.Tensor
+
+
+class CPGatherImplBase:
+    """Base interface for explicit CP gather implementations."""
+
+    def start(
+        self,
+        local_2d: torch.Tensor,
+        cp_ctx: CPContext,
+        stream: Optional[Any] = None,
+    ) -> Any:
+        raise NotImplementedError
+
+    def wait(self, handle: Any) -> torch.Tensor:
+        raise NotImplementedError
+
+
+class SyncCPGatherImpl(CPGatherImplBase):
+    """Reference implementation using the synchronous collective wrapper."""
+
+    def start(
+        self,
+        local_2d: torch.Tensor,
+        cp_ctx: CPContext,
+        stream: Optional[Any] = None,
+    ) -> CPSyncGatherHandle:
+        del stream
+        return CPSyncGatherHandle(full_2d=cp_all_gather_full(local_2d, cp_ctx))
+
+    def wait(self, handle: Any) -> torch.Tensor:
+        if not isinstance(handle, CPSyncGatherHandle):
+            raise TypeError(f"SyncCPGatherImpl.wait expected CPSyncGatherHandle, got {type(handle)!r}")
+        return handle.full_2d
+
+
+class CudaAsyncCPGatherImpl(CPGatherImplBase):
+    """Production CUDA implementation.
+
+    This path intentionally fails fast when CUDA distributed all-gather cannot
+    be launched. CPU/reference execution should select ``SyncCPGatherImpl``
+    explicitly instead of relying on a silent fallback.
+    """
+
+    def start(
+        self,
+        local_2d: torch.Tensor,
+        cp_ctx: CPContext,
+        stream: Optional[Any] = None,
+    ) -> CPCudaAsyncGatherHandle:
+        local_2d = _cp_gather_2d(local_2d, cp_ctx)
+        if not local_2d.is_cuda:
+            raise RuntimeError("CudaAsyncCPGatherImpl requires CUDA tensor input")
+        if not torch.distributed.is_initialized():
+            raise RuntimeError("CudaAsyncCPGatherImpl requires initialized torch.distributed")
+
+        process_group = collective_torch._get_group(Group.TP)
+        world_size = torch.distributed.get_world_size(process_group)
+        if world_size != cp_ctx.cp_size:
+            raise RuntimeError(
+                f"CP gather world_size({world_size}) != cp_ctx.cp_size({cp_ctx.cp_size})"
+            )
+
+        gathered = torch.empty(
+            (world_size * local_2d.size(0), local_2d.size(1)),
+            device=local_2d.device,
+            dtype=local_2d.dtype,
+        )
+
+        current_stream = torch.cuda.current_stream(local_2d.device)
+        gather_stream = stream or torch.cuda.Stream(device=local_2d.device)
+        gather_stream.wait_stream(current_stream)
+        try:
+            with torch.cuda.stream(gather_stream):
+                work = torch.distributed.all_gather_into_tensor(
+                    gathered,
+                    local_2d,
+                    group=process_group,
+                    async_op=True,
+                )
+        except Exception as exc:
+            raise RuntimeError("failed to launch CUDA CP all_gather_into_tensor") from exc
+
+        return CPCudaAsyncGatherHandle(
+            cp_ctx=cp_ctx,
+            gathered=gathered,
+            work=work,
+            stream=gather_stream,
+            local_2d=local_2d,
+        )
+
+    def wait(self, handle: Any) -> torch.Tensor:
+        if not isinstance(handle, CPCudaAsyncGatherHandle):
+            raise TypeError(
+                f"CudaAsyncCPGatherImpl.wait expected CPCudaAsyncGatherHandle, got {type(handle)!r}"
+            )
+        torch.cuda.current_stream(handle.gathered.device).wait_stream(handle.stream)
+        handle.work.wait()
+        return _cp_restore_gathered_full_2d(handle.gathered, handle.cp_ctx)
 
 
 def build_cp_context(
@@ -128,28 +246,100 @@ def build_cp_context(
     )
 
 
-def cp_all_gather_full(
-    local: torch.Tensor,
+def _cp_gather_2d(
+    local_2d: torch.Tensor,
     cp_ctx: CPContext,
 ) -> torch.Tensor:
-    """All-gather a rank-local ``[B, chunk_length, *F]`` tensor across the
-    CP (== TP) group and strip padding → ``[B, seq_len_full, *F]`` in
-    GLOBAL logical order.  ``B`` must be 1 (V4 invariant)."""
-    assert local.dim() >= 2
-    B = local.size(0)
-    assert B == 1
-    assert (
-        local.size(1) == cp_ctx.chunk_length
-    ), f"local.size(1)={local.size(1)} != chunk_length={cp_ctx.chunk_length}"
-    trailing = local.shape[2:]
+    """Validate CP gather input and return contiguous token-major 2D data.
 
-    # collective_torch.all_gather concatenates along dim 0 for 1-D/2-D
-    # tensors.  Flatten trailing dims so the helper sees a simple 2-D.
-    local_flat = local.reshape(cp_ctx.chunk_length, -1).contiguous()
-    gathered = all_gather(local_flat, group=Group.TP)
-    # gathered: [cp_size * chunk_length, prod(F)]
-    full = gathered.index_select(0, cp_ctx.unpad_restore)  # [seq_len_full, prod(F)]
-    return full.view((1, cp_ctx.seq_len_full) + trailing)
+    Contract:
+    - input shape is flattened ``[T_local, H]``;
+    - ``T_local`` must equal ``cp_ctx.chunk_length``;
+    - no batch dimension is accepted here, so callers own any
+      ``[1, T, H]`` squeeze/unsqueeze at module boundaries.
+    """
+    if local_2d.dim() != 2:
+        raise ValueError(f"CP gather expects 2D [T_local, H], got shape {tuple(local_2d.shape)}")
+    if local_2d.size(0) != cp_ctx.chunk_length:
+        raise ValueError(
+            f"CP gather T_local({local_2d.size(0)}) != cp_ctx.chunk_length({cp_ctx.chunk_length})"
+        )
+    if local_2d.size(1) <= 0:
+        raise ValueError(f"CP gather hidden dimension must be positive, got shape {tuple(local_2d.shape)}")
+    return local_2d.contiguous()
+
+
+def _cp_restore_gathered_full_2d(
+    gathered: torch.Tensor,
+    cp_ctx: CPContext,
+) -> torch.Tensor:
+    if gathered.dim() != 2:
+        raise ValueError(f"CP gathered tensor must be 2D [T_padded, H], got shape {tuple(gathered.shape)}")
+    expected_rows = cp_ctx.cp_size * cp_ctx.chunk_length
+    if gathered.size(0) != expected_rows:
+        raise ValueError(f"CP gathered rows({gathered.size(0)}) != expected rows({expected_rows})")
+    full = gathered.index_select(0, cp_ctx.unpad_restore)  # [seq_len_full, H]
+    if full.size(0) != cp_ctx.seq_len_full:
+        raise ValueError(f"CP restored rows({full.size(0)}) != cp_ctx.seq_len_full({cp_ctx.seq_len_full})")
+    return full
+
+
+def cp_all_gather_full(
+    local_2d: torch.Tensor,
+    cp_ctx: CPContext,
+) -> torch.Tensor:
+    """Synchronously gather CP-local ``[T_local, H]`` to full ``[T_full, H]``.
+
+    The API is intentionally 2D and token-major. Sequence/batch layout belongs
+    to the caller; passing ``[B, S, H]`` or arbitrary trailing dimensions is a
+    contract violation.
+    """
+    local_2d = _cp_gather_2d(local_2d, cp_ctx)
+    gathered = all_gather(local_2d, group=Group.TP)
+    # gathered: [cp_size * chunk_length, H]
+    return _cp_restore_gathered_full_2d(gathered, cp_ctx)
+
+
+def cp_all_gather_full_async(
+    local_2d: torch.Tensor,
+    cp_ctx: CPContext,
+    stream: Optional[Any] = None,
+) -> Any:
+    """Start CP gather for flattened ``[T_local, H]`` input.
+
+    Default implementation is selected by ``DSV4_CP_GATHER_IMPL``:
+    ``async`` (default) for CUDA/NCCL production, or ``sync`` for explicit
+    reference execution/tests. The async path has no implicit fallback.
+    """
+    return get_cp_gather_impl().start(local_2d, cp_ctx, stream=stream)
+
+
+def cp_wait_gather_full(handle: Any) -> torch.Tensor:
+    """Wait for a deferred CP gather and return flattened ``[T_full, H]``."""
+    if isinstance(handle, CPSyncGatherHandle):
+        return SyncCPGatherImpl().wait(handle)
+    if isinstance(handle, CPCudaAsyncGatherHandle):
+        return CudaAsyncCPGatherImpl().wait(handle)
+    raise TypeError(f"unsupported CP gather handle type: {type(handle)!r}")
+
+
+def build_cp_gather_impl(mode: Optional[str] = None) -> CPGatherImplBase:
+    mode = (mode or os.environ.get("DSV4_CP_GATHER_IMPL", "async")).strip().lower()
+    if mode == "async":
+        return CudaAsyncCPGatherImpl()
+    if mode == "sync":
+        return SyncCPGatherImpl()
+    raise ValueError(f"unsupported DSV4_CP_GATHER_IMPL={mode!r}; expected 'async' or 'sync'")
+
+
+_CP_GATHER_IMPL: Optional[CPGatherImplBase] = None
+
+
+def get_cp_gather_impl() -> CPGatherImplBase:
+    global _CP_GATHER_IMPL
+    if _CP_GATHER_IMPL is None:
+        _CP_GATHER_IMPL = build_cp_gather_impl()
+    return _CP_GATHER_IMPL
 
 
 def cp_freqs_cis_local(
@@ -184,9 +374,15 @@ def cp_all_gather_to_full(
     cp_size: int,
     cp_rank: int,
 ) -> torch.Tensor:
-    """Deprecated: use ``build_cp_context`` + ``cp_all_gather_full``."""
+    """Deprecated: use ``build_cp_context`` + ``cp_all_gather_full``.
+
+    ``local`` follows the same strict flattened contract:
+    ``[chunk_length, H] -> [seq_len_full, H]``.
+    """
     device = local.device
-    chunk_length = local.size(1)
+    if local.dim() != 2:
+        raise ValueError(f"cp_all_gather_to_full expects 2D [T_local, H], got shape {tuple(local.shape)}")
+    chunk_length = local.size(0)
     ctx = build_cp_context(cp_info, cp_size, cp_rank, chunk_length, device)
     return cp_all_gather_full(local, ctx)
 
