@@ -236,12 +236,21 @@ def build_remote_setup_command(rootdir: Path) -> str:
         # `libstdc++.so.6` to the system /usr/lib64 copy (older GCC) the
         # dlopen fails with `undefined symbol`. Prepend gcc-toolset-12 lib64
         # ahead of system paths so the JIT-built `.so` finds GCC 12's
-        # libstdc++. Guard on /opt/rocm to keep the change scoped to ROCm
-        # workers — CUDA/PPU workers don't need it (and don't ship the
-        # gcc-toolset-12 path).
-        '[ -d /opt/rocm ] && export LD_LIBRARY_PATH='
+        # libstdc++. Unconditional — ld silently skips non-existent
+        # directories, so safe on CUDA/PPU workers (run 39277006 smoke-amd
+        # showed the previous `[ -d /opt/rocm ]` guard didn't trigger on
+        # MI308X-ROCM7 REAPI workers; the dev image keeps ROCm at
+        # /opt/rocm-7.2 with /opt/rocm symlink that doesn't always resolve
+        # before the venv layer interposes).
+        'export LD_LIBRARY_PATH='
         '"/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/rocm/lib:'
         '/opt/amdgpu/lib64:${LD_LIBRARY_PATH}"; '
+        # Diagnostic — appears in remote_stdout.log per-worker so we can
+        # confirm the prologue ran and the gcc-toolset-12 path is on the
+        # search list when aiter dlopens its JIT cache.
+        'echo "[remote_setup] LD_LIBRARY_PATH=$LD_LIBRARY_PATH"; '
+        'echo "[remote_setup] /opt/rocm exists: $([ -d /opt/rocm ] && echo yes || echo no), '
+        '/opt/rh/gcc-toolset-12 exists: $([ -d /opt/rh/gcc-toolset-12 ] && echo yes || echo no)"; '
         # PPU detection signal for rtp_llm.device.device_type.get_device_type():
         # PPU torch wheel reports torch.cuda.is_available()=True and strips the
         # `+ppu1.5.2.oe` local segment from torch.__version__ (so it reads as
