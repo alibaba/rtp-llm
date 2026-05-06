@@ -2712,7 +2712,41 @@ class Attention(nn.Module):
                             f"L{self.layer_id:02d}_attn_kv_selected_{dbg_pos_name}",
                             kv_cat[:, safe_idx],
                         )
-            if _tl_kernels.tilelang_available():
+            if self._kv_cache_is_fp8 and bsz == 1 and q.is_cuda:
+                # FP8 prefill: dispatch to flash_mla_sparse_fwd (FP8-aware
+                # FlashMLA dense+sparse kernel; bf16 inputs).
+                #   - kv_cat is bf16 [1, T, head_dim] (CSA/HCA dequant +
+                #     concat already done above; SWA-only path: kv_cat ==
+                #     kv_full).
+                #   - topk_length per query row masks -1 sentinels so the
+                #     kernel skips invalid topk slots without OOB reads.
+                #   - K (topk dim) must be a multiple of B_TOPK=128 for the
+                #     head128 sparse-fwd; pad with -1 (masked by topk_length).
+                from flash_mla import (  # type: ignore[import-not-found]
+                    flash_mla_sparse_fwd,
+                )
+
+                _topk_idxs_i32 = topk_idxs.to(torch.int32)
+                topk_length = (
+                    (_topk_idxs_i32 >= 0).sum(dim=-1).reshape(-1).contiguous()
+                )
+                _B_TOPK = 128
+                _K = _topk_idxs_i32.shape[-1]
+                if _K % _B_TOPK != 0:
+                    _pad = _B_TOPK - (_K % _B_TOPK)
+                    _topk_idxs_i32 = torch.nn.functional.pad(
+                        _topk_idxs_i32, (0, _pad), value=-1
+                    )
+                o3, _, _ = flash_mla_sparse_fwd(
+                    q=q.squeeze(0),
+                    kv=kv_cat.squeeze(0).unsqueeze(1),
+                    indices=_topk_idxs_i32.squeeze(0).unsqueeze(1).contiguous(),
+                    sm_scale=self.softmax_scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=topk_length,
+                )
+                o = o3.unsqueeze(0)
+            elif _tl_kernels.tilelang_available():
                 o = _tl_kernels.sparse_attn(
                     q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
                 )
