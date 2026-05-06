@@ -89,10 +89,22 @@ def _running_under_pytest() -> bool:
 
 _bootstrap_error = None
 
+# `from .ops import *` previously ran here, but rtp_llm.ops imports torch
+# at module level (rtp_llm/ops/__init__.py:10). Eager loading meant pytest
+# entry-point plugin discovery (which imports `rtp_llm.test.remote_tests.
+# plugin` → triggers `rtp_llm/__init__.py`) pulled torch into sys.modules
+# BEFORE conftest.py's GPU slicing had a chance to set CUDA_VISIBLE_DEVICES.
+# Result: cuInit() saw the wrong CVD; test_gpu_isolation
+# (test_torch_not_imported_before_gpu_slice + test_device_count_matches_cvd)
+# failed deterministically on every ut-sm8x run.
+#
+# Defer the ops import: downstream modules use `from rtp_llm.ops import X`
+# explicitly (start_server.py, models/llama.py, pipeline.py …), which Python
+# resolves on demand without needing the eager star-import. Keep `import
+# triton` here so the `_bootstrap_error` still surfaces missing triton at
+# rtp_llm import time (triton itself does NOT pull torch).
 try:
-    import triton
-
-    from .ops import *
+    import triton  # noqa: F401
 except Exception as exc:
     _bootstrap_error = exc
     if not _running_under_pytest():
