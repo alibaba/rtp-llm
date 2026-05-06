@@ -27,7 +27,10 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 from .expert import Expert
 from .gate import Gate
-from .shared_expert import combine_routed_and_shared, get_shared_expert_executor
+from .shared_expert import (
+    combine_routed_and_shared,
+    get_shared_expert_executor,
+)
 from .strategies.base import MoeCfg, _resolve_forced, select_strategy
 
 
@@ -116,7 +119,14 @@ class MoE(nn.Module):
             storage="fp8",
             expert_weights=shared_w,
         )
-        self._shared_executor = get_shared_expert_executor()
+        self._shared_executor = get_shared_expert_executor(
+            max_tokens_per_rank=max_tokens_per_rank,
+            dim=dim,
+            inter_dim=moe_inter_dim,
+            swiglu_limit=swiglu_limit,
+        )
+        self._shared_executor.prepare(self.shared_experts)
+        self._final_out: torch.Tensor | None = None
 
         # --- Strategy selection + weight setup ---
         cfg = MoeCfg(
@@ -243,4 +253,17 @@ class MoE(nn.Module):
                 )
             return y.type_as(x).view(shape)
         with record_function_range("dsv4.moe.add_shared"):
-            return combine_routed_and_shared(y, shared_y, x.dtype).view(shape)
+            T = x.size(0)
+            if self._final_out is None or self._final_out.size(0) < T:
+                self._final_out = torch.empty(
+                    (max(T, self.max_tokens_per_rank, 1), self.dim),
+                    dtype=x.dtype,
+                    device=x.device,
+                )
+            assert self._final_out is not None
+            assert self._final_out.size(1) == self.dim
+            assert self._final_out.device == x.device
+            assert self._final_out.dtype == x.dtype
+            out = self._final_out
+            y = combine_routed_and_shared(y, shared_y, x.dtype, out=out[:T])
+            return y.view(shape)

@@ -7,8 +7,7 @@ following the V3.2 DSA pattern in ``base/cuda/indexer_op.py``
 (``_get_topk_paged``).
 
 Two implementations are gated by the env flag ``RTP_LLM_DSV4_INDEXER_DECODE_FAST_PATH``
-(default ``1`` when ``deep_gemm.fp8_paged_mqa_logits`` is importable on a
-CUDA build):
+(default ``1``):
 
   * **Reference path** — pure PyTorch einsum + ReLU + weighted sum + topk.
     Bit-equivalent to the BF16 reference in ``indexer.py`` for valid range.
@@ -39,7 +38,10 @@ import os
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.indexer_topk import select_indexer_topk
+from rtp_llm.models_py.modules.dsv4.indexer_topk import (
+    TorchIndexerTopKBackend,
+    select_indexer_topk,
+)
 
 try:
     import deep_gemm
@@ -58,8 +60,24 @@ def _fast_path_available() -> bool:
 
 _USE_DEEP_GEMM_FAST_PATH = (
     os.environ.get("RTP_LLM_DSV4_INDEXER_DECODE_FAST_PATH", "1") != "0"
-    and _fast_path_available()
 )
+
+
+def _fast_path_unavailable_reason(q_indexer: torch.Tensor) -> str:
+    if not q_indexer.is_cuda:
+        return f"q_indexer is on {q_indexer.device}, expected CUDA"
+    if not torch.cuda.is_available():
+        return "torch.cuda.is_available() is False"
+    if deep_gemm is None:
+        return "deep_gemm import failed"
+    missing = [
+        name
+        for name in ("fp8_paged_mqa_logits", "get_paged_mqa_logits_metadata")
+        if not hasattr(deep_gemm, name)
+    ]
+    if missing:
+        return f"deep_gemm missing required symbols: {missing}"
+    return "unknown"
 
 
 class IndexerDecodeV4Op:
@@ -142,18 +160,21 @@ class IndexerDecodeV4Op:
         ), f"out_buffer shape mismatch: {out_buffer.shape}"
         assert out_buffer.dtype == torch.int32, "out_buffer must be int32"
 
-        if (not force_reference) and _USE_DEEP_GEMM_FAST_PATH and q_indexer.is_cuda:
-            try:
-                return self._forward_fast(
-                    q_indexer,
-                    kv_indexer,
-                    weights,
-                    compressed_len_per_req,
-                    out_buffer,
+        if (not force_reference) and _USE_DEEP_GEMM_FAST_PATH:
+            if not _fast_path_available() or not q_indexer.is_cuda:
+                raise RuntimeError(
+                    "DSV4 indexer decode fast path is required by default but "
+                    f"is unavailable: {_fast_path_unavailable_reason(q_indexer)}. "
+                    "Set RTP_LLM_DSV4_INDEXER_DECODE_FAST_PATH=0 or pass "
+                    "force_reference=True for explicit reference execution."
                 )
-            except Exception:  # pragma: no cover - fallback for layout issues
-                # Fall through to reference path on any fast-path layout error.
-                pass
+            return self._forward_fast(
+                q_indexer,
+                kv_indexer,
+                weights,
+                compressed_len_per_req,
+                out_buffer,
+            )
         return self._forward_reference(
             q_indexer,
             kv_indexer,
@@ -196,7 +217,7 @@ class IndexerDecodeV4Op:
 
         # topk; if K > T_max we still pick top-T_max valid then -1-pad.
         k_eff = min(self.index_topk, T_max)
-        idxs = select_indexer_topk(
+        idxs = TorchIndexerTopKBackend().select(
             score,
             self.index_topk,
             lengths=compressed_len_per_req.view(B, 1).expand(B, q_len).reshape(-1),

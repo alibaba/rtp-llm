@@ -125,6 +125,22 @@ cc_library(
 )
 
 cc_library(
+    name = "persistent_topk",
+    srcs = ["persistent_topk.cu"],
+    hdrs = [
+        "persistent_topk.h",
+        "persistent_topk.cuh",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mla_quant_kernel",
     srcs = ["mla_quant_kernel.cu"],
     hdrs = ["mla_quant_kernel.h"],
