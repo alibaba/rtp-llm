@@ -21,9 +21,10 @@ _DSV4_MAX_GROUPS_PER_LAYER = 5
 
 # FP8 KV slot byte layouts. See cpp/cache/DSV4CacheConfig.h:78-91 for the
 # canonical 584B SWA/CSA/HCA fp8_model1_mla layout (448 fp8 NoPE + 64 bf16
-# RoPE + 7 UE8M0 scales + 1 pad). _compressor_kv_fused_triton.py writes
-# it; _kv_fp8_pool_io.py inverts it. _compressor_fused_triton.py
-# handles the indexer 132B layout.
+# RoPE + 7 UE8M0 scales + 1 pad). The vLLM-vendored fused writer in
+# _compressor_vllm_triton.py emits it; _kv_fp8_pool_io.py inverts it.
+# Indexer 132B layout (128 fp8 + 4-byte fp32 scale) shares the same writer
+# (head_dim=128 dispatch).
 DSV4_FP8_SLOT_BYTES = 584  # SWA / CSA / HCA canonical fp8_model1_mla
 DSV4_FP8_INDEXER_BYTES = 132  # Indexer: fp8[128] + fp32 scale
 
@@ -351,12 +352,13 @@ class PoolBackedModule(nn.Module):
         )
 
         # No bf16 → FP8 packing here. CSA/HCA prefill/decode go through
-        # _compressor_kv_fused_triton.v4_compressor_kv_fused (canonical 584B);
-        # SWA-only writes go through _prefill_write_swa_fp8_paged. This
-        # generic scatter only handles same-dtype pools (bf16 KV, fp32 STATE).
+        # the vLLM-vendored fused writer in _compressor_vllm_triton.py
+        # (canonical 584B); SWA-only writes go through
+        # _prefill_write_swa_fp8_paged. This generic scatter only handles
+        # same-dtype pools (bf16 KV, fp32 STATE).
         assert not is_fp8_swa_slot_pool(self._kv_pool_view) or D != 512, (
             "FP8 584B KV pool reached generic _scatter_kv_cache_to_pool — "
             "writes must go through the fused canonical path "
-            "(v4_compressor_kv_fused / _prefill_write_swa_fp8_paged)."
+            "(_compressor_vllm_triton / _prefill_write_swa_fp8_paged)."
         )
         write_kv_to_pool(flat, slot_mapping, self._kv_pool_view, mask_negative=True)

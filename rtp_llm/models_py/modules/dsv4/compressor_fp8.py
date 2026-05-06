@@ -1,77 +1,97 @@
-"""DeepSeek-V4 Compressor — FP8 KV pool path.
+"""DeepSeek-V4 Compressor — FP8 KV pool path (per-token state pool).
 
 Companion to ``compressor.py`` (BF16 path). Single class for both pool
-flavors; ``head_dim`` selects the writer kernel + layout:
+flavors; ``head_dim`` selects the writer kernel + FP8 KV slot layout:
 
-  * ``head_dim == 512`` (CSA / HCA): writes 584B striped layout via
-    ``v4_compressor_kv_fused``. Per-token entry = 448 fp8 NoPE +
-    64 bf16 RoPE + 8 UE8M0 scales. Reader: ``flash_mla_sparse_fwd``
-    after dequant via ``_kv_fp8_pool_io.dequantize_and_gather_k_cache``.
+  * ``head_dim == 512`` (CSA / HCA): per-slot 584B striped layout
+    (448 fp8 NoPE + 64 bf16 RoPE + 8 UE8M0 scales). Reader:
+    ``flash_mla_sparse_fwd`` after dequant.
 
-  * ``head_dim == 128`` (indexer compressor): writes 132B grouped
-    layout via ``v4_compressor_fused``. Per-token entry = 128 fp8 K +
-    4-byte fp32 UE8M0 scale. Reader: DeepGEMM
-    ``fp8_paged_mqa_logits`` (consumes the pool directly).
+  * ``head_dim == 128`` (indexer compressor): per-slot 132B grouped
+    layout (128 fp8 K + 4-byte fp32 scale). Reader: DeepGEMM
+    ``fp8_paged_mqa_logits``.
 
-What this class does NOT do — by design:
+Post-commit ``e76867719`` ("fix - align state size to 256") the C++
+state pools (INDEXER_STATE / CSA_STATE / HCA_STATE) all use
+``entries_per_block=256`` with ``fixed_blocks_per_req=2``: every token
+gets its own slot. We mirror vLLM's ``DeepseekCompressor`` flow:
 
-  * NEVER allocates ``self.kv_cache`` (no bf16 materialization). Reads
-    of the FP8 pool happen at the attention / indexer layer via the
-    dedicated readers. ``PoolBackedModule._bind/scatter_kv_cache_*``
-    machinery is unused.
-  * NO runtime fp8/bf16 dispatch. The class is FP8-only; pick the right
-    class at attention construction time (see ``attention.py`` factory).
-  * NO env gates / fallbacks. ``_compressor_triton.v4_compressor_pool``
-    and the 4-launch reference path live in ``compressor.py`` (BF16).
+  1. ``_save_partial_states_kernel`` writes per-token (kv | score+ape)
+     into the framework-allocated state pool.
+  2. ``_fused_kv_compress_norm_rope_insert_*_attn`` self-skips
+     non-boundary tokens, otherwise gathers the ``(1+overlap)*ratio``
+     window from the state pool, does softmax → RMSNorm → RoPE → FP8
+     UE8M0 quant → KV-pool slot store.
 
-State buffers (kv_state / score_state) for overlap continuation are
-still bound from the framework's fp32 STATE pool — same pattern as the
-BF16 class (PoolBackedModule's state half).
+Public API kept stable so ``attention.py`` / ``indexer_fp8.py`` call
+sites do not change:
+  * ``set_pool_context(kv_view, kv_bt, kv_eb, state_view, state_bt,
+    state_eb)`` — same 6-arg shape as the old ``PoolBackedModule``.
+  * ``forward(x, start_pos, sequence_lengths=None)`` for prefill.
+  * ``forward_decode_vectorized(x, start_pos)`` for batched decode.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.modules.dsv4._compressor_fused_triton import (
+from rtp_llm.models_py.modules.dsv4._compressor_consts import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
-    freqs_cis_to_cos_sin,
-    v4_compressor_fused,
-)
-from rtp_llm.models_py.modules.dsv4._compressor_kv_fused_triton import (
     KV_ENTRY_BYTES,
     KV_HEAD_DIM,
-    v4_compressor_kv_fused,
+)
+from rtp_llm.models_py.modules.dsv4._compressor_vllm_triton import (
+    build_cos_sin_cache,
+    run_fused_compress_kv_write,
+    run_save_partial_states,
 )
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     cp_all_gather_full,
     cp_should_gather,
 )
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import PoolBackedModule
+
+
+@dataclass(frozen=True)
+class CompressorMeta:
+    """Pre-computed per-token launch metadata.
+
+    Built once per (state_block_table, kv_block_table, positions, b_idx)
+    tuple — typically by the attention layer just after ``set_pool_context``,
+    so the math is amortized across both the host compressor and any nested
+    indexer compressor that shares the same positions/b_idx layout.
+
+    Fields are device tensors of length ``N_tok``:
+      * ``positions``    : int64 absolute token positions
+      * ``b_idx``        : int64 request index per token
+      * ``state_slots``  : int64 state-pool slot per token (-1 = skip)
+      * ``kv_slots``     : int64 KV-pool slot per token (-1 if non-boundary
+                           or unallocated)
+      * ``token_to_req`` : int32 alias of ``b_idx`` for the fused KV writer
+    """
+
+    positions: torch.Tensor
+    b_idx: torch.Tensor
+    state_slots: torch.Tensor
+    kv_slots: torch.Tensor
+    token_to_req: torch.Tensor
 
 
 class _CompressorNorm(nn.Module):
-    """RMSNorm weight holder — bf16 (rtp_llm_ops.rmsnorm requires bf16
-    weight; same convention as the BF16 class)."""
+    """RMSNorm weight holder — bf16 (vLLM kernel reads bf16 weight)."""
 
     def __init__(self, dim: int):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim, dtype=torch.bfloat16))
 
 
-class CompressorFP8(PoolBackedModule):
-    """FP8 KV cache compressor — single class for both pool flavors.
-
-    head_dim selects the writer kernel + per-slot pool layout:
-      * ``head_dim == 512`` → 584B striped (CSA / HCA), via
-        ``v4_compressor_kv_fused``.
-      * ``head_dim == 128`` → 132B grouped (indexer), via
-        ``v4_compressor_fused``.
+class CompressorFP8(nn.Module):
+    """FP8 KV cache compressor — vLLM-aligned per-token state pool path.
 
     Compress ratio: CSA uses ratio=4 (overlap=True), HCA uses ratio=128
     (overlap=False). The indexer compressor follows the host attention
@@ -90,36 +110,36 @@ class CompressorFP8(PoolBackedModule):
         compressor_weights: Optional[Dict[str, torch.Tensor]] = None,
     ):
         """``compressor_weights`` is a 4-key dict ``{"ape", "wkv", "wgate",
-        "norm"}`` extracted by the caller from ``layer_weights[W.v4_*compressor_*]``
-        — same shape as the BF16 ``Compressor`` ctor."""
+        "norm"}`` extracted by the caller from ``layer_weights[W.v4_*compressor_*]``."""
         super().__init__()
         assert head_dim in (KV_HEAD_DIM, INDEXER_HEAD_DIM), (
             f"CompressorFP8 supports head_dim in {{{KV_HEAD_DIM}, "
-            f"{INDEXER_HEAD_DIM}}} (CSA/HCA 584B and indexer 132B); got {head_dim}"
+            f"{INDEXER_HEAD_DIM}}}; got {head_dim}"
         )
         assert compressor_weights is not None, (
             "CompressorFP8 requires compressor_weights — meta-tensor / "
-            "stand-alone construction is not supported (use the BF16 path "
-            "for that)."
+            "stand-alone construction is not supported (use the BF16 path)."
         )
         self.dim = dim
         self.head_dim = head_dim
-        # Per-slot pool entry size — selects layout & writer kernel.
-        self._pool_entry_bytes = (
-            KV_ENTRY_BYTES if head_dim == KV_HEAD_DIM else INDEXER_ENTRY_BYTES
-        )
         self.rope_head_dim = rope_head_dim
         self.compress_ratio = compress_ratio
         self.overlap = compress_ratio == 4
         self.rotate = rotate
+        self.norm_eps = norm_eps
         coff = 1 + self.overlap
+        self.coff = coff
+        # Per-slot bytes of the FP8 KV pool entry (selects layout/kernel).
+        self._pool_entry_bytes = (
+            KV_ENTRY_BYTES if head_dim == KV_HEAD_DIM else INDEXER_ENTRY_BYTES
+        )
 
-        # ape / wkv / wgate stay FP32 — CompressorFP8._forward_prefill_body
-        # accumulates in FP32 for the (kv * softmax(score)).sum reduction
-        # before the FP8 quant write. (BF16 ``Compressor`` casts wkv/wgate
-        # to BF16 because its body keeps the partials in BF16; FP8 path
-        # diverges here.)
-        self.ape = compressor_weights["ape"].float()
+        # ape/wkv/wgate stay FP32 — accumulation happens in FP32 inside the
+        # state pool; vLLM keeps the same convention. Register ape as a
+        # non-trainable Parameter so .to(device) follows the module.
+        self.ape = nn.Parameter(
+            compressor_weights["ape"].float().contiguous(), requires_grad=False
+        )
         self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
         self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
         with torch.no_grad():
@@ -134,39 +154,32 @@ class CompressorFP8(PoolBackedModule):
             compressor_weights["norm"].to(torch.bfloat16),
             requires_grad=False,
         )
-        self.norm_eps = norm_eps
 
         # Fuse wkv + wgate into one fp32 weight matrix; saves one SIMT
         # SGEMM launch per compressor decode call (~92/step at bs16).
-        # Both weights share the same input projection, so cat along
-        # out-dim collapses 2× F.linear into 1× F.linear + slice. wkv /
-        # wgate Parameter objects are re-pointed to views of the fused
-        # storage so memory cost is zero (single backing buffer); state
-        # dict / external introspection still sees identical data.
         self._wkv_wgate_fused: Optional[torch.Tensor] = None
         self._fuse_wkv_wgate(coff)
 
-        # State buffer geometry — PoolBackedModule reads these in
-        # ``_bind_state_from_pool``.
-        self._state_rows = coff * compress_ratio
-        self._state_dim = coff * head_dim
-        # Unused (no kv_cache binding); kept zero so any accidental call
-        # short-circuits to None.
-        self._kv_cache_t = 0
-        self._kv_cache_d = 0
+        # Pool context — populated by attention's _set_compressor_pool_context.
+        self._state_pool_3d: Optional[torch.Tensor] = None
+        self._state_block_table: Optional[torch.Tensor] = None
+        self._state_eb: int = 0
+        self._kv_pool_3d: Optional[torch.Tensor] = None
+        self._kv_block_table: Optional[torch.Tensor] = None
+        self._kv_eb: int = 0
 
+        # Legacy attribute kept for attention.py's cmp_T fallback (line 1583).
+        self._kv_cache_t: int = 0
+
+        # Cached cos_sin cache built from self.freqs_cis at first forward.
         self.freqs_cis: Optional[torch.Tensor] = None
+        self._cos_sin_cache: Optional[torch.Tensor] = None
         self._cp_ctx: Optional[CPContext] = None
 
-    # -- exposure for legacy callers reading ``_kv_cache_t`` (e.g.
-    #    attention.py:1452); FP8 path stores no per-step bf16 cache,
-    #    so just track the maximum compressed length the layer expects.
     def _fuse_wkv_wgate(self, coff: int) -> None:
         """Concat wkv + wgate along out-dim into one fused fp32 weight,
         then re-point ``wkv.weight`` / ``wgate.weight`` to views of the
-        fused storage (zero memory overhead). Forward paths use
-        ``self._wkv_wgate_fused`` directly so a single F.linear emits
-        one GEMM launch covering both projections."""
+        fused storage (zero memory overhead)."""
         with torch.no_grad():
             fused = torch.cat(
                 [self.wkv.weight.data, self.wgate.weight.data], dim=0
@@ -176,173 +189,255 @@ class CompressorFP8(PoolBackedModule):
             self.wkv.weight = nn.Parameter(fused[:out_dim], requires_grad=False)
             self.wgate.weight = nn.Parameter(fused[out_dim:], requires_grad=False)
 
+    # ----------------------------------------------------------------------
+    # Compatibility shims (kept to match the BF16 ``Compressor`` API surface
+    # so callers don't need to special-case the FP8 class).
+    # ----------------------------------------------------------------------
     def configure_kv_cache_shape(self, kv_cache_t: int) -> None:
-        # Stored only as informational metadata — NOT used for any
-        # FP8-side allocation. Kept for compatibility with the BF16
-        # class's API surface (some callers read ``_kv_cache_t``).
-        self._kv_cache_t = kv_cache_t
+        """Stores ``_kv_cache_t`` only as informational metadata so legacy
+        readers (e.g. ``attention.py:1583`` ``cmp_T`` fallback) keep working.
+        The FP8 path does NOT allocate any per-step bf16 cache from this."""
+        self._kv_cache_t = int(kv_cache_t)
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         self._cp_ctx = cp_ctx
 
-    # --------------------------------------------------------------
-    # Helpers (private)
-    # --------------------------------------------------------------
-    def _kv_cache_block_stride_bytes(self) -> int:
-        return int(self._pool_view_3d().stride(0))
-
-    def _pool_view_3d(self) -> torch.Tensor:
-        """Return ``_kv_pool_view`` as 3D ``[num_blocks, eb, entry_bytes]``
-        uint8. Production path (``Attention._set_compressor_pool_context``)
-        already passes 3D (padded-aware via ``as_strided`` for 584B
-        CSA/HCA pools); standalone unit tests still pass flat 2D
-        ``[num_blocks*eb, entry_bytes]`` and we reshape on the fly. dim-0
-        stride in elements (uint8 → 1 byte/elem) == per-block byte stride.
-        """
-        v = self._kv_pool_view
-        if v.dim() == 3:
-            return v
-        return v.view(-1, self._kv_eb, self._pool_entry_bytes)
-
-    def _logical_to_pool_slots(
+    # ----------------------------------------------------------------------
+    # Pool context lifecycle (6-arg signature matches PoolBackedModule)
+    # ----------------------------------------------------------------------
+    def set_pool_context(
         self,
-        logical: torch.Tensor,  # [N] int64 — logical compressed positions
-        b_idx: torch.Tensor,  # [N] int64 — batch index per row
-        valid_in: torch.Tensor,  # [N] bool — caller-side validity mask
-    ) -> torch.Tensor:
-        bt = self._kv_block_table.to(torch.long)
-        eb = self._kv_eb
-        pool_capacity = bt.shape[1] * eb
-        in_capacity = (logical >= 0) & (logical < pool_capacity)
-        safe_logical = torch.where(in_capacity, logical, torch.zeros_like(logical))
-        block_in_seq = safe_logical // eb
-        in_block = safe_logical % eb
-        block_id = bt[b_idx, block_in_seq]
-        valid = valid_in & in_capacity & (block_id > 0)
-        safe_slot = block_id * eb + in_block
-        return torch.where(valid, safe_slot, torch.full_like(safe_slot, -1))
-
-    def _run_fused_pool_write(
-        self,
-        kv_state_3d: torch.Tensor,  # [B', G, D_in] fp32 contig
-        score_state_3d: torch.Tensor,
-        slots: torch.Tensor,  # [B'] int64; -1 = skip
-        freq_idx: torch.Tensor,  # [B'] int64
-        *,
-        kernel_overlap: bool,
+        kv_pool_view: Optional[torch.Tensor],
+        kv_block_table: Optional[torch.Tensor],
+        kv_eb: int,
+        state_pool_view: Optional[torch.Tensor],
+        state_block_table: Optional[torch.Tensor],
+        state_eb: int,
     ) -> None:
-        """Dispatch to the right fused writer based on head_dim.
+        """Install framework pool views.
 
-        ``kernel_overlap`` selects how the kernel reads the input:
-          * ``True``  — raw CSA state ``[B, 2r, 2d]``: kernel synthesizes
-            the post-cat view internally (used by the decode path).
-          * ``False`` — already post-_overlap_transform ``[B, G, d]``:
-            kernel reads G rows of d-elements directly (used by the
-            prefill path).
-
-        Both kernels (584B and 132B) accept the same shape and overlap
-        convention; they differ only in the per-token byte layout and
-        quant scheme.
+        ``kv_pool_view``    : 3D ``[num_blocks, kv_eb, ENTRY_BYTES]`` uint8
+                              (FP8 KV pool, already TMA-padded if 584B).
+        ``state_pool_view`` : 2D flat ``[total_slots, 2*coff*head_dim]`` fp32
+                              from ``_pool_view``. Reshaped here to
+                              ``[num_blocks, state_eb, 2*coff*head_dim]``.
         """
-        freqs = self.freqs_cis[freq_idx]
-        cos, sin = freqs_cis_to_cos_sin(freqs)
-        pool_blocks = self._pool_view_3d()
-        if self.head_dim == KV_HEAD_DIM:
-            v4_compressor_kv_fused(
-                kv_state_3d,
-                score_state_3d,
-                slots,
-                self.norm.weight,
-                cos,
-                sin,
-                pool_blocks,
-                cache_block_stride_bytes=int(pool_blocks.stride(0)),
-                overlap=kernel_overlap,
-                head_dim=self.head_dim,
-                rope_head_dim=self.rope_head_dim,
-                norm_eps=self.norm_eps,
+        self._kv_pool_3d = kv_pool_view
+        self._kv_block_table = kv_block_table
+        self._kv_eb = kv_eb
+
+        if state_pool_view is not None and state_eb > 0:
+            assert (
+                state_pool_view.dim() == 2
+            ), f"expected flat 2D state pool view, got {state_pool_view.shape}"
+            total_slots, hidden = state_pool_view.shape
+            assert total_slots % state_eb == 0, (
+                f"state pool total_slots={total_slots} not divisible by "
+                f"state_eb={state_eb}"
             )
+            num_blocks = total_slots // state_eb
+            self._state_pool_3d = state_pool_view.view(num_blocks, state_eb, hidden)
         else:
-            # head_dim == INDEXER_HEAD_DIM (128): 132B grouped layout.
-            # Kernel internally hardcodes block stride = block_size *
-            # ENTRY_BYTES (no TMA padding for 132B), so no stride arg.
-            v4_compressor_fused(
-                kv_state_3d,
-                score_state_3d,
-                slots,
-                self.norm.weight,
-                cos,
-                sin,
-                pool_blocks,
-                overlap=kernel_overlap,
-                head_dim=self.head_dim,
-                rope_head_dim=self.rope_head_dim,
-                norm_eps=self.norm_eps,
-            )
+            self._state_pool_3d = None
+        self._state_block_table = state_block_table
+        self._state_eb = state_eb
 
-    def _overlap_transform(self, tensor: torch.Tensor, value=0):
-        """[b, s, r, 2d] → [b, s, 2r, d]; first ratio rows pull from
-        previous window's tail (matches BF16 class)."""
-        b, s, _, _ = tensor.size()
-        ratio, d = self.compress_ratio, self.head_dim
-        new_tensor = tensor.new_full((b, s, 2 * ratio, d), value)
-        new_tensor[:, :, ratio:] = tensor[:, :, :, d:]
-        new_tensor[:, 1:, :ratio] = tensor[:, :-1, :, :d]
-        return new_tensor
+    def clear_pool_context(self) -> None:
+        self._state_pool_3d = None
+        self._state_block_table = None
+        self._state_eb = 0
+        self._kv_pool_3d = None
+        self._kv_block_table = None
+        self._kv_eb = 0
 
-    # --------------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # Metadata preparation (call once per forward, OFF the hot path)
+    # ----------------------------------------------------------------------
+    def prepare_metadata(
+        self,
+        positions: torch.Tensor,  # [N] int64
+        b_idx: torch.Tensor,  # [N] int64
+    ) -> CompressorMeta:
+        """Compute slot mappings + token_to_req from current pool context.
+
+        Pure function of ``(positions, b_idx, self._state_block_table,
+        self._kv_block_table, self.compress_ratio, self._state_eb,
+        self._kv_eb)`` — safe to call once per attention forward and reuse
+        across the host compressor and any nested indexer compressor that
+        shares the same positions/b_idx (when their pool context is bound).
+        """
+        state_slots = self._compute_state_slot_mapping(positions, b_idx)
+        kv_slots = self._compute_kv_slot_mapping(positions, b_idx)
+        token_to_req = b_idx.to(torch.int32)
+        return CompressorMeta(
+            positions=positions,
+            b_idx=b_idx,
+            state_slots=state_slots,
+            kv_slots=kv_slots,
+            token_to_req=token_to_req,
+        )
+
+    # ----------------------------------------------------------------------
+    # Internal helpers
+    # ----------------------------------------------------------------------
+    def _ensure_cos_sin_cache(self, device: torch.device) -> torch.Tensor:
+        if self._cos_sin_cache is None or self._cos_sin_cache.device != device:
+            assert (
+                self.freqs_cis is not None
+            ), "CompressorFP8.freqs_cis must be bound before forward"
+            cache, _ = build_cos_sin_cache(self.freqs_cis.to(device))
+            self._cos_sin_cache = cache
+        return self._cos_sin_cache
+
+    def _compute_state_slot_mapping(
+        self,
+        positions: torch.Tensor,  # [N] int64
+        b_idx: torch.Tensor,  # [N] int64
+    ) -> torch.Tensor:
+        """state_slot[t] = state_block_table[b, (pos//eb) % max_blocks] * eb + pos%eb.
+        Returns -1 where the chosen block id is unallocated (==0 sentinel)."""
+        bt = self._state_block_table
+        eb = self._state_eb
+        assert bt is not None and eb > 0, "state pool context unbound"
+        bt_long = bt.to(torch.long)
+        max_blocks = int(bt_long.shape[1])
+        block_in_seq = (positions // eb) % max_blocks
+        in_block = positions % eb
+        block_id = bt_long[b_idx, block_in_seq]
+        valid = block_id > 0
+        slot = block_id * eb + in_block
+        return torch.where(valid, slot, torch.full_like(slot, -1))
+
+    def _compute_kv_slot_mapping(
+        self,
+        positions: torch.Tensor,  # [N] int64
+        b_idx: torch.Tensor,  # [N] int64
+    ) -> torch.Tensor:
+        """KV-pool slot for each token. -1 unless (pos+1) % ratio == 0
+        (i.e. boundary token that produces a compressed entry).
+
+        Block addressing follows the framework convention: ALL DSV4 pools
+        use ``seq_size_per_block = TOKENS_PER_BLOCK = 256`` for block_table
+        indexing — i.e. the block_table is indexed in *token* space, not
+        compressed-entry space. The KV pool's per-block entry count is
+        ``kv_eb = TOKENS_PER_BLOCK / ratio``, so the in-block offset is the
+        compressed-entry offset *within that token block*.
+
+          block_in_seq = pos // TOKENS_PER_BLOCK              # token -> block
+          in_block     = (pos % TOKENS_PER_BLOCK) // ratio    # compressed offset
+          slot         = block_id * kv_eb + in_block
+        """
+        bt = self._kv_block_table
+        kv_eb = self._kv_eb
+        ratio = self.compress_ratio
+        if bt is None or kv_eb <= 0:
+            return torch.full_like(positions, -1)
+        # Recover seq_size_per_block from the pool spec invariant
+        # (kv_eb * ratio); avoids hard-coding 256 here.
+        tokens_per_block = kv_eb * ratio
+        bt_long = bt.to(torch.long)
+        max_blocks = int(bt_long.shape[1])
+        if max_blocks <= 0:
+            return torch.full_like(positions, -1)
+
+        boundary = ((positions + 1) % ratio) == 0
+        block_in_seq = positions // tokens_per_block
+        in_block = (positions % tokens_per_block) // ratio
+        in_capacity = block_in_seq < max_blocks
+        safe_block_in_seq = block_in_seq.clamp(min=0, max=max_blocks - 1)
+        block_id = bt_long[b_idx, safe_block_in_seq]
+        valid = boundary & in_capacity & (block_id > 0)
+        slot = block_id * kv_eb + in_block
+        return torch.where(valid, slot, torch.full_like(slot, -1))
+
+    def _launch(
+        self,
+        kv_flat: torch.Tensor,  # [N, coff*head_dim] fp32
+        score_flat: torch.Tensor,  # [N, coff*head_dim] fp32
+        meta: CompressorMeta,
+    ) -> None:
+        """Launch the two vLLM kernels (state write + boundary KV write).
+
+        All slot-mapping math is consumed from ``meta`` — this method only
+        does kernel launches and the cos_sin_cache lazy build. Designed to
+        stay branch-light so it composes cleanly with CUDA graph capture.
+        """
+        if (
+            self._state_pool_3d is None
+            or self._kv_pool_3d is None
+            or self._state_block_table is None
+            or self._kv_block_table is None
+        ):
+            # Warmup / unbound: nothing to write.
+            return
+
+        N = int(meta.positions.shape[0])
+        if N == 0:
+            return
+
+        cos_sin_cache = self._ensure_cos_sin_cache(kv_flat.device)
+
+        run_save_partial_states(
+            kv_flat,
+            score_flat,
+            self.ape,
+            meta.positions,
+            self._state_pool_3d,
+            meta.state_slots,
+            compress_ratio=self.compress_ratio,
+        )
+
+        run_fused_compress_kv_write(
+            self._state_pool_3d,
+            meta.token_to_req,
+            meta.positions,
+            meta.state_slots,
+            self._state_block_table.to(torch.int32),
+            self.norm.weight,
+            self.norm_eps,
+            cos_sin_cache,
+            self._kv_pool_3d,
+            meta.kv_slots,
+            head_dim=self.head_dim,
+            rope_head_dim=self.rope_head_dim,
+            compress_ratio=self.compress_ratio,
+            overlap=self.overlap,
+        )
+
+    # ----------------------------------------------------------------------
     # Forward (prefill)
-    # --------------------------------------------------------------
+    # ----------------------------------------------------------------------
     def forward(
-        self, x: torch.Tensor, start_pos, sequence_lengths=None
+        self,
+        x: torch.Tensor,
+        start_pos,
+        sequence_lengths: Optional[torch.Tensor] = None,
+        meta: Optional[CompressorMeta] = None,
     ) -> Optional[torch.Tensor]:
         """Prefill entry. ``bsz==1`` (FIFO scheduler).
 
-        Writes FP8 pool directly via ``v4_compressor_kv_fused``. State
-        buffer (kv_state / score_state) is bound/scattered from the fp32
-        STATE pool for overlap continuation across calls. Returns None
-        — the FP8 path has no bf16 ``kv_compressed`` to emit; downstream
-        readers gather from the pool.
+        Returns ``None`` — downstream readers gather compressed K from the
+        FP8 KV pool directly.
+
+        ``meta`` lets the caller (typically ``attention.py``) hoist the
+        slot-mapping compute out of the per-layer hot path and amortize it
+        across the host compressor and any nested indexer compressor that
+        share the same positions/b_idx. When ``None`` the compressor falls
+        back to the in-body compute path (warmup / standalone / UT).
         """
+        del sequence_lengths  # not needed: positions derived from start_pos+arange
         bsz, seqlen, _ = x.size()
         sp = (
             int(start_pos.item())
             if isinstance(start_pos, torch.Tensor)
             else int(start_pos)
         )
-        is_fresh_prefill = sp == 0
-        # Warmup forward (no pool bound by framework): no-op. Same gate as
-        # BF16 Compressor (`_kv_block_table is None` → skip write).
-        if (
-            self._kv_block_table is None
-            or self._kv_pool_view is None
-            or self._kv_eb <= 0
-        ):
+        # Warmup forward (no pool bound by framework): no-op.
+        if self._state_pool_3d is None or self._kv_pool_3d is None or self._kv_eb <= 0:
             return None
-        self._bind_state_from_pool(bsz, is_fresh_prefill, device=x.device)
-        # FP8 path never allocates self.kv_cache — leave None to make any
-        # accidental read explode immediately.
-        self.kv_cache = None
-        try:
-            return self._forward_prefill_body(x, sp)
-        finally:
-            self._scatter_state_to_pool(bsz)
-            self.kv_state = None
-            self.score_state = None
 
-    def _forward_prefill_body(
-        self, x: torch.Tensor, start_pos: int
-    ) -> Optional[torch.Tensor]:
-        assert (
-            self.freqs_cis is not None
-        ), "CompressorFP8.freqs_cis must be bound by caller"
-        bsz, seqlen, _ = x.size()
-        ratio, overlap, d = self.compress_ratio, self.overlap, self.head_dim
-        sp_int = start_pos
-
+        device = x.device
         x32 = x.float()
-        # Fused wkv + wgate GEMM (1 launch instead of 2). Output split
-        # along last dim — slicing returns views, no copy.
         out_dim = (1 + self.overlap) * self.head_dim
         fused_out = torch.nn.functional.linear(x32, self._wkv_wgate_fused)
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
@@ -353,156 +448,84 @@ class CompressorFP8(PoolBackedModule):
             score = cp_all_gather_full(score, cp_ctx)
             bsz, seqlen = kv.size(0), kv.size(1)
 
-        should_compress = seqlen >= ratio
-        remainder = seqlen % ratio
-        cutoff = seqlen - remainder
-        offset = ratio if overlap else 0
-
-        # Continuation prefill needs the PRIOR call's stash to fill the
-        # overlap slots of window 0. Snapshot BEFORE the save-for-next-call
-        # writes clobber them.
-        prior_kv_state_ratio = (
-            self.kv_state[:bsz, :ratio, :d].clone() if overlap and sp_int > 0 else None
-        )
-        prior_score_state_ratio = (
-            self.score_state[:bsz, :ratio, :d].clone()
-            if overlap and sp_int > 0
-            else None
-        )
-
-        if overlap and cutoff >= ratio:
-            self.kv_state[:bsz, :ratio] = kv[:, cutoff - ratio : cutoff]
-            self.score_state[:bsz, :ratio] = (
-                score[:, cutoff - ratio : cutoff] + self.ape
-            )
-
-        if remainder > 0:
-            kv, self.kv_state[:bsz, offset : offset + remainder] = kv.split(
-                [cutoff, remainder], dim=1
-            )
-            self.score_state[:bsz, offset : offset + remainder] = (
-                score[:, cutoff:] + self.ape[:remainder]
-            )
-            score = score[:, :cutoff]
-
-        if not should_compress:
-            return None
-
-        kv = kv.unflatten(1, (-1, ratio))
-        score = score.unflatten(1, (-1, ratio)) + self.ape
-
-        if overlap:
-            kv = self._overlap_transform(kv, 0)
-            score = self._overlap_transform(score, float("-inf"))
-            if sp_int > 0:
-                kv[:bsz, 0, :ratio] = prior_kv_state_ratio
-                score[:bsz, 0, :ratio] = prior_score_state_ratio
-
-        # FP8 fused write. Stage [B, NB, G, D_in] → [B*NB, G, D_in], build
-        # slot_mapping / freq idx via the fused prelude kernel (one launch
-        # vs ~10 small ops in the original pure-torch prelude).
-        from rtp_llm.models_py.modules.dsv4._compressor_prelude_triton import (
-            compressor_prelude_fused,
-        )
-
-        B, NB, G, D_in = kv.shape
-        kv_flat = kv.reshape(B * NB, G, D_in).contiguous()
-        score_flat = score.reshape(B * NB, G, D_in).contiguous()
-        write_start = sp_int // ratio
-        slots, freq_idx = compressor_prelude_fused(
-            B=B,
-            NB=NB,
-            write_start=write_start,
-            sp=sp_int,
-            ratio=ratio,
-            eb=self._kv_eb,
-            block_table=self._kv_block_table,
-        )
-        # Prefill: data is already post-_overlap_transform layout
-        # ([B', G, d] for both CSA G=2r and HCA G=r); kernel reads
-        # G rows of d-elements directly.
-        self._run_fused_pool_write(
-            kv_flat, score_flat, slots, freq_idx, kernel_overlap=False
-        )
+        N = bsz * seqlen
+        kv_flat = kv.reshape(N, -1).contiguous()
+        score_flat = score.reshape(N, -1).contiguous()
+        if meta is None:
+            positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
+            meta = self.prepare_metadata(positions, b_idx)
+        self._launch(kv_flat, score_flat, meta)
         return None
 
-    # --------------------------------------------------------------
+    # ----------------------------------------------------------------------
     # Forward (decode, vectorized over B)
-    # --------------------------------------------------------------
+    # ----------------------------------------------------------------------
     def forward_decode_vectorized(
-        self, x: torch.Tensor, start_pos: torch.Tensor
+        self,
+        x: torch.Tensor,
+        start_pos: torch.Tensor,
+        meta: Optional[CompressorMeta] = None,
     ) -> Optional[torch.Tensor]:
-        """Batched decode entry. Boundary requests trigger an FP8 write
-        for their compressed token; non-boundary requests are masked out
-        of the slot mapping (kernel early-exits on slot < 0)."""
-        assert (
-            self.freqs_cis is not None
-        ), "CompressorFP8.freqs_cis must be bound by caller"
+        """Batched decode entry. q_len == 1 per request."""
         assert x.shape[1] == 1, "decode-only: q_len must be 1"
-
         bsz = x.size(0)
-        ratio, overlap, d = self.compress_ratio, self.overlap, self.head_dim
+        if self._state_pool_3d is None or self._kv_pool_3d is None or self._kv_eb <= 0:
+            return None
+
         device = x.device
-        # Warmup forward (no pool bound by framework): no-op.
-        if (
-            self._kv_block_table is None
-            or self._kv_pool_view is None
-            or self._kv_eb <= 0
-        ):
-            return None
-        self._bind_state_from_pool(bsz, is_fresh_prefill=False, device=device)
-        self.kv_cache = None
-        try:
-            x32 = x.float()
-            # Fused wkv + wgate GEMM (1 launch instead of 2).
-            out_dim = (1 + self.overlap) * self.head_dim
-            fused_out = torch.nn.functional.linear(x32, self._wkv_wgate_fused)
-            kv_all, score_all = fused_out[..., :out_dim], fused_out[..., out_dim:]
+        x32 = x.float()
+        out_dim = (1 + self.overlap) * self.head_dim
+        fused_out = torch.nn.functional.linear(x32, self._wkv_wgate_fused)
+        kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
-            sp = start_pos.to(torch.long)
-            sp_mod = sp % ratio
-            boundary = ((sp + 1) % ratio) == 0
+        kv_flat = kv.reshape(bsz, -1).contiguous()
+        score_flat = score.reshape(bsz, -1).contiguous()
+        if meta is None:
+            positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz)
             b_idx = torch.arange(bsz, device=device, dtype=torch.long)
+            meta = self.prepare_metadata(positions, b_idx)
+        self._launch(kv_flat, score_flat, meta)
+        return None
 
-            ape_rows = self.ape[sp_mod].to(score_all.dtype)
-            score_all = score_all + ape_rows.unsqueeze(1)
 
-            slot = (sp_mod + ratio) if overlap else sp_mod
-            self.kv_state[b_idx, slot] = kv_all[:, 0]
-            self.score_state[b_idx, slot] = score_all[:, 0]
+# ---------------------------------------------------------------------------
+# Free helpers — exposed so the attention layer can build positions/b_idx
+# once per forward and feed them through ``prepare_metadata`` / ``forward``.
+# ---------------------------------------------------------------------------
+def _build_prefill_positions(
+    sp: int, bsz: int, seqlen: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``positions = sp + arange(seqlen)`` broadcast to ``[bsz, seqlen]`` →
+    flat ``[bsz*seqlen]``; ``b_idx = repeat_interleave(arange(bsz))``."""
+    N = bsz * seqlen
+    positions = (
+        (torch.arange(seqlen, device=device, dtype=torch.long).unsqueeze(0) + sp)
+        .expand(bsz, -1)
+        .reshape(N)
+        .contiguous()
+    )
+    b_idx = (
+        torch.arange(bsz, device=device, dtype=torch.long)
+        .unsqueeze(1)
+        .expand(-1, seqlen)
+        .reshape(N)
+        .contiguous()
+    )
+    return positions, b_idx
 
-            cache_logical = torch.clamp(sp // ratio, min=0)
-            slots = self._logical_to_pool_slots(cache_logical, b_idx, boundary)
-            rope_idx = torch.clamp(sp + 1 - ratio, min=0)
-            kv_state_3d = self.kv_state[:bsz].contiguous()
-            score_state_3d = self.score_state[:bsz].contiguous()
-            # Decode: feeds the RAW state buffer ([B, 2r, 2d] for CSA,
-            # [B, r, d] for HCA) — kernel synthesizes the post-cat view
-            # internally. ``kernel_overlap`` mirrors the layer's overlap.
-            self._run_fused_pool_write(
-                kv_state_3d,
-                score_state_3d,
-                slots,
-                rope_idx,
-                kernel_overlap=overlap,
-            )
 
-            # Roll kv_state/score_state for overlap=True (boundary only).
-            if overlap:
-                new_first_kv = torch.where(
-                    boundary.view(bsz, 1, 1),
-                    self.kv_state[:bsz, ratio:],
-                    self.kv_state[:bsz, :ratio],
-                )
-                self.kv_state[:bsz, :ratio] = new_first_kv
-                new_first_score = torch.where(
-                    boundary.view(bsz, 1, 1),
-                    self.score_state[:bsz, ratio:],
-                    self.score_state[:bsz, :ratio],
-                )
-                self.score_state[:bsz, :ratio] = new_first_score
-            return None
-        finally:
-            self._scatter_state_to_pool(bsz)
-            self.kv_state = None
-            self.score_state = None
+def build_prefill_metadata(
+    compressor: "CompressorFP8", sp: int, bsz: int, seqlen: int, device: torch.device
+) -> CompressorMeta:
+    """Convenience: build positions/b_idx + ``CompressorMeta`` in one call."""
+    positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
+    return compressor.prepare_metadata(positions, b_idx)
+
+
+def build_decode_metadata(
+    compressor: "CompressorFP8", start_pos: torch.Tensor, bsz: int
+) -> CompressorMeta:
+    device = start_pos.device
+    positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz)
+    b_idx = torch.arange(bsz, device=device, dtype=torch.long)
+    return compressor.prepare_metadata(positions, b_idx)

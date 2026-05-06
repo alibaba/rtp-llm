@@ -1,8 +1,9 @@
 """Production reader for the canonical 584B FP8 KV pool.
 
-Inverse of ``_compressor_kv_fused_triton.v4_compressor_kv_fused`` —
-gathers a contiguous tail window of FP8-quantized K from the per-block
-striped layout into a bf16 buffer ready for ``flash_mla_sparse_fwd``.
+Inverse of the vLLM-vendored fused writer in ``_compressor_vllm_triton.py``
+(``_fused_kv_compress_norm_rope_insert_sparse_attn``) — gathers a
+contiguous tail window of FP8-quantized K from the per-block striped
+layout into a bf16 buffer ready for ``flash_mla_sparse_fwd``.
 
   pool [num_blocks, block_size, 584] uint8
        │   per-block striped:
@@ -19,8 +20,8 @@ This kernel is **vendored from vLLM HEAD
 ``vllm/v1/attention/ops/deepseek_v4_ops/cache_utils.py``,
 ``dequantize_and_gather_k_cache`` /
 ``_dequantize_and_gather_k_kernel``). Byte-level compatibility with the
-rtp-llm 584B writer is locked by
-``test/test_compressor_fp8_reader.py``.
+fused writer in ``_compressor_vllm_triton.py`` is enforced by the shared
+584B layout constants below.
 
 A test-only frozen copy lives at ``test/_vllm_ref/cache_utils.py`` for
 byte-level golden tests; this file is the production import path.
@@ -32,9 +33,10 @@ import torch
 import triton
 import triton.language as tl
 
-# Layout constants — must agree with _compressor_kv_fused_triton.py and
-# vLLM's quantize_and_insert_k_cache. Any change here without a matching
-# writer update will silently corrupt the read path.
+# Layout constants — must agree with the writer in
+# _compressor_vllm_triton.py (and vLLM's
+# _fused_kv_compress_norm_rope_insert_sparse_attn upstream). Any change
+# here without a matching writer update will silently corrupt the read path.
 _TOKEN_FP8_DIM = 448
 _TOKEN_BF16_DIM = 64
 _TOKEN_SCALE_DIM = 8  # 7 real + 1 pad

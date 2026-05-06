@@ -48,20 +48,6 @@ py_test(
     exec_properties = {"gpu": "H20"},
 )
 
-# PP4 wireup: Compressor → fused {pool+RMSNorm+RoPE+FP8 quant+scatter}
-# round-trip test. Locks the env-gated FP8 fast path for both prefill and
-# the boundary decode case against the bf16 4-launch reference.
-py_test(
-    name = "test_compressor_fused_wireup",
-    srcs = ["test_compressor_fused_wireup.py"],
-    deps = [
-        "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm:testlib",
-    ],
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
-)
-
 # P1 — vLLM-vendored persistent radix-select TopK for the indexer decode
 # hot path.  Replaces torch.topk (~30us → ~5-10us at K=512/T=2048).
 # Auto-skipped via pytest.mark.skipif when the .so binding is missing.
