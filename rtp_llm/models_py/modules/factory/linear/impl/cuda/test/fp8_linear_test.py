@@ -1039,7 +1039,11 @@ class CudaFp8GEMMDispatchTest(CudaFp8LinearTestBase, unittest.TestCase):
             quant_config=quant_config,
         )
         self.assertIsInstance(linear, CudaFp8GEMMLinear)
-        self.assertIsInstance(linear._flashinfer_linear, CudaFp8FlashinferLinear)
+        self.assertIsInstance(linear._deepgemm_linear, CudaFp8DeepGEMMLinear)
+        if CudaFp8FlashinferLinear.can_handle(quant_config, weight, weight_scales):
+            self.assertIsInstance(linear._flashinfer_linear, CudaFp8FlashinferLinear)
+        else:
+            self.assertIsNone(linear._flashinfer_linear)
 
 
 CudaFp8DeepGEMMLinearTestBase = CudaFp8GEMMLinearTestBase
