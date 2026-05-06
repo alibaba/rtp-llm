@@ -11,9 +11,7 @@ Memory footprint:
   BF16 weight: [out, in] bf16  — no scale
 
 FP4 forward goes through ``deep_gemm.fp8_fp4_gemm_nt`` (K2 in
-``docs/dsv4/kernel_audit.md``) when DeepGEMM ≥ 2.4 is installed and the
-input is on CUDA; otherwise it falls back to the PyTorch dequant path
-(slow but memory-correct, useful for CPU-only unit tests).  Matches V4
+``docs/dsv4/kernel_audit.md``) and requires DeepGEMM ≥ 2.4 on CUDA.  Matches V4
 official ``inference/model.py``'s per-expert ``Linear.forward`` which
 calls V4's own TileLang ``fp4_gemm`` — same math, different kernel.
 
@@ -31,8 +29,6 @@ import torch.nn.functional as F
 
 FP8_BLOCK = 128
 FP4_BLOCK = 32
-
-_WARNED_FP4_FALLBACK: bool = False
 
 # FP4 e2m1 lookup: 4-bit raw -> fp32 value
 _FP4_LUT = torch.tensor([
@@ -125,8 +121,8 @@ class QuantizedLinear(nn.Module):
             return _fp8_dequant_to_fp32(self.weight, self.scale).to(out_dtype)
         return self.weight
 
-    def _fp4_forward_deepgemm(self, x: torch.Tensor) -> Optional[torch.Tensor]:
-        """Try the native FP4 kernel.  Returns None to signal fall-back.
+    def _fp4_forward_deepgemm(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the native FP4 kernel.
 
         Matches V4 official ``inference/model.py``'s per-expert linear:
         quant ``x`` to FP8 e4m3fn with UE8M0 block-128 scale along K,
@@ -136,7 +132,10 @@ class QuantizedLinear(nn.Module):
             _fp8_fp4_gemm_nt_impl, fp8_fp4_gemm_nt,
         )
         if _fp8_fp4_gemm_nt_impl is None or not x.is_cuda:
-            return None
+            raise RuntimeError(
+                "DSV4 FP4 QuantizedLinear requires deep_gemm fp8_fp4_gemm_nt "
+                f"on CUDA; got device={x.device}, impl={_fp8_fp4_gemm_nt_impl}"
+            )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
         orig_shape = x.shape
@@ -165,17 +164,7 @@ class QuantizedLinear(nn.Module):
         if self.storage == "bf16":
             return F.linear(x, self.weight)
         if self.storage == "fp4":
-            y = self._fp4_forward_deepgemm(x)
-            if y is not None:
-                return y
-            global _WARNED_FP4_FALLBACK
-            if not _WARNED_FP4_FALLBACK:
-                _WARNED_FP4_FALLBACK = True
-                import logging as _lg
-                _lg.getLogger(__name__).warning(
-                    "[dsv4] deep_gemm.fp8_fp4_gemm_nt unavailable; FP4 "
-                    "linears fall back to PyTorch dequant (slow)",
-                )
-        # FP8, or FP4 fallback: dequant to x's dtype on the fly.
+            return self._fp4_forward_deepgemm(x)
+        # FP8: dequant to x's dtype on the fly.
         w = self.dequant_weight(out_dtype=x.dtype)
         return F.linear(x, w)
