@@ -61,31 +61,32 @@ def test_all_registered_impls_have_name(registry_name, registry):
     _REGISTRIES,
     ids=[name for name, _ in _REGISTRIES],
 )
-def test_no_duplicate_names_within_registry(registry_name, registry):
-    """Within a single registry, NAME → impl is 1:1.
+def test_no_duplicate_class_objects_within_registry(registry_name, registry):
+    """Within a single registry, no class object is registered more than once.
 
-    Multiple impls CAN share a NAME across PREFILL_MHA_IMPS / DECODE_MHA_IMPS
-    (e.g. AiterPrefillImplAsm vs AiterDecodeImplAsm both expose "aiter_asm")
-    — that's the natural mental model: one user-facing name covers both
-    stages. But within ONE registry, two impls with the same NAME means the
-    second one silently shadows the first in attn_factory's name_to_impls
-    lookup, which is a footgun.
+    Multiple DIFFERENT impl classes legitimately share a NAME within one
+    registry when they're differentiated by support_parallelism_config()
+    (e.g. SparseMlaImpl + SparseMlaCpImpl both expose "sparse_mla" in
+    PREFILL_MLA_IMPS — non-CP vs CP).  attn_factory iterates ALL impls
+    matching a NAME and tries each, so same-NAME-different-class is
+    expected and intentional.
+
+    What IS a bug: registering the SAME class object twice (e.g. an
+    accidental second `.append(PyFlashinferPrefillImpl)` in __init__.py).
+    The second copy is dead — the dispatcher would always return the first
+    one's instance — but it slows iteration and signals lost edits during
+    refactors.  This test catches that shape.
     """
-    seen: dict[str, str] = {}
-    duplicates: list[tuple[str, str, str]] = []
+    seen: set[type] = set()
+    duplicates: list[str] = []
     for cls in registry:
-        name = getattr(cls, "NAME", "")
-        if not name:
-            continue
-        prior = seen.get(name)
-        cls_id = f"{cls.__module__}.{cls.__name__}"
-        if prior is None:
-            seen[name] = cls_id
+        if cls in seen:
+            duplicates.append(f"{cls.__module__}.{cls.__name__}")
         else:
-            duplicates.append((name, prior, cls_id))
+            seen.add(cls)
     assert not duplicates, (
-        f"Registry {registry_name} has duplicate NAMEs: "
-        + ", ".join(
-            f"NAME={n!r} on both {a} and {b}" for n, a, b in duplicates
-        )
+        f"Registry {registry_name} has duplicate class registrations: "
+        + ", ".join(duplicates)
+        + ". Look for a stray `.append(...)` / `.extend([...])` in "
+        + "rtp_llm/models_py/modules/factory/attention/__init__.py."
     )

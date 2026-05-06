@@ -86,6 +86,7 @@ else:
         )
         DECODE_MHA_IMPS.extend([FlashInferTRTLLMDecodeImpl])
         DECODE_MHA_IMPS.append(get_xqa_impl())
+        DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
 
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
             MlaFlashInferDecodeImpl,
@@ -121,16 +122,10 @@ else:
         # installed, so collection used to crash with ModuleNotFoundError).
         # Pulled inside the `device_type == DeviceType.Cuda` branch so the
         # else-of-ROCm fallback path stays import-safe.
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
-            PyFlashinferDecodeImpl,
-            PyFlashinferPagedPrefillImpl,
-            PyFlashinferPrefillImpl,
-        )
-
-        PREFILL_MHA_IMPS.append(PyFlashinferPrefillImpl)
-        PREFILL_MHA_IMPS.append(PyFlashinferPagedPrefillImpl)
-        DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
-
+        # NOTE: PyFlashinfer{Prefill,Paged,Decode}Impl are already registered
+        # in the extend([...]) above (lines 75-87); this block only adds
+        # CPFlashInferImpl. The earlier duplicate appends caused
+        # PyFlashinfer* impls to be tried twice in the dispatcher.
         from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer import (
             CPFlashInferImpl,
         )
