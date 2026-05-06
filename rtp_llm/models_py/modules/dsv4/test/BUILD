@@ -1,12 +1,45 @@
+_DSV4_TEST_DEPS = [
+    "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    "//rtp_llm:testlib",
+]
+
+py_library(
+    name = "dsv4_test_utils",
+    srcs = ["dsv4_test_utils.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
 py_test(
-    name = "test_dsv4_kv_cache",
-    srcs = ["test_dsv4_kv_cache.py"],
-    deps = [
-        "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm:testlib",
-    ],
+    name = "test_dsv4_compressor",
+    srcs = ["test_dsv4_compressor.py"],
+    deps = [":dsv4_test_utils"] + _DSV4_TEST_DEPS,
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "test_dsv4_indexer",
+    srcs = ["test_dsv4_indexer.py"],
+    deps = [":dsv4_test_utils"] + _DSV4_TEST_DEPS,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "test_dsv4_attention",
+    srcs = ["test_dsv4_attention.py"],
+    deps = [":dsv4_test_utils"] + _DSV4_TEST_DEPS,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+test_suite(
+    name = "test_dsv4_kv_cache",
+    tests = [
+        ":test_dsv4_attention",
+        ":test_dsv4_compressor",
+        ":test_dsv4_indexer",
+    ],
 )
 
 py_test(
