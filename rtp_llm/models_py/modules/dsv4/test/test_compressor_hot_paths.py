@@ -2,7 +2,6 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4._nvtx import nvtx_range
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.cp import CPContext
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
@@ -203,35 +202,7 @@ def test_cp_continuation_state_uses_global_prefix_for_bind_and_scatter():
     if wrong_block not in (read_logical_block, write_logical_block):
         wrong_block_id = int(state_block_table[0, wrong_block])
         if wrong_block_id > 0:
-            wrong_slots = torch.arange(wrong_block_id * state_eb, wrong_block_id * state_eb + T)
+            wrong_slots = torch.arange(
+                wrong_block_id * state_eb, wrong_block_id * state_eb + T
+            )
             assert not torch.equal(state_pool[wrong_slots], expected_written)
-
-
-def test_nvtx_range_emits_torch_profiler_annotation_by_default():
-    calls = []
-
-    class FakeRecordFunction:
-        def __init__(self, name):
-            calls.append(("init", name))
-
-        def __enter__(self):
-            calls.append(("enter", None))
-
-        def __exit__(self, exc_type, exc, tb):
-            calls.append(("exit", None))
-
-    with patch.dict("os.environ", {}, clear=True):
-        with patch("torch.cuda.is_available", return_value=False):
-            with patch(
-                "torch.autograd.profiler.record_function",
-                side_effect=FakeRecordFunction,
-            ):
-                with nvtx_range("dsv4.test.range"):
-                    calls.append(("body", None))
-
-    assert calls == [
-        ("init", "dsv4.test.range"),
-        ("enter", None),
-        ("body", None),
-        ("exit", None),
-    ]

@@ -56,3 +56,36 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "test_indexer_topk_backend",
+    srcs = ["test_indexer_topk_backend.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_shared_expert_executor",
+    srcs = ["test_shared_expert_executor.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_mega_moe_input_packer",
+    srcs = ["test_mega_moe_input_packer.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
