@@ -18,7 +18,8 @@ import torch
 
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from ..mega_buf import _get_or_create_mega_buf, _mega_moe_enabled
-from ..quant_layouts import FP4_BLOCK, _per_token_cast_to_fp8_packed_ue8m0
+from ..input_packer import get_mega_moe_input_packer
+from ..quant_layouts import FP4_BLOCK
 
 
 @register_strategy
@@ -153,6 +154,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             dtype=torch.bfloat16,
             device=device,
         )
+        self._input_packer = get_mega_moe_input_packer()
 
     def forward(
         self,
@@ -179,19 +181,11 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         if T == 0:
             return torch.zeros_like(x, dtype=torch.float32)
 
-        # Per-token FP8 cast with packed UE8M0 group-32 scale — the
-        # dispatch side of Mega MoE reads this layout directly.
-        # Inline impl avoids deep_gemm's pack_ue8m0_to_int .all() assertion
-        # which does a CUDA→CPU sync illegal during stream capture.
-        x_fp8, x_sf = _per_token_cast_to_fp8_packed_ue8m0(x.contiguous(), gran_k=32)
         # Fill the symm-mem buffer slots.  Only the first T rows are
         # meaningful; the remainder was zero-initialised at buffer
         # alloc (0 is expert 0, but tokens past T aren't read because
         # the kernel uses y.size(0) as the effective token count).
-        buf.x[:T].copy_(x_fp8)
-        buf.x_sf[:T].copy_(x_sf)
-        buf.topk_idx[:T].copy_(indices.to(torch.int64).contiguous())
-        buf.topk_weights[:T].copy_(weights.to(torch.float32).contiguous())
+        self._input_packer.pack(x, weights, indices, buf, T)
 
         y = self._mega_y[:T]
         deep_gemm.fp8_fp4_mega_moe(

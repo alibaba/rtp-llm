@@ -16,7 +16,8 @@ import torch.nn.functional as F
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_freqs_cis_local
 from rtp_llm.models_py.modules.dsv4._metadata_triton import build_pool_slots
-from rtp_llm.models_py.modules.dsv4._nvtx import nvtx_range
+from rtp_llm.models_py.modules.dsv4.indexer_topk import select_indexer_topk
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
@@ -184,7 +185,7 @@ class Indexer(nn.Module):
             self.kv_cache = torch.zeros(bsz, T, D, dtype=dtype, device=device)
             return
         eb = self._kv_eb
-        with nvtx_range("dsv4.indexer.pool_bind_slot_meta"):
+        with record_function_range("dsv4.indexer.pool_bind_slot_meta"):
             fast = build_pool_slots(self._kv_block_table, bsz=bsz, T=T, eb=eb)
             if fast is None:
                 max_blocks = self._kv_block_table.shape[1]
@@ -213,7 +214,7 @@ class Indexer(nn.Module):
             _rt.record_if_level(
                 2, f"{self._dbg_prefix}_kv_bind_valid", valid.to(torch.int32)
             )
-        with nvtx_range("dsv4.indexer.pool_bind_kv"):
+        with record_function_range("dsv4.indexer.pool_bind_kv"):
             from rtp_llm.models_py.modules.dsv4._pool_triton import (
                 masked_gather_from_pool,
             )
@@ -255,7 +256,7 @@ class Indexer(nn.Module):
 
         device = compressed.device
         eb = int(self._kv_eb)
-        with nvtx_range("dsv4.indexer.write_current_slot_meta"):
+        with record_function_range("dsv4.indexer.write_current_slot_meta"):
             write_start = sp // self.compress_ratio
             pos = torch.arange(
                 write_start, write_start + n, device=device, dtype=torch.long
@@ -280,7 +281,7 @@ class Indexer(nn.Module):
             write_kv_to_pool,
         )
 
-        with nvtx_range("dsv4.indexer.write_current_to_pool"):
+        with record_function_range("dsv4.indexer.write_current_to_pool"):
             write_kv_to_pool(
                 compressed[:bsz].reshape(bsz * n, -1),
                 slot_mapping,
@@ -407,7 +408,11 @@ class Indexer(nn.Module):
                     q_r, kv_r, w_r, q_pos=None, compress_ratio=1
                 )  # [1, 1, T_r]
                 k_r = min(K, T_r)
-                topk_r = score.topk(k_r, dim=-1)[1].to(torch.int32)
+                topk_r = select_indexer_topk(
+                    score,
+                    k_r,
+                    lengths=compressed_len[r : r + 1].to(torch.int32),
+                )
                 out_topk_buffer[r : r + 1, :, :k_r] = topk_r
             return out_topk_buffer
         finally:
@@ -490,23 +495,15 @@ class Indexer(nn.Module):
                 compress_ratio=1,
             )
 
-            t_arange = torch.arange(T_max, device=score.device).view(1, 1, T_max)
-            score = torch.where(
-                t_arange < compressed_len,
-                score,
-                torch.full_like(score, float("-inf")),
-            )
-
             K_eff = min(K, T_max)
             out_topk_buffer.fill_(-1)
             if K_eff > 0:
-                topk_idxs = score.topk(K_eff, dim=-1)[1].to(torch.int32)
-                out_topk_buffer[:, :, :K_eff].copy_(topk_idxs)
-                k_arange = torch.arange(K, device=out_topk_buffer.device).view(1, 1, K)
-                out_topk_buffer.masked_fill_(
-                    k_arange >= compressed_len,
-                    -1,
+                topk_idxs = select_indexer_topk(
+                    score,
+                    K_eff,
+                    lengths=compressed_len.view(-1),
                 )
+                out_topk_buffer[:, :, :K_eff].copy_(topk_idxs)
 
             return out_topk_buffer
         finally:
@@ -647,7 +644,7 @@ class Indexer(nn.Module):
             # into the INDEXER_KV pool via its own bind/scatter lifecycle.
             if _dbg is not None:
                 self.compressor._dbg_prefix = f"{_dbg}_cmp"
-            with nvtx_range("dsv4.indexer.nested_compressor"):
+            with record_function_range("dsv4.indexer.nested_compressor"):
                 current_compressed = self.compressor(x, start_pos)
             self._write_current_compressed_to_pool(current_compressed, start_pos)
             if _dbg is not None:
@@ -666,7 +663,7 @@ class Indexer(nn.Module):
                     f"{_dbg}_compressor_kv_cache",
                     self.kv_cache[:bsz, : end_pos // ratio],
                 )
-            with nvtx_range("dsv4.indexer.weights_proj_full"):
+            with record_function_range("dsv4.indexer.weights_proj_full"):
                 weights = F.linear(x, self.weights_proj)
             weights = weights * (self.softmax_scale * self.n_heads**-0.5)
             if _dbg is not None:
@@ -693,7 +690,7 @@ class Indexer(nn.Module):
                     ).unsqueeze(0)
                 # Kernel computes thr=(q_pos+1)//ratio, matching the prior
                 # post-add mask (kv_col >= (q_pos+1)//ratio → -inf).
-                with nvtx_range("dsv4.indexer.score"):
+                with record_function_range("dsv4.indexer.score"):
                     from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
                         v4_indexer_score,
                     )
@@ -706,7 +703,7 @@ class Indexer(nn.Module):
                         compress_ratio=ratio,
                     )
             else:
-                with nvtx_range("dsv4.indexer.score"):
+                with record_function_range("dsv4.indexer.score"):
                     from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
                         v4_indexer_score,
                     )
@@ -721,32 +718,50 @@ class Indexer(nn.Module):
             if _dbg is not None:
                 _rt.record_if_level(2, f"{_dbg}_score_post_mask", index_score)
 
-            with nvtx_range("dsv4.indexer.topk"):
-                topk_idxs = index_score.topk(
-                    min(self.index_topk, end_pos // ratio), dim=-1
-                )[1]
-            if _dbg is not None:
-                _rt.record_if_level(2, f"{_dbg}_topk_pre_offset", topk_idxs)
-            with nvtx_range("dsv4.indexer.topk_postprocess"):
+            with record_function_range("dsv4.indexer.topk"):
+                k_eff = min(self.index_topk, end_pos // ratio)
+                topk_lengths = None
+                topk_offset: int | torch.Tensor = 0
                 if is_prefill:
                     if cp_on:
-                        q_pos_1b = (cp_ctx.global_positions + 1).unsqueeze(1)
+                        q_pos_1 = (cp_ctx.global_positions + 1).to(torch.int32)
                     else:
                         sp = (
                             int(start_pos.item())
                             if isinstance(start_pos, torch.Tensor)
                             else int(start_pos)
                         )
-                        q_pos_1b = torch.arange(
-                            sp + 1, sp + seqlen + 1, device=x.device
-                        ).unsqueeze(1)
-                    mask = topk_idxs >= (q_pos_1b // ratio)
-                    topk_idxs = torch.where(mask, -1, topk_idxs + offset)
+                        q_pos_1 = (
+                            sp
+                            + torch.arange(seqlen, device=x.device, dtype=torch.int32)
+                            + 1
+                        )
+                    topk_lengths = (
+                        (q_pos_1 // ratio)
+                        .unsqueeze(0)
+                        .expand(bsz, seqlen)
+                        .reshape(-1)
+                    )
+                topk_idxs = select_indexer_topk(
+                    index_score,
+                    k_eff,
+                    lengths=topk_lengths,
+                    offset=topk_offset,
+                )
+            if _dbg is not None:
+                _rt.record_if_level(2, f"{_dbg}_topk_pre_offset", topk_idxs)
+            with record_function_range("dsv4.indexer.topk_postprocess"):
+                if is_prefill:
+                    topk_idxs = torch.where(
+                        topk_idxs >= 0,
+                        topk_idxs + offset,
+                        topk_idxs,
+                    )
                 else:
                     topk_idxs = topk_idxs + offset
             if _dbg is not None:
                 _rt.record_if_level(2, f"{_dbg}_topk_final", topk_idxs)
-            return topk_idxs
+            return topk_idxs.long()
         finally:
             self._clear_nested_pool()
             self.kv_cache = None

@@ -23,8 +23,11 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+
 from .expert import Expert
 from .gate import Gate
+from .shared_expert import combine_routed_and_shared, get_shared_expert_executor
 from .strategies.base import MoeCfg, _resolve_forced, select_strategy
 
 
@@ -113,6 +116,7 @@ class MoE(nn.Module):
             storage="fp8",
             expert_weights=shared_w,
         )
+        self._shared_executor = get_shared_expert_executor()
 
         # --- Strategy selection + weight setup ---
         cfg = MoeCfg(
@@ -163,10 +167,14 @@ class MoE(nn.Module):
                     f"L{self.layer_id:02d}_moe_x_in_{dbg_pos_name}",
                     x[dbg_pos_mask].contiguous(),
                 )
-            self.gate._dbg_prefix = f"L{self.layer_id:02d}_moe_gate"
-        weights, indices = self.gate(x, input_ids.flatten())
-        if _dbg:
-            self.gate._dbg_prefix = None
+        with record_function_range("dsv4.moe.gate"):
+            if _dbg:
+                self.gate._dbg_prefix = f"L{self.layer_id:02d}_moe_gate"
+            try:
+                weights, indices = self.gate(x, input_ids.flatten())
+            finally:
+                if _dbg:
+                    self.gate._dbg_prefix = None
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_weights", weights)
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_indices", indices)
@@ -196,7 +204,15 @@ class MoE(nn.Module):
                 "to fall through to LocalLoopStrategy)."
             )
 
-        y = self._strategy(x, weights, indices)
+        with record_function_range("dsv4.moe.shared_expert_start"):
+            self._shared_executor.start(self.shared_experts, x)
+        try:
+            with record_function_range("dsv4.moe.routed_experts"):
+                y = self._strategy(x, weights, indices)
+        except Exception:
+            with record_function_range("dsv4.moe.shared_expert_finish"):
+                self._shared_executor.finish()
+            raise
 
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_routed_y", y)
@@ -206,7 +222,8 @@ class MoE(nn.Module):
                     f"L{self.layer_id:02d}_moe_routed_y_{dbg_pos_name}",
                     y[dbg_pos_mask].contiguous(),
                 )
-        shared_y = self.shared_experts(x).float()
+        with record_function_range("dsv4.moe.shared_expert_finish"):
+            shared_y = self._shared_executor.finish()
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_shared_y", shared_y)
             if dbg_pos_mask is not None:
@@ -215,11 +232,15 @@ class MoE(nn.Module):
                     f"L{self.layer_id:02d}_moe_shared_y_{dbg_pos_name}",
                     shared_y[dbg_pos_mask].contiguous(),
                 )
-        y = y + shared_y
-        if _dbg and dbg_pos_mask is not None:
-            _rt.record_if_level(
-                2,
-                f"L{self.layer_id:02d}_moe_y_{dbg_pos_name}",
-                y[dbg_pos_mask].contiguous(),
-            )
-        return y.type_as(x).view(shape)
+        if _dbg:
+            with record_function_range("dsv4.moe.add_shared"):
+                y = y + shared_y
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_moe_y_{dbg_pos_name}",
+                    y[dbg_pos_mask].contiguous(),
+                )
+            return y.type_as(x).view(shape)
+        with record_function_range("dsv4.moe.add_shared"):
+            return combine_routed_and_shared(y, shared_y, x.dtype).view(shape)
