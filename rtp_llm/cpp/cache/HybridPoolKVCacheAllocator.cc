@@ -9,6 +9,8 @@
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/OpData.h"
 
 namespace rtp_llm {
 
@@ -219,6 +221,64 @@ std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(
     const int gid = groupIdForLayerRegion(layer_id, region_name);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(
         layer_id, block_id, partition_count, partition_id);
+}
+
+void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockIdPair* end_ptr) {
+    if (end_ptr == begin_ptr) {
+        return;
+    }
+
+    auto copy_type = BatchCopyParams::get_copy_type(
+        allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU,
+        allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU);
+
+    size_t copy_num = 0;
+    for (const auto& layers : config_.global_layer_ids) {
+        copy_num += layers.size();
+    }
+    copy_num *= static_cast<size_t>(end_ptr - begin_ptr);
+
+    BatchCopyParams copy_params;
+    copy_params.reserve(copy_type, copy_num);
+
+    for (auto it = begin_ptr; it != end_ptr; ++it) {
+        auto [src_block_index, dest_block_index] = *it;
+
+        for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
+            RTP_LLM_CHECK_WITH_INFO(
+                static_cast<size_t>(gid) < config_.cache_specs.size(), "missing cache spec for group %d", gid);
+            RTP_LLM_CHECK_WITH_INFO(
+                static_cast<size_t>(gid) < config_.global_layer_ids.size(), "missing layer ids for group %d", gid);
+
+            const size_t kv_block_size_bytes = config_.cache_specs[static_cast<size_t>(gid)]->block_size_bytes();
+            const size_t scale_block_bytes   = config_.cache_specs[static_cast<size_t>(gid)]->scale_block_size_bytes();
+
+            for (int layer_id : config_.global_layer_ids[static_cast<size_t>(gid)]) {
+                auto src_addr_info =
+                    kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, src_block_index);
+                auto dst_addr_info =
+                    kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, dest_block_index);
+
+                if (!src_addr_info.kv_addr || !dst_addr_info.kv_addr) {
+                    RTP_LLM_LOG_ERROR("Failed to get block address for group %d layer %d, src_block %d, dst_block %d",
+                                      gid,
+                                      layer_id,
+                                      src_block_index,
+                                      dest_block_index);
+                    continue;
+                }
+
+                copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes, copy_type);
+
+                if (scale_block_bytes > 0 && src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
+                    copy_params.add(
+                        dst_addr_info.kv_scale_addr, src_addr_info.kv_scale_addr, scale_block_bytes, copy_type);
+                }
+            }
+        }
+    }
+
+    execBatchCopy(copy_params);
 }
 
 size_t HybridPoolKVCacheAllocator::freeBlocksNum() const {
