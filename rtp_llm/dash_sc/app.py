@@ -8,6 +8,7 @@ asyncio event loop (the ``enqueue`` coroutine needs one) and its own
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -23,6 +24,8 @@ from rtp_llm.dash_sc.server import DashScGrpcServer
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.openai.renderer_factory import ChatRendererFactory
+from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
 
 # Env key that flips the process into reverse-proxy mode. Read once at
@@ -31,7 +34,7 @@ from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 
 
-def _derive_echo_prefix_ids(model_config: Any, generate_env_config: Any) -> List[int]:
+def _derive_echo_prefix_ids(generate_env_config: Any, base_tok: Any) -> List[int]:
     """Encode ``generate_env_config.think_start_tag`` once to produce the prefill token ids.
 
     Disabled (returns ``[]``) when ``THINK_MODE`` env is off or ``think_start_tag`` is empty;
@@ -44,11 +47,6 @@ def _derive_echo_prefix_ids(model_config: Any, generate_env_config: Any) -> List
     if not tag:
         return []
     try:
-        base_tok = TokenizerFactory.create(
-            model_config.ckpt_path,
-            model_config.tokenizer_path,
-            model_config.model_type,
-        )
         hf_tok = getattr(base_tok, "tokenizer", base_tok)
         ids = list(hf_tok.encode(tag, add_special_tokens=False))
     except Exception as e:
@@ -56,6 +54,97 @@ def _derive_echo_prefix_ids(model_config: Any, generate_env_config: Any) -> List
         return []
     logging.info("[DashScApp] echo_prefix_ids=%s (think_start_tag=%r)", ids, tag)
     return ids
+
+
+def _derive_stop_word_ids_list(
+    model_config: Any, py_env_configs: PyEnvConfigs, base_tok: Any
+) -> List[List[int]]:
+    """Mirror ``openai_endpoint.__init__`` (rtp_llm/openai/openai_endpoint.py:75-150)
+    stop-words assembly so the dash-sc gRPC path -- which bypasses the OpenAI endpoint
+    because input is pre-tokenized upstream by dashscope-serving -- ends up with the
+    same stop list. Sources merged in this order:
+      1. model special_tokens (stop_words_id_list / stop_words_str_list);
+      2. renderer-injected extras (e.g. GLM-5's <|user|>/<|observation|> via
+         ChatGlm45Renderer._setup_stop_words);
+      3. env-supplied stop_words_str / stop_words_list (with force_stop_words
+         override, mirroring HTTP path semantics);
+      4. str<->id bidirectional sync;
+      5. dedup.
+    Fail-open: any error returns [] and logs a warning so a renderer or env
+    misconfiguration cannot break dash-sc startup.
+    """
+    try:
+        gec = py_env_configs.generate_env_config
+        special_tokens = model_config.special_tokens
+
+        # Step 1: baseline from model config
+        stop_words_id_list: List[List[int]] = [
+            list(w) for w in (special_tokens.stop_words_id_list or [])
+        ]
+        stop_words_str_list: List[str] = list(special_tokens.stop_words_str_list or [])
+
+        # Step 2: renderer extras
+        params = RendererParams(
+            model_type=model_config.model_type,
+            max_seq_len=model_config.max_seq_len,
+            eos_token_id=getattr(base_tok, "eos_token_id", None)
+            or special_tokens.eos_token_id,
+            stop_word_ids_list=list(stop_words_id_list),
+            template_type=model_config.template_type,
+            ckpt_path=model_config.ckpt_path,
+        )
+        renderer = ChatRendererFactory.get_renderer(
+            base_tok,
+            params,
+            gec,
+            py_env_configs.render_config,
+            model_config.ckpt_path,
+            getattr(py_env_configs, "misc_config", None),
+            getattr(py_env_configs, "vit_config", None),
+        )
+        stop_words_id_list.extend(
+            [list(w) for w in (renderer.get_all_extra_stop_word_ids_list() or [])]
+        )
+
+        # Step 3: env-supplied (mirror openai_endpoint.py:114-130 incl force_stop_words)
+        env_str_list = json.loads(gec.stop_words_str) if gec.stop_words_str else []
+        env_id_list = json.loads(gec.stop_words_list) if gec.stop_words_list else []
+        if gec.force_stop_words:
+            stop_words_str_list = list(env_str_list)
+            stop_words_id_list = [list(w) for w in env_id_list]
+        else:
+            stop_words_str_list = stop_words_str_list + list(env_str_list)
+            stop_words_id_list = stop_words_id_list + [list(w) for w in env_id_list]
+
+        # Step 4: str<->id sync (mirror openai_endpoint.py:132-146)
+        for ids in list(stop_words_id_list):
+            try:
+                w = base_tok.decode(ids)
+                if w:
+                    stop_words_str_list.append(w)
+            except Exception:
+                pass
+        for s in list(stop_words_str_list):
+            try:
+                ids = base_tok.encode(s)
+                if ids:
+                    stop_words_id_list.append(list(ids))
+            except Exception:
+                pass
+
+        # Step 5: dedup
+        seen = set()
+        out: List[List[int]] = []
+        for ids in stop_words_id_list:
+            t = tuple(ids)
+            if t and t not in seen:
+                seen.add(t)
+                out.append(list(ids))
+    except Exception as e:
+        logging.warning("[DashScApp] stop_word derive failed: %s", e)
+        return []
+    logging.info("[DashScApp] derived stop_word_ids_list=%s", out)
+    return out
 
 
 class DashScApp:
@@ -168,8 +257,16 @@ class DashScApp:
                     model_config=model_config,
                 )
 
+                base_tok = TokenizerFactory.create(
+                    model_config.ckpt_path,
+                    model_config.tokenizer_path,
+                    model_config.model_type,
+                )
                 echo_prefix_ids = _derive_echo_prefix_ids(
-                    model_config, self.py_env_configs.generate_env_config
+                    self.py_env_configs.generate_env_config, base_tok
+                )
+                extra_stop_word_ids = _derive_stop_word_ids_list(
+                    model_config, self.py_env_configs, base_tok
                 )
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
@@ -177,6 +274,7 @@ class DashScApp:
                     port=port,
                     server_id=self.server_config.frontend_server_id,
                     echo_prefix_ids=echo_prefix_ids,
+                    extra_stop_word_ids=extra_stop_word_ids,
                 )
 
             loop = self._start_enqueue_loop()
