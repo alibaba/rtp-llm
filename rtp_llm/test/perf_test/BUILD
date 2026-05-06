@@ -121,6 +121,19 @@ py_test(
         "--reserver_runtime_mem_mb", "32768",
         "--max_context_batch_size", "1",
     ],
+    env = {
+        "LOAD_PYTHON_MODEL": "1",
+        "ENABLE_FMHA": "on",
+        "DG_JIT_CPP_STANDARD": "20",
+        "DETERMINISTIC_GEMM": "1",
+        "ENABLE_STABLE_SCATTER_ADD": "ON",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "DSV4_USE_MEGA_MOE": "1",
+    },
     tags = ["manual"],
 )
 
@@ -167,6 +180,19 @@ py_test(
         "--reserver_runtime_mem_mb", "32768",
         "--max_context_batch_size", "1",
     ],
+    env = {
+        "LOAD_PYTHON_MODEL": "1",
+        "ENABLE_FMHA": "on",
+        "DG_JIT_CPP_STANDARD": "20",
+        "DETERMINISTIC_GEMM": "1",
+        "ENABLE_STABLE_SCATTER_ADD": "ON",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "DSV4_USE_MEGA_MOE": "1",
+    },
     tags = ["manual"],
 )
 
@@ -189,8 +215,8 @@ py_test(
     data = ["//rtp_llm:sdk"],
     args = [
         "--model_type", "deepseek_v4",
-        "--checkpoint_path", "/data0/baowending.bwd/DeepSeek-V4-Flash",
-        "--tokenizer_path", "/data0/baowending.bwd/DeepSeek-V4-Flash",
+        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--batch_size", "1",
         "--input_len", "4096,8192",
         "--partial", "1",
@@ -209,6 +235,31 @@ py_test(
         "--enable_cuda_graph", "1",
         "--reserver_runtime_mem_mb", "32768",
         "--max_context_batch_size", "1"
+    ],
+    env = {
+        "LOAD_PYTHON_MODEL": "1",
+        "ENABLE_FMHA": "on",
+        "DG_JIT_CPP_STANDARD": "20",
+        "DETERMINISTIC_GEMM": "1",
+        "ENABLE_STABLE_SCATTER_ADD": "ON",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "DSV4_USE_MEGA_MOE": "1",
+    },
+    tags = ["manual"],
+)
+
+# DeepSeek V4-Flash perf coverage on SM100 (B300 / GB200).
+#   v4_flash_cp4_ep4_prefill_64k_perf  → CP=4 EP=4 64k prefill timeline
+#   v4_flash_dp4_decode_grid_perf      → DP=4 EP=4 captured-graph decode grid
+test_suite(
+    name = "perf_dsv4_v4_flash",
+    tests = [
+        ":v4_flash_cp4_ep4_prefill_64k_perf",
+        ":v4_flash_dp4_decode_grid_perf",
     ],
     tags = ["manual"],
 )
