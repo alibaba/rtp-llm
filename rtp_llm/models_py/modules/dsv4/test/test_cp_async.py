@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -7,6 +8,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     CPSyncGatherHandle,
     CudaAsyncCPGatherImpl,
     SyncCPGatherImpl,
+    build_cp_context,
     build_cp_gather_impl,
     cp_all_gather_full,
     cp_wait_gather_full,
@@ -116,6 +118,77 @@ def test_cp_wait_gather_full_rejects_unknown_handle():
     )
 
 
+def test_build_cp_context_single_stream_direct_slice_unpad_restore():
+    cp_info = SimpleNamespace(
+        prefill_qkv_padding_mask=torch.tensor(
+            [1, 1, 1, 1, 1, 1, 0, 0], dtype=torch.int32
+        ),
+        prefill_qkv_restore_indice=torch.tensor(
+            [0, 1, 6, 7, 2, 3, 4, 5], dtype=torch.int32
+        ),
+        prefill_cp_chunk_lengths=torch.tensor([4], dtype=torch.int32),
+        prefill_actual_input_lengths_cpu=torch.tensor([6], dtype=torch.int32),
+    )
+
+    ctx = build_cp_context(
+        cp_info,
+        cp_size=2,
+        cp_rank=0,
+        chunk_length=4,
+        device=torch.device("cpu"),
+        position_offset=10,
+    )
+
+    assert ctx.seq_len_full == 6
+    assert ctx.prefix_length == 10
+    assert torch.equal(ctx.relative_positions, torch.tensor([0, 1, 6, 7]))
+    assert torch.equal(ctx.global_positions, torch.tensor([10, 11, 16, 17]))
+    assert torch.equal(ctx.unpad_restore, cp_info.prefill_qkv_restore_indice[:6].long())
+
+
+def test_build_cp_context_rejects_multi_prefill_stream():
+    cp_info = SimpleNamespace(
+        prefill_qkv_padding_mask=torch.ones(16, dtype=torch.int32),
+        prefill_qkv_restore_indice=torch.arange(16, dtype=torch.int32),
+        prefill_cp_chunk_lengths=torch.tensor([4, 4], dtype=torch.int32),
+        prefill_actual_input_lengths_cpu=torch.tensor([8, 8], dtype=torch.int32),
+    )
+
+    _assert_raises(
+        lambda: build_cp_context(
+            cp_info,
+            cp_size=2,
+            cp_rank=0,
+            chunk_length=8,
+            device=torch.device("cpu"),
+        ),
+        ValueError,
+        "single prefill stream",
+    )
+
+
+def test_build_cp_context_moves_restore_indices_independently_when_cuda_available():
+    if not torch.cuda.is_available():
+        return
+    cp_info = SimpleNamespace(
+        prefill_qkv_padding_mask=torch.ones(8, dtype=torch.int32, device="cuda"),
+        prefill_qkv_restore_indice=torch.arange(8, dtype=torch.int32),
+        prefill_cp_chunk_lengths=torch.tensor([4], dtype=torch.int32),
+        prefill_actual_input_lengths_cpu=torch.tensor([6], dtype=torch.int32),
+    )
+
+    ctx = build_cp_context(
+        cp_info,
+        cp_size=2,
+        cp_rank=0,
+        chunk_length=4,
+        device=torch.device("cuda"),
+    )
+
+    assert ctx.unpad_restore.device.type == "cuda"
+    assert torch.equal(ctx.unpad_restore.cpu(), torch.arange(6, dtype=torch.long))
+
+
 if __name__ == "__main__":
     test_cp_all_gather_full_restores_2d_and_unpads()
     print("PASS test_cp_all_gather_full_restores_2d_and_unpads")
@@ -129,4 +202,10 @@ if __name__ == "__main__":
     print("PASS test_cp_gather_default_impl_is_cuda_async")
     test_cp_wait_gather_full_rejects_unknown_handle()
     print("PASS test_cp_wait_gather_full_rejects_unknown_handle")
+    test_build_cp_context_single_stream_direct_slice_unpad_restore()
+    print("PASS test_build_cp_context_single_stream_direct_slice_unpad_restore")
+    test_build_cp_context_rejects_multi_prefill_stream()
+    print("PASS test_build_cp_context_rejects_multi_prefill_stream")
+    test_build_cp_context_moves_restore_indices_independently_when_cuda_available()
+    print("PASS test_build_cp_context_moves_restore_indices_independently_when_cuda_available")
     print("ALL TESTS PASSED")

@@ -90,15 +90,15 @@ class TestIndexerDecodeOp(unittest.TestCase):
     K = 32
 
     def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("Indexer decode op is CUDA-only")
         torch.manual_seed(0)
 
     # ----------------------------------------------------------------
     # 1) Reference path == pure-Python oracle (exact match expected)
     # ----------------------------------------------------------------
     def test_reference_path_matches_indexer_einsum(self):
-        device = (
-            torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-        )
+        device = torch.device("cuda:0")
         B, Q, H, D = self.B, self.Q_LEN, self.H_IDX, self.D_IDX
         T = self.T_COMPRESSED
 
@@ -180,9 +180,7 @@ class TestIndexerDecodeOp(unittest.TestCase):
     # 3) compressed_len_per_req < T_max masks invalid range
     # ----------------------------------------------------------------
     def test_short_compressed_len(self):
-        device = (
-            torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-        )
+        device = torch.device("cuda:0")
         B, Q, H, D = self.B, self.Q_LEN, self.H_IDX, self.D_IDX
         T = self.T_COMPRESSED  # 64
         valid_len = 10
@@ -230,7 +228,7 @@ class TestIndexerDecodeOp(unittest.TestCase):
     # 4) shape & dtype sanity
     # ----------------------------------------------------------------
     def test_returns_same_buffer_with_correct_shape_dtype(self):
-        device = torch.device("cpu")
+        device = torch.device("cuda:0")
         B, Q, H, D = 2, 1, 4, 128
         T = 16
         K = 8

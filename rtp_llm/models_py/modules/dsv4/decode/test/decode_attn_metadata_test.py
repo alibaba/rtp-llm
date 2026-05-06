@@ -51,19 +51,17 @@ def _oracle_cmp_slot(
 def _oracle_window_idxs(
     start_pos: List[int], q_len: int, window: int
 ) -> List[List[List[int]]]:
-    """[B, q_len, window] of request-local ring slots, -1 for OOB."""
+    """[B, q_len, window] left-aligned request-local ring slots."""
     out = []
     for sp in start_pos:
         per_req = []
         for s in range(q_len):
             abs_pos = sp + s
-            row = []
-            for k in range(window):
-                desired = abs_pos - (window - 1) + k
-                if desired < 0:
-                    row.append(-1)
-                else:
-                    row.append(desired % window)
+            if abs_pos >= window - 1:
+                ring = abs_pos % window
+                row = [((ring + 1 + k) % window) for k in range(window)]
+            else:
+                row = list(range(abs_pos + 1)) + [-1] * (window - abs_pos - 1)
             per_req.append(row)
         out.append(per_req)
     return out
@@ -204,9 +202,9 @@ class TestWindowTopkIdxs(unittest.TestCase):
             device=device,
         )
         row = meta.topk_window_idxs[0, 0].tolist()
-        # Last 6 positions in [win] should be 0..5; first 122 should be -1.
-        self.assertEqual(row[:122], [-1] * 122)
-        self.assertEqual(row[122:], [0, 1, 2, 3, 4, 5])
+        # Left-aligned: first 6 positions are valid, tail is -1.
+        self.assertEqual(row[:6], [0, 1, 2, 3, 4, 5])
+        self.assertEqual(row[6:], [-1] * 122)
 
     def test_zero_pos(self):
         device = torch.device("cpu")
@@ -222,8 +220,7 @@ class TestWindowTopkIdxs(unittest.TestCase):
             device=device,
         )
         row = meta.topk_window_idxs[0, 0].tolist()
-        # abs_pos=0: only position 0 valid, in last slot
-        self.assertEqual(row, [-1, -1, -1, -1, -1, -1, -1, 0])
+        self.assertEqual(row, [0, -1, -1, -1, -1, -1, -1, -1])
 
 
 class TestCompressedLens(unittest.TestCase):
