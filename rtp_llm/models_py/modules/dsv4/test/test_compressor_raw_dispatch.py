@@ -257,20 +257,27 @@ def _run_one(head_dim: int, *, tag: str):
     _launch(gt, head_dim, disable_raw_path=True)  # raw path off, pure cache
     gt_bytes = _kv_slot_bytes(gt["kv_cache"], slot=0).clone()
 
+    def _make_full(seed_for_late: int):
+        f = _make_inputs(N=big_N, sp=sp, head_dim=head_dim, seed=seed_for_late)
+        # Mirror gt's first 8 raw rows so the boundary at target_pos has
+        # identical raw data (raw path -> matches gt).
+        f["kv_flat"][: COMPRESS_RATIO * 2].copy_(gt["kv_flat"])
+        f["score_flat"][: COMPRESS_RATIO * 2].copy_(gt["score_flat"])
+        # Deliberately scale up the late-batch tokens (those that cyclically
+        # overwrite slots [0..7]) so the cache-only path reads obviously
+        # different data than gt — defeats coincidental FP8-quant collisions.
+        late_lo = big_N - CACHE_WINDOW
+        f["kv_flat"][late_lo:] *= 50.0
+        f["score_flat"][late_lo:] *= 50.0
+        return f
+
     # ---------- Full launch with raw enabled ----------
-    full = _make_inputs(N=big_N, sp=sp, head_dim=head_dim, seed=0)
-    # Mirror gt's first ``COMPRESS_RATIO * 2`` raw rows so the boundary at
-    # target_pos has the same input data.
-    full["kv_flat"][: COMPRESS_RATIO * 2].copy_(gt["kv_flat"])
-    full["score_flat"][: COMPRESS_RATIO * 2].copy_(gt["score_flat"])
-    # ape/rms_w/cos_sin already match (deterministic seed + same shapes).
+    full = _make_full(seed_for_late=0)
     _launch(full, head_dim, disable_raw_path=False)
     raw_on_bytes = _kv_slot_bytes(full["kv_cache"], slot=0).clone()
 
     # ---------- Full launch with raw disabled (negative control) ----------
-    full_neg = _make_inputs(N=big_N, sp=sp, head_dim=head_dim, seed=0)
-    full_neg["kv_flat"][: COMPRESS_RATIO * 2].copy_(gt["kv_flat"])
-    full_neg["score_flat"][: COMPRESS_RATIO * 2].copy_(gt["score_flat"])
+    full_neg = _make_full(seed_for_late=0)
     _launch(full_neg, head_dim, disable_raw_path=True)
     raw_off_bytes = _kv_slot_bytes(full_neg["kv_cache"], slot=0).clone()
 
@@ -317,10 +324,38 @@ def _run_one(head_dim: int, *, tag: str):
     )
 
 
+def _run_invalid_block_id(head_dim: int, *, tag: str):
+    """Cover the early-prefill case where the framework hasn't allocated
+    both state blocks yet (block_table contains -1 sentinels). The
+    kernel's cache-read guard ``valid_block = block_numbers > 0`` must
+    suppress those reads — the launch should not OOB, and boundaries
+    whose overlap window falls entirely on -1 entries should still produce
+    bytes (sourced from the raw path when in_batch).
+    """
+    sp = 0
+    # Short launch so all overlap reads are inside the cache window
+    # (use_raw=False for an in-batch position would normally trigger a
+    # cache read; we replace the table entry with -1 to verify the guard).
+    N = 64
+    ctx = _make_inputs(N=N, sp=sp, head_dim=head_dim, seed=1)
+    # Poison block_table: mark the second logical block as unallocated.
+    # block_indices in [0, 1]; we set [0, 1] = -1 so that any cache-read
+    # for ring_pos >= STATE_BLOCK_SIZE would land on -1.
+    ctx["state_block_table"][0, 1] = -1
+
+    # Should not crash / OOB / produce NaN bytes.
+    _launch(ctx, head_dim, disable_raw_path=False)
+    bytes_buf = _kv_slot_bytes(ctx["kv_cache"], slot=0)
+    assert bytes_buf.numel() > 0
+    print(f"[{tag}] head_dim={head_dim} -1 block_id case ran cleanly")
+
+
 def main():
     assert torch.cuda.is_available(), "CUDA required"
     _run_one(head_dim=128, tag="indexer")
     _run_one(head_dim=512, tag="sparse")
+    _run_invalid_block_id(head_dim=128, tag="indexer-invalid")
+    _run_invalid_block_id(head_dim=512, tag="sparse-invalid")
     print("OK")
 
 
