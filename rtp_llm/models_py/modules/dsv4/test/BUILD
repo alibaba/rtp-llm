@@ -48,6 +48,20 @@ py_test(
     exec_properties = {"gpu": "H20"},
 )
 
+# Differential test for run_fused_compress_kv_write's raw-vs-cache dispatch
+# (state pool is a 2*256=512-slot cyclic ring — boundaries whose overlap
+# falls in the overwritten prefix must read raw kv_flat/score_flat).
+py_test(
+    name = "test_compressor_raw_dispatch",
+    srcs = ["test_compressor_raw_dispatch.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
 # P1 — vLLM-vendored persistent radix-select TopK for the indexer decode
 # hot path.  Replaces torch.topk (~30us → ~5-10us at K=512/T=2048).
 # Auto-skipped via pytest.mark.skipif when the .so binding is missing.

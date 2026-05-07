@@ -22,7 +22,7 @@ hide the constexpr table per ``head_dim``.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import triton
@@ -91,6 +91,17 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     block_table_ptr,
     block_table_stride,
     block_size,
+    # Raw kv/score (current batch) + ape + batch context — see indexer
+    # kernel comments for rationale (cyclic state_cache cannot retain
+    # earlier-batch data after later writes overwrite it).
+    kv_raw_ptr,
+    kv_raw_stride,
+    score_raw_ptr,
+    score_raw_stride,
+    ape_ptr,
+    ape_stride,
+    seq_start,
+    n_batch,
     rms_norm_weight_ptr,
     rms_norm_eps,
     cos_sin_cache_ptr,
@@ -109,6 +120,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
     KV_BLOCK_STRIDE: tl.constexpr,
+    CACHE_WINDOW: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
 
@@ -126,19 +138,70 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)
     pos = start + tokens
     mask_pos = pos >= 0
-
-    block_indices = pos // block_size
-    block_numbers = tl.load(
-        block_table_ptr + req_idx * block_table_stride + block_indices,
-        mask=mask_pos,
-        other=0,
-    )
-    block_offsets = pos % block_size
     head_offset = (tokens >= COMPRESS_RATIO).to(tl.int32) * HEAD_SIZE
 
     block = tl.arange(0, TRITON_BLOCK_SIZE)
     mask = block < HEAD_SIZE
-    block_numbers_i64 = block_numbers.to(tl.int64)
+
+    # ── Source dispatch: raw only for the prefix overwritten in cache ──
+    # State pool is a 512-slot cyclic buffer per request (2 fixed blocks *
+    # 256 entries). Cache only retains positions [sp + n_batch - 512,
+    # sp + n_batch); earlier in-batch positions were overwritten by later
+    # _save_partial_states writes in this same launch and must come from
+    # raw tensors. Out-of-batch (previous-batch overlap) stays in cache.
+    flat_idx = pos - seq_start
+    in_batch = mask_pos & (flat_idx >= 0) & (flat_idx < n_batch)
+    use_raw = in_batch & (flat_idx < n_batch - CACHE_WINDOW)
+    flat_idx_safe = tl.where(use_raw, flat_idx, 0)
+
+    raw_mask = use_raw[:, None] & mask[None, :]
+    kv_from_raw = tl.load(
+        kv_raw_ptr
+        + flat_idx_safe[:, None] * kv_raw_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    score_from_raw = tl.load(
+        score_raw_ptr
+        + flat_idx_safe[:, None] * score_raw_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    ape_rows = pos % COMPRESS_RATIO
+    ape_rows_safe = tl.where(use_raw, ape_rows, 0)
+    ape_vals = tl.load(
+        ape_ptr
+        + ape_rows_safe[:, None] * ape_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    score_from_raw = score_from_raw + ape_vals
+
+    # State-cache path (out-of-batch positions only). Guards block_id sentinels.
+    # State pool is a CACHE_WINDOW-slot cyclic ring per request; the
+    # block_table only covers the FIXED_BLOCKS_PER_REQ logical entries
+    # (block_indices in [0, CACHE_WINDOW/block_size)). Wrap pos into the
+    # ring before computing block_indices/offsets so absolute positions
+    # >= CACHE_WINDOW don't OOB the table.
+    use_cache = mask_pos & ~use_raw
+    ring_pos = pos % CACHE_WINDOW
+    block_indices = ring_pos // block_size
+    block_indices_safe = tl.where(use_cache, block_indices, 0)
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + block_indices_safe,
+        mask=use_cache,
+        other=0,
+    )
+    valid_block = block_numbers > 0
+    block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
+    block_offsets_raw = ring_pos % block_size
+    block_offsets = tl.where(mask_pos, block_offsets_raw, 0)
 
     row_base = (
         state_cache_ptr
@@ -146,22 +209,25 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
         + block_offsets * state_cache_stride1
         + head_offset
     )
-
-    combined_mask = mask_pos[:, None] & mask[None, :]
-
-    score = tl.load(
-        row_base[:, None] + STATE_WIDTH + block[None, :],
-        mask=combined_mask,
-        other=float("-inf"),
+    cache_mask = (use_cache & valid_block)[:, None] & mask[None, :]
+    kv_from_cache = tl.load(
+        row_base[:, None] + block[None, :], mask=cache_mask, other=0.0
     )
-    score = tl.softmax(score, dim=0)
-
-    kv = tl.load(
-        row_base[:, None] + block[None, :],
-        mask=combined_mask,
+    score_from_cache = tl.load(
+        row_base[:, None] + STATE_WIDTH + block[None, :],
+        mask=cache_mask,
         other=0.0,
     )
 
+    kv = tl.where(use_raw[:, None], kv_from_raw, kv_from_cache)
+    score = tl.where(use_raw[:, None], score_from_raw, score_from_cache)
+
+    final_valid = use_raw | (use_cache & valid_block)
+    combined_mask = final_valid[:, None] & mask[None, :]
+
+    score = tl.where(combined_mask, score, float("-inf"))
+    score = tl.softmax(score, dim=0)
+    kv = tl.where(combined_mask, kv, 0.0)
     compressed_kv = tl.sum(kv * score, axis=0)
 
     rms_w = tl.load(rms_norm_weight_ptr + block, mask=mask, other=0.0)
@@ -259,6 +325,21 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     block_table_ptr,
     block_table_stride,
     block_size,
+    # Raw kv/score (current batch) + ape + batch context. Used for any
+    # overlap-window position whose absolute ``pos`` falls inside the
+    # current batch (``seq_start <= pos < seq_start + n_batch``); we read
+    # the per-token contribution directly from these tensors instead of
+    # the cyclic state_cache, which only retains the latest ~512 tokens
+    # per request and would have been overwritten by later writes in
+    # this same launch.
+    kv_raw_ptr,
+    kv_raw_stride,
+    score_raw_ptr,
+    score_raw_stride,
+    ape_ptr,
+    ape_stride,
+    seq_start,
+    n_batch,
     rms_norm_weight_ptr,
     rms_norm_eps,
     cos_sin_cache_ptr,
@@ -277,6 +358,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
     KV_BLOCK_STRIDE: tl.constexpr,
+    CACHE_WINDOW: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
 
@@ -294,19 +376,72 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)
     pos = start + tokens
     mask_pos = pos >= 0
-
-    block_indices = pos // block_size
-    block_numbers = tl.load(
-        block_table_ptr + req_idx * block_table_stride + block_indices,
-        mask=mask_pos,
-        other=0,
-    )
-    block_offsets = pos % block_size
     head_offset = (tokens >= COMPRESS_RATIO).to(tl.int32) * HEAD_SIZE
 
     block = tl.arange(0, TRITON_BLOCK_SIZE)
     mask = block < HEAD_SIZE
-    block_numbers_i64 = block_numbers.to(tl.int64)
+
+    # ── Source dispatch: raw tensors only for the part overwritten in cache ──
+    # State pool per request = 2 blocks * 256 entries = 512 slots (cyclic).
+    # When n_batch > 512, _save_partial_states overwrites the earliest
+    # (n_batch - 512) slots within this same launch; cache only retains
+    # positions [sp + n_batch - 512, sp + n_batch). Everything else (in-batch
+    # tail + previous-batch overlap) stays valid in cache.
+    flat_idx = pos - seq_start
+    in_batch = mask_pos & (flat_idx >= 0) & (flat_idx < n_batch)
+    use_raw = in_batch & (flat_idx < n_batch - CACHE_WINDOW)
+    flat_idx_safe = tl.where(use_raw, flat_idx, 0)
+
+    # Raw path: kv_raw[flat_idx, head_offset:head_offset+HEAD_SIZE]
+    raw_mask = use_raw[:, None] & mask[None, :]
+    kv_from_raw = tl.load(
+        kv_raw_ptr
+        + flat_idx_safe[:, None] * kv_raw_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    score_from_raw = tl.load(
+        score_raw_ptr
+        + flat_idx_safe[:, None] * score_raw_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    # Add ape (state_cache stores score+ape; raw path adds it here)
+    ape_rows = pos % COMPRESS_RATIO
+    ape_rows_safe = tl.where(use_raw, ape_rows, 0)
+    ape_vals = tl.load(
+        ape_ptr
+        + ape_rows_safe[:, None] * ape_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    score_from_raw = score_from_raw + ape_vals
+
+    # State-cache path. State pool is a CACHE_WINDOW-slot cyclic ring per
+    # request (FIXED_BLOCKS_PER_REQ * block_size = CACHE_WINDOW); the
+    # block_table only has FIXED_BLOCKS_PER_REQ entries, so wrap absolute
+    # pos into the ring before deriving block_indices/offsets to avoid OOB
+    # for pos >= CACHE_WINDOW. Guard against -1 (rolled out) / 0
+    # (unallocated) block IDs in the block_table.
+    use_cache = mask_pos & ~use_raw
+    ring_pos = pos % CACHE_WINDOW
+    block_indices = ring_pos // block_size
+    block_indices_safe = tl.where(use_cache, block_indices, 0)
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + block_indices_safe,
+        mask=use_cache,
+        other=0,
+    )
+    valid_block = block_numbers > 0
+    block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
+    block_offsets_raw = ring_pos % block_size
+    block_offsets = tl.where(mask_pos, block_offsets_raw, 0)
 
     row_base = (
         state_cache_ptr
@@ -314,21 +449,28 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
         + block_offsets * state_cache_stride1
         + head_offset
     )
-
-    combined_mask = mask_pos[:, None] & mask[None, :]
-
-    score = tl.load(
-        row_base[:, None] + STATE_WIDTH + block[None, :],
-        mask=combined_mask,
-        other=float("-inf"),
+    cache_mask = (use_cache & valid_block)[:, None] & mask[None, :]
+    kv_from_cache = tl.load(
+        row_base[:, None] + block[None, :], mask=cache_mask, other=0.0
     )
-    score = tl.softmax(score, dim=0)
-
-    kv = tl.load(
-        row_base[:, None] + block[None, :],
-        mask=combined_mask,
+    score_from_cache = tl.load(
+        row_base[:, None] + STATE_WIDTH + block[None, :],
+        mask=cache_mask,
         other=0.0,
     )
+
+    # ── Combine: pick raw or cache per position ──
+    kv = tl.where(use_raw[:, None], kv_from_raw, kv_from_cache)
+    score = tl.where(use_raw[:, None], score_from_raw, score_from_cache)
+
+    # Final mask: position must contribute (either source produced data)
+    final_valid = use_raw | (use_cache & valid_block)
+    combined_mask = final_valid[:, None] & mask[None, :]
+
+    score = tl.where(combined_mask, score, float("-inf"))
+    score = tl.softmax(score, dim=0)
+
+    kv = tl.where(combined_mask, kv, 0.0)
 
     compressed_kv = tl.sum(kv * score, axis=0)
 
@@ -457,6 +599,17 @@ def run_fused_compress_kv_write(
     cos_sin_cache: torch.Tensor,  # [max_pos, rope_head_dim] fp32
     kv_cache: torch.Tensor,  # [num_blocks, kv_block_size, ENTRY_BYTES] uint8 (per-block padded)
     kv_slot_mapping: torch.Tensor,  # [N] int64 — KV-pool slot per token (-1 if non-boundary)
+    # Raw current-batch tensors + ape + batch context. The state pool is a
+    # cyclic buffer of only ~512 slots per request (2 fixed blocks * 256
+    # entries), so within a single launch later writes overwrite earlier
+    # tokens' state. The kernel reads these raw tensors directly for any
+    # overlap-window position whose absolute pos falls inside the current
+    # batch [seq_start, seq_start + n_batch).
+    kv_raw: torch.Tensor,  # [N_batch, (1+overlap)*head_dim] fp32 contiguous
+    score_raw: torch.Tensor,  # [N_batch, (1+overlap)*head_dim] fp32 contiguous
+    ape: torch.Tensor,  # [compress_ratio, (1+overlap)*head_dim] fp32
+    seq_start: int,  # absolute position of kv_raw[0] (== sp_int)
+    disable_raw_path: bool = False,  # decode path: skip raw, read cache only
     *,
     head_dim: int,
     rope_head_dim: int,
@@ -475,6 +628,7 @@ def run_fused_compress_kv_write(
     state_block_size = int(state_cache.shape[1])
     kv_block_size = int(kv_cache.shape[1])
     kv_block_stride = int(kv_cache.stride(0))
+    n_batch = 0 if disable_raw_path else int(kv_raw.shape[0])
 
     if head_dim == 512:
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
@@ -491,6 +645,15 @@ def run_fused_compress_kv_write(
         block_table,
         block_table.stride(0),
         state_block_size,
+        # raw path
+        kv_raw,
+        kv_raw.stride(0),
+        score_raw,
+        score_raw.stride(0),
+        ape,
+        ape.stride(0),
+        seq_start,
+        n_batch,
         rms_norm_weight,
         rms_norm_eps,
         cos_sin_cache,
@@ -509,6 +672,8 @@ def run_fused_compress_kv_write(
         TOKEN_STRIDE=cfg["token_stride"],
         SCALE_DIM=cfg["scale_dim"],
         KV_BLOCK_STRIDE=kv_block_stride,
+        # State pool: fixed_blocks_per_req=2 * entries_per_block=256.
+        CACHE_WINDOW=512,
         num_warps=cfg["num_warps"],
     )
 

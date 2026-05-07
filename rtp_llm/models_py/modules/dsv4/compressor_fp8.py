@@ -360,8 +360,20 @@ class CompressorFP8(nn.Module):
         kv_flat: torch.Tensor,  # [N, coff*head_dim] fp32
         score_flat: torch.Tensor,  # [N, coff*head_dim] fp32
         meta: CompressorMeta,
+        seq_start: Optional[int] = None,
     ) -> None:
         """Launch the two vLLM kernels (state write + boundary KV write).
+
+        ``seq_start`` is the absolute position of ``kv_flat[0]`` for
+        sequentially-laid-out batches (prefill: ``sp_int``). When provided
+        the fused kernel reads any overlap-window position with
+        ``flat_idx = pos - seq_start in [0, N)`` directly from
+        ``kv_flat / score_flat`` instead of the cyclic state pool, which
+        only retains the latest ~512 tokens per request and would have
+        been overwritten within this same launch by ``run_save_partial_states``.
+
+        Pass ``None`` to disable the raw path (decode: ``kv_flat`` is
+        indexed by ``req_idx``, not by absolute position offset).
 
         All slot-mapping math is consumed from ``meta`` — this method only
         does kernel launches and the cos_sin_cache lazy build. Designed to
@@ -392,6 +404,9 @@ class CompressorFP8(nn.Module):
             compress_ratio=self.compress_ratio,
         )
 
+        # Decode path passes seq_start=None: disable the raw branch so the
+        # kernel only reads state_cache. seq_start value is then irrelevant.
+        raw_disabled = seq_start is None
         run_fused_compress_kv_write(
             self._state_pool_3d,
             meta.token_to_req,
@@ -403,6 +418,11 @@ class CompressorFP8(nn.Module):
             cos_sin_cache,
             self._kv_pool_3d,
             meta.kv_slots,
+            kv_flat,
+            score_flat,
+            self.ape,
+            0 if raw_disabled else seq_start,
+            disable_raw_path=raw_disabled,
             head_dim=self.head_dim,
             rope_head_dim=self.rope_head_dim,
             compress_ratio=self.compress_ratio,
@@ -459,7 +479,7 @@ class CompressorFP8(nn.Module):
         if meta is None:
             positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
             meta = self.prepare_metadata(positions, b_idx)
-        self._launch(kv_flat, score_flat, meta)
+        self._launch(kv_flat, score_flat, meta, seq_start=sp)
         return None
 
     # ----------------------------------------------------------------------
