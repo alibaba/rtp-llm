@@ -13,9 +13,7 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4.attention import Attention
-from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import (
-    _hc_split_sinkhorn as hc_split_sinkhorn,
-)
+from rtp_llm.models_py.modules.dsv4.mhc import hc_split_sinkhorn
 from rtp_llm.models_py.modules.dsv4.moe import MoE
 
 # P-sinkhorn (plan_0427.md): single-Triton-kernel replacement for
