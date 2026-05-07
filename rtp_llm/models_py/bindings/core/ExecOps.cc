@@ -360,7 +360,7 @@ void cudaCheckLastError() {
         RTP_LLM_LOG_ERROR("ROCm error: %s", hipGetErrorString(err));
     }
 #elif USING_ASCEND
-    // TODO: fix ascend check last error?
+    // TODO: Ascend - fix ascend check last error?
     ASCEND_CHECK(aclrtSynchronizeDevice());
     ASCEND_CHECK_ERROR();
 #endif
@@ -385,7 +385,7 @@ void cudaProfilerBegin() {
     check_cuda_value(cudaProfilerStart());
 #else
     // no-op on ROCm / Ascend
-    // TODO: fix profiler on Ascend
+    // TODO: Ascend - fix profiler on Ascend
 #endif
 }
 
@@ -394,7 +394,7 @@ void cudaProfilerEnd() {
     check_cuda_value(cudaProfilerStop());
 #else
     // no-op on ROCm / Ascend
-    // TODO: fix profiler on Ascend
+    // TODO: Ascend - fix profiler on Ascend
 #endif
 }
 

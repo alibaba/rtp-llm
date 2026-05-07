@@ -17,25 +17,26 @@ namespace rtp_llm {
 void fusedCopy(const FusedD2DCopyParams& params) {
 #if USING_CUDA
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    invokeFusedCopy(params, stream);
 #elif USING_ROCM
     hipStream_t stream = at::hip::getCurrentHIPStream();
-#else
-    throw std::runtime_error("No supported GPU backend found for fusedCopy");
-    return;
-#endif
     invokeFusedCopy(params, stream);
+#else
+    // TODO: Ascend - Add Ascend support
+    throw std::runtime_error("No supported GPU backend found for fusedCopy");
+#endif
 }
 
 void fusedStridedCopy(const FusedStridedCopyParams& params) {
 #if USING_CUDA
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    invokeFusedStridedCopy(params, stream);
 #elif USING_ROCM
     hipStream_t stream = at::hip::getCurrentHIPStream();
+    invokeFusedStridedCopy(params, stream);
 #else
     throw std::runtime_error("No supported GPU backend found for fusedStridedCopy");
-    return;
 #endif
-    invokeFusedStridedCopy(params, stream);
 }
 
 }  // namespace rtp_llm

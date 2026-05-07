@@ -11,6 +11,8 @@
 #include <cstddef>
 #include <random>
 #include <memory>
+#elif USING_ASCEND
+#include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #endif
 
 using namespace std;
@@ -280,6 +282,24 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                int64_t(stream));
 }
 
+#elif USING_ASCEND
+
+// ============================================================
+// Sample ops (Ascend) — stub implementations
+// ============================================================
+
+namespace rtp_llm {
+
+GreedyOutput sampleGreedy(const GreedyParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+}  // namespace rtp_llm
+
 #else  // !USING_CUDA — ROCm platform
 
 }  // namespace rtp_llm — temporarily close for includes
@@ -526,7 +546,6 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                  true,
                                  int64_t(stream));
 }
-
 #endif  // USING_CUDA
 
 }  // namespace rtp_llm

@@ -8,6 +8,8 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "3rdparty/trt_beam_search/beamSearch.h"
 #include "3rdparty/trt_beam_search/beamSearchKernels.h"
+#elif USING_ASCEND
+#include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #endif
 
 using namespace std;
@@ -135,6 +137,12 @@ BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params) {
 
 #undef DISPATCH_TYPE
 #undef DISPATCH_BOOL
+}
+
+#elif USING_ASCEND
+
+BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 #else  // !USING_CUDA — ROCm platform

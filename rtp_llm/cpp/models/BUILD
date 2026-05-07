@@ -128,9 +128,13 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
-        "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
+    ] + select({
+        "//:using_cuda": ["//rtp_llm/cpp/cuda_graph:cuda_graph_impl"],
+        "@//:using_rocm": ["//rtp_llm/cpp/cuda_graph:cuda_graph_impl"],
+        "//conditions:default": [],
+    }) + [
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
     ],
     visibility = ["//visibility:public"],

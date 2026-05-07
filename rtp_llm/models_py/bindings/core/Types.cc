@@ -17,7 +17,7 @@
 
 #if USING_ASCEND
 // Ascend: use PyTorch half/bfloat16 types via fake types
-// TODO: replace with torch_npu integration
+// TODO: Ascend - replace with torch_npu integration
 #endif
 
 #ifdef ENABLE_FP8

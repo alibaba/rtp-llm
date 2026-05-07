@@ -19,6 +19,10 @@
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
 #endif
 
+#if USING_ASCEND
+#include "rtp_llm/models_py/bindings/core/CommonDefines.h"
+#endif
+
 using namespace std;
 
 namespace rtp_llm {
@@ -226,6 +230,36 @@ void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
 }
+
+#elif USING_ASCEND
+
+// ============================================================
+// Copy ops (Ascend)
+// ============================================================
+
+namespace rtp_llm {
+
+void runtimeCopy(const CopyParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void multiMergeCopy(const MultiMergeCopyParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+__attribute__((unused)) static void batchCopyFallback(const BatchCopyParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void runtimeBatchCopy(const BatchCopyParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+}  // namespace rtp_llm
 
 #else  // ROCm / non-CUDA
 
